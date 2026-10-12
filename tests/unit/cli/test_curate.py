@@ -582,7 +582,9 @@ class TestCurateReinstatePrecedent:
         node_id: str = json.loads(r.stdout.strip())["node_id"]
         return node_id
 
-    def _demote(self, node_id: str, *, requested_by: str = "cli:demote-precedent") -> None:
+    def _demote(
+        self, node_id: str, *, requested_by: str = "cli:demote-precedent"
+    ) -> None:
         result = runner.invoke(
             app,
             [

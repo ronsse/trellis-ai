@@ -1670,7 +1670,9 @@ class TestReinstatePrecedentRoute:
         node_id: str = resp.json()["node_id"]
         return node_id
 
-    def _demote(self, client, node_id: str, *, requested_by: str = "test:demote") -> None:
+    def _demote(
+        self, client, node_id: str, *, requested_by: str = "test:demote"
+    ) -> None:
         resp = client.post(
             f"/api/v1/precedents/{node_id}/demote",
             json={"reason": "superseded", "requested_by": requested_by},
@@ -1795,9 +1797,7 @@ class TestReinstatePrecedentRoute:
 
         self._demote(client, node_id)
         excluded = client.get("/api/v1/precedents")
-        assert not any(
-            p["entity_id"] == node_id for p in excluded.json()["precedents"]
-        )
+        assert not any(p["entity_id"] == node_id for p in excluded.json()["precedents"])
         assert client.get("/api/v1/precedents/domains").json()["total"] == 0
 
         reinstate_resp = client.post(

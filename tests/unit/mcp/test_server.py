@@ -26,8 +26,6 @@ from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import ConfigError, StoreError
 from trellis.llm.routing import LLMConsumer
 from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
-from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mcp.server import (
     get_context as _get_context,
 )
@@ -61,6 +59,8 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope

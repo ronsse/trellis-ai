@@ -331,7 +331,9 @@ class TestPrecedentReinstateIsMcpReachable:
         assert payload["status"] == "rejected"
         assert "not 'demoted'" in payload["message"]
 
-    def test_refuses_the_automatic_requester(self, temp_registry: StoreRegistry) -> None:
+    def test_refuses_the_automatic_requester(
+        self, temp_registry: StoreRegistry
+    ) -> None:
         """Human-only, end to end through MCP: the automatic demotion
         policy's own identity may not reinstate anything it -- or anyone
         else -- demoted."""

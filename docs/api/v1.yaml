@@ -2346,6 +2346,36 @@ components:
       - message
       title: PrecedentDemoteResponse
       type: object
+    PrecedentReinstateRequest:
+      additionalProperties: false
+      description: 'Request to reinstate a demoted precedent. ``target_id`` rides the
+
+        URL path.
+
+
+        No ``already_demoted``-shaped response field exists for this verb: a
+
+        target that is not currently ``"demoted"`` is a hard rejection (400),
+
+        never a 200 idempotent no-op the way re-demoting an already-demoted
+
+        precedent is — so the response is a plain ``CommandResponse``
+
+        (``trellis_api.routes._results.command_response``), not a dedicated
+
+        DTO the way :class:`PrecedentDemoteResponse` is.'
+      properties:
+        reason:
+          title: Reason
+          type: string
+        requested_by:
+          default: api:reinstate-precedent
+          title: Requested By
+          type: string
+      required:
+      - reason
+      title: PrecedentReinstateRequest
+      type: object
     PromoteRequest:
       additionalProperties: false
       description: Request to promote a trace to a precedent.
@@ -5394,27 +5424,35 @@ paths:
 
         SCD-2 rewrite, not a purge, so the pre-demotion version stays
 
-        readable via ``get_node_history``/``as_of`` -- but there is no
+        readable via ``get_node_history``/``as_of``. The reversal verb is
 
-        dedicated reversal verb yet: an operator undoes a demotion with
+        ``POST /precedents/{target_id}/reinstate`` (``precedent.reinstate``,
 
-        ``entity.update`` to set ``Lifecycle.state`` back to ``"current"``.
+        see :func:`reinstate` below) -- ``entity.update`` refuses a write to
 
-        A demoted precedent stops reaching ``GET /precedents`` /
+        ``properties.lifecycle`` on a precedent node, so it is no longer a
 
-        ``get_lessons`` and is withheld from packs at the collect seam,
+        way to undo this. A demoted precedent stops reaching
 
-        recorded in ``rejected_items``. Only a precedent promoted from a
+        ``GET /precedents`` / ``get_lessons`` and is withheld from packs at
 
-        learning candidate has a graph node and can be demoted -- a trace-
+        the collect seam, recorded in ``rejected_items``. Only a precedent
 
-        or miner-sourced precedent id is refused with a message naming that
+        promoted from a learning candidate has a graph node and can be
 
-        gap. Re-demoting an already-demoted precedent is a 200 idempotent
+        demoted -- a trace- or miner-sourced precedent id is refused with a
 
-        no-op: ``already_demoted=true`` and nothing changes (no new SCD-2
+        message naming that gap. Re-demoting an already-demoted precedent is
 
-        version, no new event, the stored reason unchanged).'
+        a 200 idempotent no-op: ``already_demoted=true`` and nothing changes
+
+        (no new SCD-2 version, no new event, the stored reason unchanged).
+
+        Re-approving its learning candidate instead of reinstating it is
+
+        refused too -- see
+
+        :func:`trellis.learning.scoring.submit_learning_promotion`.'
       operationId: demote_api_v1_precedents__target_id__demote_post
       parameters:
       - in: path
@@ -5445,6 +5483,66 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Demote
+      tags:
+      - curate
+  /api/v1/precedents/{target_id}/reinstate:
+    post:
+      description: 'Reinstate a demoted precedent, stamping it ``Lifecycle.state="current"``.
+
+
+        The reversal verb :func:`demote` shipped without: an SCD-2 rewrite in
+
+        the other direction, so the demoted version stays readable via
+
+        ``get_node_history``/``as_of`` too, and the precedent''s vector row is
+
+        re-synced in the same call so a semantic hit stops carrying the
+
+        demoted snapshot. Only a currently ``"demoted"`` precedent may be
+
+        reinstated -- a target that is ``"current"``, ``"archived"``, not
+
+        found, or not graph-backed is refused with a 400 naming its actual
+
+        state; there is no 200 idempotent-no-op branch the way re-demoting an
+
+        already-demoted precedent has one, since reinstating twice already
+
+        moved the state to ``"current"`` on the first call. Human-only: a
+
+        ``requested_by`` equal to the automatic demotion policy''s own
+
+        identity is refused outright.'
+      operationId: reinstate_api_v1_precedents__target_id__reinstate_post
+      parameters:
+      - in: path
+        name: target_id
+        required: true
+        schema:
+          title: Target Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrecedentReinstateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Reinstate
       tags:
       - curate
   /api/v1/proposals:

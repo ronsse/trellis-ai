@@ -469,6 +469,7 @@ class TestPrecedentDemoteHandler:
         assert exc_info.value.code == "target_not_found"
         assert "Node not found" in str(exc_info.value)
 
+
 class TestPrecedentReinstateHandler:
     """Covers ``precedent.reinstate`` (item 4 of the demotion-holes
     follow-up): the reversal verb ``precedent.demote`` shipped without.
@@ -506,8 +507,7 @@ class TestPrecedentReinstateHandler:
         assert len(history) >= 3
         assert history[0]["properties"][LIFECYCLE_KEY]["state"] == "current"
         assert any(
-            (v.get("properties", {}).get(LIFECYCLE_KEY) or {}).get("state")
-            == "demoted"
+            (v.get("properties", {}).get(LIFECYCLE_KEY) or {}).get("state") == "demoted"
             for v in history[1:]
         )
 
