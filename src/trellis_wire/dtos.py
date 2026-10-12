@@ -1061,6 +1061,18 @@ class LoopHealthRowResponse(WireModel):
     last_run_at: str | None = None
     last_status: str | None = None
     counters: dict[str, Any] | None = None
+    #: ``None`` when ``job_name`` is itself ``None`` (nothing schedules
+    #: this loop). ``"not_scheduled"`` when the named job has no stored,
+    #: enabled row with a cadence — disabled, manual-only, or never
+    #: patched via ``PATCH /admin/jobs``. ``"scheduled"`` otherwise.
+    schedule_status: str | None = None
+    #: ``True`` only when ``schedule_status`` is ``"scheduled"`` AND a
+    #: real last run (``last_run_at`` is not ``None``) is older than
+    #: twice that job's own cadence tick interval plus slack. Always
+    #: ``False`` for a loop with no job, a not-scheduled job, or one
+    #: that has never run (that fact is already carried by
+    #: ``last_run_at`` being ``None``).
+    stale: bool = False
 
 
 class LoopHealthResponse(WireModel):

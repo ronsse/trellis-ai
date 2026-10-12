@@ -148,3 +148,309 @@ class TestLoopHealthScope:
         token = _mint(registry, [SCOPE_ADMIN])
         resp = auth_client.get("/api/v1/loops", headers={"X-API-Key": token})
         assert resp.status_code == 200
+
+
+def _set_setting(registry: StoreRegistry, name: str, value: object) -> None:
+    """Write one operator override through the governed settings handler —
+    the same path ``trellis admin settings set`` and the settings route
+    use — rather than poking ``settings.json`` directly."""
+    from trellis.mutate.commands import Command, Operation
+    from trellis.mutate.handlers import SettingsUpdateHandler
+
+    handler = SettingsUpdateHandler(registry)
+    handler.handle(
+        Command(
+            operation=Operation.SETTINGS_UPDATE,
+            args={"name": name, "value": value},
+            target_id=name,
+            target_type="setting",
+        )
+    )
+
+
+_TUNE_CYCLE_PAYLOAD = {
+    "tuner_name": "rule_tuner",
+    "enabled": True,
+    "dry_run": False,
+    "proposals_considered": 1,
+    "auto_promoted": 0,
+    "rolled_back": 0,
+    "pending_manual": 1,
+    "outcomes": [],
+}
+
+
+class TestTunerActuatesFollowsResolvedSettings:
+    """``actuates`` on the tuner row must require BOTH the resolved
+    ``learning.auto_promote.enabled`` setting AND a non-dry-run
+    ``TUNE_CYCLE_COMPLETED`` event (the scheduled ``tune`` job always
+    passes ``--dry-run``, so its presence is exactly that second signal).
+    Neither alone may flip it.
+    """
+
+    def test_neither_setting_nor_event_is_false(self, client) -> None:
+        row = next(
+            r
+            for r in client.get("/api/v1/loops").json()["loops"]
+            if r["name"] == "tuner"
+        )
+        assert row["actuates"] is False
+
+    def test_setting_enabled_alone_with_no_event_is_still_false(
+        self, registry, client
+    ) -> None:
+        _set_setting(registry, "learning.auto_promote.enabled", True)
+        row = next(
+            r
+            for r in client.get("/api/v1/loops").json()["loops"]
+            if r["name"] == "tuner"
+        )
+        assert row["actuates"] is False
+
+    def test_event_alone_with_setting_disabled_is_still_false(
+        self, registry, client
+    ) -> None:
+        registry.operational.event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload=_TUNE_CYCLE_PAYLOAD,
+        )
+        row = next(
+            r
+            for r in client.get("/api/v1/loops").json()["loops"]
+            if r["name"] == "tuner"
+        )
+        assert row["actuates"] is False
+
+    def test_setting_enabled_and_event_present_is_true(self, registry, client) -> None:
+        _set_setting(registry, "learning.auto_promote.enabled", True)
+        registry.operational.event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload=_TUNE_CYCLE_PAYLOAD,
+        )
+        row = next(
+            r
+            for r in client.get("/api/v1/loops").json()["loops"]
+            if r["name"] == "tuner"
+        )
+        assert row["actuates"] is True
+
+
+class TestCandidateAutoPromoteNeverActuates:
+    """``learning_candidate_auto_promote`` stays report-only no matter what
+    settings an operator sets: ``mode=commit`` is refused with a
+    configuration error below this row (``LoopHealthRow`` construction in
+    ``loop_health.py``), so unlike the tuner there is no settings
+    combination that should ever flip its ``actuates`` to ``True``.
+    """
+
+    def test_stays_false_with_every_relevant_setting_enabled(
+        self, registry, client
+    ) -> None:
+        _set_setting(registry, "learning.auto_promote.enabled", True)
+        _set_setting(registry, "learning.candidate_auto_promote.enabled", True)
+        row = next(
+            r
+            for r in client.get("/api/v1/loops").json()["loops"]
+            if r["name"] == "learning_candidate_auto_promote"
+        )
+        assert row["actuates"] is False
+
+
+class TestLoopScheduleStatusAndStaleness:
+    """Unit coverage of ``admin._loop_schedule_status_and_staleness`` with a
+    fully controlled ``now``/``last_run_at`` — the route's own
+    ``utc_now()`` call cannot be pinned, and ``EventLog.emit`` always
+    stamps the real clock, so the stale-vs-not boundary is tested directly
+    against the helper rather than through a live event.
+    """
+
+    @staticmethod
+    def _store(tmp_path):
+        from trellis.stores.schedule_store import ScheduleStore
+
+        return ScheduleStore(tmp_path / "schedule.json")
+
+    def test_no_job_name_is_never_scheduled_or_stale(self, tmp_path) -> None:
+        from trellis.core.base import utc_now
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        status, stale = _loop_schedule_status_and_staleness(
+            None, None, self._store(tmp_path), utc_now()
+        )
+        assert status is None
+        assert stale is False
+
+    def test_catalog_job_with_no_stored_row_is_not_scheduled(self, tmp_path) -> None:
+        from trellis.core.base import utc_now
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", utc_now(), self._store(tmp_path), utc_now()
+        )
+        assert status == "not_scheduled"
+        assert stale is False
+
+    def test_disabled_stored_row_is_not_scheduled(self, tmp_path) -> None:
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=False))
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", utc_now(), store, utc_now()
+        )
+        assert status == "not_scheduled"
+        assert stale is False
+
+    def test_manual_only_stored_row_is_not_scheduled(self, tmp_path) -> None:
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence=None, enabled=True))
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", utc_now(), store, utc_now()
+        )
+        assert status == "not_scheduled"
+        assert stale is False
+
+    def test_scheduled_with_no_last_run_is_never_stale(self, tmp_path) -> None:
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", None, store, utc_now()
+        )
+        assert status == "scheduled"
+        assert stale is False
+
+    def test_scheduled_recent_run_is_not_stale(self, tmp_path) -> None:
+        from datetime import timedelta
+
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+        now = utc_now()
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", now - timedelta(hours=1), store, now
+        )
+        assert status == "scheduled"
+        assert stale is False
+
+    def test_scheduled_run_older_than_twice_cadence_plus_slack_is_stale(
+        self, tmp_path
+    ) -> None:
+        """``tune``'s catalog cadence is daily (``0 4 * * *``), so its tick
+        interval is 24h and the threshold is ``2*24h + 2h slack = 50h``. A
+        run 10h old must read fresh; one 60h old must read stale — wide
+        margins on both sides of that boundary, not a knife-edge value.
+        """
+        from datetime import timedelta
+
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+        now = utc_now()
+
+        fresh_status, fresh_stale = _loop_schedule_status_and_staleness(
+            "tune", now - timedelta(hours=10), store, now
+        )
+        assert fresh_status == "scheduled"
+        assert fresh_stale is False
+
+        stale_status, stale_stale = _loop_schedule_status_and_staleness(
+            "tune", now - timedelta(hours=60), store, now
+        )
+        assert stale_status == "scheduled"
+        assert stale_stale is True
+
+    def test_threshold_is_specifically_twice_the_interval_not_once(
+        self, tmp_path
+    ) -> None:
+        """Pin the multiplier itself, not just "some cadence-derived
+        threshold exists": 30h is stale against a single missed daily
+        tick plus slack (``1*24h + 2h = 26h``) but fresh against two
+        (``2*24h + 2h = 50h``) -- a regression from 2 to 1 flips this one
+        case while the wide-margin test above would not notice.
+        """
+        from datetime import timedelta
+
+        from trellis.core.base import utc_now
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis_api.routes.admin import _loop_schedule_status_and_staleness
+
+        store = self._store(tmp_path)
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+        now = utc_now()
+
+        status, stale = _loop_schedule_status_and_staleness(
+            "tune", now - timedelta(hours=30), store, now
+        )
+        assert status == "scheduled"
+        assert stale is False
+
+
+class TestLoopScheduleStatusViaRoute:
+    """End-to-end wiring check: the route must actually thread
+    ``ScheduleStore`` state into each row's ``schedule_status``/``stale``,
+    not just the unit-level helper above.
+    """
+
+    def test_no_stored_schedule_rows_read_not_scheduled_or_none(self, client) -> None:
+        data = client.get("/api/v1/loops").json()
+        for row in data["loops"]:
+            if row["job_name"] is None:
+                assert row["schedule_status"] is None, row["name"]
+            else:
+                assert row["schedule_status"] == "not_scheduled", row["name"]
+            assert row["stale"] is False, row["name"]
+
+    def test_stored_enabled_cadenced_job_with_a_fresh_run_reads_scheduled(
+        self, registry, client
+    ) -> None:
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis.stores.schedule_store import ScheduleStore
+
+        store = ScheduleStore(registry.stores_dir / "schedule.json")
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+        registry.operational.event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload=_TUNE_CYCLE_PAYLOAD,
+        )
+
+        data = client.get("/api/v1/loops").json()
+        row = next(r for r in data["loops"] if r["name"] == "tuner")
+        assert row["schedule_status"] == "scheduled"
+        assert row["stale"] is False
+
+    def test_a_loop_with_no_job_name_ignores_schedule_store_state(
+        self, registry, client
+    ) -> None:
+        """``precedent_promotion`` has no ``job_name`` (nothing in
+        ``LOOP_JOB`` drives it) -- storing an unrelated schedule row must
+        not give it a schedule status it never had a job to have."""
+        from trellis.schemas.schedule import ScheduledJob
+        from trellis.stores.schedule_store import ScheduleStore
+
+        store = ScheduleStore(registry.stores_dir / "schedule.json")
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+
+        data = client.get("/api/v1/loops").json()
+        row = next(r for r in data["loops"] if r["name"] == "precedent_promotion")
+        assert row["job_name"] is None
+        assert row["schedule_status"] is None
+        assert row["stale"] is False

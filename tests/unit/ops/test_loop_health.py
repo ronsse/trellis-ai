@@ -171,6 +171,10 @@ class TestPrecedentPromotionWindows:
 
         row = _row(report, "precedent_promotion")
         assert row.counters == {"promoted_last_7d": 2, "promoted_last_30d": 2}
+        # PRECEDENT_PROMOTED carries no explicit success/outcome field —
+        # the badge must never claim "ok" (a determination this event
+        # never actually made), only the neutral "ran".
+        assert row.last_status == "ran"
 
 
 class TestTunerRow:
@@ -219,9 +223,65 @@ class TestTunerRow:
 
         row = _row(report, "tuner")
         assert row.last_run_at is not None
-        assert row.last_status == "ok"
+        # TUNE_CYCLE_COMPLETED carries no explicit success/outcome field —
+        # "ran" (not "ok") so the badge never implies a success
+        # determination this event never actually made.
+        assert row.last_status == "ran"
         assert row.counters["last_run_proposals_considered"] == 4
         assert row.counters["last_run_auto_promoted"] == 1
+
+    def test_actuates_requires_both_enabled_setting_and_a_non_dry_run_event(
+        self, tmp_path: Path
+    ) -> None:
+        """A tuner row can only claim it writes unattended
+        (``actuates``) when BOTH the resolved ``learning.auto_promote``
+        setting is enabled AND a non-dry-run invocation has actually
+        happened — the catalog's scheduled ``tune`` job always passes
+        ``--dry-run``, and ``TUNE_CYCLE_COMPLETED`` is only ever emitted
+        when a run was not a dry run, so its presence is exactly that
+        second signal.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload={
+                "tuner_name": "rule_tuner",
+                "enabled": True,
+                "dry_run": False,
+                "proposals_considered": 1,
+                "auto_promoted": 0,
+                "rolled_back": 0,
+                "pending_manual": 1,
+                "outcomes": [],
+            },
+        )
+
+        enabled_report = summarize_loop_health(
+            event_log, tuner_state, auto_promote_enabled=True
+        )
+        assert _row(enabled_report, "tuner").actuates is True
+
+        disabled_report = summarize_loop_health(
+            event_log, tuner_state, auto_promote_enabled=False
+        )
+        assert _row(disabled_report, "tuner").actuates is False
+
+    def test_actuates_is_false_with_no_non_dry_run_event_even_if_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        """The setting alone is not sufficient: with no
+        ``TUNE_CYCLE_COMPLETED`` event (the scheduled job always runs
+        ``--dry-run``, which never emits one), the row must not claim
+        it actuates just because the setting resolves enabled.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+
+        report = summarize_loop_health(
+            event_log, tuner_state, auto_promote_enabled=True
+        )
+
+        assert _row(report, "tuner").actuates is False
 
 
 class TestFeedbackIntakeWindows:
@@ -244,6 +304,9 @@ class TestFeedbackIntakeWindows:
 
         row = _row(report, "feedback_intake")
         assert row.counters == {"feedback_last_7d": 2, "feedback_last_30d": 2}
+        # FEEDBACK_RECORDED carries no explicit success/outcome field —
+        # the badge must never claim "ok", only the neutral "ran".
+        assert row.last_status == "ran"
 
 
 class TestRowMetadata:
@@ -520,14 +583,20 @@ class TestCandidateAutoPromoteRowOutcomeField:
         assert row.last_status == "ok"
 
 
-class TestCandidateAutoPromoteRowStaleness:
-    """This row's job (``auto-promote-candidates``) runs on a known
-    daily cadence (``0 6 * * *`` in the job catalog), so a loop that
-    last ran days ago must not keep reading as healthy as one that ran
-    five minutes ago -- the cron could have stopped firing entirely.
+class TestCandidateAutoPromoteRowNoLongerFoldsStalenessIntoStatus:
+    """Staleness used to be computed inline here, against this one
+    job's catalog cadence, by overwriting ``last_status`` to
+    ``"stale"``. It is now computed uniformly for every loop row, from
+    that loop's own stored-or-catalog cadence, by
+    ``trellis_api.routes.admin._loop_schedule_status_and_staleness``
+    (see ``tests/unit/api/test_loop_health_route.py``) and surfaced as
+    a separate ``stale``/``schedule_status`` field rather than
+    overloading ``last_status``. This module must no longer make that
+    determination at all — a run from days ago must keep reporting
+    exactly the outcome its own event carried.
     """
 
-    def test_a_run_several_days_stale_reports_stale_not_ok(
+    def test_an_old_run_keeps_its_own_outcome_regardless_of_elapsed_time(
         self, tmp_path: Path
     ) -> None:
         event_log, tuner_state = _stores(tmp_path)
@@ -551,37 +620,10 @@ class TestCandidateAutoPromoteRowStaleness:
             },
         )
 
-        later = datetime.now(UTC) + timedelta(days=3)
+        later = datetime.now(UTC) + timedelta(days=30)
         report = summarize_loop_health(event_log, tuner_state, now=later)
 
         row = _row(report, "learning_candidate_auto_promote")
-        assert row.last_status == "stale"
-
-    def test_a_run_within_the_cadence_window_stays_ok(self, tmp_path: Path) -> None:
-        """Companion to the test above: a fresh run must not be
-        misreported as stale just because this rule now exists."""
-        event_log, tuner_state = _stores(tmp_path)
-        event_log.emit(
-            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
-            source="candidate_auto_promote",
-            payload={
-                "outcome": "ok",
-                "mode": "report_only",
-                "configured_mode": "report_only",
-                "dispositions": [],
-                "counts": {
-                    "total": 1,
-                    "would_promote": 1,
-                    "promoted": 0,
-                    "already_promoted": 0,
-                    "ineligible": 0,
-                    "skipped": 0,
-                },
-                "policy_snapshot": {"enabled": True, "mode": "report_only"},
-            },
-        )
-
-        report = summarize_loop_health(event_log, tuner_state, now=datetime.now(UTC))
-
-        row = _row(report, "learning_candidate_auto_promote")
+        # A still-present ad hoc override would turn this "stale" -- it
+        # must not, no matter how old `later` is.
         assert row.last_status == "ok"

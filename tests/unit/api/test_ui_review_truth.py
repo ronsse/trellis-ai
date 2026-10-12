@@ -254,7 +254,15 @@ def test_fmt_time_labels_the_zone_instead_of_converting_to_local() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_precedents_empty_state_names_the_real_promotion_path() -> None:
+def _render_precedents_empty_state_body(page: str) -> str:
+    return _between(
+        page,
+        "async function renderPrecedentsEmptyState() {",
+        "\n        async function loadPrecedents() {",
+    )
+
+
+def test_precedents_empty_branch_delegates_to_the_truthful_renderer() -> None:
     page = _page()
     body = _between(
         page,
@@ -264,20 +272,69 @@ def test_precedents_empty_state_names_the_real_promotion_path() -> None:
     empty_branch = _between(
         body, "if (items.length === 0) {", "return;\n                }"
     )
-    assert "trellis curate promote-learning" in empty_branch
-    # Names the job conditionally ("if ... is scheduled") rather than
-    # asserting it is scheduled, so the copy stays true whether or not
-    # `auto-promote-candidates` has been seeded into schedule.json yet —
-    # and never claims a commit mode exists (it is refused today).
-    assert "auto-promote-candidates" in empty_branch
-    assert "if" in empty_branch.lower()
-    assert "it never" in empty_branch
-    assert "promotes anything itself" in empty_branch
-    assert "commit mode" not in empty_branch
-    # The old claim ("Promote traces to create precedents") implied any
-    # trace promotion was sufficient; it must actually be gone, not merely
-    # supplemented.
-    assert "Promote traces to create precedents" not in empty_branch
+    assert "await renderPrecedentsEmptyState()" in empty_branch
+
+
+def test_precedents_empty_state_names_the_real_promotion_path() -> None:
+    """A precedent is only created when a human approves a learning
+    candidate on the Review tab — nothing schedules that approval
+    automatically. The empty state must say so and link there, never
+    repeat the old "Promote traces to create precedents" claim that
+    implied any trace promotion was sufficient.
+    """
+    page = _page()
+    body = _render_precedents_empty_state_body(page)
+    assert "switchView('review')" in body
+    assert "Promote traces to create precedents" not in body
+    assert "commit mode" not in body
+
+
+def test_precedents_empty_state_reads_the_same_candidate_count_review_does() -> None:
+    """The "N awaiting review" figure must come from the exact same
+    fetch and the exact same field the Review tab's own count badge
+    uses (``loadReviewLearning``'s ``data.candidates.length``) — a
+    second count derived independently of Review's could disagree with
+    it.
+    """
+    page = _page()
+    review_body = _load_review_learning_body(page)
+    assert "fetchJSON('/learning/candidates')" in review_body
+    empty_state_body = _render_precedents_empty_state_body(page)
+    assert "fetchJSON('/learning/candidates')" in empty_state_body
+    assert "candidatesRes.value.candidates.length" in empty_state_body
+
+
+def test_precedents_empty_state_would_qualify_count_comes_from_the_loop_row() -> None:
+    """The "M would qualify" figure is the ``learning_candidate_auto_promote``
+    loop row's own ``last_run_would_promote`` counter (loop_health.py's
+    read of the latest auto-promote-evaluation event) — not a value
+    this page re-derives from a job name or a constant.
+    """
+    page = _page()
+    body = _render_precedents_empty_state_body(page)
+    assert "fetchJSON('/loops')" in body
+    assert "l.name === 'learning_candidate_auto_promote'" in body
+    assert "row.counters.last_run_would_promote" in body
+    assert "it never promotes anything itself" in body
+
+
+def test_precedents_empty_state_never_claims_nightly_unconditionally() -> None:
+    """The old copy said "it reports nightly" whenever the job merely
+    *could* be scheduled. The new copy must gate any scheduled-and-
+    running claim on both the schedule row (stored + enabled) and the
+    dispatcher-observed signal (``#870``'s own ``dispatcher_seen``) —
+    and must never use the word "nightly" at all, since the cadence is
+    not necessarily daily.
+    """
+    page = _page()
+    body = _render_precedents_empty_state_body(page)
+    assert "nightly" not in body.lower()
+    assert "fetchJSON('/admin/jobs')" in body
+    assert "jobsRes.value.dispatcher_seen" in body
+    assert "job.stored && job.enabled" in body
+    # No literal catalog job name or source-level constant in rendered
+    # copy — the job is found by which loop it drives, not by name.
+    assert "auto-promote-candidates" not in body
 
 
 # ---------------------------------------------------------------------------
