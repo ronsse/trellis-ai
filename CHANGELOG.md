@@ -9,22 +9,33 @@ All notable changes to Trellis will be documented in this file.
 - **Precedent demotion verb (manual-trigger only): `precedent.demote` through
   the governed mutation pipeline, with CLI `trellis curate
   demote-precedent`, REST `POST /precedents/{target_id}/demote`, and MCP
-  `execute_mutation`.** A new `Lifecycle.state` value, `"demoted"`, is a
-  reversible SCD-2 rewrite of a precedent's graph node — not a purge like
-  `redact` — so the pre-demotion version stays readable via
-  `get_node_history`/`as_of`. `PrecedentDemoteHandler` refuses a non-precedent
-  target and requires a non-empty, length-bounded reason written to the
-  audit trail. Provenance is re-derived from the event log, never trusted
-  from a caller-supplied flag: a caller demoting under the (not yet wired)
-  automatic requester identity may demote only a precedent whose own
-  `precedent.promote` event was itself automatic, while every other caller
-  may demote any precedent. Once demoted, a precedent is excluded from
-  `GET /precedents`, `trellis retrieve precedents` and `get_lessons`, and is
-  withheld from packs at the collect seam alongside the existing
-  archived/noise gates, recorded in `rejected_items` with its own reason so
-  the pack's withholding statement names it. `"demoted"` is deliberately
-  left out of `RetentionPruneHandler`'s `UNSELECTABLE_STATES`, so it stays
-  reachable by `retention.prune --lifecycle-state demoted`.
+  `execute_mutation`.** A new `Lifecycle.state` value, `"demoted"`, is an
+  SCD-2 rewrite of a precedent's graph node — not a purge like `redact` —
+  so the pre-demotion version stays readable via `get_node_history`/`as_of`.
+  There is no dedicated reversal verb yet, though: an operator undoes a
+  demotion with `entity.update` to set `Lifecycle.state` back to
+  `"current"`, and the demoted version remains in history either way —
+  that gap is tracked for a follow-up PR. Only a precedent promoted from a
+  learning candidate has a graph node and can be demoted; a trace- or
+  miner-sourced precedent id is refused with a message naming that gap
+  rather than a generic "Node not found". `PrecedentDemoteHandler` refuses
+  a non-precedent target and requires a non-empty, length-bounded reason
+  written to the audit trail. Provenance is re-derived from the event log,
+  never trusted from a caller-supplied flag: a caller demoting under the
+  (not yet wired) automatic requester identity may demote only a precedent
+  whose own `precedent.promote` event was itself automatic, while every
+  other caller may demote any graph-backed precedent regardless of lifecycle
+  state. Re-demoting an already-demoted precedent is an idempotent no-op
+  (no new SCD-2 version, no new event, the stored reason unchanged) that
+  says so; demoting a precedent whose lifecycle state is not `"current"`
+  (superseded, archived, or anything else) is refused, naming the actual
+  state. Once demoted, a precedent is excluded from `GET /precedents`,
+  `trellis retrieve precedents` and `get_lessons`, and is withheld from
+  packs at the collect seam alongside the existing archived/noise gates,
+  recorded in `rejected_items` with its own reason so the pack's
+  withholding statement names it. `"demoted"` is deliberately left out of
+  `RetentionPruneHandler`'s `UNSELECTABLE_STATES`, so it stays reachable by
+  `retention.prune --lifecycle-state demoted`.
 
 - **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
   `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,

@@ -29,6 +29,7 @@ from trellis.mutate.commands import Command, Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
+    CURRENT_STATE,
     MAX_DOCUMENTS_SCANNED,
     ResolutionReport,
     RetentionCandidate,
@@ -443,6 +444,55 @@ def _was_auto_promoted(event_log: EventLog, entity_id: str) -> bool:
     return bool(events)
 
 
+def _is_promoted_precedent_event(event_log: EventLog, entity_id: str) -> bool:
+    """Whether ``entity_id`` has a ``PRECEDENT_PROMOTED`` event, any source.
+
+    ``PrecedentPromoteHandler`` emits this event for two unlike sources
+    (its own docstring): a trace- or miner-sourced precedent, whose
+    ``entity_id`` names a trace and never gets a graph entity, and a
+    learning-candidate promotion, whose ``entity_id`` is a graph entity
+    ``submit_learning_promotion`` minted first. This answers "is this id
+    a real precedent, just not a graph-backed one" so
+    :class:`PrecedentDemoteHandler` can name that gap specifically
+    instead of reporting the same "Node not found" a garbage id gets.
+    """
+    events = event_log.get_events(
+        event_type=EventType.PRECEDENT_PROMOTED,
+        entity_id=entity_id,
+        limit=1,
+    )
+    return bool(events)
+
+
+def _current_lifecycle_state(node: dict[str, Any]) -> str:
+    """``node``'s current ``Lifecycle.state``, fail-open to ``CURRENT_STATE``.
+
+    A freshly-promoted precedent's entity
+    (``trellis.learning.scoring.submit_learning_promotion``) never writes
+    ``LIFECYCLE_KEY`` at all, and a malformed record is no more
+    informative than an absent one — both read as current, matching
+    ``retrieve.lifecycle``'s own fail-open convention for this key: a
+    bad or missing lifecycle record is never by itself a reason to
+    refuse.
+    """
+    record = node["properties"].get(LIFECYCLE_KEY)
+    if not isinstance(record, dict):
+        return CURRENT_STATE
+    state = record.get("state")
+    return state if isinstance(state, str) else CURRENT_STATE
+
+
+def precedent_already_demoted_message(target_id: str) -> str:
+    """The exact message :class:`PrecedentDemoteHandler` returns for a no-op.
+
+    A single source of truth rather than a literal repeated at each
+    caller surface: the REST route matches against this to populate its
+    ``already_demoted`` field (see ``trellis_api.routes.curate.demote``),
+    and a test proves the two stay byte-identical.
+    """
+    return f"Precedent {target_id} is already demoted; no changes made"
+
+
 class PrecedentDemoteHandler:
     """Stamp a precedent node ``Lifecycle.state="demoted"``, emitting PRECEDENT_DEMOTED.
 
@@ -457,26 +507,54 @@ class PrecedentDemoteHandler:
     :data:`AUTO_DEMOTE_REQUESTED_BY` — the future automatic demotion
     policy — may demote only a precedent whose own ``precedent.promote``
     event was itself automatic (:func:`_was_auto_promoted`); every other
-    caller (a human, via CLI/MCP/API) may demote any precedent regardless
-    of how it was promoted. No auto-created precedent can exist yet in
-    this PR — promotion's own commit mode is still refused — so the first
-    half of this rule is currently unreachable in production; it exists
-    to pin the contract the future auto path depends on. Both halves are
-    pinned by tests with deliberately defective subjects: one that skips
-    the check, or trusts a caller-supplied boolean instead of re-deriving
-    it from the event log, must fail the "automatic caller is narrowed"
-    test; one that refuses every human too must fail the "human may
-    demote any precedent" test.
+    caller (a human, via CLI/MCP/API) may demote any precedent *that has
+    a graph node* regardless of how it was promoted. No auto-created
+    precedent can exist yet in this PR — promotion's own commit mode is
+    still refused — so the first half of this rule is currently
+    unreachable in production; it exists to pin the contract the future
+    auto path depends on. Both halves are pinned by tests with
+    deliberately defective subjects: one that skips the check, or trusts
+    a caller-supplied boolean instead of re-deriving it from the event
+    log, must fail the "automatic caller is narrowed" test; one that
+    refuses every human too must fail the "human may demote any
+    precedent" test.
+
+    **Only a learning-promoted precedent has a graph node.**
+    ``PrecedentPromoteHandler`` serves two sources (see its own
+    docstring): a trace- or miner-sourced precedent's
+    ``PRECEDENT_PROMOTED`` event names a trace id and mints no entity at
+    all, while ``submit_learning_promotion``'s learning-candidate path
+    mints a real graph entity first and then emits the event against
+    *that* id. Only the second kind can be demoted, because demotion is
+    a stamp on a graph node. Demoting the first kind refuses with a
+    message naming that gap (:func:`_is_promoted_precedent_event`)
+    rather than the generic "Node not found" a typo'd or unrelated id
+    gets.
 
     The check is always re-derived inside :meth:`handle` from the event
     log, never from a caller-supplied flag on ``command.args`` — the
     audit trail is authoritative and a caller cannot assert "trust me,
     this one's auto."
 
+    **Idempotent re-demotion, and only ``current`` may be demoted.** The
+    handler reads the target's current ``Lifecycle.state`` before
+    writing. A target already ``"demoted"`` is a no-op: no new SCD-2
+    version, no new ``PRECEDENT_DEMOTED`` event, the stored
+    ``deprecation_reason`` unchanged — the result still carries a
+    distinct message so every caller surface can say "already demoted"
+    rather than imply a hollow repeat write. A target in any other
+    non-``current`` state (``superseded``, ``archived``, ``draft``,
+    ``deprecated``) is refused, naming the actual state, because demotion
+    is defined only as a transition *out of* currency — overwriting
+    someone else's archival or supersession record would destroy
+    provenance a different operation is responsible for.
+
     SCD-2: the write closes the current node version and opens a new one
     (:func:`_rewrite_current_node`), so the pre-demotion state stays
-    readable via ``get_node_history`` and ``as_of`` — demotion is
-    reversible the same way archival is.
+    readable via ``get_node_history`` and ``as_of``. There is no
+    dedicated reversal verb yet, though: an operator undoes a demotion
+    with ``entity.update`` to set ``Lifecycle.state`` back to
+    ``"current"``, and the demoted version remains in history either way.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -497,8 +575,21 @@ class PrecedentDemoteHandler:
             raise ValidationError(msg, errors=[msg], code="demotion_reason_too_long")
 
         graph = self._registry.knowledge.graph_store
+        event_log = self._registry.operational.event_log
         node = graph.get_node(target_id)
         if node is None:
+            if _is_promoted_precedent_event(event_log, target_id):
+                # A real precedent — it has a PRECEDENT_PROMOTED event — but
+                # the trace-/miner-sourced path never mints a graph entity
+                # for it (see PrecedentPromoteHandler's docstring), so there
+                # is no node to stamp. Distinct from "nothing by this id
+                # exists at all" below.
+                msg = (
+                    f"Precedent {target_id} cannot be demoted: only promoted "
+                    "learning precedents can be demoted; this id has no "
+                    "graph node"
+                )
+                raise ValidationError(msg, errors=[msg], code="target_not_graph_backed")
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
         if node["node_type"] != "precedent":
@@ -507,18 +598,52 @@ class PrecedentDemoteHandler:
             )
             raise ValidationError(msg, errors=[msg], code="target_not_precedent")
 
-        if command.requested_by == AUTO_DEMOTE_REQUESTED_BY:
-            event_log = self._registry.operational.event_log
-            if not _was_auto_promoted(event_log, target_id):
-                msg = (
-                    f"Precedent {target_id} was not promoted by the automatic "
-                    "policy; the automatic demotion path may only demote "
-                    "precedents it (or an earlier run of it) promoted"
-                )
-                raise ValidationError(
-                    msg, errors=[msg], code="target_not_auto_promoted"
-                )
+        if command.requested_by == AUTO_DEMOTE_REQUESTED_BY and not _was_auto_promoted(
+            event_log, target_id
+        ):
+            msg = (
+                f"Precedent {target_id} was not promoted by the automatic "
+                "policy; the automatic demotion path may only demote "
+                "precedents it (or an earlier run of it) promoted"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_auto_promoted")
 
+        # Read current state before writing, so re-demotion and a
+        # non-current target are both handled below. Absent or malformed
+        # LIFECYCLE_KEY reads as CURRENT_STATE — submit_learning_promotion
+        # never stamps one at all, and retrieve.lifecycle's own fail-open
+        # convention treats a bad record the same way: never a reason to
+        # refuse on its own.
+        current_state = _current_lifecycle_state(node)
+        if current_state == "demoted":
+            # Idempotent no-op: no new SCD-2 version, no new
+            # PRECEDENT_DEMOTED event, the stored reason untouched. The
+            # message is the only channel a handler has to say "nothing
+            # changed" (CommandResult carries no handler-settable metadata
+            # on the SUCCESS path) — surfaces that need a structured
+            # signal match against precedent_already_demoted_message(...).
+            return target_id, precedent_already_demoted_message(target_id)
+        if current_state != CURRENT_STATE:
+            msg = (
+                f"Precedent {target_id} cannot be demoted: its lifecycle "
+                f"state is {current_state!r}, not {CURRENT_STATE!r}"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_current")
+
+        # Field-by-field, matching RetentionPruneHandler._archive's
+        # convention of a fresh Lifecycle per transition rather than
+        # reading-and-merging the prior record (RetentionRestoreHandler's
+        # _restore does the same for its own transition):
+        #   - state: "demoted" is this transition's entire point.
+        #   - valid_until: stamps when currency ended, same as _archive.
+        #   - deprecation_reason: the caller's audited reason, required
+        #     non-empty above, same field _archive writes its reason to.
+        #   - valid_from, superseded_by: never set by any writer in this
+        #     codebase today (Lifecycle's own docstring: "no classifier
+        #     populates it ... yet"), so a "current" record never holds
+        #     one to carry forward.
+        #   - classification_version: a schema-version marker no
+        #     transition bumps; stays at Lifecycle's own default.
         lifecycle = Lifecycle(
             state="demoted",
             valid_until=datetime.now(UTC),

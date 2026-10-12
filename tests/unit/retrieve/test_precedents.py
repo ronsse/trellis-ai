@@ -220,6 +220,58 @@ class TestGraphStoreExcludesDemoted:
         result = list_precedents(event_log, graph_store=graph_store)
         assert [row["entity_id"] for row in result] == ["trace-1"]
 
+    def test_limit_is_not_short_when_demoted_rows_sit_in_the_window(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """The lifecycle filter must apply BEFORE ``limit``, not after.
+
+        Five precedents are promoted, newest-first: two demoted
+        (``demoted-1``, ``demoted-2``) land inside the naive
+        ``limit=3`` window (the two most recent events), with three
+        servable ones (``servable-1..3``) sitting just behind them.
+
+        Defective subject: a ``list_precedents`` that fetches
+        ``limit=3`` once and filters after (the old shape) sees
+        ``[demoted-2, demoted-1, servable-3]``, drops the two demoted
+        rows, and returns only ``["servable-3"]`` -- one row short of
+        ``limit`` even though three servable precedents exist. The
+        fixed shape widens its fetch until it finds ``limit`` servable
+        rows (or exhausts the log), returning all three.
+        """
+        for i in range(1, 4):
+            graph_store.upsert_node(
+                node_id=f"servable-{i}",
+                node_type="precedent",
+                properties={
+                    "name": f"Pattern {i}",
+                    LIFECYCLE_KEY: {"state": "current"},
+                },
+            )
+            event_log.emit(
+                EventType.PRECEDENT_PROMOTED,
+                source="test",
+                entity_id=f"servable-{i}",
+                payload={"domain": "billing", "title": f"Pattern {i}"},
+            )
+        for i in range(1, 3):
+            graph_store.upsert_node(
+                node_id=f"demoted-{i}",
+                node_type="precedent",
+                properties={"name": f"Stale {i}", LIFECYCLE_KEY: {"state": "demoted"}},
+            )
+            event_log.emit(
+                EventType.PRECEDENT_PROMOTED,
+                source="test",
+                entity_id=f"demoted-{i}",
+                payload={"domain": "billing", "title": f"Stale {i}"},
+            )
+
+        result = list_precedents(event_log, limit=3, graph_store=graph_store)
+
+        assert len(result) == 3
+        entity_ids = {row["entity_id"] for row in result}
+        assert entity_ids == {"servable-1", "servable-2", "servable-3"}
+
     def test_without_graph_store_a_demoted_precedent_still_appears(
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
     ) -> None:

@@ -233,10 +233,18 @@ def demote_precedent(
 ) -> None:
     """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
 
-    Reversible: a soft SCD-2 rewrite of the precedent's graph node, not a
-    purge. A demoted precedent stops reaching ``list_precedents`` /
-    ``get_lessons`` and is withheld from packs at the collect seam, with
-    the withholding recorded in ``rejected_items``.
+    A soft SCD-2 rewrite of the precedent's graph node, not a purge, so
+    the pre-demotion version stays readable via ``get_node_history``/
+    ``as_of`` -- but there is no dedicated reversal verb yet: an
+    operator undoes a demotion with ``entity.update`` to set
+    ``Lifecycle.state`` back to ``"current"``. A demoted precedent stops
+    reaching ``list_precedents`` / ``get_lessons`` and is withheld from
+    packs at the collect seam, with the withholding recorded in
+    ``rejected_items``. Only a precedent promoted from a learning
+    candidate has a graph node and can be demoted; a trace- or
+    miner-sourced precedent id is refused. Re-demoting an
+    already-demoted precedent is an idempotent no-op (exit 0, message
+    says so, nothing changes).
     """
     cmd = Command(
         operation=Operation.PRECEDENT_DEMOTE,

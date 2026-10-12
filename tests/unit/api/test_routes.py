@@ -1371,6 +1371,47 @@ def test_list_precedent_domains_counts_every_promoted_precedent(client):
     assert data["truncated"] is False
 
 
+def test_list_precedent_domains_excludes_demoted_and_archived(client):
+    """A demoted or archived precedent's domain must not be counted --
+    otherwise the domain dropdown offers a filter value backed entirely
+    by precedents ``GET /precedents`` never actually lists.
+
+    Defective subject: a ``list_precedent_domains`` that drops the
+    ``is_withheld_precedent`` check counts all three ``platform`` rows
+    below (including the demoted and archived ones) instead of one.
+    """
+    event_log = app_module._registry.operational.event_log
+    graph = app_module._registry.knowledge.graph_store
+    graph.upsert_node(
+        node_id="platform-live",
+        node_type="precedent",
+        properties={"name": "t", "lifecycle": {"state": "current"}},
+    )
+    graph.upsert_node(
+        node_id="platform-demoted",
+        node_type="precedent",
+        properties={"name": "t", "lifecycle": {"state": "demoted"}},
+    )
+    graph.upsert_node(
+        node_id="platform-archived",
+        node_type="precedent",
+        properties={"name": "t", "lifecycle": {"state": "archived"}},
+    )
+    for entity_id in ("platform-live", "platform-demoted", "platform-archived"):
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=entity_id,
+            payload={"domain": "platform", "title": "t"},
+        )
+
+    resp = client.get("/api/v1/precedents/domains")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["domains"] == [{"domain": "platform", "count": 1}]
+    assert data["total"] == 1
+
+
 class TestDemotePrecedentRoute:
     """``POST /precedents/{target_id}/demote``."""
 
@@ -1495,6 +1536,103 @@ class TestDemotePrecedentRoute:
         ]
         assert len(events) == 1
         assert events[0].payload["requested_by"] == "api:demote-precedent"
+
+    def test_redemoting_returns_already_demoted_true(self, client):
+        """A second ``demote`` on an already-demoted precedent is an
+        idempotent no-op reported via ``already_demoted``, not a 400 and
+        not a second ``PRECEDENT_DEMOTED`` event.
+
+        Defective subject: a route that drops the ``already_demoted``
+        computation serves ``False`` on the second call, same as the
+        first -- the assertion on the second response's field catches it.
+        """
+        node_id = self._create_precedent(client)
+        first = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "no longer useful"},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["already_demoted"] is False
+
+        second = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "a different reason this time"},
+        )
+        assert second.status_code == 200, second.text
+        data = second.json()
+        assert data["status"] == "success"
+        assert data["already_demoted"] is True
+
+        events = [
+            e
+            for e in app_module._registry.operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_DEMOTED
+            )
+            if e.payload.get("target_id") == node_id
+        ]
+        assert len(events) == 1
+
+    def test_demote_non_current_state_is_refused(self, client):
+        """Demoting a node whose lifecycle is some other non-current
+        state (here, ``superseded``) must be refused with a message
+        naming that state, not silently stamped over.
+
+        Defective subject: a route/handler that skips the current-state
+        check demotes the node anyway -- the status-code assertion and
+        the unchanged-state assertion both catch it.
+        """
+        node_id = self._create_precedent(client)
+        graph = app_module._registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id=node_id,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                "lifecycle": {"state": "superseded"},
+            },
+        )
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "superseded" in resp.json()["detail"]
+
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "superseded"
+
+    def test_demote_trace_sourced_precedent_is_refused_with_legible_message(
+        self, client
+    ):
+        """A trace-mined precedent (a ``PRECEDENT_PROMOTED`` event
+        with no backing graph node) must be refused with a message that
+        explains the graph-node-only scope, not the generic "Node not
+        found" used for a garbage id.
+
+        Defective subject: a handler that does not distinguish
+        "promoted but never minted a node" from "no such id at all"
+        serves the same "Node not found" message as
+        ``test_demote_missing_target_is_refused`` -- the message-text
+        assertion below catches that collapse.
+        """
+        event_log = app_module._registry.operational.event_log
+        trace_id = "trace-mined-1"
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=trace_id,
+            payload={"title": "Mined from a trace"},
+        )
+
+        resp = client.post(
+            f"/api/v1/precedents/{trace_id}/demote",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "Node not found" not in detail
+        assert "graph node" in detail or "promoted" in detail
 
 
 # -- Batch mutations --

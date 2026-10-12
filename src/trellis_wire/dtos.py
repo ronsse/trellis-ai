@@ -353,6 +353,29 @@ class CommandResponse(WireModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class PrecedentDemoteResponse(WireModel):
+    """Response after ``POST /precedents/{target_id}/demote``.
+
+    A dedicated shape rather than a second construction of
+    :class:`CommandResponse` (``tests/unit/api/test_command_response_rule.py``
+    pins that DTO to exactly one projection, shared by curate/extract/
+    mutations and meaningless to add a demote-only field to) --
+    mirroring that DTO's fields and adding ``already_demoted``: true when
+    the command was a no-op because the target was already in the
+    demoted state (``PrecedentDemoteHandler``'s idempotent re-demotion),
+    false on every other outcome including a fresh demotion. Built only
+    in ``trellis_api.routes.curate.demote``.
+    """
+
+    status: str
+    command_id: str
+    operation: str
+    message: str
+    created_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    already_demoted: bool = False
+
+
 # -- Batch mutations --
 
 

@@ -2290,6 +2290,62 @@ components:
       - reason
       title: PrecedentDemoteRequest
       type: object
+    PrecedentDemoteResponse:
+      additionalProperties: false
+      description: 'Response after ``POST /precedents/{target_id}/demote``.
+
+
+        A dedicated shape rather than a second construction of
+
+        :class:`CommandResponse` (``tests/unit/api/test_command_response_rule.py``
+
+        pins that DTO to exactly one projection, shared by curate/extract/
+
+        mutations and meaningless to add a demote-only field to) --
+
+        mirroring that DTO''s fields and adding ``already_demoted``: true when
+
+        the command was a no-op because the target was already in the
+
+        demoted state (``PrecedentDemoteHandler``''s idempotent re-demotion),
+
+        false on every other outcome including a fresh demotion. Built only
+
+        in ``trellis_api.routes.curate.demote``.'
+      properties:
+        already_demoted:
+          default: false
+          title: Already Demoted
+          type: boolean
+        command_id:
+          title: Command Id
+          type: string
+        created_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created Id
+        message:
+          title: Message
+          type: string
+        operation:
+          title: Operation
+          type: string
+        status:
+          title: Status
+          type: string
+        warnings:
+          items:
+            type: string
+          title: Warnings
+          type: array
+      required:
+      - status
+      - command_id
+      - operation
+      - message
+      title: PrecedentDemoteResponse
+      type: object
     PromoteRequest:
       additionalProperties: false
       description: Request to promote a trace to a precedent.
@@ -5300,7 +5356,18 @@ paths:
 
         current page, and never offers one with zero precedents left once a
 
-        filter is applied.'
+        filter is applied.
+
+
+        A demoted or archived precedent
+
+        (:func:`trellis.retrieve.precedents.is_withheld_precedent`) is excluded
+
+        from the counts, the same lifecycle filter ``GET /precedents`` applies
+
+        -- otherwise this endpoint would offer a domain filter option backed
+
+        entirely by precedents the listing it feeds never actually shows.'
       operationId: list_precedent_domains_api_v1_precedents_domains_get
       responses:
         '200':
@@ -5321,11 +5388,29 @@ paths:
       description: 'Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
 
 
-        Reversible (SCD-2 rewrite, not a purge). A demoted precedent stops
+        SCD-2 rewrite, not a purge, so the pre-demotion version stays
 
-        reaching ``GET /precedents`` / ``get_lessons`` and is withheld from
+        readable via ``get_node_history``/``as_of`` -- but there is no
 
-        packs at the collect seam, recorded in ``rejected_items``.'
+        dedicated reversal verb yet: an operator undoes a demotion with
+
+        ``entity.update`` to set ``Lifecycle.state`` back to ``"current"``.
+
+        A demoted precedent stops reaching ``GET /precedents`` /
+
+        ``get_lessons`` and is withheld from packs at the collect seam,
+
+        recorded in ``rejected_items``. Only a precedent promoted from a
+
+        learning candidate has a graph node and can be demoted -- a trace-
+
+        or miner-sourced precedent id is refused with a message naming that
+
+        gap. Re-demoting an already-demoted precedent is a 200 idempotent
+
+        no-op: ``already_demoted=true`` and nothing changes (no new SCD-2
+
+        version, no new event, the stored reason unchanged).'
       operationId: demote_api_v1_precedents__target_id__demote_post
       parameters:
       - in: path
@@ -5345,7 +5430,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CommandResponse'
+                $ref: '#/components/schemas/PrecedentDemoteResponse'
           description: Successful Response
         '422':
           content:

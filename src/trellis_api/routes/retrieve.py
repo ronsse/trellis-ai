@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.precedents import is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -436,11 +437,23 @@ def list_precedent_domains() -> dict[str, Any]:
     other analyzer), so it lists a domain that exists but isn't on the
     current page, and never offers one with zero precedents left once a
     filter is applied.
+
+    A demoted or archived precedent
+    (:func:`trellis.retrieve.precedents.is_withheld_precedent`) is excluded
+    from the counts, the same lifecycle filter ``GET /precedents`` applies
+    -- otherwise this endpoint would offer a domain filter option backed
+    entirely by precedents the listing it feeds never actually shows.
     """
-    event_log = get_registry().operational.event_log
+    registry = get_registry()
+    event_log = registry.operational.event_log
+    graph_store = registry.knowledge.graph_store
     scan = scan_events(event_log, event_type=EventType.PRECEDENT_PROMOTED)
     counts: dict[str, int] = {}
     for event in scan.events:
+        if event.entity_id is not None and is_withheld_precedent(
+            graph_store, event.entity_id
+        ):
+            continue
         domain = event.payload.get("domain")
         if domain:
             counts[domain] = counts.get(domain, 0) + 1
