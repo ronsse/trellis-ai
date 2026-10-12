@@ -515,7 +515,7 @@ def serve(
         raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
     console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
-    app = create_app()
+    app = create_app(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
 

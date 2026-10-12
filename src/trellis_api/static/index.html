@@ -1349,6 +1349,17 @@
             border-radius: 6px;
             font-size: 0.82rem;
         }
+
+        /* Runtime panel: a small label/value grid, not the big-number
+           dashboard tiles (.cards) -- this is configuration echo, not a
+           metric. */
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.8rem 1.2rem;
+            margin-bottom: 0.8rem;
+        }
+        .info-grid strong { display: block; font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.2rem; }
         .form-row { margin-bottom: 0.9rem; }
         .form-row label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; }
         .form-row input, .form-row select {
@@ -2179,6 +2190,19 @@
         </div>
 
         <div id="view-settings" style="display:none">
+            <div id="runtime-auth-banner"></div>
+            <div class="status-section">
+                <div class="search-bar" style="margin-bottom:0.6rem">
+                    <h3 style="margin:0; flex:1">Runtime</h3>
+                    <button onclick="loadRuntime()">Refresh</button>
+                </div>
+                <p class="field-hint">
+                    Read-only snapshot of what this API process actually resolves right now &mdash;
+                    auth mode, storage backends, LLM routing and the directories a background job
+                    reads. Never shows a connection string, key or token, whatever the source.
+                </p>
+                <div id="runtime-body" class="empty-state">Loading runtime info&hellip;</div>
+            </div>
             <div id="settings-banner"></div>
             <p class="field-hint">
                 <strong>As read by: trellis-api.</strong> Settings are per-process &mdash; this
@@ -2200,6 +2224,7 @@
                             <th>Setting</th>
                             <th>Description</th>
                             <th>Type / bounds</th>
+                            <th>Read by</th>
                             <th>Effective value</th>
                             <th>Stored value</th>
                             <th>Takes effect</th>
@@ -2599,7 +2624,7 @@
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
                 if (name === 'tagrules') loadTagRules();
-                if (name === 'settings') loadSettings();
+                if (name === 'settings') { loadRuntime(); loadSettings(); }
             }
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
@@ -6728,6 +6753,100 @@
             }
         }
 
+        // === Runtime panel ===
+        // Driven entirely by GET /api/v1/runtime -- a read-only echo of
+        // what this process actually resolves, never a second copy of
+        // the logic that resolves it. The route itself guarantees no
+        // field is secret-shaped (test_runtime_route.py's
+        // TestNoSecretLeakage), so nothing here needs to redact anything.
+
+        function renderAuthBanner(data) {
+            const el = document.getElementById('runtime-auth-banner');
+            if (!el) return;
+            if (!data || !data.auth_mode_permissive) { el.innerHTML = ''; return; }
+            const mode = data.auth_mode;
+            // Exactly what each mode grants (trellis_api/auth.py::authenticate):
+            // 'off' grants every request every scope no matter what credential
+            // (if any) it presents. 'optional' grants every scope ONLY to a
+            // request that presents no credential at all -- one with an
+            // invalid credential still gets 401, and one with a valid scoped
+            // key gets that key's own scopes, not necessarily every scope.
+            const claim = mode === 'optional'
+                ? 'a request without an API key is granted every scope'
+                : 'every request is granted every scope';
+            const detail = mode === 'optional'
+                ? 'A caller that omits its API key right now is granted every scope. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.'
+                : 'No API key is required right now. Any caller that can reach this server can read and change everything an admin key could. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.';
+            el.innerHTML = `<div class="degraded-banner">
+                <span class="degraded-title">AUTH MODE: ${escHtml(mode.toUpperCase())} &mdash; ${claim}</span>
+                <span class="degraded-detail">${detail}</span>
+            </div>`;
+        }
+
+        function formatRuntimeDir(path) {
+            return path ? `<code>${escHtml(path)}</code>` : '<span class="field-hint">(not set)</span>';
+        }
+
+        function renderRuntimePanel(data) {
+            const el = document.getElementById('runtime-body');
+            if (!el) return;
+            const storeRows = Object.entries(data.stores || {})
+                .map(([name, cls]) => `<li>${escHtml(humanizeSettingName(name))}: <code>${escHtml(cls)}</code></li>`)
+                .join('');
+            const llmRows = Object.entries(data.llm_routes || {})
+                .map(([consumer, tier]) => `<li>${escHtml(humanizeSettingName(consumer))}: ${tier ? `<code>${escHtml(tier)}</code>` : '<span class="field-hint">unrouted</span>'}</li>`)
+                .join('');
+            const llmErrorHtml = data.llm_routes_error
+                ? `<p class="field-hint" style="color:var(--error)">LLM routing is misconfigured: ${escHtml(data.llm_routes_error)}</p>`
+                : '';
+            el.innerHTML = `
+                <div class="info-grid">
+                    <div>
+                        <strong>Auth mode</strong>
+                        <div><code>${escHtml(data.auth_mode)}</code> ${data.auth_mode_permissive ? '<span class="badge badge-warn">Permissive</span>' : '<span class="badge badge-ok">Required</span>'}</div>
+                    </div>
+                    <div>
+                        <strong>Ops detail</strong>
+                        <div><code>${escHtml(data.ops_detail)}</code></div>
+                    </div>
+                    <div>
+                        <strong>Metrics</strong>
+                        <div>${data.metrics_public ? '<span class="badge badge-warn">Public</span>' : '<span class="badge badge-ok">Admin-only</span>'}</div>
+                    </div>
+                    <div>
+                        <strong>Bind address</strong>
+                        <div><code>${escHtml(data.bind_host)}:${escHtml(String(data.bind_port))}</code></div>
+                    </div>
+                    <div>
+                        <strong>Embedder</strong>
+                        <div>${data.embedder ? `<code>${escHtml(data.embedder)}</code>` : '<span class="field-hint">none configured</span>'}</div>
+                    </div>
+                    <div>
+                        <strong>Learning artifacts dir</strong>
+                        <div>${formatRuntimeDir(data.learning_artifacts_dir)}</div>
+                    </div>
+                    <div>
+                        <strong>Host jobs dir</strong>
+                        <div>${formatRuntimeDir(data.host_jobs_dir)}</div>
+                    </div>
+                </div>
+                <div style="margin-top:0.8rem"><strong>Storage backends</strong><ul>${storeRows}</ul></div>
+                <div style="margin-top:0.6rem"><strong>LLM routes</strong><ul>${llmRows}</ul>${llmErrorHtml}</div>
+            `;
+        }
+
+        async function loadRuntime() {
+            const el = document.getElementById('runtime-body');
+            try {
+                const data = await fetchJSON('/runtime');
+                renderAuthBanner(data);
+                renderRuntimePanel(data);
+            } catch (err) {
+                renderAuthBanner(null);
+                if (el) el.innerHTML = `<p style="color:var(--error)">Failed to load runtime info: ${escHtml(err.message)}</p>`;
+            }
+        }
+
         // === Settings (e179) ===
         // Driven entirely by GET /api/v1/settings -- this file hardcodes no
         // knob list, no risk-caption strings and no group display names; a
@@ -6740,7 +6859,7 @@
         async function loadSettings() {
             const tbody = document.getElementById('settings-body');
             const totalEl = document.getElementById('settings-total');
-            tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading settings...')}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="9">${loadingHtml('Loading settings...')}</td></tr>`;
             renderDegradedBanner('settings-banner', null);
             totalEl.textContent = '';
             try {
@@ -6750,7 +6869,7 @@
                 populateSettingsGroupFilter(data);
                 renderSettingsTable();
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Failed to load settings: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" style="color:var(--error)">Failed to load settings: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -6770,15 +6889,53 @@
         function formatSettingBounds(s) {
             if (s.enum) return `enum: ${s.enum.join(', ')}`;
             const parts = [];
-            if (s.minimum !== null && s.minimum !== undefined) parts.push(`min ${s.minimum}`);
+            // minimum_exclusive means the bound itself is refused (value >
+            // minimum, not >=) -- "min 0" reads as 0 being accepted, which
+            // is false for a knob like this, so it gets its own wording.
+            if (s.minimum !== null && s.minimum !== undefined) {
+                parts.push(s.minimum_exclusive ? `> ${s.minimum}` : `min ${s.minimum}`);
+            }
             if (s.maximum !== null && s.maximum !== undefined) parts.push(`max ${s.maximum}`);
             return parts.length ? parts.join(', ') : 'no bounds';
+        }
+
+        // Surface codes as the registry spells them ("mcp", "api", "cli")
+        // -- never hardcoded beyond this display mapping, so a surface
+        // added to a spec later still renders (falls back to its own
+        // uppercase form rather than disappearing).
+        const SURFACE_DISPLAY_NAMES = { mcp: 'MCP', api: 'API', cli: 'CLI' };
+
+        function formatSurfaces(surfaces) {
+            if (!surfaces || surfaces.length === 0) return '<span class="field-hint">none</span>';
+            return surfaces
+                .map(s => escHtml(SURFACE_DISPLAY_NAMES[s] || s.toUpperCase()))
+                .join(', ');
+        }
+
+        // A setting whose shipped default is "unset" (no gate, no floor)
+        // carries `default: null` / `effective_value: null` honestly --
+        // but `String(null)` is the literal text "null", which reads as a
+        // broken value rather than as the deliberate unset state it is.
+        function formatSettingValue(v) {
+            return (v === null || v === undefined) ? '(unset)' : String(v);
         }
 
         // Env-pin truthfulness (brief e179 step 2): built only from the
         // route's own fields (overridden_by, env_var, stored_value) -- never
         // inferred from, say, whether the env var merely exists.
         function settingEnvPinNote(s) {
+            if (s.settings_writable === false) {
+                // Not "pinned" by a currently-set env var -- this knob
+                // reads ONLY the environment, always, so there is no
+                // settings-store path to be pinned out of (B3).
+                let note = `Read from <code>${escHtml(s.env_var)}</code> only, once at process start. ` +
+                    'The settings store is never consulted -- writing a value here is refused.';
+                if (s.stored_value !== null && s.stored_value !== undefined) {
+                    note += ` A value saved before this was enforced (<code>${escHtml(String(s.stored_value))}</code>) ` +
+                        'has no effect and is never read.';
+                }
+                return note;
+            }
             if (s.overridden_by !== 'env') return '';
             let note = `Pinned by <code>${escHtml(s.env_var)}</code> &mdash; the environment variable governs right now.`;
             if (s.stored_value !== null && s.stored_value !== undefined) {
@@ -6819,7 +6976,7 @@
                     (r.description || '').toLowerCase().includes(filterText));
             }
             if (rows.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">No settings match this filter.</div></td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">No settings match this filter.</div></td></tr>`;
             } else {
                 tbody.innerHTML = rows.map(s => renderSettingRow(s, groups, degraded)).join('');
             }
@@ -6830,6 +6987,15 @@
         function renderValueInput(s, inputId, currentValue, disabled) {
             const disabledAttr = disabled ? 'disabled' : '';
             const ariaLabel = `New value for ${s.name}`;
+            // An unset default/stored value (null) must become an empty
+            // field, not the literal text "null" -- String(null) is a
+            // real string, and the user-facing cell for this comes from
+            // the same place (formatSettingValue). Still passed through
+            // escHtml() at the interpolation site itself, like every
+            // other attribute value here (test_ui_attribute_escaping).
+            const rawValue = (currentValue === null || currentValue === undefined)
+                ? ''
+                : String(currentValue);
             if (s.enum) {
                 const options = s.enum.map(v =>
                     `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}>${escHtml(v)}</option>`
@@ -6847,9 +7013,9 @@
                 const step = s.type === 'int' ? '1' : 'any';
                 const minAttr = s.minimum !== null && s.minimum !== undefined ? `min="${escHtml(String(s.minimum))}"` : '';
                 const maxAttr = s.maximum !== null && s.maximum !== undefined ? `max="${escHtml(String(s.maximum))}"` : '';
-                return `<input type="number" id="${escHtml(inputId)}" step="${escHtml(step)}" ${minAttr} ${maxAttr} value="${escHtml(String(currentValue))}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+                return `<input type="number" id="${escHtml(inputId)}" step="${escHtml(step)}" ${minAttr} ${maxAttr} value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
             }
-            return `<input type="text" id="${escHtml(inputId)}" value="${escHtml(String(currentValue))}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+            return `<input type="text" id="${escHtml(inputId)}" value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
         }
 
         function renderSettingActions(s, disabled) {
@@ -6874,9 +7040,12 @@
             // never folded into this class (brief e179 rework, step 2).
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
-            const liveHtml = s.restart_required
-                ? '<span class="badge badge-warn">Restart required</span>'
-                : '<span class="badge badge-ok">Live &mdash; next request</span>';
+            const notWritable = s.settings_writable === false;
+            const liveHtml = notWritable
+                ? '<span class="badge badge-warn">Env only &mdash; read-only here</span>'
+                : (s.restart_required
+                    ? '<span class="badge badge-warn">Restart required</span>'
+                    : '<span class="badge badge-ok">Live &mdash; next request</span>');
             const riskNoteHtml = s.risk_note
                 ? `<div class="field-hint" style="margin-top:0.3rem">${escHtml(s.risk_note)}</div>`
                 : '';
@@ -6888,14 +7057,15 @@
                 </td>
                 <td style="max-width:360px; white-space:normal">${escHtml(s.description)}${riskNoteHtml}</td>
                 <td>${escHtml(s.type)}<div class="field-hint">${escHtml(formatSettingBounds(s))}</div></td>
+                <td>${formatSurfaces(s.surfaces)}</td>
                 <td>
-                    <div><code>${escHtml(String(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
+                    <div><code>${escHtml(formatSettingValue(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
                     ${pinNote ? `<div class="field-hint">${pinNote}</div>` : ''}
                 </td>
                 <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
                 <td>${liveHtml}</td>
                 <td>${s.updated_at ? fmtTimeCell(s.updated_at) : '<span class="field-hint">never</span>'}</td>
-                <td id="setting-actions-${escHtml(s.name)}">${renderSettingActions(s, degraded)}</td>
+                <td id="setting-actions-${escHtml(s.name)}">${notWritable ? '<span class="field-hint">Read-only &mdash; set the env var</span>' : renderSettingActions(s, degraded)}</td>
             </tr>`;
         }
 

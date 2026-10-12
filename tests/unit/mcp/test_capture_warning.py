@@ -14,6 +14,7 @@ import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +117,30 @@ class TestCaptureWarningBanner:
         make a 100%-rejected ``save_experience`` look healthy."""
         _seed_capture_failure(temp_registry)
         _accept(temp_registry, "cli:ingest")
+        result = get_context("something entirely obscure")
+        assert result.startswith(_BANNER)
+        assert "mcp:save_experience" in result
+
+    def test_a_stored_threshold_override_is_actually_read(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Re-gate #867 M15: ``_capture_warning_banner`` must thread a
+        *stored* ``capture_warn_threshold`` override through to
+        :func:`check_capture_health`, not just the env var the autouse
+        fixture above clears. Two rejections sit below the module
+        default (3) — no banner — until a stored override of 2 lowers
+        the floor enough to cross it, proving the stored value changed
+        this surface's real output, not just the resolver's return
+        value in isolation.
+        """
+        _seed_capture_failure(temp_registry, n=2)
+        result = get_context("something entirely obscure")
+        assert _BANNER not in result
+
+        settings_path = resolve_settings_path(temp_registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("capture_warn_threshold", 2)
+
         result = get_context("something entirely obscure")
         assert result.startswith(_BANNER)
         assert "mcp:save_experience" in result

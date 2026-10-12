@@ -558,6 +558,21 @@ class SettingsUpdateHandler:
             msg = f"Unknown setting: {name!r}"
             raise ValidationError(msg, errors=[msg], code="unknown_setting")
 
+        # settings_writable=False means no code path ever reads this
+        # knob's stored value -- not even after a restart (that is
+        # restart_required, which stays writable). Storing one anyway
+        # would be accepted and echoed back by GET /settings as if it
+        # mattered, with nothing that could ever make it real. Clearing
+        # a stray legacy row (raw_value is None) is still allowed.
+        if raw_value is not None and not spec.settings_writable:
+            msg = (
+                f"{name} is read from {spec.env_var} only, once at "
+                "process start; the settings store is never consulted, "
+                "so a stored value here would never take effect. Set "
+                f"{spec.env_var} instead."
+            )
+            raise ValidationError(msg, errors=[msg], code="settings_write_refused")
+
         path = resolve_settings_path(self._registry.stores_dir)
         if path is None:
             # Same precedent as trellis_api.routes.policies._get_policy_store:
