@@ -116,8 +116,12 @@ def _resolve_int_knob(
             return (
                 int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
             )
-        except (TypeError, ValueError):
-            logger.warning("capture_health.bad_env_int", var=env_var, value=raw_env)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "capture_health.bad_env_int",
+                var=env_var,
+                error_type=type(exc).__name__,
+            )
             return default
     if settings is not None and setting_name in settings:
         raw_setting = settings[setting_name]
@@ -340,8 +344,12 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except ValueError:
-        logger.warning("capture_health.bad_env_int", var=name, value=raw)
+    except ValueError as exc:
+        logger.warning(
+            "capture_health.bad_env_int",
+            var=name,
+            error_type=type(exc).__name__,
+        )
         return default
     return value if value >= 0 else default
 

@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
-from trellis.core.settings_registry import SETTINGS_REGISTRY
+from trellis.core.settings_registry import SETTINGS_REGISTRY, SettingSpec
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -32,6 +32,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.app import create_app
+from trellis_api.routes.settings import _parse_error_reason
 
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 MEMORY_EXTRACTION_ENV = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
@@ -225,6 +226,48 @@ class TestListSettings:
 
         assert row["effective_value"] == 0.2
         assert row["parse_error"] is None
+
+    def test_a_malformed_stored_int_row_gets_its_own_reason(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """f867 follow-up SF1: an int-typed knob with a stored float such
+        as 1.5 previously read the same ``"stored value is not a finite
+        number in range"`` text the float case uses above, which
+        describes the wrong coercion. The int-typed branch of
+        ``_parse_error_reason`` now has its own fixed, value-free text.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 1.5)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "noise_demotion_min_attributed_packs")
+
+        assert row["stored_value"] == 1.5
+        assert row["effective_value"] == 5  # the module default
+        assert row["parse_error"] == "stored value is not an integer in range"
+        assert row["parse_error"] != "stored value is not a finite number in range"
+        assert "1.5" not in row["parse_error"]
+
+    def test_a_malformed_stored_bool_row_is_flagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """f867 follow-up S1a: a stored value that fails the bool
+        coercion (neither a recognized true/false token) gets the
+        bool-specific fixed reason, never the stored string itself.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("memory_extraction", "maybe")
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "memory_extraction")
+
+        assert row["stored_value"] == "maybe"
+        assert row["parse_error"] == "stored value is not a recognized boolean"
+        assert "maybe" not in row["parse_error"]
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """brief e179 step 8: the UI's filter box reads display labels from
@@ -799,3 +842,67 @@ class TestGraphSeedingEffectiveValue:
         row = _entry(body, "graph_seeding")
         assert row["effective_value"] is False
         assert row["overridden_by"] == "env"
+
+
+class TestParseErrorReasonIsFixedPerType:
+    """f867 follow-up SF1/S1a/S1c, unit-level on ``_parse_error_reason``.
+
+    No shipped :data:`SETTINGS_REGISTRY` entry sets ``enum`` today (grep
+    confirms it), so the enum branch is otherwise dead in every HTTP-level
+    test above. Exercising the private function directly with a synthetic
+    ``SettingSpec`` is the only way to pin that branch's text without
+    adding a throwaway production setting just to carry a test.
+    """
+
+    def test_int_reason_is_distinct_from_float_reason(self) -> None:
+        int_spec = SettingSpec(
+            name="probe_int",
+            label="Probe int",
+            type="int",
+            default=0,
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_INT",
+        )
+        float_spec = SettingSpec(
+            name="probe_float",
+            label="Probe float",
+            type="float",
+            default=0.0,
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_FLOAT",
+        )
+        int_reason = _parse_error_reason(int_spec)
+        float_reason = _parse_error_reason(float_spec)
+        assert int_reason == "stored value is not an integer in range"
+        assert float_reason == "stored value is not a finite number in range"
+        assert int_reason != float_reason
+
+    def test_enum_reason(self) -> None:
+        enum_spec = SettingSpec(
+            name="probe_enum",
+            label="Probe enum",
+            type="str",
+            default="a",
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_ENUM",
+            enum=("a", "b"),
+        )
+        assert (
+            _parse_error_reason(enum_spec)
+            == "stored value is not one of the allowed options"
+        )

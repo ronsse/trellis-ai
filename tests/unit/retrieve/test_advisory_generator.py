@@ -280,6 +280,71 @@ class TestResolveAdvisoryThresholds:
         assert sample_size == 5
 
 
+def _assert_no_env_value_leak(logs: list[dict], event: str, secret: str) -> dict:
+    """SF3 (env half): the log line for a malformed env value must carry
+    ``var=<ENV_NAME>`` and ``error_type=...``, never the raw value --
+    matching the settings-store half #867 already fixed. Checking for
+    the full secret is not enough on its own (a truncating formatter
+    could still leak a damaging fragment), so this also rules out every
+    8-character substring of it appearing anywhere in the captured
+    entries.
+    """
+    matches = [entry for entry in logs if entry["event"] == event]
+    assert len(matches) == 1, logs
+    entry = matches[0]
+    rendered = repr(entry)
+    assert secret not in rendered, rendered
+    for start in range(len(secret) - 7):
+        chunk = secret[start : start + 8]
+        assert chunk not in rendered, (chunk, rendered)
+    return entry
+
+
+class TestEnvLogLineNeverLeaksTheRawValue:
+    """SF3 (env half). The settings-store half of this bug (a malformed
+    *stored* value logged at ``value=<raw>``) was fixed in #867; the env
+    half -- the exact same resolvers' *other* branch -- was not. A
+    secret-shaped env override (an API key pasted into the wrong
+    variable, say) must not reach stderr when it fails to parse.
+    """
+
+    def test_bad_env_int_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEAdvisoryEnvIntNeedle000111"
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, needle)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        with capture_logs() as logs:
+            sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+        entry = _assert_no_env_value_leak(
+            logs, "advisory_generator.bad_env_int", needle
+        )
+        assert entry["var"] == MIN_SAMPLE_SIZE_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
+
+    def test_bad_env_float_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEAdvisoryEnvFloatNeedle000111"
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, needle)
+
+        with capture_logs() as logs:
+            _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+        entry = _assert_no_env_value_leak(
+            logs, "advisory_generator.bad_env_float", needle
+        )
+        assert entry["var"] == MIN_EFFECT_SIZE_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
+
+
 class TestAdvisoryGeneratorEmpty:
     """Generator produces empty report with no data."""
 

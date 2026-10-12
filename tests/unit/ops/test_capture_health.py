@@ -225,6 +225,71 @@ class TestResolveCaptureThresholds:
         assert threshold == DEFAULT_THRESHOLD
 
 
+def _assert_no_env_value_leak(logs: list[dict], event: str, secret: str) -> dict:
+    """SF3 (env half): see the matching helper in
+    ``tests/unit/retrieve/test_advisory_generator.py``. The log line for
+    a malformed env value must carry ``var=<ENV_NAME>`` and
+    ``error_type=...``, never the raw value -- checked both as the full
+    secret and as every 8-character substring of it, so a truncating
+    formatter could not leak a damaging fragment either.
+    """
+    matches = [entry for entry in logs if entry["event"] == event]
+    assert len(matches) == 1, logs
+    entry = matches[0]
+    rendered = repr(entry)
+    assert secret not in rendered, rendered
+    for start in range(len(secret) - 7):
+        chunk = secret[start : start + 8]
+        assert chunk not in rendered, (chunk, rendered)
+    return entry
+
+
+class TestEnvLogLineNeverLeaksTheRawValue:
+    """``_resolve_int_knob`` (via ``resolve_capture_thresholds``) and the
+    unbounded ``_env_int`` (via ``check_capture_health`` with no explicit
+    kwarg) are two independent call sites sharing the
+    ``capture_health.bad_env_int`` event name -- both must stop logging
+    the raw env value.
+    """
+
+    def test_resolve_capture_thresholds_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKECaptureEnvThresholdNeedle000111"
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", needle)
+
+        with capture_logs() as logs:
+            threshold, _window_hours = resolve_capture_thresholds(None)
+
+        assert threshold == DEFAULT_THRESHOLD
+        entry = _assert_no_env_value_leak(logs, "capture_health.bad_env_int", needle)
+        assert entry["var"] == "TRELLIS_CAPTURE_WARN_THRESHOLD"
+        assert "error_type" in entry
+        assert "value" not in entry
+
+    def test_check_capture_health_unbounded_env_fallback_logs_var_not_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exercises the *other* ``bad_env_int`` call site --
+        ``_env_int``, reached only when ``check_capture_health`` is
+        called with no explicit ``threshold`` kwarg so it reads the env
+        var directly rather than through ``resolve_capture_thresholds``.
+        """
+        needle = "sk-proj-FAKECaptureEnvUnboundedNeedle000111"
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", needle)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+
+        with capture_logs() as logs:
+            result = check_capture_health(event_log)
+
+        # nothing seeded, so it falls back to the default and stays healthy
+        assert result is None
+        entry = _assert_no_env_value_leak(logs, "capture_health.bad_env_int", needle)
+        assert entry["var"] == "TRELLIS_CAPTURE_WARN_THRESHOLD"
+        assert "error_type" in entry
+        assert "value" not in entry
+
+
 class TestCheckCaptureHealth:
     def test_empty_log_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")

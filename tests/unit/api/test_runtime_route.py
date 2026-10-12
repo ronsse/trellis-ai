@@ -359,6 +359,74 @@ def test_a_non_mapping_embeddings_config_is_reported_as_an_error_not_a_500(
     assert len(not_mapping_logs) == 1, logs
     assert not_mapping_logs[0]["key"] == "embeddings"
     assert not_mapping_logs[0]["type"] == type(embedding_config).__name__
+    # f867 follow-up B7h: pin the level too -- a malformed ``embeddings:``
+    # block is an operator-visible misconfiguration, not a debug detail,
+    # so it must survive the default ``TRELLIS_LOG_LEVEL=WARNING`` floor.
+    assert not_mapping_logs[0]["log_level"] == "warning"
+
+    if needle is not None:
+        assert needle not in raw
+        for log in logs:
+            for value in log.values():
+                assert needle not in str(value)
+
+
+@pytest.mark.parametrize(
+    ("provider", "needle"),
+    [
+        pytest.param(5, None, id="int"),
+        pytest.param(
+            ["sk-live-NonStrProviderSecret000333"],
+            "sk-live-NonStrProviderSecret000333",
+            id="list",
+        ),
+    ],
+)
+def test_a_non_str_provider_names_the_knob_without_stringifying_the_value(
+    tmp_path, provider, needle
+) -> None:
+    """f867 follow-up item 5: ``embeddings.provider`` set to a non-string
+    (an int or a list) makes :attr:`StoreRegistry.embedding_fn` raise
+    ``ConfigError`` naming only the value's *type*. The panel's except
+    branch then calls :meth:`StoreRegistry.embedding_source_knob` to
+    attribute the failure to a knob -- which used to return ``None`` for
+    exactly this shape (its truthy check required ``isinstance(provider,
+    str)`` before naming anything), degrading the field to the generic
+    ``"unknown (ConfigError)"`` instead of ``"unknown (embeddings.provider
+    failed: ConfigError)"``. Fixed to mirror ``embedding_fn``'s own
+    truthy gate (present and non-empty, not "and is a string"), so the
+    knob is named on this path the same as it already is when a *string*
+    provider fails to import.
+    """
+    reg = StoreRegistry(
+        stores_dir=tmp_path / "stores", embedding_config={"provider": provider}
+    )
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c, capture_logs() as logs:
+            resp = c.get("/api/v1/runtime")
+    finally:
+        reg.close()
+        app_module._registry = None
+
+    assert resp.status_code == 200, resp.text
+    raw = resp.text
+    body = json.loads(raw)
+    assert body["embedder"] == "unknown (embeddings.provider failed: ConfigError)"
+
+    probe_failed_logs = [
+        log for log in logs if log.get("event") == "runtime_embedder_probe_failed"
+    ]
+    assert len(probe_failed_logs) == 1, logs
+    assert probe_failed_logs[0]["knob"] == "embeddings.provider"
+    assert probe_failed_logs[0]["error_type"] == "ConfigError"
 
     if needle is not None:
         assert needle not in raw
