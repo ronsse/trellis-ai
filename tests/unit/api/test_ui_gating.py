@@ -175,7 +175,7 @@ _ADMIN_SCOPE_VIEWS = {
     "dashboard",
     "metrics",
     "review",
-    "evolution",
+    "effectiveness",
     "loops",
     "advisories",
     "settings",

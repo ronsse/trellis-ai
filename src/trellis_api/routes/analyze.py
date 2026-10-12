@@ -417,6 +417,11 @@ def _run_cost(params: CostParams, registry: StoreRegistry) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _ReportEntry:
+    # Human-readable label for the Reports tab's picker; the dict key
+    # (the raw report name the route and CLI both use) stays the
+    # programmatic identifier and is rendered as secondary text, never
+    # the primary label -- see B15 in the UI audit.
+    title: str
     description: str
     params_model: type[TrellisModel]
     run: Callable[[Any, StoreRegistry], dict[str, Any]]
@@ -424,6 +429,7 @@ class _ReportEntry:
 
 _REPORTS: dict[str, _ReportEntry] = {
     "holdout": _ReportEntry(
+        title="Holdout effect",
         description=(
             "Compares task outcomes between agents that got a context pack "
             "and agents held out of one. A good report shows a positive, "
@@ -438,6 +444,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_holdout,
     ),
     "judged-outcomes": _ReportEntry(
+        title="Judged outcomes",
         description=(
             "Joins each judged memory operation to what happened to it "
             "afterwards: served in a pack, graded by feedback, cited as "
@@ -450,6 +457,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_judged_outcomes,
     ),
     "advisory-effectiveness": _ReportEntry(
+        title="Advisory effectiveness",
         description=(
             "Scores each advisory by how its presence correlates with pack "
             "success versus a baseline without it, read-only (never "
@@ -462,6 +470,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_advisory_effectiveness,
     ),
     "value": _ReportEntry(
+        title="Pack value",
         description=(
             "What share of the tokens a pack injected were actually cited "
             "as helpful, by strategy, item type, and intent family, plus "
@@ -474,6 +483,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_value,
     ),
     "dimension-predictiveness": _ReportEntry(
+        title="Dimension predictiveness",
         description=(
             "Correlates each pack-quality scoring dimension against actual "
             "task success (point-biserial correlation), when a PackBuilder "
@@ -486,6 +496,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_dimension_predictiveness,
     ),
     "learning-candidates": _ReportEntry(
+        title="Learning candidates",
         description=(
             "Aggregates graded packs by (intent_family, item_id) and "
             "proposes promotion or noise-demotion candidates for human "
@@ -500,6 +511,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_learning_candidates,
     ),
     "domains": _ReportEntry(
+        title="Domain coverage",
         description=(
             "Tallies the `domain` tag across traces, documents, and served "
             "packs, including an explicit `(none)` bucket for untagged "
@@ -512,6 +524,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_domains,
     ),
     "extractor-fallbacks": _ReportEntry(
+        title="Extractor fallbacks",
         description=(
             "Summarizes how often tiered extraction fell back from a "
             "deterministic extractor to a lower-priority one, per "
@@ -524,6 +537,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_extractor_fallbacks,
     ),
     "pack-telemetry": _ReportEntry(
+        title="Pack telemetry",
         description=(
             "Aggregates PACK_ASSEMBLED telemetry: budget-saturation rate, "
             "rejection-reason distribution, per-strategy yield. A good "
@@ -536,6 +550,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_pack_telemetry,
     ),
     "token-usage": _ReportEntry(
+        title="Token usage",
         description=(
             "Breaks down token usage by layer (CLI/MCP/SDK) and top "
             "operations, plus budget-saturation signals. A good pattern is "
@@ -547,6 +562,7 @@ _REPORTS: dict[str, _ReportEntry] = {
         run=_run_token_usage,
     ),
     "cost": _ReportEntry(
+        title="Cost estimate",
         description=(
             "Estimates Trellis's dollar cost overhead: tokens injected "
             "into agent prompts, priced per model. A good value is low "
@@ -568,6 +584,7 @@ async def list_analyze_reports() -> dict[str, Any]:
         "reports": [
             {
                 "name": name,
+                "title": entry.title,
                 "description": entry.description,
                 "default_params": entry.params_model().model_dump(),
             }

@@ -399,7 +399,7 @@ def tune_cmd(
 def _emit_tune_cycle_completed(
     event_log: EventLog, report: Any, *, tuner_name: str
 ) -> None:
-    """Make one ``worker tune`` pass durable where the API can read it (e167).
+    """Make one ``worker tune`` pass durable where the API can read it.
 
     Mirrors :func:`_emit_curate_cycle_completed`: never called for a dry
     run (``test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes``
@@ -713,7 +713,7 @@ def run_curation_cycle(
 def _emit_curate_cycle_completed(
     event_log: EventLog, result: CurateCycleResult, *, duration_seconds: float
 ) -> None:
-    """Make one cycle's result durable where the API can read it (e167).
+    """Make one cycle's result durable where the API can read it.
 
     The nightly cron is the host-side ``curate-nightly.sh``, whose JSON
     output lands in ``~/.trellis/logs/curate.log`` — a file the API

@@ -91,7 +91,7 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
-### `GET /api/v1/loops` (e167)
+### `GET /api/v1/loops`
 
 Is each curation / learning loop actually doing anything? Admin scope,
 REST-only — no CLI wrapper. Reads existing events only
@@ -158,13 +158,13 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 | `--port` | `8420` | Port to listen on |
 | `--host` | `0.0.0.0` | Host to bind to |
 
-### Schedule registry + job runs (#e166)
+### Schedule registry + job runs
 
 `schedule.json` (`<data_dir>/stores/schedule.json`) is the pieces a **host-side
-dispatcher cron** needs so schedules can be edited from a UI (plan p1 §(b),
-PR 6) without the container ever touching crontab. The REST routes, CLI
-parity and UI tab that edit it are documented below, under
-["Admin job schedules: REST, CLI and UI (plan p1 PR 6)"](#admin-job-schedules-rest-cli-and-ui-plan-p1-pr-6).
+dispatcher cron** needs so schedules can be edited from a UI without the
+container ever touching crontab. The REST routes, CLI parity and UI tab
+that edit it are documented below, under
+["Admin job schedules: REST, CLI and UI"](#admin-job-schedules-rest-cli-and-ui).
 
 **The command boundary.** `schedule.json` holds only operator-tunable state —
 it never holds a command. Each row is a `ScheduledJob`: `name` (must be a key
@@ -288,7 +288,7 @@ exists to durably record. Only a failure to write the EventLog pair itself
 (store unavailable) is this command's own failure, and exits `EXIT_STORE`
 (5) under both formats.
 
-### Admin job schedules: REST, CLI and UI (plan p1 PR 6)
+### Admin job schedules: REST, CLI and UI
 
 The write surface onto `schedule.json` promised above: `GET`/`PATCH
 /api/v1/admin/jobs`, `POST /api/v1/admin/jobs/{name}/run`
@@ -2419,7 +2419,7 @@ If a command with the same key has already succeeded (in-memory or in the event 
 
 ## Analyze Commands
 
-### `GET /api/v1/analyze` and `GET /api/v1/analyze/{report}` (#e182)
+### `GET /api/v1/analyze` and `GET /api/v1/analyze/{report}`
 
 Gap G15: every `trellis analyze <report>` command had a CLI only — the UI
 could not ask "are our learning loops performing or doing anything?" at

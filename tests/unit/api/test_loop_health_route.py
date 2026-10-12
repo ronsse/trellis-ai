@@ -1,4 +1,4 @@
-"""Tests for ``GET /api/v1/loops`` (e167).
+"""Tests for ``GET /api/v1/loops``.
 
 The claim under test: a loop with no event yet must read "never run",
 never a bare ``0`` that is indistinguishable from "ran and did

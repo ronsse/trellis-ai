@@ -128,8 +128,8 @@ from trellis.learning.tuners.promotion import (
 Risk = Literal["low", "caution", "high"]
 SettingType = Literal["bool", "int", "float", "str"]
 
-#: The UI's filter-box categories (brief e179, step 8): which area of the
-#: system a knob belongs to, independent of ``risk`` or ``settings_live``.
+#: The UI's filter-box categories: which area of the system a knob
+#: belongs to, independent of ``risk`` or ``settings_live``.
 #: ``"learning_loops"`` holds the tuner's ``learning.auto_promote.*`` and
 #: the ``learning.candidate_auto_promote.*`` entries below, out of this
 #: module's 31 entries total.
@@ -138,8 +138,8 @@ SettingGroup = Literal[
 ]
 
 #: The one place a human-facing group name lives, so a UI reading this
-#: registry never hardcodes a display label (brief e179, step 8's "not
-#: UI strings"). Keys are exactly :data:`SettingGroup`'s members —
+#: registry never hardcodes a display label. Keys are exactly
+#: :data:`SettingGroup`'s members —
 #: ``tests.unit.core.test_settings_registry`` proves the sets match.
 GROUP_LABELS: dict[SettingGroup, str] = {
     "retrieval": "Retrieval",

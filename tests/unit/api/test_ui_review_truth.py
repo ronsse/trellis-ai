@@ -426,7 +426,11 @@ def test_evolution_section_states_demotion_requires_evidence_of_unhelpfulness() 
         '<div id="evo-noise"></div>',
     )
     assert "evidence of unhelpfulness" in section
-    assert "demotion_gate" in section
+    # Operator-copy sweep: the module name this claim comes from
+    # (demotion_gate.py) no longer appears in rendered text -- the prose
+    # itself states the rule instead of naming the source file.
+    assert "demotion_gate" not in section
+    assert "working as intended, not under-performing" in section
 
 
 def test_apply_noise_tags_button_exists_behind_a_two_step_inline_confirm() -> None:

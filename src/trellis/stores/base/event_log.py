@@ -154,7 +154,7 @@ class EventType(StrEnum):
     #: record was a structlog line a cron wrapper piped to a host-only
     #: log file the API container cannot read — invisible to
     #: ``GET /api/v1/loops`` and to any operator not tailing that file
-    #: (e167). Emitted fail-soft: a broken EventLog must never fail the
+    #: Emitted fail-soft: a broken EventLog must never fail the
     #: cycle whose health it is reporting.
     CURATE_CYCLE_COMPLETED = "curate.cycle_completed"
 
@@ -164,7 +164,7 @@ class EventType(StrEnum):
     #: reports. A pass that promotes nothing already emits zero
     #: proposal-level events, so without this ``GET /api/v1/loops`` cannot
     #: tell "the tuner ran and found nothing to do" from "the tuner has
-    #: never run" (e167).
+    #: never run".
     TUNE_CYCLE_COMPLETED = "tune.cycle_completed"
 
     # Classification refresh (stale-tag reclassification — see Gap 1.1)
@@ -556,8 +556,8 @@ class EventType(StrEnum):
 
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see
-    #: ``trellis.stores.schedule_store.ScheduleStore``;
-    #: ``docs/design/p1-ui-control-plane.md`` §(b)). Modeled on
+    #: ``trellis.stores.schedule_store.ScheduleStore`` and the schedule
+    #: registry documented in ``docs/agent-guide/operations.md``). Modeled on
     #: :attr:`CAPTURE_SWEEP_COMPLETED`: unconditional and fail-soft — a
     #: job that fails still gets its ``JOB_RUN_COMPLETED`` with a nonzero
     #: ``exit_code``, because "the dispatcher ran this job and it failed"
@@ -577,9 +577,9 @@ class EventType(StrEnum):
     JOB_RUN_COMPLETED = "job.run_completed"
 
     #: Emitted by the admin REST/CLI schedule-editing surface
-    #: (``PATCH /admin/jobs/{name}``, ``trellis admin schedule set``;
-    #: ``docs/design/p1-ui-control-plane.md`` §(b), plan PR 6) whenever a
-    #: write to :class:`~trellis.stores.schedule_store.ScheduleStore`
+    #: (``PATCH /admin/jobs/{name}``, ``trellis admin schedule set``)
+    #: whenever a write to
+    #: :class:`~trellis.stores.schedule_store.ScheduleStore`
     #: succeeds. ``entity_id`` is ``f"job:{name}"``, matching
     #: :attr:`JOB_RUN_STARTED`/:attr:`JOB_RUN_COMPLETED`. Payload carries
     #: ``old`` and ``new`` dicts (only the fields that changed:

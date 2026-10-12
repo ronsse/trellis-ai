@@ -425,7 +425,7 @@
         }
         .status-row:last-child { border-bottom: none; }
 
-        /* Loop health (e167) */
+        /* Loop health */
         .loop-row { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
         .loop-row:last-child { border-bottom: none; }
         .loop-row-head {
@@ -1338,7 +1338,7 @@
         .warn-banner .warn-detail { color: var(--text-dim); }
         .field-hint { color: var(--text-dim); font-size: 0.78rem; margin: 0.15rem 0 0.6rem; }
 
-        /* Settings tab (e179): a long description column needs top
+        /* Settings tab: a long description column needs top
            alignment, and an unsafe/restart row needs to look more
            consequential than an ordinary one at a glance, not just via a
            badge a reader could miss. */
@@ -1631,7 +1631,7 @@
             <a href="#" class="active" data-view="dashboard" data-label="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Dashboard</span><span class="nav-key">1</span></a>
             <a href="#" data-view="metrics" data-label="Metrics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16.5A1.5 1.5 0 0 0 4.5 21H21"/><path d="M7 14.5l4-4.5 3 3 5.5-6.5"/></svg><span class="nav-label">Metrics</span><span class="nav-key">2</span></a>
             <a href="#" data-view="review" data-label="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/><path d="M8.5 11.5l3 3 9-9.5"/></svg><span class="nav-label">Review</span><span class="nav-key">3</span></a>
-            <a href="#" data-view="evolution" data-label="Effectiveness"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Effectiveness</span><span class="nav-key">4</span></a>
+            <a href="#" data-view="effectiveness" data-label="Effectiveness"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Effectiveness</span><span class="nav-key">4</span></a>
             <a href="#" data-view="graph" data-label="Graph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.6" r="2.6"/><circle cx="4.6" cy="18" r="2.6"/><circle cx="19.4" cy="18" r="2.6"/><path d="M10.7 6.9L5.9 15.7M13.3 6.9l4.8 8.8M7.2 18h9.6"/></svg><span class="nav-label">Graph</span><span class="nav-key">5</span></a>
             <a href="#" data-view="traces" data-label="Traces"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h4l2.8 6.5L14 4.5l2.6 8h4.9"/></svg><span class="nav-label">Traces</span><span class="nav-key">6</span></a>
             <a href="#" data-view="precedents" data-label="Precedents"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2.5H20v19H6.5A2.5 2.5 0 0 1 4 19V5a2.5 2.5 0 0 1 2.5-2.5z"/><path d="M8.5 7h7"/></svg><span class="nav-label">Precedents</span><span class="nav-key">7</span></a>
@@ -1725,9 +1725,11 @@
                 series by domain or intent family instead of reporting one combined line.
             </p>
             <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
-                Trends computed from the EventLog on read. Each metric shares its
-                definition with the agent-loop convergence scenario. Buckets with no
-                data are omitted (gaps mean "no signal", not zero).
+                Trends computed from the event log on read. Each metric uses the
+                same formula as the evaluation suite that regression-tests retrieval
+                quality, so a trend here and a number from that suite describe the
+                same calculation. Buckets with no data are omitted (gaps mean "no
+                signal", not zero).
             </p>
             <div class="metric-charts" id="metric-charts"></div>
         </div>
@@ -1741,8 +1743,8 @@
                 </div>
             </div>
             <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
-                Human-decision inbox. Approving or rejecting items here is gated to operators —
-                see the autonomy ladder for which surfaces are human-gated.
+                Human-decision inbox. Every change on this tab is applied only when
+                you approve or reject it here.
             </p>
 
             <!-- Section 1: Tuner proposals -->
@@ -1771,7 +1773,7 @@
         </div>
 
         <!-- ============ Evolution ============ -->
-        <div id="view-evolution" style="display:none">
+        <div id="view-effectiveness" style="display:none">
             <div class="section-header">
                 <h2>Pack Effectiveness</h2>
                 <div class="search-bar" style="margin:0">
@@ -1791,8 +1793,8 @@
             </div>
             <div class="status-section" id="evo-noise-section" style="display:none">
                 <h2>Usage-Rule Proposals</h2>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write (<code style="font-family:var(--font-mono)">trellis analyze apply-noise-tags</code>, or the scheduled curation cycle) actually tags anything.</p>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness (see <code style="font-family:var(--font-mono)">classify/demotion_gate.py</code>) &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write below, or the scheduled nightly curation run, actually tags anything. <code style="font-family:var(--font-mono); font-size:0.85em; cursor:help;" title="CLI equivalent: trellis analyze apply-noise-tags">CLI equivalent</code></p>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
                 <div id="evo-noise"></div>
                 <div id="evo-noise-apply" style="margin-top:0.75rem">
                     <button class="btn btn-sm" onclick="showApplyNoiseTagsConfirm()">Apply noise tags&hellip;</button>
@@ -1949,7 +1951,7 @@
                             <th>Doc ID</th>
                             <th>Preview</th>
                             <th>Content tags</th>
-                            <th>Size</th>
+                            <th>Chars</th>
                         </tr>
                     </thead>
                     <tbody id="memories-body"></tbody>
@@ -2036,7 +2038,7 @@
             <div id="pack-detail-container"></div>
         </div>
 
-        <!-- ============ Loops (per-loop health; e167) ============ -->
+        <!-- ============ Loops (per-loop health) ============ -->
         <div id="view-loops" style="display:none">
             <div class="section-header">
                 <h2>Loop Health</h2>
@@ -2091,10 +2093,10 @@
             </div>
             <p class="field-hint">
                 This is the full advisory store, not a record of what was served: this route does
-                not (yet) say which rows actually reached an agent in a pack. "Boosted" is not a
-                persisted state either &mdash; it is a one-run fitness-loop report, not a field on the
-                advisory &mdash; so status / confidence / fitness-scored-at below are the real,
-                queryable state.
+                not (yet) say which rows actually reached an agent in a pack. Confidence below is
+                adjusted nightly from recent pack outcomes by the advisory-fitness step (see the
+                Loops tab); "boosted" from that step is not a persisted field, so status /
+                confidence / fitness-scored-at below are the real, queryable state.
             </p>
             <div id="adv-generate-form" style="display:none"></div>
             <div id="adv-generate-result"></div>
@@ -2107,6 +2109,7 @@
                             <th>Scope</th>
                             <th>Confidence</th>
                             <th>Evidence</th>
+                            <th>Effect</th>
                             <th>Status</th>
                             <th>Created</th>
                             <th>Fitness-scored</th>
@@ -2561,23 +2564,30 @@
         // `effect_size: Infinity` from an empty baseline (divide-by-zero in a
         // ratio with no prior data). fmtNum/fmtPct route every such value
         // through Number.isFinite() first and only ever return a normal
-        // bounded numeral or one of three named states -- never a raw
-        // non-finite token. Output is always plain digits/punctuation, so
-        // callers do not need to wrap the result in escHtml().
+        // bounded numeral (with thousands separators, via toLocaleString) or
+        // one of two named states -- never a raw non-finite token. NaN and
+        // +-Infinity both mean "this comparison had no baseline to measure
+        // against", so both render the same words rather than splitting NaN
+        // into a bare dash. Output is always plain digits/punctuation/words,
+        // so callers do not need to wrap the result in escHtml().
         function fmtNum(value, digits = 2) {
             if (value == null) return 'not measured';
             const n = Number(value);
-            if (Number.isNaN(n)) return '—';
-            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
-            return n.toFixed(digits);
+            if (!Number.isFinite(n)) return 'unbounded (no baseline)';
+            return n.toLocaleString(undefined, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            });
         }
 
         function fmtPct(value, digits = 1) {
             if (value == null) return 'not measured';
             const n = Number(value);
-            if (Number.isNaN(n)) return '—';
-            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
-            return (n * 100).toFixed(digits) + '%';
+            if (!Number.isFinite(n)) return 'unbounded (no baseline)';
+            return (n * 100).toLocaleString(undefined, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            }) + '%';
         }
 
         // An id can be agent-written (entity, document and trace ids are), so
@@ -2653,7 +2663,7 @@
         // own click, the first 403 any fetch sees (throwIfAuthRefused)
         // flips keyIsNonAdmin and this badges them instead of staying quiet
         // until the click happens.
-        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'evolution', 'loops', 'advisories', 'settings'];
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings'];
         let keyIsNonAdmin = false;
 
         function applyScopeBadges() {
@@ -2713,7 +2723,7 @@
                 viewLoaded[name] = true;
                 if (name === 'metrics') loadMetrics();
                 if (name === 'review') loadReview();
-                if (name === 'evolution') loadEvolution();
+                if (name === 'effectiveness') loadEvolution();
                 if (name === 'traces') loadTraces();
                 if (name === 'precedents') loadPrecedents();
                 if (name === 'graph') initGraph();
@@ -2782,7 +2792,10 @@
         function renderCard(title, value, sub) {
             const div = document.createElement('div');
             div.className = 'card fade-in';
-            div.innerHTML = `<h3>${escHtml(title)}</h3><div class="value">${escHtml(String(value))}</div><div class="sub">${escHtml(sub)}</div>`;
+            // A raw count gets thousands separators; a pre-formatted string
+            // (a percentage, a named non-finite state) is shown as-is.
+            const shown = typeof value === 'number' ? value.toLocaleString() : String(value);
+            div.innerHTML = `<h3>${escHtml(title)}</h3><div class="value">${escHtml(shown)}</div><div class="sub">${escHtml(sub)}</div>`;
             return div;
         }
 
@@ -2823,11 +2836,11 @@
             { metric: 'pack_success_rate', title: 'Pack success rate',
               sub: 'share of graded packs with a positive outcome', pct: true },
             { metric: 'reference_rate', title: 'Reference rate',
-              sub: 'items_referenced / items_served (best "are packs improving" proxy)', pct: true },
+              sub: 'share of served items an agent later cited', pct: true },
             { metric: 'advisory_fitness', title: 'Advisory fitness',
               sub: 'mean advisory confidence (point); the point tooltip already shows n, this bucket\'s suppressed count', pct: false },
             { metric: 'noise_tag_volume', title: 'Noise-tag volume',
-              sub: 'items flipped to signal_quality="noise" per day', pct: false }
+              sub: 'items demoted to noise per day', pct: false }
         ];
 
         function metricColor(i) { return SERIES_COLORS[i % SERIES_COLORS.length]; }
@@ -3320,12 +3333,12 @@
                         <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>`
                         : `<div class="review-actions">
                             <span class="badge badge-warn">report-only — not promotable</span>
-                            <span class="review-tooltip" title="recommendation_type '${escHtml(c.recommendation_type || '')}' is not in PROMOTE_RECOMMENDATIONS, so prepare_learning_promotions would skip it as skipped_non_promotable. There is deliberately no Approve control here.">Why no approve?</span>
+                            <span class="review-tooltip" title="This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is report-only: it informs reviewers but is not a promotable precedent, so there is deliberately no Approve control here.">Why no approve?</span>
                         </div>
                         <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">
-                            recommendation_type '${escHtml(c.recommendation_type || '')}' is not in PROMOTE_RECOMMENDATIONS,
-                            so prepare_learning_promotions would skip it as skipped_non_promotable.
-                            There is deliberately no Approve control here.
+                            This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is
+                            report-only: it informs reviewers but is not a promotable precedent, so there is
+                            deliberately no Approve control here.
                         </p>`;
                     return `
                     <div class="review-card fade-in" data-candidate="${escHtml(cid)}">
@@ -3388,9 +3401,9 @@
                         </div>
                         <div class="review-actions">
                             <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
-                            <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
+                            <span class="review-tooltip" title="Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.">Why no approve?</span>
                         </div>
-                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.</p>
+                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.</p>
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
                     </div>`).join('');
             } catch (err) {
@@ -3564,7 +3577,7 @@
             const el = document.getElementById('evo-noise-apply');
             if (!el) return;
             el.innerHTML =
-                '<p style="font-size:0.8rem; color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits with signal_quality="noise" (PackBuilder excludes those by default). Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can admit fewer items than were proposed. Confirm?</p>' +
+                '<p style="font-size:0.8rem; color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits as noise, so packs stop serving them by default. Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can tag fewer items than were proposed. Confirm?</p>' +
                 '<button class="btn btn-sm btn-danger" onclick="runApplyNoiseTags()">Confirm: apply noise tags</button> ' +
                 '<button class="btn btn-ghost btn-sm" onclick="cancelApplyNoiseTags()">Cancel</button>';
         }
@@ -4225,7 +4238,7 @@
             pag.style.display = 'flex';
             const page = Math.floor(searchCurrentOffset / SEARCH_PAGE_SIZE) + 1;
             const totalPages = Math.ceil(searchTotal / SEARCH_PAGE_SIZE);
-            document.getElementById('srp-page-info').textContent = `Page ${page} of ${totalPages}`;
+            document.getElementById('srp-page-info').textContent = `Page ${page.toLocaleString()} of ${totalPages.toLocaleString()}`;
             document.getElementById('srp-prev').disabled = searchCurrentOffset === 0;
             document.getElementById('srp-next').disabled = searchCurrentOffset + SEARCH_PAGE_SIZE >= searchTotal;
         }
@@ -4478,7 +4491,7 @@
                 return;
             }
             pag.style.display = 'flex';
-            info.textContent = `${shownCount} of ${total}`;
+            info.textContent = `${shownCount.toLocaleString()} of ${total.toLocaleString()}`;
             newerBtn.disabled = pager.stack.length === 0;
             olderBtn.disabled = shownCount >= total;
         }
@@ -4857,7 +4870,7 @@
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
-                        <td style="white-space:nowrap">${fmtNum(d.content_length / 1000, 1)}k</td>
+                        <td style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
                     </tr>
                 `).join('');
 
@@ -4869,7 +4882,7 @@
                     const total = data.total || 0;
                     pag.style.display = total > limit ? 'flex' : 'none';
                     document.getElementById('mem-page-info').textContent =
-                        `${memOffset + 1}–${memOffset + docs.length} of ${total}`;
+                        `${(memOffset + 1).toLocaleString()}–${(memOffset + docs.length).toLocaleString()} of ${total.toLocaleString()}`;
                     document.getElementById('mem-prev').disabled = memOffset === 0;
                     document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
                 }
@@ -5558,7 +5571,7 @@
         }
 
         // ============================================================
-        //  LOOPS (per-loop health; e167)
+        //  LOOPS (per-loop health)
         // ============================================================
         const LOOP_LABELS = {
             noise_demotion: 'Noise demotion',
@@ -5638,6 +5651,13 @@
                 ? `<div class="loop-row-desc">Scheduled via: <a href="#" onclick="switchView('schedules'); return false;">${escHtml(loop.job_name)}</a></div>`
                 : '';
 
+            // A small secondary footnote, never folded into description or
+            // what_it_changes (both stay plain operator prose) -- see
+            // LoopHealthRow.operator_hint's docstring.
+            const operatorHint = loop.operator_hint
+                ? `<div class="loop-row-desc" style="color:var(--text-dim)">${escHtml(loop.operator_hint)}</div>`
+                : '';
+
             return `
                 <div class="loop-row">
                     <div class="loop-row-head">
@@ -5647,6 +5667,7 @@
                     <div class="loop-row-desc">${escHtml(loop.description)}</div>
                     <div class="loop-row-desc"><em>What it changes:</em> ${escHtml(loop.what_it_changes)}</div>
                     ${scheduledVia}
+                    ${operatorHint}
                     <div class="loop-row-when">${whenHtml}</div>
                     <div class="loop-row-counters">${countersHtml}</div>
                 </div>`;
@@ -5665,6 +5686,10 @@
         let reportDescriptions = {};
         let reportDefaults = {};
         let lastReportPayload = null;
+        // Keyed the same as reportDescriptions/reportDefaults -- the raw
+        // report name, rendered as secondary text next to the human
+        // title rather than as the picker's primary label.
+        let reportTitles = {};
 
         async function loadReportsTab() {
             const picker = document.getElementById('report-picker');
@@ -5683,12 +5708,14 @@
                 }
                 reportDescriptions = {};
                 reportDefaults = {};
+                reportTitles = {};
                 reports.forEach(r => {
                     reportDescriptions[r.name] = r.description || '';
                     reportDefaults[r.name] = r.default_params || {};
+                    reportTitles[r.name] = r.title || r.name;
                 });
                 picker.innerHTML = reports.map(r =>
-                    `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`
+                    `<option value="${escHtml(r.name)}">${escHtml(r.title || r.name)}</option>`
                 ).join('');
                 onReportPickerChange();
                 runReport();
@@ -5701,7 +5728,11 @@
 
         function onReportPickerChange() {
             const name = document.getElementById('report-picker').value;
-            document.getElementById('report-description').textContent = reportDescriptions[name] || '';
+            // Title is the picker's own label; the raw name (what the
+            // route and `trellis analyze <name>` both use) is secondary
+            // text here, not the primary label.
+            document.getElementById('report-description').innerHTML =
+                `${escHtml(reportDescriptions[name] || '')} <code style="font-size:0.72rem; color:var(--text-dim)">${escHtml(name)}</code>`;
             const paramsEl = document.getElementById('report-params');
             const defaults = reportDefaults[name] || {};
             const entries = Object.entries(defaults);
@@ -6291,7 +6322,7 @@
         async function loadAdvisories() {
             const tbody = document.getElementById('advisories-body');
             const totalEl = document.getElementById('advisories-total');
-            tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading advisories...')}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="9">${loadingHtml('Loading advisories...')}</td></tr>`;
             renderDegradedBanner('advisories-banner', null);
             totalEl.textContent = '';
             const scope = document.getElementById('adv-scope').value.trim();
@@ -6307,35 +6338,57 @@
                 // !res.ok check cannot see it, so it is checked explicitly
                 // rather than falling through to "0 advisories".
                 if (data.status === 'error') {
-                    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Advisories unavailable: ${escHtml(data.message || 'unknown error')}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="9" style="color:var(--error)">Advisories unavailable: ${escHtml(data.message || 'unknown error')}</td></tr>`;
                     return;
                 }
                 renderDegradedBanner('advisories-banner', data.store_degradation);
                 const rows = data.advisories || [];
                 if (rows.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">${data.store_degradation ? 'No advisories parsed from a degraded store -- see the banner above.' : 'No advisories generated yet.'}</div></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">${data.store_degradation ? 'No advisories parsed from a degraded store -- see the banner above.' : 'No advisories generated yet.'}</div></td></tr>`;
                 } else {
-                    tbody.innerHTML = rows.map(renderAdvisoryRow).join('');
+                    const filterLegacyAdvisoriesEnabled = !!data.filter_legacy_advisories_enabled;
+                    tbody.innerHTML = rows
+                        .map(a => renderAdvisoryRow(a, filterLegacyAdvisoriesEnabled))
+                        .join('');
                 }
                 totalEl.textContent = `${data.count ?? rows.length} advisor${(data.count ?? rows.length) === 1 ? 'y' : 'ies'} (route total)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Failed to load advisories: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" style="color:var(--error)">Failed to load advisories: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
-        function renderAdvisoryRow(a) {
+        // Status is a known two-value lifecycle today (active/suppressed),
+        // but a degraded-store read can surface a row this UI was never
+        // told about -- unrecognised or missing, it must say so rather
+        // than defaulting to "active", which would misreport a row as
+        // serving normally when nothing here actually knows that.
+        function renderAdvisoryStatusBadge(a, filterLegacyAdvisoriesEnabled) {
+            if (a.status === 'suppressed') {
+                return `<span class="badge badge-warn" title="${escHtml(a.suppression_reason || 'suppressed')}">suppressed</span>`;
+            }
+            if (a.status === 'active') {
+                if (filterLegacyAdvisoriesEnabled && a.is_legacy_advisory) {
+                    return '<span class="badge badge-warn" title="This row predates the evidence check added to advisory generation, so it carries no evidence score; while the legacy-advisory filter is on, retrieval leaves it out of every pack.">withheld (legacy)</span>';
+                }
+                return '<span class="badge badge-ok">active</span>';
+            }
+            const label = a.status == null ? 'unknown' : String(a.status);
+            return `<span class="badge badge-warn" title="Not a status this page recognizes">${escHtml(label)}</span>`;
+        }
+
+        function renderAdvisoryRow(a, filterLegacyAdvisoriesEnabled) {
             const ev = a.evidence || {};
-            const statusBadge = a.status === 'suppressed'
-                ? `<span class="badge badge-warn" title="${escHtml(a.suppression_reason || 'suppressed')}">suppressed</span>`
-                : `<span class="badge badge-ok">active</span>`;
+            const statusBadge = renderAdvisoryStatusBadge(a, filterLegacyAdvisoriesEnabled);
             const evidenceConf = fmtNum(ev.evidence_confidence, 2);
             const scopeCell = a.scope + (a.entity_id ? ` (entity: ${a.entity_id})` : '');
+            const evidenceTitle = `n = ${fmtNum(ev.sample_size, 0)} · success with ${fmtPct(ev.success_rate_with, 1)} · without ${fmtPct(ev.success_rate_without, 1)}`;
             return `<tr>
                 <td title="${escHtml(a.advisory_id)}"><code>${escHtml(String(a.advisory_id).substring(0, 12))}</code></td>
                 <td>${escHtml(a.category)}</td>
                 <td>${escHtml(scopeCell)}</td>
                 <td>${fmtNum(a.confidence, 2)}</td>
-                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${evidenceConf}, effect: ${fmtNum(ev.effect_size, 2)}</td>
+                <td title="${escHtml(evidenceTitle)}">${evidenceConf}</td>
+                <td title="${escHtml(evidenceTitle)}">${fmtNum(ev.effect_size, 2)}</td>
                 <td>${statusBadge}</td>
                 <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
                 <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
@@ -6621,7 +6674,7 @@
             }
         }
 
-        // === Schedules (plan p1 PR 6: GET/PATCH /admin/jobs, POST /admin/jobs/{name}/run) ===
+        // === Schedules (GET/PATCH /admin/jobs, POST /admin/jobs/{name}/run) ===
 
         const DOW_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -7400,7 +7453,7 @@
             }
         }
 
-        // === Settings (e179) ===
+        // === Settings ===
         // Driven entirely by GET /api/v1/settings -- this file hardcodes no
         // knob list, no risk-caption strings and no group display names; a
         // spec added to the registry later appears here with no UI change.
@@ -7473,7 +7526,7 @@
             return (v === null || v === undefined) ? '(unset)' : String(v);
         }
 
-        // Env-pin truthfulness (brief e179 step 2): built only from the
+        // Env-pin truthfulness: built only from the
         // route's own fields (overridden_by, env_var, stored_value) -- never
         // inferred from, say, whether the env var merely exists.
         function settingEnvPinNote(s) {
@@ -7504,7 +7557,7 @@
         }
 
         // Risk wording intentionally avoids "unsafe" as a control label
-        // (brief e179 rework: a tier name, not a verdict on the operator
+        // (a tier name, not a verdict on the operator
         // for using the control) -- low/caution/high, independent of the
         // separate "Restart required" badge below.
         function settingRiskBadge(risk) {
@@ -7600,7 +7653,7 @@
             const groupLabel = groups[s.group] || s.group;
             // Border colour follows risk tier only -- restart cost is its
             // own flag (s.restart_required) and gets its own badge below,
-            // never folded into this class (brief e179 rework, step 2).
+            // never folded into this class.
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
             // A garbage environment value for this entry's family, or a
@@ -7654,7 +7707,7 @@
         function beginSaveSetting(name) { showSettingKeyPrompt(name, 'save'); }
         function beginResetSetting(name) { showSettingKeyPrompt(name, 'reset'); }
 
-        // Every write re-asks for the admin key, inline (brief e179 step 5):
+        // Every write re-asks for the admin key, inline:
         // these writes change what the system does next, so the ambient key
         // already stored for reads is deliberately not reused here.
         function showSettingKeyPrompt(name, mode) {
@@ -7716,7 +7769,7 @@
                 return;
             }
             // A "Reset to default" sends value:null -- SETTINGS_UPDATE's own
-            // reset verb (brief e179 step 5), never a client-guessed default.
+            // reset verb, never a client-guessed default.
             await runSettingWrite(name, null, adminKey, cell);
         }
 
@@ -7755,7 +7808,7 @@
             try {
                 await writeSettingJSON(name, value, adminKey);
                 // Never assume the outcome of a write -- re-read GET and
-                // re-render the whole table from it (brief e179 step 5).
+                // re-render the whole table from it.
                 await loadSettings();
             } catch (err) {
                 if (cell) {

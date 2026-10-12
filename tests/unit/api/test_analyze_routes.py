@@ -67,6 +67,17 @@ def test_list_reports_names_every_allowlisted_report(client):
         assert isinstance(row["default_params"], dict)
 
 
+def test_every_report_carries_a_human_title_distinct_from_its_raw_name(client):
+    # B15: the Reports tab's picker must not show the raw kebab-case
+    # route/CLI name as its primary label -- every entry needs a title,
+    # and it must actually be a human label, not a copy of the name.
+    resp = client.get("/api/v1/analyze")
+    assert resp.status_code == 200
+    for row in resp.json()["reports"]:
+        assert row["title"], row
+        assert row["title"] != row["name"]
+
+
 def test_pack_quality_is_not_in_the_allowlist():
     # pack-quality's only entry point requires a --scenarios file with no
     # built-in default, so there is no bounded query-param shape for it
@@ -208,6 +219,7 @@ def test_infected_report_payload_is_sanitized_end_to_end(client, monkeypatch):
         analyze._REPORTS,
         "value",
         analyze._ReportEntry(
+            title=analyze._REPORTS["value"].title,
             description=analyze._REPORTS["value"].description,
             params_model=analyze._REPORTS["value"].params_model,
             run=_poisoned_run,
@@ -241,6 +253,7 @@ def test_second_call_within_ttl_is_served_from_cache(client, monkeypatch):
         analyze._REPORTS,
         "token-usage",
         analyze._ReportEntry(
+            title=analyze._REPORTS["token-usage"].title,
             description=analyze._REPORTS["token-usage"].description,
             params_model=analyze._REPORTS["token-usage"].params_model,
             run=_counting_run,
@@ -267,6 +280,7 @@ def test_cache_expiry_recomputes(client, monkeypatch):
         analyze._REPORTS,
         "token-usage",
         analyze._ReportEntry(
+            title=analyze._REPORTS["token-usage"].title,
             description=analyze._REPORTS["token-usage"].description,
             params_model=analyze._REPORTS["token-usage"].params_model,
             run=_counting_run,

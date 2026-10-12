@@ -1,4 +1,4 @@
-"""Tests for the admin scheduled-jobs REST surface (plan p1 PR 6).
+"""Tests for the admin scheduled-jobs REST surface.
 
 ``GET``/``PATCH /api/v1/admin/jobs`` and ``POST /api/v1/admin/jobs/{name}/run``
 mirror the CLI surface in ``trellis_cli.admin_schedule`` and the catalog/
