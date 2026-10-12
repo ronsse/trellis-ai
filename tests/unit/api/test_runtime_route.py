@@ -359,7 +359,7 @@ def test_a_non_mapping_embeddings_config_is_reported_as_an_error_not_a_500(
     assert len(not_mapping_logs) == 1, logs
     assert not_mapping_logs[0]["key"] == "embeddings"
     assert not_mapping_logs[0]["type"] == type(embedding_config).__name__
-    # f867 follow-up B7h: pin the level too -- a malformed ``embeddings:``
+    # Pin the level too -- a malformed ``embeddings:``
     # block is an operator-visible misconfiguration, not a debug detail,
     # so it must survive the default ``TRELLIS_LOG_LEVEL=WARNING`` floor.
     assert not_mapping_logs[0]["log_level"] == "warning"
@@ -385,7 +385,7 @@ def test_a_non_mapping_embeddings_config_is_reported_as_an_error_not_a_500(
 def test_a_non_str_provider_names_the_knob_without_stringifying_the_value(
     tmp_path, provider, needle
 ) -> None:
-    """f867 follow-up item 5: ``embeddings.provider`` set to a non-string
+    """``embeddings.provider`` set to a non-string
     (an int or a list) makes :attr:`StoreRegistry.embedding_fn` raise
     ``ConfigError`` naming only the value's *type*. The panel's except
     branch then calls :meth:`StoreRegistry.embedding_source_knob` to

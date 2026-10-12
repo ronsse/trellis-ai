@@ -235,7 +235,7 @@ class TestEmbeddingDimConsistency:
 
 
 class TestEmbeddingsShapeAdvisory:
-    """f867 follow-up item 6: a non-mapping ``embeddings:`` block is a
+    """A non-mapping ``embeddings:`` block is a
     startup-visible warning, not a validation failure.
 
     :attr:`StoreRegistry.embedding_fn` already degrades this shape to

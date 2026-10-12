@@ -230,7 +230,7 @@ class TestListSettings:
     def test_a_malformed_stored_int_row_gets_its_own_reason(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
-        """f867 follow-up SF1: an int-typed knob with a stored float such
+        """An int-typed knob with a stored float such
         as 1.5 previously read the same ``"stored value is not a finite
         number in range"`` text the float case uses above, which
         describes the wrong coercion. The int-typed branch of
@@ -253,7 +253,7 @@ class TestListSettings:
     def test_a_malformed_stored_bool_row_is_flagged(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
-        """f867 follow-up S1a: a stored value that fails the bool
+        """A stored value that fails the bool
         coercion (neither a recognized true/false token) gets the
         bool-specific fixed reason, never the stored string itself.
         """
@@ -845,7 +845,7 @@ class TestGraphSeedingEffectiveValue:
 
 
 class TestParseErrorReasonIsFixedPerType:
-    """f867 follow-up SF1/S1a/S1c, unit-level on ``_parse_error_reason``.
+    """Unit-level on ``_parse_error_reason``.
 
     No shipped :data:`SETTINGS_REGISTRY` entry sets ``enum`` today (grep
     confirms it), so the enum branch is otherwise dead in every HTTP-level

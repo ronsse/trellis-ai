@@ -1466,7 +1466,7 @@ class StoreRegistry:
         """Warn once, at registry load, when ``embeddings:`` cannot carry
         a ``provider`` field at all.
 
-        f867 follow-up item 6. :attr:`embedding_fn` already logs
+        :attr:`embedding_fn` already logs
         ``embedding_config_not_mapping`` for this same shape -- a bare
         string, bool, int, or list -- but only lazily, on first access.
         A deployment whose request paths never happen to touch semantic
