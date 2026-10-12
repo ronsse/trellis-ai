@@ -1367,9 +1367,7 @@ class TestSubmitPromotion:
         assert outcome["status"] != "refused_demoted"
         executor.execute.assert_called()
 
-    def test_reapprove_current_identical_payload_promotes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_reapprove_current_identical_payload_promotes(self, tmp_path: Path) -> None:
         """End to end against real stores (gate-876b R1): re-approving a
         learning candidate whose precedent is already *current* -- the
         exact shape of re-running ``trellis curate promote-learning``
@@ -1388,8 +1386,8 @@ class TestSubmitPromotion:
         ``submit_learning_promotion`` return ``"entity_failed"`` instead
         of ``"promoted"``, and the version/event counts never move.
         """
-        from trellis.mutate import build_curate_executor  # noqa: PLC0415
-        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+        from trellis.mutate import build_curate_executor
+        from trellis.stores.registry import StoreRegistry
 
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
@@ -1424,9 +1422,7 @@ class TestSubmitPromotion:
         )
 
         assert second["status"] == "promoted", second
-        assert (
-            len(graph_store.get_node_history(entity_id)) == versions_before + 1
-        )
+        assert len(graph_store.get_node_history(entity_id)) == versions_before + 1
         assert (
             len(
                 event_log.get_events(
@@ -1442,8 +1438,8 @@ class TestSubmitPromotion:
         """Same shape as the identical-payload case, but the candidate
         re-scored between runs (e.g. a changed description) -- the
         change must land on the node, not just the status."""
-        from trellis.mutate import build_curate_executor  # noqa: PLC0415
-        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+        from trellis.mutate import build_curate_executor
+        from trellis.stores.registry import StoreRegistry
 
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
@@ -1482,9 +1478,7 @@ class TestSubmitPromotion:
         node = graph_store.get_node(entity_id)
         assert node is not None
         assert node["properties"]["description"] == "re-scored description"
-        assert (
-            len(graph_store.get_node_history(entity_id)) == versions_before + 1
-        )
+        assert len(graph_store.get_node_history(entity_id)) == versions_before + 1
         assert (
             len(
                 event_log.get_events(
@@ -1500,8 +1494,8 @@ class TestSubmitPromotion:
         learning candidate after that must succeed exactly like the
         never-demoted case, not stay refused as if it were still
         demoted."""
-        from trellis.mutate import build_curate_executor  # noqa: PLC0415
-        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+        from trellis.mutate import build_curate_executor
+        from trellis.stores.registry import StoreRegistry
 
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
@@ -1540,9 +1534,9 @@ class TestSubmitPromotion:
                 requested_by="test",
             )
         )
-        assert (
-            reinstate_result.status == CommandStatus.SUCCESS
-        ), reinstate_result.message
+        assert reinstate_result.status == CommandStatus.SUCCESS, (
+            reinstate_result.message
+        )
 
         second = submit_learning_promotion(
             executor,
