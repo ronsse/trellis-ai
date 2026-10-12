@@ -59,7 +59,7 @@ from trellis.mutate import (
     build_curate_executor,
     build_schedule_executor,
 )
-from trellis.ops.loop_health import summarize_loop_health
+from trellis.ops.loop_health import JOB_LOOPS, summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
@@ -366,6 +366,7 @@ def loop_health() -> LoopHealthResponse:
                 description=row.description,
                 actuates=row.actuates,
                 what_it_changes=row.what_it_changes,
+                job_name=row.job_name,
                 last_run_at=row.last_run_at.isoformat() if row.last_run_at else None,
                 last_status=row.last_status,
                 counters=row.counters,
@@ -1828,6 +1829,7 @@ def _job_summary(
         last_run=_last_job_run(event_log, spec.name),
         next_due_at=next_due_at,
         stored=stored,
+        loops=list(JOB_LOOPS.get(spec.name, ())),
     )
 
 

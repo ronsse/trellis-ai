@@ -134,6 +134,22 @@ class TestListAdminJobs:
         )
         assert row["timeout_seconds"] == 42
 
+    def test_loops_names_what_a_job_drives_from_the_one_mapping(self, client):
+        """The Loops<->Schedules join lives in one place
+        (trellis.ops.loop_health.JOB_LOOPS) and is served here too."""
+        from trellis.ops.loop_health import JOB_LOOPS
+
+        by_name = {
+            row["name"]: row for row in client.get("/api/v1/admin/jobs").json()["jobs"]
+        }
+        for job_name, loops in JOB_LOOPS.items():
+            assert set(by_name[job_name]["loops"]) == set(loops)
+        # A job that drives no loop reports an empty list, not a missing
+        # key -- every AdminJobSummary carries the field (extra="forbid").
+        for job_name, row in by_name.items():
+            if job_name not in JOB_LOOPS:
+                assert row["loops"] == [], job_name
+
     def test_last_run_is_none_without_events(self, client):
         row = next(
             r
@@ -398,6 +414,26 @@ class TestPatchAdminJob:
         assert resp.status_code == 200
         assert resp.json()["job"]["cadence"] is None
 
+    def test_timeout_seconds_null_clears_the_override_to_catalog_default(
+        self, client, registry
+    ):
+        """An explicit ``null`` is "use the catalog default",
+        distinct from omitting the field at all (``test_successful_patch_
+        updates_only_named_fields`` pins "omitted leaves unchanged" right
+        above). Both rely on ``model_fields_set``, not a sentinel value --
+        this is the half of that distinction a ``null`` reaches."""
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", timeout_seconds=999))
+
+        resp = client.patch("/api/v1/admin/jobs/tune", json={"timeout_seconds": None})
+        assert resp.status_code == 200
+        job = resp.json()["job"]
+        assert job["timeout_seconds"] == JOB_CATALOG["tune"].default_timeout_seconds
+
+        reloaded = ScheduleStore(_schedule_path(registry)).get("tune")
+        assert reloaded is not None
+        assert reloaded.timeout_seconds is None  # cleared, not re-pinned to 999
+
     def test_patch_emits_schedule_updated_with_old_new_and_identity(
         self, client, registry
     ):
@@ -475,6 +511,9 @@ class TestRunAdminJob:
         # Never says the job itself ran.
         for forbidden in ("completed", "succeeded", "finished", "executed job"):
             assert forbidden not in hint
+        # No internal CLI/queue term in operator-facing copy.
+        assert "due-jobs" not in hint
+        assert "job_catalog" not in hint
 
     def test_run_now_writes_only_the_timestamp(self, client, registry):
         store = ScheduleStore(_schedule_path(registry))

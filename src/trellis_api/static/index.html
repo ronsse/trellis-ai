@@ -2159,11 +2159,11 @@
             <p class="field-hint">
                 Editing here can only change whether and when a catalog job runs &mdash;
                 <code>enabled</code>, <code>cadence</code> and <code>timeout_seconds</code> &mdash;
-                never what it runs; the command for each job comes from
-                <code>JOB_CATALOG</code> on the server, not from this page. "Run now" requests
-                an out-of-band run: a host dispatcher polling <code>due-jobs</code> picks it up,
-                typically within ~5 minutes, if one is installed &mdash; this page never runs a
-                job itself and a request here does not mean the job has started.
+                never what it runs; the command for each job is fixed in server source, not
+                writable from this page. "Run now" requests an out-of-band run: a host
+                dispatcher picks it up on its own poll, typically within ~5 minutes, if one is
+                installed &mdash; this page never runs a job itself and a request here does not
+                mean the job has started.
             </p>
             <div class="search-bar">
                 <button onclick="loadSchedules()">Refresh</button>
@@ -2441,6 +2441,24 @@
             return res.json();
         }
 
+        function formatPatchValidationDetail(errors) {
+            // FastAPI/pydantic's 422 body is a list of {loc, msg, type,
+            // input, ...} objects. Render only `loc` (the field) and `msg`
+            // (the message) as "field: message" -- never `input`, which
+            // echoes the raw value the operator sent and can carry back a
+            // just-typed secret or credential verbatim.
+            return errors
+                .map(e => {
+                    const loc = Array.isArray(e && e.loc)
+                        ? e.loc.filter(part => part !== 'body')
+                        : [];
+                    const field = loc.length ? loc.join('.') : 'value';
+                    const msg = e && typeof e.msg === 'string' ? e.msg : 'invalid value';
+                    return `${field}: ${msg}`;
+                })
+                .join('; ');
+        }
+
         async function patchJSON(path, body) {
             const headers = { 'Content-Type': 'application/json' };
             const key = getApiKey();
@@ -2460,6 +2478,7 @@
                     const d = j && j.detail;
                     if (typeof d === 'string') detail = d;
                     else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (Array.isArray(d)) detail = formatPatchValidationDetail(d);
                     else if (d) detail = JSON.stringify(d);
                 } catch { /* non-JSON */ }
                 throw new Error(detail);
@@ -2574,6 +2593,7 @@
             confirmDeletePolicy, deletePolicy,
             showEditJobForm, cancelEditJobForm, confirmRunJob, cancelRunJob, runJob,
             toggleJobEnabled, confirmEditJob,
+            confirmToggleJobEnabled, cancelToggleJobEnabled, resetJobTimeoutToDefault,
             confirmApplyTagCandidate, applyTagCandidate,
             confirmDismissTagCandidate, dismissTagCandidate,
             confirmRevokeTagRule, revokeTagRule,
@@ -5549,6 +5569,14 @@
                   ).join('')
                 : '<span style="color:var(--text-dim)">not measured</span>';
 
+            // Names the catalog job that drives this loop, with a
+            // link back to its Schedules row -- the reverse of the
+            // "drives: ..." sub-line renderScheduleRow adds there. Both
+            // come from the one trellis.ops.loop_health.LOOP_JOB mapping.
+            const scheduledVia = loop.job_name
+                ? `<div class="loop-row-desc">Scheduled via: <a href="#" onclick="switchView('schedules'); return false;">${escHtml(loop.job_name)}</a></div>`
+                : '';
+
             return `
                 <div class="loop-row">
                     <div class="loop-row-head">
@@ -5557,6 +5585,7 @@
                     </div>
                     <div class="loop-row-desc">${escHtml(loop.description)}</div>
                     <div class="loop-row-desc"><em>What it changes:</em> ${escHtml(loop.what_it_changes)}</div>
+                    ${scheduledVia}
                     <div class="loop-row-when">${whenHtml}</div>
                     <div class="loop-row-counters">${countersHtml}</div>
                 </div>`;
@@ -6579,8 +6608,11 @@
             // cadence (see docs/agent-guide/operations.md), so a banner here
             // means that window was exceeded, not merely "one tick late".
             // Never claims "nothing will pick this up": a dispatcher's own
-            // due-jobs polls leave no record, so their absence proves
-            // nothing either way (gate #860, blocker 5).
+            // polls leave no record, so their absence proves nothing either
+            // way (gate #860, blocker 5) -- it also must not say the
+            // opposite (that something IS running): edits on this tab are
+            // saved either way, but nothing here runs a job until a host
+            // dispatcher is installed and polling.
             //
             // "recorded at", not "started at": lastSeenAt is
             // dispatcher_last_seen_at, the JOB_RUN_STARTED event's own
@@ -6592,13 +6624,23 @@
                 ? `Last job run recorded at ${fmtTime(lastSeenAt)}.`
                 : 'No job run has ever been recorded.';
             el.innerHTML = `<div class="warn-banner">
-                <span class="warn-title">No recent job-run activity</span>
-                <span class="warn-detail">${escHtml(seenText)} The dispatcher's own
-                    <code>due-jobs</code> polls leave no record, so this is not proof
-                    no dispatcher is running. "Run now" still records the request
+                <span class="warn-title">Dispatcher: not observed</span>
+                <span class="warn-detail">${escHtml(seenText)} Edits here are saved but
+                    nothing runs them until the host dispatcher is installed and
+                    polling. A dispatcher's own polls leave no record, so this is
+                    not proof one isn't running either -- it only means none has
+                    been seen recently. "Run now" still records the request
                     either way.</span>
             </div>`;
         }
+
+        // Keyed by job name, refreshed on every loadSchedules(). ID_ACTIONS
+        // handlers receive only a job name (dataset.id), never the row's
+        // data, so anything a handler needs beyond that name -- such as
+        // which loops a job drives, for the inline toggle confirmation --
+        // is read back out of this cache rather than widening the
+        // delegated-click contract.
+        let scheduleJobsCache = {};
 
         async function loadSchedules() {
             const tbody = document.getElementById('schedules-body');
@@ -6613,8 +6655,10 @@
                 renderDegradedBanner('schedules-store-banner', data.store_degradation);
                 const degraded = !!data.store_degradation;
                 const rows = data.jobs || [];
+                scheduleJobsCache = {};
+                rows.forEach(job => { scheduleJobsCache[job.name] = job; });
                 tbody.innerHTML = rows.length
-                    ? rows.map(job => renderScheduleRow(job, degraded)).join('')
+                    ? rows.map(job => renderScheduleRow(job, degraded, data.dispatcher_seen)).join('')
                     : `<tr><td colspan="8"><div class="empty-state">No catalog jobs.</div></td></tr>`;
                 totalEl.textContent = `${data.count ?? rows.length} job(s) in the catalog`;
             } catch (err) {
@@ -6622,9 +6666,17 @@
             }
         }
 
-        function jobFlagBadges(job) {
+        function jobFlagBadges(job, dispatcherSeen) {
             let html = '';
-            if (job.host_only) html += '<span class="badge badge-info" title="Runs only on the host dispatcher, never in a container">host-only</span> ';
+            if (job.host_only) {
+                html += '<span class="badge badge-info" title="Runs only on the host dispatcher, never in a container">host-only</span> ';
+                // A host-only row has no other way to run, so when no
+                // dispatcher has been observed recently this says so on
+                // the row itself, not only in the tab-wide banner.
+                if (!dispatcherSeen) {
+                    html += '<span class="badge badge-warn" title="No host dispatcher observed recently -- saved, but nothing runs this until one is installed and polling">not running</span> ';
+                }
+            }
             if (job.spends_llm) html += '<span class="badge badge-warn" title="Spends LLM credit when it runs">spends LLM</span> ';
             if (job.heavy) html += '<span class="badge badge-warn" title="A heavy rebuild/reindex">heavy</span> ';
             return html || '<span class="badge badge-accent">none</span>';
@@ -6640,38 +6692,50 @@
                 `exit ${escHtml(String(lastRun.exit_code))}, finished ${escHtml(fmtTime(lastRun.finished_at))}`;
         }
 
-        function renderScheduleRow(job, storeDegraded) {
+        function renderScheduleRow(job, storeDegraded, dispatcherSeen) {
             const name = job.name;
             const enabledAttr = job.enabled ? 'checked' : '';
             // A catalog default (job.stored === false) is never the
-            // operator's own choice, and due-jobs never evaluates it, so
-            // it must not read as enabled-with-a-next-due-time (gate #860,
-            // blocker 1) -- disable the controls and say so plainly rather
-            // than let an operator edit/run a row that doesn't exist yet.
+            // operator's own choice, and the schedule never evaluates it,
+            // so it must not read as enabled-with-a-next-due-time (gate
+            // #860, blocker 1) -- disable the controls and say so plainly
+            // rather than let an operator edit/run a row that doesn't
+            // exist yet. Disabled only by stored/degraded, never by the
+            // dispatcher's observed state: rows stay editable even when
+            // no dispatcher has been seen.
             const disabledAttr = (!job.stored || storeDegraded) ? 'disabled' : '';
             const cadenceText = job.cadence || '(none)';
-            // next_due_at is a display-only estimate of the *next* tick, not
-            // of when due-jobs will actually report the job due: a job that
-            // has never completed a run is always due right now, at the
-            // dispatcher's very first poll, regardless of what this cell
-            // shows (gate #860, F2) -- the tooltip says so only when that
-            // applies, so a job with run history doesn't get a misleading
-            // "due immediately" hint.
+            // next_due_at is a display-only estimate of the *next* tick,
+            // not a promise that the job will actually run then: a job
+            // that has never completed a run is always due right now, at
+            // the dispatcher's very first poll, regardless of what this
+            // cell shows (gate #860, F2) -- the tooltip says so only when
+            // that applies, so a job with run history doesn't get a
+            // misleading "due immediately" hint. Separately, when no
+            // dispatcher has been observed recently, this cell must not
+            // imply a run WILL happen at that time either.
             const neverCompletedHint = !job.last_run
-                ? ' title="This job has never completed a run, so due-jobs reports it due right now, at the dispatcher\'s very first poll -- not only once this estimated time arrives."'
+                ? ' title="This job has never completed a run, so it is due right now, at the dispatcher\'s very first poll -- not only once this estimated time arrives."'
                 : '';
+            const notRunningNote = dispatcherSeen
+                ? ''
+                : '<br><span class="field-hint" style="margin:0">no dispatcher observed &mdash; may not run</span>';
             const nextDueCell = job.next_due_at
-                ? `<span${neverCompletedHint}>${escHtml(fmtTime(job.next_due_at))}</span>`
+                ? `<span${neverCompletedHint}>${escHtml(fmtTime(job.next_due_at))}</span>${notRunningNote}`
                 : (job.stored ? '&mdash;' : '<span class="field-hint" style="margin:0">not scheduled, no stored row</span>');
+            const drivesLoops = job.loops && job.loops.length
+                ? `<br><span class="field-hint" style="margin:0">drives: ${job.loops.map(l => escHtml(LOOP_LABELS[l] || l)).join(', ')} &mdash; ` +
+                  `<a href="#" onclick="switchView('loops'); return false;">see Loops</a></span>`
+                : '';
             return `<tr id="sched-row-${escHtml(name)}">
-                <td><code title="${escHtml(job.description || '')}">${escHtml(name)}</code>${job.stored ? '' : ' <span class="badge badge-info" title="No row in schedule.json yet -- showing the catalog default, which due-jobs never evaluates">not scheduled, no stored row</span>'}</td>
+                <td><code title="${escHtml(job.description || '')}">${escHtml(name)}</code>${job.stored ? '' : ' <span class="badge badge-info" title="Not yet saved here -- showing the catalog default; nothing is scheduled until this row is saved">not scheduled, no stored row</span>'}${drivesLoops}</td>
                 <td>
                     <label for="sched-enabled-${escHtml(name)}" class="sr-only">Enable ${escHtml(name)}</label>
                     <input type="checkbox" ${enabledAttr} ${disabledAttr} id="sched-enabled-${escHtml(name)}" aria-label="Enable ${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}">
                 </td>
                 <td data-cadence="${escHtml(job.cadence || '')}">${escHtml(cadenceText)}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span>${job.default_cadence && job.default_cadence !== job.cadence ? `<br><span class="field-hint" style="margin:0">catalog default: ${escHtml(job.default_cadence)}</span>` : ''}</td>
                 <td>${escHtml(String(job.timeout_seconds))}s</td>
-                <td>${jobFlagBadges(job)}</td>
+                <td>${jobFlagBadges(job, dispatcherSeen)}</td>
                 <td>${lastRunText(job.last_run)}</td>
                 <td>${nextDueCell}</td>
                 <td id="sched-actions-${escHtml(name)}">
@@ -6681,17 +6745,51 @@
             </tr>`;
         }
 
-        async function toggleJobEnabled(name) {
+        // Toggling `enabled` is never fired straight to the
+        // server -- it asks first, inline, naming what the flip actually
+        // changes (which loops a host-only job drives, when any), because
+        // disabling e.g. curate-nightly silently stops four loops a
+        // dashboard elsewhere reports as healthy. Keyed by job name since
+        // ID_ACTIONS handlers get only `dataset.id`.
+        const pendingToggleEnabled = {};
+
+        function toggleEnabledConsequence(name, enabling) {
+            const job = scheduleJobsCache[name];
+            const loops = (job && job.loops) || [];
+            const loopsText = loops.length
+                ? ` It drives: ${loops.map(l => LOOP_LABELS[l] || l).join(', ')}.`
+                : '';
+            return enabling
+                ? `Enable ${name}?${loopsText} It will run once a dispatcher is installed and polling -- editing this never runs it by itself.`
+                : `Disable ${name}?${loopsText}${loops.length ? ' Those loops stop updating until it is re-enabled.' : ''}`;
+        }
+
+        function toggleJobEnabled(name) {
             // The checkbox's own click already flipped its `checked`
-            // property before this delegated listener runs, so that's the
-            // state being requested -- the dispatcher passes only `data-id`,
-            // never a second value, so this reads it back off the DOM by id
-            // rather than widening the listener's contract.
+            // property before this delegated listener runs -- revert that
+            // immediately and wait for an explicit Confirm, rather than
+            // committing the flip to the server before the operator has
+            // seen what it does.
             const checkbox = document.getElementById('sched-enabled-' + name);
-            const checked = checkbox ? checkbox.checked : undefined;
+            if (!checkbox) return;
+            const requested = checkbox.checked;
+            checkbox.checked = !requested;
+            pendingToggleEnabled[name] = requested;
+            const cell = document.getElementById('sched-actions-' + name);
+            if (!cell) return;
+            cell.innerHTML =
+                `<span style="color:var(--warn)">${escHtml(toggleEnabledConsequence(name, requested))}</span> ` +
+                `<button class="btn btn-sm btn-danger" data-action="confirmToggleJobEnabled" data-id="${escHtml(name)}">Confirm</button> ` +
+                `<button class="btn btn-ghost btn-sm" data-action="cancelToggleJobEnabled" data-id="${escHtml(name)}">Cancel</button>`;
+        }
+
+        async function confirmToggleJobEnabled(name) {
+            const checked = pendingToggleEnabled[name];
+            const checkbox = document.getElementById('sched-enabled-' + name);
             const cell = document.getElementById('sched-actions-' + name);
             try {
                 await patchJSON(`/admin/jobs/${encodeURIComponent(name)}`, { enabled: checked });
+                delete pendingToggleEnabled[name];
                 loadSchedules();
             } catch (err) {
                 // Inline, not alert() (gate #860, F5): a modal here would
@@ -6701,7 +6799,13 @@
                         `<button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>`;
                 }
                 if (checkbox) checkbox.checked = !checked;
+                delete pendingToggleEnabled[name];
             }
+        }
+
+        function cancelToggleJobEnabled(name) {
+            delete pendingToggleEnabled[name];
+            loadSchedules();
         }
 
         function showEditJobForm(name) {
@@ -6730,7 +6834,8 @@
                 <div class="form-row">
                     <label for="sched-edit-timeout">Timeout seconds (1-86400)</label>
                     <input type="number" id="sched-edit-timeout" min="1" max="86400" value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}" data-initial-value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}">
-                    <p class="field-hint">This cell shows the <em>effective</em> timeout (the catalog default when no override is stored). Leaving this field untouched sends no change, so a null override stays null -- it does not get pinned to the default (gate #860b, follow-up 8).</p>
+                    <button class="btn btn-ghost btn-sm" data-action="resetJobTimeoutToDefault" data-id="${escHtml(name)}">Use catalog default</button>
+                    <p class="field-hint">This cell shows the <em>effective</em> timeout (the catalog default when no override is stored). Leaving this field untouched sends no change, so a null override stays null -- it does not get pinned to the default. "Use catalog default" clears a stored override explicitly, rather than leaving that to an untouched field.</p>
                 </div>
                 <div id="sched-edit-result"></div>
                 <div id="sched-edit-actions">
@@ -6779,6 +6884,25 @@
                 loadSchedules();
             } catch (err) {
                 resultEl.innerHTML = `<p style="color:var(--error)">Save failed: ${escHtml(err.message)}</p>`;
+            }
+        }
+
+        // "Use catalog default" is the one action that can
+        // actually clear a stored override -- an unchanged Save on a
+        // customized job never does (see confirmEditJob above), and
+        // nothing on the wire means "revert" except an explicit `null`.
+        // `patch_admin_job` (admin.py) relies on `model_fields_set` to
+        // tell this null apart from the field being omitted entirely, so
+        // this always sends the key, never omits it.
+        async function resetJobTimeoutToDefault(name) {
+            const resultEl = document.getElementById('sched-edit-result');
+            if (resultEl) resultEl.innerHTML = loadingHtml('Saving...');
+            try {
+                await patchJSON(`/admin/jobs/${encodeURIComponent(name)}`, { timeout_seconds: null });
+                cancelEditJobForm();
+                loadSchedules();
+            } catch (err) {
+                if (resultEl) resultEl.innerHTML = `<p style="color:var(--error)">Save failed: ${escHtml(err.message)}</p>`;
             }
         }
 
