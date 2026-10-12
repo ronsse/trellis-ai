@@ -10,8 +10,10 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from tests.recovery_command import expected_recovery
+from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
+from trellis.logging import configure_stderr_logging
 from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
 from trellis.schemas.advisory import (
     Advisory,
@@ -680,6 +682,49 @@ class TestAdvisoryEffectiveness:
             ],
         )
         assert result.exit_code == 0
+
+
+class TestRegistryWarningLogsOncePerProcess:
+    """A config.yaml parse warning fires once per process, not per command.
+
+    A top-level ``stores:`` block is deprecated and makes
+    ``StoreRegistry.from_config_dir`` log
+    ``registry_config_flat_stores_removed`` once per call.
+    ``generate-advisories`` and ``advisory-effectiveness`` used to resolve
+    their advisory store via ``trellis_cli.config.get_data_dir``, which
+    builds a *second* registry and re-parses config.yaml on every call --
+    so one command logged it twice (once for ``get_event_log()``'s
+    registry, once for ``get_data_dir()``'s), and a second command logged
+    it again. The fix resolves ``stores_dir`` off the one cached registry
+    instead, so both commands together log it exactly once in this
+    process.
+    """
+
+    def test_two_commands_log_the_warning_once_between_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text("stores: {}\n", encoding="utf-8")
+
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
+        configure_stderr_logging()
+        clear_cached_logger_proxies()
+        try:
+            first = runner.invoke(app, ["analyze", "generate-advisories"])
+            second = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+        finally:
+            monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")
+            configure_stderr_logging()
+            clear_cached_logger_proxies()
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+
+        event = "registry_config_flat_stores_removed"
+        combined = plain(first.output) + plain(second.output)
+        matching_lines = [line for line in combined.splitlines() if event in line]
+        assert len(matching_lines) == 1, combined
 
 
 class TestAdvisoryCommandsOnADegradedStore:

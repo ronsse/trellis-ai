@@ -99,7 +99,7 @@ from trellis_cli.analyze import (
     _render_advisory_degradation,
     _resolve_learning_output_dir,
 )
-from trellis_cli.config import get_config_dir, get_data_dir
+from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
@@ -1122,8 +1122,16 @@ def _advisory_store_from_data_dir() -> AdvisoryStore:
     *reader*, which is how 37 nightly-refreshed advisories stayed invisible
     to every pack. Resolution is symmetric, so an existing legacy-path file
     keeps being written in place rather than being orphaned by a second one.
+
+    Reads ``stores_dir`` off the cached registry (:func:`_get_registry`)
+    rather than calling :func:`~trellis_cli.config.get_data_dir`, which
+    builds its own ``StoreRegistry`` and re-parses ``config.yaml`` on
+    every call — inside the ``curate`` interval loop that re-logged
+    config.yaml's parse warnings once per cycle.
     """
-    return AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
+    stores_dir = _get_registry().stores_dir
+    assert stores_dir is not None  # from_config_dir always sets it
+    return AdvisoryStore(resolve_advisory_path(stores_dir))
 
 
 def _render_cycle_text(result: CurateCycleResult) -> None:
@@ -1479,12 +1487,14 @@ def _reconcile_before_cycle() -> None:
     and idempotent, so covering both costs one extra empty scan and
     never double-emits.
 
-    ``stores_dir`` comes off the registry rather than being re-derived
-    from the environment: ``StoreRegistry.from_config_dir`` lets
-    ``data_dir:`` in ``config.yaml`` override ``$TRELLIS_DATA_DIR``, so
-    an env-only derivation would scan an empty directory and report a
-    healthy no-op on exactly the deployments ``trellis admin init
-    --data-dir`` produces.
+    Both ``log_dirs`` entries come off the one cached registry
+    (:func:`_get_registry`) rather than being re-derived from the
+    environment: ``StoreRegistry.from_config_dir`` lets ``data_dir:`` in
+    ``config.yaml`` override ``$TRELLIS_DATA_DIR``, so a second,
+    independently-built registry could scan an empty directory and
+    report a healthy no-op on exactly the deployments ``trellis admin
+    init --data-dir`` produces -- and would re-parse config.yaml, which
+    re-logs its warnings every call.
     """
     from trellis.feedback.recording import (  # noqa: PLC0415
         feedback_log_dir,
@@ -1493,9 +1503,8 @@ def _reconcile_before_cycle() -> None:
 
     event_log = get_event_log()
     stores_dir = _get_registry().stores_dir
-    log_dirs = [get_data_dir()]
-    if stores_dir is not None:
-        log_dirs.insert(0, feedback_log_dir(stores_dir))
+    assert stores_dir is not None  # from_config_dir always sets it
+    log_dirs = [feedback_log_dir(stores_dir), stores_dir.parent]
     found = [d for d in log_dirs if (d / "pack_feedback.jsonl").exists()]
     if not found:
         # Loud about the no-op: "reconcile ran and found nothing" and

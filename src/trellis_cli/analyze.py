@@ -1894,10 +1894,12 @@ def generate_advisories(
     that correlate with success or failure, then stores deterministic
     advisories that can be delivered alongside future context packs.
     """
-    from trellis_cli.config import get_data_dir  # noqa: PLC0415
-
     event_log = get_event_log()
-    stores_dir = get_data_dir() / "stores"
+    # Off the cached registry (:func:`_get_registry`), not
+    # ``get_data_dir()``: that builds a second ``StoreRegistry`` and
+    # re-parses config.yaml, re-logging its warnings on every call.
+    stores_dir = _get_registry().stores_dir
+    assert stores_dir is not None  # from_config_dir always sets it
     # #373: resolve through the one seam, so this writer lands on the file
     # every pack-assembling reader opens.
     store = AdvisoryStore(resolve_advisory_path(stores_dir))
@@ -2042,12 +2044,14 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
     from trellis.retrieve.effectiveness import (  # noqa: PLC0415
         analyze_advisory_effectiveness,
     )
-    from trellis_cli.config import get_data_dir  # noqa: PLC0415
 
     event_log = get_event_log()
     # #373: same seam as ``generate-advisories`` — the fitness loop must
-    # score the advisories that were actually served.
-    store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
+    # score the advisories that were actually served. Off the cached
+    # registry, not ``get_data_dir()``, for the same reason as there.
+    stores_dir = _get_registry().stores_dir
+    assert stores_dir is not None  # from_config_dir always sets it
+    store = AdvisoryStore(resolve_advisory_path(stores_dir))
 
     # The fitness loop writes (put / suppress / restore), and every one of
     # those raises on a store that could not read its file. Exiting here

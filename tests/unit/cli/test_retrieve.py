@@ -1250,6 +1250,27 @@ class TestRetrievePrecedents:
         assert data["status"] == "ok"
         assert data["count"] == 0
 
+    @pytest.mark.parametrize("limit", ["0", "-1"])
+    def test_a_non_positive_limit_is_refused_not_served(self, limit: str) -> None:
+        """``limit=0``/negative used to reach ``list_precedents`` unchecked
+        and come back with a row anyway. Click's ``IntRange`` (``min=1``)
+        now refuses it before the command body runs.
+        """
+        result = runner.invoke(app, ["retrieve", "precedents", "--limit", limit])
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert "Traceback" not in result.output
+
+    def test_an_excessive_limit_is_refused(self) -> None:
+        result = runner.invoke(app, ["retrieve", "precedents", "--limit", "501"])
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_a_limit_within_bounds_still_works(self) -> None:
+        result = runner.invoke(app, ["retrieve", "precedents", "--limit", "500"])
+
+        assert result.exit_code == 0, result.output
+
 
 class TestRetrieveFileContext:
     @staticmethod

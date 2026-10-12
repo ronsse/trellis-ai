@@ -426,7 +426,7 @@ def traces(
 @retrieve_app.command()
 def precedents(
     domain: str = typer.Option(None, help="Domain scope"),
-    limit: int = typer.Option(20, help="Maximum results"),
+    limit: int = typer.Option(20, min=1, max=500, help="Maximum results"),
     output_format: str = typer.Option("text", "--format", help=_FMT_HELP),
     fields: str = typer.Option(None, "--fields", help=_FIELDS_HELP),
     truncate: int = typer.Option(None, "--truncate", help=_TRUNC_HELP),
