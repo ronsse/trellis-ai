@@ -671,7 +671,13 @@ class PrecedentDemoteHandler:
         # Keep the semantic path from continuing to serve the
         # pre-demotion snapshot: a vector row's metadata is an embed-time
         # copy, not a read of the graph store (#338-style gap).
-        _sync_vector_lifecycle(self._registry, target_id, lifecycle)
+        _sync_vector_lifecycle(
+            self._registry,
+            target_id,
+            lifecycle,
+            command=command,
+            log_event="precedent_demote_vector_lifecycle_sync_failed",
+        )
 
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_DEMOTED,
@@ -785,7 +791,13 @@ class PrecedentReinstateHandler:
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
-        _sync_vector_lifecycle(self._registry, target_id, lifecycle)
+        _sync_vector_lifecycle(
+            self._registry,
+            target_id,
+            lifecycle,
+            command=command,
+            log_event="precedent_reinstate_vector_lifecycle_sync_failed",
+        )
 
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_REINSTATED,
@@ -2601,15 +2613,21 @@ def _sync_vector_lifecycle(
     registry: StoreRegistry,
     item_id: str,
     lifecycle: dict[str, Any],
+    *,
+    command: Command | None = None,
+    log_event: str = "retention_vector_lifecycle_sync_failed",
 ) -> None:
     """Stamp a lifecycle record onto a vector row that has no document write.
 
-    **Repair only.** The writers that stamp a document and its row together
-    (``_archive``, ``_restore``) go through
-    :func:`~trellis.core.document_write.put_document`, which mirrors the bag
-    it just wrote — so the mirror cannot be the step a future edit forgets.
-    What is left here is ``_resync_archived``: a row that diverged *before*
-    that seam existed, repaired with no document write to mirror off.
+    Three call sites share this: ``RetentionPruneHandler._resync_archived``
+    (a row that diverged *before* the ``put_document`` mirror seam existed —
+    the writers that stamp a document and its row together, ``_archive`` and
+    ``_restore``, go through :func:`~trellis.core.document_write.put_document`
+    instead, so the mirror cannot be the step a future edit forgets) and
+    ``PrecedentDemoteHandler``/``PrecedentReinstateHandler``, neither of which
+    is a retention operation at all — pass ``log_event`` so the log line
+    names the actual caller rather than defaulting to "retention" for a
+    demotion or reinstatement.
 
     **A vector row's metadata is a snapshot taken at embed time**, and the
     semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
@@ -2632,6 +2650,15 @@ def _sync_vector_lifecycle(
     vector row is normal (structural nodes, un-embedded documents) and is a
     no-op rather than an error — retention must not fail because an item was
     never embedded.
+
+    **Visibility on failure.** The document/graph stamp is already written
+    by the time this runs, so a vector backend outage must not roll back the
+    transition — it is logged, not raised. Logging alone leaves a JSON
+    caller with no way to see that the semantic path went stale, so when
+    ``command`` is given the same condition is also appended to
+    ``command.metadata["handler_warnings"]``, which ``MutationExecutor``
+    folds into the returned ``CommandResult.warnings`` (see
+    ``_handler_warnings`` in ``executor.py``).
     """
     try:
         store = registry.knowledge.vector_store
@@ -2647,10 +2674,16 @@ def _sync_vector_lifecycle(
         # not roll back an archival, but it does leave the semantic path
         # stale, so it is logged rather than swallowed.
         logger.warning(
-            "retention_vector_lifecycle_sync_failed",
+            log_event,
             item_id=item_id,
             exc_info=True,
         )
+        if command is not None:
+            command.metadata.setdefault("handler_warnings", []).append(
+                f"{log_event}: vector row for {item_id} was not re-stamped; "
+                "the semantic path may continue serving a stale snapshot "
+                "until the next resync"
+            )
 
 
 def _prune_message(

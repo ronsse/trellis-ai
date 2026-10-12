@@ -780,3 +780,77 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         reinstate_result = executor.execute(_reinstate(node_id, reason="back"))
         assert reinstate_result.status == CommandStatus.SUCCESS
         assert registry.knowledge.vector_store.get(node_id) is None
+
+
+class TestVectorSyncFailureSurfacesAsAWarning:
+    """F3: a vector-sync failure on demote/reinstate must not be only a
+    WARNING log line. The graph write already landed by the time the
+    sync runs (fail soft, not a rollback), so the command still reports
+    SUCCESS -- but a JSON caller has no other way to learn the semantic
+    path went stale, so the same condition must also land in the
+    result's ``warnings``. The log line itself must name the actual
+    verb (``precedent_demote_...`` / ``precedent_reinstate_...``) rather
+    than the generic ``retention_...`` name shared with prune/restore,
+    since this is neither.
+    """
+
+    @staticmethod
+    def _embed(registry: StoreRegistry, node_id: str) -> None:
+        registry.knowledge.vector_store.upsert(
+            node_id,
+            [0.1, 0.2, 0.3],
+            {"excerpt": f"excerpt of {node_id}", "content_tags": {}},
+        )
+
+    @staticmethod
+    def _break_vector_upsert(
+        registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise_upsert(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("vector backend unavailable")
+
+        monkeypatch.setattr(registry.knowledge.vector_store, "upsert", _raise_upsert)
+
+    def test_demote_reports_a_vector_sync_failure_in_warnings(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        self._break_vector_upsert(registry, monkeypatch)
+
+        result = build_curate_executor(registry).execute(
+            _demote(node_id, reason="stale")
+        )
+
+        # The graph write still landed: a backend outage on the mirror
+        # must not roll back the demotion itself.
+        assert result.status == CommandStatus.SUCCESS
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        assert any(node_id in w for w in result.warnings)
+        assert any(
+            "precedent_demote_vector_lifecycle_sync_failed" in w
+            for w in result.warnings
+        )
+
+    def test_reinstate_reports_a_vector_sync_failure_in_warnings(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        executor = build_curate_executor(registry)
+        executor.execute(_demote(node_id, reason="stale"))
+        self._break_vector_upsert(registry, monkeypatch)
+
+        result = executor.execute(_reinstate(node_id, reason="back"))
+
+        assert result.status == CommandStatus.SUCCESS
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "current"
+        assert any(node_id in w for w in result.warnings)
+        assert any(
+            "precedent_reinstate_vector_lifecycle_sync_failed" in w
+            for w in result.warnings
+        )
