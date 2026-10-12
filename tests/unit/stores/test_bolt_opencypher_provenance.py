@@ -247,6 +247,106 @@ class TestBoltUpsertEdgesBulkShape:
 
 
 # ---------------------------------------------------------------------------
+# upsert_edges_bulk — lock prelude precedes resolution, sorted endpoint order
+#
+# Not provenance, but reuses this file's mock-driver harness rather than
+# duplicating it: a deterministic, no-server counterpart to the live races in
+# bolt_edge_create_race.py (check_concurrent_bulk_edge_create_leaves_one_
+# current_row and friends), which prove the behavior but can't pin the shape
+# of the fix (how many ids, which order, where in the Cypher text). The
+# prelude is one constant-text ``UNWIND $lock_ids AS lock_nid`` clause over
+# the sorted endpoint list, not one clause per endpoint, so these tests pin
+# both the sort order and that the query text itself does not grow with the
+# batch's distinct-endpoint count.
+# ---------------------------------------------------------------------------
+
+
+class TestBoltUpsertEdgesBulkLockPrelude:
+    def test_lock_ids_are_the_sorted_distinct_endpoint_set(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store, known_endpoint_ids={"a", "b", "c", "z"})
+        store.upsert_edges_bulk(
+            [
+                # Row order deliberately disagrees with sorted order ("z"
+                # before "a") so a lock order that merely followed row /
+                # batch-encounter order would disagree with this assertion.
+                {"source_id": "z", "target_id": "a", "edge_type": "links_to"},
+                {"source_id": "b", "target_id": "c", "edge_type": "links_to"},
+            ]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        lock_ids = write_call["params"]["lock_ids"]
+        assert lock_ids == sorted(lock_ids) == ["a", "b", "c", "z"]
+
+    def test_lock_prelude_text_precedes_unwind(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store, known_endpoint_ids={"a", "b"})
+        store.upsert_edges_bulk(
+            [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        cypher = str(write_call["cypher"])
+        assert "_cas_lock" in cypher
+        assert cypher.index("_cas_lock") < cypher.index("UNWIND $rows")
+
+    def test_lock_prelude_locks_every_distinct_endpoint_not_just_one(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(
+            store, known_endpoint_ids={"src1", "tgt1", "src2", "tgt2"}
+        )
+        store.upsert_edges_bulk(
+            [
+                {"source_id": "src1", "target_id": "tgt1", "edge_type": "links_to"},
+                {"source_id": "src2", "target_id": "tgt2", "edge_type": "links_to"},
+            ]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        assert set(write_call["params"]["lock_ids"]) == {
+            "src1",
+            "tgt1",
+            "src2",
+            "tgt2",
+        }
+
+    def test_lock_prelude_text_is_byte_identical_across_batch_sizes(self) -> None:
+        """The point of the constant-text rewrite: the query text -- the
+        driver's plan-cache key -- must not change with the number of
+        distinct endpoints a batch touches. Only the parameter *values*
+        (``lock_ids``, ``rows``) may vary with batch size, never the
+        Cypher string itself.
+        """
+        store_small = _make_store_with_mocked_driver()
+        captured_small = _capture_write_calls(
+            store_small, known_endpoint_ids={"a", "b"}
+        )
+        store_small.upsert_edges_bulk(
+            [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+        )
+
+        large_ids = {f"n{i}" for i in range(50)}
+        store_large = _make_store_with_mocked_driver()
+        captured_large = _capture_write_calls(store_large, known_endpoint_ids=large_ids)
+        store_large.upsert_edges_bulk(
+            [
+                {
+                    "source_id": f"n{i}",
+                    "target_id": f"n{i + 1}",
+                    "edge_type": "links_to",
+                }
+                for i in range(0, 48, 2)
+            ]
+        )
+
+        cypher_small = next(
+            c for c in captured_small if "UNWIND $rows" in str(c["cypher"])
+        )["cypher"]
+        cypher_large = next(
+            c for c in captured_large if "UNWIND $rows" in str(c["cypher"])
+        )["cypher"]
+        assert cypher_small == cypher_large
+
+
+# ---------------------------------------------------------------------------
 # A non-finite property/generation_spec value is refused before any
 # round trip — json.dumps(..., allow_nan=False) on the shared Bolt base.
 # ---------------------------------------------------------------------------

@@ -2668,6 +2668,18 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`upsert_edges_bulk` on Neo4j locks every distinct endpoint in the batch in
+  one constant-text query before resolving any row.** Two bulk writers of the
+  same `(source_id, target_id, edge_type)` triplet, or a bulk writer racing a
+  single-row `upsert_edge`, could each see "no current edge" and both create
+  one. A single `UNWIND $lock_ids AS lock_nid` clause over the sorted endpoint
+  list replaces one clause per endpoint, so the query text and cached plan stay
+  constant at any batch size, and the sort order keeps two such writers from
+  deadlocking on shared endpoints. ArcadeDB takes no lock from this touch; a
+  same-triplet duplicate there is still caught only by the existing OCC retry.
+  (follow-up 2 from the [#782](https://github.com/ronsse/trellis-ai/pull/782)
+  gate, repeated as follow-up 2 by the
+  [#803](https://github.com/ronsse/trellis-ai/pull/803) gate)
 - **The Python SDK's `get_objective_context` and `get_task_context` now name
   a failed or misconfigured retrieval axis, sync and async.** They read the
   response's `sections` and `withholding` but not its `axes` block, so an SDK

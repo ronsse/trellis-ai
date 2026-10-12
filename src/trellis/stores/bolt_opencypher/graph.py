@@ -123,6 +123,19 @@ the same harness. ``live-infra.yml`` stays pinned to 26.8.1 on purpose
 so the race — and this fix — remain testable in CI; a deployment
 already on 26.10.1 gets the fix from the engine, not from this claim.
 
+``upsert_edges_bulk`` does not take the claim row above, but locks
+every distinct endpoint the whole batch touches -- same sorted
+``node_id`` order and ``_cas_lock`` touch as above -- before any row
+resolves its endpoints. The lock is one constant-text
+``UNWIND $lock_ids AS lock_nid`` clause over the sorted list, not one
+``MATCH``/``SET``/``REMOVE`` clause per endpoint: the Bolt driver
+caches a plan by query text, so a per-endpoint clause forces a fresh
+plan at every new count. Lock order rests on ``UNWIND`` visiting
+``$lock_ids`` in list order -- not a documented contract on either
+engine (Neo4j's Cypher Manual says only ``ORDER BY`` guarantees a row
+order), so this is relied-upon, not cited. ArcadeDB's bulk path takes
+no lock from this touch at all, for the same OCC reason as above.
+
 Per-backend subclasses override the **seams**:
 
 - ``SCHEMA_STATEMENTS`` (class attribute) — DDL run by
@@ -1759,7 +1772,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         with self._driver.session(database=self._database) as session:
             # Round trip 1 — validate that every source + target has a
             # current version. Done up front so a bad row gets a precise
-            # error pointing at its index before the write runs.
+            # error pointing at its index before the write runs. The same
+            # sorted, de-duplicated id list is reused below to lock every
+            # endpoint the batch touches, in one order, before round
+            # trip 2 resolves any of them.
             endpoint_ids = sorted(
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
@@ -1796,7 +1812,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # rows), so ``old`` would always be NULL and the prior
             # version would not get closed. Both Neo4j and ArcadeDB
             # accept the WHERE form.
+            #
+            # Lock prelude: locks every distinct endpoint's current row,
+            # in sorted ``endpoint_ids`` order, before any row below
+            # resolves its endpoints -- design, plan-cache rationale and
+            # the UNWIND-order caveat are in the module docstring.
+            # ``count(lk)`` is a real barrier: drop it and the lock
+            # writes can run out of order with the row write below,
+            # caught only by the live race checks, not a mock test.
+            lock_ids = endpoint_ids
+
             cypher = f"""
+            UNWIND $lock_ids AS lock_nid
+            MATCH (lk:Node {{node_id: lock_nid}}) WHERE lk.valid_to IS NULL
+            SET lk._cas_lock = true
+            REMOVE lk._cas_lock
+            WITH count(lk) AS _locked
             UNWIND $rows AS row
             MATCH (s:Node {{node_id: row.source_id}}) WHERE s.valid_to IS NULL
             MATCH (t:Node {{node_id: row.target_id}}) WHERE t.valid_to IS NULL
@@ -1827,7 +1858,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             """
 
             def _tx(tx: ManagedTransaction) -> list[Any]:
-                records = list(tx.run(cypher, rows=rows))
+                records = list(tx.run(cypher, rows=rows, lock_ids=lock_ids))
                 # Compare row indices, not counts: one UNWIND row yields
                 # exactly one RETURN row (the FOREACH above collapses
                 # every matched old edge into one close), but comparing
