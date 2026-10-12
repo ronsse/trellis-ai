@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.errors import ConfigError
 from trellis.stores.registry import RegistryValidationError, StoreRegistry
@@ -231,3 +232,66 @@ class TestEmbeddingDimConsistency:
         }
         reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
         assert reg._check_embedding_dim_consistency() == []
+
+
+class TestEmbeddingsShapeAdvisory:
+    """A non-mapping ``embeddings:`` block is a
+    startup-visible warning, not a validation failure.
+
+    :attr:`StoreRegistry.embedding_fn` already degrades this shape to
+    "unconfigured" lazily, on first access; this check makes the same
+    fact observable at ``validate()`` time too, for a deployment whose
+    request paths never happen to touch the lazy property.
+    """
+
+    def test_a_non_mapping_block_never_fails_validate(self, tmp_path: Path) -> None:
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            embedding_config="sk-live-RegistryValidateEmbeddingsShapeSecret",
+        )
+        reg.validate(check_connectivity=False)  # must not raise
+        assert reg._check_embeddings_shape() == []
+
+    def test_a_non_mapping_block_logs_the_knob_not_the_value(
+        self, tmp_path: Path
+    ) -> None:
+        secret = "sk-live-RegistryValidateEmbeddingsShapeSecret"  # noqa: S105
+        reg = StoreRegistry(stores_dir=tmp_path / "stores", embedding_config=secret)
+        with capture_logs() as logs:
+            reg.validate(check_connectivity=False)
+        malformed = [
+            log for log in logs if log.get("event") == "config.embeddings_malformed"
+        ]
+        assert len(malformed) == 1, logs
+        assert malformed[0]["knob"] == "embeddings"
+        assert malformed[0]["log_level"] == "warning"
+        for log in logs:
+            for value in log.values():
+                assert secret not in str(value)
+
+    @pytest.mark.parametrize(
+        "embedding_config",
+        [
+            None,
+            {},
+            {"provider": "openai"},
+            {"provider": None},
+        ],
+    )
+    def test_a_well_shaped_or_unset_block_never_logs(
+        self, tmp_path: Path, embedding_config: dict | None
+    ) -> None:
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores", embedding_config=embedding_config
+        )
+        with capture_logs() as logs:
+            # openai provider with no API key raises inside _get("vector")
+            # for an unrelated reason in some configs; the pre-flight
+            # checks run before that, so assert on the pre-flight helper
+            # directly rather than requiring the whole validate() to
+            # succeed for every parametrized shape here.
+            assert reg._check_embeddings_shape() == []
+        malformed = [
+            log for log in logs if log.get("event") == "config.embeddings_malformed"
+        ]
+        assert malformed == []

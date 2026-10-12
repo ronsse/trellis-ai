@@ -301,7 +301,9 @@ def _parse_error_reason(spec: SettingSpec) -> str:
     """
     if spec.type == "bool":
         return "stored value is not a recognized boolean"
-    if spec.type in ("int", "float"):
+    if spec.type == "int":
+        return "stored value is not an integer in range"
+    if spec.type == "float":
         return "stored value is not a finite number in range"
     if spec.enum is not None:
         return "stored value is not one of the allowed options"

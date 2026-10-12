@@ -161,11 +161,11 @@ def resolve_advisory_thresholds(
                 if sample_spec is not None
                 else int(sample_raw)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             logger.warning(
                 "advisory_generator.bad_env_int",
                 var=MIN_SAMPLE_SIZE_ENV,
-                value=sample_raw,
+                error_type=type(exc).__name__,
             )
             min_sample_size = _MIN_SAMPLE_SIZE
     elif settings is not None and MIN_SAMPLE_SIZE_SETTING in settings:
@@ -195,11 +195,11 @@ def resolve_advisory_thresholds(
                 if effect_spec is not None
                 else float(effect_raw)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             logger.warning(
                 "advisory_generator.bad_env_float",
                 var=MIN_EFFECT_SIZE_ENV,
-                value=effect_raw,
+                error_type=type(exc).__name__,
             )
             min_effect_size = _MIN_EFFECT_SIZE
     elif settings is not None and MIN_EFFECT_SIZE_SETTING in settings:
