@@ -62,7 +62,7 @@ class TestLoopHealthRoute:
         resp = client.get("/api/v1/loops")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["loops"]) == 8
+        assert len(data["loops"]) == 9
         for row in data["loops"]:
             if row["name"] == "tuner":
                 # Documented exception: pending_count/auto_promoted_total are
@@ -238,14 +238,17 @@ class TestTunerActuatesFollowsResolvedSettings:
 
 
 class TestCandidateAutoPromoteNeverActuates:
-    """``learning_candidate_auto_promote`` stays report-only no matter what
-    settings an operator sets: ``mode=commit`` is refused with a
-    configuration error below this row (``LoopHealthRow`` construction in
-    ``loop_health.py``), so unlike the tuner there is no settings
-    combination that should ever flip its ``actuates`` to ``True``.
+    """``learning_candidate_auto_promote``'s row reads ``actuates`` from
+    the latest ``LEARNING_AUTO_PROMOTE_EVALUATED`` event's own effective
+    mode (``loop_health.py``'s ``_build_candidate_auto_promote_row``),
+    never from settings directly -- this route has no settings access of
+    its own. So setting ``enabled=True`` here, with no run having
+    happened, must still read ``actuates is False``: unlike the tuner
+    row (which combines a caller-supplied resolved boolean with an
+    event), there is no event-independent path to ``True`` for this row.
     """
 
-    def test_stays_false_with_every_relevant_setting_enabled(
+    def test_stays_false_with_every_relevant_setting_enabled_and_no_run(
         self, registry, client
     ) -> None:
         _set_setting(registry, "learning.auto_promote.enabled", True)

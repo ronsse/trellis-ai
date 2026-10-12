@@ -10,11 +10,14 @@ silently inert for a month" had to SSH in and tail a file.
 :func:`summarize_loop_health` answers that from the EventLog alone (plus
 one documented exception below), reading ``CURATE_CYCLE_COMPLETED`` /
 ``TUNE_CYCLE_COMPLETED`` (:mod:`trellis_cli.worker`), ``PRECEDENT_PROMOTED``,
-``PRECEDENT_DEMOTED``, ``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED`` and
-``LEARNING_AUTO_PROMOTE_EVALUATED`` (the last one for the
+``PRECEDENT_DEMOTED``, ``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED``,
+``LEARNING_AUTO_PROMOTE_EVALUATED`` (for the
 ``learning_candidate_auto_promote`` row, which also folds in
 :func:`trellis.learning.candidate_auto_promote.compute_agreement_metric`'s
-read of ``REVIEW_DECISION_RECORDED``). It adds no new probe.
+read of ``REVIEW_DECISION_RECORDED``) and ``LEARNING_AUTO_DEMOTE_EVALUATED``
+(for the ``learning_precedent_auto_demote`` row — that loop's safety
+rollback, so the two rows sit next to each other below). It adds no new
+probe.
 
 **Never-run vs ran-and-counted-zero.** ``LoopHealthRow.last_run_at`` /
 ``last_status`` are ``None`` together exactly when the loop has produced
@@ -79,6 +82,7 @@ LOOP_JOB: MappingABC[str, str] = {
     "advisory_fitness": "curate-nightly",
     "learning_candidate_scoring": "curate-nightly",
     "learning_candidate_auto_promote": "auto-promote-candidates",
+    "learning_precedent_auto_demote": "evaluate-precedent-demotion",
     "tuner": "tune",
 }
 
@@ -176,13 +180,13 @@ def _build_candidate_auto_promote_row(
             # The run's true configured mode (pre-``--dry-run``, pre- any
             # forced-report-only override) is a top-level payload field,
             # not ``policy_snapshot.mode`` -- the snapshot reflects the
-            # *effective* policy the run actually used
-            # (``LearningCandidateAutoPromotePolicy`` can never even be
-            # constructed with ``mode="commit"``, so the snapshot can
-            # only ever read "report_only"). Reading the snapshot here
-            # silently discarded the one field that lets an operator see
-            # "commit is configured, --dry-run / enabled=false is the
-            # only reason nothing happened."
+            # *effective* policy the run actually used, which collapses
+            # to "report_only" under ``--dry-run`` or ``enabled=false``
+            # (and construction itself refuses ``mode="commit"`` unless
+            # the sibling demotion policy is enabled). Reading the
+            # snapshot here would silently discard the one field that
+            # lets an operator see "commit is configured, --dry-run /
+            # enabled=false is the only reason nothing happened."
             "configured_mode": latest.payload.get("configured_mode"),
             "agreement_agree": agreement.agree,
             "agreement_disagree": agreement.disagree,
@@ -218,16 +222,28 @@ def _build_candidate_auto_promote_row(
             "Evaluates learning candidates and reports what it would "
             "promote to a precedent."
         ),
-        actuates=False,
+        # Derived from the latest run's own recorded effective mode
+        # (never from this function's own settings access, which it has
+        # none of): commit mode can only have been reached if
+        # enabled resolved true, so this is a live, run-grounded signal
+        # rather than a static guess.
+        actuates=bool(counters and counters.get("last_run_mode") == "commit"),
         what_it_changes=(
-            "Nothing yet: committing a promotion automatically is refused "
-            "until a follow-up ships auto-demotion, so every run today "
-            "only reports what it would do for each candidate — it never "
-            "writes a precedent."
+            "Ships enabled=False by default, so every run only reports "
+            "what it would promote until an operator turns it on. Even "
+            "then, commit mode is refused at construction unless the "
+            "sibling demotion policy (the row below) is enabled too — "
+            "that loop is commit mode's rollback, so it has to be in "
+            "place first. Once both are enabled, it promotes each "
+            "would-promote candidate to a precedent through the same "
+            "governed path a human `trellis curate promote-learning` "
+            "call uses, capped by max_promotions_per_run."
         ),
         operator_hint=(
-            "CLI: `trellis curate auto-promote-candidates`. Automatic "
-            "commits are refused; only report-only runs succeed today."
+            "CLI: `trellis curate auto-promote-candidates`. Settings: "
+            "`learning.candidate_auto_promote.enabled` / `.mode`, plus "
+            "`learning.precedent_auto_demote.enabled` for the commit-mode "
+            "gate."
         ),
         job_name=LOOP_JOB.get("learning_candidate_auto_promote"),
         last_run_at=latest.occurred_at if latest else None,
@@ -235,6 +251,81 @@ def _build_candidate_auto_promote_row(
         counters=counters,
     )
     return row, candidate_scan.coverage
+
+
+def _build_precedent_auto_demote_row(
+    event_log: EventLog, *, limit: int
+) -> tuple[LoopHealthRow, ScanCoverage]:
+    """Build the ``learning_precedent_auto_demote`` row.
+
+    Mirrors :func:`_build_candidate_auto_promote_row`'s shape — same
+    scan-then-latest-event pattern, same ``counters``/``last_status``
+    derivation — minus the agreement metric, which has no demotion-side
+    analog.
+    """
+    demote_scan = _scan(
+        event_log, EventType.LEARNING_AUTO_DEMOTE_EVALUATED, limit=limit
+    )
+    latest = demote_scan.events[-1] if demote_scan.events else None
+
+    counters: dict[str, Any] | None = None
+    last_status: str | None = None
+    if latest is not None:
+        counts = latest.payload.get("counts") or {}
+        snapshot = latest.payload.get("policy_snapshot") or {}
+        counters = {
+            "last_run_mode": latest.payload.get("mode"),
+            "last_run_would_demote": counts.get("would_demote"),
+            "last_run_demoted": counts.get("demoted"),
+            "last_run_skipped_rate_limited": counts.get("skipped_rate_limited"),
+            "last_run_refused": counts.get("refused"),
+            "last_run_already_demoted": counts.get("already_demoted"),
+            "last_run_ineligible": counts.get("ineligible"),
+            "configured_enabled": snapshot.get("enabled"),
+            # Same reasoning as the promotion row above: the run's true
+            # configured mode (pre-enabled-gate) is a top-level payload
+            # field, surviving even when effective mode downgraded to
+            # report_only because enabled resolved false.
+            "configured_mode": latest.payload.get("configured_mode"),
+        }
+        # LEARNING_AUTO_DEMOTE_EVALUATED's ``outcome`` is always "ok" for
+        # a completed evaluation (unlike the promote event, this gate has
+        # no "degraded" case) and "refused"/"failed" for a run that never
+        # reached one — see emit_precedent_auto_demote_failure_event.
+        outcome = latest.payload.get("outcome")
+        last_status = outcome if outcome is not None else "ok"
+
+    row = LoopHealthRow(
+        name="learning_precedent_auto_demote",
+        description=(
+            "Evaluates current precedents and reports which ones the "
+            "evidence gate would demote."
+        ),
+        actuates=bool(counters and counters.get("last_run_mode") == "commit"),
+        what_it_changes=(
+            "Ships enabled=False by default, so every run only reports "
+            "what it would demote until an operator turns it on. "
+            "Enabling this switch alone still does not demote anything "
+            "here -- its own mode (see counters.last_run_mode) must also "
+            "be switched to commit via the environment variable. Once "
+            "both are on, it demotes each would-demote precedent through "
+            "the same governed path a human `trellis curate "
+            "demote-precedent` call uses, capped by "
+            "max_demotions_per_run. But enabling this switch has an "
+            "effect before that: it is also what the auto-promotion "
+            "loop above checks to unlock its own commit mode, since "
+            "this loop is the safety rollback that mode depends on."
+        ),
+        operator_hint=(
+            "CLI: `trellis curate evaluate-precedent-demotion`. Settings: "
+            "`learning.precedent_auto_demote.enabled` / `.mode`."
+        ),
+        job_name=LOOP_JOB.get("learning_precedent_auto_demote"),
+        last_run_at=latest.occurred_at if latest else None,
+        last_status=last_status,
+        counters=counters,
+    )
+    return row, demote_scan.coverage
 
 
 def summarize_loop_health(
@@ -247,10 +338,11 @@ def summarize_loop_health(
 ) -> LoopHealthReport:
     """Build the ``GET /api/v1/loops`` report from existing events (+ one live read).
 
-    Eight rows, in the order the nightly cycle runs them: noise
+    Nine rows, in the order the nightly cycle runs them: noise
     demotion, advisory generation, advisory fitness, learning-candidate
     scoring, precedent promotion, learning-candidate auto-promotion,
-    tuner, feedback intake.
+    precedent auto-demotion (that loop's safety rollback, so it sits
+    right after it), tuner, feedback intake.
 
     ``auto_promote_enabled`` is the caller's already-resolved (env >
     settings > config.yaml > default) ``learning.auto_promote.enabled``
@@ -385,15 +477,21 @@ def summarize_loop_health(
         ),
         actuates=False,
         what_it_changes=(
-            "Nothing schedules a promotion automatically: a human approves "
-            "each one from the Review tab. The auto-promotion loop below "
-            "only ever reports what it would promote; committing one "
-            "automatically is refused until a follow-up ships "
-            "auto-demotion. This count includes any promotion run by hand "
-            "as well as from the review queue, and keeps rising even "
-            "after a promoted precedent is later demoted -- the demoted "
-            "count is tracked and shown separately, never subtracted "
-            "from this one."
+            "Nothing schedules a promotion automatically through this "
+            "row's own mechanism: it only counts promotions that already "
+            "happened, whichever path created them, and a human approves "
+            "most from the Review tab by default. The sibling "
+            "auto-promotion loop below ships enabled=False, so until an "
+            "operator turns both it and its own mode setting to commit, "
+            "every run there only reports what it would promote too; "
+            "once both are on, a run there writes a promotion through "
+            "this same governed path a human approval uses, and that "
+            "write lands in this same count -- see that row's own "
+            "description for what turns it on. This count includes any "
+            "promotion run by hand, from the review queue, or written "
+            "that way, and keeps rising even after a promoted precedent "
+            "is later demoted -- the demoted count is tracked and shown "
+            "separately, never subtracted from this one."
         ),
         operator_hint="CLI: `trellis curate promote-learning`.",
         job_name=LOOP_JOB.get("precedent_promotion"),
@@ -432,6 +530,9 @@ def summarize_loop_health(
 
     candidate_auto_promote_row, candidate_auto_promote_coverage = (
         _build_candidate_auto_promote_row(event_log, limit=limit)
+    )
+    precedent_auto_demote_row, precedent_auto_demote_coverage = (
+        _build_precedent_auto_demote_row(event_log, limit=limit)
     )
 
     tune_scan = _scan(event_log, EventType.TUNE_CYCLE_COMPLETED, limit=limit)
@@ -524,6 +625,7 @@ def summarize_loop_health(
         precedent_scan.coverage,
         precedent_demoted_scan.coverage,
         candidate_auto_promote_coverage,
+        precedent_auto_demote_coverage,
         tune_scan.coverage,
         auto_promoted_scan.coverage,
         feedback_scan.coverage,
@@ -538,6 +640,7 @@ def summarize_loop_health(
             learning_row,
             precedent_row,
             candidate_auto_promote_row,
+            precedent_auto_demote_row,
             tuner_row,
             feedback_row,
         ],

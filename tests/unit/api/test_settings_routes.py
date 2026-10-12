@@ -203,10 +203,23 @@ class TestListSettings:
         assert "auto-demotion" in row["refused_reason"]
 
     def test_no_other_entry_reports_a_refused_value(self, client: TestClient) -> None:
+        """Exactly the two entries that refuse ``commit`` through Settings
+        unconditionally report ``refused_values`` --
+        ``learning.candidate_auto_promote.mode`` and
+        ``learning.precedent_auto_demote.mode``. Both can still be set to
+        ``commit`` through their own environment variable; only
+        ``learning.candidate_auto_promote.mode``'s construction-time
+        check additionally refuses that env-set value unless the sibling
+        demotion policy is enabled too -- a separate gate this Settings-
+        layer block does not depend on. No other entry declares one.
+        """
         resp = client.get("/api/v1/settings")
         body = resp.json()
         refusing = [row["name"] for row in body["settings"] if row["refused_values"]]
-        assert refusing == ["learning.candidate_auto_promote.mode"]
+        assert refusing == [
+            "learning.candidate_auto_promote.mode",
+            "learning.precedent_auto_demote.mode",
+        ]
 
     def test_a_malformed_stored_row_is_flagged_not_silently_swallowed(
         self, client: TestClient, registry: StoreRegistry
@@ -241,6 +254,46 @@ class TestListSettings:
         assert row["effective_value"] == 0.0  # the module default
         assert row["parse_error"] == "stored value is not a finite number in range"
         assert "1.5" not in row["parse_error"]
+
+    @pytest.mark.parametrize(
+        ("setting", "env_var"),
+        [
+            (
+                "learning.precedent_auto_demote.mode",
+                "TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE",
+            ),
+            (
+                "learning.candidate_auto_promote.mode",
+                "TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE",
+            ),
+        ],
+    )
+    def test_a_hand_written_refused_mode_degrades_its_family_not_the_route(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        setting: str,
+        env_var: str,
+    ) -> None:
+        """The resolvers refuse a stored ``mode: commit`` with
+        ``ConfigError``. That refusal must degrade only its own family to
+        defaults, exactly as a malformed knob does, rather than take the
+        whole Settings page down."""
+        monkeypatch.delenv(env_var, raising=False)
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps({"settings": [{"name": setting, "value": "commit"}]})
+        )
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), setting)
+        assert row["effective_value"] == "report_only"
+        assert row["parse_error"] is not None
+        assert _entry(resp.json(), "pack_holdout_rate")["parse_error"] is None
 
     def test_a_valid_stored_row_is_not_flagged(
         self, client: TestClient, registry: StoreRegistry

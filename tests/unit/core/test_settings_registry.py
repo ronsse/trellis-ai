@@ -13,7 +13,11 @@ knobs for the new candidate-promotion policy — nine entries on top of the
 fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below. A parallel PR
 registered eight more catalog-only, read-side knobs (the subgraph depth
 cap, two noise-demotion thresholds, two advisory-generation thresholds,
-and three capture-health knobs), bringing the total to 31.
+and three capture-health knobs), bringing the total to 31. This PR adds
+the three ``learning.precedent_auto_demote.*`` knobs for the new
+precedent-demotion policy — commit mode's rollback for the
+candidate-promotion policy above — pinned by
+:data:`_PRECEDENT_AUTO_DEMOTE_NAMES`, bringing the total to 34.
 """
 
 from __future__ import annotations
@@ -57,6 +61,17 @@ _AUTO_PROMOTE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+#: The three knobs for the precedent-auto-demotion policy — commit
+#: mode's rollback for the candidate-promotion policy above, registered
+#: by this PR.
+_PRECEDENT_AUTO_DEMOTE_NAMES: frozenset[str] = frozenset(
+    {
+        "learning.precedent_auto_demote.enabled",
+        "learning.precedent_auto_demote.mode",
+        "learning.precedent_auto_demote.max_demotions_per_run",
+    }
+)
+
 
 class TestCatalogMembership:
     def test_every_write_behaviour_field_is_registered(self) -> None:
@@ -85,10 +100,11 @@ class TestCatalogMembership:
                 "capture_strict",
             }
             | _AUTO_PROMOTE_NAMES
+            | _PRECEDENT_AUTO_DEMOTE_NAMES
         )
 
-    def test_thirtyone_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 31
+    def test_thirtyfour_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 34
 
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the
@@ -99,21 +115,43 @@ class TestCatalogMembership:
         prefixes = ("learning.auto_promote", "learning.candidate_auto_promote")
         assert all(name.startswith(prefixes) for name in _AUTO_PROMOTE_NAMES)
 
+    def test_precedent_auto_demote_family_is_registered(self) -> None:
+        """The demotion family (commit mode's rollback) is registered
+        alongside the promotion family it gates, not as a later
+        afterthought.
+        """
+        assert set(SETTINGS_REGISTRY) >= _PRECEDENT_AUTO_DEMOTE_NAMES
+        assert all(
+            name.startswith("learning.precedent_auto_demote")
+            for name in _PRECEDENT_AUTO_DEMOTE_NAMES
+        )
+
     @pytest.mark.parametrize(
         "name",
         [
             "learning.candidate_auto_promote.enabled",
             "learning.candidate_auto_promote.max_promotions_per_run",
+            "learning.precedent_auto_demote.max_demotions_per_run",
         ],
     )
     def test_no_observable_effect_knobs_disclose_it_in_the_first_sentence(
         self, name: str
     ) -> None:
-        """Both knobs are switches with no observable effect until a
-        future commit-mode release — the description must say so as its
-        first sentence, not bury it after an explanation of what the
-        knob will eventually do, so an operator reading only the first
-        line still learns the knob is inert today.
+        """These knobs are switches with no observable effect unless
+        their sibling commit-mode setting is also enabled — the
+        description must say so as its first sentence, not bury it
+        after an explanation of what the knob will eventually do, so an
+        operator reading only the first line still learns the knob is
+        inert today.
+
+        ``learning.precedent_auto_demote.enabled`` is deliberately not
+        in this list: unlike the other three, it has a real effect the
+        moment it is turned on — it unlocks
+        ``learning.candidate_auto_promote.mode``'s own commit
+        construction — so claiming "no observable effect" for it would
+        itself be the falsehood (see
+        :meth:`test_enabled_setting_states_its_promotion_side_effect`
+        below).
         """
         spec = get_setting(name)
         assert spec is not None
@@ -121,6 +159,20 @@ class TestCatalogMembership:
         assert "no observable effect" in first_sentence or (
             "no effect today" in first_sentence
         )
+
+    def test_enabled_setting_states_its_promotion_side_effect(self) -> None:
+        """Enabling demotion alone is not inert: it is the gate that
+        lets ``learning.candidate_auto_promote.mode`` be constructed as
+        ``commit`` at all (demotion is that mode's rollback). The
+        description must say this plainly rather than call the switch
+        a no-op.
+        """
+        spec = get_setting("learning.precedent_auto_demote.enabled")
+        assert spec is not None
+        assert "no observable effect" not in spec.description
+        assert "no effect today" not in spec.description
+        assert "learning.candidate_auto_promote.mode" in spec.description
+        assert "commit" in spec.description
 
     def test_candidate_auto_promote_mode_refuses_commit(self) -> None:
         """Pins the declarative refusal :func:`validate_value` enforces:
@@ -134,14 +186,27 @@ class TestCatalogMembership:
         assert spec.refused_reason
         assert "auto-demotion" in spec.refused_reason
 
-    def test_no_other_entry_declares_refused_values(self) -> None:
-        """``refused_values`` is new and, today, used by exactly one
-        entry -- catches an accidental copy-paste onto another spec.
+    def test_precedent_auto_demote_mode_refuses_commit(self) -> None:
+        """Same declarative refusal, for the demotion family's own mode
+        knob -- this one has no sibling policy to name in its reason,
+        since demotion is itself commit mode's rollback.
         """
-        refusing = [
+        spec = get_setting("learning.precedent_auto_demote.mode")
+        assert spec is not None
+        assert spec.refused_values == ("commit",)
+        assert spec.refused_reason
+
+    def test_no_other_entry_declares_refused_values(self) -> None:
+        """``refused_values`` is used by exactly these two entries --
+        catches an accidental copy-paste onto another spec.
+        """
+        refusing = sorted(
             name for name, spec in SETTINGS_REGISTRY.items() if spec.refused_values
+        )
+        assert refusing == [
+            "learning.candidate_auto_promote.mode",
+            "learning.precedent_auto_demote.mode",
         ]
-        assert refusing == ["learning.candidate_auto_promote.mode"]
 
 
 class TestEverySpecIsWellFormed:
@@ -287,6 +352,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "require_bodied_attribution",
             "learning.candidate_auto_promote.mode",
             "learning.candidate_auto_promote.require_zero_unhelpful",
+            "learning.precedent_auto_demote.mode",
             "graph_max_subgraph_depth",
             "noise_demotion_min_attributed_packs",
             "noise_demotion_min_unhelpful_citations",
@@ -549,6 +615,16 @@ class TestCandidateAutoPromoteFloorsMatchThePolicyConstants:
         spec = get_setting("learning.auto_promote.min_effect_size")
         assert spec is not None
         assert spec.minimum == DEFAULT_MIN_EFFECT_SIZE
+
+    def test_max_demotions_per_run_minimum_matches_the_floor_constant(self) -> None:
+        """Same drift-catching pin as the promotion family above, for
+        the demotion policy's own (separate) floor constant.
+        """
+        from trellis.learning.precedent_auto_demote import MAX_DEMOTIONS_PER_RUN_FLOOR
+
+        spec = get_setting("learning.precedent_auto_demote.max_demotions_per_run")
+        assert spec is not None
+        assert spec.minimum == MAX_DEMOTIONS_PER_RUN_FLOOR
 
 
 def _assert_no_duplicate_names(specs: tuple[SettingSpec, ...]) -> None:

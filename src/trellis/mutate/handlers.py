@@ -387,13 +387,13 @@ class PrecedentPromoteHandler:
         return event.event_id, f"Precedent promoted: {args['title']}"
 
 
-#: Requester identity the future automatic demotion policy (PR 3's
-#: ``PrecedentAutoDemotePolicy``) will stamp on every ``precedent.demote``
+#: Requester identity :mod:`trellis.learning.precedent_auto_demote`'s
+#: ``PrecedentAutoDemotePolicy`` stamps on every ``precedent.demote``
 #: command it submits. Defined here, not in ``trellis.learning``, so that
 #: constant and :class:`PrecedentDemoteHandler`'s own provenance check
 #: below agree on the same string by construction rather than by two
-#: modules happening to copy the same literal — the future auto path
-#: imports this name rather than minting its own copy. Mirrors
+#: modules happening to copy the same literal — the auto path imports
+#: this name rather than minting its own copy. Mirrors
 #: :data:`~trellis.learning.candidate_auto_promote.AUTO_PROMOTE_REQUESTED_BY`'s
 #: shape and reason for existing: an audit reader filtering by
 #: ``requested_by`` should be able to tell "a human demoted this" from
@@ -504,15 +504,17 @@ class PrecedentDemoteHandler:
 
     **Provenance depends on who is demoting, not on who is being
     demoted.** A caller whose own ``Command.requested_by`` equals
-    :data:`AUTO_DEMOTE_REQUESTED_BY` — the future automatic demotion
-    policy — may demote only a precedent whose own ``precedent.promote``
-    event was itself automatic (:func:`_was_auto_promoted`); every other
-    caller (a human, via CLI/MCP/API) may demote any precedent *that has
-    a graph node* regardless of how it was promoted. No auto-created
-    precedent can exist yet in this PR — promotion's own commit mode is
-    still refused — so the first half of this rule is currently
-    unreachable in production; it exists to pin the contract the future
-    auto path depends on. Both halves are pinned by tests with
+    :data:`AUTO_DEMOTE_REQUESTED_BY` —
+    :mod:`trellis.learning.precedent_auto_demote`'s
+    ``PrecedentAutoDemotePolicy`` in ``mode="commit"`` — may demote only
+    a precedent whose own ``precedent.promote`` event was itself
+    automatic (:func:`_was_auto_promoted`); every other caller (a human,
+    via CLI/MCP/API) may demote any precedent *that has a graph node*
+    regardless of how it was promoted. Both the promotion and demotion
+    policies still ship ``enabled=False``, so no auto-created precedent
+    exists in a default deployment — but the check itself does not read
+    that flag; it pins the contract for the moment an operator turns
+    either policy's commit mode on. Both halves are pinned by tests with
     deliberately defective subjects: one that skips the check, or trusts
     a caller-supplied boolean instead of re-deriving it from the event
     log, must fail the "automatic caller is narrowed" test; one that

@@ -23,9 +23,12 @@ Six defects, pinned one test group each:
    ``fmtUtc()`` instead of silently relabelled to the browser's local zone
    by ``fmtDate()``.
 4. The precedents empty state said "Promote traces to create precedents",
-   implying any trace promotion suffices. A precedent is only created when
-   a learning candidate is approved, and nothing schedules that approval
-   automatically.
+   implying any trace promotion suffices. A precedent is ordinarily
+   created when a learning candidate is approved on the Review tab —
+   nothing schedules that approval automatically — but the auto-promotion
+   loop can also create one itself once an operator enables its commit
+   mode, and the empty state now says so instead of claiming human
+   approval is the only path.
 5. ``/effectiveness`` with zero feedback rendered a "0.0%" success rate,
    reading as "every pack failed" rather than "nothing was measured".
    ``noise_candidates`` is the usage-rule's *proposal* (see
@@ -276,17 +279,20 @@ def test_precedents_empty_branch_delegates_to_the_truthful_renderer() -> None:
 
 
 def test_precedents_empty_state_names_the_real_promotion_path() -> None:
-    """A precedent is only created when a human approves a learning
-    candidate on the Review tab — nothing schedules that approval
-    automatically. The empty state must say so and link there, never
-    repeat the old "Promote traces to create precedents" claim that
-    implied any trace promotion was sufficient.
+    """A precedent is ordinarily created when a human approves a learning
+    candidate on the Review tab. The empty state must say so and link
+    there, never repeat the old "Promote traces to create precedents"
+    claim that implied any trace promotion was sufficient — but it must
+    also not claim human approval is the *only* path, since the
+    auto-promotion loop can commit a precedent itself once an operator
+    enables its commit mode.
     """
     page = _page()
     body = _render_precedents_empty_state_body(page)
     assert "switchView('review')" in body
     assert "Promote traces to create precedents" not in body
-    assert "commit mode" not in body
+    assert "commit mode" in body
+    assert "only when a human approves" not in body
 
 
 def test_precedents_empty_state_reads_the_same_candidate_count_review_does() -> None:
@@ -308,14 +314,17 @@ def test_precedents_empty_state_would_qualify_count_comes_from_the_loop_row() ->
     """The "M would qualify" figure is the ``learning_candidate_auto_promote``
     loop row's own ``last_run_would_promote`` counter (loop_health.py's
     read of the latest auto-promote-evaluation event) — not a value
-    this page re-derives from a job name or a constant.
+    this page re-derives from a job name or a constant. Whether that run
+    actually promoted anything itself comes from the same row's own
+    ``actuates`` flag, never a hardcoded claim either way.
     """
     page = _page()
     body = _render_precedents_empty_state_body(page)
     assert "fetchJSON('/loops')" in body
     assert "l.name === 'learning_candidate_auto_promote'" in body
     assert "row.counters.last_run_would_promote" in body
-    assert "it never promotes anything itself" in body
+    assert "row && row.actuates" in body
+    assert "it never promotes anything itself" not in body
 
 
 def test_precedents_empty_state_never_claims_nightly_unconditionally() -> None:

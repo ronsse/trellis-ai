@@ -24,6 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
+from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.learning.precedent_evidence_gate import (
     DISPOSITION_REFUSED,
     DISPOSITION_SKIPPED,
@@ -35,6 +36,7 @@ from trellis.learning.precedent_evidence_gate import (
     REFUSED_NO_UNHELPFUL,
     SKIPPED_ALREADY_DEMOTED,
     SKIPPED_ARCHIVED,
+    SKIPPED_INCOMPLETE_EVIDENCE,
     SKIPPED_NOT_GRAPH_BACKED,
     PrecedentCitationEvidence,
     discover_current_precedents,
@@ -79,7 +81,13 @@ def _ev(
     )
 
 
-def _emit_promote(event_log: EventLog, entity_id: str, *, at: datetime) -> None:
+def _emit_promote(
+    event_log: EventLog,
+    entity_id: str,
+    *,
+    at: datetime,
+    requested_by: str = AUTO_PROMOTE_REQUESTED_BY,
+) -> None:
     event_log.append(
         Event(
             event_type=EventType.MUTATION_EXECUTED,
@@ -88,6 +96,7 @@ def _emit_promote(event_log: EventLog, entity_id: str, *, at: datetime) -> None:
             payload={
                 "operation": Operation.PRECEDENT_PROMOTE.value,
                 "status": "success",
+                "requested_by": requested_by,
             },
             occurred_at=at,
         )
@@ -627,6 +636,59 @@ class TestEvaluatePrecedentDemotions:
         assert report.refused_count == 1
         assert report.outcomes[0].disposition == DISPOSITION_REFUSED
         assert report.outcomes[0].reason == REFUSED_NO_EVIDENCE
+
+    def test_truncated_join_skips_incomplete_evidence_full_join_contests(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Blocker 2, report-only: report-only mode must show the same
+        classification commit mode does. Three helpful citations land
+        before two unhelpful ones; a small ``join_limit`` truncates the
+        newest-first scan down to just the two (newer) unhelpful
+        citations, which would otherwise wrongly read as clean evidence.
+        The precedent's own window start (``_T0``) predates the scan's
+        ``covered_since``, so the truncation guard reclassifies it to
+        ``DISPOSITION_SKIPPED``/``SKIPPED_INCOMPLETE_EVIDENCE`` instead of
+        ``would_demote`` -- counted, not dropped. With the full join
+        limit all five citations are visible and it is genuinely
+        contested (3 helpful >= 2 unhelpful): ``DISPOSITION_REFUSED`` /
+        ``REFUSED_CONTESTED``.
+        """
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0)
+        for i in range(1, 4):
+            at = _T0 + timedelta(hours=i)
+            _emit_pack_assembled(
+                event_log, pack_id=f"pack-helpful-{i}", item_ids=["p1"], at=at
+            )
+            _emit_feedback(
+                event_log, pack_id=f"pack-helpful-{i}", at=at, helpful=["p1"]
+            )
+        for i in range(4, 6):
+            at = _T0 + timedelta(hours=i)
+            _emit_pack_assembled(
+                event_log, pack_id=f"pack-unhelpful-{i}", item_ids=["p1"], at=at
+            )
+            _emit_feedback(
+                event_log, pack_id=f"pack-unhelpful-{i}", at=at, unhelpful=["p1"]
+            )
+
+        truncated_report = evaluate_precedent_demotions(
+            event_log, graph_store, join_limit=2
+        )
+        assert truncated_report.scan.truncated is True
+        assert len(truncated_report.outcomes) == 1
+        truncated_outcome = truncated_report.outcomes[0]
+        assert truncated_outcome.disposition == DISPOSITION_SKIPPED
+        assert truncated_outcome.reason == SKIPPED_INCOMPLETE_EVIDENCE
+        assert truncated_report.would_demote_count == 0
+
+        full_report = evaluate_precedent_demotions(event_log, graph_store)
+        assert full_report.scan.truncated is False
+        assert len(full_report.outcomes) == 1
+        full_outcome = full_report.outcomes[0]
+        assert full_outcome.disposition == DISPOSITION_REFUSED
+        assert full_outcome.reason == REFUSED_CONTESTED
+        assert full_report.would_demote_count == 0
 
     def test_exactly_one_event_emitted_per_run(
         self, event_log: EventLog, graph_store: SQLiteGraphStore

@@ -367,7 +367,7 @@ class TestRowMetadata:
 
         report = summarize_loop_health(event_log, tuner_state)
 
-        assert len(report.loops) == 8
+        assert len(report.loops) == 9
         names = {row.name for row in report.loops}
         assert names == {
             "noise_demotion",
@@ -376,6 +376,7 @@ class TestRowMetadata:
             "learning_candidate_scoring",
             "precedent_promotion",
             "learning_candidate_auto_promote",
+            "learning_precedent_auto_demote",
             "tuner",
             "feedback_intake",
         }
@@ -388,22 +389,33 @@ class TestRowMetadata:
         self, tmp_path: Path
     ) -> None:
         """The precedent_promotion row must keep saying nothing schedules a
-        promotion. `learning_candidate_auto_promote` reports what it would
-        promote; its `commit` mode is refused with a configuration error,
-        so this row must never claim the loop "can also commit one
-        unattended when enabled".
+        promotion automatically: a human always approves one from the
+        Review tab, whether or not the auto-promotion loop below it is
+        enabled. `learning_candidate_auto_promote` can commit once an
+        operator enables both it and its sibling demotion policy — this
+        pins that its copy says so (default-off, gated on the sibling),
+        never that it writes unconditionally or that the precedent row
+        itself can.
         """
         event_log, tuner_state = _stores(tmp_path)
 
         report = summarize_loop_health(event_log, tuner_state)
 
         row = _row(report, "precedent_promotion")
-        assert "Nothing schedules a promotion" in row.what_it_changes
+        assert "Nothing schedules a promotion automatically" in row.what_it_changes
         assert "can also commit" not in row.what_it_changes
         assert "unattended" not in row.what_it_changes
 
         auto_promote_row = _row(report, "learning_candidate_auto_promote")
-        assert "it never writes a precedent" in auto_promote_row.what_it_changes
+        assert "enabled=False by default" in auto_promote_row.what_it_changes
+        assert "sibling demotion policy" in auto_promote_row.what_it_changes
+        assert "promotes each would-promote candidate" in (
+            auto_promote_row.what_it_changes
+        )
+
+        demote_row = _row(report, "learning_precedent_auto_demote")
+        assert "enabled=False by default" in demote_row.what_it_changes
+        assert "safety rollback" in demote_row.what_it_changes
 
 
 class TestCandidateAutoPromoteRowStatus:
@@ -531,13 +543,14 @@ class TestCandidateAutoPromoteRowConfiguredMode:
                     "ineligible": 0,
                     "skipped": 0,
                 },
-                # The effective policy a --dry-run forced to report_only
-                # -- LearningCandidateAutoPromotePolicy can never even be
-                # constructed with mode="commit", so this is always
-                # "report_only" whenever the top-level configured_mode is
-                # "commit". Reading this field for "configured_mode"
-                # would report the opposite of what was actually
-                # configured.
+                # The effective policy a --dry-run (or enabled=false)
+                # forced to report_only even though mode="commit" was
+                # configured -- effective_mode always collapses to
+                # report_only in either case, whether or not the sibling
+                # demotion policy's enabled state would otherwise have
+                # let construction succeed. Reading the snapshot's mode
+                # for "configured_mode" would report the opposite of
+                # what was actually configured.
                 "policy_snapshot": {"enabled": True, "mode": "report_only"},
             },
         )
@@ -677,3 +690,128 @@ class TestCandidateAutoPromoteRowNoLongerFoldsStalenessIntoStatus:
         # A still-present ad hoc override would turn this "stale" -- it
         # must not, no matter how old `later` is.
         assert row.last_status == "ok"
+
+
+class TestPrecedentAutoDemoteRow:
+    """``learning_precedent_auto_demote`` mirrors
+    ``learning_candidate_auto_promote``'s row shape: same scan-then-
+    latest-event derivation, same counters/last_status pattern, read
+    from ``LEARNING_AUTO_DEMOTE_EVALUATED`` instead.
+    """
+
+    def test_report_only_run_reports_would_demote_counts_and_does_not_actuate(
+        self, tmp_path: Path
+    ) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_DEMOTE_EVALUATED,
+            source="precedent_auto_demote",
+            payload={
+                "outcome": "ok",
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 2,
+                    "would_demote": 1,
+                    "demoted": 0,
+                    "skipped_rate_limited": 0,
+                    "refused": 0,
+                    "already_demoted": 0,
+                    "ineligible": 1,
+                },
+                "policy_snapshot": {
+                    "enabled": False,
+                    "mode": "report_only",
+                    "max_demotions_per_run": 5,
+                },
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_precedent_auto_demote")
+        assert row.last_run_at is not None
+        assert row.last_status == "ok"
+        assert row.actuates is False
+        assert row.counters == {
+            "last_run_mode": "report_only",
+            "last_run_would_demote": 1,
+            "last_run_demoted": 0,
+            "last_run_skipped_rate_limited": 0,
+            "last_run_refused": 0,
+            "last_run_already_demoted": 0,
+            "last_run_ineligible": 1,
+            "configured_enabled": False,
+            "configured_mode": "report_only",
+        }
+
+    def test_commit_mode_run_actuates_and_reports_demoted_count(
+        self, tmp_path: Path
+    ) -> None:
+        """Once enabled, a run whose effective mode actually reached
+        "commit" must flip `actuates` true and surface the demoted
+        count -- the loop-health signal this row exists to give an
+        operator checking whether the rollback is live, not just
+        configured.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_DEMOTE_EVALUATED,
+            source="precedent_auto_demote",
+            payload={
+                "outcome": "ok",
+                "mode": "commit",
+                "configured_mode": "commit",
+                "dispositions": [],
+                "counts": {
+                    "total": 3,
+                    "would_demote": 0,
+                    "demoted": 1,
+                    "skipped_rate_limited": 2,
+                    "refused": 0,
+                    "already_demoted": 0,
+                    "ineligible": 0,
+                },
+                "policy_snapshot": {
+                    "enabled": True,
+                    "mode": "commit",
+                    "max_demotions_per_run": 1,
+                },
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_precedent_auto_demote")
+        assert row.actuates is True
+        assert row.counters is not None
+        assert row.counters["last_run_demoted"] == 1
+        assert row.counters["last_run_skipped_rate_limited"] == 2
+        assert row.counters["configured_enabled"] is True
+
+    def test_failure_event_reports_refused_outcome_not_ok(self, tmp_path: Path) -> None:
+        """A run that never reached an evaluation
+        (``emit_precedent_auto_demote_failure_event``) carries no
+        ``counts``/``policy_snapshot`` at all -- it must not be
+        confused with a completed, empty run that read "ok".
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_DEMOTE_EVALUATED,
+            source="precedent_auto_demote",
+            payload={
+                "outcome": "refused",
+                "configured_mode": "commit",
+                "error": {"type": "ConfigError", "message": "withheld"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_precedent_auto_demote")
+        assert row.last_status == "refused"
+        assert row.actuates is False
+        assert row.counters is not None
+        assert row.counters["last_run_demoted"] is None
+        assert row.counters["configured_mode"] == "commit"
