@@ -41,7 +41,16 @@ class Operation(StrEnum):
     RETENTION_PRUNE = "retention.prune"
     RETENTION_RESTORE = "retention.restore"
 
-    # Admin
+    # Admin — each routed only through its own admin-scope executor, never
+    # through ``create_curate_handlers``. SCHEDULE_UPDATE and
+    # JOB_RUN_REQUEST go through ``build_schedule_executor`` (see
+    # ``mutate/schedule_handlers.py``); SETTINGS_UPDATE is a *separate*
+    # executor, ``build_settings_executor`` (see
+    # ``mutate/handlers.py::create_settings_handlers``) — the two
+    # executors are disjoint, not one shared admin executor (gate #860b,
+    # follow-up 9).
+    SCHEDULE_UPDATE = "schedule.update"
+    JOB_RUN_REQUEST = "job.run_request"
     SETTINGS_UPDATE = "settings.update"
     CLASSIFY_RULE_APPLY = "classify_rule.apply"
     CLASSIFY_RULE_REVOKE = "classify_rule.revoke"
@@ -186,6 +195,12 @@ class OperationRegistry:
         # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
         # re-derive the same population that was wrong the first time.
         self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
+        # Both schedule admin operations push their own field allowlist in
+        # the handler (``ScheduleUpdateHandler`` / ``JobRunRequestHandler``):
+        # every field but ``target_id`` is optional on an update, and a
+        # run-request takes none, so neither has a required-arg set here.
+        self._schemas[Operation.SCHEDULE_UPDATE] = set()
+        self._schemas[Operation.JOB_RUN_REQUEST] = set()
         # ``value`` is required as a *key*, not a truthy value: ``None``
         # means "remove the override" (SettingsUpdateHandler's own
         # docstring), so the presence check below must not reject a

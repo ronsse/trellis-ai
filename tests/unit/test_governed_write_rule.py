@@ -89,6 +89,13 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "trellis_api/routes/. The actual governed write happens inside "
         "SettingsUpdateHandler via MutationExecutor, not at this call site."
     ),
+    ("trellis/mutate/schedule_handlers.py", "put"): (
+        "ScheduleStore is a JSON file store for schedule.json, outside the "
+        "document and vector planes policed by issue #360. The call sits "
+        "inside ScheduleUpdateHandler/JobRunRequestHandler, which are "
+        "themselves only reachable through build_schedule_executor's "
+        "MutationExecutor -- the write is governed, just not by this rule."
+    ),
 }
 
 # Re-read on 2026-09-12 with git grep over the
@@ -438,10 +445,13 @@ def test_unknown_receivers_are_explicitly_classified_as_other_stores() -> None:
         if len(reason.split()) < 4
     ]
     assert not thin, f"unclassified write exemptions need prose reasons: {thin}"
-    assert len(sites) == 10, (
+    assert len(sites) == 12, (
         f"found {len(sites)} unclassified calls, expected 10 hand-read "
         "ParameterStore/AdvisoryStore calls plus the one @router.put(...) "
-        "decorator false positive (trellis_api/routes/settings.py)"
+        "decorator false positive (trellis_api/routes/settings.py) plus "
+        "the two ScheduleStore.put call sites in "
+        "trellis/mutate/schedule_handlers.py (ScheduleUpdateHandler and "
+        "JobRunRequestHandler)"
     )
 
 

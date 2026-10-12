@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import Any, NoReturn
 
 import httpx
 import structlog
@@ -52,11 +52,9 @@ from trellis_cli.stores import (
     get_document_store,
     get_event_log,
     get_graph_store,
+    get_schedule_store,
     get_trace_store,
 )
-
-if TYPE_CHECKING:
-    from trellis.stores.schedule_store import ScheduleStore
 
 # API-key env vars the memory-extraction doctor checks for. The flag name
 # and its truthy spellings are imported from ``trellis.core.write_config``
@@ -1930,19 +1928,6 @@ def migrate_graph(
 # ---------------------------------------------------------------------------
 
 
-def _get_schedule_store() -> ScheduleStore:
-    """Open the schedule registry at its one canonical path.
-
-    Unlike ``policies.json`` / ``advisories.json`` (``resolve_policy_path``,
-    ``resolve_advisory_path``), there is no legacy location to fall back
-    to — ``schedule.json`` is new in this PR — so the path is inlined
-    rather than routed through a resolver with nothing to resolve.
-    """
-    from trellis.stores.schedule_store import ScheduleStore  # noqa: PLC0415
-
-    return ScheduleStore(get_data_dir() / "stores" / "schedule.json")
-
-
 def _render_schedule_degradation(degraded: dict[str, Any] | None) -> None:
     """Print the schedule store's degraded state, or nothing at all.
 
@@ -2150,7 +2135,7 @@ def due_jobs(
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
-    store = _get_schedule_store()
+    store = get_schedule_store()
     jobs = store.list()
     degradation = store.degradation
     degraded = degradation.to_dict() if degradation else None
@@ -2259,7 +2244,7 @@ def init_schedule(
 
     from trellis_cli.schedule_seed import default_scheduled_jobs  # noqa: PLC0415
 
-    store = _get_schedule_store()
+    store = get_schedule_store()
     degradation = store.degradation
     if degradation is not None:
         degraded = degradation.to_dict()
@@ -3047,6 +3032,19 @@ from trellis_cli.admin_api_keys import (  # noqa: E402
 )
 
 _register_api_keys(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# schedule set / run — CLI parity for PATCH/POST /admin/jobs (plan p1 PR 6)
+# ---------------------------------------------------------------------------
+# Registration hook mirrors the modules above so the schedule-editing CLI
+# stays in its own module and admin.py only carries the wiring.
+
+from trellis_cli.admin_schedule import (  # noqa: E402
+    register as _register_schedule,
+)
+
+_register_schedule(admin_app)
 
 
 # ---------------------------------------------------------------------------

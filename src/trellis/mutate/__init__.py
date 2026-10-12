@@ -90,6 +90,42 @@ def build_curate_executor(
     )
 
 
+def build_schedule_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build the admin-only executor for the schedule-registry write surface.
+
+    Wires :data:`~trellis.mutate.commands.Operation.SCHEDULE_UPDATE` and
+    :data:`~trellis.mutate.commands.Operation.JOB_RUN_REQUEST` to
+    :class:`~trellis.mutate.schedule_handlers.ScheduleUpdateHandler` /
+    :class:`~trellis.mutate.schedule_handlers.JobRunRequestHandler` —
+    deliberately a *disjoint* two-handler dict, never merged into
+    :func:`create_curate_handlers`. That dict backs
+    ``POST /api/v1/commands/batch`` (``mutate`` scope) and MCP
+    ``execute_mutation``; those two ops are admin-scoped, so only the
+    admin REST route and ``trellis admin schedule`` build an executor
+    from *this* function. Submitting either operation to the
+    curate-wired executor hits "no handler registered" (``FAILED``),
+    which is the refusal, not an oversight.
+
+    Stage 2 runs exactly as :func:`build_curate_executor` wires it — same
+    ``policy_gate=build_policy_gate(registry)`` construction — so an
+    ``entity_type="schedule"`` deny policy refuses this surface too.
+    """
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+    from trellis.mutate.schedule_handlers import (  # noqa: PLC0415
+        JobRunRequestHandler,
+        ScheduleUpdateHandler,
+    )
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers={
+            Operation.SCHEDULE_UPDATE: ScheduleUpdateHandler(registry),
+            Operation.JOB_RUN_REQUEST: JobRunRequestHandler(registry),
+        },
+        policy_gate=build_policy_gate(registry),
+    )
+
+
 def build_settings_executor(registry: StoreRegistry) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with ONLY the settings handler.
 
@@ -214,6 +250,7 @@ __all__ = [
     "build_evidence_ingest_command",
     "build_evidence_ingest_command_from_args",
     "build_policy_gate",
+    "build_schedule_executor",
     "build_settings_executor",
     "ensure_evidence_document",
     "governing_key_refusal",
