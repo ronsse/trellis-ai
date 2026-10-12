@@ -308,6 +308,34 @@ class TestApplyRule:
         assert payload["precision"] == 0.8
         assert payload["lift"] == 0.3
 
+    def test_anonymous_apply_pins_the_constant_requested_by_label(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """F1: pins M21. With no caller identity at all (the default
+        ``client`` fixture: ``TRELLIS_AUTH_MODE`` unset, no API key
+        header), ``_audit_identity(ctx)`` is ``{"key_id": None,
+        "key_name": None}``, so ``applied_by``'s
+        ``key_id or key_name or requested_by`` fallback resolves to
+        ``command.requested_by`` verbatim -- the only path that reveals
+        whether the route still passes the literal
+        ``"api:classify.apply-rule"`` rather than embedding the (here,
+        absent) caller identity into it."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, order="asc", limit=10
+        )
+        assert events[-1].payload["applied_by"] == "api:classify.apply-rule"
+
     def test_apply_missing_fields_is_422(self, client: TestClient) -> None:
         resp = client.post("/api/v1/classify/rules", json={"kind": "tag_keyword"})
         assert resp.status_code == 422

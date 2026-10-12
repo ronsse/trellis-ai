@@ -1109,9 +1109,9 @@ def apply_rule(
         "cli:classify-apply-rule",
         "--by",
         help=(
-            "Sets Command.requested_by, the audit event's constant "
-            "entry-point label -- it does not reach applied_by, which "
-            "always comes from the stamped OS-user identity instead."
+            "Sets Command.requested_by, the audit event's entry-point "
+            "label -- it does not reach applied_by, which always comes "
+            "from the stamped OS-user identity instead."
         ),
     ),
     output_format: str = typer.Option(

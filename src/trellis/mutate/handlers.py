@@ -721,11 +721,19 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
     from the caller's original string -- stayed un-stripped, splitting one
     logical identifier across two different strings. A
     control character (:func:`unicodedata.category` category ``"Cc"``,
-    which includes NUL and ESC) can break a downstream consumer outright --
-    a NUL embedded in a Postgres ``jsonb`` audit payload fails to write at
-    all. A key, target, or source_event_id over the length limit risks the
-    same failure on some backends' index-row limits, writing the overlay
-    row and then failing only when the audit event is emitted.
+    which includes NUL and ESC) or a lone UTF-16 surrogate (category
+    ``"Cs"``, checked with :func:`_contains_nul_or_lone_surrogate` rather
+    than re-deriving the same surrogate-range test) can break a
+    downstream consumer outright: a NUL embedded in a Postgres ``jsonb``
+    audit payload fails to write at all, and a lone surrogate cannot be
+    encoded to UTF-8 at all -- pydantic-core refuses one even earlier,
+    raising its own ``pydantic_core.ValidationError`` the moment
+    ``ClassifyOverrideRow`` is built, which this handler's callers do not
+    catch, so an unchecked surrogate reaches the caller as a handler
+    panic (``FAILED``) rather than a clean refusal. A key, target, or
+    source_event_id over the length limit risks the same failure on some
+    backends' index-row limits, writing the overlay row and then failing
+    only when the audit event is emitted.
 
     Args:
         value: the string to check.
@@ -739,8 +747,8 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
 
     Raises:
         ValidationError: ``value`` has leading/trailing whitespace,
-            contains a control character, or exceeds
-            ``_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH`` characters
+            contains a control character or an unpaired UTF-16 surrogate,
+            or exceeds ``_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH`` characters
             (raised with the caller-supplied ``code``).
     """
     if value != value.strip():
@@ -754,6 +762,12 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
         msg = (
             f"classify_rule: {field} is {len(value)} characters, over the "
             f"{_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH}-character limit"
+        )
+        raise ValidationError(msg, errors=[msg], code=code)
+    if _contains_nul_or_lone_surrogate(value):
+        msg = (
+            f"classify_rule: {field} {value!r} contains a NUL byte or an "
+            "unpaired UTF-16 surrogate"
         )
         raise ValidationError(msg, errors=[msg], code=code)
     for ch in value:
@@ -792,30 +806,35 @@ def _find_unsafe_jsonb_string(
 ) -> tuple[str, str] | None:
     """Walk ``obj`` for the first string a jsonb column cannot store.
 
-    Recurses into ``dict``/``list`` nesting at any depth; every other
-    leaf type (``int``, ``float``, ``bool``, ``None``, a datetime already
-    rendered to ``str`` by the caller) is skipped, since a NUL or lone
-    surrogate can only ever occur inside a Python ``str``.
+    Recurses into ``dict``/``list``/``tuple`` nesting at any depth,
+    checking dict *keys* as well as dict and sequence values -- a str
+    key is exactly as storable (or not) as a str value, so a key is
+    checked the same way rather than assumed safe for being a key; every
+    other leaf type (``int``, ``float``, ``bool``, ``None``, a datetime
+    already rendered to ``str`` by the caller) is skipped, since a NUL
+    or lone surrogate can only ever occur inside a Python ``str``.
 
     Returns:
         ``(path, value)`` for the first unsafe string found, walking
-        dict values in insertion order and list items in index order, or
-        ``None`` if no string in the structure is unsafe.
+        each dict item's key before its value, in insertion order, and
+        list/tuple items in index order, or ``None`` if no string in the
+        structure is unsafe.
     """
     if isinstance(obj, str):
         return (path, obj) if _contains_nul_or_lone_surrogate(obj) else None
     if isinstance(obj, dict):
         for key, value in obj.items():
+            if isinstance(key, str) and _contains_nul_or_lone_surrogate(key):
+                return (f"{path} key", key)
             found = _find_unsafe_jsonb_string(value, f"{path}[{key!r}]")
             if found is not None:
                 return found
         return None
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         for index, value in enumerate(obj):
             found = _find_unsafe_jsonb_string(value, f"{path}[{index}]")
             if found is not None:
                 return found
-        return None
     return None
 
 
@@ -829,15 +848,16 @@ def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> 
     prior row's own fields (e.g. ``existing.source_event_id``, which may
     predate that validator or have been written by hand-editing the
     overlay file), and whatever a future field adds -- so this is the
-    backstop that covers the whole payload rather than one field at a
+    backstop that checks every string in the payload, dict keys
+    included, at any nesting depth, rather than one named field at a
     time. Called before the write it would otherwise follow
     (``store.put`` in Apply, ``store.remove`` in Revoke), so a refusal
     here leaves the prior state -- row present or absent -- exactly as
     it was, with no row written and no event emitted.
 
     Raises:
-        ValidationError: some string value, at any nesting depth,
-            contains a NUL byte or an unpaired UTF-16 surrogate
+        ValidationError: some string value or dict key, at any nesting
+            depth, contains a NUL byte or an unpaired UTF-16 surrogate
             (``code="unsafe_audit_payload"``).
     """
     found = _find_unsafe_jsonb_string(payload)
@@ -849,6 +869,97 @@ def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> 
             f"store: {value!r}"
         )
         raise ValidationError(msg, errors=[msg], code="unsafe_audit_payload")
+
+
+_CLASSIFY_RULE_IDENTITY_FIELD_CODES = (
+    ("requested_by_claim", "invalid_requested_by_claim"),
+    ("key_id", "invalid_key_id"),
+    ("key_name", "invalid_key_name"),
+)
+
+
+def _validate_classify_rule_identity_fields(
+    *, requested_by_claim: Any, key_id: Any, key_name: Any, operation: str
+) -> None:
+    """Refuse ``requested_by_claim``/``key_id``/``key_name`` unless str|None.
+
+    Shared by :class:`ClassifyRuleApplyHandler` and
+    :class:`ClassifyRuleRevokeHandler`, called before either builds or
+    removes a row. No shipped surface sends anything else today --
+    ``requested_by_claim`` comes from ``command.args``, which no surface
+    sets, and REST/CLI only ever stamp ``metadata``'s ``key_id``/
+    ``key_name`` as ``str | None`` -- but nothing upstream of this
+    handler enforces that, and a non-str value here would otherwise
+    reach the audit payload unchecked: a ``float("nan")`` claim passes
+    straight through ``_validate_jsonb_safe_payload`` (it is not a
+    ``str``) and only ``json.dumps(..., allow_nan=False)`` would catch
+    it, while a ``set`` (or anything else ``json.dumps`` cannot encode
+    at all) raises an uncaught ``TypeError`` that neither probe below
+    catches, turning a bad claim into a handler panic rather than a
+    clean refusal.
+
+    Args:
+        requested_by_claim: ``command.args.get("requested_by_claim")``.
+        key_id: ``command.metadata.get("key_id")``.
+        key_name: ``command.metadata.get("key_name")``.
+        operation: ``"apply"`` or ``"revoke"``, for the error message.
+
+    Raises:
+        ValidationError: one of the three is neither ``str`` nor
+            ``None`` (``code="invalid_requested_by_claim"``,
+            ``"invalid_key_id"`` or ``"invalid_key_name"``, matching
+            whichever field failed first).
+    """
+    values = (requested_by_claim, key_id, key_name)
+    for value, (field, code) in zip(
+        values, _CLASSIFY_RULE_IDENTITY_FIELD_CODES, strict=True
+    ):
+        if value is not None and not isinstance(value, str):
+            msg = (
+                f"classify_rule.{operation}: {field} must be a string or "
+                f"null, got {type(value).__name__}"
+            )
+            raise ValidationError(msg, errors=[msg], code=code)
+
+
+def _validate_json_serializable_payload(
+    payload: dict[str, Any], *, operation: str
+) -> None:
+    """Refuse an audit ``payload`` ``json.dumps(..., allow_nan=False)`` rejects.
+
+    Shared by :class:`ClassifyRuleApplyHandler` and
+    :class:`ClassifyRuleRevokeHandler`, called before the write it would
+    otherwise follow (``store.put`` in Apply, ``store.remove`` in
+    Revoke). On Apply, ``_validate_classify_rule_metrics`` already
+    refuses a non-finite support/precision/lift, so this should never
+    fire there in practice -- it is the backstop for whatever the
+    payload gains next that isn't a plain, finite number. Revoke carries
+    no metrics of its own, but this is still the only probe that would
+    catch one reaching its payload some other way (e.g. a legacy row's
+    own fields). The actual event log backend serialises with
+    ``json.dumps(..., allow_nan=False)`` regardless of which store backs
+    it (SQLite and Postgres both), and a failure there, discovered only
+    after the write already ran, would leave a rule applied or revoked
+    with no event to show for it.
+
+    Raises:
+        ValidationError: ``json.dumps(payload, allow_nan=False)`` raises
+            ``ValueError`` -- always for a non-finite float, which is
+            the only shape reaching this point that it refuses
+            (``code="invalid_metric"``).
+    """
+    try:
+        json.dumps(payload, allow_nan=False)
+    except ValueError as exc:
+        # json.dumps(..., allow_nan=False) always raises ValueError(msg)
+        # with a single string argument ("Out of range float values are
+        # not JSON compliant: nan"), never a wrapped driver/library
+        # exception, so args[0] is exactly that message -- a
+        # structured-field read, not a bare str(exc) stringification of
+        # the caught exception.
+        detail = exc.args[0] if exc.args else "not serializable"
+        msg = f"classify_rule.{operation}: audit payload is not serializable: {detail}"
+        raise ValidationError(msg, errors=[msg], code="invalid_metric") from exc
 
 
 class ClassifyRuleApplyHandler:
@@ -936,6 +1047,17 @@ class ClassifyRuleApplyHandler:
             source_event_id, field="source_event_id", code="invalid_source_event_id"
         )
         _validate_classify_rule_metrics(command.args)
+        # Before any row is built: a non-str/non-None requested_by_claim
+        # or metadata key_id/key_name would otherwise reach the audit
+        # payload unchecked (see _validate_classify_rule_identity_fields's
+        # own docstring for exactly what the two probes further down
+        # would and would not have caught on their own).
+        _validate_classify_rule_identity_fields(
+            requested_by_claim=command.args.get("requested_by_claim"),
+            key_id=command.metadata.get("key_id"),
+            key_name=command.metadata.get("key_name"),
+            operation="apply",
+        )
 
         row_id = f"{kind}:{key}"
         # Defence in depth, same posture as SettingsUpdateHandler: this
@@ -1084,35 +1206,22 @@ class ClassifyRuleApplyHandler:
         if requested_by_claim is not None:
             payload["requested_by_claim"] = requested_by_claim
 
-        # Built and probed BEFORE the overlay write: ``_validate_classify_rule_metrics``
-        # already refuses a non-finite support/precision/lift, so this
-        # should never fire in practice, but it is the backstop for
-        # whatever this payload gains next that isn't a plain, finite
-        # number -- the actual event log backend serializes with
-        # ``json.dumps(..., allow_nan=False)`` (SQLite) and a failure
-        # there, discovered only after ``store.put`` already wrote the
-        # row, is exactly the gap this reorder closes: a rule applied
-        # with no ``CLASSIFY_RULE_APPLIED`` event to show for it.
-        try:
-            json.dumps(payload, allow_nan=False)
-        except ValueError as exc:
-            # json.dumps(..., allow_nan=False) always raises
-            # ValueError(msg) with a single string argument ("Out of
-            # range float values are not JSON compliant: nan"), never a
-            # wrapped driver/library exception, so args[0] is exactly
-            # that message -- a structured-field read, not a bare
-            # str(exc) stringification of the caught exception.
-            detail = exc.args[0] if exc.args else "not serializable"
-            msg = f"classify_rule.apply: audit payload is not serializable: {detail}"
-            raise ValidationError(msg, errors=[msg], code="invalid_metric") from exc
+        # Built and probed BEFORE the overlay write, in two independent
+        # passes over the same payload (shared with Revoke -- see each
+        # helper's own docstring): the first catches a non-finite float
+        # that ``_validate_classify_rule_metrics`` should already have
+        # refused, so it should never fire in practice, but it is the
+        # backstop for whatever this payload gains next that isn't a
+        # plain, finite number. Discovered only after ``store.put``
+        # already wrote the row, either failure would apply a rule with
+        # no ``CLASSIFY_RULE_APPLIED`` event to show for it.
+        _validate_json_serializable_payload(payload, operation="apply")
 
         # A second, independent probe on the same built payload: the
-        # json.dumps check above catches a non-finite float, but a NUL
-        # byte or lone surrogate round-trips through json.dumps just
-        # fine and only fails once a Postgres jsonb column refuses to
-        # store it -- the gap this closes, same posture and same reason
-        # as the probe above (before the write, so a refusal leaves no
-        # row and no event).
+        # json-serializable check above catches a non-finite float, but
+        # a NUL byte or lone surrogate round-trips through json.dumps
+        # just fine and only fails once a Postgres jsonb column refuses
+        # to store it.
         _validate_jsonb_safe_payload(payload, operation="apply")
 
         try:
@@ -1170,6 +1279,15 @@ class ClassifyRuleRevokeHandler:
             msg = "classify_rule.revoke requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
         _validate_classify_rule_identifier(key, field="key", code="invalid_key")
+        # Before any row is removed: the same type guard Apply runs,
+        # same reason -- see _validate_classify_rule_identity_fields's
+        # own docstring.
+        _validate_classify_rule_identity_fields(
+            requested_by_claim=command.args.get("requested_by_claim"),
+            key_id=command.metadata.get("key_id"),
+            key_name=command.metadata.get("key_name"),
+            operation="revoke",
+        )
 
         row_id = f"{kind}:{key}"
         if command.target_type != "classify_rule" or command.target_id != row_id:
@@ -1289,16 +1407,19 @@ class ClassifyRuleRevokeHandler:
         if requested_by_claim is not None:
             payload["requested_by_claim"] = requested_by_claim
 
-        # Built and probed BEFORE the store write -- the mirror image of
-        # Apply's reorder, and for the same reason: a NUL or lone
-        # surrogate can reach this payload through a field this handler
-        # never otherwise validates (``command.metadata``'s identity
-        # fields, or ``existing``'s own ``source_event_id``/``applied_by``,
-        # which may have been written by an earlier build or by
-        # hand-editing the overlay file). Discovering that only after
+        # Built and probed BEFORE the store write -- genuinely the
+        # mirror image of Apply's reorder now, with the same two
+        # independent probes in the same order. A non-finite float, a
+        # NUL byte or a lone surrogate can each reach this payload
+        # through a field the type guard above checks only for type
+        # (``command.metadata``'s identity fields), or through
+        # ``existing``'s own ``source_event_id``/``applied_by``, which
+        # may have been written by an earlier build or by hand-editing
+        # the overlay file. Discovering either failure only after
         # ``store.remove`` already ran would revoke the rule with no
         # ``CLASSIFY_RULE_REVOKED`` event to show for it; probing first
         # leaves the row in place on a refusal.
+        _validate_json_serializable_payload(payload, operation="revoke")
         _validate_jsonb_safe_payload(payload, operation="revoke")
 
         try:

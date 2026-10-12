@@ -87,10 +87,13 @@ def _revoke_cmd(
     *,
     requested_by: str = "test:classify",
     metadata: dict[str, object] | None = None,
+    **extra_args: object,
 ) -> Command:
+    args: dict[str, object] = {"kind": kind, "key": key}
+    args.update(extra_args)
     return Command(
         operation=Operation.CLASSIFY_RULE_REVOKE,
-        args={"kind": kind, "key": key},
+        args=args,
         target_id=f"{kind}:{key}",
         target_type="classify_rule",
         requested_by=requested_by,
@@ -681,6 +684,41 @@ class TestClassifyRuleIdentifierNormalForm:
         assert _store(registry).get("tag_keyword", "zzzkw") is None
         assert _applied_event_count(registry) == 0
 
+    def test_apply_lone_surrogate_target_is_refused_with_invalid_target_code(
+        self, registry: StoreRegistry
+    ) -> None:
+        """S-C: a lone UTF-16 surrogate in ``target`` must be refused by
+        the identifier validator itself, with ``invalid_target`` -- not
+        reach ``ClassifyOverrideRow`` construction, where pydantic-core
+        would raise its own (uncaught) ``ValidationError`` and the
+        handler would panic (``FAILED``) instead of cleanly refusing."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "fin\udcffance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_target"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_lone_surrogate_source_event_id_is_refused_with_its_own_code(
+        self, registry: StoreRegistry
+    ) -> None:
+        """S-C: same as above for ``source_event_id``, with
+        ``invalid_source_event_id``."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword", "zzzkw", "finance", source_event_id="01EVT\udcff000"
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_source_event_id"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
     def test_apply_leading_whitespace_source_event_id_is_refused(
         self, registry: StoreRegistry
     ) -> None:
@@ -1070,3 +1108,253 @@ class TestRevokePayloadCarriesStructuredIdentity:
             event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
         )
         assert events[-1].payload["revoked_by"] == "api:classify.revoke-rule"
+
+
+# ---------------------------------------------------------------------------
+# S-B — _find_unsafe_jsonb_string walks dict keys and tuples, not just
+# dict values and lists
+# ---------------------------------------------------------------------------
+
+
+class TestFindUnsafeJsonbStringWalker:
+    """Direct unit tests of the walker itself, independent of either
+    handler -- a list, a nested dict, a dict key, and a tuple, the four
+    shapes ``_find_unsafe_jsonb_string``'s own docstring now claims to
+    walk. Each case puts the unsafe string one level deeper than the
+    top-level dict the handlers always pass in, so a regression in the
+    recursion (not just the top-level dispatch) is caught here directly,
+    with no handler, store, or event log involved."""
+
+    def test_unsafe_string_inside_a_list_is_found(self) -> None:
+        from trellis.mutate.handlers import _find_unsafe_jsonb_string
+
+        found = _find_unsafe_jsonb_string({"items": ["safe", "bad\x00value"]})
+
+        assert found == ("payload['items'][1]", "bad\x00value")
+
+    def test_unsafe_string_inside_a_nested_dict_is_found(self) -> None:
+        from trellis.mutate.handlers import _find_unsafe_jsonb_string
+
+        found = _find_unsafe_jsonb_string(
+            {"outer": {"inner": {"deep": "bad\udcffvalue"}}}
+        )
+
+        assert found == ("payload['outer']['inner']['deep']", "bad\udcffvalue")
+
+    def test_unsafe_dict_key_is_found_and_flagged_as_a_key(self) -> None:
+        from trellis.mutate.handlers import _find_unsafe_jsonb_string
+
+        found = _find_unsafe_jsonb_string({"safe": "ok", "bad\x00key": "ok too"})
+
+        assert found == ("payload key", "bad\x00key")
+
+    def test_unsafe_string_inside_a_tuple_is_found(self) -> None:
+        from trellis.mutate.handlers import _find_unsafe_jsonb_string
+
+        found = _find_unsafe_jsonb_string({"items": ("safe", "bad\udcffvalue")})
+
+        assert found == ("payload['items'][1]", "bad\udcffvalue")
+
+    def test_fully_safe_nested_structure_returns_none(self) -> None:
+        """Sanity check for the four cases above: a structure with no
+        unsafe string anywhere, including non-str leaves (int/float/
+        bool/None), returns ``None`` rather than a false positive."""
+        from trellis.mutate.handlers import _find_unsafe_jsonb_string
+
+        found = _find_unsafe_jsonb_string(
+            {
+                "list": ["a", "b"],
+                "tuple": ("c", "d"),
+                "nested": {"x": 1, "y": None, "z": True},
+                "number": 3.14,
+            }
+        )
+
+        assert found is None
+
+
+# ---------------------------------------------------------------------------
+# S-B — requested_by_claim / metadata key_id / key_name must be str|None
+# before any row is built or removed
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyRuleIdentityFieldTypeGuard:
+    """``_validate_classify_rule_identity_fields`` (shared by Apply and
+    Revoke) refuses a non-str/non-None ``requested_by_claim``,
+    ``metadata.key_id`` or ``metadata.key_name`` before either handler
+    builds or removes a row -- not reachable from any shipped surface
+    today, but previously a handler panic (a ``set`` cannot reach
+    ``json.dumps`` at all) or a silent orphan row/missing event (a NaN
+    claim, which ``_validate_jsonb_safe_payload`` never sees because it
+    is not a ``str``)."""
+
+    def test_revoke_nan_claim_is_rejected_row_present_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", "zzzkw", requested_by_claim=math.nan)
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_requested_by_claim"
+        assert _store(registry).get("tag_keyword", "zzzkw") is not None
+        assert _revoked_event_count(registry) == 0
+
+    def test_revoke_set_claim_is_rejected_row_present_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", "zzzkw", requested_by_claim={"x"})
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_requested_by_claim"
+        assert _store(registry).get("tag_keyword", "zzzkw") is not None
+        assert _revoked_event_count(registry) == 0
+
+    def test_apply_nan_claim_is_rejected_no_row_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The same guard on Apply's side, before any row is built."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", requested_by_claim=math.nan)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_requested_by_claim"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_non_str_metadata_key_id_is_rejected_no_row_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", metadata={"key_id": 12345})
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key_id"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_non_str_metadata_key_name_is_rejected_no_row_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            metadata={"key_name": ["not", "a", "str"]},
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key_name"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+
+# ---------------------------------------------------------------------------
+# S-A — the Apply full-payload backstop catches what the early
+# metadata-only probe cannot: a NUL confined to requested_by itself
+# ---------------------------------------------------------------------------
+
+
+class TestApplyFullPayloadBackstop:
+    """The early, metadata-only ``_validate_jsonb_safe_payload`` call in
+    ``ClassifyRuleApplyHandler.handle`` only ever looks at
+    ``metadata.key_id``/``metadata.key_name`` -- with no metadata set at
+    all, a NUL confined to ``command.requested_by`` reaches
+    ``applied_by`` (the ``key_id or key_name or requested_by`` fallback)
+    and then the payload's own ``applied_by`` field, where only the
+    later, full-payload backstop (run on the built payload, right
+    before ``store.put``) can still catch it. Moving that backstop after
+    the write (M3b) or deleting it outright (M3c) must make this test
+    fail."""
+
+    def test_apply_nul_in_requested_by_with_no_metadata_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", requested_by="cli:\x00")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "unsafe_audit_payload"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+
+# ---------------------------------------------------------------------------
+# S-D — Apply's payload carries metadata.key_id verbatim (M12b)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPayloadCarriesStructuredIdentity:
+    """Mirrors ``TestRevokePayloadCarriesStructuredIdentity`` for Apply:
+    the ``CLASSIFY_RULE_APPLIED`` event's payload must carry
+    ``metadata.key_id``/``metadata.key_name`` verbatim, not just use
+    ``key_id`` to compute ``applied_by`` and then drop it. Pins M12b
+    (the payload's ``key_id`` hardcoded to ``None``)."""
+
+    def test_apply_payload_carries_metadata_key_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        handler.handle(cmd)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=10
+        )
+        assert events[-1].payload["key_id"] == "key_abc123"
+
+    def test_apply_payload_carries_metadata_key_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        handler.handle(cmd)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=10
+        )
+        assert events[-1].payload["key_name"] == "ci-bot"
+
+    def test_apply_payload_key_id_is_none_without_metadata(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=10
+        )
+        assert events[-1].payload["key_id"] is None
+        assert events[-1].payload["key_name"] is None
