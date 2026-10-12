@@ -1885,13 +1885,24 @@ class EntityCreateHandler:
     :class:`EntityUpdateHandler`: an omitted field carries the stored link
     forward, an explicit value replaces it.
 
-    **An existing precedent's id is refused outright.** ENTITY_CREATE on
-    any other existing id is a legitimate upsert (it opens a new SCD-2
-    version, e.g. re-extracting an entity), but an unconditional property
-    replace on a precedent would drop its ``lifecycle`` — a demoted
-    precedent would come back ``"current"`` with no reason recorded and
-    no ``PRECEDENT_REINSTATED`` event, the same silent-reinstate shape
-    :class:`EntityUpdateHandler`'s guards close on the update path.
+    **An existing precedent's id is refused unless it is current.**
+    ENTITY_CREATE on any other existing id is a legitimate upsert (it
+    opens a new SCD-2 version, e.g. re-extracting an entity), and
+    re-approving a learning candidate whose target is already a *current*
+    precedent is equally legitimate (``submit_learning_promotion`` writes
+    it this way; ``_precedent_reapproval_refusal`` already lets a current
+    precedent's re-approval through before this handler ever runs). What
+    is refused is an unconditional property replace that would drop a
+    *non-current* ``lifecycle`` — a demoted precedent would come back
+    ``"current"`` with no reason recorded and no ``PRECEDENT_REINSTATED``
+    event, the same silent-reinstate shape :class:`EntityUpdateHandler`'s
+    guards close on the update path. A ``entity_type`` other than
+    ``"precedent"`` over an existing precedent is refused outright,
+    whatever its lifecycle state, mirroring
+    :class:`EntityUpdateHandler`'s retype guard: it would otherwise
+    retype the node away from precedent in the same call that replaces
+    its properties, reaching the same end state as the two-step bypass
+    that guard closes.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1915,17 +1926,34 @@ class EntityCreateHandler:
             else None
         )
         if existing_node is not None and existing_node["node_type"] == "precedent":
-            msg = (
-                f"entity.create refuses to upsert over existing precedent "
-                f"{caller_id}: an unconditional property replace would drop "
-                "its lifecycle (a demoted precedent would come back "
-                "'current' with no reason recorded and no "
-                "PRECEDENT_REINSTATED event); use precedent.reinstate for "
-                "that, or entity.update for a non-lifecycle property edit"
-            )
-            raise ValidationError(
-                msg, errors=[msg], code="entity_create_over_existing_precedent"
-            )
+            supplied_entity_type = command.args["entity_type"]
+            if supplied_entity_type != "precedent":
+                msg = (
+                    f"entity.create refuses to retype existing precedent "
+                    f"{caller_id} to {supplied_entity_type!r}: a later "
+                    "entity.update naming properties.lifecycle under that "
+                    "non-precedent node_type would then slip past the guard "
+                    "that refuses it on a precedent; use entity.update for "
+                    "a non-retyping property edit"
+                )
+                raise ValidationError(
+                    msg,
+                    errors=[msg],
+                    code="entity_create_retypes_existing_precedent",
+                )
+            if _current_lifecycle_state(existing_node) != CURRENT_STATE:
+                msg = (
+                    f"entity.create refuses to upsert over existing "
+                    f"precedent {caller_id}: an unconditional property "
+                    "replace would drop its lifecycle (a demoted precedent "
+                    "would come back 'current' with no reason recorded and "
+                    "no PRECEDENT_REINSTATED event); use "
+                    "precedent.reinstate for that, or entity.update for a "
+                    "non-lifecycle property edit"
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="entity_create_over_existing_precedent"
+                )
 
         # ``document_ids`` is the first-class graph↔document link (Phase 4 of
         # ADR planes-and-substrates). Threading it here gives the pointer a
@@ -2049,12 +2077,20 @@ class EntityUpdateHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         entity_id = command.args["entity_id"]
         store = self._registry.knowledge.graph_store
-        supplied_properties = command.args.get("properties") or {}
+        raw_properties = command.args.get("properties") or {}
+        # ``props.update(...)`` below accepts a dict OR an iterable of
+        # ``(key, value)`` pairs, and callers use both (MCP
+        # ``execute_mutation`` and REST ``/commands/batch`` both carry
+        # ``args`` as loosely-typed JSON, so a list-of-pairs payload reaches
+        # here unchanged). Normalising to a dict *here*, before either
+        # precedent guard reads it, means ``touches_lifecycle`` below sees
+        # the same key regardless of which shape the caller sent --
+        # otherwise a pairs-form ``[["lifecycle", {...}]]`` skipped the
+        # ``isinstance(..., dict)`` check entirely and reinstated a demoted
+        # precedent with no ``PRECEDENT_REINSTATED`` event.
+        supplied_properties: dict[str, Any] = dict(raw_properties)
         supplied_entity_type = command.args.get("entity_type")
-        touches_lifecycle = (
-            isinstance(supplied_properties, dict)
-            and LIFECYCLE_KEY in supplied_properties
-        )
+        touches_lifecycle = LIFECYCLE_KEY in supplied_properties
 
         # Read the existing node only when one of the two precedent guards
         # below could actually need it, so the common case -- a property
@@ -2126,9 +2162,7 @@ class EntityUpdateHandler:
         # Bound and emitted only after the write succeeded, so a refused
         # update leaves neither an alias nor an event.
         final_name = written["properties"].get("name")
-        name_was_supplied = "name" in command.args or (
-            isinstance(supplied_properties, dict) and "name" in supplied_properties
-        )
+        name_was_supplied = "name" in command.args or "name" in supplied_properties
         if name_was_supplied:
             _bind_entity_name_alias(
                 store,

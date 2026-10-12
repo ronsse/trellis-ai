@@ -1367,6 +1367,202 @@ class TestSubmitPromotion:
         assert outcome["status"] != "refused_demoted"
         executor.execute.assert_called()
 
+    def test_reapprove_current_identical_payload_promotes(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end against real stores (gate-876b R1): re-approving a
+        learning candidate whose precedent is already *current* -- the
+        exact shape of re-running ``trellis curate promote-learning``
+        with the same decisions file, or re-clicking Approve on an
+        already-promoted Review row -- must come back ``"promoted"``,
+        add one version and one ``PRECEDENT_PROMOTED`` event, same as a
+        fresh first approval. ``_precedent_reapproval_refusal`` already
+        lets a current precedent's re-approval through before
+        ``ENTITY_CREATE`` is issued; it is ``EntityCreateHandler``'s own
+        guard that must not then refuse the write a second time just
+        because the id already names a precedent.
+
+        Defective subject: an ``EntityCreateHandler`` guard that refuses
+        ``entity.create`` over *any* existing precedent regardless of
+        lifecycle state (the pre-fix shape) makes the second
+        ``submit_learning_promotion`` return ``"entity_failed"`` instead
+        of ``"promoted"``, and the version/event counts never move.
+        """
+        from trellis.mutate import build_curate_executor  # noqa: PLC0415
+        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        executor = build_curate_executor(registry)
+        graph_store = registry.knowledge.graph_store
+        event_log = registry.operational.event_log
+        entity_id = "precedent://learning/reapprove-identical"
+        payload = self._entity_payload(entity_id=entity_id)
+
+        first = submit_learning_promotion(
+            executor,
+            payload,
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+        assert first["status"] == "promoted", first
+        versions_before = len(graph_store.get_node_history(entity_id))
+        promoted_before = len(
+            event_log.get_events(
+                event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+            )
+        )
+
+        second = submit_learning_promotion(
+            executor,
+            payload,
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+
+        assert second["status"] == "promoted", second
+        assert (
+            len(graph_store.get_node_history(entity_id)) == versions_before + 1
+        )
+        assert (
+            len(
+                event_log.get_events(
+                    event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+                )
+            )
+            == promoted_before + 1
+        )
+
+    def test_reapprove_current_changed_payload_promotes_and_applies_change(
+        self, tmp_path: Path
+    ) -> None:
+        """Same shape as the identical-payload case, but the candidate
+        re-scored between runs (e.g. a changed description) -- the
+        change must land on the node, not just the status."""
+        from trellis.mutate import build_curate_executor  # noqa: PLC0415
+        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        executor = build_curate_executor(registry)
+        graph_store = registry.knowledge.graph_store
+        event_log = registry.operational.event_log
+        entity_id = "precedent://learning/reapprove-changed"
+
+        first = submit_learning_promotion(
+            executor,
+            self._entity_payload(entity_id=entity_id),
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+        assert first["status"] == "promoted", first
+        versions_before = len(graph_store.get_node_history(entity_id))
+        promoted_before = len(
+            event_log.get_events(
+                event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+            )
+        )
+
+        changed_payload = self._entity_payload(entity_id=entity_id)
+        changed_payload["properties"] = {"description": "re-scored description"}
+        second = submit_learning_promotion(
+            executor,
+            changed_payload,
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+
+        assert second["status"] == "promoted", second
+        node = graph_store.get_node(entity_id)
+        assert node is not None
+        assert node["properties"]["description"] == "re-scored description"
+        assert (
+            len(graph_store.get_node_history(entity_id)) == versions_before + 1
+        )
+        assert (
+            len(
+                event_log.get_events(
+                    event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+                )
+            )
+            == promoted_before + 1
+        )
+
+    def test_reapprove_after_reinstate_promotes(self, tmp_path: Path) -> None:
+        """A precedent demoted and then legitimately reinstated
+        (``precedent.reinstate``) is current again -- re-approving its
+        learning candidate after that must succeed exactly like the
+        never-demoted case, not stay refused as if it were still
+        demoted."""
+        from trellis.mutate import build_curate_executor  # noqa: PLC0415
+        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        executor = build_curate_executor(registry)
+        graph_store = registry.knowledge.graph_store
+        entity_id = "precedent://learning/reapprove-reinstated"
+        payload = self._entity_payload(entity_id=entity_id)
+
+        first = submit_learning_promotion(
+            executor,
+            payload,
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+        assert first["status"] == "promoted", first
+
+        demote_result = executor.execute(
+            Command(
+                operation=Operation.PRECEDENT_DEMOTE,
+                args={"target_id": entity_id, "reason": "no longer applicable"},
+                target_id=entity_id,
+                target_type="precedent",
+                requested_by="test",
+            )
+        )
+        assert demote_result.status == CommandStatus.SUCCESS, demote_result.message
+
+        reinstate_result = executor.execute(
+            Command(
+                operation=Operation.PRECEDENT_REINSTATE,
+                args={"target_id": entity_id, "reason": "false positive"},
+                target_id=entity_id,
+                target_type="precedent",
+                requested_by="test",
+            )
+        )
+        assert (
+            reinstate_result.status == CommandStatus.SUCCESS
+        ), reinstate_result.message
+
+        second = submit_learning_promotion(
+            executor,
+            payload,
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+
+        assert second["status"] == "promoted", second
+        node = graph_store.get_node(entity_id)
+        assert node is not None
+        # ENTITY_CREATE replaces ``properties`` wholesale, so a
+        # re-approval of an already-current precedent drops any explicit
+        # ``lifecycle`` key entirely rather than writing "current" back --
+        # absent reads as current by the fail-open convention
+        # ``_current_lifecycle_state`` shares with ``retrieve.lifecycle``.
+        lifecycle = node["properties"].get("lifecycle") or {}
+        assert lifecycle.get("state", "current") == "current"
+
 
 class TestPromotionVisibleToGetLessons:
     """End-to-end guarantee (P9): a promoted learning candidate must reach
