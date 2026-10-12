@@ -118,11 +118,15 @@ def _strip_interpolation(template: str) -> str:
 
 
 def _split_script_and_markup(page: str) -> tuple[str, str]:
+    # Case-insensitive: an uppercase <SCRIPT>/<STYLE> tag would otherwise
+    # survive both the extraction and the strip, landing raw markup/JS in
+    # the text-node pass below (CodeQL py/bad-tag-filter).
+    tag_flags = re.DOTALL | re.IGNORECASE
     script_text = "\n".join(
-        m.group(1) for m in re.finditer(r"<script[^>]*>(.*?)</script>", page, re.DOTALL)
+        m.group(1) for m in re.finditer(r"<script[^>]*>(.*?)</script>", page, tag_flags)
     )
-    markup = re.sub(r"<script[^>]*>.*?</script>", "", page, flags=re.DOTALL)
-    markup = re.sub(r"<style[^>]*>.*?</style>", "", markup, flags=re.DOTALL)
+    markup = re.sub(r"<script[^>]*>.*?</script>", "", page, flags=tag_flags)
+    markup = re.sub(r"<style[^>]*>.*?</style>", "", markup, flags=tag_flags)
     return script_text, markup
 
 
