@@ -1462,6 +1462,41 @@ class StoreRegistry:
             )
         return errors, to_write
 
+    def _check_embeddings_shape(self) -> list[tuple[str, Exception]]:
+        """Warn once, at registry load, when ``embeddings:`` cannot carry
+        a ``provider`` field at all.
+
+        :attr:`embedding_fn` already logs
+        ``embedding_config_not_mapping`` for this same shape -- a bare
+        string, bool, int, or list -- but only lazily, on first access.
+        A deployment whose request paths never happen to touch semantic
+        search (or never reach the degrade-to-keyword+graph callers that
+        do) would otherwise carry this misconfiguration invisibly for
+        its whole life. Hooking it into :meth:`validate`'s pre-flight
+        section, alongside :meth:`_check_embedding_dim_consistency`,
+        makes it fire deterministically wherever a deployment already
+        treats registry construction as a startup event (the FastAPI
+        lifespan calls ``validate()`` for exactly this reason) rather
+        than adding a second, independent probe.
+
+        Never returns an error: a malformed ``embeddings:`` block is not
+        fatal here either, matching :attr:`embedding_fn`'s own posture
+        of degrading it to "unconfigured" rather than raising -- this
+        check only makes that condition observable sooner. Knob name
+        only, never the value, which could be a pasted credential.
+        Wrapped whole, like :func:`trellis.core.version.resolve_stamp_staleness`
+        -- a bug in this advisory check must never block every other
+        store from validating.
+        """
+        try:
+            if self._embedding_config and not isinstance(
+                self._embedding_config, Mapping
+            ):
+                logger.warning("config.embeddings_malformed", knob="embeddings")
+        except Exception:  # advisory check; never fail validate()
+            return []
+        return []
+
     def _check_embedding_dim_consistency(self) -> list[tuple[str, Exception]]:
         """Ensure ``vector`` and ``graph`` configs agree on ``embedding_dim``.
 
@@ -1559,6 +1594,7 @@ class StoreRegistry:
         # consolidated report.
         errors.extend(self._check_uri_formats(targets))
         errors.extend(self._check_embedding_dim_consistency())
+        errors.extend(self._check_embeddings_shape())
 
         # Schema-fingerprint check (Logic Gap 4.5) — detects substrate
         # swaps and schema-version bumps that would otherwise corrupt
@@ -1851,6 +1887,16 @@ class StoreRegistry:
         label, the value half here could be anything an operator pasted
         into the knob, including a credential. Returns ``None`` when
         neither knob is set.
+
+        A present-but-non-string ``provider`` (an int, a list, a bool, a
+        mapping) still names ``"embeddings.provider"`` here: that is the
+        exact knob :attr:`embedding_fn` raises ``ConfigError`` on for that
+        shape, so a caller building a failure message (``admin.runtime``)
+        must not lose the knob just because the bad value was not a
+        string. The truthy check mirrors :attr:`embedding_fn`'s own
+        ``provider is not None and provider != ""`` gate, not a bare
+        ``isinstance`` check, so the two never disagree on what counts as
+        "set".
         """
         import os  # noqa: PLC0415
 
@@ -1865,7 +1911,7 @@ class StoreRegistry:
             # malformed value.
             return "embeddings" if self._embedding_config else None
         provider = self._embedding_config.get("provider")
-        if isinstance(provider, str) and provider:
+        if provider is not None and provider != "":
             return "embeddings.provider"
         return None
 
