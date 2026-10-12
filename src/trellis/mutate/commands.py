@@ -53,6 +53,8 @@ class Operation(StrEnum):
     SCHEDULE_UPDATE = "schedule.update"
     JOB_RUN_REQUEST = "job.run_request"
     SETTINGS_UPDATE = "settings.update"
+    CLASSIFY_RULE_APPLY = "classify_rule.apply"
+    CLASSIFY_RULE_REVOKE = "classify_rule.revoke"
 
 
 class CommandStatus(StrEnum):
@@ -206,6 +208,13 @@ class OperationRegistry:
         # docstring), so the presence check below must not reject a
         # literal null the way an `if not command.args.get("value")` would.
         self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
+        self._schemas[Operation.CLASSIFY_RULE_APPLY] = {
+            "kind",
+            "key",
+            "target",
+            "source_event_id",
+        }
+        self._schemas[Operation.CLASSIFY_RULE_REVOKE] = {"kind", "key"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

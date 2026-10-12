@@ -33,7 +33,9 @@ class TestOperation:
         # see trellis/mutate/schedule_handlers.py)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
-        assert len(Operation) == 24
+        # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
+        # candidate review)
+        assert len(Operation) == 26
 
 
 class TestCommand:

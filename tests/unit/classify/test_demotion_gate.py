@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from trellis.classify.demotion_gate import (
     MIN_ATTRIBUTED_PACKS,
+    MIN_ATTRIBUTED_PACKS_ENV,
+    MIN_ATTRIBUTED_PACKS_SETTING,
     MIN_UNHELPFUL_CITATIONS,
+    MIN_UNHELPFUL_CITATIONS_ENV,
+    MIN_UNHELPFUL_CITATIONS_SETTING,
     REFUSED_CONTESTED,
     REFUSED_INSUFFICIENT,
     REFUSED_NO_EVIDENCE,
@@ -22,6 +27,7 @@ from trellis.classify.demotion_gate import (
     REFUSED_THIN_CORPUS,
     DemotionEvidence,
     NoiseDemotionScreen,
+    resolve_demotion_thresholds,
     screen_noise_candidates,
 )
 
@@ -44,6 +50,242 @@ def screen(*evidence: DemotionEvidence, attributed_packs: int = AMPLE, **kw):
         attributed_packs=attributed_packs,
         **kw,
     )
+
+
+class TestResolveDemotionThresholds:
+    """``resolve_demotion_thresholds`` is the one path every caller (the
+    nightly curation worker, the REST and CLI effectiveness surfaces) uses
+    to turn a settings-store snapshot into the two numbers this gate
+    checks — proven here at the resolver level, independent of any one
+    caller's wiring.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        assert resolve_demotion_thresholds(None) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
+    def test_a_settings_only_override_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 9,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 4,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (9, 4)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "11")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "7")
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 9,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 4,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (11, 7)
+
+    def test_an_unparseable_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "not-a-number")
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        packs, _citations = resolve_demotion_thresholds(None)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
+
+    def test_an_unparseable_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-gate #867 M6: the stored side of ``_resolve_int_threshold``
+        has its own ``except`` block, independent of the env side above --
+        a malformed *stored* value must fall back to the default too,
+        not just a malformed env var. (The gate's M6 mutant changes this
+        branch's ``return default`` to ``return 0``, which would silently
+        disable the coverage floor rather than honour the module default.)
+        """
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {MIN_ATTRIBUTED_PACKS_SETTING: "not-a-number"}
+
+        packs, _citations = resolve_demotion_thresholds(settings)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
+        assert packs != 0
+
+    def test_a_non_finite_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``int(float("inf"))`` raises ``OverflowError``, not
+        ``ValueError`` -- routing through the registry's
+        ``validate_value`` (which checks ``math.isfinite`` before any
+        cast) means the bare ``except (TypeError, ValueError)`` here
+        never needs to see one. Proves the env side survives ``inf``.
+        """
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "inf")
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        packs, _citations = resolve_demotion_thresholds(None)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
+
+    def test_a_non_finite_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same as above, stored side: a ``nan`` stored value must not
+        reach ``int()`` unguarded.
+        """
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {MIN_ATTRIBUTED_PACKS_SETTING: float("nan")}
+
+        packs, _citations = resolve_demotion_thresholds(settings)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
+
+    def test_a_negative_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both thresholds are registered with ``minimum=1`` -- a
+        negative env value must be rejected by that bound, not passed
+        straight through to disable the floor it names.
+        """
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "-1")
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+
+        _packs, citations = resolve_demotion_thresholds(None)
+
+        assert citations == MIN_UNHELPFUL_CITATIONS
+
+    def test_a_negative_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {MIN_UNHELPFUL_CITATIONS_SETTING: -1}
+
+        _packs, citations = resolve_demotion_thresholds(settings)
+
+        assert citations == MIN_UNHELPFUL_CITATIONS
+
+    def test_the_exact_maximum_settings_value_is_honoured_for_both_thresholds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both thresholds are registered with ``maximum=1_000_000`` -- a
+        sanity cap against a typo or an overflow-class value, not an
+        operational ceiling, so the cap value itself must still resolve.
+        """
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 1_000_000,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 1_000_000,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (1_000_000, 1_000_000)
+
+    def test_one_past_the_maximum_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 1_000_001,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 1_000_001,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
+    def test_the_exact_maximum_env_value_is_honoured_for_both_thresholds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "1000000")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "1000000")
+
+        assert resolve_demotion_thresholds(None) == (1_000_000, 1_000_000)
+
+    def test_one_past_the_maximum_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "1000001")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "1000001")
+
+        assert resolve_demotion_thresholds(None) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
+
+def _assert_no_env_value_leak(logs: list[dict], event: str, secret: str) -> dict:
+    """SF3 (env half): see the matching helper in
+    ``tests/unit/retrieve/test_advisory_generator.py``. The log line for
+    a malformed env value must carry ``var=<ENV_NAME>`` and
+    ``error_type=...``, never the raw value -- checked both as the full
+    secret and as every 8-character substring of it, so a truncating
+    formatter could not leak a damaging fragment either.
+    """
+    matches = [entry for entry in logs if entry["event"] == event]
+    assert len(matches) == 1, logs
+    entry = matches[0]
+    rendered = repr(entry)
+    assert secret not in rendered, rendered
+    for start in range(len(secret) - 7):
+        chunk = secret[start : start + 8]
+        assert chunk not in rendered, (chunk, rendered)
+    return entry
+
+
+class TestEnvLogLineNeverLeaksTheRawValue:
+    """SF3 (env half). The settings-store half of ``_resolve_int_knob``
+    was fixed in #867; the env half -- the same function's other
+    branch, shared by both thresholds -- was not.
+    """
+
+    def test_bad_env_int_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEDemotionEnvNeedle000111"
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, needle)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        with capture_logs() as logs:
+            packs, _citations = resolve_demotion_thresholds(None)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
+        entry = _assert_no_env_value_leak(logs, "demotion_gate.bad_env_int", needle)
+        assert entry["var"] == MIN_ATTRIBUTED_PACKS_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
+
+    def test_bad_env_int_on_the_other_threshold_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEDemotionEnvCitationsNeedle000111"
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, needle)
+
+        with capture_logs() as logs:
+            _packs, citations = resolve_demotion_thresholds(None)
+
+        assert citations == MIN_UNHELPFUL_CITATIONS
+        entry = _assert_no_env_value_leak(logs, "demotion_gate.bad_env_int", needle)
+        assert entry["var"] == MIN_UNHELPFUL_CITATIONS_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
 
 
 class TestConstantsArePinnedByValue:

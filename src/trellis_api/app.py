@@ -29,7 +29,30 @@ from trellis_api.observability import install_observability
 
 logger = structlog.get_logger(__name__)
 
+#: Default bind address. Loopback-only by default so a fresh install
+#: doesn't expose the unauthenticated API on the network. Container
+#: deployments that need to listen on the pod IP set
+#: ``TRELLIS_API_HOST=0.0.0.0`` (or pass ``--host``) explicitly.
+#:
+#: Defined here, above :func:`create_app`, because it is also that
+#: function's default parameter value — a default is evaluated once at
+#: function-definition time, so the name must already exist.
+DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
+
 _registry: StoreRegistry | None = None
+
+#: The host/port this process actually bound, recorded by
+#: :func:`create_app`. Both ``trellis serve --host``/``--port`` and
+#: ``trellis admin serve --host``/``--port`` accept a bind address as a
+#: CLI flag that never touches ``TRELLIS_API_HOST``/``TRELLIS_API_PORT``,
+#: so re-deriving from the environment inside a route would read the
+#: *default*, not the address uvicorn actually bound, whenever a flag was
+#: used instead of the env var. Recording the value the caller passed in
+#: is the only way the Runtime panel (``GET /api/v1/runtime``) can report
+#: a bind address that is never wrong.
+_bind_host: str = DEFAULT_HOST
+_bind_port: int = DEFAULT_PORT
 
 
 def get_registry() -> StoreRegistry:
@@ -38,6 +61,17 @@ def get_registry() -> StoreRegistry:
         msg = "StoreRegistry not initialized. Start the app with create_app()."
         raise RuntimeError(msg)
     return _registry
+
+
+def get_bind_info() -> tuple[str, int]:
+    """Return the ``(host, port)`` the running process actually bound.
+
+    Set once per :func:`create_app` call; falls back to the env-derived
+    defaults for any caller that builds the app directly (tests, the
+    in-process testing shim) without going through ``main()`` or the
+    ``trellis serve`` / ``trellis admin serve`` CLI commands.
+    """
+    return (_bind_host, _bind_port)
 
 
 @asynccontextmanager
@@ -126,10 +160,22 @@ def resolve_ui_enabled() -> bool:
     raise ConfigError(msg, setting=UI_ENABLED_ENV)
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    ``host``/``port`` default to the env-derived values but are meant to
+    be passed explicitly by a caller that resolved them some other way
+    (a CLI ``--host``/``--port`` flag) — see :func:`get_bind_info`, which
+    the Runtime panel route reads instead of re-deriving from the
+    environment.
+    """
+    global _bind_host, _bind_port
+    _bind_host, _bind_port = host, port
+
     from trellis_api.routes import (  # noqa: PLC0415
         admin,
+        analyze,
+        classify_rules,
         curate,
         explore,
         extract,
@@ -195,6 +241,7 @@ def create_app() -> FastAPI:
     # optional / required — see ``trellis_api.auth``). The map:
     #
     #   retrieve                     -> read
+    #   analyze                      -> read
     #   ingest                       -> ingest
     #   mutations / curate / extract -> mutate
     #   admin                        -> admin
@@ -205,6 +252,10 @@ def create_app() -> FastAPI:
     #                                   (route-level deps in
     #                                   routes/policies.py)
     #   settings                     -> admin (both GET and PUT/POST)
+    #   classify_rules               -> read on the two GET routes, plus
+    #                                   admin on mine/apply/revoke/dismiss
+    #                                   (route-level deps in
+    #                                   routes/classify_rules.py)
     #
     # ``admin`` implies every other scope; the legacy ``TRELLIS_API_KEY``
     # shared secret is granted all scopes for backwards compatibility.
@@ -228,6 +279,9 @@ def create_app() -> FastAPI:
         explore.router, prefix="/api/v1", tags=["explore"], dependencies=read_auth
     )
     app.include_router(
+        analyze.router, prefix="/api/v1", tags=["analyze"], dependencies=read_auth
+    )
+    app.include_router(
         curate.router, prefix="/api/v1", tags=["curate"], dependencies=mutate_auth
     )
     app.include_router(
@@ -248,6 +302,12 @@ def create_app() -> FastAPI:
         tags=["observations"],
         dependencies=read_auth,
     )
+    app.include_router(
+        classify_rules.router,
+        prefix="/api/v1",
+        tags=["classify"],
+        dependencies=read_auth,
+    )
 
     # Static UI at /ui — the page itself is unauthenticated; the UI
     # calls /api/v1 routes which ARE gated, and the page stores its key
@@ -258,14 +318,6 @@ def create_app() -> FastAPI:
         app.mount("/ui", StaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
 
     return app
-
-
-#: Default bind address. Loopback-only by default so a fresh install
-#: doesn't expose the unauthenticated API on the network. Container
-#: deployments that need to listen on the pod IP set
-#: ``TRELLIS_API_HOST=0.0.0.0`` (or pass ``--host``) explicitly.
-DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
 
 
 def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
@@ -281,7 +333,7 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     from trellis_api.logging import configure_logging  # noqa: PLC0415
 
     configure_logging()
-    app = create_app()
+    app = create_app(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
 

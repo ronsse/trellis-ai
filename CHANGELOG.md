@@ -72,6 +72,76 @@ All notable changes to Trellis will be documented in this file.
   from the authenticated principal, never a client-supplied field, and a
   policy scoped to `entity_type=schedule` now refuses the route and the
   CLI the same way it refuses any other governed mutation.
+- **Governed tag/domain candidate review — Apply and
+  Revoke.** `trellis classify tag-candidates` / `domain-candidates` have
+  always *mined* keyword and alias rules (`TAG_KEYWORD_CANDIDATE` /
+  `DOMAIN_ALIAS_CANDIDATE` events) but never written anywhere — approving
+  one meant hand-pasting YAML into `config.yaml`, with no audit trail.
+  This adds the missing approve step:
+  - `classify_overrides.json` (`<data_dir>/stores/`): a third
+    `DegradableJsonStore` subclass (CLAUDE.md: "a third such file gets a
+    subclass, never a copy") alongside `PolicyStore` / `AdvisoryStore` —
+    reads degrade row-by-row, writes refuse whole. Holds applied
+    `tag_keyword` / `domain_alias` rows, keyed by `(kind, key)`.
+  - **Precedence**: built-in defaults < `config.yaml` < this overlay.
+    `effective_domain_keywords()` / `effective_domain_aliases()`
+    (`trellis.classify.factory`) are the only readers of the merged view;
+    every call site that used to read `config.yaml` alone now reads
+    through them.
+  - New governed operations `Operation.CLASSIFY_RULE_APPLY` /
+    `CLASSIFY_RULE_REVOKE`, routed through a dedicated admin-only
+    executor (`build_classify_rules_executor`) rather than the general
+    curate executor — applying a mined rule changes what the
+    classifier does on every future document, not a piece of content.
+    Apply carries the candidate's original `source_event_id` forward so
+    the applied row traces back to the event that proposed it.
+  - REST: `GET /classify/candidates`, `POST /classify/candidates/mine`,
+    `POST /classify/candidates/{id}/dismiss`, `POST /classify/rules`,
+    `DELETE /classify/rules/{kind}/{key}`, `GET /classify/rules` — admin
+    scope on every write, read scope on the two `GET`s, mirroring
+    `policies.py`'s mixed-scope mounting.
+  - CLI: `trellis classify apply-rule`, `revoke-rule`, `effective-rules`
+    — same executor, text/JSON output, exit code derived from the
+    `--format`-independent refusal mapping (CLAUDE.md format/exit
+    parity rule).
+  - UI: a new "Tag rules" tab lists open candidates with Apply/Dismiss
+    and the effective-rule table with Revoke gated to `source ==
+    "overlay"` rows (a `default`/`config` row was never written by the
+    overlay store and the `DELETE` route refuses it).
+- **Analyze reports over HTTP + a Reports UI tab (#e182).** "Are our
+  learning loops performing?" was answerable only from the CLI
+  (`trellis analyze <report>`); it now has a read-scoped HTTP surface and a
+  UI tab, both calling the exact library functions the CLI calls — never a
+  copy of their logic.
+  - `GET /api/v1/analyze` lists the allowlisted reports with an operator
+    description and default params each.
+  - `GET /api/v1/analyze/{report}` runs one: `holdout`, `judged-outcomes`,
+    `advisory-effectiveness`, `value`, `dimension-predictiveness`,
+    `learning-candidates`, `domains`, `extractor-fallbacks`,
+    `pack-telemetry`, `token-usage`, `cost`. Each report has its own
+    `extra="forbid"` param DTO; an unknown report 404s listing the allowed
+    names, a bad or unknown param 422s. `pack-quality` (needs a scenarios
+    file, no bounded default shape), `replay`, `generate-advisories` and
+    `apply-noise-tags` (writes) are deliberately excluded.
+  - Payloads are finite JSON always — Infinity/NaN are sanitised to `null`
+    before the response leaves the process, never written inline. A report
+    that scans the whole EventLog is cached per-process for 60s, surfaced
+    via `computed_at` / `cached`.
+  - `advisory-effectiveness` refuses to score a degraded advisory store
+    (same check the CLI makes before its own dry-run), rather than silently
+    scoring an incomplete set.
+  - The UI's new "Reports" tab picks a report, fills params from its
+    defaults, and renders the result as cards with a raw-JSON toggle,
+    honest "insufficient data" / degraded states, and `computed_at`.
+  - A small readiness pill in the header (fed by the `/readyz` probe the
+    dashboard already fetches — no extra request) shows ready / degraded /
+    unknown, with failing backend names on hover when the caller is
+    authenticated.
+  - G9 (`parameter_promotions` truthfulness, plus outcome/version signal)
+    was re-measured rather than rebuilt: the metric and its annotated
+    promote/reject/degrade/auto-rollback event strip already ship on the
+    Metrics view (`src/trellis/retrieve/metrics_timeseries.py`) — no gap
+    found, no new work needed there.
 - **Schedule registry + job-run records (#e166).** The pieces a host-side
   dispatcher cron needs so job schedules can later be edited from a UI
   (plan p1 §(b)) without the container ever touching crontab — and the

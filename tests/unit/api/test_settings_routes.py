@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
-from trellis.core.settings_registry import SETTINGS_REGISTRY
+from trellis.core.settings_registry import SETTINGS_REGISTRY, SettingSpec
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -32,10 +32,12 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.app import create_app
+from trellis_api.routes.settings import _parse_error_reason
 
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 MEMORY_EXTRACTION_ENV = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
 GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
+GRAPH_MAX_SUBGRAPH_DEPTH_ENV = "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH"
 
 
 @pytest.fixture
@@ -152,21 +154,168 @@ class TestListSettings:
         row = _entry(body, "pack_holdout_rate")
         assert row == {
             "name": "pack_holdout_rate",
+            "label": row["label"],  # non-empty, checked below
             "type": "float",
             "default": 0.0,
             "minimum": 0.0,
             "maximum": 1.0,
+            "minimum_exclusive": False,
             "enum": None,
             "description": row["description"],  # non-empty, checked below
+            "risk_note": row["risk_note"],  # non-empty, checked below (risk=high)
             "surfaces": list(row["surfaces"]),
             "restart_required": False,
-            "risk": "unsafe",
+            "risk": "high",
+            "group": "retrieval",
             "settings_live": True,
             "env_var": PACK_HOLDOUT_RATE_ENV,
             "effective_value": 0.0,
             "overridden_by": "default",
+            "stored_value": None,
+            "parse_error": None,
+            "updated_at": None,
+            "settings_writable": True,
         }
+        assert row["label"]
         assert row["description"]
+        assert row["risk_note"]
+
+    def test_a_malformed_stored_row_is_flagged_not_silently_swallowed(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Re-gate #867 B4: a stored value the registry's own bounds check
+        would refuse (here, 1.5 for a 0..1 rate) makes the resolver fall
+        back to the default -- correct -- but ``overridden_by`` still
+        reads "settings" off the row's mere presence, and the only way to
+        notice the fallback was to diff ``effective_value`` against
+        ``stored_value`` by hand. ``stored_value_invalid`` makes that an
+        explicit, visible fact instead. Renamed to ``parse_error`` (a fixed,
+        value-free reason string, never a bool) so the raw out-of-range
+        value can never leak back out through this field either.
+
+        The reason text itself states only that validation rejects the
+        row, not what happens next -- some knobs this field covers do not
+        fall back to a default at all (an env-pinned knob, or
+        ``WriteBehaviourConfig``'s own looser bool/unbounded-int
+        resolvers), so the text cannot claim that in general; this case
+        happens to fall back to the default too, which the
+        ``effective_value`` assertion above already shows.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("pack_holdout_rate", 1.5)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "pack_holdout_rate")
+
+        assert row["stored_value"] == 1.5
+        assert row["effective_value"] == 0.0  # the module default
+        assert row["parse_error"] == "stored value is not a finite number in range"
+        assert "1.5" not in row["parse_error"]
+
+    def test_a_valid_stored_row_is_not_flagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("pack_holdout_rate", 0.2)
+
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "pack_holdout_rate")
+
+        assert row["effective_value"] == 0.2
+        assert row["parse_error"] is None
+
+    def test_a_malformed_stored_int_row_gets_its_own_reason(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """An int-typed knob with a stored float such
+        as 1.5 previously read the same ``"stored value is not a finite
+        number in range"`` text the float case uses above, which
+        describes the wrong coercion. The int-typed branch of
+        ``_parse_error_reason`` now has its own fixed, value-free text.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 1.5)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "noise_demotion_min_attributed_packs")
+
+        assert row["stored_value"] == 1.5
+        assert row["effective_value"] == 5  # the module default
+        assert row["parse_error"] == "stored value is not an integer in range"
+        assert row["parse_error"] != "stored value is not a finite number in range"
+        assert "1.5" not in row["parse_error"]
+
+    def test_a_malformed_stored_bool_row_is_flagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """A stored value that fails the bool
+        coercion (neither a recognized true/false token) gets the
+        bool-specific fixed reason, never the stored string itself.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("memory_extraction", "maybe")
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "memory_extraction")
+
+        assert row["stored_value"] == "maybe"
+        assert row["parse_error"] == "stored value is not a recognized boolean"
+        assert "maybe" not in row["parse_error"]
+
+    def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
+        """brief e179 step 8: the UI's filter box reads display labels from
+        ``groups``, not a hardcoded string -- so every group a real entry
+        names must have a label.
+        """
+        resp = client.get("/api/v1/settings")
+        body = resp.json()
+        used_groups = {row["group"] for row in body["settings"]}
+        assert used_groups <= set(body["groups"])
+        assert all(
+            isinstance(label, str) and label for label in body["groups"].values()
+        )
+
+    def test_minimum_exclusive_is_reported_for_the_one_entry_that_sets_it(
+        self, client: TestClient
+    ) -> None:
+        """``reconcile_timeout_s`` refuses 0 (its own ``minimum``) because
+        its env reader degrades a zero timeout to the shipped default
+        rather than honouring it -- the UI must say "> 0", not "min 0",
+        or an operator reads 0 as an accepted value it silently is not.
+        """
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "reconcile_timeout_s")
+        assert row["minimum"] == 0.0
+        assert row["minimum_exclusive"] is True
+
+        # And the common case must stay the inclusive default -- this is
+        # what distinguishes "reported" from "always true".
+        other = _entry(resp.json(), "pack_holdout_rate")
+        assert other["minimum_exclusive"] is False
+
+    def test_stored_value_and_updated_at_reflect_a_real_override(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Unset -> both None (proven above); once a value is written, the
+        GET response's stored_value/updated_at must show it, not just
+        effective_value -- the two can legitimately differ (env-pinned).
+        """
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        store = SettingsStore(path)
+        store.set("pack_holdout_rate", 0.2)
+
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "pack_holdout_rate")
+        assert row["stored_value"] == 0.2
+        assert row["updated_at"] is not None
 
     def test_store_degradation_is_none_when_healthy(self, client: TestClient) -> None:
         resp = client.get("/api/v1/settings")
@@ -451,6 +600,224 @@ class TestEnvPinnedWrite:
 # ---------------------------------------------------------------------------
 
 
+#: ``(setting_name, env_var, default, env_value, parsed_env, settings_value)``
+#: for every registry entry with a dedicated resolver. These crashed
+#: ``GET /settings`` outright until ``_effective_values`` called each real
+#: resolver -- ``effective[spec.name]`` raised ``KeyError`` for all eight,
+#: because the function only ever populated the twelve ``WriteBehaviourConfig``
+#: fields plus the two hand-cased booleans above it. Covering every entry
+#: here (not just one as a representative) is deliberate: the bug was
+#: per-entry, so proof has to be too.
+_RESOLVER_BACKED_KNOBS = (
+    (
+        "noise_demotion_min_attributed_packs",
+        "TRELLIS_NOISE_DEMOTION_MIN_ATTRIBUTED_PACKS",
+        5,
+        "9",
+        9,
+        7,
+    ),
+    (
+        "noise_demotion_min_unhelpful_citations",
+        "TRELLIS_NOISE_DEMOTION_MIN_UNHELPFUL_CITATIONS",
+        2,
+        "4",
+        4,
+        3,
+    ),
+    ("advisory_min_sample_size", "TRELLIS_ADVISORY_MIN_SAMPLE_SIZE", 5, "8", 8, 6),
+    (
+        "advisory_min_effect_size",
+        "TRELLIS_ADVISORY_MIN_EFFECT_SIZE",
+        0.15,
+        "0.3",
+        0.3,
+        0.25,
+    ),
+    ("capture_warn_threshold", "TRELLIS_CAPTURE_WARN_THRESHOLD", 3, "7", 7, 1),
+    (
+        "capture_warn_window_hours",
+        "TRELLIS_CAPTURE_WARN_WINDOW_HOURS",
+        24,
+        "48",
+        48,
+        12,
+    ),
+    # graph_max_subgraph_depth is deliberately absent from this list (see
+    # TestGraphMaxSubgraphDepthIsEnvOnly below): unlike every other entry
+    # here, its settings-store override is never consulted by anything,
+    # so "a stored override is previewed" is false for this one knob --
+    # that was the B3 bug, not a case this generic table should still
+    # assert.
+)
+
+
+class TestResolverBackedEffectiveValues:
+    """Each entry's ``effective_value`` must equal its real resolver's
+    output, not a generic reimplementation -- proven by actually setting
+    the env var / settings-store override and reading the resolved value
+    back, the same way ``TestGraphSeedingEffectiveValue`` below proves it
+    for the two hand-cased booleans.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_defaults_when_nothing_is_set(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        monkeypatch.delenv(env_var, raising=False)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == default
+        assert row["overridden_by"] == "default"
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_env_overrides_the_default(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        monkeypatch.setenv(env_var, env_value)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == parsed_env
+        assert row["overridden_by"] == "env"
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_a_stored_override_is_previewed_when_env_is_unset(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        _store(registry).set(name, settings_value)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == settings_value
+        assert row["overridden_by"] == "settings"
+
+
+class TestGraphMaxSubgraphDepthIsEnvOnly:
+    """B3 (re-gate #867): nothing ever reads a stored override for this
+    knob -- not ``trellis.stores.base.graph``'s three backends, which all
+    resolve :data:`MAX_SUBGRAPH_DEPTH` once at import from the
+    environment only, and (unlike ``minhash_seed_max_docs``) not even
+    after a restart. ``settings_writable=False`` makes the write path
+    refuse rather than accept a value that would silently never matter.
+    """
+
+    def test_default_when_nothing_is_set(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(GRAPH_MAX_SUBGRAPH_DEPTH_ENV, raising=False)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 6
+        assert row["overridden_by"] == "default"
+        assert row["settings_writable"] is False
+
+    def test_env_still_overrides_the_default(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(GRAPH_MAX_SUBGRAPH_DEPTH_ENV, "10")
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 10
+        assert row["overridden_by"] == "env"
+
+    def test_a_stored_value_is_never_previewed_as_effective(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """This is the exact B3 bug: a stray stored row used to be echoed
+        back as ``effective_value`` even though no code path ever reads
+        it. ``overridden_by`` must agree with ``effective_value`` here --
+        reporting "settings" while serving the default would be its own,
+        subtler version of the same lie.
+        """
+        _store(registry).set("graph_max_subgraph_depth", 8)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 6
+        assert row["overridden_by"] == "default"
+        assert row["stored_value"] == 8  # still reported, just inert
+
+    def test_put_a_value_is_refused(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/v1/settings/graph_max_subgraph_depth", json={"value": 10}
+        )
+        assert resp.status_code == 400, resp.text
+        assert "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH" in resp.text
+
+    def test_clearing_a_stray_stored_value_is_still_allowed(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _store(registry).set("graph_max_subgraph_depth", 8)
+        resp = client.put(
+            "/api/v1/settings/graph_max_subgraph_depth", json={"value": None}
+        )
+        assert resp.status_code == 200, resp.text
+        assert _store(registry).get("graph_max_subgraph_depth") is None
+
+
+class TestCaptureStrictEffectiveValue:
+    """``capture_strict`` is boolean and shares the opt-out-token
+    semantics ``strict_mode`` already applies to a sweep -- 0/false/no/off
+    disable it, everything else (including an unrecognised token) leaves
+    it strict, same asymmetric contract as ``graph_seeding``.
+    """
+
+    def test_defaults_to_strict(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is True
+        assert row["overridden_by"] == "default"
+
+    def test_env_opt_out_disables_it(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is False
+        assert row["overridden_by"] == "env"
+
+    def test_stored_false_override_is_honoured(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _store(registry).set("capture_strict", False)
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is False
+        assert row["overridden_by"] == "settings"
+
+
 class TestGraphSeedingEffectiveValue:
     def test_unset_env_defaults_on(self, client: TestClient) -> None:
         body = client.get("/api/v1/settings").json()
@@ -475,3 +842,67 @@ class TestGraphSeedingEffectiveValue:
         row = _entry(body, "graph_seeding")
         assert row["effective_value"] is False
         assert row["overridden_by"] == "env"
+
+
+class TestParseErrorReasonIsFixedPerType:
+    """Unit-level on ``_parse_error_reason``.
+
+    No shipped :data:`SETTINGS_REGISTRY` entry sets ``enum`` today (grep
+    confirms it), so the enum branch is otherwise dead in every HTTP-level
+    test above. Exercising the private function directly with a synthetic
+    ``SettingSpec`` is the only way to pin that branch's text without
+    adding a throwaway production setting just to carry a test.
+    """
+
+    def test_int_reason_is_distinct_from_float_reason(self) -> None:
+        int_spec = SettingSpec(
+            name="probe_int",
+            label="Probe int",
+            type="int",
+            default=0,
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_INT",
+        )
+        float_spec = SettingSpec(
+            name="probe_float",
+            label="Probe float",
+            type="float",
+            default=0.0,
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_FLOAT",
+        )
+        int_reason = _parse_error_reason(int_spec)
+        float_reason = _parse_error_reason(float_spec)
+        assert int_reason == "stored value is not an integer in range"
+        assert float_reason == "stored value is not a finite number in range"
+        assert int_reason != float_reason
+
+    def test_enum_reason(self) -> None:
+        enum_spec = SettingSpec(
+            name="probe_enum",
+            label="Probe enum",
+            type="str",
+            default="a",
+            description="d",
+            surfaces=("api",),
+            restart_required=False,
+            risk="low",
+            group="ops",
+            settings_live=True,
+            env_var="TRELLIS_PROBE_ENUM",
+            enum=("a", "b"),
+        )
+        assert (
+            _parse_error_reason(enum_spec)
+            == "stored value is not one of the allowed options"
+        )

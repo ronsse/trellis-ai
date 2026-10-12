@@ -568,6 +568,42 @@ class EventType(StrEnum):
     #: ``f"job:{name}"``; payload carries ``run_requested_at`` and the
     #: actor identity.
     JOB_RUN_REQUESTED = "job.run_requested"
+    #: Emitted by the governed classify-overlay write path
+    #: (``ClassifyRuleApplyHandler`` / ``Operation.CLASSIFY_RULE_APPLY``) on
+    #: every successful apply of a mined ``tag_keyword`` or ``domain_alias``
+    #: candidate into ``classify_overrides.json``
+    #: (:mod:`trellis.stores.classify_overrides_store`). Payload:
+    #: ``{kind, key, target, support, precision, lift, applied_by, key_id,
+    #: key_name, source_event_id, prior_target, prior_applied_by,
+    #: prior_applied_at, prior_source_event_id, config_target}``, plus
+    #: ``requested_by_claim`` when the caller supplied one — the candidate's
+    #: own metrics are copied onto this event (not just referenced by
+    #: ``source_event_id``) so an audit trail reader never has to join back
+    #: to the original :attr:`TAG_KEYWORD_CANDIDATE` /
+    #: :attr:`DOMAIN_ALIAS_CANDIDATE` event to see what was approved.
+    #: ``entity_id`` is the overlay row's own id (``f"{kind}:{key}"``).
+    CLASSIFY_RULE_APPLIED = "classify_rule.applied"
+    #: Emitted by the same write path's revoke handler
+    #: (``ClassifyRuleRevokeHandler`` / ``Operation.CLASSIFY_RULE_REVOKE``) on
+    #: every successful removal of an overlay row. Payload: ``{kind, key,
+    #: target, revoked_by, key_id, key_name, removed_applied_by,
+    #: removed_applied_at, removed_source_event_id, config_target}``, plus
+    #: ``requested_by_claim`` when the caller supplied one. Revoking a rule
+    #: that came from ``config.yaml`` rather than the overlay is refused
+    #: before this event would ever be emitted — see the handler's own
+    #: docstring.
+    CLASSIFY_RULE_REVOKED = "classify_rule.revoked"
+    #: Emitted by ``POST /api/v1/classify/candidates/{id}/dismiss`` (no
+    #: dedicated ``Operation`` — a dismiss changes no store state, only this
+    #: audit trail, so it is plain telemetry like :attr:`JOB_RUN_STARTED`
+    #: rather than a governed mutation). Payload: ``{candidate_id, kind,
+    #: dismissed_by, key_id, key_name}``. ``GET /api/v1/classify/candidates``
+    #: excludes a candidate with a ``CLASSIFY_CANDIDATE_DISMISSED`` event
+    #: more recent than its latest ``TAG_KEYWORD_CANDIDATE`` /
+    #: ``DOMAIN_ALIAS_CANDIDATE`` emission from its "open" listing, the same
+    #: latest-event-wins resolution :mod:`trellis.learning.cooldown` already
+    #: uses for recurrence.
+    CLASSIFY_CANDIDATE_DISMISSED = "classify_candidate.dismissed"
 
 
 class Event(VersionedModel):
