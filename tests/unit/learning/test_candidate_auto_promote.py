@@ -800,6 +800,52 @@ class TestRunCandidateAutoPromotionCommit:
         finally:
             registry.close()
 
+    def test_an_archived_precedent_refuses_resubmission_not_promotion(
+        self, tmp_path: Path
+    ) -> None:
+        """B1 delegation: the commit branch's only write path is
+        :func:`~trellis.learning.scoring.submit_learning_promotion` — the
+        same function the CLI/API review surfaces call — so it must not
+        duplicate or bypass that function's re-approval guard. The
+        candidate's target id is created directly as an already-archived
+        precedent, never through a ``precedent.promote`` event, so
+        ``_scan_already_promoted_entity_ids`` does not exclude it before
+        ``_evaluate_candidate`` runs and the submission call is actually
+        reached. Without the guard this would silently resurrect the
+        precedent as current via ``ENTITY_CREATE``."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True)
+            candidate = _candidate("cand-archived")
+            entity_id = precedent_entity_id_for_candidate("cand-archived")
+            registry.knowledge.graph_store.upsert_node(
+                entity_id,
+                "precedent",
+                {
+                    "name": "Pre-existing archived precedent",
+                    "lifecycle": {"state": "archived"},
+                },
+            )
+
+            report = run_candidate_auto_promotion(
+                candidates=[candidate],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            outcome = report.outcomes[0]
+            assert outcome.disposition == "ineligible:submission_refused_archived"
+            assert outcome.entity_id == entity_id
+            assert report.promoted_count == 0
+            node = registry.knowledge.graph_store.get_node(entity_id)
+            assert node is not None
+            assert node["properties"]["lifecycle"]["state"] == "archived"
+        finally:
+            registry.close()
+
 
 class TestAlreadyPromotedExclusion:
     """B2: a candidate that already has any successful ``precedent.promote``
