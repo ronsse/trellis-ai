@@ -441,8 +441,12 @@ The five checks it runs, equivalent to running these manually:
 # 1. Liveness — should always return 200
 curl -fsS http://localhost:8420/healthz
 
-# 2. Readiness — 200 only when every cloud backend round-trips
-curl -fsS http://localhost:8420/readyz | jq
+# 2. Readiness — 200 only when every cloud backend round-trips.
+#    smoke-test sends the resolved key here too, so the per-backend
+#    breakdown shows on an auth-required deployment; without a key
+#    (or with one readyz itself rejects) the breakdown is withheld and
+#    smoke-test notes it rather than reporting a bare pass/fail.
+curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/readyz | jq
 
 # 3. Auth — should 401 without the key, 200 with it
 curl -fsS -o /dev/null -w "%{http_code}\n" \
@@ -453,8 +457,9 @@ curl -fsS -o /dev/null -w "%{http_code}\n" \
 
 # 4. Metrics — should return Prometheus-format text (404 means the
 #    [observability] extra isn't installed; smoke-test reports this
-#    as INFO rather than FAIL)
-curl -fsS http://localhost:8420/metrics | head
+#    as INFO rather than FAIL). smoke-test sends the key here too, so
+#    a gated /metrics (TRELLIS_METRICS_PUBLIC=false) doesn't 401.
+curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/metrics | head
 ```
 
 If `/readyz` returns `degraded` with `event_log` or `document_store`

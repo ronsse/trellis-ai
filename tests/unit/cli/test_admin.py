@@ -774,9 +774,19 @@ class TestCheckExtractorsRouting:
     def test_text_escapes_a_tier_name_that_reads_as_markup(
         self, mock_get_reg, monkeypatch
     ):
-        """``[/]`` is a closing tag with nothing to close: unescaped, Rich raises."""
+        """``[/]`` is a closing tag with nothing to close: unescaped, Rich raises.
+
+        The undefined-tier message (B1) never echoes the route's own value --
+        only the operator's own ``llm.tiers`` labels, which are not secrets.
+        So the markup-breaking value here is a *defined* tier name, reached
+        via the "defined: [...]" list, rather than the broken route's target.
+        """
         mock_get_reg.return_value = _make_registry(
-            llm_config={**_ROUTED_LLM, "routes": {"memory_extraction": "[/]"}}
+            llm_config={
+                **_ROUTED_LLM,
+                "tiers": {**_ROUTED_LLM["tiers"], "[/]": {"model": "m"}},
+                "routes": {"memory_extraction": "missing"},
+            }
         )
         monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
         result = runner.invoke(admin_app, ["check-extractors"])

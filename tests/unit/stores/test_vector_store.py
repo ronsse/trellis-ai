@@ -80,3 +80,17 @@ def test_get_nonexistent(vector_store: SQLiteVectorStore) -> None:
 def test_query_empty(vector_store: SQLiteVectorStore) -> None:
     results = vector_store.query([1.0, 0.0])
     assert results == []
+
+
+def test_upsert_refuses_a_non_finite_metadata_value(
+    vector_store: SQLiteVectorStore,
+) -> None:
+    """json.dumps(..., allow_nan=False) refuses NaN/Infinity metadata before
+    the INSERT runs. ``upsert_bulk`` loops over ``upsert`` (SQLite is an
+    in-process backend; the bulk method exists for API symmetry only), so
+    this one fix covers both call paths.
+    """
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        vector_store.upsert("v1", [1.0, 0.0], {"score": float("inf")})
+    assert vector_store.get("v1") is None
+    assert vector_store.count() == 0

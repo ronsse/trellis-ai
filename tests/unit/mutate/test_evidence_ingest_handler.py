@@ -148,7 +148,7 @@ class TestEvidenceIngestHandler:
 
         monkeypatch.setattr(
             "trellis.retrieve.embed_ingest_hook.embed_on_ingest_enabled",
-            lambda: True,
+            lambda registry=None: True,
         )
         monkeypatch.setattr(
             type(registry),

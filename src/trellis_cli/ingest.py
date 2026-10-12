@@ -354,7 +354,9 @@ def _index_dbt_descriptions(
             "name": entity.properties.get("name", entity.name),
             "unique_id": entity.entity_id,
         }
-        written_metadata = classify_metadata_on_write(metadata, desc, doc_id=doc_id)
+        written_metadata = classify_metadata_on_write(
+            metadata, desc, doc_id=doc_id, registry=registry
+        )
         put_document(
             doc_store,
             vector_store,

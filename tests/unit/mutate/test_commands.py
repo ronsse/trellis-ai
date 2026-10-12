@@ -27,7 +27,24 @@ class TestOperation:
         # inverse of retention.prune, without which phase-one archival's
         # "walk it back by re-stamping" claim has no sanctioned path)
         # + ALIAS_UPSERT (governed alias/backfill writes)
-        assert len(Operation) == 21
+        # + SCHEDULE_UPDATE + JOB_RUN_REQUEST (admin-only schedule-registry
+        # writes, handled only by trellis.mutate.build_schedule_executor,
+        # never create_curate_handlers; see
+        # trellis/mutate/schedule_handlers.py)
+        # + SETTINGS_UPDATE (governed settings-store write; null value
+        # means "remove the override" rather than a separate RESET verb)
+        # - PRECEDENT_UPDATE (removed: this verb had no handler anywhere
+        # in src/ since the initial commit — see docs/design/adr-retention
+        # -prune.md's "Sibling unhandled verbs" row — so every submission
+        # of it failed with "No handler registered" and there was no
+        # writer to lose. EventType.PRECEDENT_UPDATED is removed alongside
+        # it; that event type was never emitted either. Neither member is
+        # carried forward into the report-only auto-promote evaluator
+        # added here; its commit mode is refused via ConfigError, not via
+        # this verb)
+        # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
+        # candidate review)
+        assert len(Operation) == 25
 
 
 class TestCommand:

@@ -23,7 +23,7 @@ from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
-from trellis.errors import StoreError
+from trellis.errors import ConfigError, StoreError
 from trellis.llm.routing import LLMConsumer
 from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
@@ -59,8 +59,10 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.well_known import APPLIES_TO, CONCEPT, SOFTWARE_APPLICATION
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -942,6 +944,29 @@ class TestSaveMemory:
             limit=100,
         )
 
+    def test_non_finite_metadata_writes_no_document(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A NaN/Infinity metadata value must not leave a durable orphan.
+
+        Before the document store refused non-finite JSON (allow_nan=False
+        on the write path), ``save_memory`` committed the document row
+        first and only the later ``MEMORY_STORED`` emit failed — an
+        unrecoverable write the caller's error made look recoverable.
+        Once the document store also refuses, nothing durable lands.
+        """
+        with pytest.raises(McpError):
+            save_memory(
+                "memory content with non-finite metadata",
+                metadata={"score": float("nan")},
+            )
+
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=100,
+        )
+
     def test_embedding_runs_once_outside_dedup_lock(
         self,
         temp_registry: StoreRegistry,
@@ -1160,6 +1185,34 @@ class TestSaveMemoryEmbedOnIngest:
         assert row["metadata"]["doc_id"] == doc_id
         assert row["metadata"]["content"] == "embedded memory content"
         assert row["metadata"]["domain"] == "ops"
+
+    def test_flag_on_broken_vector_store_still_succeeds(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#830 follow-up 3: a ``vector_store`` that raises at resolve
+        time must not fail ``save_memory`` for a memory that was already
+        durably stored. Before the fix, ``run_embed_on_ingest``
+        let that ``ConfigError`` propagate straight out of the hook, past
+        the "fail-soft" comment at its own call site, into an McpError for
+        a write that had already landed — inviting a client retry of an
+        already-stored memory."""
+        from unittest.mock import PropertyMock
+
+        from trellis.stores.registry import _KnowledgePlane
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            PropertyMock(side_effect=ConfigError("down", setting="vector.backend")),
+        )
+
+        result = save_memory("stored despite a broken vector store")
+
+        assert result.startswith("Memory saved:")
+        doc_id = result.split(":", 1)[1].strip()
+        assert temp_registry.knowledge.document_store.get(doc_id) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1769,6 +1822,133 @@ class TestSearch:
         assert "kubernetes" in result.lower()
 
 
+def _seed_advisories(registry: StoreRegistry) -> AdvisoryStore:
+    """Two advisories with different categories, confidences, evidence and
+    directions of effect — never a population-of-one uniform fixture."""
+    store = AdvisoryStore(registry.stores_dir / "advisories.json")
+    store.put(
+        Advisory(
+            advisory_id="adv-flat-entity",
+            category=AdvisoryCategory.ENTITY,
+            confidence=0.88,
+            message="Packs citing the deploy runbook succeeded 75% vs 20% without.",
+            evidence=AdvisoryEvidence(
+                sample_size=12,
+                success_rate_with=0.75,
+                success_rate_without=0.2,
+                effect_size=0.55,
+                evidence_confidence=1.0,
+            ),
+            scope="global",
+        )
+    )
+    store.put(
+        Advisory(
+            advisory_id="adv-flat-anti-pattern",
+            category=AdvisoryCategory.ANTI_PATTERN,
+            confidence=0.64,
+            message="Skipping the smoke test before promote correlated with rollback.",
+            evidence=AdvisoryEvidence(
+                sample_size=7,
+                success_rate_with=0.3,
+                success_rate_without=0.86,
+                effect_size=-0.56,
+                evidence_confidence=0.9,
+            ),
+            scope="global",
+        )
+    )
+    return store
+
+
+class TestFlatContextRendersAdvisories:
+    """``_flat_context`` renders ``pack.advisories`` the way ``_sectioned_context``
+    always has (#392, decision-ledger D-4).
+
+    Before this fix, ``PackBuilder`` attached advisories to every flat pack
+    (``get_context`` / ``search``) exactly as it does to sectioned ones, but
+    only ``_sectioned_context`` called ``format_advisories_as_markdown`` on
+    them — so the nightly advisory-fitness loop, which reads
+    ``PACK_ASSEMBLED.advisory_ids`` as "presented", scored exposures on the
+    path agents actually call that no agent ever saw rendered.
+    """
+
+    def test_renders_advisories_alongside_items(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
+        )
+        _seed_advisories(temp_registry)
+
+        result = get_context("deploy platform")
+
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+        assert "`adv-flat-anti-pattern`" in result
+        assert "**[entity]**" in result
+        assert "**[anti_pattern]**" in result
+        # The position ``_sectioned_context`` uses: after the items and the
+        # cite footer.
+        assert result.index("## Advisories") > result.index("`doc1`")
+        assert result.index("## Advisories") > result.index("*Cite feedback")
+
+    def test_omits_the_section_when_there_are_no_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Output is unchanged from before this fix when the pack has no
+        advisories: nothing at all is appended after the cite footer."""
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely"
+        )
+
+        result = get_context("deploy platform")
+
+        assert "## Advisories" not in result
+        assert result.splitlines()[-1].startswith("*Cite feedback")
+
+    def test_empty_item_pack_still_renders_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """An empty-*item* pack is not an empty *pack*: advisory selection
+        (``PackBuilder._select_advisories``) does not depend on whether any
+        item was selected, so the "No context found" line and the advisory
+        section are both true at once — matching how ``_sectioned_context``
+        never special-cases empty sections before appending advisories."""
+        _seed_advisories(temp_registry)
+
+        result = get_context("something nothing in the corpus matches")
+
+        assert "No context found" in result
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+
+    def test_index_mode_also_renders_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
+        )
+        _seed_advisories(temp_registry)
+
+        result = get_context("deploy platform", index=True)
+
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+
+    def test_search_tool_shares_the_fix(self, temp_registry: StoreRegistry) -> None:
+        """``search`` renders through the same ``_flat_context`` helper as
+        ``get_context``, so the fix does not need a second call site."""
+        temp_registry.knowledge.document_store.put(
+            "doc1", "kubernetes deployment guide"
+        )
+        _seed_advisories(temp_registry)
+
+        result = search("kubernetes")
+
+        assert "## Advisories" in result
+
+
 # ---------------------------------------------------------------------------
 # get_sectioned_context
 # ---------------------------------------------------------------------------
@@ -2370,6 +2550,64 @@ class TestNearDuplicateSuppression:
 
 
 # ---------------------------------------------------------------------------
+# Prewarm (http transport only)
+# ---------------------------------------------------------------------------
+
+
+class TestPrewarmRegistry:
+    """``_prewarm_registry``'s per-component degradation warning.
+
+    #830 gate verdict mutant M2 dropped ``error_type`` from the warning
+    and survived tests/unit/mcp plus the hook's own tests (676 passed) —
+    nothing asserted the field exists or names the failing component's
+    own cause, rather than some other component's.
+    """
+
+    def test_embedding_fn_failure_warns_with_its_own_error_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``vector_store`` succeeds here (so it logs nothing); only
+        ``embedding_fn`` fails, and the warning must name that failure's
+        own ``error_type`` — not drop the field, and not some other
+        component's."""
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setattr(server_mod, "_get_minhash_index", lambda registry: None)
+        monkeypatch.setattr(server_mod, "_memory_extractor", None)
+        monkeypatch.setattr(server_mod, "_memory_extractor_attempted", False)
+        monkeypatch.delenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", raising=False)
+
+        registry = MagicMock()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError("no key", setting="embeddings.provider")
+        )
+
+        # The package's autouse `_suppress_structlog` filters below
+        # CRITICAL at the `wrapper_class` level, which `capture_logs`
+        # cannot see past (it only replaces processors) — lift it, and
+        # evict the module logger's memoised bind so the lift actually
+        # reaches `server_mod.logger` (see TestBuildLlmClientRouting.logs).
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as logs:
+                clear_cached_logger_proxies()
+                server_mod._prewarm_registry(registry)
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+        unavailable = [
+            (entry["component"], entry["error_type"])
+            for entry in logs
+            if entry["event"] == "mcp_prewarm_optional_unavailable"
+        ]
+        assert unavailable == [("embedding_fn", "ConfigError")]
+
+
+# ---------------------------------------------------------------------------
 # Shutdown handling
 # ---------------------------------------------------------------------------
 
@@ -2869,6 +3107,35 @@ class TestStructuredErrorContract:
         server_mod._get_minhash_index(temp_registry)
 
         assert "minhash_index_seed_empty" not in recorded
+
+    def test_minhash_seed_respects_a_settings_only_override(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``minhash_seed_max_docs`` is read through ``resolve_write_behaviour``
+        (see its ``SettingSpec.restart_required`` in
+        ``trellis.core.settings_registry``, which still calls it live within
+        one process) — proven here with a settings row and no env var at
+        all, bounding the seed to exactly the configured count on a store
+        that holds more than that.
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.delenv(MINHASH_SEED_MAX_DOCS_ENV, raising=False)
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "minhash_seed_max_docs", 2
+        )
+        document_store = temp_registry.knowledge.document_store
+        document_store.put("doc_1", "first prior memory content")
+        document_store.put("doc_2", "second prior memory content")
+        document_store.put("doc_3", "third prior memory content")
+
+        index = server_mod._get_minhash_index(temp_registry)
+
+        assert index.size == 2
 
     def test_record_feedback_missing_ids_data_lists_both_fields(self) -> None:
         """The ``data`` payload lists every field involved in the

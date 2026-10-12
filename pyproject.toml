@@ -223,6 +223,7 @@ ignore = [
 "src/trellis/mutate/executor.py" = ["PLR0911"]  # pipeline method has many return points
 "src/trellis/mcp/**/*.py" = ["PLR0911"]  # many return paths in tool handlers
 "src/trellis_api/**/*.py" = ["PLR0911"]  # routes may have many return paths
+"src/trellis/retrieve/embed_ingest_hook.py" = ["PLR0911"]  # one early-return per fail-soft branch (flag off, empty content, each optional dependency's resolve failure, unconfigured, upsert failure) — collapsing them would obscure which branch fired
 # LOG004 flags `logger.exception()` outside a lexical `except` block. Both
 # sites below ARE handling an exception — `sys.exc_info()` is set — but via a
 # function boundary the rule cannot see through: `_store_error(exc, ...)` is

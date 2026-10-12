@@ -13,13 +13,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 import structlog
 
 from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.errors import ConfigError, StoreError, TrellisError
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_workers.session_capture import __main__ as capture_main
 from trellis_workers.session_capture.models import CaptureReport
@@ -87,7 +89,11 @@ class TestMain:
 
         capture_main.main(["--dry-run"])
 
-        spy.assert_called_once_with(dry_run=True)
+        # `registry` is whatever StoreRegistry.from_config_dir() built in this
+        # process (main()'s own, real, unmocked call) -- it's threaded through
+        # so main() can also read a stored `capture_strict` override from the
+        # same handle below; this test only pins the dry_run forwarding.
+        spy.assert_called_once_with(dry_run=True, registry=ANY)
 
     def test_unconfigured_judge_exits_nonzero_and_says_why(
         self, monkeypatch, capsys
@@ -262,6 +268,49 @@ class TestMain:
         assert str(config_dir / "config.yaml") in captured.err
         assert "Traceback" not in captured.err
         assert captured.out == ""
+
+    def test_a_stored_capture_strict_override_opts_out_without_the_env_var(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """S1: the standalone entry point reads a *stored* override too.
+
+        Before this, ``main()`` called ``strict_mode()`` bare, so only
+        ``TRELLIS_CAPTURE_STRICT`` could opt a sweep out of strict mode --
+        a ``capture_strict: false`` row written through the settings
+        surface (the same one ``trellis worker capture-sessions`` already
+        honoured) sat inert for this entry point. ``run_sweep`` is mocked
+        (the sweep itself is ``test_sweep.py``'s concern); what this pins
+        is that ``main()`` resolves the *same* ``stores_dir`` it builds for
+        the sweep when it reads ``capture_strict``, with no env var set.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(
+            capture_main, "run_sweep", MagicMock(return_value=_unjudged_report())
+        )
+
+        # Default strict mode, no override anywhere yet: the outage fails.
+        assert capture_main.main([]) == capture_main.EXIT_JUDGE_UNAVAILABLE
+        capsys.readouterr()
+
+        # The exact stores_dir main()'s own registry resolves to -- write
+        # the override there, through the real settings store, not by
+        # reaching into main()'s internals.
+        registry = StoreRegistry.from_config_dir()
+        assert registry.stores_dir is not None
+        SettingsStore(resolve_settings_path(registry.stores_dir)).set(
+            "capture_strict", False
+        )
+
+        assert capture_main.main([]) == capture_main.EXIT_OK
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["sessions_judge_unavailable"] == 2
+        assert "2 session(s) left unjudged" in captured.err
 
     def test_untyped_exception_is_not_caught(
         self, monkeypatch: pytest.MonkeyPatch

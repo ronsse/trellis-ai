@@ -207,15 +207,26 @@ NOTE_DOMAIN_HARD_EXCLUDES = (
 # Tokenization
 # ---------------------------------------------------------------------------
 
+#: Shortest token this analyzer will ever mine, and the same floor
+#: :class:`~trellis.mutate.handlers.ClassifyRuleApplyHandler` enforces on a
+#: hand-submitted ``tag_keyword`` key (apply-rule does not route through
+#: tokenization, so nothing else stops an operator or script from applying
+#: a one- or two-character key the miner itself would never propose).
+#: Two-character tokens match far too much under the classifier's substring
+#: semantics (``"ml"`` is inside ``"html"``), and a single keyword already
+#: controls assignment only jointly with a second hit
+#: (:data:`~trellis.classify.classifiers.keyword._MIN_HITS`), so a short,
+#: overly-general key defeats that two-hit minimum by matching almost
+#: everything on its own.
+MIN_TAG_KEYWORD_LENGTH = 3
+
 #: Token matcher. Keeps ``-`` and ``_`` inside tokens so ``task-management``
 #: and ``source_system`` survive as single keywords — the multi-word tags an
-#: LLM produces are exactly the interesting candidates. The ``{3,}`` bound is
+#: LLM produces are exactly the interesting candidates. The length bound is
 #: in the pattern rather than a filter so the engine never allocates a Python
 #: string for the short tokens (measured 26% faster over a whole scan, and the
-#: analyzer tokenises the corpus twice). Two-character tokens match far too
-#: much under the classifier's substring semantics (``"ml"`` is inside
-#: ``"html"``).
-_TOKEN_RE = re.compile(r"[a-z0-9_-]{3,}")
+#: analyzer tokenises the corpus twice).
+_TOKEN_RE = re.compile(rf"[a-z0-9_-]{{{MIN_TAG_KEYWORD_LENGTH},}}")
 
 #: Tokens that never become keywords. Deliberately small — a real stopword list
 #: is a tuning surface, and the support/precision/lift gates already reject a
@@ -960,6 +971,7 @@ __all__ = [
     "DEFAULT_PAGE_SIZE",
     "DEFAULT_SCAN_LIMIT",
     "FACETS_WITH_WRITE_TARGET",
+    "MIN_TAG_KEYWORD_LENGTH",
     "NOTE_AGREEMENT_NOT_OUTCOME",
     "NOTE_DOMAIN_HARD_EXCLUDES",
     "NOTE_NO_WRITE_TARGET",

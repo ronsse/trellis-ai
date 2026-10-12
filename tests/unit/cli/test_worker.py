@@ -41,6 +41,7 @@ from trellis.stores.advisory_source import (
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_cli import worker
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app, worker_app
@@ -163,6 +164,16 @@ def _make_feedback(*, outcome: str, items: list[str]):
 
 _CURATE_KEPT = "wc:doc:kept"
 _CURATE_NOISY = "wc:doc:noisy"
+#: A second real document, admitted and written alongside ``_CURATE_NOISY``
+#: so the written and refused counts differ (2 vs 1) and a mutant that
+#: swaps them, or inverts the dry-run predicate, fails on the count
+#: itself rather than only incidentally on another assertion.
+_CURATE_NOISY_2 = "wc:doc:noisy2"
+#: A trace id, never put into the document store, used by
+#: ``test_live_run_separates_written_from_refused_not_document`` to stand
+#: in for an id the demotion gate admits on citation evidence alone
+#: (#833).
+_CURATE_PHANTOM = "wc:trace:phantom"
 _CURATE_FINDINGS = frozenset(
     {"NoiseTagsApplied", "AdvisoryCycleReport", "LearningCandidatesReport"}
 )
@@ -225,6 +236,141 @@ def _seed_curate_signal(registry: StoreRegistry) -> None:
         "noisy test content",
         {"content_tags": {"signal_quality": "standard"}},
     )
+
+
+def _seed_second_noisy_document(registry: StoreRegistry, pack_prefix: str) -> None:
+    """Seed a second real document the gate admits and the writer resolves.
+
+    Mirrors ``_seed_curate_signal``'s evidence shape for ``_CURATE_NOISY``
+    but for ``_CURATE_NOISY_2``, so a live or dry curate cycle alongside a
+    refused non-document id writes (or previews) two documents, not one.
+    """
+    event_log = registry.operational.event_log
+    for i in range(5):
+        pack_id = f"{pack_prefix}-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "intent_family": "wc-curate",
+                "domain": "wc-test",
+                "injected_item_ids": [_CURATE_NOISY_2],
+                "injected_items": [
+                    {
+                        "item_id": _CURATE_NOISY_2,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "run_id": f"{pack_prefix}-run-{i}",
+                "intent_family": "wc-curate",
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": [_CURATE_NOISY_2],
+            },
+        )
+    registry.knowledge.document_store.put(
+        _CURATE_NOISY_2,
+        "second noisy test content",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+
+
+_ENTITY_GOOD = "wc:ent:good"
+
+
+def _seed_entity_correlation_signal(registry: StoreRegistry) -> None:
+    """Seed packs that only clear the advisory gate below the module default.
+
+    ``wc:ent:good`` appears in 3 successful packs (rate_with=1.0); 3 more
+    packs without it all fail (rate_without=0.0, baseline 0 -> effect
+    1.0, comfortably above the 0.15 default floor). ``AdvisoryGenerator``
+    refuses both arms below ``min_sample_size`` packs
+    (``_supported_effect``), so at the module default (5) neither the
+    3-pack presence arm nor the 3-pack comparison arm qualifies; an
+    override of 3 lets both through.
+    """
+    event_log = registry.operational.event_log
+    for i in range(3):
+        pack_id = f"wc-ent-with-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "wc-test",
+                "injected_item_ids": [_ENTITY_GOOD],
+                "injected_items": [
+                    {
+                        "item_id": _ENTITY_GOOD,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "success",
+                "success": True,
+                "helpful_item_ids": [_ENTITY_GOOD],
+            },
+        )
+    for i in range(3):
+        pack_id = f"wc-ent-without-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "wc-test",
+                "injected_item_ids": [f"wc:ent:other{i}"],
+                "injected_items": [
+                    {
+                        "item_id": f"wc:ent:other{i}",
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+            },
+        )
 
 
 def _graph_shape(registry: StoreRegistry) -> dict[str, int]:
@@ -358,6 +504,38 @@ def test_looser_than_manual_rejected_via_exit(config_dir: Path) -> None:
         worker._build_auto_promote_policy_or_exit()
 
 
+@pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+def test_non_finite_env_threshold_rejected_via_exit_not_overflow(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A non-finite TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE must surface the
+    # same clean typer.Exit every other malformed config value gets here
+    # — never an uncaught OverflowError escaping past the
+    # `except ValueError` in _build_auto_promote_policy_or_exit.
+    monkeypatch.setenv("TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE", raw)
+    with pytest.raises(typer.Exit):
+        worker._build_auto_promote_policy_or_exit()
+
+
+def test_invalid_env_threshold_message_is_value_free(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `worker tune`'s message used to interpolate str(exc), which embeds
+    # the raw rejected value (e.g. "not a number: '<raw>'"). Plant a
+    # secret-shaped value and assert it never reaches the printed message
+    # — only the exception type name may appear.
+    secret = "SEKRETtune0d0d"  # noqa: S105 - synthetic test placeholder, not a credential
+    monkeypatch.setenv("TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE", secret)
+    with pytest.raises(typer.Exit):
+        worker._build_auto_promote_policy_or_exit()
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "ValueError" in captured.out
+
+
 # ===========================================================================
 # worker curate — full cycle (WP3)
 # ===========================================================================
@@ -418,8 +596,109 @@ class TestWorkerCurate:
         # Promote-half artifacts are written for human review.
         assert data["candidates_path"] is not None
         assert Path(data["candidates_path"]).exists()
+        # Promotion-ready digest (#845): this seed's one candidate has 3
+        # helpful citations and 0 unhelpful, so it is promotion-ready end
+        # to end through the real JSON CLI payload, not just the unit
+        # tests on the pure digest builder.
+        promotion_ready = data["learning_promotion_ready"]
+        assert promotion_ready["count"] == 1
+        assert len(promotion_ready["top"]) == 1
+        top_row = promotion_ready["top"][0]
+        assert top_row["helpful_count"] == 3
+        assert top_row["times_served"] == 3
+        assert top_row["success_rate"] == 1.0
+        # The item ("wc:doc:helpful") was only ever referenced in event
+        # payloads, never put into the document store, so the
+        # readable-name fallback can't resolve it and the bare item id
+        # survives in the name.
+        assert top_row["precedent_name"].endswith("wc:doc:helpful")
+        candidates_payload = json.loads(Path(data["candidates_path"]).read_text())
+        assert candidates_payload["promotion_ready"] == promotion_ready
         assert Path(data["decisions_path"]).exists()
         assert data["skipped_stages"] == []
+
+    def test_full_cycle_emits_curate_cycle_completed_event(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A live cycle leaves a durable, API-readable health record (e167).
+
+        Before this, the cycle's only record was a structlog line a cron
+        wrapper piped to a host-only log file the API container cannot
+        read. ``GET /admin/loops`` and every other API-side reader can
+        only see what the EventLog carries.
+        """
+        _seed_promote_signal(temp_stores)
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.CURATE_CYCLE_COMPLETED, limit=10
+        )
+        assert len(events) == 1, "exactly one cycle ran, so exactly one event"
+        payload = events[0].payload
+        assert payload["status"] == data["status"]
+        assert payload["learning_candidates"] == data["learning_candidates"]
+        assert payload["noise_tagged"] == data["noise_tagged"]
+        assert payload["advisories_generated"] == data["advisories_generated"]
+        assert payload["skipped_stages"] == data["skipped_stages"]
+        assert isinstance(payload["duration_seconds"], float)
+        assert payload["duration_seconds"] >= 0
+        # emit() stamps write_provenance on every event; the brief names
+        # it explicitly as one of the counters a reader should get for
+        # free rather than this test re-deriving it.
+        assert "write_provenance" in events[0].metadata
+
+    def test_text_surface_singular_candidate_wording(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """One promotion-ready candidate reads as singular, not '1 candidates'."""
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "1 candidate promotion-ready" in rendered
+        assert "1 candidates" not in rendered
+
+    def test_full_cycle_names_title_less_candidate_from_its_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        # The nightly path must hand its document store to the artifact
+        # write (#845): a title-less candidate whose item resolves carries
+        # the readable name into the digest and the decisions template.
+        temp_stores.knowledge.document_store.put(
+            "wc:doc:named",
+            "---\nkind: note\n---\n# Readable Doc Heading\n\nBody line.",
+            {},
+        )
+        _seed_promote_signal(temp_stores, item_id="wc:doc:named")
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            ["worker", "curate", "--output-dir", str(out_dir), "--format", "json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        top_row = data["learning_promotion_ready"]["top"][0]
+        name = top_row["precedent_name"]
+        assert name.endswith(":: Readable Doc Heading"), name
+        decisions = json.loads(Path(data["decisions_path"]).read_text("utf-8"))
+        by_id = {d["candidate_id"]: d["promotion_name"] for d in decisions["decisions"]}
+        assert by_id[top_row["candidate_id"]] == name
 
     def test_skip_noise_tags(self, tmp_path: Path, temp_stores: StoreRegistry) -> None:
         _seed_promote_signal(temp_stores)
@@ -811,6 +1090,177 @@ class TestWorkerCurate:
         assert (out_dir / "intent_learning_candidates.json").is_file()
         assert (out_dir / "promotion_decisions.template.json").is_file()
 
+    def test_live_run_separates_written_from_refused_not_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """``noise_tagged`` counts writes, not gate admissions.
+
+        The demotion gate admits on citation evidence alone, with no
+        notion of which store an id belongs to. A phantom id cited
+        unhelpful just as often as the real noisy documents is admitted
+        right alongside them, but it was never put into the document
+        store, so ``apply_noise_tags`` writes nothing for it. A second
+        real document is seeded beside ``_CURATE_NOISY`` so the written
+        (2) and refused (1) counts differ: before the fix, ``noise_tagged``
+        reported all three as demoted (3); it has to report 2 and name
+        the other refused (#833).
+        """
+        _seed_curate_signal(temp_stores)
+        _seed_second_noisy_document(temp_stores, "wc-curate-noisy2")
+        event_log = temp_stores.operational.event_log
+        for i in range(5):
+            pack_id = f"wc-curate-phantom-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-curate",
+                    "domain": "wc-test",
+                    "injected_item_ids": [_CURATE_PHANTOM],
+                    "injected_items": [
+                        {
+                            "item_id": _CURATE_PHANTOM,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-run-phantom-{i}",
+                    "intent_family": "wc-curate",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [_CURATE_PHANTOM],
+                },
+            )
+        # Deliberately never put _CURATE_PHANTOM into the document
+        # store — it stands in for a trace id or other non-document id
+        # the gate still admits.
+        assert temp_stores.knowledge.document_store.get(_CURATE_PHANTOM) is None
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["noise_tagged"] == 2
+        assert data["noise_refused_non_document"] == 1
+        noisy = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+        noisy2 = temp_stores.knowledge.document_store.get(_CURATE_NOISY_2)
+        assert noisy2 is not None
+        assert noisy2["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+    def test_dry_run_separates_written_from_refused_not_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A dry run previews the same split, from a read, not a write.
+
+        Mirrors ``test_live_run_separates_written_from_refused_not_document``
+        but with ``--dry-run``: nothing is written either way, so
+        ``_curate_stage_noise_tags`` recomputes both counts with a
+        read-only ``document_store.get`` check per admitted id instead of
+        reading ``report.noise_tags_written`` (which a dry run never sets).
+        A second real document is seeded beside ``_CURATE_NOISY`` so the
+        would-be-written (2) and refused (1) counts differ. Before that
+        recomputation existed, a dry run reported the gate's raw
+        admission count (3) under ``noise_tagged`` with no way to see
+        that one of the three would refuse; it has to report 2 and 1,
+        same as the live run would, without writing anything.
+        """
+        _seed_curate_signal(temp_stores)
+        _seed_second_noisy_document(temp_stores, "wc-curate-noisy2-dry")
+        event_log = temp_stores.operational.event_log
+        for i in range(5):
+            pack_id = f"wc-curate-phantom-dry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-curate",
+                    "domain": "wc-test",
+                    "injected_item_ids": [_CURATE_PHANTOM],
+                    "injected_items": [
+                        {
+                            "item_id": _CURATE_PHANTOM,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-run-phantom-dry-{i}",
+                    "intent_family": "wc-curate",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [_CURATE_PHANTOM],
+                },
+            )
+        assert temp_stores.knowledge.document_store.get(_CURATE_PHANTOM) is None
+        noisy_before = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
+        noisy2_before = temp_stores.knowledge.document_store.get(_CURATE_NOISY_2)
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["dry_run"] is True
+        assert data["noise_tagged"] == 2
+        assert data["noise_refused_non_document"] == 1
+        # A dry run writes nothing — the split above is a preview.
+        docs = temp_stores.knowledge.document_store
+        assert docs.get(_CURATE_NOISY) == noisy_before
+        assert docs.get(_CURATE_NOISY_2) == noisy2_before
+        assert docs.get(_CURATE_PHANTOM) is None
+        assert not out_dir.exists()
+
 
 # ===========================================================================
 # worker curate --interval — loop mode (WP3)
@@ -1015,6 +1465,258 @@ class TestCurateSurvivesADegradedAdvisoryStore:
             str(advisory_file),
             f"{advisory_file}.corrupt",
         ], f"the printed recovery command does not parse as `mv src dst`: {command!r}"
+
+
+class TestWorkerCurateSettingsWiring:
+    """Re-gate #867 M13/M14: ``trellis worker curate`` must thread a
+    *stored* settings override through to both the advisory-generation
+    stage and the noise-tag (demotion) stage end to end — not just at the
+    resolver level (that is pinned in ``test_advisory_generator.py`` /
+    ``test_demotion_gate.py``) and not just at the ``run_curation_cycle``
+    call-signature level, but through the real CLI command this is the
+    production nightly cron's entry point.
+    """
+
+    def test_a_stored_sample_size_override_admits_an_advisory(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        _seed_entity_correlation_signal(temp_stores)
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+                "--skip-noise-tags",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["advisories_generated"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("advisory_min_sample_size", 3)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review2"),
+                "--format",
+                "json",
+                "--skip-noise-tags",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["advisories_generated"] >= 1
+
+    def test_a_stored_coverage_floor_override_admits_a_noise_tag(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Same proof, noise-tag stage: the thin-coverage shape (2 packs)
+        sits below the module default coverage floor (5) until a stored
+        ``noise_demotion_min_attributed_packs`` override of 2 lowers it.
+        """
+        event_log = temp_stores.operational.event_log
+        doc_id = "wc:doc:thin-cli"
+        for i in range(2):
+            pack_id = f"wc-thin-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-thin",
+                    "domain": "wc-test",
+                    "injected_item_ids": [doc_id],
+                    "injected_items": [
+                        {
+                            "item_id": doc_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-thin-run-{i}",
+                    "intent_family": "wc-thin",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [doc_id],
+                },
+            )
+        temp_stores.knowledge.document_store.put(
+            doc_id,
+            "thin coverage cli test content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["noise_tagged"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review2"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["noise_tagged"] == 1
+        noisy = temp_stores.knowledge.document_store.get(doc_id)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+    def test_a_stored_coverage_floor_override_is_honoured_in_dry_run_too(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Re-gate #867 M14b: ``--dry-run`` reads the noise-tag stage
+        through the read-only :func:`analyze_effectiveness`
+        (``_curate_stage_noise_tags``'s ``if dry_run:`` arm), a second,
+        independent call site from the live arm the test above pins —
+        a mutant that drops that call's ``demotion_settings=settings``
+        argument (passing ``None`` instead) is invisible to that test,
+        since dry-run never reaches ``run_effectiveness_feedback``. Same
+        thin-coverage shape (2 packs, below the module default floor of
+        5) and the same stored override of 2, but asserting the
+        dry-run report and the complete absence of a write — ``--dry-run``
+        touches nothing.
+        """
+        event_log = temp_stores.operational.event_log
+        doc_id = "wc:doc:thin-cli-dry"
+        for i in range(2):
+            pack_id = f"wc-thin-dry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-thin-dry",
+                    "domain": "wc-test",
+                    "injected_item_ids": [doc_id],
+                    "injected_items": [
+                        {
+                            "item_id": doc_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-thin-dry-run-{i}",
+                    "intent_family": "wc-thin-dry",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [doc_id],
+                },
+            )
+        temp_stores.knowledge.document_store.put(
+            doc_id,
+            "thin coverage cli dry-run test content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["noise_tagged"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry2"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["noise_tagged"] == 1
+
+        # --dry-run touches nothing, override or not.
+        untouched = temp_stores.knowledge.document_store.get(doc_id)
+        assert untouched is not None
+        assert untouched["metadata"]["content_tags"]["signal_quality"] == "standard"
 
 
 class TestWorkerCurateLoop:
@@ -1857,6 +2559,37 @@ class TestWorkerCaptureSessions:
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    sessions_seen=2,
+                    warnings=[{"kind": "distill_unavailable", "session_id": "a"}],
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["status"] == "partial"
+        assert payload["sessions_judge_unavailable"] == 1
+
+    def test_a_stored_strict_opt_out_keeps_the_count_but_exits_zero(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-gate #867 M16: ``trellis worker capture-sessions`` (the CLI
+        front door, distinct from the standalone ``trellis-session-capture``
+        console script that S1 fixed separately in ``__main__.py``) must
+        thread a *stored* ``capture_strict`` override through too, not
+        just the env var the test above covers.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("capture_strict", False)
         monkeypatch.setattr(
             capture_sweep,
             "run_sweep",

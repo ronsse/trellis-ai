@@ -825,6 +825,46 @@ class GraphStoreContractTests:
         assert len(current) == 1
         assert current[0]["properties"]["v"] == 3
 
+    def test_upsert_edge_carries_created_at_forward(self, store: GraphStore) -> None:
+        """A single-row re-upsert of the same triplet carries the prior
+        version's ``created_at`` forward onto the new current version,
+        matching :meth:`~trellis.stores.base.graph.GraphStore.upsert_edges_bulk`
+        and the Bolt store's ``coalesce``. ``valid_from`` still advances —
+        only ``created_at`` (the logical edge's original mint time) is
+        stable across versions.
+
+        Three versions, not two: every shipped backend mints v1 with
+        ``created_at`` equal to ``valid_from``, so after one re-upsert a
+        carry that read the closed version's ``valid_from`` cannot be told
+        apart from one that read its ``created_at``. v3 tells them apart.
+        """
+        store.upsert_node("car-x", "service", {})
+        store.upsert_node("car-y", "service", {})
+        store.upsert_edge("car-x", "car-y", "depends_on", {"v": 1})
+
+        v1 = store.get_edges("car-x", direction="outgoing", edge_type="depends_on")
+        assert len(v1) == 1
+        v1_created_at = datetime.fromisoformat(v1[0]["created_at"])
+        prior_valid_from = datetime.fromisoformat(v1[0]["valid_from"])
+
+        for version in (2, 3):
+            _sleep_for_ordering()
+            store.upsert_edge("car-x", "car-y", "depends_on", {"v": version})
+
+            current = store.get_edges(
+                "car-x", direction="outgoing", edge_type="depends_on"
+            )
+            assert len(current) == 1
+            assert current[0]["properties"]["v"] == version
+            # Instants, not raw strings: a carried-forward value can come
+            # back through a different wire rendering of the same timestamp
+            # (e.g. ArcadeDB renders one as ``+00:00`` and another as ``Z``)
+            # without the carry having failed.
+            assert datetime.fromisoformat(current[0]["created_at"]) == v1_created_at
+            valid_from = datetime.fromisoformat(current[0]["valid_from"])
+            assert valid_from > prior_valid_from
+            prior_valid_from = valid_from
+
     def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
         """Re-upserting the same edge (single-row) keeps one current version.
 

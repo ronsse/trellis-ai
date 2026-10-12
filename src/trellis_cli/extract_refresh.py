@@ -600,7 +600,8 @@ def _print_backfill(
         if row["entities"] or row["edges"]:
             console.print(
                 f"    - {escape(row['trace_id'])} ({escape(row['domain'] or '-')}): "
-                f"{row['entities']} entities, {row['edges']} edges"
+                f"{row['entities']} entities, {row['edges']} edges",
+                soft_wrap=True,
             )
 
 
@@ -677,7 +678,7 @@ def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
     try:
         for trace in stored_traces:
             _result, batch = extract_trace_batch(
-                trace, requested_by="cli:extract-traces"
+                trace, requested_by="cli:extract-traces", registry=registry
             )
             if batch is not None and not dry_run:
                 reconcile_node_roles(batch, registry.knowledge.graph_store)

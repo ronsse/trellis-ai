@@ -361,7 +361,7 @@ trellis admin migrate-graph \
 
 Retrieval tools accept `max_tokens` (default 2000; `get_items` defaults to 4000, and the three sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `save_knowledge`, `POST /documents`, `POST /evidence`, `trellis ingest corpus` / `conversations` or `trellis ingest dbt-manifest` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
-**Python SDK** — HTTP-only (`import trellis_sdk`): point `base_url` at a running `trellis admin serve`, or use `trellis.testing.in_memory_client` in tests. Against a server running `TRELLIS_AUTH_MODE=required`, pass `api_key=` so the client sends it as `X-API-Key` on every request.
+**Python SDK** — HTTP-only (`import trellis_sdk`): point `base_url` at a running `trellis admin serve`, or use `trellis.testing.in_memory_client` in tests. Against a server running `TRELLIS_AUTH_MODE=required`, pass `api_key=` so the client sends it as `Authorization: Bearer` on every request.
 
 ```python
 from trellis_sdk import TrellisClient

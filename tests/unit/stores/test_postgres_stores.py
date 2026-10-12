@@ -181,6 +181,12 @@ class TestPostgresDocumentStore:
         store.put("doc-1", "content")
         assert store.count() == 1
 
+    def test_put_refuses_a_non_finite_metadata_value(self, store) -> None:
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.put("doc-1", "content", {"score": float("nan")})
+        assert store.get("doc-1") is None
+        assert store.count() == 0
+
     def test_get_by_hash(self, store) -> None:
         store.put("doc-1", "unique content")
         doc = store.get("doc-1")
@@ -1708,6 +1714,32 @@ class TestPostgresEventLogDriverErrors:
 
         with pytest.raises(TypeError):
             store.append(event)
+
+    def test_a_non_finite_payload_float_is_refused_before_any_write(
+        self, store
+    ) -> None:
+        """NaN/Infinity in a payload or metadata float is a caller bug too.
+
+        ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` while the
+        parameter tuple is built, before ``cur.execute`` runs, so this never
+        reaches the server as invalid JSON text. Same rationale as the
+        non-serializable-object case above: a ``StoreError`` relabelling
+        would hide that the caller handed the store a value JSON cannot
+        round-trip.
+        """
+        from trellis.stores.base.event_log import Event, EventType
+
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="syn-source",
+            payload={"syn-score": float("nan")},
+        )
+
+        with pytest.raises(ValueError):
+            store.append(event)
+
+        events = store.get_events(event_type=EventType.ENTITY_CREATED)
+        assert len(events) == 0
 
 
 # ======================================================================

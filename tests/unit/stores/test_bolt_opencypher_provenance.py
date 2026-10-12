@@ -253,7 +253,11 @@ class TestBoltUpsertEdgesBulkShape:
 # duplicating it: a deterministic, no-server counterpart to the live races in
 # bolt_edge_create_race.py (check_concurrent_bulk_edge_create_leaves_one_
 # current_row and friends), which prove the behavior but can't pin the shape
-# of the fix (how many ids, which order, where in the Cypher text).
+# of the fix (how many ids, which order, where in the Cypher text). The
+# prelude is one constant-text ``UNWIND $lock_ids AS lock_nid`` clause over
+# the sorted endpoint list, not one clause per endpoint, so these tests pin
+# both the sort order and that the query text itself does not grow with the
+# batch's distinct-endpoint count.
 # ---------------------------------------------------------------------------
 
 
@@ -271,11 +275,8 @@ class TestBoltUpsertEdgesBulkLockPrelude:
             ]
         )
         write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
-        params = write_call["params"]
-        lock_params = {k: v for k, v in params.items() if k.startswith("lock_id_")}
-        assert set(lock_params) == {f"lock_id_{i}" for i in range(4)}
-        ordered = [lock_params[f"lock_id_{i}"] for i in range(4)]
-        assert ordered == sorted(ordered) == ["a", "b", "c", "z"]
+        lock_ids = write_call["params"]["lock_ids"]
+        assert lock_ids == sorted(lock_ids) == ["a", "b", "c", "z"]
 
     def test_lock_prelude_text_precedes_unwind(self) -> None:
         store = _make_store_with_mocked_driver()
@@ -300,10 +301,174 @@ class TestBoltUpsertEdgesBulkLockPrelude:
             ]
         )
         write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
-        lock_params = {
-            k: v for k, v in write_call["params"].items() if k.startswith("lock_id_")
+        assert set(write_call["params"]["lock_ids"]) == {
+            "src1",
+            "tgt1",
+            "src2",
+            "tgt2",
         }
-        assert set(lock_params.values()) == {"src1", "tgt1", "src2", "tgt2"}
+
+    def test_lock_prelude_text_is_byte_identical_across_batch_sizes(self) -> None:
+        """The point of the constant-text rewrite: the query text -- the
+        driver's plan-cache key -- must not change with the number of
+        distinct endpoints a batch touches. Only the parameter *values*
+        (``lock_ids``, ``rows``) may vary with batch size, never the
+        Cypher string itself.
+        """
+        store_small = _make_store_with_mocked_driver()
+        captured_small = _capture_write_calls(
+            store_small, known_endpoint_ids={"a", "b"}
+        )
+        store_small.upsert_edges_bulk(
+            [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+        )
+
+        large_ids = {f"n{i}" for i in range(50)}
+        store_large = _make_store_with_mocked_driver()
+        captured_large = _capture_write_calls(
+            store_large, known_endpoint_ids=large_ids
+        )
+        store_large.upsert_edges_bulk(
+            [
+                {
+                    "source_id": f"n{i}",
+                    "target_id": f"n{i + 1}",
+                    "edge_type": "links_to",
+                }
+                for i in range(0, 48, 2)
+            ]
+        )
+
+        cypher_small = next(
+            c for c in captured_small if "UNWIND $rows" in str(c["cypher"])
+        )["cypher"]
+        cypher_large = next(
+            c for c in captured_large if "UNWIND $rows" in str(c["cypher"])
+        )["cypher"]
+        assert cypher_small == cypher_large
+
+
+# ---------------------------------------------------------------------------
+# A non-finite property/generation_spec value is refused before any
+# round trip — json.dumps(..., allow_nan=False) on the shared Bolt base.
+# ---------------------------------------------------------------------------
+
+
+class TestBoltRefusesNonFiniteJson:
+    def test_upsert_node_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_node("a", "service", {"score": float("nan")})
+        assert captured == []
+
+    def test_upsert_node_refuses_a_non_finite_generation_spec_value(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_node(
+                "a",
+                "memory",
+                {},
+                node_role="curated",
+                generation_spec={"confidence": float("inf")},
+            )
+        assert captured == []
+
+    def test_update_node_if_current_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.update_node_if_current(
+                "a",
+                "2026-01-01T00:00:00+00:00",
+                "service",
+                {"score": float("-inf")},
+                node_role="semantic",
+            )
+        assert captured == []
+
+    def test_update_node_if_current_refuses_a_non_finite_generation_spec_value(
+        self,
+    ) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.update_node_if_current(
+                "a",
+                "2026-01-01T00:00:00+00:00",
+                "memory",
+                {},
+                node_role="curated",
+                generation_spec={"confidence": float("nan")},
+            )
+        assert captured == []
+
+    def test_upsert_nodes_bulk_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_nodes_bulk(
+                [
+                    {"node_id": "a", "node_type": "service", "properties": {"v": 1}},
+                    {
+                        "node_id": "b",
+                        "node_type": "service",
+                        "properties": {"v": float("nan")},
+                    },
+                ]
+            )
+        # The pre-fetch (read) may have run, but no write round trip did.
+        assert not any("UNWIND $rows" in str(c["cypher"]) for c in captured)
+
+    def test_upsert_nodes_bulk_refuses_a_non_finite_generation_spec_value(
+        self,
+    ) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "a",
+                        "node_type": "memory",
+                        "node_role": "curated",
+                        "properties": {},
+                        "generation_spec": {"confidence": float("nan")},
+                    },
+                ]
+            )
+        assert not any("UNWIND $rows" in str(c["cypher"]) for c in captured)
+
+    def test_upsert_edge_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_edge("a", "b", "depends_on", {"weight": float("nan")})
+        assert captured == []
+
+    def test_upsert_edges_bulk_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "edge_type": "depends_on",
+                        "properties": {"weight": 1.0},
+                    },
+                    {
+                        "source_id": "a",
+                        "target_id": "c",
+                        "edge_type": "depends_on",
+                        "properties": {"weight": float("inf")},
+                    },
+                ]
+            )
+        # The build loop raises before the endpoint pre-check round trip.
+        assert captured == []
 
 
 # ---------------------------------------------------------------------------

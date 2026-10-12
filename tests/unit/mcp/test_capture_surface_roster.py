@@ -89,6 +89,7 @@ from trellis.ops.capture_health import (
 )
 from trellis.stores.advisory_source import ADVISORY_WRITER_SURFACE
 from trellis.stores.base.event_log import EventType
+from trellis.stores.classify_overrides_store import CLASSIFY_OVERLAY_SURFACE
 from trellis.stores.registry import StoreRegistry
 
 save_experience = unwrap_tool(server_mod.save_experience)
@@ -133,6 +134,7 @@ MCP_WRAPPER_MODULE = "trellis/mcp/server.py"
 NON_MCP_REJECTION_PRODUCERS: dict[str, str] = {
     "trellis/mutate/policy_source.py": POLICY_GATE_SURFACE,
     "trellis_cli/worker.py": ADVISORY_WRITER_SURFACE,
+    "trellis/stores/registry.py": CLASSIFY_OVERLAY_SURFACE,
 }
 
 
@@ -436,6 +438,16 @@ class TestTheRoster:
         again (#448).
         """
         assert ADVISORY_WRITER_SURFACE in NON_CAPTURE_SURFACES
+
+    def test_the_classify_overlay_surface_literal_has_not_drifted(self) -> None:
+        """``capture_health`` spells the classify-overlay label out; pin the copy.
+
+        Same reasoning as the advisory literal above: a silent drift
+        between the two spellings would let a degraded
+        ``classify_overrides.json`` quietly start headlining the banner
+        for every surface, even though only ``backfill`` is blocked.
+        """
+        assert CLASSIFY_OVERLAY_SURFACE in NON_CAPTURE_SURFACES
 
     def test_non_capture_surfaces_are_all_real_rejection_sites(self) -> None:
         """Nothing is excluded from the banner that could not have raised it.

@@ -16,6 +16,7 @@ functions.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
@@ -47,9 +48,15 @@ SDK_API_MINOR = 2
 SDK_WIRE_SCHEMA = "0.1.0"
 SDK_VERSION = "0.1.0"
 
-#: Header name :mod:`trellis_api.auth` accepts a credential on (it wins over
-#: ``Authorization: Bearer`` when both are present).
-API_KEY_HEADER = "X-API-Key"
+#: Header name the SDK sends its credential on. :mod:`trellis_api.auth`
+#: accepts this header or ``X-API-Key`` (which wins when both are present),
+#: so either reaches the same scopes and the same legacy-shared-secret
+#: path. ``httpx`` masks only ``Authorization`` as ``[secure]`` when a
+#: ``Headers`` object is printed (``dict()`` and ``.items()`` still carry
+#: the key), and drops only it on a cross-origin redirect (neither client
+#: follows redirects).
+AUTHORIZATION_HEADER = "Authorization"
+_BEARER_PREFIX = "Bearer"
 
 _HTTP_OK_MAX = 299
 _HTTP_CLIENT_MIN = 400
@@ -57,6 +64,51 @@ _HTTP_CLIENT_MAX = 499
 _HTTP_NOT_FOUND = 404
 _HTTP_RATE_LIMITED = 429
 _HTTP_SERVER_MIN = 500
+
+
+def describe_body_parse_error(exc: Exception) -> str:
+    """Describe a malformed response-body error by type and location,
+    never by ``str(exc)`` (describe, don't quote — #206).
+
+    A 2xx body that fails to decode or validate may be an intermediate
+    proxy's own interstitial page, or SDK/server wire-schema skew — content
+    the Trellis server never wrote, so it must not be echoed back whole:
+
+    * ``json.JSONDecodeError`` — ``exc.msg`` is one of the ``json`` module's
+      own canned phrases ("Expecting value", "Extra data", ...), never a
+      copy of the document, so it is safe on its own; this pairs it with
+      ``lineno``/``colno`` the same way
+      :func:`trellis.core.error_sanitize.describe_json_error` does.
+    * ``pydantic.ValidationError`` — only ``loc`` (dotted field path) and
+      ``type`` (pydantic's own short error code, e.g. ``"string_type"``)
+      are kept; pydantic's per-error ``msg`` is dropped entirely, not just
+      sanitized, because a wire DTO could in principle gain a custom
+      ``@field_validator`` later whose own message interpolates a value —
+      ``loc``/``type`` alone can never carry one.
+    * anything else — the exception's type name.
+
+    This is a standalone, dependency-free reimplementation of
+    :func:`trellis.core.error_sanitize.describe_validation_error` /
+    ``describe_json_error``: ``trellis_sdk`` must not import ``trellis.*``
+    (``tests/unit/sdk/test_isolation.py``), so the logic is ported here
+    rather than shared. Keep the two in sync if either drifts.
+    """
+    if isinstance(exc, json.JSONDecodeError):
+        return f"{exc.msg} (line {exc.lineno}, column {exc.colno})"
+    errors_method = getattr(exc, "errors", None)
+    if not callable(errors_method):
+        return type(exc).__name__
+    try:
+        raw_errors = errors_method(include_input=False)
+    except TypeError:
+        return type(exc).__name__
+    pairs = [
+        ".".join(str(part) for part in err.get("loc", ())) + f": {err.get('type', '?')}"
+        if err.get("loc")
+        else f"<root>: {err.get('type', '?')}"
+        for err in raw_errors
+    ]
+    return "; ".join(pairs) if pairs else type(exc).__name__
 
 
 def raise_for_status(resp: httpx.Response, *, request_path: str) -> None:
@@ -147,7 +199,7 @@ def api_key_headers(
     if not api_key:
         msg = "api_key= is empty; pass a key or omit the argument."
         raise ValueError(msg)
-    return {API_KEY_HEADER: api_key}
+    return {AUTHORIZATION_HEADER: f"{_BEARER_PREFIX} {api_key}"}
 
 
 def pack_attribution(
@@ -297,7 +349,7 @@ def _parse_retry_after(header: str | None) -> float | None:
 
 
 __all__ = [
-    "API_KEY_HEADER",
+    "AUTHORIZATION_HEADER",
     "SDK_API_MAJOR",
     "SDK_API_MINOR",
     "SDK_VERSION",

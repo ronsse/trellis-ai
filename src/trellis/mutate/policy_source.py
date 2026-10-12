@@ -152,6 +152,11 @@ from typing import TYPE_CHECKING, overload
 
 import structlog
 
+from trellis.core.error_sanitize import (
+    describe_json_error,
+    describe_os_error,
+    describe_validation_error,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.errors import ConfigError
 from trellis.mutate.policy_gate import DefaultPolicyGate
@@ -286,9 +291,18 @@ def _load_from_path(path: Path | None) -> list[Policy]:
     # above no longer swallows those into "absent". ``exc`` carries the
     # errno and the OS message, so the reason is named rather than inferred.
     except (OSError, UnicodeDecodeError) as exc:
+        # describe_os_error / the inline UnicodeDecodeError description,
+        # not str(exc): either can be reached by a file an operator does
+        # not control the bytes of, and the OS/decoder message should
+        # never carry more than its own structured fields.
+        detail = (
+            describe_os_error(exc)
+            if isinstance(exc, OSError)
+            else f"invalid {exc.encoding} text at byte offset {exc.start}"
+        )
         msg = (
             f"Could not read the Trellis policy file at {path}: "
-            f"{type(exc).__name__}: {exc}. Fix the path or the file "
+            f"{type(exc).__name__}: {detail}. Fix the path or the file "
             "(a symlink loop, a path component that is not a directory, or "
             "permissions all surface here), or remove the file to run with "
             "no policies."
@@ -299,7 +313,8 @@ def _load_from_path(path: Path | None) -> list[Policy]:
         data = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         msg = (
-            f"Could not parse the Trellis policy file at {path}: {exc}. "
+            f"Could not parse the Trellis policy file at {path}: "
+            f"{describe_json_error(exc)}. "
             "Fix the JSON, or remove the file to run with no policies."
         )
         raise ConfigError(msg, setting=POLICY_FILENAME) from exc
@@ -345,8 +360,11 @@ def _load_from_path(path: Path | None) -> list[Policy]:
         # the recovery advice every other malformed shape here provides —
         # the same complaint this module makes about ``UnicodeDecodeError``.
         except Exception as exc:
+            # describe_validation_error, not str(exc): pydantic's text
+            # embeds input_value=<the policy's own field value>.
             msg = (
-                f"Invalid policy at index {index} in {path}: {exc}. "
+                f"Invalid policy at index {index} in {path}: "
+                f"{describe_validation_error(exc)}. "
                 "Fix the entry, or remove it to run without that policy."
             )
             raise ConfigError(msg, setting=POLICY_FILENAME) from exc

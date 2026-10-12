@@ -46,7 +46,10 @@ from trellis.learning import (
 )
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
     run_advisory_fitness_loop,
@@ -72,6 +75,7 @@ from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
@@ -319,13 +323,27 @@ def _print_demotion_outcome(report: Any) -> None:
         f"  Attributed packs: {screen.attributed_packs}"
         f" (minimum {screen.min_attributed_packs})"
     )
+    refused_not_document = getattr(report, "noise_refused_not_document", None) or []
+    refused_set = set(refused_not_document)
+    written = getattr(report, "noise_tags_written", None)
     if screen.admitted:
+        applied = written if written is not None else len(screen.admitted)
+        written_ids = [
+            item_id for item_id in screen.admitted if item_id not in refused_set
+        ]
         console.print(
-            f"  [yellow]Noise tags applied to {len(screen.admitted)}"
+            f"  [yellow]Noise tags applied to {applied}"
             f" of {proposed} proposed item(s)[/yellow]:"
         )
-        for item_id in screen.admitted:
+        for item_id in written_ids:
             console.print(f"    - {escape(item_id)}")
+        if refused_not_document:
+            console.print(
+                f"  [yellow]{len(refused_not_document)} admitted item(s) refused:"
+                " not found in the document store[/yellow]:"
+            )
+            for item_id in refused_not_document:
+                console.print(f"    - {escape(item_id)}")
     elif proposed:
         console.print(
             f"  [green]Withheld all {proposed} proposed demotion(s)[/green]"
@@ -353,6 +371,7 @@ def context_effectiveness(
 ) -> None:
     """Analyze which context items correlate with task success."""
     event_log = get_event_log()
+    settings_values = load_settings_values(_get_registry().stores_dir)
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
         analyzer_name="cli.analyze.context-effectiveness",
@@ -362,6 +381,7 @@ def context_effectiveness(
             event_log,
             days=days,
             min_appearances=min_appearances,
+            demotion_settings=settings_values,
         )
         if _meta_record.enabled and report.total_packs > 0:
             _meta_record.produced_finding(
@@ -446,9 +466,11 @@ def apply_noise_tags(
     """
     event_log = get_event_log()
     document_store = get_document_store()
+    registry = _get_registry()
     # #338: a demotion that reaches only the document store leaves the
     # semantic axis serving the item's pre-demotion snapshot.
-    vector_store = resolve_vector_store(_get_registry())
+    vector_store = resolve_vector_store(registry)
+    settings_values = load_settings_values(registry.stores_dir)
 
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -461,6 +483,7 @@ def apply_noise_tags(
             days=days,
             min_appearances=min_appearances,
             vector_store=vector_store,
+            demotion_settings=settings_values,
         )
         if _meta_record.enabled and report.noise_candidates:
             _meta_record.produced_finding(
@@ -1848,11 +1871,15 @@ def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -
 @analyze_app.command("generate-advisories")
 def generate_advisories(
     days: int = typer.Option(30, help="Days of history to analyze"),
-    min_sample: int = typer.Option(
-        5, "--min-sample", help="Min sample size for advisory generation"
+    min_sample: int | None = typer.Option(
+        None,
+        "--min-sample",
+        help="Min sample size for advisory generation; default is the configured value",
     ),
-    min_effect: float = typer.Option(
-        0.15, "--min-effect", help="Min effect size to emit an advisory"
+    min_effect: float | None = typer.Option(
+        None,
+        "--min-effect",
+        help="Min effect size to emit an advisory; defaults to the configured setting",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
@@ -1870,9 +1897,16 @@ def generate_advisories(
     from trellis_cli.config import get_data_dir  # noqa: PLC0415
 
     event_log = get_event_log()
+    stores_dir = get_data_dir() / "stores"
     # #373: resolve through the one seam, so this writer lands on the file
     # every pack-assembling reader opens.
-    store = AdvisoryStore(resolve_advisory_path(get_data_dir() / "stores"))
+    store = AdvisoryStore(resolve_advisory_path(stores_dir))
+    settings_values = load_settings_values(stores_dir)
+    default_min_sample, default_min_effect = resolve_advisory_thresholds(
+        settings_values
+    )
+    effective_min_sample = min_sample if min_sample is not None else default_min_sample
+    effective_min_effect = min_effect if min_effect is not None else default_min_effect
 
     try:
         with wrap_cli_meta_analysis(
@@ -1883,8 +1917,8 @@ def generate_advisories(
             generator = AdvisoryGenerator(
                 event_log,
                 store,
-                min_sample_size=min_sample,
-                min_effect_size=min_effect,
+                min_sample_size=effective_min_sample,
+                min_effect_size=effective_min_effect,
             )
             report = generator.generate(days=days)
             if _meta_record.enabled and report.advisories_generated > 0:
@@ -3206,6 +3240,7 @@ def learning_candidates(
     """
     output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
+    document_store = get_document_store()
     registry = _build_learning_registry_or_exit()
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -3219,7 +3254,12 @@ def learning_candidates(
             min_support=min_support,
             artifacts_root=output_dir,
         )
-        paths = write_learning_review_artifacts(report=report, output_dir=output_dir)
+        # ``document_store`` lets the write apply the readable-name
+        # fallback (#845) before it computes ``report["promotion_ready"]`` —
+        # see ``write_learning_review_artifacts``.
+        paths = write_learning_review_artifacts(
+            report=report, output_dir=output_dir, document_store=document_store
+        )
         if _meta_record.enabled and report.get("candidate_count", 0) > 0:
             _meta_record.produced_finding(
                 f"learning-candidates-d{days}-m{min_support}",
@@ -3251,6 +3291,16 @@ def learning_candidates(
     console.print(
         f"  Decisions template: [cyan]{escape(paths['decisions_template_path'])}[/cyan]"
     )
+    promotion_ready_count = int(
+        (report.get("promotion_ready") or {}).get("count", 0) or 0
+    )
+    if promotion_ready_count:
+        # Surfacing only (#845) — nothing here promotes anything.
+        noun = "candidate" if promotion_ready_count == 1 else "candidates"
+        console.print(
+            f"  {promotion_ready_count} {noun} promotion-ready — review with "
+            "[bold]trellis curate promote-learning[/bold] or the Review tab"
+        )
 
     if not report["candidates"]:
         console.print()
@@ -3276,13 +3326,18 @@ def learning_candidates(
             if candidate["recommendation_type"].startswith("promote_")
             else "yellow"
         )
+        # ``retry_rate`` is ``None`` whenever no feedback event in the
+        # window reported ``had_retry`` at all (scoring.py's
+        # ``metrics_coverage``) — a sparse-signal fact, not a zero. Render
+        # "n/a" rather than formatting ``None`` as a percentage.
+        retry_rate = metrics["retry_rate"]
         table.add_row(
             escape(candidate["candidate_id"]),
             f"[{rec_style}]{candidate['recommendation_type']}[/{rec_style}]",
             candidate.get("item_type") or "-",
             str(metrics["times_served"]),
             f"{metrics['success_rate']:.1%}",
-            f"{metrics['retry_rate']:.1%}",
+            "n/a" if retry_rate is None else f"{retry_rate:.1%}",
         )
     console.print(table)
     console.print()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from trellis_sdk._http import (
     SDK_VERSION,
     _parse_retry_after,
     check_handshake,
+    describe_body_parse_error,
     raise_for_status,
 )
 from trellis_sdk.client import TrellisClient
@@ -178,3 +180,42 @@ class TestIntegrationHandshake:
             import trellis_api.app as app_module
 
             app_module._registry = None
+
+
+# ---------------------------------------------------------------------------
+# Follow-up to trellis-ai#829/#836/#837's "describe, don't quote" sweep
+# (issue #206): ``describe_body_parse_error`` is a local, dependency-free
+# port of ``trellis.core.error_sanitize.describe_validation_error`` /
+# ``describe_json_error`` -- ``trellis_sdk`` must not import ``trellis.*``
+# (test_isolation.py), so these two branches get their own direct coverage
+# rather than relying solely on the end-to-end record_feedback tests.
+# ---------------------------------------------------------------------------
+
+#: A credential-shaped planted value -- the hostile document content a
+#: JSONDecodeError's ``.doc``/``.pos`` carry but ``str(exc)`` does not.
+_HOSTILE = "sk-ant-TESTTOKEN-9f8e7d6c5b4a"
+
+
+class TestDescribeBodyParseError:
+    def test_json_decode_error_drops_the_document(self) -> None:
+        try:
+            json.loads(f'{{"leak": "{_HOSTILE}", "oops"')
+        except json.JSONDecodeError as exc:
+            detail = describe_body_parse_error(exc)
+        else:  # pragma: no cover - defensive
+            pytest.fail("expected JSONDecodeError")
+        assert _HOSTILE not in detail
+        assert "line" in detail
+        assert "column" in detail
+        # Exact match, not just absence-of-leak: ``str(exc)`` for this
+        # same JSONDecodeError is "Expecting ':' delimiter: line 1
+        # column 49 (char 48)" -- it also omits the document and also
+        # contains "line"/"column", so it would pass every assertion
+        # above while being the un-fixed, raw-``str(exc)`` behaviour.
+        assert detail == "Expecting ':' delimiter (line 1, column 49)"
+
+    def test_non_validation_exception_falls_back_to_type_name(self) -> None:
+        exc = RuntimeError(f"connection failed: api_key={_HOSTILE}")
+        detail = describe_body_parse_error(exc)
+        assert detail == "RuntimeError"
+        assert _HOSTILE not in detail

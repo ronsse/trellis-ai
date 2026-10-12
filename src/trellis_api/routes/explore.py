@@ -15,8 +15,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN, scopes_satisfy
-from trellis.core.pack_holdout import blind_holdout
-from trellis.stores.base.event_log import Event, EventType
+from trellis.core.pack_holdout import blind_holdout, is_holdout
+from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 
@@ -216,6 +216,17 @@ def list_events(
     }
 
 
+def _is_sectioned(payload: dict[str, Any]) -> bool:
+    """A sectioned pack (``PackBuilder.build_sectioned``) emits ``sections``
+    and no ``injected_items[]`` — the same discriminator ``pack_value.py``
+    uses to exclude sectioned packs from per-item attribution. A flat pack
+    contributes ``injected_items[]`` and, before #371, could legitimately
+    have none (zero candidates); checking ``sections`` first keeps that
+    case flagged as flat, not sectioned.
+    """
+    return bool(payload.get("sections")) and not payload.get("injected_items")
+
+
 def _pack_summary(event: Event) -> dict[str, Any]:
     payload = event.payload or {}
     return {
@@ -229,18 +240,26 @@ def _pack_summary(event: Event) -> dict[str, Any]:
         "candidates_found": payload.get("candidates_found"),
         "strategies_used": payload.get("strategies_used", []),
         "reranker": payload.get("reranker"),
+        "sectioned": _is_sectioned(payload),
     }
 
 
 @router.get("/packs")
 def list_packs(
+    until: datetime | None = Query(  # noqa: B008 — FastAPI DI idiom
+        None,
+        description=(
+            "Upper bound (inclusive) on assembly time. Page older history"
+            " by passing the oldest created_at you have."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
 ) -> dict[str, Any]:
     """List assembled context packs (newest first), summary fields only."""
     registry = get_registry()
     event_log = registry.operational.event_log
     events = event_log.get_events(
-        event_type=EventType.PACK_ASSEMBLED, limit=limit, order="desc"
+        event_type=EventType.PACK_ASSEMBLED, until=until, limit=limit, order="desc"
     )
     return {
         "status": "ok",
@@ -262,6 +281,12 @@ def get_pack(
     ``trellis.learning.pack_observations.join_pack_feedback``). On a
     withheld pack's row, the ``holdout_*`` keys but ``holdout_rate`` (the
     would-be pack) reach ``admin`` callers only.
+
+    ``feedback`` stays capped at 50 rows, but ``feedback_total`` (the
+    true count, read via a bounded ``DEFAULT_SCAN_LIMIT`` over-fetch
+    since :meth:`EventLog.count` cannot filter by ``payload_filters``)
+    and ``feedback_truncated`` (``feedback_total > len(feedback)``) now
+    say when the 50-row list is not the whole picture (P1-9).
     """
     registry = get_registry()
     event_log = registry.operational.event_log
@@ -271,19 +296,33 @@ def get_pack(
     if not events:
         raise HTTPException(status_code=404, detail=f"Pack not found: {pack_id}")
     event = events[0]
-    feedback = event_log.get_events(
+    # One bounded fetch serves both the displayed slice and the true
+    # total, so the two can never disagree about which 50 rows they
+    # describe. A pack accumulating >= DEFAULT_SCAN_LIMIT feedback rows
+    # is not expected in practice; ``feedback_total`` would then read as
+    # a floor rather than an exact count, same as any other capped scan.
+    feedback_scan = event_log.get_events(
         event_type=EventType.FEEDBACK_RECORDED,
         payload_filters={"pack_id": pack_id},
-        limit=50,
+        limit=DEFAULT_SCAN_LIMIT,
     )
+    feedback_total = len(feedback_scan)
+    feedback = feedback_scan[:50]
     payload = event.payload or {}
+    blind = _blind(ctx)
     return {
         "status": "ok",
         "pack": {
             **_pack_summary(event),
-            "payload": blind_holdout(payload) if _blind(ctx) else payload,
+            "payload": blind_holdout(payload) if blind else payload,
         },
+        # True when this caller's own payload above had fields stripped
+        # (a held-out pack, read without admin) — so the UI can say *why*
+        # a field reads short rather than let it pass as "nothing there".
+        "holdout_blinded": blind and is_holdout(payload),
         "feedback": [f.model_dump(mode="json") for f in feedback],
+        "feedback_total": feedback_total,
+        "feedback_truncated": feedback_total > len(feedback),
     }
 
 

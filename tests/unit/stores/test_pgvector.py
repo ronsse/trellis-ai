@@ -53,6 +53,12 @@ class TestUpsert:
         assert result is not None
         assert result["metadata"]["v"] == 2
 
+    def test_upsert_refuses_a_non_finite_metadata_value(self, store):
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert("a", _vec(1, 0, 0), metadata={"score": float("nan")})
+        assert store.get("a") is None
+        assert store.count() == 0
+
 
 class TestGet:
     def test_returns_none_when_missing(self, store):

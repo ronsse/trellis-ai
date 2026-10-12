@@ -58,20 +58,22 @@ class TestMeasurementRequiredFields:
 
 
 class TestMeasurementValueTypes:
-    @pytest.mark.parametrize("value", [0.0, 0.5, 1.0, 999.9, -1.0, 1e9])
+    @pytest.mark.parametrize("value", [0.0, 0.5, 1.0, 999.9, -1.0, 1e9, 1e308])
     def test_metric_value_accepts_floats(self, value: float) -> None:
         m = Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
         assert m.metric_value == value
 
     def test_metric_value_refuses_nan(self) -> None:
-        with pytest.raises(ValidationError, match="not NaN"):
+        with pytest.raises(ValidationError, match="finite number"):
             Measurement(**{**_valid_kwargs(), "metric_value": float("nan")})  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
-    def test_metric_value_accepts_infinity(self, value: float) -> None:
-        """Refusing Infinity is an open owner decision; this pins today's answer."""
-        m = Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
-        assert m.metric_value == value
+    def test_metric_value_refuses_infinity(self, value: float) -> None:
+        """Infinity breaks Postgres JSONB storage and poisons downstream
+        arithmetic (``inf - inf`` is NaN); see the field docstring. This
+        flips the pin that used to accept it."""
+        with pytest.raises(ValidationError, match="finite number"):
+            Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
 
     def test_unit_optional(self) -> None:
         m = Measurement(**{**_valid_kwargs(), "unit": "percent"})  # type: ignore[arg-type]

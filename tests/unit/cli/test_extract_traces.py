@@ -139,6 +139,45 @@ class TestBackfill:
         assert data["traces_scanned"] == 0
 
 
+class TestBackfillLongValuesDoNotWrap:
+    def test_per_trace_row_long_domain_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_print_backfill``'s per-trace row, printed before ``traces()``
+        exits non-zero on a refused backfill: its draft counts come from
+        extraction, not the batch's commit outcome, so the row prints with
+        a long domain even when every write is denied."""
+        monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+        monkeypatch.setenv("COLUMNS", "60")
+        long_domain = "synthetic-backfill-domain-" + "0123456789abcdef" * 4
+        trace = {
+            "source": "agent",
+            "intent": "synthetic backfill probe",
+            "steps": [{"step_type": "tool_call", "name": "grep"}],
+            "context": {"agent_id": "probe-agent", "domain": long_domain},
+        }
+        _ingest(trace)
+        condition = "synthetic-deny-backfill-" + "fedcba9876543210" * 4
+        added = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "*",
+                "--action",
+                "deny",
+                "--condition",
+                condition,
+            ],
+        )
+        assert added.exit_code == 0, added.stdout
+        result = runner.invoke(app, ["extract", "traces"])
+        assert result.exit_code != 0, result.stdout
+        lines = plain(result.stdout).splitlines()
+        assert any(long_domain in line for line in lines), result.stdout
+
+
 class _DriverError(Exception):
     """An exception outside the executor's handler tuple, as ``psycopg.Error`` is."""
 

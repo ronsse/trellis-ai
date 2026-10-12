@@ -277,7 +277,10 @@ class ArcadeDBVectorStore(VectorStore):
             f"UPDATE Node SET embedding = {vec_literal}, "
             f"vector_metadata_json = :meta "
             f"WHERE node_id = :item_id AND valid_to IS NULL",
-            params={"meta": json.dumps(metadata or {}), "item_id": item_id},
+            params={
+                "meta": json.dumps(metadata or {}, allow_nan=False),
+                "item_id": item_id,
+            },
         )
         count = int(rows[0]["count"]) if rows and isinstance(rows[0], dict) else 0
         if count == 0:

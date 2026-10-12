@@ -204,28 +204,52 @@ def test_a_failed_idempotency_read_logs_its_type_and_not_its_cause(
 
 
 @pytest.mark.parametrize(
-    ("handler", "message", "result_message"),
+    ("handler", "message", "result_message", "error_type", "error_code", "cause"),
     [
         pytest.param(
             _MappedDriverFailure(),
             _TYPED_MESSAGE,
             f"Execution failed: {_TYPED_MESSAGE}",
+            "StoreError",
+            "STORE_ERROR",
+            {
+                "error_type": "_DriverError",
+                "error_code": None,
+                "message": f"server says: {_SERVER_TEXT}",
+            },
             id="typed",
         ),
         pytest.param(
-            _Panic(), _PANIC_MESSAGE, "Execution failed: RuntimeError", id="unexpected"
+            _Panic(),
+            _PANIC_MESSAGE,
+            "Execution failed: RuntimeError",
+            "RuntimeError",
+            None,
+            None,
+            id="unexpected",
         ),
     ],
 )
 def test_a_handler_failure_returns_failed_and_audits_one_rejection(
-    handler: CommandHandler, message: str, result_message: str
+    handler: CommandHandler,
+    message: str,
+    result_message: str,
+    error_type: str,
+    error_code: str | None,
+    cause: dict[str, object] | None,
 ) -> None:
     """The FAILED result and the MUTATION_REJECTED event a failure produces.
 
     Every field is pinned, and the command's optional fields are set to distinct
     values, so a change to how the failure is logged cannot move what the caller
     and the audit see. ``executed_at`` is a clock and ``schema_version`` the
-    model's own.
+    model's own. ``error_type`` is always present; ``error_code`` only when
+    ``summarize_exception`` found one (``StoreError``'s fixed code; a bare
+    ``RuntimeError`` has none, so the key is absent rather than ``None``).
+    ``_MappedDriverFailure`` chains its ``StoreError`` from the ``_DriverError``
+    it caught, so that case also carries a one-level ``cause`` summarizing the
+    driver exception; ``_Panic`` chains nothing, so its payload has no ``cause``
+    key.
     """
     event_log = MagicMock()
     event_log.has_idempotency_key.return_value = False
@@ -254,20 +278,26 @@ def test_a_handler_failure_returns_failed_and_audits_one_rejection(
         "warnings": [],
         "metadata": {},
     }
+    expected_payload = {
+        "command_id": _COMMAND_ID,
+        "operation": Operation.ENTITY_CREATE,
+        "status": CommandStatus.FAILED,
+        "message": message,
+        "requested_by": "test:synthetic",
+        "idempotency_key": "idem-synthetic-1",
+        "error_type": error_type,
+    }
+    if error_code is not None:
+        expected_payload["error_code"] = error_code
+    if cause is not None:
+        expected_payload["cause"] = cause
     assert event_log.emit.call_args_list == [
         call(
             EventType.MUTATION_REJECTED,
             "mutation_executor",
             entity_id="node-synthetic-1",
             entity_type="entity",
-            payload={
-                "command_id": _COMMAND_ID,
-                "operation": Operation.ENTITY_CREATE,
-                "status": CommandStatus.FAILED,
-                "message": message,
-                "requested_by": "test:synthetic",
-                "idempotency_key": "idem-synthetic-1",
-            },
+            payload=expected_payload,
         )
     ]
 
@@ -374,7 +404,12 @@ def test_a_failed_read_and_emit_return_failed_with_the_audit_warning() -> None:
 
     The warning names the raw emit error by its type alone, as the
     ``audit_emit_failed`` line does: the result reaches the caller, and a
-    driver's text can carry query text and values.
+    driver's text can carry query text and values. The stored
+    ``mutation.rejected`` payload is different: its ``message`` and
+    ``error_type`` carry ``summarize_exception``'s sanitized summary of the
+    read's own driver error (here, synthetic text with no leak-shaped
+    content, so it survives masking unmodified) — the owner's requirement
+    that audit events carry the actual error, not only its type.
     """
     result, event_log, handler = _run_keyed_command(_raw, _raw)
 
@@ -407,10 +442,11 @@ def test_a_failed_read_and_emit_return_failed_with_the_audit_warning() -> None:
                 "command_id": _COMMAND_ID,
                 "operation": Operation.ENTITY_CREATE,
                 "status": CommandStatus.REJECTED,
-                "message": "Idempotency check failed: OperationalError",
+                "message": f"Idempotency check failed: server says: {_SERVER_TEXT}",
                 "requested_by": "test:synthetic",
                 "idempotency_key": "idem-synthetic-3",
                 "reason": "idempotency_check_failed",
+                "error_type": "OperationalError",
             },
         )
     ]

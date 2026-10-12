@@ -8,6 +8,7 @@ import shlex
 import shutil
 import time
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, NoReturn
@@ -18,6 +19,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from trellis.core.base import utc_now
 from trellis.core.error_sanitize import describe_yaml_error, sanitize_error_message
 from trellis.core.path_presence import path_is_present
 from trellis.core.version import (
@@ -32,10 +34,14 @@ from trellis.core.write_config import (
     MEMORY_EXTRACTION_FLAG,
     TRUTHY,
     WriteBehaviourConfig,
+    resolve_overridden_by,
 )
 from trellis.core.write_provenance import build_write_provenance
-from trellis.errors import BackendNotInstalledError
+from trellis.errors import BackendNotInstalledError, StoreWriteRefusedError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
+from trellis.schedule.catalog import JOB_CATALOG
+from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import get_skills_target_dir, install_skills
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
@@ -46,6 +52,7 @@ from trellis_cli.stores import (
     get_document_store,
     get_event_log,
     get_graph_store,
+    get_schedule_store,
     get_trace_store,
 )
 
@@ -413,10 +420,23 @@ def write_config(
     a working tree that has moved on reports the sha it was installed at,
     confidently and wrongly. That row compares it against the tree's live
     ``HEAD``.
+
+    Each knob's ``overridden_by`` names which of ``env`` / ``settings`` /
+    ``default`` is in force — read fresh from
+    ``<data_dir>/stores/settings.json`` on every call (no caching,
+    matching every other reader in this module), so a concurrent
+    ``trellis admin settings`` write is visible on the next invocation. A
+    **settings**-sourced row is reported truthfully even for the one knob
+    where it has no live effect yet (``SettingSpec.settings_live`` in
+    ``trellis.core.settings_registry`` — today that is every field except
+    ``minhash_seed_max_docs``, read once at process start).
     """
-    config = WriteBehaviourConfig.from_env()
+    stores_dir = get_data_dir() / "stores"
+    settings_values = load_settings_values(stores_dir)
+    config = WriteBehaviourConfig.from_env_and_settings(settings=settings_values)
     provenance = build_write_provenance(config)
     staleness = resolve_stamp_staleness()
+    overridden_by = resolve_overridden_by(settings=settings_values)
 
     if output_format == "json":
         # The stamp verbatim (so it can be diffed against a stored row)
@@ -428,7 +448,7 @@ def write_config(
         # where they stand.
         payload = {
             "write_provenance": provenance,
-            "knobs": config.describe(),
+            "knobs": config.describe(overridden_by=overridden_by),
             "stamp_staleness": {
                 "state": staleness.state,
                 "source_tree_commit": staleness.source_tree_commit,
@@ -455,13 +475,15 @@ def write_config(
     knobs.add_column("Env var", overflow="fold")
     knobs.add_column("Value", overflow="fold")
     knobs.add_column("Default", overflow="fold")
-    for row in config.describe():
+    knobs.add_column("Overridden by", overflow="fold")
+    for row in config.describe(overridden_by=overridden_by):
         style = "yellow" if row["overridden"] else None
         knobs.add_row(
             row["name"],
             row["env_var"],
             str(row["value"]),
             str(row["default"]),
+            row["overridden_by"],
             style=style,
         )
     console.print(knobs)
@@ -491,7 +513,7 @@ def serve(
         raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
     console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
-    app = create_app()
+    app = create_app(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
 
@@ -1894,6 +1916,383 @@ def migrate_graph(
 
 
 # ---------------------------------------------------------------------------
+# Schedule registry + job-run records (#e166, plan p1 §(b)). The container
+# never touches crontab; a host-side dispatcher (documented, not installed,
+# at docs/ops/job-dispatcher.sh.example) calls due-jobs, execs each due job's
+# argv directly (never through a shell) or, for a host-only job, resolves
+# $TRELLIS_HOST_JOBS_DIR/<name> itself, and calls record-job-run once per
+# execution. schedule.json holds no command at all — due-jobs joins each row
+# with trellis.schedule.catalog.JOB_CATALOG by name; see that module and
+# src/trellis/stores/schedule_store.py's module docstring for the full
+# boundary argument.
+# ---------------------------------------------------------------------------
+
+
+def _render_schedule_degradation(degraded: dict[str, Any] | None) -> None:
+    """Print the schedule store's degraded state, or nothing at all.
+
+    Mirrors ``trellis_cli.policy._render_degradation`` — same markup and
+    wrapping hazards (an exception ``detail`` can contain ``[...]``; a long
+    ``mv`` recovery command must survive as one line), same fix.
+    """
+    if not degraded:
+        return
+    console.print(
+        f"  [bold red]SCHEDULE STORE DEGRADED[/bold red] — "
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}",
+        soft_wrap=True,
+    )
+    console.print(
+        f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
+        f"({degraded['rows_loaded']} job(s) readable, "
+        f"{escape(str(degraded['rows_skipped_display']))} not)",
+        soft_wrap=True,
+    )
+    console.print(
+        "    Writes are refused so the file is intact. This listing is a "
+        "partial view, not the whole registry.",
+        soft_wrap=True,
+    )
+    console.print(
+        f"    To reset: [bold]{escape(str(degraded['recovery']))}[/bold]",
+        soft_wrap=True,
+    )
+
+
+def _last_completed_job_run(event_log: EventLog, job_name: str) -> datetime | None:
+    """The ``finished_at`` of the most recent ``JOB_RUN_COMPLETED`` for *job_name*.
+
+    Reads the payload's own ``finished_at`` rather than the event's
+    ``occurred_at``. The two coincide for a live dispatcher — it calls
+    ``record-job-run`` immediately after the job exits — but only the
+    payload field is correct for a backfilled or replayed row, and nothing
+    here needs to assume it is never one.
+    """
+    events = event_log.get_events(
+        event_type=EventType.JOB_RUN_COMPLETED,
+        entity_id=f"job:{job_name}",
+        order="desc",
+        limit=1,
+    )
+    if not events:
+        return None
+    raw = events[0].payload.get("finished_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+@admin_app.command("record-job-run")
+def record_job_run(
+    job: str = typer.Option(..., "--job", help="Job name (schedule registry key)."),
+    duration_ms: int = typer.Option(
+        ..., "--duration-ms", min=0, help="Wall-clock duration of the run, in ms."
+    ),
+    exit_code: int = typer.Option(
+        ..., "--exit-code", help="The job process's own exit code."
+    ),
+    status: str = typer.Option(
+        "",
+        "--status",
+        help=(
+            "Free-form status label (default: 'ok' or 'failed', derived "
+            "from --exit-code). Use e.g. 'skipped_overlap' when the "
+            "dispatcher's flock meant the job never ran."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Record one job execution as a JOB_RUN_STARTED / JOB_RUN_COMPLETED pair.
+
+    Modeled on ``CAPTURE_SWEEP_COMPLETED``: a plain audit record of what a
+    dispatcher ran, not a governed mutation — there is no state these
+    events gate, so they go straight to the EventLog rather than through
+    ``MutationExecutor``. Call this once, immediately after the job
+    process exits; ``started_at`` is derived as ``now - duration_ms``
+    rather than taken as a second argument, since the dispatcher already
+    has to measure the duration and a wrapper calling this correctly
+    cannot make the two disagree.
+
+    Recording a *failed* job's run (a nonzero ``--exit-code``) is itself a
+    successful CLI call and exits 0 — "the dispatcher ran this job and it
+    failed" is exactly the fact this command exists to durably record.
+    Only a failure to write both events (EventLog unavailable) is this
+    command's own failure, and exits non-zero.
+    """
+    if output_format not in ("text", "json"):
+        typer.echo(
+            f"Unsupported --format {output_format!r}; expected one of: text, json"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    now = utc_now()
+    started_at = now - timedelta(milliseconds=duration_ms)
+    resolved_status = status.strip() or ("ok" if exit_code == 0 else "failed")
+    run_id = None
+    error: str | None = None
+    try:
+        from trellis.core.ids import generate_ulid  # noqa: PLC0415
+
+        run_id = generate_ulid()
+        event_log = get_event_log()
+        entity_id = f"job:{job}"
+        event_log.emit(
+            EventType.JOB_RUN_STARTED,
+            source="trellis.admin.record_job_run",
+            entity_id=entity_id,
+            entity_type="scheduled_job",
+            payload={
+                "job": job,
+                "run_id": run_id,
+                "started_at": started_at.isoformat(),
+            },
+        )
+        event_log.emit(
+            EventType.JOB_RUN_COMPLETED,
+            source="trellis.admin.record_job_run",
+            entity_id=entity_id,
+            entity_type="scheduled_job",
+            payload={
+                "job": job,
+                "run_id": run_id,
+                "started_at": started_at.isoformat(),
+                "finished_at": now.isoformat(),
+                "duration_ms": duration_ms,
+                "exit_code": exit_code,
+                "status": resolved_status,
+            },
+        )
+    except Exception as exc:
+        error = sanitize_error_message(str(exc))
+
+    failed = error is not None
+
+    if output_format == "json":
+        payload: dict[str, Any] = {
+            "status": "error" if failed else "ok",
+            "job": job,
+            "run_id": run_id,
+            "exit_code": exit_code,
+            "job_status": resolved_status,
+            "recorded": not failed,
+        }
+        if failed:
+            payload["message"] = error
+        emit_json(payload, indent=2)
+    elif failed:
+        console.print(
+            f"[red]Failed to record job run for {escape(job)}: "
+            f"{escape(str(error))}[/red]",
+            soft_wrap=True,
+        )
+    else:
+        console.print(
+            f"Recorded [bold]{escape(job)}[/bold]: "
+            f"exit_code={exit_code} status={escape(resolved_status)}"
+        )
+
+    if failed:
+        raise typer.Exit(code=EXIT_STORE)
+
+
+@admin_app.command("due-jobs")
+def due_jobs(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """List schedule-registry jobs that are due to run now.
+
+    Due-ness (``trellis.core.cron.is_job_due``) combines, per job:
+    ``enabled`` (false always wins), ``run_requested_at`` (a manual "Run
+    now" newer than the last completed run is always due — the only way a
+    ``cadence: null`` job is ever due), and ``cadence`` against the most
+    recent ``JOB_RUN_COMPLETED`` for that job name. A job that has never
+    completed is always due.
+
+    Every due row is joined with its
+    :data:`trellis.schedule.catalog.JOB_CATALOG` entry by name — the
+    schedule file never supplies a command. A Trellis-native job reports
+    its catalog ``argv``; a host-only job reports ``command: null`` and
+    ``host_only: true``, a marker the dispatcher turns into
+    ``$TRELLIS_HOST_JOBS_DIR/<name>`` itself, never a path this command
+    emits.
+
+    Works on a degraded schedule file — the jobs that parsed are still
+    checked — but says so and exits
+    :data:`~trellis_cli.exit_codes.EXIT_STORE` rather than 0: a partial
+    due-jobs answer presented as complete is the failure mode a dispatcher
+    must not see silently.
+    """
+    if output_format not in ("text", "json"):
+        typer.echo(
+            f"Unsupported --format {output_format!r}; expected one of: text, json"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    store = get_schedule_store()
+    jobs = store.list()
+    degradation = store.degradation
+    degraded = degradation.to_dict() if degradation else None
+    file_present = path_is_present(store.path)
+
+    event_log = get_event_log()
+    now = utc_now()
+    due: list[dict[str, Any]] = []
+    for schedule_job in jobs:
+        last_completed_at = _last_completed_job_run(event_log, schedule_job.name)
+        from trellis.core.cron import is_job_due  # noqa: PLC0415
+
+        if is_job_due(
+            enabled=schedule_job.enabled,
+            cadence=schedule_job.cadence,
+            run_requested_at=schedule_job.run_requested_at,
+            last_completed_at=last_completed_at,
+            now=now,
+        ):
+            # ScheduledJob.name is validated against JOB_CATALOG on every
+            # load, so this lookup cannot miss for a row store.list()
+            # returned. due-jobs never reads a command from the file —
+            # only this catalog join supplies one.
+            spec = JOB_CATALOG[schedule_job.name]
+            due.append(
+                {
+                    "name": schedule_job.name,
+                    "command": list(spec.argv) if spec.argv is not None else None,
+                    "host_only": spec.host_only,
+                    "cadence": schedule_job.cadence,
+                    "timeout_seconds": (
+                        schedule_job.timeout_seconds
+                        if schedule_job.timeout_seconds is not None
+                        else spec.default_timeout_seconds
+                    ),
+                    "last_completed_at": (
+                        last_completed_at.isoformat() if last_completed_at else None
+                    ),
+                    "run_requested_at": (
+                        schedule_job.run_requested_at.isoformat()
+                        if schedule_job.run_requested_at
+                        else None
+                    ),
+                }
+            )
+
+    if output_format == "json":
+        payload = {
+            "status": "degraded" if degraded else "ok",
+            "count": len(due),
+            "due_jobs": due,
+            "schedule_file": str(store.path),
+            "schedule_file_present": file_present,
+            "store_degradation": degraded,
+        }
+        emit_json(payload, indent=2, default=str)
+        if degraded:
+            raise typer.Exit(code=EXIT_STORE)
+        return
+
+    _render_schedule_degradation(degraded)
+    if not due:
+        console.print("[dim]No jobs due.[/dim]")
+        if degraded:
+            raise typer.Exit(code=EXIT_STORE)
+        return
+
+    table = Table(title="Due Jobs")
+    table.add_column("Name", style="cyan")
+    table.add_column("Cadence")
+    table.add_column("Host-only")
+    table.add_column("Last completed")
+    for row in due:
+        table.add_row(
+            escape(str(row["name"])),
+            escape(str(row["cadence"])) if row["cadence"] else "[dim]manual[/dim]",
+            "yes" if row["host_only"] else "no",
+            escape(str(row["last_completed_at"]))
+            if row["last_completed_at"]
+            else "never",
+        )
+    console.print(table)
+    if degraded:
+        raise typer.Exit(code=EXIT_STORE)
+
+
+@admin_app.command("init-schedule")
+def init_schedule(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Seed the schedule registry with Trellis's own default jobs.
+
+    Adds each default job (the nightly capture/curate/backup/roadmap
+    sweeps, the tuner dry-run, and manual-only CLI commands from the UI
+    gap inventory) whose name is not already present in ``schedule.json``.
+    Never overwrites a job an operator already edited or added under the
+    same name — safe to re-run, and a no-op once the defaults are in.
+    """
+    if output_format not in ("text", "json"):
+        typer.echo(
+            f"Unsupported --format {output_format!r}; expected one of: text, json"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    from trellis_cli.schedule_seed import default_scheduled_jobs  # noqa: PLC0415
+
+    store = get_schedule_store()
+    degradation = store.degradation
+    if degradation is not None:
+        degraded = degradation.to_dict()
+        if output_format == "json":
+            emit_json(
+                {"status": "degraded", "store_degradation": degraded},
+                indent=2,
+                default=str,
+            )
+        else:
+            _render_schedule_degradation(degraded)
+        raise typer.Exit(code=EXIT_STORE)
+
+    existing = {existing_job.name for existing_job in store.list()}
+    defaults = default_scheduled_jobs()
+    to_add = [j for j in defaults if j.name not in existing]
+    skipped = [j.name for j in defaults if j.name in existing]
+
+    error: str | None = None
+    if to_add:
+        try:
+            store.put_many(to_add)
+        except StoreWriteRefusedError as exc:
+            error = exc.message
+
+    failed = error is not None
+
+    if output_format == "json":
+        payload: dict[str, Any] = {
+            "status": "error" if failed else "ok",
+            "added": [j.name for j in to_add] if not failed else [],
+            "skipped": skipped,
+        }
+        if failed:
+            payload["message"] = error
+        emit_json(payload, indent=2, default=str)
+    elif failed:
+        console.print(f"[red]{escape(str(error))}[/red]", soft_wrap=True)
+    else:
+        console.print(
+            f"[green]Added {len(to_add)} job(s)[/green]; "
+            f"{len(skipped)} already present."
+        )
+    if failed:
+        raise typer.Exit(code=EXIT_STORE)
+
+
+# ---------------------------------------------------------------------------
 # smoke-test — operationalises the validation checklist in
 # docs/deployment/runbook.md "Validating a deployment". Run after a
 # fresh deploy or before sending real traffic; exits non-zero on any
@@ -1933,23 +2332,65 @@ def _check_healthz(client: httpx.Client) -> dict[str, Any]:
     return _record_check("healthz", "pass", started)
 
 
-def _check_readyz(client: httpx.Client) -> dict[str, Any]:
+def _get_with_key_retry(
+    client: httpx.Client, path: str, api_key: str | None
+) -> tuple[httpx.Response, list[str], bool]:
+    """GET ``path``, sending ``api_key`` as ``X-API-Key`` when one resolves.
+
+    Key *validity* is ``_check_auth_accepts_valid``'s verdict to render, not
+    this probe's: if the key is rejected (401), re-probe once without the
+    header so the underlying question (is it ready? is metrics reachable?)
+    is still answered rather than reporting unrelated breakage. Returns the
+    final response, any notes earned along the way, and whether the key was
+    rejected (so a caller can decide how to phrase a missing-detail note).
+    """
+    headers = {"X-API-Key": api_key} if api_key else None
+    response = client.get(path, headers=headers)
+    notes: list[str] = []
+    key_rejected = False
+    if api_key and response.status_code == HTTPStatus.UNAUTHORIZED:
+        key_rejected = True
+        notes.append(
+            f"API key rejected by {path} (401); re-probed without it — "
+            "see auth_accepts_valid for key validity"
+        )
+        response = client.get(path)
+    return response, notes, key_rejected
+
+
+def _check_readyz(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
     started = time.monotonic_ns()
     try:
-        response = client.get("/readyz")
+        response, notes, key_rejected = _get_with_key_retry(client, "/readyz", api_key)
     except httpx.HTTPError as exc:
         return _record_check("readyz", "fail", started, error=str(exc))
+
     body = _safe_json(response)
     backends = body.get("backends") if isinstance(body, dict) else None
+    if isinstance(body, dict) and backends is None:
+        # /readyz withholds the per-backend breakdown from a caller with
+        # no credential (trellis_api.routes.health.readyz); say so instead
+        # of silently reporting a bare pass/fail with no detail. Only blame
+        # "no API key" when that's actually why — no key was sent, or the
+        # one that was got rejected above; a valid key with no breakdown is
+        # some other cause, so don't misattribute it.
+        if not api_key or key_rejected:
+            notes.append("per-backend breakdown withheld (no API key)")
+        else:
+            notes.append("per-backend breakdown absent")
+    extra: dict[str, Any] = {"backends": backends}
+    if notes:
+        extra["note"] = "; ".join(notes)
+
     if response.status_code != HTTPStatus.OK:
         return _record_check(
             "readyz",
             "fail",
             started,
             error=f"expected 200, got {response.status_code}",
-            backends=backends,
+            **extra,
         )
-    return _record_check("readyz", "pass", started, backends=backends)
+    return _record_check("readyz", "pass", started, **extra)
 
 
 def _check_auth_rejects_missing(client: httpx.Client) -> dict[str, Any]:
@@ -1984,12 +2425,19 @@ def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, A
     return _record_check("auth_accepts_valid", "pass", started)
 
 
-def _check_metrics(client: httpx.Client) -> dict[str, Any]:
+def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
     started = time.monotonic_ns()
     try:
-        response = client.get("/metrics")
+        response, notes, _key_rejected = _get_with_key_retry(
+            client, "/metrics", api_key
+        )
     except httpx.HTTPError as exc:
         return _record_check("metrics", "fail", started, error=str(exc))
+
+    def _extra(extra_note: str | None = None) -> dict[str, Any]:
+        all_notes = [*notes, extra_note] if extra_note else notes
+        return {"note": "; ".join(all_notes)} if all_notes else {}
+
     # 404 means the [observability] extra isn't installed — that's a
     # legitimate deploy choice, not a smoke-test failure. Treat as info.
     if response.status_code == HTTPStatus.NOT_FOUND:
@@ -1997,7 +2445,7 @@ def _check_metrics(client: httpx.Client) -> dict[str, Any]:
             "metrics",
             "info",
             started,
-            note="not wired (install trellis-ai[observability] to enable)",
+            **_extra("not wired (install trellis-ai[observability] to enable)"),
         )
     if response.status_code != HTTPStatus.OK:
         return _record_check(
@@ -2005,6 +2453,7 @@ def _check_metrics(client: httpx.Client) -> dict[str, Any]:
             "fail",
             started,
             error=f"expected 200, got {response.status_code}",
+            **_extra(),
         )
     # Prometheus exposition format starts every metric with a # HELP
     # comment; bail if the body doesn't look like one.
@@ -2014,8 +2463,9 @@ def _check_metrics(client: httpx.Client) -> dict[str, Any]:
             "fail",
             started,
             error="response is not Prometheus format (no '# HELP' line in first 4KB)",
+            **_extra(),
         )
-    return _record_check("metrics", "pass", started)
+    return _record_check("metrics", "pass", started, **_extra())
 
 
 def _safe_json(response: httpx.Response) -> Any:
@@ -2079,7 +2529,7 @@ def _render_smoke_text(
                 f"        [red]{escape(check['error'])}[/red]", soft_wrap=True
             )
         if check.get("note"):
-            console.print(f"        [dim]{escape(check['note'])}[/dim]")
+            console.print(f"        [dim]{escape(check['note'])}[/dim]", soft_wrap=True)
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
         if check["name"] == "readyz" and isinstance(check.get("backends"), dict):
@@ -2153,7 +2603,7 @@ def smoke_test(
     checks: list[dict[str, Any]] = []
     with httpx.Client(base_url=base_url, timeout=timeout) as client:
         checks.append(_check_healthz(client))
-        checks.append(_check_readyz(client))
+        checks.append(_check_readyz(client, key))
         if key:
             checks.append(_check_auth_rejects_missing(client))
             checks.append(_check_auth_accepts_valid(client, key))
@@ -2172,7 +2622,7 @@ def smoke_test(
                     "reason": "no API key configured (TRELLIS_API_KEY unset)",
                 }
             )
-        checks.append(_check_metrics(client))
+        checks.append(_check_metrics(client, key))
 
     summary = _summarize(checks)
     ok = summary["fail"] == 0
@@ -2585,6 +3035,19 @@ _register_api_keys(admin_app)
 
 
 # ---------------------------------------------------------------------------
+# schedule set / run — CLI parity for PATCH/POST /admin/jobs (plan p1 PR 6)
+# ---------------------------------------------------------------------------
+# Registration hook mirrors the modules above so the schedule-editing CLI
+# stays in its own module and admin.py only carries the wiring.
+
+from trellis_cli.admin_schedule import (  # noqa: E402
+    register as _register_schedule,
+)
+
+_register_schedule(admin_app)
+
+
+# ---------------------------------------------------------------------------
 # reindex-vectors — embed-on-ingest backfill
 # ---------------------------------------------------------------------------
 # Registration hook mirrors the modules above so the backfill logic stays
@@ -2628,3 +3091,12 @@ from trellis_cli.admin_backfill_outcomes import (  # noqa: E402
 )
 
 _register_backfill_outcomes(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# settings set/unset — governed settings-store write (PR 3, p1 plan)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_settings import register as _register_settings  # noqa: E402
+
+_register_settings(admin_app)

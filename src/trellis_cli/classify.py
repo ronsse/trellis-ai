@@ -50,7 +50,7 @@ is a real difference and is documented in ``operations.md`` too.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
@@ -58,9 +58,8 @@ from rich.markup import escape
 
 from trellis.classify.factory import (
     CLASSIFY_CONFIG_KEY,
-    DOMAIN_ALIASES_KEY,
     DOMAIN_ASPECTS_KEY,
-    DOMAIN_KEYWORDS_KEY,
+    effective_classify_rule_rows,
 )
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
@@ -78,11 +77,26 @@ from trellis.learning.tag_evolution import (
     analyze_tag_keyword_candidates,
     apply_promotion,
 )
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    Operation,
+    build_classify_rules_executor,
+)
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
+from trellis.stores.classify_overrides_store import (
+    ClassifyOverridesStore,
+    resolve_classify_overrides_path,
+)
 from trellis_cli.analyze import _InMemoryParameterStore
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_STORE,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
@@ -595,9 +609,11 @@ def tag_candidates(
     high precision for it, so precision alone would surface the whole
     vocabulary as predictive.
 
-    The text output ends with a ready-to-paste ``classify.domain_keywords``
-    block. Paste it into ``config.yaml`` to promote; delete those lines to
-    revoke.
+    The text output ends with a ready ``trellis classify apply-rule
+    tag_keyword <keyword> <tag> --source-event-id <id>`` line per candidate
+    -- never a ``config.yaml`` fragment to hand-paste. Promoting (or
+    undoing) goes through that governed Apply/Revoke command, which is
+    audited; nothing here writes ``config.yaml`` on your behalf.
     """
     registry = _get_registry()
 
@@ -658,7 +674,7 @@ def tag_candidates(
 def _render_tag_candidates(
     candidates: list[TagKeywordCandidate], *, facet: str, emitted: bool
 ) -> None:
-    """Human-readable rendering, ending in a paste-ready config block."""
+    """Human-readable rendering, ending in a ready apply-rule command per row."""
     if not candidates:
         console.print(
             f"[green]Tag candidates ({facet}):[/green] none surfaced.\n"
@@ -684,21 +700,25 @@ def _render_tag_candidates(
     fragment = apply_promotion({}, candidates).domain_keywords
     if not fragment:
         return
-    config_path = str(get_config_dir() / "config.yaml")
     console.print(
-        f"\n[dim]To promote, merge into {escape(config_path)} (delete the "
-        "lines to revoke):[/dim]"
+        "\n[dim]Not written to config.yaml. To promote one, find its "
+        "source event id via 'GET /api/v1/classify/candidates' (or the Tag "
+        "Rules UI tab) and run the governed command, e.g.:[/dim]"
     )
-    console.print(f"{CLASSIFY_CONFIG_KEY}:")
-    console.print(f"  {DOMAIN_KEYWORDS_KEY}:")
     for tag, keywords in fragment.items():
-        console.print(f"    {tag}:")
         for keyword in keywords:
-            console.print(f"      - {keyword}")
+            console.print(
+                f"  trellis classify apply-rule tag_keyword {keyword} {tag} "
+                "--source-event-id <event-id>",
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
     console.print(
         "\n[yellow]Review before promoting: 'domain' hard-excludes on "
         "mismatch, so a wrong keyword hides documents from domain-scoped "
-        "queries rather than re-ranking them.[/yellow]"
+        "queries rather than re-ranking them. To undo an applied rule, run "
+        "'trellis classify revoke-rule tag_keyword <keyword>'.[/yellow]"
     )
 
 
@@ -824,7 +844,7 @@ def domain_candidates(
 def _render_domain_candidates(
     candidates: list[DomainAliasCandidate], *, total: int, emitted: bool
 ) -> None:
-    """Human-readable rendering, ending in a paste-ready config block."""
+    """Human-readable rendering, ending in a ready apply-rule command per row."""
     if not candidates:
         console.print(
             "[green]Domain alias candidates:[/green] none surfaced.\n"
@@ -875,27 +895,390 @@ def _render_domain_candidates(
             )
 
     fragment = apply_normalization({}, candidates).domain_aliases
-    config_path = str(get_config_dir() / "config.yaml")
     console.print(
-        f"\n[dim]To merge, add to {escape(config_path)} (delete the lines to "
-        "revoke):[/dim]"
+        "\n[dim]Not written to config.yaml. To promote one, find its "
+        "source event id via 'GET /api/v1/classify/candidates' (or the Tag "
+        "Rules UI tab) and run the governed command, e.g.:[/dim]"
     )
-    console.print(f"{CLASSIFY_CONFIG_KEY}:")
-    console.print(f"  {DOMAIN_ALIASES_KEY}:")
     for alias, canonical in fragment.items():
         console.print(
-            f"    {alias}: {canonical}",
+            f"  trellis classify apply-rule domain_alias {alias} {canonical} "
+            "--source-event-id <event-id>",
             markup=False,
             highlight=False,
             soft_wrap=True,
         )
     console.print(
-        "\n[yellow]Review before merging: 'domain' hard-excludes on mismatch, "
-        "so a wrong merge hides every document carrying the alias — in bulk, "
-        "which is worse than one wrong keyword.[/yellow]"
+        "\n[yellow]Review before merging: this only changes how future "
+        "keyword/alias candidates are mined and how rules are labelled -- "
+        "it does not change the domain on any document already stored. "
+        "To undo, run "
+        "'trellis classify revoke-rule domain_alias <alias>'.[/yellow]"
     )
     console.print(
         "[dim]If a destination above collects unrelated subjects it names an "
         f"aspect, not a subject: list it under {CLASSIFY_CONFIG_KEY}."
         f"{DOMAIN_ASPECTS_KEY} and it stops attracting merges.[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# apply-rule / revoke-rule / effective-rules — CLI parity for the governed
+# Apply/Revoke review flow (REST: trellis_api/routes/classify_rules.py).
+# ---------------------------------------------------------------------------
+
+
+def _render_classify_overrides_degradation(degraded: dict[str, Any] | None) -> None:
+    """Print the classify-overrides store's degraded state, or nothing at all.
+
+    Mirrors ``trellis_cli.policy._render_degradation`` /
+    ``trellis_cli.admin._render_schedule_degradation`` -- same markup and
+    wrapping hazards (an exception ``detail`` can contain ``[...]``; a long
+    ``mv`` recovery command must survive as one line), same fix.
+    """
+    if not degraded:
+        return
+    console.print(
+        f"  [bold red]CLASSIFY OVERLAY DEGRADED[/bold red] — "
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}",
+        soft_wrap=True,
+    )
+    console.print(
+        f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
+        f"({degraded['rows_loaded']} applied rule(s) readable, "
+        f"{escape(str(degraded['rows_skipped_display']))} not)",
+        soft_wrap=True,
+    )
+    console.print(
+        "    Writes are refused so the file is intact. This listing is a "
+        "partial view, not every applied rule.",
+        soft_wrap=True,
+    )
+    console.print(f"    recovery: {escape(degraded['recovery'])}", soft_wrap=True)
+
+
+def _execute_classify_command(cmd: Command, output_format: str) -> None:
+    """Submit *cmd*, render the result, and exit non-zero on refusal/failure.
+
+    Mirrors ``trellis_cli.admin_settings._execute`` exactly: both formats
+    are rendered first, the exit decided below that branch
+    (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    registry = _get_registry()
+    result = build_classify_rules_executor(registry).execute(cmd)
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "operation": result.operation,
+                "message": result.message,
+                "created_id": result.created_id,
+                "warnings": list(result.warnings),
+            }
+        )
+    else:
+        if result.status == CommandStatus.SUCCESS:
+            console.print(f"[green]✓ Command executed[/green]: {result.operation}")
+        else:
+            console.print(
+                f"[red]✗ Command {result.status}[/red]: {result.operation}",
+                soft_wrap=True,
+            )
+        console.print(f"  ID: {escape(result.command_id)}")
+        console.print(
+            f"  Message: {result.message}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        raise typer.Exit(code=refusal_exit_code(result))
+
+
+def _print_apply_rule_risk_warning(kind: str, key: str, target: str) -> None:
+    """Print the same truthful risk copy the UI shows before a confirm click.
+
+    The UI only ever surfaces this on ``confirmApplyTagCandidate`` in
+    ``index.html`` -- the CLI route to the identical governed write
+    (``Operation.CLASSIFY_RULE_APPLY``) said nothing. Printed to stderr
+    unconditionally, before the command even executes, so ``--format
+    json`` stdout stays parseable and the exit code is unaffected either
+    way (format-exit parity: this runs above that branch entirely).
+    """
+    if kind == "domain_alias":
+        risk = (
+            f"Merge {key!r} into {target!r}? This only changes how future "
+            "keyword/alias candidates are mined and how rules are labelled "
+            "-- it does not change the domain on any document already "
+            "stored."
+        )
+    else:
+        risk = (
+            f"Apply {key!r} -> {target!r}? A single keyword never assigns "
+            "a domain by itself: this classifier requires at least two "
+            "matching keywords for the same domain in one document, and a "
+            "wrong domain hides content from domain-scoped queries rather "
+            "than just re-ranking it. Even once applied, this has no "
+            "effect by itself -- new and existing content is never "
+            "auto-tagged with domain at write time; it only reaches "
+            "already-stored content if an administrator later runs a "
+            "separate, explicitly opted-in reprocessing pass."
+        )
+    err_console.print(f"[yellow]{escape(risk)}[/yellow]", soft_wrap=True)
+
+
+def _print_revoke_rule_risk_warning(kind: str, key: str) -> None:
+    """Print the same truthful risk copy the UI shows before a confirm click.
+
+    Mirrors ``_print_apply_rule_risk_warning`` for the revoke side
+    (``confirmRevokeTagRule`` in ``index.html``): same stderr-only,
+    format/exit-neutral posture.
+    """
+    if kind == "domain_alias":
+        risk = (
+            f"Revoke {key!r}? This only stops it affecting future "
+            "candidate mining and this listing's badges -- it does not "
+            "change the domain on any document already stored."
+        )
+    else:
+        risk = (
+            "Revoke this rule? Removing the override does not retag any "
+            "content a reprocessing pass already assigned under it -- "
+            "already-stored domain tags stay exactly as they are."
+        )
+    err_console.print(f"[yellow]{escape(risk)}[/yellow]", soft_wrap=True)
+
+
+def _audit_identity() -> dict[str, str | None]:
+    """CLI-actor identity stamped on a classify-rule audit event.
+
+    A local invocation carries no authenticated credential, so this
+    stamps the OS user in place of the REST route's ``key_id``/
+    ``key_name`` (:func:`_audit_identity` in
+    ``trellis_api.routes.classify_rules``) -- no other CLI module
+    stamps identity this way. Apply's handler prefers this identity
+    over ``requested_by`` for the audit event's ``applied_by`` field,
+    so ``--by`` no longer reaches ``applied_by`` at all on
+    ``apply-rule``; it still sets ``requested_by`` itself, a free-text
+    label for the entry point, which ``revoke-rule`` copies directly as
+    ``revoked_by`` (Revoke never reads this identity back the way Apply
+    does).
+    """
+    import getpass  # noqa: PLC0415
+
+    try:
+        user: str | None = getpass.getuser()
+    except Exception:  # pragma: no cover - exotic/no-passwd environments
+        user = None
+    return {"key_id": None, "key_name": f"cli:{user}" if user else "cli"}
+
+
+@classify_app.command("apply-rule")
+def apply_rule(
+    kind: str = typer.Argument(..., help="'tag_keyword' or 'domain_alias'."),
+    key: str = typer.Argument(
+        ..., help="Keyword (tag_keyword) or alias (domain_alias) to apply."
+    ),
+    target: str = typer.Argument(
+        ..., help="Domain (tag_keyword) or canonical tag (domain_alias)."
+    ),
+    source_event_id: str = typer.Option(
+        ...,
+        "--source-event-id",
+        help=(
+            "The TAG_KEYWORD_CANDIDATE/DOMAIN_ALIAS_CANDIDATE event this "
+            "rule was mined from. 'trellis classify tag-candidates' / "
+            "'domain-candidates' print a candidate_id, not this id -- read "
+            "it from GET /api/v1/classify/candidates's 'source_event_id' "
+            "field for the same candidate."
+        ),
+    ),
+    support: int | None = typer.Option(
+        None, "--support", help="Carried onto the audit event."
+    ),
+    precision: float | None = typer.Option(
+        None, "--precision", help="Carried onto the audit event."
+    ),
+    lift: float | None = typer.Option(
+        None, "--lift", help="Carried onto the audit event."
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-apply-rule",
+        "--by",
+        help=(
+            "Sets Command.requested_by, the audit event's entry-point "
+            "label -- it does not reach applied_by, which always comes "
+            "from the stamped OS-user identity instead."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Apply one mined candidate into the operator overlay (governed write).
+
+    Routes through ``Operation.CLASSIFY_RULE_APPLY`` -- the same governed
+    path the admin-scoped REST route (``POST /api/v1/classify/rules``)
+    uses -- so a denying policy, a degraded store, or a malformed
+    candidate is refused identically on both surfaces.
+    """
+    # Click's FLOAT type parses via Python's ``float()``, which happily
+    # accepts "nan"/"inf"/"-inf" from the command line -- unlike the REST
+    # DTO's ``allow_inf_nan=False``, nothing upstream of this command stops
+    # it. No pre-check here: ``ClassifyRuleApplyHandler``'s own
+    # ``_validate_classify_rule_metrics`` refuses the same value with the
+    # same exit code, and it does so through ``_execute_classify_command``
+    # below, which still renders a parseable ``--format json`` payload --
+    # a pre-check that exits before that point left ``--format json``
+    # callers with an empty stdout for an otherwise-ordinary rejection.
+    _print_apply_rule_risk_warning(kind, key, target)
+    cmd = Command(
+        operation=Operation.CLASSIFY_RULE_APPLY,
+        args={
+            "kind": kind,
+            "key": key,
+            "target": target,
+            "source_event_id": source_event_id,
+            "support": support,
+            "precision": precision,
+            "lift": lift,
+        },
+        target_id=f"{kind}:{key}",
+        target_type="classify_rule",
+        requested_by=requested_by,
+        metadata=_audit_identity(),
+    )
+    _execute_classify_command(cmd, output_format)
+
+
+@classify_app.command("revoke-rule")
+def revoke_rule(
+    kind: str = typer.Argument(..., help="'tag_keyword' or 'domain_alias'."),
+    key: str = typer.Argument(
+        ..., help="Keyword (tag_keyword) or alias (domain_alias)."
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-revoke-rule",
+        "--by",
+        help=(
+            "Sets Command.requested_by, which the audit event copies "
+            "directly as revoked_by -- unlike apply-rule, where the "
+            "stamped OS-user identity wins instead."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Revoke one applied rule from the operator overlay.
+
+    Refused -- not a no-op -- when ``(kind, key)`` has no overlay row,
+    including when the rule instead comes from ``config.yaml``: that one
+    was never written by this store and cannot be un-applied through it
+    (see ``ClassifyRuleRevokeHandler``'s docstring for the two distinct
+    refusal messages).
+    """
+    _print_revoke_rule_risk_warning(kind, key)
+    cmd = Command(
+        operation=Operation.CLASSIFY_RULE_REVOKE,
+        args={"kind": kind, "key": key},
+        target_id=f"{kind}:{key}",
+        target_type="classify_rule",
+        requested_by=requested_by,
+        metadata=_audit_identity(),
+    )
+    _execute_classify_command(cmd, output_format)
+
+
+@classify_app.command("effective-rules")
+def effective_rules(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Every effective tag-keyword / domain-alias rule, badged by source.
+
+    Read-only parity for ``GET /api/v1/classify/rules``: both call
+    :func:`~trellis.classify.factory.effective_classify_rule_rows`, so the
+    precedence badging (``default`` / ``config`` / ``overlay``) can never
+    disagree between the two surfaces.
+
+    Works on a degraded overlay file -- the applied rules that parsed are
+    still listed -- but says so and exits
+    :data:`~trellis_cli.exit_codes.EXIT_STORE` rather than 0, mirroring
+    ``trellis policy list`` / ``trellis admin due-jobs``: an applied rule
+    that failed to parse is simply missing from this listing with no other
+    signal, so a caller reading the exit code alone must not see a partial
+    answer as a complete one.
+    """
+    registry = _get_registry()
+    path = resolve_classify_overrides_path(registry.stores_dir)
+    overlay_rows: dict[tuple[str, str], object] = {}
+    degraded: dict[str, Any] | None = None
+    if path is not None:
+        store = ClassifyOverridesStore(path)
+        overlay_rows = {(row.kind, row.key): row for row in store.list()}
+        degradation = store.degradation
+        degraded = degradation.to_dict() if degradation is not None else None
+
+    try:
+        domain_keyword_map = registry.domain_keyword_map()
+        domain_alias_map = registry.domain_alias_map()
+    except ValueError as exc:
+        # Same precedent as ``backfill`` above: registry.domain_alias_map()
+        # raises a bare ValueError when config.yaml and/or the overlay
+        # merge into a self-map or chain (effective_domain_aliases) --
+        # Revoke now refuses the write that would create one, but a
+        # config.yaml edit alone can still produce this with no overlay
+        # write to have caught it. Degrade visibly with the composed
+        # reason instead of a traceback.
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+    rows = effective_classify_rule_rows(
+        classify_config=registry.classify_config,
+        domain_keyword_map=domain_keyword_map,
+        domain_alias_map=domain_alias_map,
+        overlay_rows=overlay_rows,
+    )
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "degraded" if degraded else "ok",
+                "count": len(rows),
+                "rules": [
+                    {
+                        **row,
+                        "applied_at": row["applied_at"].isoformat()
+                        if row["applied_at"] is not None
+                        else None,
+                    }
+                    for row in rows
+                ],
+                "store_degradation": degraded,
+            }
+        )
+        raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)
+
+    _render_classify_overrides_degradation(degraded)
+
+    if not rows:
+        console.print("[green]Effective classify rules:[/green] none.")
+        raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)
+
+    console.print(f"[green]Effective classify rules:[/green] {len(rows)}")
+    badges = {"default": "dim", "config": "cyan", "overlay": "bold green"}
+    for row in rows:
+        badge = badges[row["source"]]
+        console.print(
+            f"  [{badge}]{row['source']:>8}[/{badge}] "
+            f"{escape(row['kind'])}: {escape(row['key'])} -> {escape(row['target'])}"
+        )
+    raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)

@@ -407,13 +407,15 @@ class TestRetrievePack:
 
         ``describe_axes`` distinguishes ``misconfigured`` from
         ``not_configured``, but the CLI supplies the argument that separates
-        them (``embedder_configured=registry.embedding_fn is not None``) —
-        and hard-coding that argument to ``False`` passed every other test
-        in this file. The state was therefore unreachable from the surface
-        that renders it, so an operator with a resolved embedder and a
-        broken vector backend would have been told to configure an
-        embedder: sent to fix something already correct, which is the exact
-        failure this state exists to prevent.
+        them (``embedder_configured=builder.embedder_configured`` — read off
+        the builder, not a second ``registry.embedding_fn`` call, since Q5-A
+        made that property re-raise on every access while
+        misconfigured) — and hard-coding that argument to ``False`` passed
+        every other test in this file. The state was therefore unreachable
+        from the surface that renders it, so an operator with a resolved
+        embedder and a broken vector backend would have been told to
+        configure an embedder: sent to fix something already correct, which
+        is the exact failure this state exists to prevent.
 
         ``build_strategies`` swallows a ``SemanticSearch`` init failure —
         it logs at ``warning`` to *stderr* and carries on, so the pack
@@ -450,6 +452,54 @@ class TestRetrievePack:
         assert "has no semantic results" in out
         assert "keyword + graph only" not in out
         assert "keyword and graph only" not in out
+
+    def test_pack_degrades_the_semantic_axis_when_the_embedder_fails_to_resolve(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fifth axis state, and the Q5-A acceptance test itself.
+
+        Before this fix, ``registry.embedding_fn`` raising propagated out
+        of ``build_strategies`` unchanged -- the CLI exited non-zero, the
+        same failure shape REST answered with 409 and MCP with
+        ``INTERNAL_ERROR`` (q-review.md #9). This is distinct from
+        ``misconfigured`` above: there the embedder resolves and the
+        *vector backend* fails to initialise; here the embedder itself
+        never resolves, so there is no vector backend to blame.
+
+        The real production path is exercised, not a seam below it: this
+        monkeypatches ``StoreRegistry.embedding_fn`` (what
+        ``_get_registry()`` actually constructs), not ``build_strategies``
+        or ``describe_axes`` directly.
+        """
+        from trellis.errors import ConfigError
+        from trellis.stores.registry import StoreRegistry
+
+        def _boom(_self: object) -> None:
+            exc = ConfigError(
+                "embeddings.provider is not set", setting="embeddings.provider"
+            )
+            raise exc
+
+        monkeypatch.setattr(StoreRegistry, "embedding_fn", property(_boom))
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["axes"]["semantic"] == "embedder_failed"
+        assert data["axes"]["embedder_error_type"] == "ConfigError"
+        assert data["axes"]["embedder_setting"] == "embeddings.provider"
+        assert "semantic" not in data["axes"]["available"]
+        assert "keyword" in data["axes"]["available"]
+        assert "graph" in data["axes"]["available"]
+
+        # The spec's literal acceptance check: the CLI exits 0, not 5.
+        text = runner.invoke(app, ["retrieve", "pack", "--intent", "canary rollout"])
+        assert text.exit_code == 0
+        out = _plain(text.stdout)
+        assert "Semantic retrieval unavailable" in out
+        assert "reindex-vectors" in out
+        # Describe, don't quote: the cause names the type and setting,
+        # never the exception's message text.
+        assert "embeddings.provider is not set" not in out
 
     def test_pack_item_ids_are_printed_verbatim_not_emojified(self) -> None:
         r"""``emoji=False`` is load-bearing, and nothing else pins it.

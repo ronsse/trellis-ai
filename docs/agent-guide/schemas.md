@@ -523,7 +523,7 @@ A scalar / numeric / boolean measurement attached to an entity. Machine-comparab
 from trellis.retrieve import ObservationSearch, PackBuilder
 from trellis.retrieve.strategies import build_strategies
 
-strategies = build_strategies(registry)
+strategies = build_strategies(registry).strategies
 strategies.append(ObservationSearch(registry.knowledge.graph_store))
 pack = PackBuilder(strategies=strategies).build(
     intent="why is this column flagged?",
@@ -1018,7 +1018,6 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `evidence.ingest` | Ingest | Ingest evidence |
 | `evidence.attach` | Ingest | Attach evidence to a target |
 | `precedent.promote` | Curate | Promote trace to precedent |
-| `precedent.update` | Curate | Update a precedent |
 | `entity.create` | Curate | Create an entity |
 | `entity.update` | Curate | Update an entity |
 | `entity.merge` | Curate | Merge two entities |

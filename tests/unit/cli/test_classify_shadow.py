@@ -317,7 +317,9 @@ class TestTagCandidatesCommand:
         # Every candidate states the limit of what the measurement supports.
         assert all(c["notes"] for c in payload["candidates"])
 
-    def test_the_promote_hint_names_the_config_in_use(self, config_yaml) -> None:
+    def test_the_promote_hint_routes_through_apply_rule(self, cli_env) -> None:
+        """Promotion is governed (#864): the footer points at apply-rule,
+        never at a config.yaml paste."""
         _seed_thresholds()
         _seed_shadowed(
             [
@@ -332,11 +334,13 @@ class TestTagCandidatesCommand:
         result = runner.invoke(classify_app, ["tag-candidates", "--no-emit"])
         assert result.exit_code == 0, result.output
         text = " ".join(plain(result.stdout).split())
+        assert "Not written to config.yaml" in text, text
+        assert "GET /api/v1/classify/candidates" in text, text
         assert (
-            f"To promote, merge into {config_yaml} (delete the lines to revoke):"
-            in text
-        ), text
-        assert "~/.trellis" not in text
+            "trellis classify apply-rule tag_keyword todoist task-management "
+            "--source-event-id <event-id>"
+        ) in text, text
+        assert "revoke-rule tag_keyword" in text, text
 
     def test_emits_events_by_default_and_not_with_no_emit(self, cli_env) -> None:
         _seed_thresholds()
@@ -399,15 +403,21 @@ class TestDomainCandidatesCommand:
         payload = _run_json("domain-candidates", "--no-emit")
         assert payload["domain_aliases_fragment"] == {"budget-hunting": "hunting"}
 
-    def test_the_merge_hint_names_the_config_in_use(self, config_yaml) -> None:
+    def test_the_merge_hint_routes_through_apply_rule(self, cli_env) -> None:
+        """Promotion is governed (#864): the footer points at apply-rule,
+        never at a config.yaml paste."""
         self._seed_fragmented()
         result = runner.invoke(classify_app, ["domain-candidates", "--no-emit"])
         assert result.exit_code == 0, result.output
         text = " ".join(plain(result.stdout).split())
+        assert "Not written to config.yaml" in text, text
+        assert "GET /api/v1/classify/candidates" in text, text
         assert (
-            f"To merge, add to {config_yaml} (delete the lines to revoke):" in text
-        ), text
-        assert "~/.trellis" not in text
+            "trellis classify apply-rule domain_alias budget-hunting hunting "
+            "--source-event-id <event-id>"
+        ) in text, text
+        assert "revoke-rule domain_alias" in text, text
+        assert "in bulk" not in text, text
 
     def test_min_gain_hides_merges_that_change_nothing(self, cli_env) -> None:
         _seed_shadowed(
@@ -478,7 +488,10 @@ class TestDomainCandidatesCommand:
 
         rendered = assert_coloured(capsys.readouterr().out)
         visible = plain(rendered)
-        assert f"{alias}: {canonical}" in visible
+        assert (
+            f"trellis classify apply-rule domain_alias {alias} {canonical} "
+            "--source-event-id <event-id>"
+        ) in visible
         assert f"-> {canonical}" in visible
         assert f"{alias}:" in visible
         assert competitor in visible

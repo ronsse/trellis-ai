@@ -285,3 +285,37 @@ def test_a_failed_append_holds_no_write_lock(event_log: SQLiteEventLog, tmp_path
     finally:
         other.close()
     assert rows == [(first.event_id, "syn-first"), ("syn-other-1", "syn-other")]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("payload", float("nan")),
+        ("payload", float("inf")),
+        ("payload", float("-inf")),
+        ("metadata", float("nan")),
+        ("metadata", float("inf")),
+    ],
+)
+def test_append_refuses_a_non_finite_float(
+    event_log: SQLiteEventLog, field: str, value: float
+):
+    """NaN/Infinity in a payload or metadata float must not reach storage.
+
+    SQLite's JSON functions parse the non-standard ``NaN``/``Infinity``
+    tokens Python's ``json`` module writes by default, so a silent
+    ``allow_nan=True`` dump would store unparseable-by-spec JSON text that
+    reads back fine here but breaks any strict JSON consumer (the REST
+    API, a non-Python backend). ``json.dumps(..., allow_nan=False)`` raises
+    before the INSERT runs, so nothing is written.
+    """
+    event = Event(
+        event_type=EventType.ENTITY_CREATED,
+        source="syn-source",
+        **{field: {"syn-score": value}},
+    )
+
+    with pytest.raises(ValueError):
+        event_log.append(event)
+
+    assert event_log.get_events() == []

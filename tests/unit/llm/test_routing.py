@@ -231,7 +231,7 @@ class TestValidation:
             (
                 {"tiers": {"deep": _DEEP}, "routes": {"reconcile": None}},
                 "llm.routes.reconcile",
-                "got null",
+                "got a null value",
             ),
             (
                 {"tiers": {"deep": _DEEP}, "routes": {"reconcile": ""}},
@@ -283,6 +283,52 @@ class TestValidation:
     def test_a_tier_may_set_every_block_key(self):
         body = dict.fromkeys(LLM_BLOCK_KEYS, "x")
         validate_llm_routing(_config(tiers={"t": body}))
+
+
+class TestNonMappingConfig:
+    """S1 (re-gate #867): a truthy non-Mapping top-level ``llm:`` block --
+    ``None``/``{}``/``""``/``[]`` are already coerced to ``{}`` before this
+    check runs, but a string, a list, ``True``, or a bare int used to reach
+    ``_section``'s own ``.get`` call as an uncaught ``AttributeError`` --
+    not an ``LLMRoutingError`` -- so none of this module's three callers,
+    nor the admin API's ``except LLMRoutingError`` clause, ever caught it.
+    """
+
+    @pytest.mark.parametrize(
+        "llm_config",
+        [
+            pytest.param("sk-live-NonMappingConfigSecretValue000111", id="str"),
+            pytest.param([1, 2, 3], id="list"),
+            pytest.param(True, id="bool"),
+            pytest.param(42, id="int"),
+        ],
+    )
+    def test_validate_raises_llm_routing_error_not_attribute_error(self, llm_config):
+        with pytest.raises(LLMRoutingError) as exc_info:
+            validate_llm_routing(llm_config)
+        error = exc_info.value
+        assert error.setting == "llm"
+        assert "must be a mapping" in error.message
+        assert "sk-live-NonMappingConfigSecretValue000111" not in error.message
+
+    @pytest.mark.parametrize(
+        "llm_config",
+        [
+            pytest.param("sk-live-NonMappingConfigSecretValue000111", id="str"),
+            pytest.param([1, 2, 3], id="list"),
+            pytest.param(True, id="bool"),
+            pytest.param(42, id="int"),
+        ],
+    )
+    def test_resolve_llm_route_raises_too(self, llm_config):
+        """:func:`resolve_llm_route` is the entry point
+        ``StoreRegistry.llm_route`` (and so the admin API's Runtime panel)
+        actually calls -- it must not reach ``_tiers``/``_routes`` at all
+        for a non-Mapping parent.
+        """
+        with pytest.raises(LLMRoutingError) as exc_info:
+            resolve_llm_route(llm_config, LLMConsumer.RECONCILE)
+        assert exc_info.value.setting == "llm"
 
 
 class TestDescribe:

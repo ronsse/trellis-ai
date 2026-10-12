@@ -334,6 +334,31 @@ is the status quo and costs only opportunity.
 Also unresolved and *not* panel-eligible: **whether to clear the 51 legacy rows.** That is a
 live-store mutation and stays with the operator regardless of which option is chosen.
 
+**Resolved 2026-10-10 — owner approved rendering; it shipped without B's legacy-row filter,
+so the shipped scope is A's.** The flat path now calls `format_advisories_as_markdown` the
+same way `_sectioned_context` does (#392, #844). The code makes no attempt to distinguish
+pre-/post-#394 rows: whatever `_select_advisories` selects renders, on both pack shapes,
+legacy rows included while any stay active. Clearing them (noted above) is still a
+live-store mutation and still the operator's, untouched by this change.
+Consequence for prior fitness reads: `advisory-effectiveness` counts an advisory as
+"presented" from `PACK_ASSEMBLED.advisory_ids` alone. For a pack served by MCP
+`get_context`/`search` before a build containing #844 was deployed, the agent never saw the
+text, so those rows are exposure counts, not presentation counts. The payload cannot isolate
+them: REST and CLI packs share `entity_type="pack"` and did return advisories (as JSON), the
+event has no surface field, and the build is identified by `metadata.write_provenance`, not
+by the merge date. The SDK markdown helpers and the CLI text arm still render none.
+
+**2026-10-10 — the missing half of B ships.** `_select_advisories` now drops any
+advisory where `evidence.evidence_confidence is None` — the field #394 introduced, so its
+absence identifies a pre-repair row — before ranking and the cap runs, on both pack shapes,
+gated by `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on). Filtering before rank/cap means a
+legacy row can never occupy a slot a post-repair row would have won; `PACK_ASSEMBLED` carries
+the count as `advisories_filtered_legacy`, so fitness scoring never counts a withheld row as a
+presentation. Measured against the live store on 2026-10-10: 51 legacy rows, 361 post-repair,
+zero mismatches against the alternative id-prefix discriminator. Clearing the 51 legacy rows
+from the live store is unchanged by this PR — still the operator's live-store mutation, not
+automated here.
+
 ---
 
 ## Taken

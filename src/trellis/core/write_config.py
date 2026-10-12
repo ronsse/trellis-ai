@@ -31,12 +31,16 @@ monkeypatches a variable still sees the change, exactly as before.  The
 from __future__ import annotations
 
 import functools
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -188,6 +192,78 @@ def _truthy(env: Mapping[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in TRUTHY
 
 
+def parse_finite_float(raw: Any) -> float:
+    """Parse *raw* (a string, int or float) to a ``float``, or raise.
+
+    The one shared conversion step behind both float-typed sides of a
+    write-behaviour knob: this module's own environment parsers
+    (:func:`_parse_min_confidence`, :func:`_parse_pack_holdout_rate`,
+    :func:`_reconcile_timeout`) and
+    :func:`trellis.core.settings_registry.validate_value`'s settings-store
+    coercion. A value neither side can make sense of fails the same way
+    through either entry point, as ``ValueError`` — including a value
+    plain ``float()`` cannot even raise ``ValueError`` for: an int (or a
+    numeric string parsing to one) outside float range, such as
+    ``10**400``, raises ``OverflowError`` instead, which is not a
+    ``ValueError`` and so would otherwise pass an ``except ValueError``
+    uncaught.
+
+    Deliberately does **not** reject a non-finite result (``inf``,
+    ``nan``): ``float("nan")``/``float("inf")`` succeed, and each caller
+    already has its own policy for what to do with one — the two
+    ``[0, 1]``-bounded knobs fold it into their existing out-of-range
+    warning via a plain range comparison (``nan`` compares ``False``
+    against any bound), and :mod:`trellis.core.settings_registry` checks
+    ``math.isfinite`` explicitly where a raw value may be a bare Python
+    ``int``/``float`` rather than a string. Collapsing that here would
+    have turned an "out of range" warning into an "unparseable" one.
+    """
+    try:
+        return float(raw)
+    except (ValueError, OverflowError) as exc:
+        msg = f"not a number: {raw!r}"
+        raise ValueError(msg) from exc
+
+
+def parse_finite_int(raw: Any) -> int:
+    """Parse *raw* to a finite ``int`` via ``float``, or raise ``ValueError``.
+
+    For an env-var knob that is logically an integer but, like every other
+    numeric env value in this module, arrives as a string someone may have
+    typed a decimal or scientific-notation value into (``"30.0"``,
+    ``"3e1"``) — hence the ``float`` round-trip rather than a bare
+    ``int(raw)``.
+
+    Unlike :func:`parse_finite_float`, this function *does* reject a
+    non-finite result. ``int(raw)`` has no non-finite case, but
+    ``int(float(raw))`` does, and the two failure modes are easy to
+    under-catch: ``int(float("nan"))`` raises ``ValueError`` (caught by
+    the obvious ``except ValueError``), but ``int(float("inf"))`` — and
+    the same for the literal string ``"1e999"``, which overflows ``float``
+    to ``inf`` — raises ``OverflowError`` instead, which an
+    ``except ValueError`` does not catch. A caller that wrote
+    ``int(float(raw))`` inline and wrapped only ``ValueError`` would 500 on
+    a settings-route read or crash a worker's startup on exactly the
+    ``inf``/``1e999`` input, while the ``nan`` sibling degraded cleanly —
+    an inconsistency with no good reason to preserve. This collapses both
+    into one ``ValueError``, mirroring :func:`parse_finite_float`'s own
+    ``OverflowError``-into-``ValueError`` normalization for the float-parse
+    step itself.
+    """
+    value = parse_finite_float(raw)
+    if not math.isfinite(value):
+        msg = f"must be a finite number, got {raw!r}"
+        raise ValueError(msg)
+    try:
+        return int(value)
+    except OverflowError as exc:  # pragma: no cover - defensive; value is
+        # already known finite above, so int() cannot overflow in
+        # practice, but a bare `except ValueError` upstream must never be
+        # the only thing standing between this and an uncaught OverflowError.
+        msg = f"not a valid integer: {raw!r}"
+        raise ValueError(msg) from exc
+
+
 @functools.lru_cache(maxsize=8)
 def _parse_min_confidence(raw: str) -> float | None:
     """Parse one confidence-floor spelling, warning at most once for it.
@@ -200,7 +276,7 @@ def _parse_min_confidence(raw: str) -> float | None:
     would fire on flag reads that have nothing to do with this knob.
     """
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         logger.warning(
             "trace_extraction_min_confidence_unparseable",
@@ -282,7 +358,7 @@ def _parse_pack_holdout_rate(raw: str) -> float:
     withholding packs from agents.
     """
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         logger.warning(
             "pack_holdout_rate_unparseable",
@@ -314,7 +390,7 @@ def _reconcile_timeout(env: Mapping[str, str]) -> float:
     if not raw:
         return DEFAULT_RECONCILE_TIMEOUT_S
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         return DEFAULT_RECONCILE_TIMEOUT_S
     return value if value > 0 else DEFAULT_RECONCILE_TIMEOUT_S
@@ -362,21 +438,66 @@ class WriteBehaviourConfig:
             reconcile_timeout_s=_reconcile_timeout(src),
         )
 
+    @classmethod
+    def from_env_and_settings(
+        cls,
+        *,
+        settings: Mapping[str, bool | int | float | str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> WriteBehaviourConfig:
+        """Resolve with **env > settings > default** precedence.
+
+        ``settings`` is a plain ``field name -> value`` mapping — typically
+        :meth:`trellis.stores.settings_store.SettingsStore.as_values`,
+        read by the caller so this function stays decoupled from the
+        store: a caller that already has the values in hand pays no
+        second file read, and this module never imports the store layer.
+
+        Implemented as a layer under :meth:`from_env` rather than a
+        parallel set of per-field branches: a real, non-blank environment
+        variable is left untouched, a settings override is rendered into
+        the same raw-string shape that variable would have held and used
+        only where the environment is blank, and the merged mapping is
+        then parsed by the exact same per-field helpers (``_truthy``,
+        ``_min_confidence``, the clamps) that :meth:`from_env` uses. A
+        typo'd or out-of-range *settings* value therefore degrades exactly
+        as a typo'd or out-of-range *environment* value already does,
+        rather than gaining a second, divergent validation rule.
+        """
+        src: Mapping[str, str] = os.environ if env is None else env
+        merged = dict(src)
+        for flag, rendered in _settings_as_env_strings(settings or {}).items():
+            if not merged.get(flag, "").strip():
+                merged[flag] = rendered
+        return cls.from_env(merged)
+
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe mapping, field name → effective value."""
         return asdict(self)
 
-    def describe(self) -> list[dict[str, Any]]:
+    def describe(
+        self, *, overridden_by: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any]]:
         """Per-knob report rows for the operator surface.
 
         Each row carries the field name, the environment variable that
-        drives it, the effective value, the shipped default, and whether
-        the effective value differs from that default — which is the one
-        column an operator comparing two hosts actually reads.
+        drives it, the effective value, the shipped default, whether the
+        effective value differs from that default — which is the one
+        column an operator comparing two hosts actually reads — and
+        ``overridden_by``: ``"env"``, ``"settings"`` or ``"default"``.
+
+        ``overridden_by`` (the parameter) is this config's provenance map,
+        from :func:`resolve_overridden_by` against the same ``env`` /
+        ``settings`` this config was resolved from — pass it whenever this
+        config came from :meth:`from_env_and_settings`. Omitted, every row
+        falls back to ``"env"`` or ``"default"`` from the ``overridden``
+        boolean: a caller that still only calls :meth:`from_env` never put
+        a settings file in the picture, so any override can only be env.
         """
         defaults = WriteBehaviourConfig()
         effective = self.as_dict()
         default_values = defaults.as_dict()
+        provenance = overridden_by or {}
         return [
             {
                 "name": name,
@@ -384,9 +505,112 @@ class WriteBehaviourConfig:
                 "value": effective[name],
                 "default": default_values[name],
                 "overridden": effective[name] != default_values[name],
+                "overridden_by": provenance.get(
+                    name,
+                    "env" if effective[name] != default_values[name] else "default",
+                ),
             }
             for name in effective
         ]
+
+
+def _settings_as_env_strings(
+    settings: Mapping[str, bool | int | float | str],
+) -> dict[str, str]:
+    """Render settings-store values as the raw strings ``from_env`` parses.
+
+    Only fields :data:`ENV_VAR_BY_FIELD` knows about are rendered — a
+    settings row for a tunable this module does not govern (``graph_seeding``
+    lives in :mod:`trellis.retrieve.builder_factory` on purpose; see that
+    module's own ``GRAPH_SEEDING_ENV`` comment) is silently skipped here
+    rather than raising, so a caller can pass a whole
+    :meth:`~trellis.stores.settings_store.SettingsStore.as_values` read to
+    every precedence resolver without filtering it first.
+    """
+    rendered: dict[str, str] = {}
+    for field, flag in ENV_VAR_BY_FIELD.items():
+        if field not in settings:
+            continue
+        value = settings[field]
+        if isinstance(value, bool):
+            rendered[flag] = "true" if value else "false"
+        elif isinstance(value, float) and value.is_integer():
+            # "500.0" would defeat ``int("500.0")`` for an int-typed field
+            # if a caller stored the override as a Python float; every
+            # ``from_env`` parser accepts the plain-integer spelling.
+            rendered[flag] = str(int(value))
+        else:
+            rendered[flag] = str(value)
+    return rendered
+
+
+def resolve_overridden_by(
+    *,
+    settings: Mapping[str, bool | int | float | str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Per-field ``"env" | "settings" | "default"``, for an operator report.
+
+    Mirrors the precedence :meth:`WriteBehaviourConfig.from_env_and_settings`
+    applies, as a separate function rather than folded into
+    :meth:`~WriteBehaviourConfig.describe`: ``describe`` only has the
+    *resolved* value in scope, never the environment or settings that
+    produced it, so the "which" question has to be answered here, by the
+    same two inputs, before the config is built.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    settings_map = settings or {}
+    return {
+        field: (
+            "env"
+            if src.get(flag, "").strip()
+            else "settings"
+            if field in settings_map
+            else "default"
+        )
+        for field, flag in ENV_VAR_BY_FIELD.items()
+    }
+
+
+def resolve_write_behaviour(
+    registry: StoreRegistry | None = None,
+) -> WriteBehaviourConfig:
+    """The effective write-behaviour config for ``registry`` — env > settings > default.
+
+    The one call every per-knob reader in :mod:`trellis.classify.ingest`,
+    :mod:`trellis.extract.memory_ingest_hook`, :mod:`trellis.extract.trace_ingest_hook`,
+    :mod:`trellis.mcp.reconcile`, :mod:`trellis.mcp.server` and
+    :mod:`trellis.retrieve.embed_ingest_hook` delegates to, so a settings
+    override for any of those knobs takes effect at the knob's real
+    enforcement site rather than only in a reporting surface.
+
+    ``registry is None`` (a caller with no store context, such as a
+    process that never built one) resolves with no settings file in the
+    picture — :meth:`WriteBehaviourConfig.from_env` alone, not a hard
+    failure.  A ``registry`` whose ``stores_dir`` is also ``None`` (an
+    in-memory deployment) takes the same path, since
+    :func:`~trellis.stores.settings_store.load_settings_values` already
+    answers ``{}`` for that.
+
+    **Never raises.**  This sits on every memory/trace/document write's
+    read path (classify-on-ingest, embed-on-ingest, reconcile-on-write,
+    attribution gates, ...), so an unreadable or corrupt
+    ``settings.json`` must degrade to the environment/default answer
+    exactly as :func:`trellis.core.version.resolve_stamp_staleness`
+    degrades an unreadable git tree — wrapped whole, not guarded by an
+    enumerated exception list, because the settings store's own
+    degrade-on-read contract (:mod:`trellis.stores.degradable_json_store`)
+    is advisory, not a guarantee against every exotic I/O or JSON failure.
+    """
+    try:
+        from trellis.stores.settings_store import load_settings_values  # noqa: PLC0415
+
+        stores_dir = registry.stores_dir if registry is not None else None
+        settings = load_settings_values(stores_dir)
+        return WriteBehaviourConfig.from_env_and_settings(settings=settings)
+    except Exception:  # advisory read; never fail a write
+        logger.warning("write_behaviour_settings_read_failed", exc_info=True)
+        return WriteBehaviourConfig.from_env()
 
 
 #: Field name → the environment variable that drives it.  Declared after
@@ -427,4 +651,7 @@ __all__ = [
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
     "TRUTHY",
     "WriteBehaviourConfig",
+    "parse_finite_float",
+    "resolve_overridden_by",
+    "resolve_write_behaviour",
 ]

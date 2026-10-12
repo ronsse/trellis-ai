@@ -47,7 +47,7 @@ class LocalBlobStore(BlobStore):
         if merged_meta:
             meta_path = self._meta_dir / f"{key}.json"
             meta_path.parent.mkdir(parents=True, exist_ok=True)
-            meta_path.write_text(json.dumps(merged_meta))
+            meta_path.write_text(json.dumps(merged_meta, allow_nan=False))
         logger.debug("blob_stored", key=key)
         return self.get_uri(key)
 

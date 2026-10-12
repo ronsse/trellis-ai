@@ -87,6 +87,60 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### `GET /api/v1/loops` (e167)
+
+Is each curation / learning loop actually doing anything? Admin scope,
+REST-only — no CLI wrapper. Reads existing events only
+(`trellis.ops.loop_health.summarize_loop_health`), plus one documented
+live read of `TunerStateStore.list_proposals(status="pending")` for the
+tuner row's backlog size.
+
+Seven rows, in nightly-cycle order: `noise_demotion`,
+`advisory_generation`, `advisory_fitness`, `learning_candidate_scoring`,
+`precedent_promotion`, `tuner`, `feedback_intake`. Each carries
+`actuates: bool` and a one-line `what_it_changes`, so a caller can tell
+"writes automatically" apart from "sensing only, a human still approves
+every change" without reading source.
+
+**Never-run vs ran-and-counted-zero**, the one load-bearing distinction:
+a loop with no visible event reports `last_run_at` / `last_status` /
+`counters` all `null` — "never run (or ran before this build)". A loop
+that ran and found nothing to do reports a real `last_run_at` and a
+`counters` dict whose values are legitimately `0`. The two must never
+render the same; collapsing them is exactly the failure CLAUDE.md's
+health-signal rule exists to prevent.
+
+```json
+{
+  "generated_at": "2026-10-10T23:00:00+00:00",
+  "loops": [
+    {
+      "name": "tuner",
+      "description": "Runs a RuleTuner pass over outcomes. The scheduled run always passes --dry-run, so the schedule itself never auto-promotes; learning.auto_promote.enabled only takes effect on a manual `trellis worker tune` run made without --dry-run.",
+      "actuates": true,
+      "what_it_changes": "The scheduled run writes nothing but pending proposals. Auto-promoting a proposal needs both learning.auto_promote.enabled set AND a manual run without --dry-run; until both hold, every proposal stays pending for a human to run `trellis metrics promote --commit`.",
+      "job_name": "tune",
+      "last_run_at": null,
+      "last_status": null,
+      "counters": {"pending_count": 3, "auto_promoted_total": 0}
+    }
+  ]
+}
+```
+
+The nightly cycle makes this durable by emitting `CURATE_CYCLE_COMPLETED`
+(end of every live `trellis worker curate` run) and `TUNE_CYCLE_COMPLETED`
+(end of every live `trellis worker tune` run) — never on a `--dry-run`
+pass, which must still write nothing to the EventLog. Both emits are
+wrapped whole (CLAUDE.md's advisory-step rule): a broken EventLog write
+logs a warning but never fails the cycle it is reporting on.
+
+The operator UI's **Loops** tab (`src/trellis_api/static/index.html`)
+renders this report: `last_run_at` labelled UTC with relative age, a row
+flagged `stale` when that age exceeds 36h regardless of its own
+`last_status`, `null` rendered as "Not measured", and a fetch failure
+rendered as a visible error rather than a silent empty list.
+
 ### `trellis admin serve`
 
 Start the REST API server.
@@ -99,6 +153,303 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 |--------|---------|-------------|
 | `--port` | `8420` | Port to listen on |
 | `--host` | `0.0.0.0` | Host to bind to |
+
+### Schedule registry + job runs (#e166)
+
+`schedule.json` (`<data_dir>/stores/schedule.json`) is the pieces a **host-side
+dispatcher cron** needs so schedules can be edited from a UI (plan p1 §(b),
+PR 6) without the container ever touching crontab. The REST routes, CLI
+parity and UI tab that edit it are documented below, under
+["Admin job schedules: REST, CLI and UI (plan p1 PR 6)"](#admin-job-schedules-rest-cli-and-ui-plan-p1-pr-6).
+
+**The command boundary.** `schedule.json` holds only operator-tunable state —
+it never holds a command. Each row is a `ScheduledJob`: `name` (must be a key
+in `trellis.schedule.catalog.JOB_CATALOG`, validated on every read and write —
+an unknown name degrades the row, it is never treated as a job to run),
+`cadence` (a 5-field cron expression, or `null` for manual-only — triggered
+later by setting `run_requested_at`), `enabled`, an optional `timeout_seconds`
+override (bounded `1..86400`; `null` defers to the catalog default), and
+`run_requested_at`. The command, operator-facing description, and `host_only`
+flag all come from [`trellis.schedule.catalog`](../../src/trellis/schedule/catalog.py)
+under that same `name` — the **only** source of what a job runs. A
+Trellis-native job carries its argv fixed in source; a host-only job
+(`capture-nightly`, `curate-nightly`, `backup-nightly`, `roadmap-nightly` —
+they need the host's project directories, the docker socket, or `gh` auth,
+none of which the API container has) carries no argv at all — its executable
+is `$TRELLIS_HOST_JOBS_DIR/<name>`, placed there by the operator outside the
+shared data mount, resolved by the host dispatcher itself after checking
+`name` against `^[a-z0-9-]+$` (`trellis.schedule.catalog.validate_host_job_name`).
+Because the model is `extra="forbid"`, a legacy or tampered row still
+carrying the old `command` field fails validation the same way an unknown
+`name` does — it degrades, it does not run. So editing `schedule.json`, by
+hand or over the PR 6 API below, can change only *whether* and *when* a
+catalog job runs, never *what* runs; see
+[`catalog.py`](../../src/trellis/schedule/catalog.py)'s module docstring and
+[`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s for the
+full argument. The one thing that execs a job is the reference dispatcher at
+[`docs/ops/job-dispatcher.sh.example`](../ops/job-dispatcher.sh.example) —
+documentation, not installed by this repo — which reads the command from
+`due-jobs`' catalog-joined output (never from `schedule.json`), builds it as
+a bash array, and execs it directly, never through `sh -c` or `eval`.
+
+`ScheduleStore` is a third [`DegradableJsonStore`](#if-the-file-is-damaged)
+subclass, alongside `PolicyStore` and `AdvisoryStore`: **reads degrade,
+writes refuse.** A duplicate `name` degrades the file (`list()`/`due-jobs`
+still serve what parsed) rather than silently collapsing two rows to one.
+
+#### `trellis admin init-schedule`
+
+Seed the registry from the catalog's defaults: the nightly
+capture/curate/backup/roadmap sweeps, the tuner dry-run, and the manual-only
+commands from the UI gap inventory (`trellis_cli.schedule_seed`, which builds
+one minimal row per `trellis.schedule.catalog.JOB_CATALOG` entry). Adds only
+jobs whose `name` is not already present — never overwrites an
+operator-edited row, so it is safe to re-run. `trellis admin migrate-graph`
+is deliberately not in the catalog: its whole shape is a pair of
+`--from-config` / `--to-config` YAML paths chosen per migration, so there is
+no stable default command to seed.
+
+```bash
+trellis admin init-schedule [--format text|json]
+```
+
+```json
+{"status": "ok", "added": ["capture-nightly", "curate-nightly", "..."], "skipped": []}
+```
+
+Exits `EXIT_STORE` (5) on an already-degraded file, under both formats.
+
+Seeding a row here does not itself make a job wait: a job that has never
+completed a run is always due (`is_job_due`, below), so the very first time
+a dispatcher polls `due-jobs` after `init-schedule`, every freshly-seeded
+enabled job reports due — there is no grace period before the first tick.
+
+#### `trellis admin due-jobs`
+
+List registry jobs due to run now. Combines, per job
+(`trellis.core.cron.is_job_due`): `enabled` (false always wins),
+`run_requested_at` (newer than the last completed run is always due — the
+only way a `cadence: null` job ever becomes due), and `cadence` against the
+most recent `JOB_RUN_COMPLETED` for that job name in the EventLog. A job
+that has never completed is always due.
+
+```bash
+trellis admin due-jobs [--format text|json]
+```
+
+```json
+{"status": "ok", "count": 2, "due_jobs": [{"name": "tune", "command": ["trellis", "worker", "tune", "--dry-run", "--format", "json"], "host_only": false, "cadence": "0 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}, {"name": "backup-nightly", "command": null, "host_only": true, "cadence": "30 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}], "schedule_file": "/path/to/schedule.json", "schedule_file_present": true, "store_degradation": null}
+```
+
+`command` is joined from `trellis.schedule.catalog.JOB_CATALOG` by `name`,
+never read from `schedule.json`. A host-only row reports `command: null` — a
+marker, not a path — so the dispatcher resolves
+`$TRELLIS_HOST_JOBS_DIR/<name>` itself; see "The command boundary" above.
+
+Works on a degraded file — jobs that parsed are still checked — but reports
+`"status": "degraded"` and exits `EXIT_STORE` (5) under both formats, same
+posture as `trellis policy list`: a partial due-jobs answer must not reach a
+dispatcher looking like a complete one.
+
+#### `trellis admin record-job-run`
+
+Record one job execution as a `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event
+pair, modeled on `CAPTURE_SWEEP_COMPLETED`: plain EventLog telemetry, not a
+governed mutation — there is no state these events gate. Call once,
+immediately after the job process exits.
+
+```bash
+trellis admin record-job-run --job NAME --duration-ms MS --exit-code N [--status STR] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--job` | — (required) | Job name (schedule registry key). |
+| `--duration-ms` | — (required) | Wall-clock duration of the run, in ms. |
+| `--exit-code` | — (required) | The job process's own exit code. |
+| `--status` | derived | Free-form label; defaults to `ok` / `failed` from `--exit-code`. Use e.g. `skipped_overlap` when the dispatcher's `flock` meant the job never ran. |
+| `--format` | `text` | `text` or `json`. |
+
+`started_at` is derived as `now - duration_ms`, not taken as a second
+argument — the dispatcher already measured the duration, so there is no
+second number that could disagree with it.
+
+```json
+{"status": "ok", "job": "tune", "run_id": "01M...", "exit_code": 0, "job_status": "ok", "recorded": true}
+```
+
+**Recording a *failed* job's run is itself a successful call and exits 0** —
+"the dispatcher ran this job and it failed" is exactly the fact this command
+exists to durably record. Only a failure to write the EventLog pair itself
+(store unavailable) is this command's own failure, and exits `EXIT_STORE`
+(5) under both formats.
+
+### Admin job schedules: REST, CLI and UI (plan p1 PR 6)
+
+The write surface onto `schedule.json` promised above: `GET`/`PATCH
+/api/v1/admin/jobs`, `POST /api/v1/admin/jobs/{name}/run`
+(`src/trellis_api/routes/admin.py`), CLI parity (`trellis admin schedule set`
+/ `run`, `src/trellis_cli/admin_schedule.py`), and the web UI's **Schedules**
+tab. All three REST routes require admin scope. **The writable surface is
+exactly `enabled`, `cadence` (cron-validated) and `timeout_seconds` (bounded
+`1..86400`) via the PATCH, and `run_requested_at` via the run route — the
+same fields `ScheduledJob` exposes, and only for a `name` already present in
+`JOB_CATALOG`.** No route creates, deletes, or can ever carry a `command`,
+`argv`, `path` or environment variable: `AdminJobPatchRequest` has no such
+field, and `extra="forbid"` refuses any other field name outright (422).
+Both writes refuse with 409 and the schedule store's own error text (never a
+generic message) while it is degraded or stale; both emit an audit event
+(`SCHEDULE_UPDATED` / `JOB_RUN_REQUESTED`) carrying `old`/`new` dicts with
+only the fields that actually changed, plus the caller's identity
+(`key_id`/`key_name` over REST, `cli:<os user>` from the CLI).
+
+**Both writes route through `MutationExecutor`.** The PATCH and run routes,
+and the two CLI subcommands below, submit `Operation.SCHEDULE_UPDATE` /
+`Operation.JOB_RUN_REQUEST` `Command`s (stamped `target_type="schedule"`,
+`target_id=<job name>`) to `trellis.mutate.build_schedule_executor` — a
+sibling of `build_curate_executor` with the same `policy_gate`, but a
+disjoint handler dict. `ScheduleUpdateHandler` / `JobRunRequestHandler`
+(`src/trellis/mutate/schedule_handlers.py`) are the only code that calls
+`ScheduleStore.put`; every boundary described above (field allowlist,
+catalog membership, degraded/stale refusal) is enforced there, before the
+store write. These two operations are deliberately absent from
+`create_curate_handlers`, so neither `POST /api/v1/commands/batch` nor MCP
+`execute_mutation` can reach them — a `mutate`-scoped credential cannot
+edit a schedule or request a run; that is admin-scoped only, via a
+separate authorization axis. A policy with `entity_type="schedule"` denies
+the PATCH/run routes and the CLI the same way it denies any other governed
+mutation. `changed_by` is always the authenticated principal; no request
+body or CLI flag can set it.
+
+#### `GET /api/v1/admin/jobs`
+
+Lists every `JOB_CATALOG` job, joined with its `schedule.json` row
+(materialized with catalog defaults if the row doesn't exist yet — this
+route never creates one) and its last-run status. `last_run` is derived from
+the EventLog's own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair for that job
+name — `null` means no record at all, never a hardcoded placeholder; an
+in-flight start newer than the last completion reports that start with every
+other field `null`, rather than falling back to an older finished run.
+Each row's `stored` is `false` for a materialized catalog default (no row in
+`schedule.json` yet, or one that failed to parse out of a degraded store) —
+such a row's `enabled`/`cadence` are catalog defaults, never the operator's
+own choice, and `next_due_at` is unconditionally `null` for it, because
+`due-jobs` only ever evaluates a *stored* row. `default_cadence` is always
+the catalog's own default, shown alongside the effective `cadence` so an
+operator can tell "customized" from "still the default". `store_degradation`
+is `null` on a clean read and otherwise the same shape `GET /api/v1/policies`
+and `GET /api/v1/advisories` already use — a caller must not read catalog
+defaults as the operator's own stored choices with no signal the file
+behind them is damaged.
+
+`dispatcher_seen` (and `dispatcher_last_seen_at`) reflects only whether any
+job has actually *run* recently — the most recent `JOB_RUN_STARTED` across
+every job, `occurred_at` (when the EventLog recorded it, not necessarily
+the payload's own `started_at`) — never "is any host dispatcher polling
+`due-jobs` at all": a dispatcher can poll and find nothing due, which
+leaves no event and reads identically to no dispatcher running (gate
+#860b, follow-up 3; this is why the UI banner hedges rather than claiming
+"nothing will pick it up"). The staleness window is **not** a fixed 15
+minutes: a missing poll record is not evidence of a dead dispatcher, and a flat window
+false-positives against any cadence slower than it (a daily job's
+dispatcher would read "not reporting" ~23 hours a day). The window is the
+longest enabled, stored cadence's own tick interval plus two hours of
+slack, falling back to a 15-minute floor only when no enabled cadenced job
+exists. Serves catalog defaults even when `schedule.json` is degraded (200,
+not 409 — a read is never refused, only a write).
+
+```json
+{"count": 1, "jobs": [{"name": "tune", "description": "...", "host_only": false, "spends_llm": true, "heavy": false, "enabled": true, "cadence": "0 4 * * *", "default_cadence": "0 4 * * *", "timeout_seconds": 3600, "run_requested_at": null, "last_run": {"run_id": "01M...", "started_at": "...", "finished_at": "...", "duration_ms": 12000, "exit_code": 0, "status": "ok"}, "next_due_at": "2026-10-12T04:00:00+00:00", "stored": true}], "dispatcher_last_seen_at": "2026-10-11T02:55:00+00:00", "dispatcher_seen": true, "store_degradation": null}
+```
+
+#### `PATCH /api/v1/admin/jobs/{name}`
+
+Edits `enabled`/`cadence`/`timeout_seconds`. 404 for a name not in
+`JOB_CATALOG` — this never creates a job. Only fields present in the body
+(`model_fields_set`) are changed; an empty body `{}` is a no-op that writes
+nothing and emits no event. A bad cron expression or an out-of-range
+timeout is 422. `cadence: null` clears it to manual-only (triggered only by
+the run route below).
+
+```bash
+curl -X PATCH https://host/api/v1/admin/jobs/tune -H "Authorization: Bearer $KEY" -d '{"enabled": false, "timeout_seconds": 60}'
+```
+
+#### `POST /api/v1/admin/jobs/{name}/run`
+
+Requests an out-of-band run ("Run now"). **Writes only `run_requested_at` —
+this route never executes the job inline and never claims to.**
+`is_job_due` treats a `run_requested_at` newer than the job's last completed
+run as always due, so a host dispatcher polling `due-jobs` on its own
+cadence is what actually picks it up from there — typically within ~5
+minutes, if one is installed at all. The response's `dispatcher_hint` field
+states exactly that; it is never worded as "started" or "completed".
+`run_requested_at` in the response is exactly what the handler wrote to
+`schedule.json` — re-read after the write, never a timestamp computed by
+this route — so it is `null` in the (expected-unreachable) case the row
+didn't stick.
+
+Refuses rather than runs for two cases, on both REST and the CLI (same
+handler, `trellis.mutate.schedule_handlers.JobRunRequestHandler`): a
+**disabled** job ("enable it first") and a job with **no stored row yet**
+(run `init-schedule` first). `job_disabled`/`not_scheduled` are the
+handler's internal `rejection_reason`, visible only in the audit trail's
+`MUTATION_REJECTED.reason` — neither reaches the caller as a response
+`code`. REST answers 422 with a bare string `detail` (no `code` field;
+`_schedule_result_http_error` reads this case as plain caller-input
+rejection, same as a bad cadence). The CLI answers exit 2 with JSON
+`{"code": "validation_error", ...}` (`_cli_result_failure`'s single code
+for "the request you typed was bad"); the message text still names which
+case it was. Neither silently writes the catalog's default cadence into
+`schedule.json` just because "Run now" was clicked — a deferred run of an
+LLM-spending job would otherwise be a surprise spend the operator never
+asked for.
+
+```json
+{"status": "ok", "name": "tune", "run_requested_at": "2026-10-11T03:00:00+00:00", "dispatcher_hint": "Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed."}
+```
+
+#### `trellis admin schedule set` / `trellis admin schedule run`
+
+CLI parity for the two writes above — same validation, same refusal
+posture, same audit events — for an operator at a terminal rather than a
+browser or the REST API.
+
+```bash
+trellis admin schedule set <name> [--enabled | --disabled] [--cadence CRON | --cadence none] [--timeout SECONDS] [--format text|json]
+trellis admin schedule run <name> [--format text|json]
+```
+
+`set` requires at least one of `--enabled`/`--disabled`, `--cadence` or
+`--timeout` (exits `EXIT_VALIDATION` otherwise, "no_fields") — omitting a
+flag leaves that field unchanged, it is never read as "clear it". Passing
+the literal `--cadence none` is how an operator clears cadence to
+manual-only; there is no other way to spell `null` on a command line. Both
+subcommands exit `EXIT_STORE` (5) under both formats on a degraded or stale
+schedule store, matching the REST routes' 409.
+
+#### The Schedules tab
+
+The operator UI's **Schedules** tab (`src/trellis_api/static/index.html`)
+renders `GET /admin/jobs`: cadence shown both as its raw cron expression and
+as hand-formatted text (explicitly labelled **UTC** — `trellis.core.cron`
+evaluates every production caller's `utc_now()`, never the dispatcher
+host's local clock), an enable toggle (disabled, with its own label, while
+the store reads degraded), inline cadence/timeout editing that reads the
+current cadence from a data attribute rather than the rendered cell's text
+(so saving with no changes round-trips instead of clobbering it with
+whatever the display happened to show) with client-side bounds validation
+before the PATCH, a two-step "Run now" confirmation (with an extra warning
+when the job is flagged `spends_llm` or `heavy`), last-run times rendered in
+UTC, a banner for a degraded schedule store (`store_degradation`), and a
+dispatcher-activity banner that states only what the EventLog actually
+shows rather than asserting "nothing will pick this up" — a missing poll
+record is not proof the dispatcher is dead. A row with no stored
+`schedule.json` entry (`stored: false`) is labelled "not scheduled, no
+stored row" rather than shown as an enabled, catalog-default job. A job
+that has never completed a run is due at the dispatcher's very first tick
+after being scheduled (see `due-jobs` above); the next-due cell's tooltip
+says so rather than implying a wait.
 
 ---
 
@@ -477,7 +828,7 @@ trellis classify tag-candidates [--facet <name>] [--limit <n>] [--emit/--no-emit
 | `--limit` | `50000` | Cap on documents scanned. |
 | `--emit / --no-emit` | emit | Emit a `TAG_KEYWORD_CANDIDATE` event per candidate. `--no-emit` is a dry run and does not advance the cooldown. |
 
-**Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a paste-ready `classify.domain_keywords` block — pasting it promotes, deleting those lines revokes. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
+**Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a ready `trellis classify apply-rule tag_keyword <keyword> <tag> --source-event-id <event-id>` line per candidate — not a `config.yaml` fragment to hand-paste. The event id is looked up via `GET /api/v1/classify/candidates` (or the Tag Rules UI tab); promoting (or undoing) then goes through the governed Apply/Revoke review below. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
 
 Thresholds come from the `ParameterRegistry` under component `learning.tag_evolution`. The **analyzer** never substitutes a default — a missing key raises, naming it and its recommended seed. The **command** seeds the recommended values for that run and warns on stderr, matching `trellis analyze schema-evolution`; nothing seeds this component automatically, so hard-failing would mean failing on every deployment. Seed them for real (making runs reproducible) from `trellis.learning.tag_evolution.RECOMMENDED_SEED_VALUES`:
 
@@ -506,6 +857,84 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 ```json
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
 ```
+
+### Classify rule review — Apply / Revoke 
+
+`tag-candidates` / `domain-candidates` (above) only *propose*: their text
+output ends with a ready `apply-rule` invocation per candidate rather than a
+`config.yaml` fragment to hand-paste (that path had no audit trail). This
+section is the governed "approve" step that sits on top of mining — an
+**operator overlay**, not a third mining command.
+
+**Precedence.** `trellis.classify.factory.effective_domain_keywords()` /
+`effective_domain_aliases()` merge three layers, lowest to highest: built-in
+defaults < `config.yaml` < `classify_overrides.json` (`<data_dir>/stores/`,
+a `DegradableJsonStore` subclass — reads degrade row-by-row, writes refuse
+whole, same posture as `PolicyStore` / `AdvisoryStore`). An applied row
+always wins over the same key in `config.yaml`: an operator approving a
+mined candidate through this path is a more specific, more recent decision
+than whatever is sitting in a host-local file Trellis never writes to
+itself.
+
+**Governed, not a direct write.** Apply and revoke route through
+`Operation.CLASSIFY_RULE_APPLY` / `CLASSIFY_RULE_REVOKE`, via a dedicated
+admin-only executor (`build_classify_rules_executor`) rather than the
+general curate executor — this changes what the classifier does to every
+future document, not one piece of content. Both the CLI and the admin-scoped
+REST route submit the same `Command`, so a denying policy, a degraded
+overlay store, or a malformed candidate is refused identically on either
+surface (Stage 2 always runs, CLAUDE.md).
+
+```bash
+trellis classify apply-rule <kind> <key> <target> --source-event-id <id> \
+    [--support <n>] [--precision <f>] [--lift <f>] [--by <who>] [--format text|json]
+trellis classify revoke-rule <kind> <key> [--by <who>] [--format text|json]
+trellis classify effective-rules [--format text|json]
+```
+
+| Argument / option | Description |
+|---|---|
+| `kind` | `tag_keyword` or `domain_alias`. |
+| `key` | Keyword (`tag_keyword`) or alias (`domain_alias`) to apply/revoke. |
+| `target` (apply only) | Domain (`tag_keyword`) or canonical tag (`domain_alias`). |
+| `--source-event-id` (apply, required) | The `TAG_KEYWORD_CANDIDATE` / `DOMAIN_ALIAS_CANDIDATE` event this rule was mined from. `tag-candidates` / `domain-candidates` print a `candidate_id`, not this id — read it from `GET /api/v1/classify/candidates`'s `source_event_id` field for the same candidate. Kept so the applied row traces back to the event that proposed it, without a reviewer having to join back to it by hand. |
+| `--support` / `--precision` / `--lift` (apply) | The candidate's own mining metrics, carried onto the audit event. |
+
+`revoke-rule` is **refused, not a no-op**, when `(kind, key)` has no overlay
+row — including when the effective rule instead comes from `config.yaml`:
+that row was never written by this store and cannot be un-applied through
+it. `effective-rules` is read-only parity for `GET /api/v1/classify/rules`
+(see below): both call `effective_classify_rule_rows()`, badging every
+effective keyword/alias row by `source` (`default`, `config`, `overlay`).
+
+**REST** (`src/trellis_api/routes/classify_rules.py`; admin scope
+(`SCOPE_ADMIN`) on every write, read scope on the two `GET`s, mirroring
+`policies.py`'s mixed-scope mounting):
+
+| Method & path | Scope | Description |
+|---|---|---|
+| `GET /classify/candidates` | read | List mined candidates (`?limit=`). No `status` filter server-side — filter client-side on `status == "open"`. |
+| `POST /classify/candidates/mine` | admin | Run the tag-keyword / domain-alias miners inline and emit candidate events — reuses the same analyzer functions `tag-candidates` / `domain-candidates` call, not a reimplementation. Body: `{"kinds": ["tag_keyword", "domain_alias"], "scan_limit": null, "use_recommended_defaults": true}`. |
+| `POST /classify/candidates/{candidate_id}/dismiss` | admin | Mark one candidate dismissed (no body). `404` if no such candidate. |
+| `POST /classify/rules` | admin | Apply one candidate. Body is `ClassifyRuleApplyRequest`: `kind`, `key`, `target`, `source_event_id` (required — the candidate's `source_event_id`, **not** its `candidate_id`), optional `support`/`precision`/`lift`. |
+| `DELETE /classify/rules/{kind}/{key}` | admin | Revoke one applied (overlay-sourced) rule. |
+| `GET /classify/rules` | read | Every effective rule, badged by `source`. |
+
+**JSON shapes:**
+
+```json
+{"status": "ok", "tag_keyword_count": 2, "domain_alias_count": 0, "used_recommended_defaults": [], "candidates": [{"candidate_id": "3f2a...", "kind": "tag_keyword", "key": "todoist", "target": "task-management", "status": "open", "recurrence_count": 0, "example_count": 3, "notes": [], "metrics": {"support": 40, "precision": 0.976, "lift": 21.4}, "emitted_at": "2026-10-11T00:00:00Z", "source_event_id": "evt-9c1..."}]}
+```
+
+```json
+{"count": 2, "rules": [{"kind": "tag_keyword", "key": "todoist", "target": "task-management", "source": "overlay", "applied_at": "2026-10-11T00:00:00Z", "applied_by": "cli:alice", "source_event_id": "evt-9c1..."}]}
+```
+
+**UI:** the "Tag rules" tab (`src/trellis_api/static/index.html`) lists open
+candidates with Apply/Dismiss actions and the effective-rule table with
+Revoke restricted to `source === "overlay"` rows — the same refusal the
+`DELETE` route enforces, surfaced before the request rather than only after
+it fails.
 
 ### `trellis ingest evidence`
 
@@ -990,6 +1419,101 @@ and no `warnings` key, because nothing was submitted.
 
 ---
 
+## Settings Store
+
+`<data_dir>/stores/settings.json` holds per-deployment overrides for the
+write-behaviour knobs reported by `trellis admin write-config` and
+`GET /api/version`, plus `graph_seeding` — 13 tunables total
+(`src/trellis/core/settings_registry.py`'s `SETTINGS_REGISTRY`: the 12
+`WriteBehaviourConfig` fields plus `graph_seeding`, explicitly **not**
+`learning.auto_promote.*`, which stays out by owner decision).
+
+**The write surface**: `trellis admin settings set <name> <value>` /
+`settings unset <name>` and `PUT`/`POST /api/v1/settings/{name}` (admin
+scope) both submit `Operation.SETTINGS_UPDATE` through the same narrow
+`build_settings_executor` — a denying policy, a degraded store or an
+out-of-range value is refused identically on either surface, and nothing
+is silently clamped. These two are the *only* surfaces that can reach
+this operation at all: the generic `POST /commands/batch` route and
+MCP's `execute_mutation` build `build_curate_executor` instead, which
+never registers `Operation.SETTINGS_UPDATE`, so a `settings.update`
+command submitted there fails — `status: "failed"`, not `"rejected"`,
+because nothing was evaluated and no `MUTATION_REJECTED` event exists
+to name a reason — rather than being evaluated and refused by policy;
+there is no shared refusal path to be "identical" to from those two.
+Both surfaces rewrite the message (not the status) through
+`redirect_unreachable_settings_update`, so the failure names where the
+write *is* reachable (`PUT`/`POST /api/v1/settings/{name}`, or
+`trellis admin settings set`/`unset`) instead of a bare "no handler
+registered for: settings.update".
+`value: null` (CLI: `settings unset`) removes the
+override; there is no separate reset operation. A write for a setting
+whose environment variable is currently set still stores the override —
+the REST response says `accepted: true` plus the env value actually in
+force, rather than claiming the write just took effect. `GET
+/api/v1/settings` lists every registry entry's metadata, resolved value
+and provenance; **no CLI equivalent ships yet** — `trellis admin
+settings list` is not a real subcommand today even though
+`SettingsStore`'s stale-write recovery text below still names it (#854),
+so follow that text's advice with the REST route, or `trellis admin
+write-config` for the twelve `WriteBehaviourConfig` fields, until one is
+added.
+
+### Precedence: env > settings > default
+
+Each knob resolves through `WriteBehaviourConfig.from_env_and_settings()` in
+that order: a real (non-blank) environment variable always wins; a settings
+override applies only where the environment is unset or blank; the shipped
+default applies when neither is set. `resolve_overridden_by()` answers the
+same question per field independently, as `"env"` / `"settings"` /
+`"default"` — `describe(overridden_by=...)` carries it into
+`trellis admin write-config --format json`'s `knobs[].overridden_by` and
+into `GET /api/version`'s `write_behaviour_settings[].overridden_by`.
+Callers that omit `overridden_by` keep the older two-valued behaviour
+(`describe()` falls back to `"env"` / `"default"` from the `overridden`
+flag), so this is additive, not a breaking change to `describe()`'s shape.
+
+**`settings_live` tells you whether an override does anything yet.** The
+registry catalogs every tunable `write_config.py` knows about plus two
+retrieval-side knobs resolved outside it (`graph_seeding`,
+`filter_legacy_advisories`); it is not a claim that each one has a
+settings-aware enforcement site, only that this one does. Every registered
+knob now resolves env > settings > default at its real enforcement site —
+each per-knob reader (`classify/ingest.py`, `extract/memory_ingest_hook.py`,
+`extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
+`mcp/reconcile.py`, `mcp/server.py`) delegates to
+`write_config.resolve_write_behaviour()`, and `graph_seeding` /
+`filter_legacy_advisories` each carry their own settings-aware read in
+`builder_factory.py` / `pack_builder.py` — so a settings override reaches
+runtime the moment you set one. The lone exception is
+`minhash_seed_max_docs`: it is read once, lazily, at an MCP process's first
+`save_memory` call and cached for that process's lifetime, so a settings
+write after that first call has no effect until the next process starts.
+`SettingSpec.settings_live` is `False` only for that one knob, which
+instead carries `restart_required=True`.
+
+### Failure posture: degrades, never raises
+
+Unlike `policies.json` below, a damaged `settings.json` **does not fail a
+read.** `SettingsStore` (`src/trellis/stores/settings_store.py`, built on
+the shared `DegradableJsonStore`) degrades per row: rows that parsed are
+served, a row that didn't parse is simply absent from the override set,
+which makes that one knob fall back through the same
+`env > settings > default` chain as if it had never been overridden — not a
+`ConfigError`. A corrupt settings file silently reverting one tunable to its
+environment value or default is no worse than that tunable never having
+been overridden, so nothing here needs to fail closed the way a damaged
+`policies.json` does. The degradation is still visible, not silent: a
+`settings_load_degraded` **error**-level log line names the path and reason,
+because a reverted override an operator can't see is still a surprise, just
+not an access-control one. Every write (once a write surface ships) is
+refused while degraded or stale, for the same whole-file-rewrite reason
+`policies.json` refuses writes: replacing the file from a partial view would
+make the damaged file *valid* and erase whatever didn't parse, for good.
+Recovery: `trellis admin settings list`.
+
+---
+
 ## Policy Commands
 
 Stage 2 of the [governed mutation pipeline](#python-only-mutation-api) evaluates
@@ -1460,13 +1984,14 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 
 **`--quiet` means a different population on `retrieve search`.** Same flag, same one-id-per-line shape, and `search` excludes `<parent>#chunk-N` rows by pushing the exclusion into the store — so its line count refills with whole documents rather than shrinking. Pipelines that consume both surfaces cannot assume one id vocabulary.
 
-**The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints. The `axes` block says which of four things happened:
+**The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints — except when resolving the embedder itself raises (Q5-A, #838), which logs `semantic_search_embedder_resolve_failed` at `WARNING`, once per distinct cause per process, so it prints at the default level. The `axes` block says which of five things happened:
 
 | `axes.semantic` | Meaning |
 |---|---|
 | `ran` | The axis exists and ran |
 | `not_configured` | No `embeddings:` provider and no `TRELLIS_EMBEDDING_FN` — this pack is keyword + graph only |
 | `misconfigured` | An embedder resolved but the vector backend failed to initialise |
+| `embedder_failed` | `registry.embedding_fn` raised instead of resolving — keyword and graph still run; `axes.embedder_error_type` names the exception type and, for a `ConfigError`, `axes.embedder_setting` names the setting, never the message |
 | `failed` | The axis exists and raised during *this* build; see `PACK_ASSEMBLED.strategy_failures` |
 
 Text output prints a sentence for every state but `ran`.
@@ -1505,13 +2030,13 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
   "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
   "budget": {"max_items": 10, "max_tokens": 8000},
   "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5},
-  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured"}
+  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "embedder_error_type": null, "embedder_setting": null}
 }
 ```
 
 `withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget.
 
-**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
+**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
 
 **MCP renders a markdown line, not a JSON block.** `get_context`, `search`, and — since #789 — `get_context(sections=...)`, `get_objective_context`, `get_task_context` and `get_sectioned_context` all add one line naming any axis in `axes.failed`, to both a populated and an empty reply:
 
@@ -1527,9 +2052,17 @@ A `misconfigured` semantic axis (an embedder resolved but the vector backend nev
 **Semantic retrieval misconfigured:** the vector store did not initialise, so this pack has no semantic results.
 ```
 
-Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line. One gap remains:
+Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line.
 
-- The SDK's `get_objective_context` / `get_task_context` format their own local markdown (`trellis_sdk._format.format_sectioned_pack_as_markdown`) and never read the response's `axes` key, so neither renders either line at all.
+An `embedder_failed` semantic axis (Q5-A, #838 — `registry.embedding_fn` itself raised, before any strategy was built) adds a third, independent line:
+
+```
+**Semantic retrieval unavailable:** the embedder failed to resolve (<error_type>[: <setting>]), so this pack has no semantic results. Fix the setting, then run `trellis admin reindex-vectors`.
+```
+
+`<error_type>` and, for a `ConfigError`, `<setting>` name the cause, never the exception message. All three lines are independent and render together when more than one applies.
+
+**The Python SDK renders the same three lines from the response's `axes` block.** `TrellisClient.get_objective_context` / `get_task_context`, sync and async, pass it to `trellis_wire.axes.axis_note_from_payload`, which renders MCP's wording through the same three formatters (`format_failed_axes_note`, `format_misconfigured_semantic_note`, `format_embedder_failed_note` — defined in `trellis_wire.axes`, the first two re-exported from `trellis.retrieve.builder_factory`). A response without `axes`, or with `axes: null`, renders no line.
 
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`
@@ -1568,7 +2101,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `index_mode` | `true` when the pack was assembled for the one-line-per-item index rendering (`get_context(index=True)` / `search(index=True)`, #305) instead of excerpt bodies. Always present on packs built after #305; read it with a `False` default. **Branch on it before aggregating token numbers** — see the two rows below. |
 | `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. `item_tokens` is whichever cost was *charged*: the item's excerpt normally, its rendered index line when `index_mode` is `true`. |
 | `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. `token_total_estimated` sums the same charge `budget_trace[].item_tokens` records, so on an `index_mode` pack it is index-line tokens, not excerpt tokens — averaging it across a mixed corpus mixes two units. The per-item excerpt read cost stays on `injected_items[].estimated_tokens` in both modes. |
-| `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. |
+| `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. Each row's `message` is sanitized, bounded, and never a raw `str(exc)` that could echo a DSN or credential into this stored event — but the exact derivation differs by caller: most rows (a strategy's own init or search raising) are `summarize_exception(exc)["message"]`, computed by the `_audit_message` helper, which falls back to the suppression marker if summarizing itself raises; the one in-tree exception is the embedder-resolve row (`EmbedderResolveFailure`, #838), whose `message` is `<ErrorType>[: <setting>]` — a type name and a config key, never driver text. |
 | `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. **Not a count of meta-Activities suppressed.** Since #375/#436 the recorder mints them `node_role="structural"` and `GraphSearch` drops them *inside the strategy*, before the candidate slice, so they never become candidates and this field reads `0` while suppression happens on every pack. It counts only what reached `PackBuilder`: pre-#436 `semantic` rows, and any meta-Activity reached by a non-graph axis. |
 | `holdout` / `holdout_rate` | The pack holdout (`TRELLIS_PACK_HOLDOUT_RATE`, default `0`): whether this pack was withheld from its caller, and the rate in force when it was drawn. On every build of both pack kinds, flag off included, so a served row (`false`) is told apart from one an older build wrote (key absent). Read it as `payload.get("holdout") is True`. See [the exception to stated withholding](#withholding-is-stated-not-implied-404). |
 | `holdout_items[]` / `holdout_sections[]` / `holdout_advisory_ids` | Only on a withheld pack: the would-be pack, its items in the `injected_items[]` row shape (sectioned: `holdout_sections[]` in the `sections[]` shape), and its advisory ids. Every other key describes the empty pack the caller received, so `injected_items`, `injected_item_ids` and `advisory_ids` are empty and no reader counts a withheld item as served. |
@@ -1576,6 +2109,8 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-ups `items_count` / `strategies_used` / `candidates_found`, and `advisory_ids` / `reranker` / `semantic_dedup_enabled` / `semantic_dedup_rejected`, all as named.
 
 `advisories_matched` (#392) is how many advisories matched the pack's scope **before** the delivery cap cut them; `advisory_ids` is what actually rode the pack, at most `PackBuilder._ADVISORY_MAX_COUNT` (5). Equal whenever the cap did not bind, so a widening gap between the two is the signal that the advisory corpus is outgrowing what a pack can carry. Emitted on both pack kinds.
+
+`advisories_filtered_legacy` (decision-ledger D-4, option B) is how many scope-matching advisories were withheld for predating the #394 generator repair — rows with no `evidence_confidence`, dropped before ranking and the cap, so a legacy row can never occupy a slot a post-repair row would have won. `advisories_matched` is counted *after* this filter. Controlled by `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted/rejected-value vocabulary as `TRELLIS_GRAPH_SEEDING`); `0` when the knob is off. Emitted on both pack kinds.
 
 **The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `injected_items[]`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. Everything else above is shared. Two consequences to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**, because it reads `injected_item_ids`; and since the learning join reads `injected_items[]`, a sectioned pack yields **zero per-item rows** — `run_id` and `intent_family` are emitted there for symmetry but stay inert until that gap is closed.
 
@@ -1618,7 +2153,7 @@ Three properties worth knowing:
 - **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
 - **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
 
-**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
+**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
 
 `PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under **no shipped default** (`configure_stderr_logging` pins INFO, the CLI pins WARNING). `trellis -vv` or `TRELLIS_LOG_LEVEL=DEBUG` does enable it — which is precisely the point: the signal existed only for someone who already suspected the problem and went looking.
 
@@ -1714,7 +2249,6 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `precedent.promote` | `trace_id`, `title`, `description` | Promote a trace to a precedent (also available via CLI) |
-| `precedent.update` | `precedent_id` | Update an existing precedent |
 
 ### Link Operations
 
@@ -1799,6 +2333,80 @@ If a command with the same key has already succeeded (in-memory or in the event 
 ---
 
 ## Analyze Commands
+
+### `GET /api/v1/analyze` and `GET /api/v1/analyze/{report}` (#e182)
+
+Gap G15: every `trellis analyze <report>` command had a CLI only — the UI
+could not ask "are our learning loops performing or doing anything?" at
+all. Read scope. Each report calls the *exact* library function its CLI
+counterpart calls (never a subprocess, never a re-derivation), so a route
+and its CLI command can disagree about transport but never about
+arithmetic.
+
+`GET /api/v1/analyze` lists every allowed report name, an operator-facing
+description (what it measures, what a good vs. a bad value looks like,
+which loop it informs), and that report's default query params.
+`GET /api/v1/analyze/{report}` runs one. An unrecognized `{report}` is a
+404 naming every allowed name (never a 500 from an unhandled import); an
+unrecognized or out-of-range query param is a 422 (`extra="forbid"` on
+every params model, so a typo'd param name is rejected rather than
+silently ignored).
+
+Eleven reports: `holdout`, `judged-outcomes`, `advisory-effectiveness`,
+`value`, `dimension-predictiveness`, `learning-candidates`, `domains`,
+`extractor-fallbacks`, `pack-telemetry`, `token-usage`, `cost`. Three
+families are deliberately absent, not forgotten: `replay` takes a change
+spec rather than bounded query params; `generate-advisories` and
+`apply-noise-tags` are write paths and this router is read-scope only
+end to end; `pack-quality` requires a `--scenarios` YAML file that must
+already exist on the server's local disk, with no shipped default set —
+there is no bounded query-param shape for "a path on the server's
+filesystem," so it is a premise refutation rather than unfinished work.
+
+**Finite JSON, always.** Every response passes through a recursive
+non-finite-float sanitizer before `JSONResponse`, which also sets
+`allow_nan=False`: a latent `inf`/`nan` becomes `null` rather than
+crashing the request or putting a non-JSON token on the wire. This is
+defense in depth — every library report already types an unmeasured
+quantity as `float | None`.
+
+**Caching.** A per-process, 60s TTL cache covers every report (several
+aggregate the whole requested window per request, at the same cost
+report to report). Every response names `computed_at` (when the report
+was actually computed) and `cached` (whether this response reused that
+computation), so a caller can tell a stale read from a fresh one.
+
+```json
+{
+  "report": "advisory-effectiveness",
+  "params": {"days": 30, "min_presentations": 3},
+  "computed_at": "2026-10-10T23:00:00+00:00",
+  "cached": false,
+  "data": {"status": "degraded", "store_degradation": {"reason": "..."}}
+}
+```
+
+`advisory-effectiveness` can answer `{"status": "degraded", ...}` instead
+of a scored report — the same gate the CLI's `advisory-effectiveness` and
+`generate-advisories` commands use: a degraded advisory file scores a set
+that is missing whatever failed to parse, so the route reports the
+degradation itself rather than a silently-incomplete measurement.
+`learning-candidates` answers the pure aggregator's output plus a `note`
+field explaining what it deliberately does not do: no
+candidates/decisions file is written (a GET route must not write, and
+must not race the Review queue's own reader/writer over that directory),
+so there is no `promotion_ready` field and candidate names fall back to
+bare item ids rather than the document-store-backed readable name — both
+are computed only by `trellis analyze learning-candidates` or the nightly
+worker.
+
+The operator UI's **Reports** tab (`src/trellis_api/static/index.html`)
+renders this: a report picker populated from `GET /api/v1/analyze`, an
+editable params form seeded from each report's defaults, `computed_at`
+and a `cached` badge, scalar fields as cards and nested structures as
+collapsible JSON, a degraded-store payload rendered as a visible refusal
+rather than folded into the generic card view, and a fetch failure
+rendered as a visible error rather than a silently empty panel.
 
 ### `trellis analyze context-effectiveness`
 
@@ -2098,6 +2706,8 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 
 **Promotion stays human-gated.** This command writes learning candidates for review and **never promotes** (Tier-2 invariant). To promote, review the emitted `promotion_decisions.template.json`, set `approved: true` on the rows you want, then run `trellis curate promote-learning`. In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts (noise-tagged, advisories generated/suppressed, candidates written); SIGINT/SIGTERM drains the current cycle and exits cleanly.
 
+**Promotion-ready digest (#845).** Both `--format json`'s `learning_promotion_ready` field and the `intent_learning_candidates.json` artifact's `promotion_ready` key carry a surfacing-only summary — `count` of `promote_guidance` candidates with `helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (currently `1`) and `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate` desc, then `times_served` desc). Text output prints `"N candidate(s) promotion-ready — review with trellis curate promote-learning or the Review tab"` when `N > 0` (singular at `N == 1`). Nothing here promotes anything; it only tells a reader that candidates are waiting. A candidate's `precedent_name` also gets a readable fallback name (first non-empty line of its document, frontmatter and heading markers stripped) when it has no `title` and its item resolves — kept as a bare item id only when the item can't be resolved.
+
 ### `trellis worker enrich`
 
 Batch-enrich under-tagged documents via the LLM `EnrichmentService`, writing the suggested tags / classification / importance back into each document's `metadata.content_tags`.
@@ -2333,10 +2943,26 @@ decide which surfaces are human-gated are described in
 each with a live count:
 
 1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
-   dry-run preview and shows the predicted decision before a confirm step.
-   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. The
-   CLI (`trellis metrics promote`) keeps working identically — both share
-   `trellis.learning.tuners.preview_promotion`.
+   dry-run preview and shows the predicted decision before a confirm step,
+   and disables the confirm button when that preview predicts a
+   rejection (nothing it could do but spend the one proposal). Approve
+   wraps `promote_proposal`; Reject wraps `reject_proposal`. Both routes
+   and the CLI (`trellis metrics promote`) share the same
+   `trellis.learning.tuners.promote_proposal` / `preview_promotion`
+   functions, the same unconditional reachability check (refused even
+   under `force`), and — since both now default `allow_no_baseline` to
+   `False` — the same baseline requirement: a scope's first promotion is
+   refused by default on either surface. A no-baseline refusal is not
+   terminal (the proposal stays `pending`, not `rejected`), so it can
+   still be bootstrapped later — but only from the CLI, via
+   `trellis metrics promote --allow-no-baseline`, which skips only
+   `PromotionPolicy.allow_no_baseline`, not min-sample-size, min-effect-
+   size, reachability, or the immutable-core check. The Review queue
+   exposes no equivalent override, so a scope with no snapshot yet can
+   never clear its own first refusal from the UI alone. The CLI's
+   `--force` is the coarser, pre-existing escape hatch: it skips the
+   whole policy gate, including the baseline requirement, but never the
+   reachability or immutable-core refusals (which no flag skips).
 2. **Learning promotion candidates** — candidate cards with metrics, an
    approve checkbox + rationale field, and a single submit that runs the
    existing `prepare_learning_promotions` → `MutationExecutor` path.
@@ -2525,7 +3151,7 @@ The check is advisory telemetry and fails soft: if it raises, the pack is served
 
 ### Citing Pack Elements in Feedback
 
-The three sectioned-context tools render each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`:
+Every pack-assembling tool — the three sectioned-context tools and the flat `get_context` / `search` paths alike (#392, decision-ledger D-4) — renders each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`. One exception: an empty flat pack at the default holdout rate of 0 renders a one-line answer with no `pack_id` header, so any advisories shown under it cannot be cited:
 
 ```markdown
 # Context for: deploy checklist
@@ -2534,11 +3160,11 @@ The three sectioned-context tools render each response with a `pack_id` header a
 ## Domain Knowledge
 - `doc_ownership_rules` (document, 0.82): Ownership rules for platform...
 
-## Advisories
-1. `adv_01HXYZ` **[pattern]** Always run dry-run first (n=12, effect=+18%)
-
 ---
 *Cite feedback via `record_feedback(pack_id="01HABCDEF...", success=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
+
+## Advisories
+1. `adv_01HXYZ` **[pattern]** Always run dry-run first (n=12, effect=+18%)
 ```
 
 When an agent finishes the task, it calls `record_feedback` with the copied IDs:

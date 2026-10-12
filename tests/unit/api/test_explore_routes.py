@@ -438,6 +438,41 @@ def test_packs_list(client, registry):
     # Summary rows never carry the full payload
     assert "payload" not in pack
     assert "injected_items" not in pack
+    # _PACK_PAYLOAD carries injected_items[], so it is a flat pack
+    assert pack["sectioned"] is False
+
+
+def test_packs_list_flags_a_sectioned_pack(client, registry):
+    """build_sectioned emits sections and no injected_items[] (pack_value.py's
+    own discriminator) -- the summary row says so, so the UI can label it
+    "unattributable (sectioned)" instead of implying zero items served."""
+    log = registry.operational.event_log
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id="pack-sectioned",
+        entity_type="sectioned_pack",
+        payload={
+            "intent": "survey",
+            "sections": [{"name": "patterns", "items": []}],
+        },
+    )
+    resp = client.get("/api/v1/packs")
+    assert resp.status_code == 200
+    pack = resp.json()["packs"][0]
+    assert pack["sectioned"] is True
+
+
+def test_packs_list_until_pages_older_history(client, registry):
+    _seed_pack(registry, pack_id="pack-older")
+    older_at = client.get("/api/v1/packs").json()["packs"][0]["created_at"]
+    _seed_pack(registry, pack_id="pack-newer")
+
+    resp = client.get("/api/v1/packs", params={"until": older_at})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [p["pack_id"] for p in data["packs"]] == ["pack-older"]
+    assert data["total"] == 2
 
 
 def test_pack_detail_with_feedback(client, registry):
@@ -458,6 +493,53 @@ def test_pack_detail_with_feedback(client, registry):
 def test_pack_detail_404(client):
     resp = client.get("/api/v1/packs/no-such-pack")
     assert resp.status_code == 404
+
+
+def _seed_pack_with_feedback(registry, pack_id, count):
+    """Seed one pack plus ``count`` feedback events scoped to it.
+
+    ``count`` is always > 1 here (never a population-1 fixture): callers
+    pick a value either side of the route's ``limit=50`` cap on purpose,
+    so the same helper proves both the untruncated and truncated cases.
+    """
+    log = registry.operational.event_log
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload=_PACK_PAYLOAD,
+    )
+    for i in range(count):
+        log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mutation_executor",
+            entity_id=pack_id,
+            payload={"pack_id": pack_id, "rating": 1, "comment": f"fb-{i}"},
+        )
+
+
+def test_pack_detail_feedback_total_not_truncated_below_cap(client, registry):
+    _seed_pack_with_feedback(registry, "pack-small", 3)
+    resp = client.get("/api/v1/packs/pack-small")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["feedback"]) == 3
+    assert data["feedback_total"] == 3
+    assert data["feedback_truncated"] is False
+
+
+def test_pack_detail_feedback_total_true_count_above_cap(client, registry):
+    _seed_pack_with_feedback(registry, "pack-big", 55)
+    resp = client.get("/api/v1/packs/pack-big")
+    assert resp.status_code == 200
+    data = resp.json()
+    # The displayed list stays capped at 50 (unchanged behaviour) ...
+    assert len(data["feedback"]) == 50
+    # ... but the true total and the truncation flag now say so, rather
+    # than leaving the UI to read 50 as "all of it".
+    assert data["feedback_total"] == 55
+    assert data["feedback_truncated"] is True
 
 
 # ---------------------------------------------------------------------------

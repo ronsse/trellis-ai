@@ -352,12 +352,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        properties_json = json.dumps(properties)
+        properties_json = json.dumps(properties, allow_nan=False)
         generation_spec_json = (
-            json.dumps(generation_spec) if generation_spec is not None else None
+            json.dumps(generation_spec, allow_nan=False)
+            if generation_spec is not None
+            else None
         )
         document_ids_json = (
-            json.dumps(document_ids) if document_ids is not None else None
+            json.dumps(document_ids, allow_nan=False)
+            if document_ids is not None
+            else None
         )
 
         # Each attempt is one transaction on one pooled connection. Its
@@ -506,12 +510,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 "node_type": node_type,
                 "node_role": node_role,
                 "generation_spec": (
-                    json.dumps(generation_spec) if generation_spec is not None else None
+                    json.dumps(generation_spec, allow_nan=False)
+                    if generation_spec is not None
+                    else None
                 ),
                 "document_ids": (
-                    json.dumps(document_ids) if document_ids is not None else None
+                    json.dumps(document_ids, allow_nan=False)
+                    if document_ids is not None
+                    else None
                 ),
-                "properties": json.dumps(properties),
+                "properties": json.dumps(properties, allow_nan=False),
                 "created_at": current["created_at"],
                 "updated_at": now,
                 "valid_from": now,
@@ -598,12 +606,14 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     spec["node_type"],
                     spec.get("node_role", "semantic"),
                     (
-                        json.dumps(generation_spec)
+                        json.dumps(generation_spec, allow_nan=False)
                         if generation_spec is not None
                         else None
                     ),
-                    json.dumps(document_ids) if document_ids is not None else None,
-                    json.dumps(spec.get("properties") or {}),
+                    json.dumps(document_ids, allow_nan=False)
+                    if document_ids is not None
+                    else None,
+                    json.dumps(spec.get("properties") or {}, allow_nan=False),
                     created_at,
                     now,
                     now,
@@ -1012,7 +1022,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        properties_json = json.dumps(properties or {})
+        properties_json = json.dumps(properties or {}, allow_nan=False)
 
         # Single connection for the read+write so the SCD-2 close-and-
         # reinsert is transactional. ``FOR UPDATE`` alone does NOT
@@ -1031,7 +1041,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT edge_id FROM edges
+                    SELECT edge_id, created_at FROM edges
                     WHERE source_id = %s AND target_id = %s AND edge_type = %s
                       AND valid_to IS NULL
                     FOR UPDATE
@@ -1042,6 +1052,12 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
             if row:
                 edge_id: str = row[0]
+                # Carry created_at forward from the version being closed,
+                # matching upsert_edges_bulk and the Bolt store's coalesce
+                # (contract: test_upsert_edge_carries_created_at_forward): a
+                # re-upsert is a new version of the same logical edge, not a
+                # new edge.
+                created_at = row[1]
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE edges SET valid_to = %s"
@@ -1066,7 +1082,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                             target_id,
                             edge_type,
                             properties_json,
-                            now,
+                            created_at,
                             now,
                             source_trace_id,
                             agent_id,
@@ -1199,7 +1215,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                         spec["source_id"],
                         spec["target_id"],
                         spec["edge_type"],
-                        json.dumps(spec.get("properties") or {}),
+                        json.dumps(spec.get("properties") or {}, allow_nan=False),
                         created_at,
                         now,
                         prov["source_trace_id"],

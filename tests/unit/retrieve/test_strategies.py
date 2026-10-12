@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from trellis.errors import BackendNotInstalledError, ConfigError
 from trellis.retrieve import strategies as strategies_module
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_FLOOR,
@@ -18,11 +19,15 @@ from trellis.retrieve.strategies import (
     DEFAULT_RECENCY_HALF_LIFE_DAYS,
     GRAPH_RECENCY_CLOCK_FIELD,
     RECENCY_FLOOR,
+    EmbedderResolveFailure,
     GraphSearch,
     KeywordSearch,
     SemanticSearch,
     _apply_importance,
     _apply_recency_decay,
+    _warn_embedder_resolve_failed_once,
+    _warn_semantic_search_init_failed_once,
+    build_strategies,
 )
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 
@@ -963,3 +968,366 @@ class TestGraphRecencyClock:
         assert not [
             e for e in logs if e["event"] == "graph_search_recency_clock_unusable"
         ]
+
+
+class _KnowledgeStoresOnly:
+    """Minimal ``registry.knowledge`` stand-in -- construction only, never searched."""
+
+    def __init__(self) -> None:
+        self.document_store = object()
+        self.graph_store = object()
+        self.vector_store = object()
+
+
+class _EmbeddingFnRaises:
+    """Stand-in for StoreRegistry whose ``embedding_fn`` property raises.
+
+    Deliberately not a MagicMock: a mock's attribute access never raises on
+    its own, so it cannot stand in for the case under test (Q5-A) --
+    ``getattr(registry, "embedding_fn", None)`` suppresses only an
+    ``AttributeError`` from the attribute not existing, never a raise from
+    *inside* the property.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.knowledge = _KnowledgeStoresOnly()
+        self._exc = exc
+
+    @property
+    def embedding_fn(self) -> Any:
+        raise self._exc
+
+
+class TestBuildStrategiesEmbedderResolveFailure:
+    """Q5-A: ``registry.embedding_fn`` raising must degrade, not propagate.
+
+    Before this fix, ``build_strategies`` read
+    ``getattr(registry, "embedding_fn", None)`` directly -- and ``getattr``
+    with a default suppresses only ``AttributeError``, not a raise from
+    inside the property itself. A misconfigured embedder therefore crashed
+    every pack build identically to a corrupt policy file, instead of
+    degrading to keyword + graph search the way a failed vector-backend
+    init already did.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_warn_cache(self) -> Any:
+        _warn_embedder_resolve_failed_once.cache_clear()
+        yield
+        _warn_embedder_resolve_failed_once.cache_clear()
+
+    def test_a_config_error_is_caught_not_propagated(self) -> None:
+        registry = _EmbeddingFnRaises(
+            ConfigError("embeddings.provider is not set", setting="embeddings.provider")
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert not any(isinstance(s, SemanticSearch) for s in result.strategies)
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+        assert result.embedder_configured is False
+        assert result.embedder_resolve_failure == EmbedderResolveFailure(
+            error_type="ConfigError", setting="embeddings.provider"
+        )
+
+    def test_a_backend_not_installed_error_is_caught_too(self) -> None:
+        """Not just the base ConfigError -- a subclass raised the same way."""
+        registry = _EmbeddingFnRaises(
+            BackendNotInstalledError(backend_name="openai", extra="llm-openai")
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert result.embedder_configured is False
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.error_type == "BackendNotInstalledError"
+        assert failure.setting == "backend.openai"
+
+    def test_a_non_config_error_is_caught_with_no_setting(self) -> None:
+        """Only a ConfigError carries a ``.setting`` hint; anything else
+        still degrades, just without naming a setting key."""
+        registry = _EmbeddingFnRaises(RuntimeError("boom"))
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert result.embedder_configured is False
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.error_type == "RuntimeError"
+        assert failure.setting is None
+
+    def test_the_message_text_never_appears_in_the_result(self) -> None:
+        """Describe, don't quote: the raw exception message must not leak
+        into the reported failure, even though it is right there on ``exc``."""
+        registry = _EmbeddingFnRaises(
+            ConfigError(
+                "postgresql://user:supersecret@host/db is unreachable",
+                setting="database.dsn",
+            )
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert "supersecret" not in failure.error_type
+        assert "supersecret" not in (failure.setting or "")
+        strategy_failure = failure.to_strategy_failure()
+        assert "supersecret" not in strategy_failure.message
+        # The *safe* parts still must reach the message -- a message that
+        # never carries the setting would also pass the line above.
+        assert strategy_failure.message == "ConfigError: database.dsn"
+        assert strategy_failure.error_class == "ConfigError"
+        assert strategy_failure.strategy == "semantic"
+
+    def test_to_strategy_failure_omits_the_colon_when_there_is_no_setting(
+        self,
+    ) -> None:
+        """The no-setting branch of the same join, pinned the other way."""
+        registry = _EmbeddingFnRaises(RuntimeError("boom"))
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.to_strategy_failure().message == "RuntimeError"
+
+    def test_it_warns_once_per_distinct_cause(self) -> None:
+        registry = _EmbeddingFnRaises(ConfigError("x", setting="embeddings.provider"))
+
+        with capture_logs() as logs:
+            build_strategies(registry)  # type: ignore[arg-type]
+            build_strategies(registry)  # type: ignore[arg-type]
+
+        warned = [
+            e for e in logs if e["event"] == "semantic_search_embedder_resolve_failed"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert warned[0]["error_type"] == "ConfigError"
+        assert warned[0]["setting"] == "embeddings.provider"
+
+    def test_an_explicit_embedding_fn_argument_bypasses_the_registry_entirely(
+        self,
+    ) -> None:
+        """Passing ``embedding_fn`` directly must never even touch the
+        raising property -- a caller supplying its own callable (e.g. a
+        test) is unaffected by a broken registry config."""
+        registry = _EmbeddingFnRaises(ConfigError("x", setting="embeddings.provider"))
+
+        result = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2],
+        )
+
+        assert result.embedder_configured is True
+        assert result.embedder_resolve_failure is None
+        assert any(isinstance(s, SemanticSearch) for s in result.strategies)
+
+    def test_an_unhashable_setting_still_degrades(self) -> None:
+        """O1 (#843 gate): a ``ConfigError.setting`` that is not a string
+        (a list, say -- unhashable) must not reach the
+        ``functools.cache``-keyed dedup call unguarded. This branch
+        predates this PR (#838) and had the identical gap R1 fixes on the
+        sibling semantic-init branch below."""
+        registry = _EmbeddingFnRaises(
+            ConfigError("bad", setting=["embeddings", "provider"])
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert result.embedder_configured is False
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.error_type == "ConfigError"
+        assert failure.setting is None
+
+
+class _KnowledgeVectorStoreRaises:
+    """``registry.knowledge`` stand-in whose ``vector_store`` property raises.
+
+    Mirrors ``_EmbeddingFnRaises`` above: a mock's attribute access never
+    raises on its own, so a real property is needed to reproduce #830's
+    construction-time failure. ``registry.knowledge.vector_store`` is
+    evaluated as a ``SemanticSearch(...)`` call argument, inside the
+    ``try`` that the embedder-resolve failure's ``try`` (above) does not
+    cover -- this is the *other* branch of ``build_strategies``.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.document_store = object()
+        self.graph_store = object()
+        self._exc = exc
+
+    @property
+    def vector_store(self) -> Any:
+        raise self._exc
+
+
+class _VectorStoreRaises:
+    """Stand-in for StoreRegistry whose ``knowledge.vector_store`` raises."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.knowledge = _KnowledgeVectorStoreRaises(exc)
+
+
+class TestBuildStrategiesSemanticSearchInitFailure:
+    """#830 fu4: ``semantic_search_init_failed`` must warn once per cause,
+    never per build, and never carry the exception's message or a
+    traceback.
+
+    ``StoreRegistry._get`` caches only success, so a broken vector
+    backend is re-instantiated -- and re-raises identically -- on every
+    pack build. Before this fix, ``build_strategies`` logged
+    ``semantic_search_init_failed`` with ``exc_info=True`` (a full
+    traceback, which carries the message) unconditionally on every call.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_warn_cache(self) -> Any:
+        _warn_semantic_search_init_failed_once.cache_clear()
+        yield
+        _warn_semantic_search_init_failed_once.cache_clear()
+
+    def test_it_degrades_to_keyword_and_graph_only(self) -> None:
+        registry = _VectorStoreRaises(RuntimeError("boom"))
+
+        result = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2],
+        )
+
+        assert not any(isinstance(s, SemanticSearch) for s in result.strategies)
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+
+    def test_it_warns_once_per_distinct_cause(self) -> None:
+        registry = _VectorStoreRaises(ConfigError("x", setting="vector_store.provider"))
+
+        with capture_logs() as logs:
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert warned[0]["error_type"] == "ConfigError"
+        assert warned[0]["setting"] == "vector_store.provider"
+
+    def test_log_never_carries_the_message_text_or_a_traceback(self) -> None:
+        """Describe, don't quote: the prior ``exc_info=True`` behaviour put
+        a full traceback -- including the message -- on every build."""
+        sentinel = "SENTINEL-leak-marker-semantic-init-7c2a"
+        registry = _VectorStoreRaises(RuntimeError(sentinel))
+
+        with capture_logs() as logs:
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["error_type"] == "RuntimeError"
+        assert warned[0]["setting"] is None
+        # No exc_info -> no "exception" key carrying a rendered traceback.
+        assert "exc_info" not in warned[0]
+        for value in warned[0].values():
+            assert sentinel not in str(value)
+
+    def test_logs_again_for_a_different_cause(self) -> None:
+        """Dedup is per-cause, not a global silence switch."""
+        with capture_logs() as logs:
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(RuntimeError("a")),
+                embedding_fn=lambda _text: [0.1],
+            )
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(ConfigError("b", setting="vector_store.dsn")),
+                embedding_fn=lambda _text: [0.1],
+            )
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 2
+        assert {w["error_type"] for w in warned} == {"RuntimeError", "ConfigError"}
+
+    def test_an_unhashable_setting_still_degrades(self) -> None:
+        """R1 (#843 gate, probe scratchpad/g843_unhashable.py): a
+        ``ConfigError.setting`` that is not a string (a list, say --
+        unhashable) must not reach the ``functools.cache``-keyed dedup
+        call unguarded. Before this fix it raised
+        ``TypeError: unhashable type: 'list'`` out of build_strategies,
+        failing every pack build instead of degrading to keyword + graph
+        the way #839 already guarantees for the sibling
+        embed_ingest_hook/vector_metadata helpers."""
+        registry = _VectorStoreRaises(
+            ConfigError("bad", setting=["vector_store", "provider"])
+        )
+
+        with capture_logs() as logs:
+            result = build_strategies(
+                registry,  # type: ignore[arg-type]
+                embedding_fn=lambda _text: [0.1],
+            )
+
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["setting"] is None
+
+    def test_distinct_settings_of_the_same_error_type_both_warn(self) -> None:
+        """O2 (kills mutant G9): dedup keys on (error_type, setting), not
+        error_type alone. Two ``ConfigError``s that share a type but name
+        different settings are distinct causes and must both warn --
+        the CHANGELOG's claim is "once per distinct (error_type,
+        setting)"."""
+        with capture_logs() as logs:
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(ConfigError("a", setting="vector_store.provider")),
+                embedding_fn=lambda _text: [0.1],
+            )
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(ConfigError("b", setting="vector_store.dsn")),
+                embedding_fn=lambda _text: [0.1],
+            )
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 2
+        assert {w["setting"] for w in warned} == {
+            "vector_store.provider",
+            "vector_store.dsn",
+        }
+        assert {w["error_type"] for w in warned} == {"ConfigError"}
+
+    def test_an_unrelated_exceptions_own_setting_attribute_is_ignored(
+        self,
+    ) -> None:
+        """O3 (kills mutant G10): only a ``ConfigError``'s ``.setting`` is
+        trusted. An unrelated exception shape that happens to carry a
+        same-named ``.setting`` attribute (untrusted, possibly
+        unhashable) must log ``setting=None``, not that attribute's
+        value."""
+
+        class _HasSettingError(RuntimeError):
+            setting = "not-a-config-error-setting"
+
+        with capture_logs() as logs:
+            result = build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(_HasSettingError("boom")),
+                embedding_fn=lambda _text: [0.1],
+            )
+
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["error_type"] == "_HasSettingError"
+        assert warned[0]["setting"] is None

@@ -401,6 +401,22 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         """Whether this store refuses writes because its load was partial."""
         return self._degradation is not None
 
+    @property
+    def stale_recovery(self) -> str:
+        """The recovery command :meth:`refuse_if_stale` would cite.
+
+        Public for a caller one layer behind the exception itself -- a
+        governed write (e.g. ``trellis_api.routes.settings``) learns of a
+        ``stale_store_write`` refusal only through the mutation result, not
+        the raised :class:`~trellis.errors.StaleStoreWriteError`, and
+        :attr:`degradation` is ``None`` for staleness (the file parsed
+        fine; it just changed underneath this read) so there is nothing
+        there to report a recovery from. This exposes the same per-subclass
+        constant :meth:`refuse_if_stale` uses, rather than that caller
+        duplicating it.
+        """
+        return self._stale_recovery
+
     def refuse_if_degraded(self) -> None:
         """Raise rather than rewrite a file this store could not read.
 
@@ -682,6 +698,17 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         return a wrong answer from the in-memory view before they would
         ever reach here, so this guard cannot cover them, and they cannot
         cover a direct call to this one.
+
+        ``allow_nan=False`` refuses a non-finite float here, before this
+        call, the same gap #835 closed on every other store's write path.
+        It is one-directional: :meth:`_load_rows` parses with the default,
+        lenient ``json.loads``, so a file holding the non-standard
+        ``NaN``/``Infinity``/``-Infinity`` tokens a pre-fix write already
+        left on disk still loads cleanly — degrading that read would turn
+        an old, already-written file into a newly-unreadable one for no
+        gain, since nothing downstream of a load re-serializes it with
+        ``allow_nan=False`` until the next write, which this guard now
+        refuses.
         """
         self.refuse_if_degraded()
         self.refuse_if_stale()
@@ -695,7 +722,9 @@ class DegradableJsonStore(ABC, Generic[RowT]):
                 for row in self._rows.values()
             ]
         }
-        atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
+        atomic_write_text(
+            self._path, json.dumps(data, indent=2, default=str, allow_nan=False)
+        )
         # What we just wrote is now what we "loaded": a second write from the
         # same store instance must not trip its own guard.
         self._loaded_fingerprint = self._fingerprint()

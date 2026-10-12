@@ -66,7 +66,9 @@ health-check failure can never block or corrupt retrieval.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from pydantic import Field
@@ -81,6 +83,101 @@ _WINDOW_ENV = "TRELLIS_CAPTURE_WARN_WINDOW_HOURS"
 
 DEFAULT_THRESHOLD = 3
 DEFAULT_WINDOW_HOURS = 24
+
+#: Settings-registry wiring for the two knobs above — env wins over a
+#: stored override, which wins over the module default. See
+#: ``trellis.core.settings_registry``'s ``capture_warn_threshold`` /
+#: ``capture_warn_window_hours`` entries.
+THRESHOLD_SETTING = "capture_warn_threshold"
+WINDOW_HOURS_SETTING = "capture_warn_window_hours"
+
+
+def _resolve_int_knob(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Both the env and the stored value go through the same coercion the
+    governed ``PUT /settings`` path uses, so a non-finite value (``nan``,
+    ``inf``) is rejected instead of crashing later with ``OverflowError``
+    (uncaught by a bare ``except ValueError``), and a negative value is
+    rejected by the setting's registered ``minimum`` rather than by a
+    second, easy-to-miss floor check duplicated on every return.
+
+    Imported lazily: ``trellis.core.settings_registry`` itself imports
+    the learning tuners, which import ``trellis.ops.parameter_reachability``,
+    which imports this package's ``__init__`` -- a module-level import
+    here would close that cycle and fail with a partially-initialized
+    module on whichever side runs first.
+    """
+    from trellis.core.settings_registry import (  # noqa: PLC0415
+        get_setting,
+        validate_value,
+    )
+
+    spec = get_setting(setting_name)
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "capture_health.bad_env_int",
+                var=env_var,
+                error_type=type(exc).__name__,
+            )
+            return default
+    if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
+        try:
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "capture_health.bad_settings_int",
+                setting=setting_name,
+                error_type=type(exc).__name__,
+            )
+            return default
+    return default
+
+
+def resolve_capture_thresholds(
+    settings: Mapping[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Resolve ``(threshold, window_hours)`` for :func:`check_capture_health`.
+
+    Env beats a settings-store override beats the module default — the
+    same precedence every other read-side knob in this codebase applies.
+    A caller that already received an explicit per-call override (a CLI
+    flag, a query parameter) should pass that straight to
+    :func:`check_capture_health` instead of calling this at all; this is
+    for the common case where nothing was explicitly passed.
+    """
+    return (
+        _resolve_int_knob(
+            env_var=_THRESHOLD_ENV,
+            setting_name=THRESHOLD_SETTING,
+            default=DEFAULT_THRESHOLD,
+            settings=settings,
+        ),
+        _resolve_int_knob(
+            env_var=_WINDOW_ENV,
+            setting_name=WINDOW_HOURS_SETTING,
+            default=DEFAULT_WINDOW_HOURS,
+            settings=settings,
+        ),
+    )
+
 
 #: Cap on the detail fetch once the counts have crossed the threshold —
 #: enough to attribute surfaces and date the outage without pulling an
@@ -162,8 +259,19 @@ _REPLAY_REASON = "idempotency_replay"
 #: duplication is pinned by execution rather than by eye —
 #: ``tests/unit/mcp/test_capture_surface_roster.py`` matches the two
 #: spellings and drives the real surface to prove no banner is raised.
+#:
+#: ``config:classify_overrides`` joins the same exception for the same
+#: reason: a degraded classify overlay makes
+#: ``StoreRegistry.build_ingestion_pipeline`` refuse, but that method's
+#: only caller is the ``backfill`` command — classify-on-write, Apply,
+#: Revoke and the miners all resolve the overlay through a different path
+#: that never raises. "Capture is failing" would be false for every one of
+#: them. The literal is spelled out here rather than imported from
+#: :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
+#: for the same import-weight reason as the advisory label; the two
+#: spellings are matched by the same roster test.
 NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
-    {"mcp:record_feedback", "config:advisory_file"}
+    {"mcp:record_feedback", "config:advisory_file", "config:classify_overrides"}
 )
 
 #: Accept events that clear a capture surface **in addition to** the
@@ -257,8 +365,12 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except ValueError:
-        logger.warning("capture_health.bad_env_int", var=name, value=raw)
+    except ValueError as exc:
+        logger.warning(
+            "capture_health.bad_env_int",
+            var=name,
+            error_type=type(exc).__name__,
+        )
         return default
     return value if value >= 0 else default
 
@@ -446,7 +558,25 @@ def check_capture_health(
         if window_hours is not None
         else _env_int(_WINDOW_ENV, DEFAULT_WINDOW_HOURS)
     )
-    since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
+    try:
+        since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
+    except OverflowError:
+        # Defense in depth: the registry spec now caps
+        # TRELLIS_CAPTURE_WARN_WINDOW_HOURS / the stored override at
+        # 87600 (10 years), so a value reaching this function through
+        # ``resolve_capture_thresholds`` is already bounded. This guards
+        # the *other* path in — an explicit ``window_hours`` kwarg, or a
+        # future caller that reads the env var directly with
+        # ``_env_int`` (unbounded) rather than the capped resolver —
+        # from turning a huge-but-syntactically-valid hour count into an
+        # unhandled crash on every retrieval call instead of a banner
+        # that just can't clear.
+        logger.warning(
+            "capture_health.window_hours_overflow",
+            window_hours=resolved_window,
+        )
+        resolved_window = DEFAULT_WINDOW_HOURS
+        since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
 
     total_rejected = event_log.count(
         event_type=EventType.WRITE_REJECTED, since=since

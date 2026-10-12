@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
+from trellis.core.error_sanitize import describe_validation_error
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
@@ -131,11 +134,15 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     )
 
     # The axis report `trellis retrieve pack --format json` prints, so a
-    # caller can tell a pack missing a failed axis from a full one.
+    # caller can tell a pack missing a failed axis from a full one. Both
+    # kwargs come from the builder, not a second ``registry.embedding_fn``
+    # read — that property re-raises on every access when misconfigured
+    # (Q5-A).
     axes = describe_axes(
         builder,
         pack.retrieval_report.strategies_used,
-        embedder_configured=registry.embedding_fn is not None,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
     )
 
     return PackResponse(
@@ -170,7 +177,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         sections = [SectionRequest(**s) for s in req.sections]
     except (ValidationError, TypeError) as exc:
         raise HTTPException(
-            status_code=422, detail=f"Invalid section request: {exc}"
+            status_code=422,
+            detail=f"Invalid section request: {describe_validation_error(exc)}",
         ) from exc
 
     builder = _build_pack_builder(registry)
@@ -199,7 +207,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         **describe_axes(
             builder,
             pack.sections[0].retrieval_report.strategies_used,
-            embedder_configured=registry.embedding_fn is not None,
+            embedder_configured=builder.embedder_configured,
+            embedder_resolve_failure=builder.embedder_resolve_failure,
         )
     )
 
@@ -307,17 +316,44 @@ def get_entity(
 def list_traces(
     domain: str | None = Query(None),
     agent: str | None = Query(None, alias="agent_id"),
+    until: datetime | None = Query(  # noqa: B008 — FastAPI DI idiom
+        None,
+        description=(
+            "Upper bound (inclusive). Page older history by passing the"
+            " oldest created_at you have, same convention as GET /events."
+        ),
+    ),
     limit: int = Query(20),
 ) -> dict[str, Any]:
-    """List recent traces."""
+    """List recent traces.
+
+    ``TraceStore.query`` has no offset — page older history with
+    ``until``, mirroring ``GET /events``.
+    """
     registry = get_registry()
     traces = registry.operational.trace_store.query(
-        domain=domain, agent_id=agent, limit=limit
+        domain=domain, agent_id=agent, until=until, limit=limit
     )
     total = registry.operational.trace_store.count(domain=domain)
 
     items = [t.to_summary_dict() for t in traces]
     return {"status": "ok", "total": total, "count": len(items), "traces": items}
+
+
+@router.get("/traces/domains", summary="Count traces per domain")
+def list_trace_domains() -> dict[str, Any]:
+    """Count all stored traces per ``domain``, for a domain filter's options.
+
+    Unlike the ``domain`` dropdown built from one fetched page, this counts
+    the whole store, so it lists a domain that exists but isn't on the
+    current page, and never offers one that has zero traces.
+    """
+    counts = get_registry().operational.trace_store.count_by_domain()
+    domains = [
+        {"domain": domain, "count": count}
+        for domain, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {"status": "ok", "total": sum(counts.values()), "domains": domains}
 
 
 @router.get("/traces/{trace_id}")
@@ -383,3 +419,33 @@ def list_precedents(
     registry = get_registry()
     items = _list_precedents(registry.operational.event_log, domain=domain, limit=limit)
     return {"status": "ok", "count": len(items), "precedents": items}
+
+
+@router.get("/precedents/domains", summary="Count promoted precedents per domain")
+def list_precedent_domains() -> dict[str, Any]:
+    """Count promoted precedents per ``domain``, for a domain filter's options.
+
+    Unlike the ``domain`` dropdown built from one fetched page of
+    precedents, this scans every ``PRECEDENT_PROMOTED`` event (capped at
+    :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`, same as any
+    other analyzer), so it lists a domain that exists but isn't on the
+    current page, and never offers one with zero precedents left once a
+    filter is applied.
+    """
+    event_log = get_registry().operational.event_log
+    scan = scan_events(event_log, event_type=EventType.PRECEDENT_PROMOTED)
+    counts: dict[str, int] = {}
+    for event in scan.events:
+        domain = event.payload.get("domain")
+        if domain:
+            counts[domain] = counts.get(domain, 0) + 1
+    domains = [
+        {"domain": domain, "count": count}
+        for domain, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {
+        "status": "ok",
+        "total": sum(counts.values()),
+        "domains": domains,
+        "truncated": scan.coverage.truncated,
+    }

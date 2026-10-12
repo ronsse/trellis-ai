@@ -125,8 +125,8 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                     event.entity_type,
                     event.occurred_at,
                     event.recorded_at,
-                    json.dumps(event.payload),
-                    json.dumps(event.metadata),
+                    json.dumps(event.payload, allow_nan=False),
+                    json.dumps(event.metadata, allow_nan=False),
                     event.schema_version,
                 ),
             )

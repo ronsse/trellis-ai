@@ -62,6 +62,14 @@ class VersionResponse(WireModel):
     by :mod:`trellis.core.write_provenance`, not by the wire contract.
     ``None`` means the server withheld it — it is ops detail, gated like
     the ``/readyz`` breakdown — not that the server cannot report it.
+
+    ``write_behaviour_settings`` is gated identically (``None`` under the
+    same withholding) but, unlike ``write_provenance``, is read fresh on
+    every call rather than cached once per process: a settings-store
+    override can change between two calls with no restart in between.
+    Each row is one :meth:`trellis.core.write_config.WriteBehaviourConfig.describe`
+    entry — ``name``, ``env_var``, ``value``, ``default``, ``overridden``,
+    and ``overridden_by`` (``"env"`` / ``"settings"`` / ``"default"``).
     """
 
     api_major: int
@@ -72,6 +80,7 @@ class VersionResponse(WireModel):
     package_version: str
     mcp_tools_version: int = 1
     write_provenance: dict[str, Any] | None = None
+    write_behaviour_settings: list[dict[str, Any]] | None = None
 
 
 # -- Ingest --
@@ -136,13 +145,18 @@ class AxisReportResponse(WireModel):
     """Which retrieval axes this pack has, ran, and did not.
 
     Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
-    and states only, never an exception message.
+    and states only, never an exception message. ``embedder_error_type`` and
+    ``embedder_setting`` are non-``None`` only when ``semantic ==
+    "embedder_failed"`` (Q5-A); default to ``None`` so a client built
+    against an older server still parses this model.
     """
 
     available: list[str]
     ran: list[str]
     failed: list[str]
     semantic: str
+    embedder_error_type: str | None = None
+    embedder_setting: str | None = None
 
 
 class PackResponse(WireModel):
@@ -468,11 +482,28 @@ class BulkIngestResponse(WireModel):
 # -- Admin --
 
 
+class BackendHealth(WireModel):
+    """One backend's probe outcome — mirrors ``/readyz``'s per-backend shape."""
+
+    status: str
+    latency_ms: float | None = None
+    error: str | None = None
+
+
 class HealthResponse(WireModel):
-    """Health check response."""
+    """Health check response.
+
+    ``checks`` is a flat bool-per-key view (``api`` plus one key per
+    probed backend) kept for backward compatibility with existing
+    callers; ``backends`` carries the same probe results with latency
+    and error detail for a dashboard. Both are derived from the same
+    probe run (``trellis_api.routes.health.probe_backends``) — never a
+    hard-coded literal.
+    """
 
     status: str = "ok"
     checks: dict[str, bool] = Field(default_factory=dict)
+    backends: dict[str, BackendHealth] | None = None
 
 
 class StatsResponse(WireModel):
@@ -504,6 +535,95 @@ class StatsResponse(WireModel):
     nodes: int = 0
     edges: int = 0
     events: int = 0
+
+
+class RuntimeResponse(WireModel):
+    """Response body for ``GET /api/v1/runtime`` — the admin Runtime panel.
+
+    A read-only snapshot of this process's effective configuration,
+    sourced from the same resolvers the behaviour itself consults
+    (``trellis_api.auth.resolve_auth_mode``,
+    ``trellis_api.routes.health.resolve_ops_detail``,
+    ``trellis_api.observability.resolve_metrics_public``,
+    ``trellis_api.app.get_bind_info``) so this view can never drift from
+    what a real request gets.
+
+    Deliberately excludes anything secret-shaped: ``stores`` is class
+    names only, ``embedder`` names only the configuration knob in play
+    (never a key or URL), ``llm_routes`` carries tier names only (never a
+    provider base URL, credential source, or API-key env name), and the
+    two directory fields are plain filesystem paths with no embedded
+    credentials. See ``tests/unit/api/test_runtime_route.py``'s
+    secret-leakage test for the seeded-secret assertion backing that
+    claim.
+    """
+
+    auth_mode: str
+    auth_mode_permissive: bool = Field(
+        description=(
+            "True when a request presenting no credential is granted"
+            " every scope (auth mode 'off' or 'optional') — the exact"
+            " condition the UI's warning banner fires on."
+        )
+    )
+    ops_detail: str
+    metrics_public: bool
+    bind_host: str
+    bind_port: int
+    stores: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend class name per store, keyed by store name.",
+    )
+    embedder: str | None = Field(
+        default=None,
+        description=(
+            "Which knob registry.embedding_fn resolved from"
+            " (TRELLIS_EMBEDDING_FN or embeddings.provider), the same"
+            " resolver every retrieval surface calls; null when neither"
+            " is set. 'unknown (...)' when the knob is set but failed to"
+            " resolve -- never a key or URL."
+        ),
+    )
+    llm_routes: dict[str, str | None] = Field(
+        default_factory=dict,
+        description=(
+            "Tier name each LLM consumer routes to, keyed by consumer"
+            " name; null means the consumer is unrouted (falls back to"
+            " the parent llm: block)."
+        ),
+    )
+    llm_routes_error: str | None = Field(
+        default=None,
+        description="Set instead of llm_routes when llm.routes is malformed.",
+    )
+    learning_artifacts_dir: str | None = None
+    host_jobs_dir: str | None = Field(
+        default=None,
+        description=(
+            "TRELLIS_HOST_JOBS_DIR as seen by this process. Only the host"
+            " job dispatcher (docs/ops/job-dispatcher.sh.example) resolves"
+            " an executable path under it — this process never reads the"
+            " directory itself, so a null here means the variable is"
+            " unset in this process's environment, not that host-only jobs"
+            " are unconfigured."
+        ),
+    )
+
+
+# -- Settings (PR 3, governed settings write) --
+
+
+class SettingUpdateRequest(WireRequestModel):
+    """Body for ``PUT``/``POST /api/v1/settings/{name}``.
+
+    ``value`` is required but nullable: an explicit ``null`` means "remove
+    the override" (``Operation.SETTINGS_UPDATE``'s own contract — there is
+    no separate reset verb), while an *absent* field is an ordinary 422,
+    so a client cannot reset a setting by typo'ing the field name.
+    """
+
+    value: bool | int | float | str | None
+    requested_by: str = "api:settings"
 
 
 # -- Review queue (WP10) --
@@ -660,6 +780,166 @@ class SchemaEvolutionListResponse(WireModel):
     candidates: list[SchemaEvolutionCandidate] = Field(default_factory=list)
 
 
+class ClassifyCandidate(WireModel):
+    """One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
+
+    ``kind`` is ``"tag_keyword"`` (``key`` = keyword, ``target`` = domain
+    tag) or ``"domain_alias"`` (``key`` = alias, ``target`` = canonical
+    tag). ``status`` is ``"open"``, ``"applied"`` (an overlay row exists
+    for this ``(kind, key)``) or ``"dismissed"`` (a
+    ``CLASSIFY_CANDIDATE_DISMISSED`` event postdates this emission).
+
+    ``metrics`` carries the mined candidate's own kind-specific fields
+    verbatim from its ``to_event_payload()`` -- ``support``/``precision``/
+    ``recall``/``lift``/``has_write_target`` for ``tag_keyword``;
+    ``cooccurrence_rate``/``is_lexical_only``/``documents_gained``/etc. for
+    ``domain_alias``. The two kinds' metric vocabularies differ enough
+    that typing each field individually would force every row of one kind
+    to carry nulls for the other's fields; a passthrough dict keeps the
+    DTO's own fields (above) honest about what every row actually has.
+    """
+
+    candidate_id: str
+    kind: str
+    key: str
+    target: str
+    status: str
+    recurrence_count: int = 0
+    example_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    emitted_at: str
+    source_event_id: str
+
+
+class ClassifyCandidateListResponse(WireModel):
+    """List of mined classify candidates, deduped to their latest emission.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    an applied-row-derived ``"applied"``/``"dismissed"`` status above is
+    read from whatever of that file parsed, so a caller rendering this
+    list needs the same "is what I'm showing the whole picture?" signal
+    ``GET /settings`` and ``GET /policies`` already carry.
+    """
+
+    count: int = 0
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
+
+
+class ClassifyMineRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/candidates/mine``.
+
+    ``use_recommended_defaults`` (default ``True``) mirrors ``trellis
+    classify tag-candidates``/``domain-candidates``'s own
+    ``_tag_evolution_registry``/``_domain_normalization_registry``: when
+    the real, persistent ``ParameterRegistry`` is missing a required
+    threshold for a component, mine with that component's shipped
+    ``RECOMMENDED_SEED_VALUES`` instead of hard-failing -- never silent,
+    since the response's ``used_recommended_defaults`` names exactly
+    which component(s) this happened for and a ``structlog`` WARN is
+    emitted for each. Pin it ``False`` to require every threshold
+    pre-seeded (``trellis admin settings`` has no seeding command for
+    these yet -- seed via a governed write directly) and get a 400
+    naming the missing keys and their recommended values instead of a
+    mined set of candidates run against unreviewed defaults.
+    """
+
+    kinds: list[str] = Field(default_factory=lambda: ["tag_keyword", "domain_alias"])
+    scan_limit: int | None = None
+    use_recommended_defaults: bool = True
+
+
+class ClassifyMineResponse(WireModel):
+    """Outcome of one mining run, plus the candidates it just emitted."""
+
+    status: str = "ok"
+    tag_keyword_count: int = 0
+    domain_alias_count: int = 0
+    used_recommended_defaults: list[str] = Field(default_factory=list)
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+
+
+class ClassifyRuleRow(WireModel):
+    """One effective tag/domain rule, with the source that wins it.
+
+    ``source`` is ``"default"`` (built-in), ``"config"``
+    (``config.yaml``) or ``"overlay"`` (applied through the governed
+    write path) -- the precedence documented in
+    ``trellis.classify.factory``. ``applied_at``/``applied_by``/
+    ``source_event_id`` are set only for an ``"overlay"`` row.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source: str
+    applied_at: str | None = None
+    applied_by: str | None = None
+    source_event_id: str | None = None
+
+
+class ClassifyRuleListResponse(WireModel):
+    """Effective tag/domain rules, defaults and config.yaml included.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    a row that failed to parse there is simply missing from ``rules``
+    with no other signal, same reasoning as ``ClassifyCandidateListResponse``.
+    """
+
+    count: int = 0
+    rules: list[ClassifyRuleRow] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
+
+
+class ClassifyRuleApplyRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/rules``.
+
+    ``source_event_id`` must name the ``TAG_KEYWORD_CANDIDATE`` /
+    ``DOMAIN_ALIAS_CANDIDATE`` event this rule was mined from, so the
+    applied overlay row -- and its audit event -- stay traceable back to
+    the evidence that justified it. ``support``/``precision``/``lift``
+    are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
+    they are optional only because a caller applying a rule with no
+    mined candidate behind it (hand-typed) has none to carry.
+
+    Each metric's range mirrors what :mod:`trellis.learning.tag_evolution`
+    computes it from -- ``support`` is a document count (``ge=0``),
+    ``precision`` is ``support / keyword_documents`` (``ge=0, le=1``), and
+    ``lift`` is ``precision / base_rate`` (``ge=0``, unbounded above).
+    ``allow_inf_nan=False`` on the two floats refuses a raw ``NaN``/
+    ``Infinity`` a scripted client can still send even though
+    ``json.dumps`` never emits one by default -- without it, a float
+    field happily accepts either and REST answers 400 from deeper in
+    the pipeline instead of a clean 422 at the boundary.
+    :class:`~trellis.mutate.handlers.ClassifyRuleApplyHandler` re-checks
+    the same ranges itself before any write
+    (``_validate_classify_rule_metrics``), so a caller that reaches the
+    handler directly -- the CLI, a direct ``MutationExecutor.execute``
+    -- is refused the same way even without this field; it buys REST
+    callers a cheaper, more specific error, not the only backstop.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source_event_id: str
+    support: int | None = Field(default=None, ge=0)
+    precision: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    lift: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+
+
+class ClassifyCandidateDismissResponse(WireModel):
+    """Outcome of dismissing one open candidate."""
+
+    status: str = "ok"
+    candidate_id: str
+    kind: str | None = None
+    message: str | None = None
+
+
 class DraftAdrResponse(WireModel):
     """Rendered promotion-ADR markdown for a schema-evolution candidate."""
 
@@ -734,6 +1014,16 @@ class MetricsTimeseriesResponse(WireModel):
     them, and carries one series per resolved group key. An empty store
     (or a metric with no events in the window) yields an empty
     ``series`` list.
+
+    ``scan_truncated`` / ``scanned_events`` flatten
+    :class:`trellis.stores.base.event_log.ScanCoverage` (``truncated`` /
+    ``scanned``) into plain scalars rather than nesting that core model
+    directly: ``trellis_wire`` has zero dependency on ``trellis`` core by
+    design (see ``trellis_wire.base``), so only the two fields the UI
+    needs cross the boundary. ``scan_truncated`` is true when the
+    underlying EventLog read(s) hit their cap, meaning buckets near the
+    recent end of the window may be missing data rather than genuinely
+    showing none (P1-8).
     """
 
     metric: str
@@ -741,3 +1031,203 @@ class MetricsTimeseriesResponse(WireModel):
     group_by: str = "none"
     days: int = 30
     series: list[TimeseriesSeriesResponse] = Field(default_factory=list)
+    scan_truncated: bool = False
+    scanned_events: int | None = None
+
+
+# -- Loop health (e167) --
+
+
+class LoopHealthRowResponse(WireModel):
+    """One loop's last-run snapshot, as served by ``GET /api/v1/loops``.
+
+    ``last_run_at`` / ``last_status`` / ``counters`` are ``None``
+    together exactly when the loop has produced no event the EventLog
+    can see — "never run (or ran before this build)", never a bare
+    ``0``. ``actuates`` says whether the loop can write without a human
+    approving each change; ``what_it_changes`` is the one-line
+    plain-English explanation either way.
+    """
+
+    name: str
+    description: str
+    actuates: bool
+    what_it_changes: str
+    #: The catalog job (``AdminJobSummary.name``) that drives this loop,
+    #: or ``None`` when nothing schedules it. A UI links this to the
+    #: Schedules tab row of the same name.
+    job_name: str | None = None
+    #: ISO-8601 UTC, not a ``datetime`` — see module note on DTOs below.
+    last_run_at: str | None = None
+    last_status: str | None = None
+    counters: dict[str, Any] | None = None
+    #: ``None`` when ``job_name`` is itself ``None`` (nothing schedules
+    #: this loop). ``"not_scheduled"`` when the named job has no stored,
+    #: enabled row with a cadence — disabled, manual-only, or never
+    #: patched via ``PATCH /admin/jobs``. ``"scheduled"`` otherwise.
+    schedule_status: str | None = None
+    #: ``True`` only when ``schedule_status`` is ``"scheduled"`` AND a
+    #: real last run (``last_run_at`` is not ``None``) is older than
+    #: twice that job's own cadence tick interval plus slack. Always
+    #: ``False`` for a loop with no job, a not-scheduled job, or one
+    #: that has never run (that fact is already carried by
+    #: ``last_run_at`` being ``None``).
+    stale: bool = False
+
+
+class LoopHealthResponse(WireModel):
+    """Response for ``GET /api/v1/loops``: one row per loop."""
+
+    generated_at: str
+    loops: list[LoopHealthRowResponse] = Field(default_factory=list)
+
+
+# -- Admin: scheduled jobs (plan p1 PR 6) --
+#
+# DTOs backing ``GET``/``PATCH /api/v1/admin/jobs`` and
+# ``POST /api/v1/admin/jobs/{name}/run``. The writable surface is
+# deliberately thin: ``enabled``, ``cadence``, ``timeout_seconds`` and
+# (via the run route) ``run_requested_at`` — the same four fields
+# :class:`~trellis.schemas.schedule.ScheduledJob` exposes. There is no
+# field here for a command, argv, path or environment variable, because
+# the job's command always comes from
+# :data:`trellis.schedule.catalog.JOB_CATALOG`, never from a request
+# body (see that module's docstring for the full boundary argument).
+
+
+class AdminJobLastRun(WireModel):
+    """Most recent job-run record for one catalog job, from the EventLog.
+
+    Derived from the latest ``JOB_RUN_STARTED`` / ``JOB_RUN_COMPLETED``
+    pair (see ``trellis admin record-job-run``) — never a hardcoded
+    literal. All fields ``None`` together means the job has no run
+    record the EventLog can see (never run, or run before this build).
+    ``started_at`` can be present with the rest ``None`` when a run
+    started but the dispatcher never called ``record-job-run`` to close
+    it out (crashed before reporting).
+    """
+
+    run_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
+    exit_code: int | None = None
+    status: str | None = None
+
+
+class AdminJobSummary(WireModel):
+    """One job: catalog identity joined with its schedule-registry row.
+
+    ``name``, ``description``, ``host_only``, ``spends_llm`` and
+    ``heavy`` are fixed catalog facts (source-reviewed, never writable
+    over this API). ``enabled``, ``cadence``, ``timeout_seconds`` and
+    ``run_requested_at`` are the mutable schedule-registry row —
+    materialized with catalog defaults when no row has been written
+    yet, so a job always appears here even before ``init-schedule`` or
+    a first ``PATCH``. ``stored`` is ``False`` for exactly that
+    materialized-default case (including a row that failed to parse
+    out of a degraded store): the catalog default shown is never the
+    operator's own choice, and ``next_due_at`` is always ``None`` for
+    such a row — ``due-jobs`` only ever evaluates a *stored* row, so a
+    catalog default could never actually fire at the time this field
+    would otherwise claim. ``default_cadence`` is the catalog's own
+    default, shown alongside the effective ``cadence`` so an operator
+    can tell "customized" from "still the catalog default" without a
+    second request. ``next_due_at`` is a display-only estimate
+    (``None`` for a manual-only job, a job with no stored row, or when
+    no tick could be found).
+    """
+
+    name: str
+    description: str
+    host_only: bool
+    spends_llm: bool
+    heavy: bool
+    enabled: bool
+    cadence: str | None = None
+    default_cadence: str | None = None
+    timeout_seconds: int
+    run_requested_at: str | None = None
+    last_run: AdminJobLastRun | None = None
+    next_due_at: str | None = None
+    stored: bool = True
+    #: Loop names (``LoopHealthRowResponse.name``) this job drives, from
+    #: ``trellis.ops.loop_health.JOB_LOOPS`` — the one mapping both this
+    #: field and ``LoopHealthRowResponse.job_name`` are derived from.
+    #: Empty for a job that drives no loop (most of the catalog).
+    loops: list[str] = Field(default_factory=list)
+
+
+class AdminJobListResponse(WireModel):
+    """Response for ``GET /api/v1/admin/jobs``.
+
+    ``dispatcher_last_seen_at`` is the most recent ``JOB_RUN_STARTED``
+    across every catalog job — the only signal this server has that
+    *some* dispatcher is polling ``due-jobs`` at all. ``dispatcher_seen``
+    is the boolean a UI banner reads directly (recently seen within a
+    server-chosen window) rather than re-deriving a staleness threshold
+    client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
+    no dispatcher has ever reported. ``store_degradation`` is ``None``
+    on a clean read and otherwise the same shape ``GET /api/v1/policies``
+    and ``GET /api/v1/advisories`` already use (``LoadDegradation.
+    to_dict()``, recovery command included) — a caller reading only
+    ``jobs``/``count`` would otherwise see catalog defaults presented as
+    the operator's own stored choices with no signal that the file
+    behind them is damaged.
+    """
+
+    count: int = 0
+    jobs: list[AdminJobSummary] = Field(default_factory=list)
+    dispatcher_last_seen_at: str | None = None
+    dispatcher_seen: bool = False
+    store_degradation: dict[str, Any] | None = None
+
+
+class AdminJobPatchRequest(WireRequestModel):
+    """Body for ``PATCH /api/v1/admin/jobs/{name}``.
+
+    Every field is optional with no sentinel beyond Pydantic's own
+    ``model_fields_set``: the route reads which fields were actually
+    present in the request body (vs omitted) so a ``PATCH`` changes only
+    what the caller named — sending ``"cadence": null`` explicitly
+    clears cadence (makes the job manual-only); omitting ``cadence``
+    leaves it unchanged. ``extra="forbid"`` (:class:`WireRequestModel`)
+    refuses any other field name outright, including a command, argv,
+    path or environment variable — there is no such field here to
+    forbid *selectively*, which is the point.
+    """
+
+    enabled: bool | None = None
+    cadence: str | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+
+
+class AdminJobPatchResponse(WireModel):
+    """Response for a successful ``PATCH /api/v1/admin/jobs/{name}``."""
+
+    status: str = "ok"
+    job: AdminJobSummary
+
+
+class AdminJobRunResponse(WireModel):
+    """Response for ``POST /api/v1/admin/jobs/{name}/run``.
+
+    Never claims synchronous execution: the write sets
+    ``run_requested_at`` and nothing else runs inline.
+    ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
+    the confirm — a host dispatcher polling for due jobs on its own
+    cadence is what actually executes the job, if one is installed.
+    ``run_requested_at`` is exactly what the re-read row carries —
+    ``None`` on the (expected-unreachable, since a non-success result
+    raises before this is built) chance the handler's own write did not
+    stick — never a timestamp this route or the CLI computed itself,
+    which would report a value the handler never wrote.
+    """
+
+    status: str = "ok"
+    name: str
+    run_requested_at: str | None
+    dispatcher_hint: str = (
+        "Accepted. A host dispatcher, if one is installed, picks this "
+        "up on its next poll, typically within ~5 minutes."
+    )

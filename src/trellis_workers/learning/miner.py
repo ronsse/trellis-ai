@@ -15,7 +15,11 @@ from trellis.extract.telemetry import (
     emit_extraction_failure,
 )
 from trellis.llm import Message
-from trellis.llm.json_response import JSONParseOutcome, parse_json_response
+from trellis.llm.json_response import (
+    JSONParseOutcome,
+    coerce_finite_float,
+    parse_json_response,
+)
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent import Precedent
 from trellis.schemas.trace import Trace
@@ -259,7 +263,9 @@ class PrecedentMiner:
             if not title or not description:
                 continue
 
-            confidence = float(item.get("confidence", 0.5))
+            confidence = coerce_finite_float(item.get("confidence", 0.5))
+            if confidence is None:
+                confidence = 0.5
 
             try:
                 precedent = Precedent(
