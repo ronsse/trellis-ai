@@ -3,13 +3,13 @@
 ``schedule.json`` (:class:`~trellis.stores.schedule_store.ScheduleStore`,
 :class:`~trellis.schemas.schedule.ScheduledJob`) lives in a directory
 mounted read-write into every Trellis container, and is API-editable
-(plan p1 PR 6: ``GET``/``PATCH /admin/jobs``). Anything that can write
+(``GET``/``PATCH /admin/jobs``). Anything that can write
 that file therefore
 controls its contents — which is fine, because this module, not that
 file, decides what runs. A ``schedule.json`` row names a job by
 ``name``; the argv that name runs comes from :data:`JOB_CATALOG` here, in
 source, reviewed the same way any other code change is. Editing
-``schedule.json`` — by hand, a compromised container, or the future API —
+``schedule.json`` — by hand, a compromised container, or the admin API —
 can change only *whether* and *when* a catalog job runs, never *what*
 runs.
 

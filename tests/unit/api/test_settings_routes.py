@@ -298,7 +298,7 @@ class TestListSettings:
         assert "maybe" not in row["parse_error"]
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
-        """brief e179 step 8: the UI's filter box reads display labels from
+        """The UI's filter box reads display labels from
         ``groups``, not a hardcoded string -- so every group a real entry
         names must have a label.
         """

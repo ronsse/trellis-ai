@@ -1,6 +1,6 @@
 """Tests for the job catalog — the only source of a scheduled job's command.
 
-Pins brief e169's remaining boundary tests that aren't about
+Pins the boundary tests that aren't about
 ``schedule.json`` or ``due-jobs`` directly: the catalog's own shape, the
 host-job name guard, and that no personal absolute path ever leaks into
 either the catalog or the seed module built from it.

@@ -1916,7 +1916,7 @@ def migrate_graph(
 
 
 # ---------------------------------------------------------------------------
-# Schedule registry + job-run records (#e166, plan p1 §(b)). The container
+# Schedule registry + job-run records. The container
 # never touches crontab; a host-side dispatcher (documented, not installed,
 # at docs/ops/job-dispatcher.sh.example) calls due-jobs, execs each due job's
 # argv directly (never through a shell) or, for a host-only job, resolves
@@ -3035,7 +3035,7 @@ _register_api_keys(admin_app)
 
 
 # ---------------------------------------------------------------------------
-# schedule set / run — CLI parity for PATCH/POST /admin/jobs (plan p1 PR 6)
+# schedule set / run — CLI parity for PATCH/POST /admin/jobs
 # ---------------------------------------------------------------------------
 # Registration hook mirrors the modules above so the schedule-editing CLI
 # stays in its own module and admin.py only carries the wiring.

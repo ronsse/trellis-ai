@@ -186,14 +186,13 @@ class TestEverySpecIsWellFormed:
 #: Catches an issue/PR reference such as "#862" or "#848" leaking into
 #: operator-facing text -- the UI renders ``description``/``risk_note``
 #: verbatim, and a tracker number means nothing to an operator deciding
-#: whether to flip a switch (brief e179 rework: "no issue numbers, no PR
-#: numbers").
+#: whether to flip a switch.
 _TRACKER_REFERENCE = re.compile(r"#\d+")
 
 
 class TestLabelDescriptionAndRiskNoteShape:
     """The UI renders ``label``, ``description`` and ``risk_note``
-    separately (brief e179 rework, step 1) -- every entry needs a usable
+    separately -- every entry needs a usable
     ``label`` and ``description``, every non-``"low"`` entry needs a
     ``risk_note`` the UI can show beside its risk badge, and none of that
     operator-facing text may carry a tracker reference that only means
@@ -455,7 +454,7 @@ class TestEveryEntryIsLiveOrExplainsWhyNot:
 
 
 class TestEveryEntryHasAValidGroup:
-    """Grouping drives the UI's filter box (brief step 8, e179) — a value
+    """Grouping drives the UI's filter box — a value
     outside the five declared areas would silently vanish from every
     filter the UI builds from :data:`GROUP_LABELS`, with nothing to catch
     the gap. ``GROUP_LABELS`` is the one place a human-facing group name

@@ -74,6 +74,7 @@ from trellis.retrieve.effectiveness import (
     run_effectiveness_feedback,
 )
 from trellis.retrieve.metrics_timeseries import compute_timeseries
+from trellis.retrieve.pack_builder import PackBuilder, _filter_legacy_advisories_enabled
 from trellis.schedule.catalog import JOB_CATALOG, JobSpec
 from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.advisory_source import load_advisory_store
@@ -90,6 +91,7 @@ from trellis_api.auth import (
 )
 from trellis_api.observability import resolve_metrics_public
 from trellis_api.routes.health import probe_backends, resolve_ops_detail
+from trellis_api.routes.settings import resolve_env_pinned_bool_setting
 from trellis_wire.dtos import (
     AdminJobLastRun,
     AdminJobListResponse,
@@ -683,6 +685,16 @@ def list_advisories(
         return {"status": "error", "message": "stores_dir not configured"}
     advisories = store.list(scope=scope, min_confidence=min_confidence)
     degradation = store.degradation
+    # Whether a legacy row (pre-#394, no evidence_confidence) is actually
+    # being withheld from packs right now -- the same precedence
+    # GET /settings reports for this entry, read here with the one shared
+    # resolver so the two routes cannot disagree about which value governs.
+    settings_values = load_settings_values(registry.stores_dir)
+    filter_legacy_advisories_enabled = resolve_env_pinned_bool_setting(
+        "filter_legacy_advisories",
+        _filter_legacy_advisories_enabled,
+        settings_values,
+    )
     # ``count`` silently under-reports on a partial load, so a corrupt file
     # would present to an API client (and to the Memory Explorer) exactly as
     # a deployment that has never generated an advisory — the state
@@ -690,7 +702,17 @@ def list_advisories(
     # that parsed are still returned: the read stays lenient.
     return {
         "count": len(advisories),
-        "advisories": [a.model_dump(mode="json") for a in advisories],
+        "advisories": [
+            {
+                **a.model_dump(mode="json"),
+                # Same predicate PackBuilder uses to filter legacy rows out
+                # of a pack -- imported, not re-derived, so this can never
+                # disagree with what retrieval actually withholds.
+                "is_legacy_advisory": PackBuilder._is_legacy_advisory(a),
+            }
+            for a in advisories
+        ],
+        "filter_legacy_advisories_enabled": filter_legacy_advisories_enabled,
         "store_degradation": degradation.to_dict() if degradation else None,
     }
 
@@ -1637,7 +1659,7 @@ def _code_proposal_source_file(preview: str) -> str | None:
 
 
 # ===========================================================================
-#  Scheduled jobs (plan p1 PR 6) — ``GET``/``PATCH /admin/jobs``,
+#  Scheduled jobs — ``GET``/``PATCH /admin/jobs``,
 #  ``POST /admin/jobs/{name}/run``
 # ===========================================================================
 #

@@ -620,7 +620,7 @@ class TestWorkerCurate:
     def test_full_cycle_emits_curate_cycle_completed_event(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:
-        """A live cycle leaves a durable, API-readable health record (e167).
+        """A live cycle leaves a durable, API-readable health record.
 
         Before this, the cycle's only record was a structlog line a cron
         wrapper piped to a host-only log file the API container cannot

@@ -7,9 +7,11 @@ gate has shipped ``effect_size: Infinity`` off an empty baseline (a
 divide-by-zero in a ratio with no prior data). Every ``.toFixed()`` call
 site in the admin UI now routes through one of two shared helpers,
 ``fmtNum``/``fmtPct``, which check ``Number.isFinite()`` first and only ever
-return a normal bounded numeral or one of three named states: "not
-measured" (null/undefined), an em dash (NaN), or "(no baseline)" alongside
-an infinity sign (+-Infinity).
+return a normal bounded numeral (with ``toLocaleString`` thousands
+separators) or one of two named states: "not measured" (null/undefined) or
+"unbounded (no baseline)" (NaN and +-Infinity alike -- both mean the
+comparison had no baseline to measure against, so neither renders as a bare
+dash or a raw non-finite token).
 
 The Reports tab's ``computed_at`` stamp used to render the raw ISO string
 with no timezone label; it now goes through the existing ``fmtTime()``
@@ -47,36 +49,34 @@ class TestSharedFormattersExist:
     def test_fmt_pct_defined(self) -> None:
         assert "function fmtPct(value, digits = 1) {" in _page()
 
-    def test_fmt_num_guards_all_three_non_finite_states(self) -> None:
+    def test_fmt_num_guards_both_non_finite_states(self) -> None:
         body = _function_body(_page(), "fmtNum")
         assert "value == null" in body
-        assert "Number.isNaN(n)" in body
         assert "Number.isFinite(n)" in body
+        assert "not measured" in body
         assert "no baseline" in body
 
-    def test_fmt_pct_guards_all_three_non_finite_states(self) -> None:
+    def test_fmt_pct_guards_both_non_finite_states(self) -> None:
         body = _function_body(_page(), "fmtPct")
         assert "value == null" in body
-        assert "Number.isNaN(n)" in body
         assert "Number.isFinite(n)" in body
+        assert "not measured" in body
         assert "no baseline" in body
 
 
 class TestNoRawToFixedLeft:
     """Regression guard: every former ``.toFixed()`` call site must now
-    route through fmtNum/fmtPct. The only ``.toFixed(`` left in the file
-    should be the two inside the helpers' own bodies."""
+    route through fmtNum/fmtPct, which format their bounded branch with
+    ``toLocaleString`` (so displayed numbers also get thousands
+    separators) rather than ``toFixed``. ``.toFixed(`` must not appear
+    anywhere in the file, inside the helpers or out."""
 
     def test_only_the_helpers_themselves_call_tofixed(self) -> None:
         page = _page()
         fmt_num_body = _function_body(page, "fmtNum")
         fmt_pct_body = _function_body(page, "fmtPct")
-        # Every toFixed( occurrence in the live file must fall inside one
-        # of the two helper bodies -- i.e. there is no call site left in
-        # ordinary rendering code. Comment lines (which name `.toFixed()`
-        # in prose to explain *why* the helpers exist) are not call sites.
-        assert fmt_num_body.count(".toFixed(") == 1
-        assert fmt_pct_body.count(".toFixed(") == 1
+        assert fmt_num_body.count(".toFixed(") == 0
+        assert fmt_pct_body.count(".toFixed(") == 0
         code_lines = [
             line for line in page.splitlines() if not line.strip().startswith("//")
         ]
@@ -97,7 +97,7 @@ class TestKnownTroubleSitesUseTheHelper:
         assert "fmtNum(pv.effect_size, 4)" in _page()
 
     def test_advisory_effect_size_uses_fmt_num(self) -> None:
-        assert "effect: ${fmtNum(ev.effect_size, 2)}" in _page()
+        assert "${fmtNum(ev.effect_size, 2)}" in _page()
 
     def test_advisory_confidence_uses_fmt_num(self) -> None:
         assert "<td>${fmtNum(a.confidence, 2)}</td>" in _page()

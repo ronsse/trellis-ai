@@ -1,4 +1,4 @@
-"""Per-loop health: is each learning / curation loop doing anything? (e167)
+"""Per-loop health: is each learning / curation loop doing anything?
 
 The nightly cron (``03:30 worker curate``, invoked manually for
 ``worker tune``) is the only thing that drives most of these loops, and
@@ -109,7 +109,11 @@ class LoopHealthRow(TrellisModel):
     a human approving each change; ``what_it_changes`` is the one-line
     explanation a UI renders next to it either way. ``job_name`` is the
     catalog job (see :data:`LOOP_JOB`) that drives this loop, or ``None``
-    when nothing schedules it.
+    when nothing schedules it. ``operator_hint``, when set, is the CLI
+    invocation or setting name an operator would need to act on this loop
+    by hand (for example a manual promotion command); a renderer shows it
+    as a small secondary footnote, never folded into ``description`` or
+    ``what_it_changes``, which stay plain operator prose.
     """
 
     name: str
@@ -117,6 +121,7 @@ class LoopHealthRow(TrellisModel):
     actuates: bool
     what_it_changes: str
     job_name: str | None = None
+    operator_hint: str | None = None
     last_run_at: datetime | None = None
     last_status: str | None = None
     counters: dict[str, Any] | None = None
@@ -211,16 +216,18 @@ def _build_candidate_auto_promote_row(
         name="learning_candidate_auto_promote",
         description=(
             "Evaluates learning candidates and reports what it would "
-            "promote to a precedent, via `trellis curate "
-            "auto-promote-candidates`."
+            "promote to a precedent."
         ),
         actuates=False,
         what_it_changes=(
-            "Nothing yet: `mode=commit` is refused with a configuration "
-            "error until a follow-up ships auto-demotion, so every run "
-            "today only reports a disposition per candidate "
-            "(would_promote / already_promoted / ineligible) — it never "
+            "Nothing yet: committing a promotion automatically is refused "
+            "until a follow-up ships auto-demotion, so every run today "
+            "only reports what it would do for each candidate — it never "
             "writes a precedent."
+        ),
+        operator_hint=(
+            "CLI: `trellis curate auto-promote-candidates`. Automatic "
+            "commits are refused; only report-only runs succeed today."
         ),
         job_name=LOOP_JOB.get("learning_candidate_auto_promote"),
         last_run_at=latest.occurred_at if latest else None,
@@ -280,15 +287,15 @@ def summarize_loop_health(
     noise_row = LoopHealthRow(
         name="noise_demotion",
         description=(
-            'Demotes low-value items to signal_quality="noise" based on '
+            'Demotes low-value items to a "noise" quality based on '
             "serve/feedback evidence, so they stop being candidates for "
             "new packs."
         ),
         actuates=True,
         what_it_changes=(
-            "Writes a noise-quality tag onto each demoted item during "
-            "worker curate; demotion requires evidence of unhelpfulness, "
-            "never absence of evidence (demotion_gate.py)."
+            "Writes a noise-quality tag onto each demoted item during the "
+            "nightly curation run; demotion requires evidence of "
+            "unhelpfulness, never merely an absence of evidence."
         ),
         job_name=LOOP_JOB.get("noise_demotion"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
@@ -298,7 +305,9 @@ def summarize_loop_health(
 
     advisory_generation_row = LoopHealthRow(
         name="advisory_generation",
-        description="Mines new advisories from outcome data during worker curate.",
+        description=(
+            "Mines new advisories from outcome data during the nightly curation run."
+        ),
         actuates=True,
         what_it_changes=(
             "Writes new Advisory rows to the advisory store; a generated "
@@ -319,9 +328,9 @@ def summarize_loop_health(
         ),
         actuates=True,
         what_it_changes=(
-            "Rewrites confidence on existing Advisory rows and flips "
-            "suppressed/restored during worker curate; a suppressed "
-            "advisory stops being served without being deleted."
+            "Rewrites confidence on existing advisories and flips them "
+            "suppressed/restored during the nightly curation run; a "
+            "suppressed advisory stops being served without being deleted."
         ),
         job_name=LOOP_JOB.get("advisory_fitness"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
@@ -340,14 +349,14 @@ def summarize_loop_health(
     learning_row = LoopHealthRow(
         name="learning_candidate_scoring",
         description=(
-            "Scores learning-candidate observations from the EventLog and "
-            "writes a review artifact (candidates.jsonl / decisions.jsonl)."
+            "Scores learning-candidate observations and writes them to a "
+            "review queue for a human to evaluate."
         ),
         actuates=False,
         what_it_changes=(
-            "Writes review-artifact files to disk during worker curate; "
-            "it never promotes a candidate to a precedent itself — that is "
-            "a separate human-run command (sensing only)."
+            "Adds candidates to the review queue during the nightly "
+            "curation run; it never promotes a candidate to a precedent "
+            "itself — that decision is always made by a human."
         ),
         job_name=LOOP_JOB.get("learning_candidate_scoring"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
@@ -362,18 +371,19 @@ def summarize_loop_health(
         name="precedent_promotion",
         description=(
             "Turns a reviewed, promotion-ready learning candidate into a "
-            "precedent that get_lessons and the Precedents tab serve."
+            "precedent that agents can retrieve and the Precedents tab "
+            "lists."
         ),
         actuates=False,
         what_it_changes=(
-            "Nothing schedules a promotion: a human approves one (Review "
-            "tab or `trellis curate promote-learning`). The scheduled "
-            "learning_candidate_auto_promote loop below only reports what "
-            "it would promote — its `commit` mode is refused with a "
-            "configuration error. This row counts every "
-            "PRECEDENT_PROMOTED event, which also includes any manual "
-            "run of the unscheduled PrecedentMiner."
+            "Nothing schedules a promotion automatically: a human approves "
+            "each one from the Review tab. The auto-promotion loop below "
+            "only ever reports what it would promote; committing one "
+            "automatically is refused until a follow-up ships "
+            "auto-demotion. This count includes any promotion run by hand "
+            "as well as from the review queue."
         ),
+        operator_hint="CLI: `trellis curate promote-learning`.",
         job_name=LOOP_JOB.get("precedent_promotion"),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
         # PRECEDENT_PROMOTED carries no explicit outcome field -- "ran"
@@ -423,11 +433,9 @@ def summarize_loop_health(
     tuner_row = LoopHealthRow(
         name="tuner",
         description=(
-            "Runs a RuleTuner pass over outcomes. The scheduled run "
-            "always passes --dry-run, so the schedule itself never "
-            "auto-promotes; learning.auto_promote.enabled only takes "
-            "effect on a manual `trellis worker tune` run made without "
-            "--dry-run."
+            "Looks for rule-tuning opportunities in recent outcomes. The "
+            "scheduled run only ever proposes changes; it never promotes "
+            "one automatically."
         ),
         # Resolved settings alone are not enough: the schedule's own run
         # is permanently --dry-run (see description above), so this is
@@ -436,11 +444,14 @@ def summarize_loop_health(
         # since that event is only emitted for one.
         actuates=auto_promote_enabled and tune_latest is not None,
         what_it_changes=(
-            "The scheduled run writes nothing but pending proposals. "
-            "Auto-promoting a proposal needs both "
-            "learning.auto_promote.enabled set AND a manual run without "
-            "--dry-run; until both hold, every proposal stays pending "
-            "for a human to run `trellis metrics promote --commit`."
+            "The scheduled run writes nothing but pending proposals; "
+            "until auto-promotion is both enabled and run by hand, every "
+            "proposal stays pending for a human to review."
+        ),
+        operator_hint=(
+            "Auto-promotion needs `learning.auto_promote.enabled` set AND "
+            "a manual, non-dry-run `trellis worker tune` run. Manual "
+            "promotion: `trellis metrics promote --commit`."
         ),
         job_name=LOOP_JOB.get("tuner"),
         last_run_at=tune_latest.occurred_at if tune_latest else None,
@@ -462,9 +473,9 @@ def summarize_loop_health(
         ),
         actuates=False,
         what_it_changes=(
-            "Appends a FEEDBACK_RECORDED event; it does not itself change "
-            "behavior or content — it is the input the other loops above "
-            "consume (sensing only)."
+            "Records the signal itself; it does not change behavior or "
+            "content on its own — it is the input the other loops above "
+            "consume."
         ),
         job_name=LOOP_JOB.get("feedback_intake"),
         last_run_at=latest_feedback.occurred_at if latest_feedback else None,
