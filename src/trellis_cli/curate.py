@@ -440,11 +440,19 @@ def restore(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Return archived items to ``Lifecycle.state="current"``.
+    """Return archived items to their pre-archival ``Lifecycle``.
 
-    The governed inverse of ``curate prune``. Ids that are not currently
-    archived are skipped, not treated as errors — a corrective batch built
-    from an audit payload will legitimately name items already restored.
+    The governed inverse of ``curate prune``. A restored document goes to
+    ``state="current"``; a restored precedent goes to whatever state its
+    SCD-2 history shows it held just before that archival (so a demoted
+    precedent that was then pruned comes back demoted, not reinstated).
+    Ids that are not currently archived are skipped, not treated as
+    errors — a corrective batch built from an audit payload will
+    legitimately name items already restored. A precedent whose history
+    cannot answer what it held before archival is refused individually
+    (named, with its code, in ``warnings``) without aborting the rest of
+    the batch; the command itself is rejected only when nothing in the
+    batch was actually restored.
     """
     ids = list(item_id)
     if from_file:

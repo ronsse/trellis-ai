@@ -650,6 +650,122 @@ class TestRestorePrecedentHistory:
         assert node is not None
         assert node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
 
+    def test_a_refused_item_does_not_abort_the_rest_of_the_batch(
+        self, registry: StoreRegistry
+    ) -> None:
+        """[ok, refused, ok]: one history-unavailable id in the middle of a
+        batch must not cost the other two their restore.
+
+        Before this fix the per-item ``ValidationError`` from
+        ``_pre_archival_lifecycle`` escaped the whole loop, so the item
+        after the refused one was never even attempted — only the item(s)
+        *before* it in iteration order came back restored, and the
+        command reported REJECTED even though two thirds of the batch
+        actually succeeded.
+        """
+        graph = registry.knowledge.graph_store
+        executor = build_curate_executor(registry)
+
+        def demoted_then_pruned(name: str) -> str:
+            precedent_id = self._node(registry, {"name": name})
+            demote = executor.execute(
+                Command(
+                    operation=Operation.PRECEDENT_DEMOTE,
+                    args={"target_id": precedent_id, "reason": "superseded"},
+                    target_id=precedent_id,
+                    target_type="precedent",
+                    requested_by="cli:demote-precedent",
+                )
+            )
+            assert demote.status == CommandStatus.SUCCESS
+            prune = executor.execute(
+                _prune(
+                    {"lifecycle_states": ["demoted"], "older_than_days": 0},
+                    reason="sweeping demoted precedents",
+                    dry_run=False,
+                )
+            )
+            assert prune.status == CommandStatus.SUCCESS
+            return precedent_id
+
+        first_ok = demoted_then_pruned("Pooling pattern A")
+        refused_id = self._node(
+            registry, {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+        )
+        second_ok = demoted_then_pruned("Pooling pattern B")
+
+        result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={
+                    "item_ids": [first_ok, refused_id, second_ok],
+                    "reason": "corrective batch",
+                },
+            )
+        )
+
+        # Two of three restored: SUCCESS, not REJECTED.
+        assert result.status == CommandStatus.SUCCESS
+        assert "refused" in result.message
+        assert any(refused_id in w for w in result.warnings)
+        assert any(
+            "retention_restore_history_unavailable" in w for w in result.warnings
+        )
+
+        for ok_id in (first_ok, second_ok):
+            node = graph.get_node(ok_id)
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+        refused_node = graph.get_node(refused_id)
+        assert refused_node is not None
+        assert refused_node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["restored"] == 2
+        assert payload["refused"] == 1
+        assert set(payload["restored_ids"]) == {first_ok, second_ok}
+        assert payload["refused_ids"] == [refused_id]
+        assert payload["refused_items"][0]["item_id"] == refused_id
+        assert (
+            payload["refused_items"][0]["code"]
+            == "retention_restore_history_unavailable"
+        )
+
+    def test_rejected_only_when_nothing_in_the_batch_was_restored(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A batch that mixes ``skipped`` and ``refused`` but restores
+        nothing at all still rejects — "some ids were merely skipped"
+        does not turn a wholly-unactioned batch into a reported success.
+        """
+        executor = build_curate_executor(registry)
+        refused_id = self._node(
+            registry, {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+        )
+        never_archived_id = self._node(registry, {"name": "Never archived"})
+
+        result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={
+                    "item_ids": [never_archived_id, refused_id],
+                    "reason": "corrective batch",
+                },
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_history_unavailable"
+        )
+        assert any(refused_id in w for w in result.warnings)
+
 
 class TestNodePurgedMidCommand:
     """A purge that commits between a node's read and its rewrite stands.

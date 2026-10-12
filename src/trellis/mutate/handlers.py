@@ -2983,8 +2983,9 @@ def _pre_archival_lifecycle(graph: GraphStore, item_id: str) -> dict[str, Any]:
     ``deprecation_reason`` and ``valid_until`` come back too.
 
     Refuses rather than guesses when history cannot answer the question:
-    fewer than two versions on record, or every version on record itself
-    reads as archived (no pre-archival version exists to read).
+    every version on record reads as archived, including the degenerate
+    case of no history at all (an id purged mid-command) — either way,
+    no pre-archival version exists to read.
     """
     history = graph.get_node_history(item_id)
     idx = 0
@@ -3041,6 +3042,21 @@ class RetentionRestoreHandler:
     An id that is not archived is counted in ``skipped``, not raised: a
     corrective batch assembled from an audit payload will legitimately name
     items someone else already restored.
+
+    A precedent whose history cannot answer what it held before archival
+    (:func:`_pre_archival_lifecycle`) is counted in ``refused``, not raised
+    out of the loop: the ids in the same batch after it are independent
+    restores and the ones already restored before it stay restored. Each
+    refusal's id and code land in the ``RETENTION_RESTORED`` payload's
+    ``refused_items`` and in ``CommandResult.warnings`` (via
+    ``command.metadata["handler_warnings"]``, see ``_handler_warnings`` in
+    ``executor.py``), so a caller sees exactly which ids need
+    ``precedent.reinstate`` or a different remedy instead of a blanket
+    retry. The command is rejected only when *nothing* in the batch was
+    restored — some skipped and some refused, with nothing restored, still
+    rejects, since "skipped" alone cannot turn a wholly-unactioned batch
+    into a reported success. A genuinely unexpected exception (not this
+    history refusal) still aborts the remainder of the batch, as before.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -3063,13 +3079,24 @@ class RetentionRestoreHandler:
 
         restored: list[str] = []
         skipped: list[str] = []
+        refused: list[dict[str, str]] = []
         unfinished: Exception | None = None
         try:
             for item_id in item_ids:
-                if self._restore(item_id):
-                    restored.append(item_id)
-                else:
-                    skipped.append(item_id)
+                try:
+                    if self._restore(item_id):
+                        restored.append(item_id)
+                    else:
+                        skipped.append(item_id)
+                except ValidationError as exc:
+                    # A per-item history refusal (see
+                    # _pre_archival_lifecycle): does not abort the batch.
+                    # Anything other than this specific, expected refusal
+                    # still escapes to the outer except below and aborts
+                    # the remainder, same as before.
+                    refused.append(
+                        {"item_id": item_id, "code": exc.code, "message": str(exc)}
+                    )
         except Exception as exc:
             # Re-raised after the event: what was restored stays restored.
             unfinished = exc
@@ -3080,12 +3107,22 @@ class RetentionRestoreHandler:
             "requested_by": command.requested_by,
             "restored": len(restored),
             "skipped": len(skipped),
+            "refused": len(refused),
             "restored_ids": restored,
             "skipped_ids": skipped,
+            "refused_ids": [r["item_id"] for r in refused],
+            "refused_items": refused,
         }
-        message = f"retention.restore: restored {len(restored)} item(s)" + (
-            f", {len(skipped)} not archived (skipped)" if skipped else ""
-        )
+        message = f"retention.restore: restored {len(restored)} item(s)"
+        if skipped:
+            message += f", {len(skipped)} not archived (skipped)"
+        if refused:
+            message += f", {len(refused)} refused (history unavailable)"
+            command.metadata.setdefault("handler_warnings", []).extend(
+                f"retention.restore: {r['item_id']} refused ({r['code']}): "
+                f"{r['message']}"
+                for r in refused
+            )
         try:
             self._registry.operational.event_log.emit(
                 EventType.RETENTION_RESTORED,
@@ -3104,6 +3141,22 @@ class RetentionRestoreHandler:
             message += " (WARNING: RETENTION_RESTORED audit emit failed)"
         if unfinished is not None:
             raise unfinished
+        if not restored and refused:
+            # Nothing in the batch actually changed state. "Skipped" alone
+            # is a legitimate success (a corrective batch may legitimately
+            # name items already restored by someone else), but a batch
+            # that restored nothing *and* refused at least one id is not a
+            # no-op retry — it is reported to the caller as rejected,
+            # naming every refused id rather than only the first.
+            codes = {r["code"] for r in refused}
+            code = (
+                next(iter(codes))
+                if len(codes) == 1
+                else "retention_restore_nothing_restored"
+            )
+            detail = "; ".join(f"{r['item_id']} ({r['code']})" for r in refused)
+            msg = f"retention.restore restored none of the requested items: {detail}"
+            raise ValidationError(msg, errors=[r["message"] for r in refused], code=code)
         return command.command_id, message
 
     def _restore(self, item_id: str) -> bool:
