@@ -25,8 +25,10 @@ INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
 # The nav's actual DOM order (verified against the <aside class="sidebar">
 # markup) -- used only to sanity-check that the page still has exactly
 # this many distinct views wired up; the page itself derives its own
-# `views` from the DOM rather than from this list.
-_EXPECTED_VIEW_COUNT = 15
+# `views` from the DOM rather than from this list. 16, not 15: the
+# governed tag/domain candidate review tab (`tagrules`) is a 16th nav
+# entry added after this count was first set.
+_EXPECTED_VIEW_COUNT = 16
 
 
 def _page() -> str:
@@ -54,7 +56,7 @@ class TestViewsDerivedFromNav:
         ) in page
         assert "const views = navLinks.map(a => a.dataset.view);" in page
 
-    def test_nav_has_fifteen_distinct_views_with_no_duplicates(self) -> None:
+    def test_nav_has_sixteen_distinct_views_with_no_duplicates(self) -> None:
         names = _nav_data_views(_page())
         assert len(names) == _EXPECTED_VIEW_COUNT
         assert len(set(names)) == _EXPECTED_VIEW_COUNT

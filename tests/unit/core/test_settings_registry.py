@@ -10,7 +10,10 @@ settings override actually reaches today (all of them except
 A later PR (auto-promote-report-only) registered the tuner's three
 ``learning.auto_promote.*`` knobs and the six ``learning.candidate_auto_promote.*``
 knobs for the new candidate-promotion policy — nine entries on top of the
-fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below.
+fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below. A parallel PR
+registered eight more catalog-only, read-side knobs (the subgraph depth
+cap, two noise-demotion thresholds, two advisory-generation thresholds,
+and three capture-health knobs), bringing the total to 31.
 """
 
 from __future__ import annotations
@@ -72,12 +75,20 @@ class TestCatalogMembership:
             | {
                 "graph_seeding",
                 "filter_legacy_advisories",
+                "graph_max_subgraph_depth",
+                "noise_demotion_min_attributed_packs",
+                "noise_demotion_min_unhelpful_citations",
+                "advisory_min_sample_size",
+                "advisory_min_effect_size",
+                "capture_warn_threshold",
+                "capture_warn_window_hours",
+                "capture_strict",
             }
             | _AUTO_PROMOTE_NAMES
         )
 
-    def test_twentythree_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 23
+    def test_thirtyone_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 31
 
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the
@@ -160,15 +171,16 @@ class TestEverySpecIsWellFormed:
     def test_group_is_a_declared_group(self, name: str) -> None:
         assert SETTINGS_REGISTRY[name].group in _VALID_GROUPS
 
-    def test_exactly_one_entry_needs_a_restart(self) -> None:
-        """``minhash_seed_max_docs`` is read once at process start (its own
-        description says why); every other registered knob is re-read
-        live, so it carries ``settings_live=True`` instead.
+    def test_exactly_two_entries_need_a_restart(self) -> None:
+        """``minhash_seed_max_docs`` and ``graph_max_subgraph_depth`` are
+        each read once at process start (their own descriptions say why);
+        every other registered knob is re-read live, so it carries
+        ``settings_live=True`` instead.
         """
-        restarters = [
+        restarters = {
             name for name, spec in SETTINGS_REGISTRY.items() if spec.restart_required
-        ]
-        assert restarters == ["minhash_seed_max_docs"]
+        }
+        assert restarters == {"minhash_seed_max_docs", "graph_max_subgraph_depth"}
 
 
 #: Catches an issue/PR reference such as "#862" or "#848" leaking into
@@ -247,10 +259,16 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     ``memory_extraction``, ``reconcile_on_write``, ``minhash_seed_max_docs``
     (a restart cost, not a correctness/cost risk) and ``pack_holdout_rate``.
     Those three (minus the restart-only one) are this registry's ``"high"``
-    tier. This PR adds a fifth knob as a deliberate, documented deviation —
-    ``require_bodied_attribution``, at the lighter ``"caution"`` tier (see
-    its own code comment's "~46% more" measurement) — not an oversight, so
-    pin both tiers rather than let them silently drift.
+    tier. ``require_bodied_attribution`` was added at the lighter
+    ``"caution"`` tier (see its own code comment's "~46% more"
+    measurement) as a deliberate, documented deviation, and a later batch
+    of read-side knobs (the subgraph depth cap, the two noise-demotion
+    thresholds, the two advisory-generation thresholds, and whether a
+    partial capture sweep fails the run) joined it there — each one
+    can silently admit weaker evidence, a slower query, or a quieter
+    failure when turned down, which is exactly the "caution" tier's
+    bar. None of this is an oversight, so pin both tiers rather than let
+    them silently drift.
     """
 
     def test_high_tier_is_exactly_this_set(self) -> None:
@@ -270,6 +288,12 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "require_bodied_attribution",
             "learning.candidate_auto_promote.mode",
             "learning.candidate_auto_promote.require_zero_unhelpful",
+            "graph_max_subgraph_depth",
+            "noise_demotion_min_attributed_packs",
+            "noise_demotion_min_unhelpful_citations",
+            "advisory_min_sample_size",
+            "advisory_min_effect_size",
+            "capture_strict",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:
@@ -280,6 +304,15 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
         assert spec.risk == "low"
         assert spec.restart_required is True
 
+    def test_graph_max_subgraph_depth_is_caution_and_restart_required(self) -> None:
+        """The second restart-required entry sits at a different risk
+        tier than the first, proving the two flags really are
+        independent rather than always moving together.
+        """
+        spec = SETTINGS_REGISTRY["graph_max_subgraph_depth"]
+        assert spec.risk == "caution"
+        assert spec.restart_required is True
+
 
 class TestSettingsLive:
     """``settings_live`` is the one field that is not plain metadata — it
@@ -287,11 +320,13 @@ class TestSettingsLive:
     test than "every spec is well-formed".
     """
 
-    def test_every_entry_except_minhash_is_settings_live(self) -> None:
-        not_live = [
+    def test_every_entry_except_minhash_and_subgraph_depth_is_settings_live(
+        self,
+    ) -> None:
+        not_live = {
             name for name, spec in SETTINGS_REGISTRY.items() if not spec.settings_live
-        ]
-        assert not_live == ["minhash_seed_max_docs"]
+        }
+        assert not_live == {"minhash_seed_max_docs", "graph_max_subgraph_depth"}
 
     def test_graph_seeding_is_now_settings_live(self) -> None:
         """Was catalog-only through an earlier PR; this PR wires
@@ -301,6 +336,62 @@ class TestSettingsLive:
 
     def test_filter_legacy_advisories_is_settings_live(self) -> None:
         assert SETTINGS_REGISTRY["filter_legacy_advisories"].settings_live is True
+
+
+class TestSettingsWritable:
+    """``settings_writable`` (B3, re-gate #867) is narrower than
+    ``settings_live``: ``minhash_seed_max_docs`` is also not
+    ``settings_live`` today, but its stored value *is* read -- at the
+    process's first subsequent use after a restart, via
+    ``WriteBehaviourConfig.from_env_and_settings`` -- so storing one is
+    still meaningful and stays writable. ``graph_max_subgraph_depth`` is
+    the one entry with no code path that ever reads a stored value, at
+    any time, which is why it alone is not writable.
+    """
+
+    def test_graph_max_subgraph_depth_is_the_only_non_writable_entry(self) -> None:
+        not_writable = {
+            name
+            for name, spec in SETTINGS_REGISTRY.items()
+            if not spec.settings_writable
+        }
+        assert not_writable == {"graph_max_subgraph_depth"}
+
+    def test_minhash_seed_max_docs_stays_writable(self) -> None:
+        """Also ``restart_required`` and not ``settings_live``, but its
+        stored value IS read after a restart -- the two "not live today"
+        entries from :class:`TestSettingsLive` must not collapse into one
+        "not writable" treatment.
+        """
+        assert SETTINGS_REGISTRY["minhash_seed_max_docs"].settings_writable is True
+
+    def test_every_entry_defaults_writable_unless_stated(self) -> None:
+        """``settings_writable`` defaults to ``True`` on the dataclass --
+        this is the field a new entry gets for free, so adding a knob
+        never silently makes it refuse writes.
+        """
+        assert SettingSpec.__dataclass_fields__["settings_writable"].default is True
+
+    def test_mutant_a_second_non_writable_entry_is_caught(self) -> None:
+        """A deliberately defective registry: a second entry flipped to
+        ``settings_writable=False``. Proven against a mutant, not just
+        the real registry, so this cannot pass merely because today's
+        catalog happens to have exactly one.
+        """
+        base = next(
+            spec
+            for spec in SETTINGS_REGISTRY.values()
+            if spec.name != "graph_max_subgraph_depth"
+        )
+        mutant = replace(base, settings_writable=False)
+        defective_registry = {**SETTINGS_REGISTRY, mutant.name: mutant}
+
+        not_writable = {
+            name
+            for name, spec in defective_registry.items()
+            if not spec.settings_writable
+        }
+        assert not_writable == {"graph_max_subgraph_depth", mutant.name}
 
 
 class TestEveryEntryIsLiveOrExplainsWhyNot:

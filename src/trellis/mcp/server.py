@@ -121,6 +121,7 @@ from trellis.mutate import (
 from trellis.ops import (
     check_capture_health,
     format_capture_warning,
+    resolve_capture_thresholds,
 )
 from trellis.retrieve.builder_factory import (
     AxisReport,
@@ -156,6 +157,7 @@ from trellis.schemas.trace import Trace
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import load_settings_values
 
 logger = structlog.get_logger(__name__)
 
@@ -951,7 +953,13 @@ def _capture_warning_banner(registry: StoreRegistry) -> str:
     context it warns about — see :func:`format_capture_warning`.
     """
     try:
-        warning = check_capture_health(registry.operational.event_log)
+        settings = load_settings_values(registry.stores_dir)
+        threshold, window_hours = resolve_capture_thresholds(settings)
+        warning = check_capture_health(
+            registry.operational.event_log,
+            threshold=threshold,
+            window_hours=window_hours,
+        )
         return format_capture_warning(warning) if warning is not None else ""
     except Exception:
         # GRACEFUL-DEGRADATION: the health check is advisory read-side

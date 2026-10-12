@@ -27,6 +27,7 @@ from trellis.schemas.trace import Trace
 from trellis.stores.base import VectorStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
 
@@ -1333,6 +1334,43 @@ def test_precedents_empty(client):
     assert data["count"] == 0
 
 
+def test_list_precedent_domains_counts_every_promoted_precedent(client):
+    """The domain filter's options come from a server-side count over every
+    promoted precedent, not the fetched page -- a domain with zero
+    precedents on the current (small) page, but precedents elsewhere,
+    still shows up, and one with zero precedents anywhere never does."""
+    event_log = app_module._registry.operational.event_log
+    for i in range(3):
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=f"platform-{i}",
+            payload={"domain": "platform", "title": "t"},
+        )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="data-0",
+        payload={"domain": "data", "title": "t"},
+    )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="no-domain-0",
+        payload={"title": "t"},  # no domain
+    )
+
+    resp = client.get("/api/v1/precedents/domains")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["domains"] == [
+        {"domain": "platform", "count": 3},
+        {"domain": "data", "count": 1},
+    ]
+    assert data["truncated"] is False
+
+
 # -- Batch mutations --
 
 
@@ -2238,6 +2276,122 @@ class TestAdvisoryGenerateOnADegradedStore:
         detail = resp.json()["detail"]
         assert detail["code"] == "stale_store_write"
         assert detail["path"] == str(path)
+
+
+_GENERATE_ENTITY_GOOD = "ar:ent:good"
+
+
+def _seed_generate_entity_correlation_signal(registry: StoreRegistry) -> None:
+    """Seed packs that only clear the advisory gate below the module
+    default ``min_sample_size`` (5).
+
+    ``ar:ent:good`` appears in 3 successful packs (rate_with=1.0); 3 more
+    packs without it all fail (rate_without=0.0, baseline 0 -> effect
+    1.0, comfortably above the 0.15 default ``min_effect_size`` floor).
+    ``AdvisoryGenerator`` refuses both arms below ``min_sample_size``
+    packs, so at the module default neither the 3-pack presence arm nor
+    the 3-pack comparison arm qualifies; a stored override of 3 lets both
+    through (mirrors ``tests/unit/cli/test_worker.py``'s
+    ``_seed_entity_correlation_signal``, which proves the same resolver
+    through the CLI's live-mode entry point rather than this REST one).
+    """
+    event_log = registry.operational.event_log
+    for i in range(3):
+        pack_id = f"ar-ent-with-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "ar-test",
+                "injected_item_ids": [_GENERATE_ENTITY_GOOD],
+                "injected_items": [
+                    {
+                        "item_id": _GENERATE_ENTITY_GOOD,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "success",
+                "success": True,
+                "helpful_item_ids": [_GENERATE_ENTITY_GOOD],
+            },
+        )
+    for i in range(3):
+        pack_id = f"ar-ent-without-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "ar-test",
+                "injected_item_ids": [f"ar:ent:other{i}"],
+                "injected_items": [
+                    {
+                        "item_id": f"ar:ent:other{i}",
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "failure",
+                "success": False,
+                "unhelpful_item_ids": [],
+            },
+        )
+
+
+class TestAdvisoryGenerateSettingsWiring:
+    """Re-gate #867 M26: ``POST /advisories/generate`` must thread a
+    *stored* ``advisory_min_sample_size`` override through to
+    ``resolve_advisory_thresholds`` -- not just accept ``min_sample``/
+    ``min_effect`` as query params, which every other test in this class
+    already exercises. A mutant that drops the call's
+    ``settings_values`` argument (passing ``None`` instead) still returns
+    200 with an empty report every time, because it falls back silently
+    to the module defaults -- this proves the stored value is what
+    actually widens the gate, by seeding a shape that clears it only
+    with the override in place.
+    """
+
+    def test_generate_honours_a_stored_min_sample_size(self, client, tmp_path):
+        registry = app_module._registry
+        _seed_generate_entity_correlation_signal(registry)
+
+        default_resp = client.post("/api/v1/advisories/generate")
+        assert default_resp.status_code == 200, default_resp.text
+        assert default_resp.json()["advisories_generated"] == 0
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("advisory_min_sample_size", 3)
+
+        overridden_resp = client.post("/api/v1/advisories/generate")
+        assert overridden_resp.status_code == 200, overridden_resp.text
+        assert overridden_resp.json()["advisories_generated"] >= 1
 
 
 class TestVectorsResetStatusLine:

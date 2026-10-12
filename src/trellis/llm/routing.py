@@ -177,6 +177,17 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
     is an error, because routing to it would silently build the parent.
     """
     parent = llm_config or {}
+    if not isinstance(parent, Mapping):
+        # A truthy non-Mapping (a string, a list, ``True``, an int --
+        # ``None``/``{}``/``""``/``[]`` are already coerced to ``{}`` above)
+        # used to reach ``_section``'s own ``.get`` call as an
+        # AttributeError, which is not an ``LLMRoutingError`` and so was
+        # never caught by any of this module's three callers (S1, re-gate
+        # #867): an operator's ``llm: <scalar-or-list>`` typo 500'd the
+        # admin API's Runtime panel instead of degrading to a reported
+        # error like every other malformed shape in this block.
+        msg = f"llm: must be a mapping, got {type(parent).__name__}."
+        raise LLMRoutingError(msg, setting="llm")
     tiers = _tiers(parent)
     routes = _routes(parent)
     parent_endpoint = {key: parent.get(key) for key in ENDPOINT_KEYS}
@@ -267,17 +278,28 @@ def _validate_route(
         )
         raise LLMRoutingError(msg, setting=setting)
     if not isinstance(tier, str) or not tier:
+        # Name the value's *type*, never its repr: a route value can be
+        # whatever an operator pasted in by mistake -- a credential
+        # mapping, a list holding one -- and this message reaches the
+        # admin API's runtime panel verbatim as ``llm_routes_error``.
+        shape = "null" if tier is None else type(tier).__name__
         msg = (
-            f"llm.routes.{consumer} must name a tier, got"
-            f" {'null' if tier is None else repr(tier)}. Delete the route to"
-            " use the parent 'llm:' block."
+            f"llm.routes.{consumer} must name a tier as a non-empty string,"
+            f" got a {shape} value. Delete the route to use the parent"
+            " 'llm:' block."
         )
         raise LLMRoutingError(msg, setting=setting)
     if tier not in tiers:
+        # Likewise: ``tier`` is already known to be a non-empty string here,
+        # but it can still be a secret pasted in place of a tier name (a
+        # short password, a bare API key). Report the defined tier names
+        # (the operator's own labels, never secret-shaped) instead of the
+        # value that failed to match one of them.
         defined = sorted(tiers) or "none"
         msg = (
-            f"llm.routes.{consumer} names tier {tier!r}, which llm.tiers does"
-            f" not define (defined: {defined})."
+            f"llm.routes.{consumer} names a tier llm.tiers does not define"
+            f" (defined: {defined}). Check the route for a typo, or a"
+            " credential pasted in place of a tier name."
         )
         raise LLMRoutingError(msg, setting=setting)
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -70,7 +71,10 @@ from trellis.learning.tuners import (
 )
 from trellis.llm.routing import LLMConsumer
 from trellis.ops.write_health import record_write_rejection
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import (
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
@@ -88,6 +92,7 @@ from trellis.stores.advisory_source import (
 )
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
     _build_learning_registry_or_exit,
@@ -595,6 +600,7 @@ def run_curation_cycle(
     skip_advisories: bool = False,
     skip_learning: bool = False,
     no_meta_trace: bool = False,
+    settings: Mapping[str, Any] | None = None,
 ) -> CurateCycleResult:
     """Run one full curation cycle against injected stores.
 
@@ -630,6 +636,14 @@ def run_curation_cycle(
       noise-tag and learning findings name writes (the tags, the review
       files) that a dry run does not make.
 
+    ``settings`` is the settings-store snapshot
+    (:func:`trellis.stores.settings_store.load_settings_values`) this
+    cycle resolves its noise-demotion and advisory-generation thresholds
+    from — ``None`` falls back to each threshold's env var, then its
+    module default, same as every other caller of
+    :func:`~trellis.classify.demotion_gate.resolve_demotion_thresholds` /
+    :func:`~trellis.retrieve.advisory_generator.resolve_advisory_thresholds`.
+
     Returns a :class:`CurateCycleResult` with per-stage counts.
     """
     started = time.monotonic()
@@ -644,6 +658,7 @@ def run_curation_cycle(
         skip=skip_noise_tags,
         no_meta_trace=no_meta_trace,
         skipped=skipped,
+        settings=settings,
     )
     advisory = _curate_stage_advisories(
         event_log,
@@ -653,6 +668,7 @@ def run_curation_cycle(
         skip=skip_advisories,
         no_meta_trace=no_meta_trace,
         skipped=skipped,
+        settings=settings,
     )
     learning = _curate_stage_learning(
         event_log,
@@ -741,6 +757,7 @@ def _curate_stage_noise_tags(
     skip: bool,
     no_meta_trace: bool,
     skipped: list[str],
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, int]:
     """Stage 1 — effectiveness feedback (demote / noise-tag).
 
@@ -778,13 +795,16 @@ def _curate_stage_noise_tags(
         disabled=no_meta_trace,
     ) as record:
         if dry_run:
-            report = analyze_effectiveness(event_log, days=days)
+            report = analyze_effectiveness(
+                event_log, days=days, demotion_settings=settings
+            )
         else:
             report = run_effectiveness_feedback(
                 event_log,
                 document_store,
                 days=days,
                 vector_store=vector_store,
+                demotion_settings=settings,
             )
         screen = report.demotion_screen
         if report.noise_tags_written is not None:
@@ -890,6 +910,7 @@ def _curate_stage_advisories(
     skip: bool,
     no_meta_trace: bool,
     skipped: list[str],
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Stages 2 & 3 — advisory generation + fitness loop.
 
@@ -950,7 +971,13 @@ def _curate_stage_advisories(
             analyzer_name="cli.worker.curate.advisories",
             disabled=no_meta_trace,
         ) as record:
-            gen = AdvisoryGenerator(event_log, advisory_store).generate(days=days)
+            min_sample_size, min_effect_size = resolve_advisory_thresholds(settings)
+            gen = AdvisoryGenerator(
+                event_log,
+                advisory_store,
+                min_sample_size=min_sample_size,
+                min_effect_size=min_effect_size,
+            ).generate(days=days)
             generated = gen.advisories_generated
             refused = gen.findings_refused_no_comparison_arm
             fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
@@ -1225,10 +1252,11 @@ def _run_curate_loop(
     result: CurateCycleResult | None = None
     while not flag.stop:
         cycle += 1
+        registry = _get_registry()
         result = run_curation_cycle(
             event_log=get_event_log(),
             document_store=get_document_store(),
-            vector_store=resolve_vector_store(_get_registry()),
+            vector_store=resolve_vector_store(registry),
             advisory_store=_advisory_store_from_data_dir(),
             learning_registry=_build_learning_registry_or_exit(),
             output_dir=output_dir,
@@ -1238,6 +1266,7 @@ def _run_curate_loop(
             skip_advisories=skip_advisories,
             skip_learning=skip_learning,
             no_meta_trace=no_meta_trace,
+            settings=load_settings_values(registry.stores_dir),
         )
         logger.info("worker_curate.cycle", cycle=cycle, **result.to_dict())
         if output_format == "json":
@@ -1406,10 +1435,11 @@ def curate_cmd(
         )
         return
 
+    registry = _get_registry()
     result = run_curation_cycle(
         event_log=get_event_log(),
         document_store=get_document_store(),
-        vector_store=resolve_vector_store(_get_registry()),
+        vector_store=resolve_vector_store(registry),
         advisory_store=_advisory_store_from_data_dir(),
         learning_registry=_build_learning_registry_or_exit(),
         output_dir=output_dir,
@@ -1419,6 +1449,7 @@ def curate_cmd(
         skip_advisories=skip_advisories,
         skip_learning=skip_learning,
         no_meta_trace=no_meta_trace,
+        settings=load_settings_values(registry.stores_dir),
     )
 
     if output_format == "json":
@@ -2081,8 +2112,9 @@ def capture_sessions_cmd(
         strict_mode,
     )
 
+    registry = _get_registry()
     try:
-        report = run_sweep(registry=_get_registry(), dry_run=dry_run)
+        report = run_sweep(registry=registry, dry_run=dry_run)
     except CaptureJudgeUnavailableError as exc:
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
@@ -2108,7 +2140,7 @@ def capture_sessions_cmd(
     else:
         _render_capture_text(payload)
 
-    if failed and strict_mode():
+    if failed and strict_mode(load_settings_values(registry.stores_dir)):
         raise typer.Exit(code=EXIT_INTERNAL)
 
 

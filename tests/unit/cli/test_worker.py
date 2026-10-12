@@ -41,6 +41,7 @@ from trellis.stores.advisory_source import (
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_cli import worker
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app, worker_app
@@ -287,6 +288,89 @@ def _seed_second_noisy_document(registry: StoreRegistry, pack_prefix: str) -> No
         "second noisy test content",
         {"content_tags": {"signal_quality": "standard"}},
     )
+
+
+_ENTITY_GOOD = "wc:ent:good"
+
+
+def _seed_entity_correlation_signal(registry: StoreRegistry) -> None:
+    """Seed packs that only clear the advisory gate below the module default.
+
+    ``wc:ent:good`` appears in 3 successful packs (rate_with=1.0); 3 more
+    packs without it all fail (rate_without=0.0, baseline 0 -> effect
+    1.0, comfortably above the 0.15 default floor). ``AdvisoryGenerator``
+    refuses both arms below ``min_sample_size`` packs
+    (``_supported_effect``), so at the module default (5) neither the
+    3-pack presence arm nor the 3-pack comparison arm qualifies; an
+    override of 3 lets both through.
+    """
+    event_log = registry.operational.event_log
+    for i in range(3):
+        pack_id = f"wc-ent-with-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "wc-test",
+                "injected_item_ids": [_ENTITY_GOOD],
+                "injected_items": [
+                    {
+                        "item_id": _ENTITY_GOOD,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "success",
+                "success": True,
+                "helpful_item_ids": [_ENTITY_GOOD],
+            },
+        )
+    for i in range(3):
+        pack_id = f"wc-ent-without-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "wc-test",
+                "injected_item_ids": [f"wc:ent:other{i}"],
+                "injected_items": [
+                    {
+                        "item_id": f"wc:ent:other{i}",
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+            },
+        )
 
 
 def _graph_shape(registry: StoreRegistry) -> dict[str, int]:
@@ -1364,6 +1448,258 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         ], f"the printed recovery command does not parse as `mv src dst`: {command!r}"
 
 
+class TestWorkerCurateSettingsWiring:
+    """Re-gate #867 M13/M14: ``trellis worker curate`` must thread a
+    *stored* settings override through to both the advisory-generation
+    stage and the noise-tag (demotion) stage end to end — not just at the
+    resolver level (that is pinned in ``test_advisory_generator.py`` /
+    ``test_demotion_gate.py``) and not just at the ``run_curation_cycle``
+    call-signature level, but through the real CLI command this is the
+    production nightly cron's entry point.
+    """
+
+    def test_a_stored_sample_size_override_admits_an_advisory(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        _seed_entity_correlation_signal(temp_stores)
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+                "--skip-noise-tags",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["advisories_generated"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("advisory_min_sample_size", 3)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review2"),
+                "--format",
+                "json",
+                "--skip-noise-tags",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["advisories_generated"] >= 1
+
+    def test_a_stored_coverage_floor_override_admits_a_noise_tag(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Same proof, noise-tag stage: the thin-coverage shape (2 packs)
+        sits below the module default coverage floor (5) until a stored
+        ``noise_demotion_min_attributed_packs`` override of 2 lowers it.
+        """
+        event_log = temp_stores.operational.event_log
+        doc_id = "wc:doc:thin-cli"
+        for i in range(2):
+            pack_id = f"wc-thin-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-thin",
+                    "domain": "wc-test",
+                    "injected_item_ids": [doc_id],
+                    "injected_items": [
+                        {
+                            "item_id": doc_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-thin-run-{i}",
+                    "intent_family": "wc-thin",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [doc_id],
+                },
+            )
+        temp_stores.knowledge.document_store.put(
+            doc_id,
+            "thin coverage cli test content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["noise_tagged"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review2"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["noise_tagged"] == 1
+        noisy = temp_stores.knowledge.document_store.get(doc_id)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+    def test_a_stored_coverage_floor_override_is_honoured_in_dry_run_too(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Re-gate #867 M14b: ``--dry-run`` reads the noise-tag stage
+        through the read-only :func:`analyze_effectiveness`
+        (``_curate_stage_noise_tags``'s ``if dry_run:`` arm), a second,
+        independent call site from the live arm the test above pins —
+        a mutant that drops that call's ``demotion_settings=settings``
+        argument (passing ``None`` instead) is invisible to that test,
+        since dry-run never reaches ``run_effectiveness_feedback``. Same
+        thin-coverage shape (2 packs, below the module default floor of
+        5) and the same stored override of 2, but asserting the
+        dry-run report and the complete absence of a write — ``--dry-run``
+        touches nothing.
+        """
+        event_log = temp_stores.operational.event_log
+        doc_id = "wc:doc:thin-cli-dry"
+        for i in range(2):
+            pack_id = f"wc-thin-dry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-thin-dry",
+                    "domain": "wc-test",
+                    "injected_item_ids": [doc_id],
+                    "injected_items": [
+                        {
+                            "item_id": doc_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-thin-dry-run-{i}",
+                    "intent_family": "wc-thin-dry",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [doc_id],
+                },
+            )
+        temp_stores.knowledge.document_store.put(
+            doc_id,
+            "thin coverage cli dry-run test content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["noise_tagged"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry2"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["noise_tagged"] == 1
+
+        # --dry-run touches nothing, override or not.
+        untouched = temp_stores.knowledge.document_store.get(doc_id)
+        assert untouched is not None
+        assert untouched["metadata"]["content_tags"]["signal_quality"] == "standard"
+
+
 class TestWorkerCurateLoop:
     def test_loop_runs_n_cycles_then_stops(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -2204,6 +2540,37 @@ class TestWorkerCaptureSessions:
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(
+                return_value=self._report(
+                    sessions_seen=2,
+                    warnings=[{"kind": "distill_unavailable", "session_id": "a"}],
+                )
+            ),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["status"] == "partial"
+        assert payload["sessions_judge_unavailable"] == 1
+
+    def test_a_stored_strict_opt_out_keeps_the_count_but_exits_zero(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-gate #867 M16: ``trellis worker capture-sessions`` (the CLI
+        front door, distinct from the standalone ``trellis-session-capture``
+        console script that S1 fixed separately in ``__main__.py``) must
+        thread a *stored* ``capture_strict`` override through too, not
+        just the env var the test above covers.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("capture_strict", False)
         monkeypatch.setattr(
             capture_sweep,
             "run_sweep",

@@ -38,7 +38,9 @@ class TestOperation:
         # carried forward into the report-only auto-promote evaluator
         # added here; its commit mode is refused via ConfigError, not via
         # this verb)
-        assert len(Operation) == 21
+        # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
+        # candidate review)
+        assert len(Operation) == 23
 
 
 class TestCommand:

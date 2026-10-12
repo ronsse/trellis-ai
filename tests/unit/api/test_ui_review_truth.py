@@ -259,7 +259,7 @@ def test_precedents_empty_state_names_the_real_promotion_path() -> None:
     body = _between(
         page,
         "async function loadPrecedents() {",
-        "// Populate domain filter",
+        'container.innerHTML = `<div class="precedent-grid">',
     )
     empty_branch = _between(
         body, "if (items.length === 0) {", "return;\n                }"

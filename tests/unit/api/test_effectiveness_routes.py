@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 
 PHANTOM = "ar:trace:phantom"
 NOISY_DOC = "ar:doc:noisy"
@@ -203,5 +204,102 @@ class TestApplyNoiseTagsRoute:
         assert data["noise_tags_written"] == 1
         assert data["noise_refused_not_document"] == []
         noisy = registry.knowledge.document_store.get(NOISY_DOC)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+
+THIN_DOC = "ar:doc:thin"
+
+
+def _seed_thin_coverage_admission(registry: StoreRegistry) -> None:
+    """Two packs citing a real document unhelpful -- below the module
+    default coverage floor (5), so the gate refuses by default.
+    """
+    event_log = registry.operational.event_log
+    for i in range(2):
+        pack_id = f"ar-thin-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "intent_family": "ar-test",
+                "domain": "ar-test",
+                "injected_item_ids": [THIN_DOC],
+                "injected_items": [
+                    {
+                        "item_id": THIN_DOC,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "run_id": f"ar-thin-run-{i}",
+                "intent_family": "ar-test",
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": [THIN_DOC],
+            },
+        )
+    registry.knowledge.document_store.put(
+        THIN_DOC,
+        "thin coverage test content",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+
+
+class TestEffectivenessRouteSettingsWiring:
+    """Re-gate #867 M12: both the plain analysis route and the
+    apply-noise-tags route must thread a *stored* settings override
+    through to the demotion gate, not just accept it at the resolver
+    level (``tests/unit/retrieve/test_effectiveness.py`` proves the
+    resolver is read; this proves the REST route actually loads the
+    store and passes it along).
+    """
+
+    def test_get_effectiveness_honours_a_stored_coverage_floor(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _seed_thin_coverage_admission(registry)
+
+        default_resp = client.get("/api/v1/effectiveness")
+        assert default_resp.status_code == 200
+        assert default_resp.json()["demotion_screen"]["admitted"] == []
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_resp = client.get("/api/v1/effectiveness")
+        assert overridden_resp.status_code == 200
+        assert overridden_resp.json()["demotion_screen"]["admitted"] == [THIN_DOC]
+
+    def test_apply_noise_tags_honours_a_stored_coverage_floor(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _seed_thin_coverage_admission(registry)
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        resp = client.post("/api/v1/effectiveness/apply-noise-tags")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["demotion_screen"]["admitted"] == [THIN_DOC]
+        assert data["noise_tags_written"] == 1
+        noisy = registry.knowledge.document_store.get(THIN_DOC)
         assert noisy is not None
         assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"

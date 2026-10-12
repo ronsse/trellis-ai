@@ -120,6 +120,32 @@ def build_settings_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
+def build_classify_rules_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build a :class:`MutationExecutor` wired with ONLY the classify-overlay handlers.
+
+    Mirrors :func:`build_settings_executor` exactly, and for the same
+    reason: ``Operation.CLASSIFY_RULE_APPLY`` / ``CLASSIFY_RULE_REVOKE``
+    are deliberately absent from :func:`build_curate_executor`'s handler
+    dict (see ``create_classify_handlers``'s docstring), because that
+    executor backs the generic mutation surfaces, which have no
+    admin-scope gate of their own. Only the admin-scoped classify-rules
+    REST routes and ``trellis classify apply-rule``/``revoke-rule`` call
+    this builder.
+
+    Stage 2 still always runs here, same as every other executor in this
+    module: the policy gate is built from the deployment's declared
+    policies unconditionally (``tests/unit/test_policy_gate_rule.py``).
+    """
+    from trellis.mutate.handlers import create_classify_handlers  # noqa: PLC0415
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_classify_handlers(registry),
+        policy_gate=build_policy_gate(registry),
+    )
+
+
 def redirect_unreachable_settings_update(result: CommandResult) -> CommandResult:
     """Point a caller at the real settings write path; ``status`` unchanged.
 
@@ -183,6 +209,7 @@ __all__ = [
     "MutationExecutor",
     "Operation",
     "OperationRegistry",
+    "build_classify_rules_executor",
     "build_curate_executor",
     "build_evidence_ingest_command",
     "build_evidence_ingest_command_from_args",

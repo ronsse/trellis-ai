@@ -33,6 +33,7 @@ from trellis.core.settings_registry import (
     SettingSpec,
     get_setting,
     resolve_source,
+    validate_value,
 )
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.learning.candidate_auto_promote import (
@@ -107,8 +108,38 @@ def _effective_values(
     failure. This route is read by an operator who did not necessarily
     set the bad value and must still see every *other* setting, so a
     family that fails to resolve degrades to each of its entries'
-    registry defaults here, with the parse error recorded against each
-    affected entry name rather than raised past this function.
+    registry defaults here, with a FIXED, value-free reason recorded
+    against each affected entry name (never the raw exception text,
+    which can echo the offending stored/env value) rather than raised
+    past this function.
+
+    The remaining registry entries each have a dedicated resolver with
+    the exact same env-beats-settings-beats-default precedence, built
+    for the production call site rather than for this route -- calling
+    it here, instead of re-deriving the value from ``spec`` generically,
+    is what keeps this list from drifting from what a request actually
+    gets:
+
+    * :func:`trellis.classify.demotion_gate.resolve_demotion_thresholds`
+      for ``noise_demotion_min_attributed_packs`` /
+      ``noise_demotion_min_unhelpful_citations``.
+    * :func:`trellis.retrieve.advisory_generator.resolve_advisory_thresholds`
+      for ``advisory_min_sample_size`` / ``advisory_min_effect_size``.
+    * :func:`trellis.ops.capture_health.resolve_capture_thresholds` for
+      ``capture_warn_threshold`` / ``capture_warn_window_hours``.
+    * :func:`trellis_workers.session_capture.sweep.strict_mode` for
+      ``capture_strict`` (imported locally -- ``trellis_api`` otherwise
+      has no reason to load the worker package at import time).
+
+    ``graph_max_subgraph_depth`` is the one entry in this second group
+    that is *not* settings-live: :data:`trellis.stores.base.graph.MAX_SUBGRAPH_DEPTH`
+    is resolved once at import, from the environment only -- the
+    settings store is never consulted, so, unlike every env-pinned knob
+    above, a restart does not make a stored override take effect either.
+    ``SettingsUpdateHandler`` refuses a write that would set one
+    (``settings_writable=False``); this function still never echoes a
+    stray legacy row as if it were effective, always calling the real
+    resolver below regardless of what ``settings_values`` holds.
     """
     effective = WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
@@ -125,6 +156,42 @@ def _effective_values(
             effective[name] = bool(settings_values[name])
         else:
             effective[name] = spec.default
+
+    from trellis.classify.demotion_gate import (  # noqa: PLC0415
+        resolve_demotion_thresholds,
+    )
+    from trellis.ops.capture_health import (  # noqa: PLC0415
+        resolve_capture_thresholds,
+    )
+    from trellis.retrieve.advisory_generator import (  # noqa: PLC0415
+        resolve_advisory_thresholds,
+    )
+    from trellis_workers.session_capture.sweep import strict_mode  # noqa: PLC0415
+
+    (
+        effective["noise_demotion_min_attributed_packs"],
+        effective["noise_demotion_min_unhelpful_citations"],
+    ) = resolve_demotion_thresholds(settings_values)
+    (
+        effective["advisory_min_sample_size"],
+        effective["advisory_min_effect_size"],
+    ) = resolve_advisory_thresholds(settings_values)
+    (
+        effective["capture_warn_threshold"],
+        effective["capture_warn_window_hours"],
+    ) = resolve_capture_thresholds(settings_values)
+    effective["capture_strict"] = strict_mode(settings_values)
+
+    # Always the real resolver, regardless of what settings_values holds:
+    # no code path reads a stored override for this knob (B3), so echoing
+    # one back here as "effective" would be exactly the lie this route
+    # exists to avoid. _resolve_max_subgraph_depth() already falls back
+    # to the spec default (6) on an unset or invalid env var.
+    from trellis.stores.base.graph import (  # noqa: PLC0415
+        _resolve_max_subgraph_depth,
+    )
+
+    effective["graph_max_subgraph_depth"] = _resolve_max_subgraph_depth()
 
     # The two auto-promote families resolve env > settings > default here,
     # through the same two resolver functions every other caller of
@@ -150,12 +217,15 @@ def _effective_values(
     ):
         try:
             resolved = resolve()
-        except (ValueError, TypeError, OverflowError) as exc:
+        except (ValueError, TypeError, OverflowError):
             # One bad knob in a family must not blank every other
             # setting off the response -- degrade every entry in *this*
-            # family to its registry default and record why, rather
-            # than letting the exception reach list_settings() and turn
-            # the whole route into a 500. A typo'd
+            # family to its registry default and record a FIXED,
+            # value-free reason (never the raw exception text, which
+            # can echo the offending stored/env value back through this
+            # route) against each affected entry, rather than letting
+            # the exception reach list_settings() and turn the whole
+            # route into a 500. A typo'd
             # TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT must not
             # take down every other operator control. ``OverflowError``
             # is a real member of this family, not a defensive extra:
@@ -163,11 +233,10 @@ def _effective_values(
             # ``int(float(raw))`` inside the two resolvers and raises
             # ``OverflowError``, not ``ValueError`` (see
             # ``parse_finite_int``'s docstring in ``write_config.py``).
-            message = str(exc)
             for spec in SETTINGS_REGISTRY.values():
                 if spec.name.startswith(prefix):
                     effective[spec.name] = spec.default
-                    parse_errors[spec.name] = message
+                    parse_errors[spec.name] = _family_parse_error_reason()
             continue
         for field, value in resolved.items():
             effective[f"{prefix}{field}"] = value
@@ -189,6 +258,11 @@ def _entry(
         "default": spec.default,
         "minimum": spec.minimum,
         "maximum": spec.maximum,
+        # Whether ``minimum`` excludes the boundary itself (``value >
+        # minimum`` required, not ``>=``) -- the UI renders "> N" instead
+        # of "min N" when this is set, since "min 0" reads as 0 being a
+        # valid value for a knob that actually refuses it.
+        "minimum_exclusive": spec.minimum_exclusive,
         "enum": list(spec.enum) if spec.enum is not None else None,
         # Members of ``enum`` that are structurally valid but refused at
         # write time (e.g. ``"commit"`` before auto-demotion ships) --
@@ -204,14 +278,64 @@ def _entry(
         "risk": spec.risk,
         "group": spec.group,
         "settings_live": spec.settings_live,
+        "settings_writable": spec.settings_writable,
         "env_var": spec.env_var,
         "effective_value": effective[spec.name],
-        "overridden_by": resolve_source(spec, settings_values),
+        # For a non-writable knob, ``resolve_source`` would still answer
+        # "settings" off a stray row on disk even though effective_value
+        # (above) never reads it -- the two fields would then name
+        # different sources for the same row. Collapse that one case to
+        # "default" so the two agree: a non-writable knob's effective
+        # value only ever comes from its environment variable or the
+        # shipped default, never a stored row.
+        "overridden_by": (
+            "default"
+            if not spec.settings_writable
+            and resolve_source(spec, settings_values) == "settings"
+            else resolve_source(spec, settings_values)
+        ),
         # The raw override on disk, if any -- distinct from
         # effective_value, which may instead be the env or default value
         # while a stored override sits inert underneath it (brief e179
         # step 2's env-pin truthfulness).
         "stored_value": stored_row.value if stored_row is not None else None,
+        # Re-gate #867 B4/B6: a malformed stored row (``1e999``, ``nan``,
+        # a string where an int belongs) makes every resolver above fall
+        # back to the default silently -- correct for the knob's own
+        # behaviour, but invisible here, where ``overridden_by`` would
+        # still read "settings" off the row's mere presence
+        # (``resolve_source`` checks presence, not validity) while
+        # ``effective_value`` quietly differs from ``stored_value``. This
+        # re-runs the same ``validate_value`` the governed write path
+        # already enforces, against the row already on disk, so a value
+        # that predates a tightened bound or was written outside the
+        # governed path (direct settings.json edit) surfaces as a fact
+        # the UI can show next to the mismatched pair above, not
+        # something a caller has to notice by diffing two fields
+        # themselves. ``None`` when there is no stored row, or it is
+        # valid. A FIXED reason string otherwise -- never the raw
+        # ``stored_value`` above, which this field exists to flag as
+        # untrustworthy, not re-echo under a new name.
+        # Checked in this order because a family-level failure already
+        # won: it means the environment or settings resolver for the
+        # whole family (learning.auto_promote.*,
+        # learning.candidate_auto_promote.*) raised, so every entry in
+        # it -- not just one with a bad stored row -- has already had
+        # its effective_value forced to the registry default above. The
+        # stored-row check only runs once that is ruled out, since a
+        # row can be individually invalid even when its family resolved
+        # fine overall (e.g. one other entry's env var is what's bad).
+        # Either branch is a FIXED, value-free reason string -- never
+        # the raw stored or env value, which is what this field exists
+        # to flag as untrustworthy, not re-echo under a new name.
+        "parse_error": (
+            (parse_errors or {}).get(spec.name)
+            or (
+                _stored_value_parse_error(spec, stored_row.value)
+                if stored_row is not None
+                else None
+            )
+        ),
         # "Last changed ... when" (brief e179 step 1). The store never
         # records who changed a setting -- SettingRow carries no
         # changed_by field, and SettingsUpdateHandler's changed_by is
@@ -220,13 +344,81 @@ def _entry(
         "updated_at": (
             stored_row.updated_at.isoformat() if stored_row is not None else None
         ),
-        # Non-``None`` only when this entry's family (today, one of the
-        # two auto-promote families) failed to resolve from the
-        # environment/settings -- "effective_value" is then that
-        # entry's registry default, not a crash, and this field is the
-        # operator-visible reason why.
-        "parse_error": (parse_errors or {}).get(spec.name),
     }
+
+
+def _stored_value_parse_error(spec: SettingSpec, raw: Any) -> str | None:
+    """``None`` if the registry's own coercion accepts ``raw``, else a
+    FIXED reason string -- never the value itself.
+
+    Mirrors the ``except (TypeError, ValueError)`` every dedicated
+    resolver in this PR uses around the same ``validate_value`` call
+    (``demotion_gate``, ``advisory_generator``, ``capture_health``) --
+    ``validate_value`` itself never raises ``OverflowError`` (its
+    ``_coerce_int``/``_coerce_float`` check finiteness before casting),
+    so that is not a gap here either.
+
+    The reason text is keyed only on ``spec.type``/``spec.enum`` -- never
+    on ``raw`` -- so a stored secret-shaped string that fails validation
+    (a mistyped knob holding a credential, say) cannot resurface through
+    this field. That is narrower than it may sound: ``_entry`` above
+    already puts the raw override on the same response, unconditionally,
+    as ``stored_value`` -- a different field built for a different job
+    (showing an operator what is actually on disk). This field's job is
+    only to say that row is unusable, never to be a second, redundant
+    echo of it.
+    """
+    try:
+        validate_value(spec, raw)
+    except (TypeError, ValueError):
+        return _parse_error_reason(spec)
+    return None
+
+
+def _parse_error_reason(spec: SettingSpec) -> str:
+    """The fixed, value-free reason text for ``spec``'s type.
+
+    States only that ``validate_value`` rejects the stored row, never
+    what happens next. An earlier wording appended "; using the default"
+    unconditionally, which does not hold for every knob this field
+    covers: an env-pinned knob ignores the stored row either way (the
+    environment variable wins, not a default); ``WriteBehaviourConfig``'s
+    own boolean fields accept a stored ``1``/``1.0`` that this registry's
+    stricter ``validate_value`` rejects; and ``minhash_seed_max_docs``,
+    ``reconcile_timeout_s`` and ``reconcile_model`` are resolved by
+    dedicated code that is unbounded, accepts ``inf``, or never checks
+    the type the way this field's probe does. The field still does its
+    job -- it flags that the registry's own validation disagrees with
+    what is on disk -- without asserting a specific resolution this
+    function cannot see.
+    """
+    if spec.type == "bool":
+        return "stored value is not a recognized boolean"
+    if spec.type == "int":
+        return "stored value is not an integer in range"
+    if spec.type == "float":
+        return "stored value is not a finite number in range"
+    if spec.enum is not None:
+        return "stored value is not one of the allowed options"
+    return "stored value failed validation"
+
+
+def _family_parse_error_reason() -> str:
+    """The fixed, value-free reason for a whole-family resolution failure.
+
+    Used when ``resolve_auto_promote_overrides`` or
+    ``resolve_candidate_auto_promote_overrides`` raises: unlike
+    :func:`_parse_error_reason`, the culprit is not necessarily *this*
+    entry's own stored row -- it can be another entry in the same
+    family whose environment variable is the one that is malformed, so
+    the wording does not name "stored value" specifically. Still never
+    the raw exception text or the offending value itself, which can
+    carry the bad env var's contents.
+    """
+    return (
+        "this setting's family could not be resolved from the "
+        "environment or stored overrides; using the default"
+    )
 
 
 def _execute_command(cmd: Command) -> CommandResponse:
