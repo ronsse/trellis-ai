@@ -2724,15 +2724,17 @@ def _sync_vector_lifecycle(
 ) -> None:
     """Stamp a lifecycle record onto a vector row that has no document write.
 
-    Three call sites share this: ``RetentionPruneHandler._resync_archived``
-    (a row that diverged *before* the ``put_document`` mirror seam existed —
-    the writers that stamp a document and its row together, ``_archive`` and
-    ``_restore``, go through :func:`~trellis.core.document_write.put_document`
-    instead, so the mirror cannot be the step a future edit forgets) and
-    ``PrecedentDemoteHandler``/``PrecedentReinstateHandler``, neither of which
-    is a retention operation at all — pass ``log_event`` so the log line
-    names the actual caller rather than defaulting to "retention" for a
-    demotion or reinstatement.
+    Four call sites share this: ``RetentionPruneHandler._resync_archived``
+    (a row that diverged *before* the ``put_document`` mirror seam existed),
+    ``RetentionRestoreHandler._restore``'s graph-node branch (a graph node
+    has no document write to piggyback a mirror onto, unlike the document
+    branches of ``_archive``/``_restore``, which go through
+    :func:`~trellis.core.document_write.put_document` instead, so the
+    mirror there is not a step a future edit could forget), and
+    ``PrecedentDemoteHandler``/``PrecedentReinstateHandler``, neither of
+    which is a retention operation at all — pass ``log_event`` so the log
+    line names the actual caller rather than defaulting to "retention" for
+    a demotion or reinstatement.
 
     **A vector row's metadata is a snapshot taken at embed time**, and the
     semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
@@ -3169,14 +3171,16 @@ def _validate_restore_args(command: Command) -> tuple[list[str], str]:
     return item_ids, reason
 
 
-def _raise_nothing_restored(refused: list[dict[str, str]]) -> None:
+def _raise_nothing_restored(refused: list[dict[str, str]], skipped: list[str]) -> None:
     """Escalate a wholly-unactioned ``retention.restore`` batch.
 
     "Skipped" alone is a legitimate success (a corrective batch may
     legitimately name items someone else already restored), but a batch
     that restored nothing *and* refused at least one id is not a no-op
     retry — it is reported to the caller as rejected, naming every
-    refused id rather than only the first. Split out of
+    refused id *and* every skipped one, not only the refused half, so an
+    operator reading the rejection sees the whole batch rather than just
+    the part that failed loudly. Split out of
     ``RetentionRestoreHandler.handle`` to keep that method's branch count
     under the linter's ceiling.
     """
@@ -3185,6 +3189,8 @@ def _raise_nothing_restored(refused: list[dict[str, str]]) -> None:
         next(iter(codes)) if len(codes) == 1 else "retention_restore_nothing_restored"
     )
     detail = "; ".join(f"{r['item_id']} ({r['code']})" for r in refused)
+    if skipped:
+        detail += "; " + "; ".join(f"{item_id} (not archived)" for item_id in skipped)
     msg = f"retention.restore restored none of the requested items: {detail}"
     raise ValidationError(msg, errors=[r["message"] for r in refused], code=code)
 
@@ -3219,6 +3225,20 @@ class RetentionRestoreHandler:
     back demoted, not reinstated: prune-then-restore is not a second,
     unaudited way to undo a demotion.
 
+    A vector row's metadata is an embed-time snapshot, not a live read of
+    the graph store, so a graph-node restore also re-stamps the node's
+    vector row with the lifecycle it was just given — the same
+    ``_sync_vector_lifecycle`` call :class:`PrecedentDemoteHandler` and
+    :class:`PrecedentReinstateHandler` already make. Without it, a
+    restored precedent's row kept reading ``archived`` and stayed withheld
+    on the semantic path even though the graph node itself was current
+    again — wrong, though it failed closed rather than open. The document
+    branch needs no equivalent call: ``put_document`` already mirrors the
+    lifecycle onto the vector row for every document write. A sync failure
+    does not undo the restore (the graph write already happened); it is
+    logged and appended to ``CommandResult.warnings``, exactly like a
+    demote/reinstate sync failure.
+
     An id that is not archived is counted in ``skipped``, not raised: a
     corrective batch assembled from an audit payload will legitimately name
     items someone else already restored.
@@ -3235,8 +3255,20 @@ class RetentionRestoreHandler:
     retry. The command is rejected only when *nothing* in the batch was
     restored — some skipped and some refused, with nothing restored, still
     rejects, since "skipped" alone cannot turn a wholly-unactioned batch
-    into a reported success. A genuinely unexpected exception (not this
-    history refusal) still aborts the remainder of the batch, as before.
+    into a reported success. The rejection message names every skipped id
+    alongside every refused one, not only the refused half, so an operator
+    reading the rejection sees the whole batch rather than just the part
+    that failed loudly. A genuinely unexpected exception (not this history
+    refusal) still aborts the remainder of the batch, as before.
+
+    ``RETENTION_RESTORED`` is emitted unconditionally, including for a
+    batch that restored nothing at all (all refused, all skipped, or a
+    mix of the two) — the same audit-completeness posture as
+    ``RETENTION_PRUNED``, which is emitted in both dry-run and apply mode
+    even over zero candidates. Nothing in this codebase branches on the
+    event's ``restored`` count, so there is no consumer to protect by
+    suppressing it, and an audit trail with a gap for "requested but
+    nothing happened" is a worse trail than one that records the attempt.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -3244,7 +3276,7 @@ class RetentionRestoreHandler:
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         item_ids, reason = _validate_restore_args(command)
-        restored, skipped, refused, unfinished = self._restore_batch(item_ids)
+        restored, skipped, refused, unfinished = self._restore_batch(item_ids, command)
 
         payload: dict[str, Any] = {
             "reason": reason,
@@ -3287,11 +3319,11 @@ class RetentionRestoreHandler:
         if unfinished is not None:
             raise unfinished
         if not restored and refused:
-            _raise_nothing_restored(refused)
+            _raise_nothing_restored(refused, skipped)
         return command.command_id, message
 
     def _restore_batch(
-        self, item_ids: list[str]
+        self, item_ids: list[str], command: Command
     ) -> tuple[list[str], list[str], list[dict[str, str]], Exception | None]:
         """Restore every id, collecting outcomes rather than aborting on a
         per-item history refusal (see ``_pre_archival_lifecycle``).
@@ -3308,7 +3340,7 @@ class RetentionRestoreHandler:
         try:
             for item_id in item_ids:
                 try:
-                    if self._restore(item_id):
+                    if self._restore(item_id, command):
                         restored.append(item_id)
                     else:
                         skipped.append(item_id)
@@ -3320,7 +3352,7 @@ class RetentionRestoreHandler:
             unfinished = exc
         return restored, skipped, refused, unfinished
 
-    def _restore(self, item_id: str) -> bool:
+    def _restore(self, item_id: str, command: Command) -> bool:
         """Un-archive one item. Returns False if it was not archived."""
         current = Lifecycle(state="current").model_dump(mode="json")
 
@@ -3385,7 +3417,23 @@ class RetentionRestoreHandler:
                 props[LIFECYCLE_KEY] = current
             return {"properties": props}
 
-        return _rewrite_current_node(graph, item_id, restore) is not None
+        written = _rewrite_current_node(graph, item_id, restore)
+        if written is None:
+            return False
+        # A graph node has no document write to piggyback a vector mirror
+        # onto (unlike the document branch above, which gets one for
+        # free from put_document), so re-stamp the vector row directly --
+        # the same gap PrecedentDemoteHandler/PrecedentReinstateHandler
+        # close with this call. Without it, a restored precedent's row
+        # kept reading archived and stayed withheld on the semantic path.
+        _sync_vector_lifecycle(
+            self._registry,
+            item_id,
+            written["properties"][LIFECYCLE_KEY],
+            command=command,
+            log_event="retention_restore_vector_lifecycle_sync_failed",
+        )
+        return True
 
 
 def create_curate_handlers(

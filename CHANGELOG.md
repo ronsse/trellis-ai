@@ -796,6 +796,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`retention.restore` re-syncs a restored graph node's vector row, and a
+  REJECTED batch now names the whole batch.** A graph-node restore (used
+  for, among others, a demoted-then-pruned precedent) rewrote the node
+  but never re-stamped its vector row, unlike `precedent.demote` /
+  `precedent.reinstate`, which always do — a restored precedent's row
+  could keep reading `archived` and stay withheld on the semantic
+  retrieval path even though the node itself was current again: wrong,
+  though it failed closed rather than open. The graph branch now calls
+  the same vector-resync helper demote/reinstate use, and a sync failure
+  surfaces as a result warning the same way theirs does; a document
+  restore already had this for free via `put_document`'s metadata
+  mirror, so it is unchanged. `RETENTION_RESTORED` is now documented as
+  unconditional, including over a batch that restored nothing at all —
+  nothing in the codebase reads the event's `restored` count, so there
+  is no consumer to protect by suppressing it, and this keeps the same
+  audit-completeness posture as `RETENTION_PRUNED`. The REJECTED message
+  for a batch that restored nothing now names every skipped id alongside
+  every refused one, not only the refused half.
+
 - **UI P2 sweep (e174): tables, values, time, naming, accessibility,
   build footer.** Nine findings from a UI-quality review's P2 section
   ("consistency, clarity, enterprise hygiene"), re-located against
