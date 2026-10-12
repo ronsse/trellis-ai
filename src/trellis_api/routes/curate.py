@@ -17,6 +17,7 @@ from trellis.mutate import (
     build_curate_executor,
     build_evidence_ingest_command,
 )
+from trellis.mutate.handlers import precedent_already_demoted_message
 from trellis_api.app import get_registry
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
@@ -26,6 +27,8 @@ from trellis_wire.dtos import (
     LinkRequest,
     PackFeedbackRequest,
     PackFeedbackResponse,
+    PrecedentDemoteRequest,
+    PrecedentDemoteResponse,
     PromoteRequest,
 )
 
@@ -60,6 +63,49 @@ def promote(req: PromoteRequest) -> CommandResponse:
         requested_by=req.requested_by,
     )
     return _execute_command(cmd)
+
+
+@router.post(
+    "/precedents/{target_id:path}/demote", response_model=PrecedentDemoteResponse
+)
+def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteResponse:
+    """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
+
+    SCD-2 rewrite, not a purge, so the pre-demotion version stays
+    readable via ``get_node_history``/``as_of`` -- but there is no
+    dedicated reversal verb yet: an operator undoes a demotion with
+    ``entity.update`` to set ``Lifecycle.state`` back to ``"current"``.
+    A demoted precedent stops reaching ``GET /precedents`` /
+    ``get_lessons`` and is withheld from packs at the collect seam,
+    recorded in ``rejected_items``. Only a precedent promoted from a
+    learning candidate has a graph node and can be demoted -- a trace-
+    or miner-sourced precedent id is refused with a message naming that
+    gap. Re-demoting an already-demoted precedent is a 200 idempotent
+    no-op: ``already_demoted=true`` and nothing changes (no new SCD-2
+    version, no new event, the stored reason unchanged).
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_DEMOTE,
+        args={"target_id": target_id, "reason": req.reason},
+        target_id=target_id,
+        target_type="precedent",
+        requested_by=req.requested_by,
+    )
+    result = build_curate_executor(get_registry()).execute(cmd)
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
+    already_demoted = result.message == precedent_already_demoted_message(target_id)
+    return PrecedentDemoteResponse(
+        status=result.status.value,
+        command_id=result.command_id,
+        operation=result.operation,
+        message=result.message,
+        created_id=result.created_id,
+        warnings=list(result.warnings),
+        already_demoted=already_demoted,
+    )
 
 
 @router.post("/links")

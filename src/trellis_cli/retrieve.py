@@ -434,7 +434,9 @@ def precedents(
 ) -> None:
     """List precedents, optionally scoped by domain."""
     event_log = get_event_log()
-    items = _list_precedents(event_log, domain=domain, limit=limit)
+    items = _list_precedents(
+        event_log, domain=domain, limit=limit, graph_store=get_graph_store()
+    )
 
     if output_format in ("json", "jsonl", "tsv"):
         wrapper = {"status": "ok"} if output_format == "json" else None

@@ -51,6 +51,7 @@ class EventType(StrEnum):
 
     # Precedent lifecycle
     PRECEDENT_PROMOTED = "precedent.promoted"
+    PRECEDENT_DEMOTED = "precedent.demoted"
 
     # Policy
     POLICY_CREATED = "policy.created"
