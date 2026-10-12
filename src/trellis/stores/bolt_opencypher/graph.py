@@ -134,11 +134,27 @@ before the claim row existed. The lock is one constant-text
 not one ``MATCH``/``SET``/``REMOVE`` clause built per endpoint: a Bolt
 driver caches a query plan by its literal text, so a clause built per
 call turns every new endpoint count into a fresh plan, and the lock
-order then rests on ``UNWIND`` evaluating ``$lock_ids`` in list order
-on both engines (verified against the Cypher/openCypher ``UNWIND``
-semantics both backends implement, and against Neo4j's and ArcadeDB's
-own test suites for it), so a batch's lock order stays the sorted
-order passed in. On Neo4j this still takes each endpoint's lock, so a
+order then rests on ``UNWIND`` visiting ``$lock_ids`` in list order on
+both engines. Neither engine documents that as a contract — Neo4j's
+Cypher Manual says ``UNWIND``'s row order is unspecified and that only
+``ORDER BY`` guarantees one — so this is a relied-upon, not a cited,
+property of the current single-pass execution of a plain ``UNWIND``
+over a literal list; a future runtime change that reorders ``UNWIND``
+could reopen the deadlock gap below silently, surfacing as a driver
+retry rather than a duplicate, since the write that establishes the
+order is still inside the ``count()`` barrier below. Two concurrent
+writers whose batches lock the same endpoints in opposite row order,
+100 reps on ``neo4j:2025.12``, produced zero deadlocks and zero
+duplicates (the same reps against the single-row lock's two-endpoint
+case below), which is evidence this holds today, not a guarantee it
+keeps holding. That is weaker than the per-row
+``MATCH``/``SET``/``REMOVE``/``WITH`` chain the single-row path uses,
+where each clause's own data dependency is a real guarantee rather
+than an observed one; the trade accepts that gap in exchange for
+fixing a measured, catastrophic planning cost that the stronger
+per-clause design could not avoid.
+
+On Neo4j this still takes each endpoint's lock, so a
 bulk writer and a single-row writer of the same triplet, or two bulk
 writers, serialize in the same global sorted order a single-row writer
 would use, and two bulk writers whose batches share endpoints in
@@ -1839,11 +1855,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # count instead of reusing one; this constant-text form reuses
             # the same plan at any batch size. Lock order then rests on
             # ``UNWIND`` visiting ``$lock_ids`` in list order on both
-            # engines, which is the openCypher ``UNWIND`` clause's defined
-            # behavior (both Neo4j's and ArcadeDB's own conformance suites
-            # exercise ordered ``UNWIND`` over a literal list), so the
-            # lock order stays the ascending order ``$lock_ids`` carries
-            # in. A missing endpoint just locks nothing for that id (the
+            # engines. Neither engine's docs make that a contract --
+            # Neo4j's Cypher Manual says ``UNWIND``'s row order is
+            # unspecified and only ``ORDER BY`` guarantees one -- so this
+            # is a measured property of the current single-pass
+            # execution of a plain ``UNWIND`` over a literal list (module
+            # docstring has the measurement and the trade-off against the
+            # single-row path's stronger clause-sequencing guarantee),
+            # not a cited one, and the lock order stays the ascending
+            # order ``$lock_ids`` carries in only as long as that holds.
+            # A missing endpoint just locks nothing for that id (the
             # ``MATCH`` filters it out before ``count``); round trip 1 and
             # the per-row MATCH below still own raising for that. On
             # Neo4j this takes each row's lock, so single-row and bulk

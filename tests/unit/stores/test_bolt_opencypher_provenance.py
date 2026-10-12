@@ -325,9 +325,7 @@ class TestBoltUpsertEdgesBulkLockPrelude:
 
         large_ids = {f"n{i}" for i in range(50)}
         store_large = _make_store_with_mocked_driver()
-        captured_large = _capture_write_calls(
-            store_large, known_endpoint_ids=large_ids
-        )
+        captured_large = _capture_write_calls(store_large, known_endpoint_ids=large_ids)
         store_large.upsert_edges_bulk(
             [
                 {

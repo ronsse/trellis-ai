@@ -11,6 +11,7 @@ so one lucky interleaving cannot pass it.
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -283,6 +284,26 @@ def check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
         second.close()
 
 
+class _RetryCapture(logging.Handler):
+    """Collects the neo4j driver's own "transaction will be retried" warnings.
+
+    The Bolt driver retries a transaction that fails with a retryable
+    error -- a deadlock included -- so a check that only asserts the
+    final row count passes whether the two writers' sorted lock order
+    avoided a deadlock or a deadlock happened and the driver silently
+    retried past it. Attaching this to the ``neo4j.session`` logger (the
+    one :mod:`neo4j` logs "...will be retried..." warnings on) during a
+    race turns that silent retry into an assertable record.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record.getMessage())
+
+
 def check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
     store: _GraphStore, make_second_store: Any
 ) -> None:
@@ -295,8 +316,16 @@ def check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
     avoidance at batch granularity -- the shape the single-row ``x->y`` vs
     ``y->x`` race exercises per edge. Repeated :data:`REPS` times with
     fresh ids each rep.
+
+    A deadlock the driver retries past still leaves one current row, so
+    the row-count assertions alone cannot tell "no deadlock" from "a
+    deadlock happened and was retried away" -- :class:`_RetryCapture`
+    makes the driver's own retry warning assertable instead.
     """
     second = make_second_store()
+    retries = _RetryCapture()
+    session_logger = logging.getLogger("neo4j.session")
+    session_logger.addHandler(retries)
     try:
         for i in range(REPS):
             s1, t1 = f"race-order-s1-{i}", f"race-order-t1-{i}"
@@ -326,4 +355,10 @@ def check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
             assert len(current_1) == 1, (i, [row["edge_id"] for row in current_1])
             assert len(current_2) == 1, (i, [row["edge_id"] for row in current_2])
     finally:
+        session_logger.removeHandler(retries)
         second.close()
+    assert not retries.records, (
+        "a bulk writer's transaction was retried, so the sorted lock order "
+        "did not avoid a deadlock -- the driver just retried past it: "
+        f"{retries.records}"
+    )
