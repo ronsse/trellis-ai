@@ -9,13 +9,15 @@ truly never writes; (3) commit mode writes only through the governed
 :data:`~trellis.mutate.handlers.AUTO_DEMOTE_REQUESTED_BY`, and
 ``max_demotions_per_run`` caps a single run's blast radius with every
 precedent above the cap reported ``"skipped_rate_limited"``, never
-silently dropped; (4) the handler's own provenance check means a
-human-promoted precedent clears the evidence gate but is refused, not
-demoted, when this policy tries to commit it; (5) the idempotency case
-(a precedent already demoted) is reported and never re-attempted; and
-(6) end to end, a precedent this policy auto-demoted is still excluded
-from re-promotion by the promotion policy's own idempotency scan — the
-loop actually closes.
+silently dropped; (4) a human-promoted precedent is pre-filtered by the
+evidence gate itself and reported ``"ineligible:not_auto_promoted"``,
+never reaching ``would_demote`` — the handler's own provenance check
+exists only as defence in depth for the race the gate's read cannot
+close; (5) the idempotency case (a precedent already demoted, or a
+duplicate command on the same evidence window) is reported and never
+re-attempted or double-counted; and (6) end to end, a precedent this
+policy auto-demoted is still excluded from re-promotion by the
+promotion policy's own idempotency scan — the loop actually closes.
 
 Unlike :mod:`trellis.learning.candidate_auto_promote`, this policy's own
 ``mode="commit"`` carries no sibling-policy construction gate (see the
@@ -50,6 +52,7 @@ from trellis.learning.precedent_auto_demote import (
     PRECEDENT_AUTO_DEMOTE_MODE_ENV,
     PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
     PrecedentAutoDemotePolicy,
+    _demote_idempotency_key,
     _gate_outcome_to_disposition,
     emit_precedent_auto_demote_failure_event,
     report_to_dict,
@@ -67,7 +70,7 @@ from trellis.learning.precedent_evidence_gate import (
     PrecedentDemotionOutcome,
 )
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Operation
+from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
 from trellis.mutate.handlers import AUTO_DEMOTE_REQUESTED_BY
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import Event, EventLog, EventType
@@ -271,17 +274,23 @@ class TestResolveOverridesPrecedence:
         }
 
     def test_settings_override_the_default(self) -> None:
+        # ``mode`` cannot be exercised here: "commit" is a stored
+        # value refused at read time (see
+        # TestModeSettingRefusedValue below), so this covers the two
+        # knobs settings can actually move, and leaves mode at its
+        # settings-provided "report_only" to show it still passes
+        # through unchanged.
         overrides = resolve_precedent_auto_demote_overrides(
             settings={
                 PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING: True,
-                PRECEDENT_AUTO_DEMOTE_MODE_SETTING: "commit",
+                PRECEDENT_AUTO_DEMOTE_MODE_SETTING: "report_only",
                 PRECEDENT_AUTO_DEMOTE_MAX_DEMOTIONS_PER_RUN_SETTING: 7,
             },
             env={},
         )
         assert overrides == {
             "enabled": True,
-            "mode": "commit",
+            "mode": "report_only",
             "max_demotions_per_run": 7,
         }
 
@@ -318,6 +327,40 @@ class TestResolveOverridesPrecedence:
                 settings={}, env={PRECEDENT_AUTO_DEMOTE_MODE_ENV: "launch_the_missiles"}
             )
         assert "launch_the_missiles" not in str(excinfo.value)
+
+    def test_stored_commit_mode_is_refused_even_hand_written(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``settings.json`` edited by hand, outside the governed
+        write path, must not be able to smuggle ``mode="commit"`` in —
+        it is read back exactly as any other stored value and refused
+        the same way."""
+        import json
+
+        from trellis.stores.settings_store import load_settings_values
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        (stores_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "settings": [
+                        {
+                            "name": PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
+                            "value": "commit",
+                        }
+                    ]
+                }
+            )
+        )
+
+        settings = load_settings_values(stores_dir)
+        assert settings[PRECEDENT_AUTO_DEMOTE_MODE_SETTING] == "commit"
+
+        with pytest.raises(ConfigError) as excinfo:
+            resolve_precedent_auto_demote_overrides(settings=settings, env={})
+        assert excinfo.value.setting == PRECEDENT_AUTO_DEMOTE_MODE_SETTING
+        assert "TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE" in str(excinfo.value)
 
 
 class TestSanitizeConfiguredMode:
@@ -530,15 +573,18 @@ class TestRunPrecedentAutoDemotionCommit:
         finally:
             registry.close()
 
-    def test_human_promoted_precedent_clears_the_gate_but_is_refused_not_demoted(
+    def test_human_promoted_precedent_is_ineligible_before_the_gate_judges_it(
         self, tmp_path: Path
     ) -> None:
-        """The handler's own provenance check: the automatic demotion path
-        may only demote what the automatic promotion path promoted. A
-        human-promoted precedent reaches ``would_demote`` (the evidence
-        gate does not care who promoted it) but the executor refuses the
-        commit attempt — reported, not silently dropped, and not treated
-        as a successful demotion."""
+        """A human-promoted precedent is pre-filtered by the evidence gate
+        itself (``_was_auto_promoted``), never reaching ``would_demote`` at
+        all: it is reported ``ineligible:not_auto_promoted`` and this
+        module never submits a command for it. The handler's own
+        provenance check (``refused:target_not_auto_promoted``) still
+        exists as defence in depth for the race the gate's read cannot
+        close, but a normal run — gate reads first, commits second —
+        never reaches it, so that disposition is now the unexpected case,
+        not the routine one."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
             executor = build_curate_executor(registry)
@@ -564,9 +610,10 @@ class TestRunPrecedentAutoDemotionCommit:
             )
 
             assert report.demoted_count == 0
-            assert report.refused_count == 1
+            assert report.refused_count == 0
+            assert report.ineligible_count == 1
             outcome = report.outcomes[0]
-            assert outcome.disposition == "refused:target_not_auto_promoted"
+            assert outcome.disposition == "ineligible:not_auto_promoted"
 
             node = registry.knowledge.graph_store.get_node("p1")
             assert node is not None
@@ -690,17 +737,19 @@ class TestRunPrecedentAutoDemotionCommit:
                 registry.operational.event_log,
                 "p1",
                 at=_T0,
-                requested_by="custom:requester",
+                requested_by=AUTO_PROMOTE_REQUESTED_BY,
             )
             _give_two_unhelpful_citations(
                 registry.operational.event_log, "p1", promoted_at=_T0
             )
             policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
 
-            # A custom requested_by that is not AUTO_DEMOTE_REQUESTED_BY
-            # skips the provenance check entirely (that check only fires
-            # when requested_by == AUTO_DEMOTE_REQUESTED_BY), so this
-            # commits even though "custom:requester" never promoted it.
+            # p1 is genuinely auto-promoted, so the gate's own
+            # provenance pre-filter passes it through unchanged; this
+            # test is about a *different* requested_by: the one
+            # stamped on the demote command itself, which the caller
+            # can override independent of either policy's own
+            # requested-by constants.
             report = run_precedent_auto_demotion(
                 policy=policy,
                 event_log=registry.operational.event_log,
@@ -721,6 +770,233 @@ class TestRunPrecedentAutoDemotionCommit:
             assert len(demote_events) == 1
         finally:
             registry.close()
+
+    def test_human_reinstatement_resets_the_evidence_window(
+        self, tmp_path: Path
+    ) -> None:
+        """A human reinstatement must not be undone by the next run on old
+        evidence (Blocker 1). Auto-promote, then two unhelpful citations,
+        then a commit run demotes. A human reinstates. The next commit
+        run must not demote -- the evidence window now starts at the
+        reinstatement, so the pre-reinstatement citations contribute
+        nothing and the precedent is reported ineligible with a distinct
+        (no-evidence) reason, never ``"demoted"`` again on the strength of
+        the same two citations. A later, genuinely new round of two
+        unhelpful citations (after the reinstatement) demotes it again.
+        """
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            event_log = registry.operational.event_log
+            registry.knowledge.graph_store.upsert_node(
+                node_id="p1", node_type="precedent", properties={}
+            )
+            _emit_promote(
+                event_log, "p1", at=_T0, requested_by=AUTO_PROMOTE_REQUESTED_BY
+            )
+            _give_two_unhelpful_citations(event_log, "p1", promoted_at=_T0)
+            policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
+
+            first_run = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+            assert first_run.demoted_count == 1
+            assert first_run.outcomes[0].disposition == "demoted"
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+            reinstate_cmd = Command(
+                operation=Operation.PRECEDENT_REINSTATE,
+                args={"target_id": "p1", "reason": "re-reviewed and still useful"},
+                target_id="p1",
+                target_type="precedent",
+                requested_by="cli:reinstate-precedent",
+            )
+            reinstate_result = executor.execute(reinstate_cmd)
+            assert reinstate_result.status == CommandStatus.SUCCESS
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "current"
+
+            reinstate_events = event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                entity_id="p1",
+                payload_filters={
+                    "operation": Operation.PRECEDENT_REINSTATE.value,
+                    "status": "success",
+                },
+            )
+            assert len(reinstate_events) == 1
+            reinstated_at = reinstate_events[0].occurred_at
+
+            second_run = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+            assert second_run.demoted_count == 0
+            assert second_run.ineligible_count == 1
+            second_outcome = second_run.outcomes[0]
+            assert second_outcome.disposition == "ineligible:no_evidence_supplied"
+            assert second_outcome.disposition != first_run.outcomes[0].disposition
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "current"
+
+            _give_two_unhelpful_citations(event_log, "p1", promoted_at=reinstated_at)
+
+            third_run = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+            assert third_run.demoted_count == 1
+            assert third_run.outcomes[0].disposition == "demoted"
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        finally:
+            registry.close()
+
+    def test_truncated_join_never_demotes_full_scan_reaches_contested(
+        self, tmp_path: Path
+    ) -> None:
+        """Commit mode must never demote on a truncated evidence scan
+        (Blocker 2). Three helpful citations land before two unhelpful
+        ones; with a small ``join_limit`` the newest-first scan drops the
+        three older helpful citations, which would make the raw evidence
+        wrongly look clean (0 helpful / 2 unhelpful, admitted). The
+        truncation guard catches this instead: the precedent's own
+        evidence-window start (``_T0``) predates the scan's
+        ``covered_since``, so it is reported
+        ``"skipped_incomplete_evidence"`` -- counted, not dropped -- and
+        nothing is demoted. With the full join limit the same five
+        citations are all visible and the precedent is contested
+        (3 helpful >= 2 unhelpful): ``"ineligible:contested_by_helpful_citations"``.
+        """
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            event_log = registry.operational.event_log
+            registry.knowledge.graph_store.upsert_node(
+                node_id="p1", node_type="precedent", properties={}
+            )
+            _emit_promote(
+                event_log, "p1", at=_T0, requested_by=AUTO_PROMOTE_REQUESTED_BY
+            )
+            for i in range(1, 4):
+                at = _T0 + timedelta(hours=i)
+                _emit_pack_assembled(
+                    event_log, pack_id=f"pack-p1-helpful-{i}", item_ids=["p1"], at=at
+                )
+                _emit_feedback(
+                    event_log, pack_id=f"pack-p1-helpful-{i}", at=at, helpful=["p1"]
+                )
+            for i in range(4, 6):
+                at = _T0 + timedelta(hours=i)
+                _emit_pack_assembled(
+                    event_log, pack_id=f"pack-p1-unhelpful-{i}", item_ids=["p1"], at=at
+                )
+                _emit_feedback(
+                    event_log, pack_id=f"pack-p1-unhelpful-{i}", at=at, unhelpful=["p1"]
+                )
+            policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
+
+            truncated_report = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+                join_limit=2,
+            )
+            assert truncated_report.demoted_count == 0
+            assert len(truncated_report.outcomes) == 1
+            truncated_outcome = truncated_report.outcomes[0]
+            assert truncated_outcome.disposition == "skipped_incomplete_evidence"
+            assert truncated_report.scan.truncated is True
+
+            demote_events = event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                payload_filters={"operation": Operation.PRECEDENT_DEMOTE.value},
+            )
+            assert len(demote_events) == 0
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"].get(LIFECYCLE_KEY) is None
+
+            full_report = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+            assert full_report.demoted_count == 0
+            assert full_report.scan.truncated is False
+            assert len(full_report.outcomes) == 1
+            full_outcome = full_report.outcomes[0]
+            assert (
+                full_outcome.disposition == "ineligible:contested_by_helpful_citations"
+            )
+
+            demote_events = event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                payload_filters={"operation": Operation.PRECEDENT_DEMOTE.value},
+            )
+            assert len(demote_events) == 0
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"].get(LIFECYCLE_KEY) is None
+        finally:
+            registry.close()
+
+    def test_duplicate_demote_command_is_reported_deduplicated_not_demoted(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """An overlapping run (follow-up 7): the governed executor reports
+        the submitted demote command as ``DUPLICATE`` -- the exact
+        ``idempotency_key`` an identical overlapping run would already
+        have recorded. The outcome must be reported ``"deduplicated"``,
+        never ``"demoted"``, and must not burn the per-run cap."""
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0, requested_by=AUTO_PROMOTE_REQUESTED_BY)
+        _give_two_unhelpful_citations(event_log, "p1", promoted_at=_T0)
+
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = CommandResult(
+            command_id="dupe",
+            status=CommandStatus.DUPLICATE,
+            operation=Operation.PRECEDENT_DEMOTE,
+            target_id="p1",
+            message="duplicate command",
+        )
+        policy = PrecedentAutoDemotePolicy(
+            enabled=True, mode="commit", max_demotions_per_run=1
+        )
+
+        report = run_precedent_auto_demotion(
+            policy=policy,
+            event_log=event_log,
+            graph_store=graph_store,
+            executor=mock_executor,
+        )
+
+        assert report.demoted_count == 0
+        assert report.deduplicated_count == 1
+        outcome = report.outcomes[0]
+        assert outcome.entity_id == "p1"
+        assert outcome.disposition == "deduplicated"
+
+        assert mock_executor.execute.call_count == 1
+        submitted = mock_executor.execute.call_args.args[0]
+        assert submitted.idempotency_key == _demote_idempotency_key(
+            "p1", _T0.isoformat()
+        )
 
 
 class TestEmitFailureEvent:

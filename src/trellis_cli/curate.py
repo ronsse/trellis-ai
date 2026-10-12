@@ -1291,6 +1291,10 @@ def evaluate_precedent_demotion(
     console.print(f"  skipped_rate_limited: {report.skipped_rate_limited_count}")
     console.print(f"  refused: {report.refused_count}")
     console.print(f"  already_demoted: {report.already_demoted_count}")
+    console.print(
+        f"  skipped_incomplete_evidence: {report.skipped_incomplete_evidence_count}"
+    )
+    console.print(f"  deduplicated: {report.deduplicated_count}")
     console.print(f"  ineligible: {report.ineligible_count}")
     for outcome in report.outcomes:
         detail = outcome.reason or outcome.disposition

@@ -33,11 +33,19 @@ function's own docstring), so
 :class:`~trellis.mutate.handlers.PrecedentDemoteHandler`'s own provenance
 check (only a precedent *this policy itself promoted* may be demoted this
 way) and this module's submissions agree on the same string by construction.
-A ``would_demote`` precedent that a human promoted is therefore **refused**
-by the handler when this module tries to commit it — an expected, reported
-outcome (``"refused:target_not_auto_promoted"``), not a bug: the automatic
-demotion path may only undo what the automatic promotion path (or an earlier
-run of this same policy) did.
+A human-promoted precedent is filtered out before judging, by the same
+evidence gate:
+:func:`~trellis.learning.precedent_evidence_gate.judge_current_precedents`
+re-derives provenance with
+:func:`~trellis.mutate.handlers._was_auto_promoted` and reports it
+``"ineligible:not_auto_promoted"`` rather than ever producing a
+``would_demote`` outcome for it. The handler's own provenance check (only a
+precedent *this policy itself promoted* may be demoted this way) still runs
+on every commit — defence in depth against a narrow race between the gate's
+read and the commit, not the primary mechanism — so an outcome it refuses
+for that reason is now unexpected rather than routine: the automatic
+demotion path may only undo what the automatic promotion path (or an
+earlier run of this same policy) did.
 
 **Post-change monitoring remains an open gap.** Tier-1 autonomy invariant
 (b) — watching what happened *after* an automatic write, not just gating
@@ -55,10 +63,38 @@ reports it as ``skipped`` with reason
 :data:`~trellis.learning.precedent_evidence_gate.SKIPPED_ALREADY_DEMOTED`,
 and this module passes that disposition straight through as
 ``"already_demoted"`` without attempting a redundant commit.
+
+That covers a precedent already demoted *before this run started*; it says
+nothing about two runs racing each other within the same evidence window.
+For that, every ``precedent.demote`` command this module submits carries an
+``idempotency_key`` derived from the precedent id and its evidence-window
+start (see :func:`_demote_idempotency_key`), so
+:class:`~trellis.mutate.executor.MutationExecutor`'s own idempotency stage
+collapses a second, overlapping submission into a
+:attr:`~trellis.mutate.commands.CommandStatus.DUPLICATE` result — reported
+here as ``"deduplicated"``, never as a second ``"demoted"`` and never
+double-charged against ``max_demotions_per_run``. The window start itself is
+the later of the precedent's last successful ``precedent.promote`` and its
+last successful ``precedent.reinstate`` — see
+:func:`~trellis.learning.precedent_evidence_gate.discover_current_precedents_with_coverage`
+— so a human reinstatement changes the key: citations from before the
+reinstatement stop counting toward demotion, and a later, genuinely new
+round of unhelpful citations demotes again under a fresh key rather than
+being deduplicated against the demotion the reinstatement already undid.
+
+**Truncation never demotes past what was actually scanned.** When the
+join scan backing the evidence gate is truncated, a precedent whose
+evidence window starts before the scan's own ``covered_since`` is reported
+``"skipped_incomplete_evidence"`` instead of ``"would_demote"`` or
+``"demoted"`` — the citations outside the scanned window could as easily be
+helpful as unhelpful, so a demotion verdict formed without seeing them is
+not evidence of unhelpfulness, just absence of evidence. It is counted, not
+dropped, in both modes.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -75,6 +111,7 @@ from trellis.learning.precedent_evidence_gate import (
     DISPOSITION_WOULD_DEMOTE,
     MIN_UNHELPFUL_CITATIONS,
     SKIPPED_ALREADY_DEMOTED,
+    SKIPPED_INCOMPLETE_EVIDENCE,
     PrecedentDemotionOutcome,
     judge_current_precedents,
 )
@@ -216,11 +253,37 @@ def resolve_precedent_auto_demote_overrides(
     :class:`ValueError` rather than surviving to be recorded as a
     ``configured_mode`` or echoed as a settings ``effective_value``.
 
+    A stored ``mode`` that matches one of
+    :data:`~trellis.core.settings_registry.SettingSpec.refused_values`
+    for ``learning.precedent_auto_demote.mode`` (today, only
+    ``"commit"``) raises :class:`~trellis.errors.ConfigError` instead of
+    being resolved: the governed write path
+    (:class:`~trellis.mutate.handlers.SettingsUpdateHandler`) already
+    refuses to *write* that value through
+    ``trellis.core.settings_registry.validate_value``, and this is the
+    same refusal applied at *read* time, so a settings file edited by
+    hand (outside that governed path) cannot smuggle ``commit`` in
+    anyway. This check only ever fires against a value read from the
+    settings store — the environment variable path is unchanged and
+    carries no such check, matching every other knob in this module.
+
     Raises:
         ValueError: If the resolved ``mode`` is neither ``"report_only"``
             nor ``"commit"``. The message never includes the offending
             value.
+        ConfigError: If a *stored* ``mode`` value is one of the setting's
+            ``refused_values``. Names the setting key
+            (:data:`PRECEDENT_AUTO_DEMOTE_MODE_SETTING`) and points at
+            :data:`PRECEDENT_AUTO_DEMOTE_MODE_ENV` as the only path that
+            can still reach ``"commit"``.
     """
+    # Lazy: trellis.core.settings_registry imports this module's own
+    # env/setting-name constants at module level for its SettingSpec
+    # entries, so a module-level import of settings_registry here would
+    # complete an import cycle. Mirrors the lazy AUTO_DEMOTE_REQUESTED_BY
+    # import in run_precedent_auto_demotion below.
+    from trellis.core.settings_registry import get_setting  # noqa: PLC0415
+
     src_env: Mapping[str, str] = os.environ if env is None else env
     settings_map: Mapping[str, bool | int | float | str] = settings or {}
 
@@ -247,6 +310,16 @@ def resolve_precedent_auto_demote_overrides(
         if setting_name in settings_map:
             return str(settings_map[setting_name])
         return default
+
+    mode_from_env = src_env.get(PRECEDENT_AUTO_DEMOTE_MODE_ENV, "").strip()
+    if not mode_from_env and PRECEDENT_AUTO_DEMOTE_MODE_SETTING in settings_map:
+        stored_mode = str(settings_map[PRECEDENT_AUTO_DEMOTE_MODE_SETTING])
+        spec = get_setting(PRECEDENT_AUTO_DEMOTE_MODE_SETTING)
+        if spec is not None and stored_mode in spec.refused_values:
+            msg = spec.refused_reason or (
+                f"{PRECEDENT_AUTO_DEMOTE_MODE_SETTING}={stored_mode!r} is not accepted."
+            )
+            raise ConfigError(msg, setting=PRECEDENT_AUTO_DEMOTE_MODE_SETTING)
 
     mode = resolve_str(
         PRECEDENT_AUTO_DEMOTE_MODE_ENV,
@@ -284,14 +357,23 @@ class PrecedentAutoDemoteOutcome:
     entity_id: str
     #: ``"would_demote"`` — cleared the gate, run was report-only (or
     #: disabled); ``"demoted"`` — cleared the gate, committed this run;
+    #: ``"deduplicated"`` — cleared the gate, commit mode, but an
+    #: overlapping run (same precedent, same evidence-window start) had
+    #: already committed or was already in flight for the same
+    #: ``idempotency_key``, so this run's own command was refused as a
+    #: replay rather than counted as a second demotion;
     #: ``"skipped_rate_limited"`` — cleared the gate, commit mode, but the
     #: per-run cap was already reached; ``"refused:<rejection_reason>"`` —
     #: commit attempted and the handler refused it (e.g. a human-promoted
     #: precedent, under ``AUTO_DEMOTE_REQUESTED_BY``'s provenance check);
     #: ``"already_demoted"`` — the evidence gate's own idempotency case;
-    #: ``"ineligible:<reason>"`` — every other skip or refusal the
-    #: evidence gate reported (not admitted, or not the current lifecycle
-    #: state for a reason other than already being demoted).
+    #: ``"skipped_incomplete_evidence"`` — the evidence gate withheld a
+    #: would-be ``would_demote`` verdict because the join scan that
+    #: produced it was truncated before this precedent's own
+    #: evidence-window start; ``"ineligible:<reason>"`` — every other
+    #: skip or refusal the evidence gate reported (not admitted, not the
+    #: current lifecycle state for a reason other than already being
+    #: demoted, or not auto-promoted in the first place).
     disposition: str
     reason: str = ""
     promoted_at: str | None = None
@@ -341,6 +423,16 @@ class PrecedentAutoDemoteReport:
         return sum(1 for o in self.outcomes if o.disposition == "already_demoted")
 
     @property
+    def skipped_incomplete_evidence_count(self) -> int:
+        return sum(
+            1 for o in self.outcomes if o.disposition == "skipped_incomplete_evidence"
+        )
+
+    @property
+    def deduplicated_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.disposition == "deduplicated")
+
+    @property
     def ineligible_count(self) -> int:
         return sum(1 for o in self.outcomes if o.disposition.startswith("ineligible:"))
 
@@ -354,10 +446,17 @@ def _gate_outcome_to_disposition(outcome: PrecedentDemotionOutcome) -> tuple[str
     ``would_demote`` passes straight through (report-only / disabled, or
     not yet decided in commit mode — the caller overwrites it when it
     actually commits or rate-limits); the gate's own idempotency skip
-    (:data:`SKIPPED_ALREADY_DEMOTED`) becomes ``"already_demoted"``; every
-    other skip or refusal becomes ``"ineligible:<reason>"`` so a reader
-    scanning for that prefix sees every precedent this run declined to
-    demote, for whatever reason, in one place.
+    (:data:`SKIPPED_ALREADY_DEMOTED`) becomes ``"already_demoted"``; a
+    truncated-scan withholding (:data:`SKIPPED_INCOMPLETE_EVIDENCE`)
+    becomes ``"skipped_incomplete_evidence"`` — kept out of the generic
+    ``ineligible:`` bucket below because, unlike every other skip or
+    refusal there, this one is not a verdict about the precedent at all:
+    the same precedent may read ``would_demote`` on a later run once the
+    scan is no longer truncated, so collapsing it into "ineligible"
+    would blur a scan limitation with a judgment; every other skip or
+    refusal becomes ``"ineligible:<reason>"`` so a reader scanning for
+    that prefix sees every precedent this run declined to demote, for
+    whatever reason, in one place.
     """
     if outcome.disposition == DISPOSITION_WOULD_DEMOTE:
         return DISPOSITION_WOULD_DEMOTE, outcome.reason
@@ -365,6 +464,10 @@ def _gate_outcome_to_disposition(outcome: PrecedentDemotionOutcome) -> tuple[str
         SKIPPED_ALREADY_DEMOTED
     ):
         return "already_demoted", outcome.reason
+    if outcome.disposition == DISPOSITION_SKIPPED and outcome.reason == (
+        SKIPPED_INCOMPLETE_EVIDENCE
+    ):
+        return "skipped_incomplete_evidence", outcome.reason
     if outcome.disposition in (DISPOSITION_REFUSED, DISPOSITION_SKIPPED):
         return f"ineligible:{outcome.reason}", outcome.reason
     # Defensive: the evidence gate's vocabulary is closed today, but a
@@ -396,11 +499,15 @@ def _emit_evaluated_event(
     """
     would_demote = sum(1 for o in outcomes if o.disposition == "would_demote")
     demoted = sum(1 for o in outcomes if o.disposition == "demoted")
+    deduplicated = sum(1 for o in outcomes if o.disposition == "deduplicated")
     skipped_rate_limited = sum(
         1 for o in outcomes if o.disposition == "skipped_rate_limited"
     )
     refused = sum(1 for o in outcomes if o.disposition.startswith("refused:"))
     already_demoted = sum(1 for o in outcomes if o.disposition == "already_demoted")
+    skipped_incomplete_evidence = sum(
+        1 for o in outcomes if o.disposition == "skipped_incomplete_evidence"
+    )
     ineligible = sum(1 for o in outcomes if o.disposition.startswith("ineligible:"))
     payload: dict[str, Any] = {
         "outcome": "ok",
@@ -422,9 +529,11 @@ def _emit_evaluated_event(
             "total": len(outcomes),
             "would_demote": would_demote,
             "demoted": demoted,
+            "deduplicated": deduplicated,
             "skipped_rate_limited": skipped_rate_limited,
             "refused": refused,
             "already_demoted": already_demoted,
+            "skipped_incomplete_evidence": skipped_incomplete_evidence,
             "ineligible": ineligible,
         },
         "policy_snapshot": {
@@ -480,6 +589,26 @@ def emit_precedent_auto_demote_failure_event(
         )
         return None
     return event.event_id
+
+
+def _demote_idempotency_key(entity_id: str, evidence_window_start: str) -> str:
+    """Key one ``precedent.demote`` command to its precedent and evidence window.
+
+    Two overlapping runs judging the same precedent against the same
+    evidence-window start (the later of its last successful
+    ``precedent.promote`` and ``precedent.reinstate`` — see
+    :func:`~trellis.learning.precedent_evidence_gate.discover_current_precedents_with_coverage`)
+    must settle on exactly one demotion and one cap charge, not two
+    racing commands both landing as ``"demoted"``. A human reinstatement
+    moves the window start forward, which changes this key, so a later,
+    legitimately new demotion (fresh unhelpful citations after the
+    reinstatement) is never deduplicated against the one the
+    reinstatement already undid.
+    """
+    digest = hashlib.sha256(
+        f"precedent.demote\0{entity_id}\0{evidence_window_start}".encode()
+    ).hexdigest()
+    return f"precedent-demote:{digest}"
 
 
 def run_precedent_auto_demotion(
@@ -616,6 +745,9 @@ def run_precedent_auto_demotion(
             target_id=gate_outcome.entity_id,
             target_type="precedent",
             requested_by=requested_by,
+            idempotency_key=_demote_idempotency_key(
+                gate_outcome.entity_id, gate_outcome.promoted_at or ""
+            ),
         )
         result = executor.execute(cmd)
         if result.status == CommandStatus.SUCCESS:
@@ -624,6 +756,23 @@ def run_precedent_auto_demotion(
                 PrecedentAutoDemoteOutcome(
                     entity_id=gate_outcome.entity_id,
                     disposition="demoted",
+                    reason=reason,
+                    promoted_at=gate_outcome.promoted_at,
+                    appearances=gate_outcome.appearances,
+                    helpful_count=gate_outcome.helpful_count,
+                    unhelpful_count=gate_outcome.unhelpful_count,
+                )
+            )
+        elif result.status == CommandStatus.DUPLICATE:
+            # An overlapping run already committed (or is mid-flight on)
+            # this exact precedent + evidence-window-start combination --
+            # never counted toward demotions_committed, and never
+            # reported as "demoted", so a replayed command cannot double
+            # a demotion or silently burn the per-run cap on a no-op.
+            outcomes.append(
+                PrecedentAutoDemoteOutcome(
+                    entity_id=gate_outcome.entity_id,
+                    disposition="deduplicated",
                     reason=reason,
                     promoted_at=gate_outcome.promoted_at,
                     appearances=gate_outcome.appearances,
@@ -687,16 +836,29 @@ def _outcome_to_dict(outcome: PrecedentAutoDemoteOutcome) -> dict[str, Any]:
 
 
 def report_to_dict(report: PrecedentAutoDemoteReport) -> dict[str, Any]:
-    """Serialise a :class:`PrecedentAutoDemoteReport` for ``--format json``."""
+    """Serialise a :class:`PrecedentAutoDemoteReport` for ``--format json``.
+
+    ``status`` is always ``"ok"``: this report is only ever built from a
+    run that reached :func:`judge_current_precedents` and produced
+    outcomes — a run that failed before that point never reaches this
+    function, and is reported instead through
+    :func:`emit_precedent_auto_demote_failure_event`'s own
+    ``"refused"``/``"failed"`` event payload. Named here, rather than
+    left implicit, so this JSON shape and the CLI's exit code are both
+    read off the same flag (``tests/unit/test_format_exit_parity_rule.py``).
+    """
     return {
+        "status": "ok",
         "enabled": report.enabled,
         "mode": report.mode,
         "configured_mode": sanitize_configured_mode(report.configured_mode),
         "would_demote_count": report.would_demote_count,
         "demoted_count": report.demoted_count,
+        "deduplicated_count": report.deduplicated_count,
         "skipped_rate_limited_count": report.skipped_rate_limited_count,
         "refused_count": report.refused_count,
         "already_demoted_count": report.already_demoted_count,
+        "skipped_incomplete_evidence_count": report.skipped_incomplete_evidence_count,
         "ineligible_count": report.ineligible_count,
         "min_unhelpful_citations": report.min_unhelpful_citations,
         "attribution_caveat": report.attribution_caveat,

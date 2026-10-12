@@ -1567,9 +1567,27 @@ from `trellis.classify.demotion_gate`, measured for noise documents, not
 for precedents) — never on the absence of helpful ones — and any
 precedent cited helpful at least as often as unhelpful is refused
 regardless of the unhelpful count. An already-demoted or archived
-precedent, or one otherwise not in the current lifecycle state, is
-reported `already_demoted` or `ineligible:<reason>` without being
-judged.
+precedent, a human-promoted one (`ineligible:not_auto_promoted` /
+`refused:not_auto_promoted` — pre-filtered via the same
+`_was_auto_promoted` derivation the handler itself checks, so it is
+never listed `would_demote` and commit mode never submits a command
+for it), or one otherwise not in the current lifecycle state, is
+reported `already_demoted` or `ineligible:<reason>` /
+`refused:<reason>` without being judged.
+
+Each precedent's evidence window starts at the later of its last
+successful `precedent.promote` and its last successful
+`precedent.reinstate`, so citations from before a human reinstatement
+never count toward demoting it again — a reinstated precedent with no
+new citations since reports `ineligible:no_evidence_supplied` /
+`refused:no_evidence_supplied`, not `would_demote`. When the citation
+join is truncated, a precedent demotes (or is reported `would_demote`)
+only if its evidence window start is at or after the scan's
+`covered_since`; every other current precedent whose window falls
+outside what was actually read is reported
+`skipped_incomplete_evidence` instead, and counted via
+`skipped_incomplete_evidence_count` — never silently dropped and never
+demoted on a partial read.
 
 Only a precedent served through a flat `get_context` pack can
 accumulate evidence this way: `get_lessons` and sectioned packs emit no
@@ -1586,12 +1604,24 @@ rollback a safe commit mode needs. In `commit` mode each `would_demote`
 precedent is demoted through the same governed path
 `trellis curate demote-precedent` uses, capped by
 `max_demotions_per_run` and rate-limited per run
-(`skipped_rate_limited`).
+(`skipped_rate_limited`). The submitted command carries an
+`idempotency_key` derived from the precedent id and its evidence
+window start, so two overlapping runs cannot both count a demotion or
+spend rate-limit cap on the same no-op; the losing run reports that
+precedent `deduplicated` (`PrecedentAutoDemoteReport.deduplicated_count`)
+rather than `demoted`. A hand-edited `settings.json` cannot set
+`learning.precedent_auto_demote.mode` (or its promotion twin) to
+`commit`: resolving a stored value against the setting's
+`refused_values` raises `ConfigError` naming the setting, the same as
+the environment-variable path; only the environment variable can
+select `commit`.
 
 Every run — including one that fails before evaluating a single
 precedent — emits exactly one `LEARNING_AUTO_DEMOTE_EVALUATED` event,
 mirroring the promotion event's `outcome`/`configured_mode`/
-`policy_snapshot` shape.
+`policy_snapshot` shape. Both this report and the promotion report's
+JSON carry a top-level `status` key derived from the same flag that
+drives the exit code.
 
 ```bash
 trellis curate evaluate-precedent-demotion [--min-unhelpful-citations <n>] [--dry-run] [--format text|json]

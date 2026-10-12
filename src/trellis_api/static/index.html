@@ -4841,11 +4841,16 @@
                 if (wouldQualify === null || wouldQualify === undefined) {
                     qualifyLine = 'The automatic check that estimates what would qualify has not reported yet.';
                 } else if (committed) {
+                    // In commit mode a qualifying candidate's outcome is
+                    // "promoted", never "would_promote", so wouldQualify
+                    // (last_run_would_promote) reads 0 here on every real
+                    // run -- not a sign that nothing qualified. Report the
+                    // promoted count on its own rather than as a fraction
+                    // of a denominator this mode never populates.
                     const promoted = row.counters.last_run_promoted;
                     qualifyLine = `Its last run promoted ${escHtml(promoted == null ? 0 : promoted)} ` +
-                        `of ${escHtml(wouldQualify)} qualifying candidate(s) itself &mdash; it ships ` +
-                        'enabled=False by default, so this only happens once an operator turns commit ' +
-                        'mode on.';
+                        'candidate(s) itself &mdash; it ships enabled=False by default, so this only ' +
+                        'happens once an operator turns commit mode on.';
                 } else {
                     qualifyLine = `Its last report said ${escHtml(wouldQualify)} candidate(s) would qualify ` +
                         '&mdash; it did not promote them itself (report-only, unless an operator enables ' +
@@ -4872,8 +4877,10 @@
             return '<div class="empty-state"><div class="icon">&#x2713;</div>' +
                 '<p>No precedents yet. A precedent is ordinarily created when a human approves a ' +
                 'learning candidate on the <a href="#" onclick="switchView(\'review\'); return false;">' +
-                'Review</a> tab; the auto-promotion loop below can also create one on its own once an ' +
-                `operator enables its commit mode. ${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
+                'Review</a> tab; the auto-promotion loop on the ' +
+                '<a href="#" onclick="switchView(\'loops\'); return false;">Loops</a> tab can also ' +
+                'create one on its own once an operator enables its commit mode. ' +
+                `${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
         }
 
         async function loadPrecedents() {

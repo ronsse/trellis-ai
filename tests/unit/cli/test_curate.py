@@ -20,7 +20,7 @@ from trellis.learning.candidate_auto_promote import (
 )
 from trellis.learning.precedent_auto_demote import (
     PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING,
-    PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
+    PRECEDENT_AUTO_DEMOTE_MODE_ENV,
 )
 from trellis.mutate.commands import (
     Command,
@@ -1940,8 +1940,23 @@ class TestCurateEvaluatePrecedentDemotion:
     """
 
     def _emit_promote(
-        self, entity_id: str, *, at: datetime, requested_by: str | None = None
+        self,
+        entity_id: str,
+        *,
+        at: datetime,
+        requested_by: str | None = AUTO_PROMOTE_REQUESTED_BY,
     ) -> None:
+        """Default ``requested_by`` to an auto-promoted provenance.
+
+        This class pins the CLI's option wiring and output shape, not
+        provenance filtering (that is covered exhaustively in
+        ``test_precedent_auto_demote.py`` and
+        ``test_precedent_evidence_gate.py``), so a precedent built here
+        must clear the evidence gate's own ``_was_auto_promoted``
+        pre-filter by default to reach the gate decision these tests
+        actually assert on. Pass ``requested_by=None`` explicitly for a
+        human-promoted precedent.
+        """
         payload: dict[str, object] = {
             "operation": Operation.PRECEDENT_PROMOTE.value,
             "status": "success",
@@ -2245,19 +2260,24 @@ class TestCurateEvaluatePrecedentDemotion:
         assert "lifecycle" not in node["properties"]
 
     def test_commit_mode_demotes_a_would_demote_precedent_through_the_executor(
-        self,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Enabling the policy with mode=commit, through the same raw
-        settings-row write ``test_dry_run_overrides_a_stored_commit_mode``
-        uses for the promote side (the governed write refuses ``commit``
-        permanently -- see ``learning.precedent_auto_demote.mode``'s
-        ``refused_values`` -- so only a pre-existing or env-set row can
-        carry it), demotes a precedent whose citations clear the floor
-        through the governed ``precedent.demote`` path."""
+        """Enabling the policy through a stored settings row for
+        ``enabled``, and mode through
+        :data:`~trellis.learning.precedent_auto_demote.PRECEDENT_AUTO_DEMOTE_MODE_ENV`
+        -- a *stored* ``mode="commit"`` is refused at read time
+        regardless of how it reached the settings file (see
+        ``learning.precedent_auto_demote.mode``'s ``refused_values``,
+        and ``TestResolveOverridesPrecedence`` in
+        ``test_precedent_auto_demote.py`` for the unit-level coverage of
+        that refusal), so the environment variable is the only path
+        left to commit mode -- demotes a precedent whose citations
+        clear the floor through the governed ``precedent.demote``
+        path."""
         stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
         settings_store = SettingsStore(stores_dir / "settings.json")
         settings_store.set(PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING, True)
-        settings_store.set(PRECEDENT_AUTO_DEMOTE_MODE_SETTING, "commit")
+        monkeypatch.setenv(PRECEDENT_AUTO_DEMOTE_MODE_ENV, "commit")
 
         self._upsert_graph_backed_precedent("prec-1")
         promoted_at = datetime(2026, 1, 1, tzinfo=UTC)

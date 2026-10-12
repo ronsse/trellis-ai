@@ -304,12 +304,17 @@ def _build_precedent_auto_demote_row(
         actuates=bool(counters and counters.get("last_run_mode") == "commit"),
         what_it_changes=(
             "Ships enabled=False by default, so every run only reports "
-            "what it would demote until an operator turns it on. Once "
-            "enabled, it demotes each would-demote precedent through the "
-            "same governed path a human `trellis curate demote-precedent` "
-            "call uses, capped by max_demotions_per_run — this loop is "
-            "the safety rollback the auto-promotion loop above needs "
-            "before its own commit mode can run."
+            "what it would demote until an operator turns it on. "
+            "Enabling this switch alone still does not demote anything "
+            "here -- its own mode (see counters.last_run_mode) must also "
+            "be switched to commit via the environment variable. Once "
+            "both are on, it demotes each would-demote precedent through "
+            "the same governed path a human `trellis curate "
+            "demote-precedent` call uses, capped by "
+            "max_demotions_per_run. But enabling this switch has an "
+            "effect before that: it is also what the auto-promotion "
+            "loop above checks to unlock its own commit mode, since "
+            "this loop is the safety rollback that mode depends on."
         ),
         operator_hint=(
             "CLI: `trellis curate evaluate-precedent-demotion`. Settings: "
@@ -472,14 +477,21 @@ def summarize_loop_health(
         ),
         actuates=False,
         what_it_changes=(
-            "Nothing schedules a promotion automatically: a human approves "
-            "each one from the Review tab. The auto-promotion loop below "
-            "ships enabled=False by default, so it only reports what it "
-            "would promote until an operator turns it on. This count "
-            "includes any promotion run by hand as well as from the "
-            "review queue, and keeps rising even after a promoted "
-            "precedent is later demoted -- the demoted count is tracked "
-            "and shown separately, never subtracted from this one."
+            "Nothing schedules a promotion automatically through this "
+            "row's own mechanism: it only counts promotions that already "
+            "happened, whichever path created them, and a human approves "
+            "most from the Review tab by default. The sibling "
+            "auto-promotion loop below ships enabled=False, so until an "
+            "operator turns both it and its own mode setting to commit, "
+            "every run there only reports what it would promote too; "
+            "once both are on, a run there writes a promotion through "
+            "this same governed path a human approval uses, and that "
+            "write lands in this same count -- see that row's own "
+            "description for what turns it on. This count includes any "
+            "promotion run by hand, from the review queue, or written "
+            "that way, and keeps rising even after a promoted precedent "
+            "is later demoted -- the demoted count is tracked and shown "
+            "separately, never subtracted from this one."
         ),
         operator_hint="CLI: `trellis curate promote-learning`.",
         job_name=LOOP_JOB.get("precedent_promotion"),

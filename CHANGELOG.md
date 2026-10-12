@@ -54,6 +54,48 @@ All notable changes to Trellis will be documented in this file.
   - No default behavior changes: both policies ship `enabled=False`,
     so every existing deployment stays exactly as report-only as
     before until an operator opts in to one or both.
+  - **A human `precedent.reinstate` resets the demotion evidence
+    window.** `discover_current_precedents_with_coverage` now starts
+    each precedent's window at the later of its last successful
+    `precedent.promote` and its last successful `precedent.reinstate`,
+    in both report-only and commit mode, so citations from before a
+    reinstatement no longer count toward demoting it again on the
+    next run. A reinstated precedent with no new citations reports
+    `ineligible:no_evidence_supplied` (report-only:
+    `refused:no_evidence_supplied`) instead of being silently
+    re-demoted.
+  - **Commit mode never demotes on a truncated evidence scan.** When
+    the citation join is truncated, a precedent is demoted only if its
+    evidence window start is at or after the scan's `covered_since`;
+    every other precedent is reported under a new disposition,
+    `skipped_incomplete_evidence`, and counted via the report's new
+    `skipped_incomplete_evidence_count`, never silently dropped.
+    Report-only shows the same classification.
+  - **Human-promoted precedents are pre-filtered, not refused per
+    run.** Both report-only and commit mode now drop a human-promoted
+    precedent before judging it (reusing the existing
+    `_was_auto_promoted` derivation), reporting it
+    `ineligible:not_auto_promoted` (report-only:
+    `refused:not_auto_promoted`) instead of listing it as
+    `would_demote` or submitting a command the handler's own
+    provenance check refuses every run. The handler's provenance check
+    stays as defence in depth.
+  - **A hand-edited `settings.json` can no longer set `mode: commit`.**
+    Resolving `learning.precedent_auto_demote.mode` (and the
+    promotion twin) now checks a stored settings value against the
+    setting's `refused_values` the same way the environment-variable
+    path already does, raising `ConfigError` and naming the setting
+    when one is found; the CLI exits `5` and the rejection is
+    recorded. Only the environment variable can still select `commit`.
+  - **The demote command carries an `idempotency_key`** derived from
+    the precedent id and its evidence window start, so two overlapping
+    runs cannot both count a demotion or spend rate-limit cap on the
+    same no-op; the loser reports a new disposition, `deduplicated`
+    (`PrecedentAutoDemoteReport.deduplicated_count`), and is never
+    counted as `demoted`.
+  - Both the demotion and promotion report JSON gain a top-level
+    `status` key, derived from the same flag that drives the exit
+    code.
 - **Operator UI: paged search results, a reachable event lookup, typed
   report parameters, and a help link on every tab.** `GET /precedents/domains`
   mirrors `GET /traces/domains` (same shape, same demoted/archived

@@ -131,7 +131,6 @@ class TestCatalogMembership:
         [
             "learning.candidate_auto_promote.enabled",
             "learning.candidate_auto_promote.max_promotions_per_run",
-            "learning.precedent_auto_demote.enabled",
             "learning.precedent_auto_demote.max_demotions_per_run",
         ],
     )
@@ -144,6 +143,15 @@ class TestCatalogMembership:
         after an explanation of what the knob will eventually do, so an
         operator reading only the first line still learns the knob is
         inert today.
+
+        ``learning.precedent_auto_demote.enabled`` is deliberately not
+        in this list: unlike the other three, it has a real effect the
+        moment it is turned on — it unlocks
+        ``learning.candidate_auto_promote.mode``'s own commit
+        construction — so claiming "no observable effect" for it would
+        itself be the falsehood (see
+        :meth:`test_enabled_setting_states_its_promotion_side_effect`
+        below).
         """
         spec = get_setting(name)
         assert spec is not None
@@ -151,6 +159,20 @@ class TestCatalogMembership:
         assert "no observable effect" in first_sentence or (
             "no effect today" in first_sentence
         )
+
+    def test_enabled_setting_states_its_promotion_side_effect(self) -> None:
+        """Enabling demotion alone is not inert: it is the gate that
+        lets ``learning.candidate_auto_promote.mode`` be constructed as
+        ``commit`` at all (demotion is that mode's rollback). The
+        description must say this plainly rather than call the switch
+        a no-op.
+        """
+        spec = get_setting("learning.precedent_auto_demote.enabled")
+        assert spec is not None
+        assert "no observable effect" not in spec.description
+        assert "no effect today" not in spec.description
+        assert "learning.candidate_auto_promote.mode" in spec.description
+        assert "commit" in spec.description
 
     def test_candidate_auto_promote_mode_refuses_commit(self) -> None:
         """Pins the declarative refusal :func:`validate_value` enforces:

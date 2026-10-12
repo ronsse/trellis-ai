@@ -1048,8 +1048,19 @@ def _outcome_to_dict(outcome: CandidateAutoPromoteOutcome) -> dict[str, Any]:
 
 
 def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
-    """Serialise a :class:`CandidateAutoPromoteReport` for ``--format json``."""
+    """Serialise a :class:`CandidateAutoPromoteReport` for ``--format json``.
+
+    ``status`` is always ``"ok"``: this report is only ever built from a
+    run that reached :func:`run_candidate_auto_promotion` and produced
+    outcomes — a run that failed before that point never reaches this
+    function, and is reported instead through
+    :func:`emit_candidate_auto_promote_failure_event`'s own
+    ``"refused"``/``"failed"`` event payload. Named here, rather than left
+    implicit, so this JSON shape and the CLI's exit code are both read off
+    the same flag (``tests/unit/test_format_exit_parity_rule.py``).
+    """
     return {
+        "status": "ok",
         "enabled": report.enabled,
         "mode": report.mode,
         "configured_mode": sanitize_configured_mode(report.configured_mode),
