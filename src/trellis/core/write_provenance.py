@@ -68,14 +68,69 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
+from pathlib import Path
 from typing import Any
+
+import structlog
 
 from trellis.core.version import resolve_code_version, resolve_stamp_staleness
 from trellis.core.write_config import WriteBehaviourConfig
 
+logger = structlog.get_logger(__name__)
+
 #: Metadata key the stamp is written under.  Consumers filtering events by
 #: build should key off this constant, not the literal.
 WRITE_PROVENANCE_KEY = "write_provenance"
+
+
+def _guess_stores_dir() -> Path:
+    """Guess ``stores_dir`` from the environment alone, never raising.
+
+    Mirrors the env-var half of
+    :meth:`trellis.stores.registry.StoreRegistry.from_config_dir`
+    (``TRELLIS_CONFIG_DIR`` → ``config_dir``, default ``~/.trellis``;
+    ``TRELLIS_DATA_DIR`` → ``data_dir``, default ``<config_dir>/data``;
+    ``stores_dir = data_dir / "stores"``) but deliberately skips that
+    method's ``config.yaml`` ``data_dir`` override: this is a zero-arg hot
+    path called with no registry in hand (:func:`get_write_provenance`
+    takes no arguments), so there is no ``config_dir`` to read a YAML file
+    from without adding a disk read — and a filesystem miss there — to
+    every process's first write. A deployment that overrides ``data_dir``
+    only via ``config.yaml`` (not the env var) is not reached by the
+    settings-aware stamp; its ``env_flags`` still falls back correctly to
+    :meth:`WriteBehaviourConfig.from_env`, the same answer it got before
+    this function existed.
+    """
+    config_default = str(Path.home() / ".trellis")
+    config_dir = Path(os.environ.get("TRELLIS_CONFIG_DIR", config_default))
+    data_dir = Path(os.environ.get("TRELLIS_DATA_DIR", str(config_dir / "data")))
+    return data_dir / "stores"
+
+
+def _resolve_write_behaviour_for_stamp() -> WriteBehaviourConfig:
+    """The merged (env > settings > default) config for the process stamp.
+
+    ``env_flags`` records effective permission, so once a settings
+    override can make a knob live, the stamp must reflect the merged
+    value rather than freezing it at the environment alone. Advisory,
+    like :func:`trellis.core.version.resolve_stamp_staleness`: this rides
+    every write via :func:`get_write_provenance`, so a settings-store read
+    that raises must degrade to the environment-only answer, never fail
+    the write.
+    """
+    try:
+        return _resolve_via_guessed_stores_dir()
+    except Exception:  # advisory probe; never fail a write
+        logger.warning("write_provenance_settings_resolve_failed", exc_info=True)
+        return WriteBehaviourConfig.from_env()
+
+
+def _resolve_via_guessed_stores_dir() -> WriteBehaviourConfig:
+    from trellis.stores.settings_store import load_settings_values  # noqa: PLC0415
+
+    settings = load_settings_values(_guess_stores_dir())
+    return WriteBehaviourConfig.from_env_and_settings(settings=settings)
 
 
 def _env_flags_digest(flags: dict[str, Any]) -> str:
@@ -97,8 +152,16 @@ def build_write_provenance(
     Uncached — :func:`get_write_provenance` is the hot-path entry point.
     Exposed so the CLI / API surfaces can report a stamp for an explicitly
     supplied configuration.
+
+    The default (``config is None``) resolves env > settings > default
+    via :func:`_resolve_write_behaviour_for_stamp`, guessing ``stores_dir``
+    from the environment alone (:func:`_guess_stores_dir`) since this
+    function takes no registry. A caller that already has one should pass
+    ``WriteBehaviourConfig`` from
+    :func:`trellis.core.write_config.resolve_write_behaviour` explicitly
+    instead, to also honour a ``config.yaml`` ``data_dir`` override.
     """
-    flags = (config or WriteBehaviourConfig.from_env()).as_dict()
+    flags = (config or _resolve_write_behaviour_for_stamp()).as_dict()
     stamp = resolve_code_version().as_dict()
     stamp["env_flags"] = flags
     stamp["env_flags_digest"] = _env_flags_digest(flags)

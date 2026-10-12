@@ -6,6 +6,465 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
+  `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,
+  plan p1 PR 6).** Completes the schedule registry below (#e166): an admin
+  can now edit a catalog job's `enabled`/`cadence`/`timeout_seconds` and
+  request an out-of-band run, without the write surface ever being able to
+  name a command, argv, path or environment variable —
+  `AdminJobPatchRequest` has no such field, and `extra="forbid"` refuses any
+  other field name with 422 rather than silently ignoring it. `GET
+  /api/v1/admin/jobs` joins every `JOB_CATALOG` entry with its
+  `ScheduleStore` row and its last-run status, derived from the EventLog's
+  own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair — never a hardcoded
+  literal. "Run now" writes only `run_requested_at`; the response's
+  `dispatcher_hint` says a host dispatcher polling `due-jobs` picks it up,
+  typically within ~5 minutes, and never claims the run itself completed.
+  Both writes refuse with 409 and the schedule store's real error text while
+  it is degraded or stale, and both emit an audit event (`SCHEDULE_UPDATED`
+  / `JOB_RUN_REQUESTED`) carrying only the changed old/new fields plus the
+  caller's identity. `trellis admin schedule set <name>` / `schedule run
+  <name>` give the same two writes from a terminal, `--format json` and an
+  exit code independent of format. The web UI's new **Schedules** tab
+  renders cadence as both raw cron and hand-formatted text (labelled UTC —
+  `trellis.core.cron` evaluates every production caller's `utc_now()`, not
+  the dispatcher host's local clock), an enable toggle, inline edit with
+  bounds validation, a two-step "Run now" confirm with an extra warning for
+  `spends_llm`/`heavy` jobs, and a dispatcher-activity banner that compares
+  against the longest enabled cadence's own tick interval rather than a
+  fixed window.
+  **Gate #860 fixes, same change:** a degraded schedule store is now
+  surfaced on `GET /api/v1/admin/jobs` (`store_degradation`, each row's
+  `stored: bool`) instead of showing catalog defaults as if they were the
+  operator's own stored, enabled choice; "Run now" refuses a disabled or
+  never-stored job (`job_disabled` / `not_scheduled`) instead of silently
+  enrolling it into the catalog's default cadence; `run_requested_at` in
+  the run response is exactly what the handler wrote, or `null`, never a
+  timestamp fabricated by the route or the CLI; and the Edit form reads the
+  current cadence from a data attribute rather than scraping rendered
+  table text, so saving with no changes round-trips instead of clobbering
+  the cadence with whatever the display text happened to contain.
+  **Bug found and fixed in the same change:** `admin schedule set`'s
+  tri-state option detection compared `ctx.get_parameter_source(name)`
+  against `click.ParameterSource.COMMANDLINE` by identity — Typer invokes
+  that callback through its own vendored click fork, whose `ParameterSource`
+  is a distinct enum class with identically-named members, so the
+  comparison was always `False` and every `--enabled`/`--cadence`/`--timeout`
+  flag was silently a no-op regardless of what was passed. Fixed by
+  comparing `source.name == "COMMANDLINE"` instead.
+- **Schedule writes route through `MutationExecutor`, not a direct store
+  call (e175 rework, PR #860).** The admin route and CLI above now submit
+  `Operation.SCHEDULE_UPDATE` / `Operation.JOB_RUN_REQUEST` `Command`s to a
+  new `trellis.mutate.build_schedule_executor`, whose `ScheduleUpdateHandler`
+  / `JobRunRequestHandler` (`trellis/mutate/schedule_handlers.py`) are the
+  only code left that calls `ScheduleStore.put`. Both handlers re-enforce
+  the same boundary the wire layer already had — a catalog job name only;
+  only `enabled`/`cadence`/`timeout_seconds` on update, no fields at all on
+  a run request; every check runs before the store write, so a rejected
+  command never reaches `ScheduleStore.put`. The two operations are
+  deliberately **not** in `create_curate_handlers`: that dict backs `POST
+  /api/v1/commands/batch` (`mutate` scope) and MCP `execute_mutation`, and
+  a mutate-scoped credential must not be able to edit a job's schedule or
+  request a run — those stay admin-only through a separate authorization
+  axis. Submitting either operation to the curate-wired executor fails
+  with "no handler registered for: \<operation\>", the same path an
+  unknown operation gets anywhere else. `changed_by`/audit identity comes
+  from the authenticated principal, never a client-supplied field, and a
+  policy scoped to `entity_type=schedule` now refuses the route and the
+  CLI the same way it refuses any other governed mutation.
+- **Governed tag/domain candidate review — Apply and
+  Revoke.** `trellis classify tag-candidates` / `domain-candidates` have
+  always *mined* keyword and alias rules (`TAG_KEYWORD_CANDIDATE` /
+  `DOMAIN_ALIAS_CANDIDATE` events) but never written anywhere — approving
+  one meant hand-pasting YAML into `config.yaml`, with no audit trail.
+  This adds the missing approve step:
+  - `classify_overrides.json` (`<data_dir>/stores/`): a third
+    `DegradableJsonStore` subclass (CLAUDE.md: "a third such file gets a
+    subclass, never a copy") alongside `PolicyStore` / `AdvisoryStore` —
+    reads degrade row-by-row, writes refuse whole. Holds applied
+    `tag_keyword` / `domain_alias` rows, keyed by `(kind, key)`.
+  - **Precedence**: built-in defaults < `config.yaml` < this overlay.
+    `effective_domain_keywords()` / `effective_domain_aliases()`
+    (`trellis.classify.factory`) are the only readers of the merged view;
+    every call site that used to read `config.yaml` alone now reads
+    through them.
+  - New governed operations `Operation.CLASSIFY_RULE_APPLY` /
+    `CLASSIFY_RULE_REVOKE`, routed through a dedicated admin-only
+    executor (`build_classify_rules_executor`) rather than the general
+    curate executor — applying a mined rule changes what the
+    classifier does on every future document, not a piece of content.
+    Apply carries the candidate's original `source_event_id` forward so
+    the applied row traces back to the event that proposed it.
+  - REST: `GET /classify/candidates`, `POST /classify/candidates/mine`,
+    `POST /classify/candidates/{id}/dismiss`, `POST /classify/rules`,
+    `DELETE /classify/rules/{kind}/{key}`, `GET /classify/rules` — admin
+    scope on every write, read scope on the two `GET`s, mirroring
+    `policies.py`'s mixed-scope mounting.
+  - CLI: `trellis classify apply-rule`, `revoke-rule`, `effective-rules`
+    — same executor, text/JSON output, exit code derived from the
+    `--format`-independent refusal mapping (CLAUDE.md format/exit
+    parity rule).
+  - UI: a new "Tag rules" tab lists open candidates with Apply/Dismiss
+    and the effective-rule table with Revoke gated to `source ==
+    "overlay"` rows (a `default`/`config` row was never written by the
+    overlay store and the `DELETE` route refuses it).
+- **Analyze reports over HTTP + a Reports UI tab (#e182).** "Are our
+  learning loops performing?" was answerable only from the CLI
+  (`trellis analyze <report>`); it now has a read-scoped HTTP surface and a
+  UI tab, both calling the exact library functions the CLI calls — never a
+  copy of their logic.
+  - `GET /api/v1/analyze` lists the allowlisted reports with an operator
+    description and default params each.
+  - `GET /api/v1/analyze/{report}` runs one: `holdout`, `judged-outcomes`,
+    `advisory-effectiveness`, `value`, `dimension-predictiveness`,
+    `learning-candidates`, `domains`, `extractor-fallbacks`,
+    `pack-telemetry`, `token-usage`, `cost`. Each report has its own
+    `extra="forbid"` param DTO; an unknown report 404s listing the allowed
+    names, a bad or unknown param 422s. `pack-quality` (needs a scenarios
+    file, no bounded default shape), `replay`, `generate-advisories` and
+    `apply-noise-tags` (writes) are deliberately excluded.
+  - Payloads are finite JSON always — Infinity/NaN are sanitised to `null`
+    before the response leaves the process, never written inline. A report
+    that scans the whole EventLog is cached per-process for 60s, surfaced
+    via `computed_at` / `cached`.
+  - `advisory-effectiveness` refuses to score a degraded advisory store
+    (same check the CLI makes before its own dry-run), rather than silently
+    scoring an incomplete set.
+  - The UI's new "Reports" tab picks a report, fills params from its
+    defaults, and renders the result as cards with a raw-JSON toggle,
+    honest "insufficient data" / degraded states, and `computed_at`.
+  - A small readiness pill in the header (fed by the `/readyz` probe the
+    dashboard already fetches — no extra request) shows ready / degraded /
+    unknown, with failing backend names on hover when the caller is
+    authenticated.
+  - G9 (`parameter_promotions` truthfulness, plus outcome/version signal)
+    was re-measured rather than rebuilt: the metric and its annotated
+    promote/reject/degrade/auto-rollback event strip already ship on the
+    Metrics view (`src/trellis/retrieve/metrics_timeseries.py`) — no gap
+    found, no new work needed there.
+- **Schedule registry + job-run records (#e166).** The pieces a host-side
+  dispatcher cron needs so job schedules can later be edited from a UI
+  (plan p1 §(b)) without the container ever touching crontab — and the
+  command boundary redesigned so the shared, read-write-mounted
+  `schedule.json` can never choose *what* runs:
+  - `trellis.schedule.catalog.JOB_CATALOG`: the **only** source of a job's
+    command. A Trellis-native job (`tune`, `worker-enrich`, …) carries its
+    argv fixed in source; a host-only job (`capture-nightly`,
+    `curate-nightly`, `backup-nightly`, `roadmap-nightly` — they need the
+    docker socket / `gh` auth the container doesn't have) names only an
+    executable the operator places at `$TRELLIS_HOST_JOBS_DIR/<name>`,
+    outside the shared data mount. No absolute personal path in the repo.
+  - `schedule.json` (`<data_dir>/stores/schedule.json`) holds only
+    operator-tunable state per `ScheduledJob` row: `name` (must be a
+    catalog key — an unknown name degrades the row, never runs it),
+    `cadence`, `enabled`, a bounded `timeout_seconds` override (1–86400),
+    `run_requested_at`. `command`, `description` and `host_only` are gone
+    from the persisted row — `extra="forbid"` means a legacy or tampered
+    row still carrying `command` degrades instead of executing it. Backed
+    by `ScheduleStore`, the third `DegradableJsonStore` subclass alongside
+    `PolicyStore` and `AdvisoryStore` (reads degrade, writes refuse).
+  - `trellis admin init-schedule` seeds the registry from the catalog's
+    defaults — the nightly capture/curate/backup/roadmap sweeps, the tuner
+    dry-run, and the manual-only commands from the UI gap inventory —
+    without overwriting anything an operator already edited.
+  - `trellis admin due-jobs --format json` joins each due row with its
+    catalog entry and reports which jobs are due now, combining `enabled`,
+    `cadence` (`trellis.core.cron`), the most recent `JOB_RUN_COMPLETED` in
+    the EventLog, and `run_requested_at`. For a host-only job it reports
+    `command: null` and `host_only: true` — a marker, not a path — so the
+    host dispatcher resolves `$TRELLIS_HOST_JOBS_DIR/<name>` itself, after
+    checking the name matches `^[a-z0-9-]+$` (no path traversal).
+  - `trellis admin record-job-run` records one execution as a
+    `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event pair, modeled on
+    `CAPTURE_SWEEP_COMPLETED`.
+  - `docs/ops/job-dispatcher.sh.example`: a reference host-side dispatcher
+    script (documentation only, not installed by this repo) showing the
+    `due-jobs` → exec argv (or resolve + exec a host-only path) →
+    `record-job-run` loop under `flock`.
+
+  The REST route and UI that edit this registry shipped separately, above
+  (plan p1 PR 6). **The actual
+  boundary:** commands are fixed in source or confined to one host-only
+  directory outside the shared mount; editing `schedule.json` — by hand, a
+  compromised container, or the PR 6 API above — can change only
+  *whether* and *when* a catalog job runs, never *what* runs. (An earlier
+  draft of this entry claimed "no arbitrary command execution anywhere" on
+  the strength of argv-not-shell alone; that claim did not hold once
+  `schedule.json`'s own `command` field was the thing deciding what an
+  argv-exec'd — this redesign is the fix.) **Deviation from the original
+  PR:** `capture-nightly` and `curate-nightly` are now catalogued
+  `host_only=True` (they were `False`) — both need the host's Claude Code
+  project directories / `flock`-serialized worker invocation that a
+  container does not have, matching `backup-nightly` and
+  `roadmap-nightly`.
+- **Report-only evaluation of learning candidates.** Owner's
+  stated intent is "eventually we want automatic promotion"; this PR
+  ships only the evaluation and reporting half of that — a candidate is
+  never promoted or demoted by this code. Auto-demotion and a working
+  commit mode are deferred to a follow-up PR.
+  - `trellis.learning.candidate_auto_promote.LearningCandidateAutoPromotePolicy`:
+    `enabled` (default `False`), `mode` (`report_only` default | `commit`),
+    `min_helpful_count` (≥1, default 5), `min_distinct_sessions` (≥2,
+    default 3 — an n=1 single-session candidate can never qualify),
+    `require_zero_unhelpful` (default `True`), `max_promotions_per_run`
+    (≥1, default 3). All six are `SETTINGS_REGISTRY` entries
+    (`learning.candidate_auto_promote.*`, group `learning_loops`)
+    resolved env > settings > default, each with a plain-English UI
+    description. **`mode="commit"` raises `ConfigError` at construction**
+    — "commit mode is not available until auto-demotion ships" — on
+    every resolution path (CLI, settings, env); `report_only` is the
+    only mode that can actually run. `--dry-run` forces this run's
+    *effective* mode to `report_only` before the policy is constructed,
+    so a stored or env-configured `commit` never reaches the refusal —
+    the run still truthfully reports what was configured: the CLI
+    output, the emitted event, and the Loop Health row all carry a
+    separate `configured_mode` (the pre-`--dry-run` value) alongside the
+    `mode`/`effective_mode` that actually ran, so "commit is configured"
+    and "commit ran" stay distinguishable. The Settings UI does not
+    offer `commit` as a selectable value for this setting at all, and the
+    settings route reports it under `refused_values`/`refused_reason`
+    rather than letting a client learn the refusal only by submitting it.
+  - The pre-existing tuner-side `trellis.learning.tuners.auto_promote.AutoPromotePolicy`
+    (`enabled`, `min_sample_size`, `min_effect_size`) is now also a
+    `SETTINGS_REGISTRY` family (`learning.auto_promote.*`). `resolve_auto_promote_overrides`
+    is new in this PR — it is the first thing to resolve env > settings >
+    config.yaml > default for this family — and reads three new env vars:
+    `TRELLIS_ENABLE_AUTO_PROMOTE`, `TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE`,
+    `TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE`. Registering the family adds a
+    UI-tunable surface, not a second resolution path. Both families' effective values now appear in
+    `GET /api/v1/settings` (#857), computed by calling each resolver
+    directly rather than reimplementing env/settings/default precedence a
+    third time.
+  - `run_candidate_auto_promotion` evaluates every candidate and reports
+    a disposition — never writes a precedent, since the commit-execution
+    branch is unreachable while `mode="commit"` is refused at
+    construction. Evaluation order: already-promoted (any existing
+    `PRECEDENT_PROMOTED` for that candidate's entity id, human or
+    automatic, reports `already_promoted` and is excluded from
+    `would_promote` and from the `max_promotions_per_run` cap), then
+    not-promotable recommendation type, then unhelpful citations (if
+    `require_zero_unhelpful`), then the helpful-count and
+    distinct-session floors.
+  - Distinct-session counting now reads the real `PACK_ASSEMBLED.session_id`
+    captured on each citation, never a pack or run id. A citation with
+    no captured session id cannot count toward `min_distinct_sessions`
+    and is reported separately as `sessionless_citations`.
+  - Every invocation of this command emits exactly one
+    `LEARNING_AUTO_PROMOTE_EVALUATED` event, whatever it did. A completed
+    run carries a per-candidate disposition, the
+    would_promote/already_promoted/promoted/ineligible counts, the
+    policy snapshot, and an `outcome` of `"ok"` (or `"degraded"` if a
+    candidate was skipped for having no usable id). A run that exits
+    *before* reaching evaluation — a missing/malformed `--candidates`
+    file or a top-level shape error (exit 2), a non-finite env override
+    (exit 1), or a refused `mode=commit` without `--dry-run` (exit 5,
+    `ConfigError`) — still emits one event, with `outcome: "refused"`
+    (the `ConfigError` case) or `outcome: "failed"` (everything else)
+    and an `error: {type, message}`, never zero events: a silent exit
+    would otherwise be indistinguishable from "this job never ran" in
+    `loop_health.py`, whose `last_status` now derives from this
+    `outcome` field (falling back to the old skipped-based rule for an
+    event recorded before the field existed) instead of always reading
+    "ok" off the mere presence of an event. `report_to_dict` adds
+    `already_promoted_count` alongside `would_promote_count`.
+    `compute_agreement_metric` compares this policy's `would_promote`
+    dispositions against later human Review-queue decisions
+    (agree/disagree/undecided). Two data gaps reported honestly, not
+    assumed away: there is no per-intent-family holdout marker anywhere
+    in the pipeline — `_holdout_arm_status` always reports `"unknown"`
+    and nothing gates on it — and no event records a human *rejecting*
+    a candidate for this surface (only `action="promote"` exists), so
+    `disagree` is structurally always `0` and `rate` can only be `None`
+    or `1.0` today; `AgreementMetric.note` says so in the payload rather
+    than leaving a reader to infer it from an un-explained constant.
+    The `loop_health` panel gains an eighth row,
+    `learning_candidate_auto_promote` (`actuates=False`: nothing it does
+    writes without a human in the loop today), whose `last_status` also
+    reads `"stale"` once the job's known daily cadence
+    (`auto-promote-candidates` in the job catalog) has had a tick with
+    no new run since.
+  - `trellis curate auto-promote-candidates` (job catalog:
+    `auto-promote-candidates`, nightly). A missing `--candidates` file,
+    one that isn't valid JSON, or one whose top level isn't a JSON
+    object (e.g. a bare list) all fail with a clean `BadParameter`
+    message (exit 2) instead of a raw traceback.
+  - The Precedents tab's empty state names the real promotion path
+    (`trellis curate promote-learning`) and, conditionally on whether
+    `auto-promote-candidates` is scheduled, that the job reports but
+    never commits — true both before and after the job is scheduled.
+  - **Removed `Operation.PRECEDENT_UPDATE` and `EventType.PRECEDENT_UPDATED`.**
+    The verb had a registry schema but no handler since the initial
+    commit, so every request for it was rejected at dispatch, and
+    `PRECEDENT_UPDATED` was never emitted; both are removed.
+  - The Settings UI never offers `commit` as a selectable value for
+    `learning.candidate_auto_promote.mode`: `GET /api/v1/settings` adds
+    `refused_values`/`refused_reason` to this setting's row (so a client
+    learns the refusal from the schema, not by submitting it and reading
+    a validation refusal — `400` over REST, exit `2` from the CLI), and
+    `renderValueInput` disables the refused option in the dropdown
+    instead of letting it be picked and then rejected. The save path's
+    "must be one of" validation error also no longer lists `commit`
+    among the values it suggests trying instead.
+  - `AutoPromotePolicy.__post_init__`'s effect-size floor check rejects
+    a non-finite `min_effect_size` (`NaN`/`inf`) regardless of whether it
+    arrived via env, the settings store, or `config.yaml` (a YAML
+    `.nan`/`.inf` literal parses straight to a non-finite `float`) — a
+    non-finite value compares `False` against every bound the "looser
+    than the manual floor" check uses, so without the dedicated
+    `isfinite` check it would construct successfully and let every
+    proposal clear the gate.
+- **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
+  curation / learning loop actually doing anything?" for all seven loops
+  (noise demotion, advisory generation, advisory fitness,
+  learning-candidate scoring, precedent promotion, tuner, feedback
+  intake) from the EventLog alone — no new probe. `trellis worker curate`
+  and `trellis worker tune` now emit `CURATE_CYCLE_COMPLETED` /
+  `TUNE_CYCLE_COMPLETED` at the end of every **live** run (never on
+  `--dry-run`, which still writes nothing), carrying the same counters
+  `--format json` already reports; the emit is wrapped whole, so a broken
+  EventLog write cannot fail the cycle it is reporting on. Each row
+  carries `actuates: bool` and a one-line `what_it_changes`, and — the
+  one load-bearing distinction — a loop with no event yet reports
+  `last_run_at`/`last_status`/`counters` all `null` ("never run"), never
+  a bare `0` indistinguishable from "ran and found nothing to do". New
+  module `trellis.ops.loop_health`; route is admin-scoped, alongside the
+  other Review-queue surfaces in `trellis_api.routes.admin`. A new Loops
+  tab in the operator UI (`src/trellis_api/static/index.html`) renders
+  the report: timestamps labelled UTC with relative age, a loop whose
+  last run is over 36h old is flagged `stale` independently of its own
+  `last_status`, a never-run loop reads "Not measured" rather than a
+  bare zero, and a fetch failure renders a visible error instead of a
+  silent empty state.
+- **Pack feedback from the Packs detail view.** `POST /packs/{pack_id}/feedback`
+  was the only learning-loop input the dashboard could add and the UI never
+  called it — the "Feedback" count on a pack's detail page only ever grew by
+  an agent calling the route directly. The injected-items table now carries a
+  Helpful/Unhelpful checkbox per row (checking one clears the other), plus an
+  optional comment and two overall-verdict buttons ("Helpful overall" /
+  "Not helpful") that set `success` and leave `rating` for the server to
+  derive, matching the existing REST/MCP contract. A successful submit shows
+  whether the event reached the EventLog yet (`event_log_in_sync`) and
+  reloads the pack so the new row and count reflect it; a failed submit shows
+  the error and re-enables the buttons instead of resetting the form. UI
+  only — the route and `PackFeedbackRequest`/`PackFeedbackResponse` shapes
+  are unchanged.
+- **Advisories and Policies tabs in the web UI (#850).** Both surfaces
+  existed only as CLI/REST before this: `GET /advisories` (+
+  `POST /advisories/generate`, an admin action gated behind an inline
+  two-step confirm, never `window.confirm`) and `/policies*` (list is
+  read-scope, create/delete escalate to admin — a 403 now renders as "needs
+  an admin-scoped key" rather than a blank panel). A degraded
+  `AdvisoryStore`/`PolicyStore` (`DegradableJsonStore`) renders a dedicated
+  banner from `store_degradation` so a damaged file never reads the same as
+  an empty one, and `GET /advisories`' `stores_dir not configured` sentinel
+  (a 200 with `{"status": "error"}`, not an HTTP failure) is checked
+  explicitly rather than falling through to a silently empty table. Every
+  interpolated value goes through `escHtml`; dates are rendered through a new
+  UTC-labelled `fmtDateUtc` rather than the existing unlabelled `fmtDate`. The
+  policy create form submits exactly one rule per policy, matching
+  `trellis policy add`'s own shape; each field carries a one-line
+  description, including the deny-wins resolution order.
+- **Settings store and env > settings > default precedence for write-behaviour
+  knobs.** `SettingsStore` (`<data_dir>/stores/settings.json`, built on the
+  shared `DegradableJsonStore`) and a 13-entry catalog
+  (`src/trellis/core/settings_registry.py`'s `SETTINGS_REGISTRY`: the 12
+  `WriteBehaviourConfig` fields plus `graph_seeding`) let an operator override
+  a write-behaviour knob without an env var — once a write surface exists; this
+  change ships the store and the read path only, no CLI/REST write route and no
+  `MutationExecutor` op yet (deferred to a follow-up). Every knob now resolves
+  `env > settings > default`: `WriteBehaviourConfig.from_env_and_settings()`
+  overlays a settings value only where the real environment is blank, and
+  `resolve_overridden_by()` reports which of the three won, per field, as a new
+  `overridden_by` column on `trellis admin write-config --format json`'s
+  `knobs[]` and on `GET /api/version`'s `write_behaviour_settings[]`.
+  `describe()` stays backward compatible: a caller that omits
+  `overridden_by=` keeps the old `"env"`/`"default"` two-valued read. A damaged
+  `settings.json` degrades per row (never raises) and falls back through the
+  same precedence chain, logging `settings_load_degraded` at `error` so the
+  reversion is visible; every write is refused while degraded or stale, same
+  posture as `PolicyStore`/`AdvisoryStore`. Only `pack_holdout_rate`
+  (`SettingSpec.settings_live`) has a settings-aware enforcement site today
+  (`builder_factory.py`); the other twelve registry entries report truthfully
+  but have no runtime effect from a settings override yet. See
+  [`docs/agent-guide/operations.md` § Settings
+  Store](docs/agent-guide/operations.md#settings-store).
+- **Governed settings write path (#857), the write surface the entry above
+  deferred.** `Operation.SETTINGS_UPDATE` (`SettingsUpdateHandler`) backs
+  `trellis admin settings set|unset` and admin-scoped
+  `PUT`/`POST /api/v1/settings/{name}` — unknown name, wrong type and
+  out-of-range are refused, never clamped, through the real `MutationExecutor`
+  Stage 2 policy gate on both surfaces.
+  - The handler is registered only on a new, narrow
+    `create_settings_handlers` / `build_settings_executor`, built by the admin
+    route and the CLI alone — `create_curate_handlers` (and so the generic
+    `POST /commands/batch` route and MCP's `execute_mutation`, both built on
+    `build_curate_executor`) does not register it at all, so a
+    `settings.update` submitted there answers `FAILED`, with a message
+    naming where it *is* reachable, rather than being reachable itself. The
+    handler also refuses any `Command` whose `target_type` isn't `"setting"`
+    or whose `target_id` doesn't match the setting name, as defence in
+    depth. An `entity_type=setting` deny policy refuses the write on every
+    path that can reach it.
+  - `changed_by` on the audit event comes from the authenticated principal,
+    never the client-supplied `requested_by` (kept only as a separate
+    `requested_by_claim`); `stored_value` is the normalized, parsed value,
+    never the raw request body — surrounding whitespace included, so a
+    string setting written as `" x "` stores `"x"`, matching the effective
+    value `WriteBehaviourConfig.from_env_and_settings` resolves. A write
+    behind a currently-set env var still stores the override and says so,
+    identically on the CLI and REST and on a plain set and a reset alike (a
+    reset leaves nothing stored, and the note says exactly that rather than
+    claiming a stored value "takes effect" once the variable is unset). The
+    response and event both carry `settings_live`/`restart_required` from
+    the registry, with an explicit note that a `restart_required` change
+    applies after a restart; `GET /settings` carries a `read_by:
+    "trellis-api"` label so a multi-container deployment can tell a
+    per-process read from a fleet-wide one. A degraded or stale
+    `SettingsStore` answers REST `409` / CLI exit `5` (`EXIT_STORE`); the
+    409 body carries `recovery` and the real `store_degradation` as their
+    own fields (mirroring `routes/policies.py`), so the recovery command
+    survives `sanitize_error_message`'s 512-character cap on `message`
+    instead of being truncated away on a long `stores_dir` path.
+  - `validate_value` refuses every value `WriteBehaviourConfig.from_env`
+    would otherwise silently replace with the shipped default instead of
+    applying — `reconcile_timeout_s <= 0` (including `-0.0`) and a
+    blank/whitespace `reconcile_model` are rejected, not stored as a no-op
+    override. Both sides of each affected knob share one parser
+    (`parse_finite_float`), so an `int` too large for `float()` (e.g.
+    `10**400`) raises `ValueError` — a governed `invalid_value` rejection —
+    on both the env read and the settings write, never an uncaught
+    `OverflowError` that would otherwise surface as the executor's generic
+    `FAILED`.
+
+  Each claim above is pinned by a regression test, not asserted on faith:
+  `tests/unit/api/test_settings_routes.py`,
+  `tests/unit/api/test_settings_update_not_reachable_via_batch.py`,
+  `tests/unit/cli/test_admin_settings.py`,
+  `tests/unit/core/test_settings_value_validation.py`,
+  `tests/unit/mcp/test_execute_mutation.py` and
+  `tests/unit/mutate/test_settings_update_handler.py` — rerun those (or
+  `make test`) to reverify rather than trusting this entry.
+- **Promotion-ready-candidate digest and readable fallback names (#845).**
+  Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
+  top 15 `promote_guidance` candidates carried an ugly bare-item-id
+  `precedent_name` because `title` was missing at scoring time. Two fixes,
+  both surfacing-only — nothing here promotes anything:
+  - A title-less candidate now gets a readable fallback name — the first
+    non-empty line of its document (frontmatter and a leading markdown
+    heading marker stripped, truncated like the existing `precedent_name`
+    convention) — resolved once a `DocumentStore` is reachable, at the point
+    `write_learning_review_artifacts` writes the artifact. A candidate that
+    already has a `title`, or whose item can't be resolved, is unchanged; the
+    `promotion_name` override still wins over whichever `precedent_name`
+    results.
+  - `intent_learning_candidates.json` and `trellis worker curate --format
+    json` now carry a `promotion_ready` / `learning_promotion_ready` digest:
+    `count` of `promote_guidance` candidates with `helpful_count >=
+    LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (`1`) and
+    `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count`
+    desc, then `success_rate` desc, then `times_served` desc). Text output
+    prints `"N candidate(s) promotion-ready — review with trellis curate
+    promote-learning or the Review tab"` when `N > 0`, singular at `N == 1`.
 - **Write provenance on emitted events.** Every event emitted through
   `EventLog.emit` now carries `metadata["write_provenance"]`: the build that
   wrote it (version, git sha, dirty flag, and which mechanism resolved it) plus
@@ -211,6 +670,64 @@ All notable changes to Trellis will be documented in this file.
   injected `http=`, raises `ValueError`.
   (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
+### Fixed
+
+- **UI P2 sweep (e174): tables, values, time, naming, accessibility,
+  build footer.** Nine findings from a UI-quality review's P2 section
+  ("consistency, clarity, enterprise hygiene"), re-located against
+  current `main` since several had already moved or been fixed by
+  #849-#852/#855:
+  - **Tables.** Traces, Events and Packs share one cursor-pager family
+    (`makeCursorPager`/`renderCursorPagerFooter`) with real "N of total
+    &middot; newer/older" footers; Memories' existing offset-based
+    pagination already satisfied this and was left alone. A Trace,
+    Document or Pack detail miss names the id instead of rendering blank;
+    an Event miss (paged by cursor window, not id lookup) also names the
+    loaded window. The Traces domain filter is now populated from a
+    server-side `GET /traces/domains` count over the whole store, not
+    just the currently-loaded page.
+  - **Values.** Swept the remaining `|| '-'`/`|| 0` fallbacks that were
+    conflating a legitimate zero with "missing"; the sole surviving
+    `|| '-'` is a string-join fallback, not a numeric one. `/packs`
+    summaries gain a `sectioned` field so a sectioned pack's attribution
+    badge reads "unattributable (sectioned)" instead of implying a zero
+    outcome, and `get_pack` gains `holdout_blinded` so the UI can say
+    *why* a blinded holdout payload reads short.
+  - **Time.** `fmtDate`/`fmtUtc`/`fmtDateUtc` collapsed into one `fmtTime`
+    that always renders in UTC and labels it; `fmtTimeCell` pairs a
+    relative "3h ago" with the raw ISO instant as its `title`.
+  - **Build footer.** The sidebar now reads "API build" (not "Backend")
+    and surfaces `stamp_stale` / `fallback-version` / `commit: null` from
+    `GET /api/version` as an honest warning instead of a normal version.
+  - **Toasts.** A dedicated `#toast-region[aria-live="polite"]` replaces
+    the previous reuse of the static `#error` banner; a terminal-action
+    toast pauses on hover/focus and carries an explicit dismiss button.
+  - **Naming.** The "Evolution" tab is now "Effectiveness"; "self-learning"
+    is never used.
+  - **Help text.** Added one-line `.field-hint` descriptions for the
+    Metrics `days`/`group_by` controls and the Graph Explorer's
+    depth/sort controls. The Dashboard stat cards already had per-card
+    descriptions via `renderCard`'s `sub` param, and the Review tab has
+    no filter controls to describe — both sub-items were already
+    satisfied or do not apply to current code, not re-implemented.
+  - **Accessibility.** 18 previously-unlabeled `<select>`/`<input>`
+    elements got `aria-label`s; the four clickable `<tr>` row templates
+    (Traces/Memories/Events/Packs) are now `tabindex="0" role="button"`
+    with a keyboard handler for Enter/Space; the "Why no approve?"
+    explanations are now visible text, not only a hover `title`; every
+    icon-only button (API-key toggle, value-copy, row-expand, the five
+    graph-toolbar buttons) carries an `aria-label`; the graph canvas gets
+    `role="img"` plus a `aria-describedby` text alternative; the
+    search-results-panel's close control is a real `<button>`, not a
+    `<span>` with an `onclick`; a `/stats` or `/health` fetch failure on
+    the Dashboard now renders inside the card that failed instead of the
+    shared `#error` line. The key-banner close control was already a
+    `<button>` from a prior merged PR — no change needed there.
+  - **Welcome banner.** Unchanged this sweep — already gated on a green
+    `/readyz` and zero counts together, from a prior fix.
+  New failing-before tests in `tests/unit/api/test_ui_p2_sweep.py` pin
+  every item above that wasn't already covered.
+
 ### Changed
 
 - **BREAKING: `trellis admin quickstart` no longer writes Claude Code settings
@@ -376,6 +893,221 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Review tab and its empty states stop hiding why.** Five defects in
+  `src/trellis_api/static/index.html` where the admin console read a failure
+  or an absence as "nothing pending," per the UI-quality review's P1 section:
+  - A tuner proposal card now shows `status`, `tool_name` and the
+    reachability verdict `/proposals` already computes; an unreachable
+    proposal's Approve control is disabled with the reason in its `title`
+    instead of inviting a click `promote_proposal()` would refuse. Reject —
+    terminal, unlike a recoverable bootstrap refusal — now routes through an
+    in-page two-step confirm instead of calling it directly.
+  - A fetch failure on any of the four Review-queue count badges
+    (proposals, learning, schema, code) used to write a literal `0` via
+    `setCount`, reading identically to an honest empty result. A new
+    `setCountError` renders a distinct "!" marker with the failure in
+    `title`, and `setCount` clears that state on a subsequent clean load.
+  - `GET /learning/candidates` answering 200 with `status: "error"` (the
+    artifact is missing or unreadable) never reached the page's `catch`
+    block and rendered as "no candidates found." It now renders as an error
+    with the server's own `hint`. The artifact's `generated_at_utc` is shown
+    through a new `fmtUtc()`, labelled UTC, instead of `fmtDate()`'s silent
+    `toLocaleString()` conversion to the browser's zone.
+  - The precedents empty state said "Promote traces to create precedents,"
+    implying any trace promotion sufficed. It now names the actual path (a
+    learning candidate approved via Review → Learning, or `trellis curate
+    promote-learning`) and says plainly that nothing schedules that
+    promotion automatically today.
+  - `/effectiveness` with zero feedback rendered a "0.0%" success rate,
+    reading as "every pack failed" rather than "nothing was measured"; it
+    now renders "not measured". `noise_candidates` is the usage-rule's
+    *proposal* (see `EffectivenessReport`'s docstring), not a demotion, so
+    the section is relabelled "Usage-Rule Proposals" and reports how many of
+    those proposals `demotion_screen.admitted` — the evidence gate's
+    verdict — actually cleared, without claiming any of them were tagged
+    (this view never calls the write path).
+- **`GET /api/v1/health` reports real store status; the Memories table
+  reads the tags a tagging pipeline actually writes.** Two defects found
+  in a UI quality review (P0):
+  - `health()` returned a literal `{"api": True, "stores": True}`
+    regardless of backend state — the dashboard's Store Health card read
+    green even while `/readyz` (which really probes) read 503. The probe
+    logic in `readyz` is now factored into `probe_backends` /
+    `overall_backend_status` (`src/trellis_api/routes/health.py`), and
+    `health()` calls the same functions, so the two surfaces can no
+    longer disagree. `HealthResponse` gains an additive, optional
+    `backends` field (per-backend status/latency/error) alongside the
+    existing `checks` bool map, which keeps the response shape backward
+    compatible for its two prior readers
+    (`tests/unit/api/test_routes.py`,
+    `tests/integration/api/test_live_smoke.py`). The dashboard's store
+    health rows now render each backend's latency or error string.
+  - The Memories table's `tagChips(metadata)` read `metadata.tags`, a key
+    no writer sets; the tagging pipeline writes the 4 retrieval-shaping
+    facets to `metadata["content_tags"]` (`ContentTags` in
+    `trellis.schemas.classification`), so the column was empty on every
+    row regardless of whether tagging ran. `tagChips` now reads
+    `content_tags` and renders only the facets a row actually has;
+    `content_tags_shadow` (LLM shadow-mode proposals never applied — see
+    `trellis.retrieve.servable`) is never rendered as if it were an
+    applied tag. The column header is renamed "Content tags" per
+    [`adr-terminology.md`](docs/design/adr-terminology.md).
+
+- **`trellis analyze learning-candidates` text output no longer crashes on
+  an unmeasured retry rate.** The "Candidates by Recommendation" table
+  formatted `metrics["retry_rate"]` with `:.1%` unconditionally;
+  `scoring.py` legitimately returns `retry_rate=None` whenever no feedback
+  event in the window reported `had_retry` at all (a sparse-signal fact,
+  not a measured zero — see the `metrics_coverage` comments in
+  `src/trellis/learning/scoring.py`), so any non-empty, text-mode run
+  without `had_retry` coverage raised `TypeError: unsupported format
+  string passed to NoneType.__format__`. The cell now renders `"n/a"`
+  instead. A swept check of every other `{x:.Nf}`-style format call in
+  `analyze.py` found no other unguarded nullable metric; `injection_rate`
+  and `avg_selection_efficiency` (also nullable in `scoring.py`) are not
+  currently rendered by any text surface, so there was nothing else to fix
+  there.
+
+- **The flat `get_context` / `search` paths render advisories.**
+  `_flat_context` built `pack.advisories` via `PackBuilder._select_advisories`
+  on every call but never rendered them — only `_sectioned_context` called
+  `format_advisories_as_markdown`. Flat is the path agents actually use (37
+  flat packs served in production vs. 0 sectioned, per the decision-ledger
+  measurement), so advisories were mined nightly and attached to packs an
+  agent could never see, while the advisory-fitness loop
+  (`analyze_advisory_effectiveness`) still read `PACK_ASSEMBLED.advisory_ids`
+  off those same flat packs as "presented". `_flat_context` now calls
+  `format_advisories_as_markdown` in the same position `_sectioned_context`
+  does — after the items and the cite footer — on both the
+  non-empty and empty-pack branches (an empty-item pack can still carry
+  advisories; only the pack-effect holdout zeroes both together), and in
+  both full and `index=True` rendering. An empty advisory list renders
+  nothing, so output is unchanged for every pack that has none. Decided and
+  approved as decision-ledger D-4, 2026-10-10. While the pack holdout is on,
+  an item-less pack now carries no advisories on either shape too
+  (`PackBuilder._blind_advisories_for_empty_pack`), so a naturally empty
+  pack and a withheld one still look alike instead of the advisory block
+  becoming the one tell that gave a holdout draw away.
+  ([#392](https://github.com/ronsse/trellis-ai/issues/392),
+  [#844](https://github.com/ronsse/trellis-ai/pull/844))
+
+- **Stop serving advisories minted before the #394 generator repair.**
+  #844 rendered advisories on the flat path but shipped decision-ledger D-4's
+  option A (render everything matching), not the option B the owner
+  approved: the code made no attempt to distinguish pre-/post-#394 rows, so
+  the 51 known-degenerate legacy rows measured live on 2026-10-10 (vs. 361
+  post-repair, zero mismatches against the alternative id-prefix
+  discriminator) were eligible to ride every pack. `_select_advisories` now
+  drops any advisory whose `evidence.evidence_confidence is None` — the
+  field only the repaired generator populates — before ranking and the
+  delivery cap run, on both pack shapes, so a legacy row can never occupy a
+  rank or cap slot a post-repair row would have won. Reversible via
+  `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted-value
+  vocabulary as `TRELLIS_GRAPH_SEEDING`). `PACK_ASSEMBLED` carries the
+  withheld count as `advisories_filtered_legacy` (`0` when the knob is
+  off), counted before `advisories_matched`, so the advisory-fitness loop
+  never counts a withheld row as a presentation. Clearing the 51 legacy
+  rows from the live store is a separate, operator-only live-store
+  mutation, unchanged by this fix.
+  ([decision-ledger D-4](docs/design/decision-ledger.md#d-4--should-the-flat-pack-path-render-advisories-at-all--panel-split))
+
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
+  the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
+  graph store (`bolt_opencypher/graph.py`, 11 call sites across
+  `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,
+  `upsert_edge` and `upsert_edges_bulk`), the SQLite and Postgres document
+  stores, every vector store's metadata write (SQLite, pgvector, Neo4j —
+  `upsert` and the separately-implemented `upsert_bulk` are two distinct
+  call sites there — and ArcadeDB), the outcome/tuner-state/parameter
+  stores, and the local blob store's metadata sidecar all still wrote a
+  non-finite float as a silent `NaN`/`Infinity` JSON token. The fix is the
+  same `allow_nan=False` on each `json.dumps` call, and the same
+  `ValueError` raised before the write lands. Two gaps this also closes:
+  (1) MCP `save_memory` previously committed a document row with NaN
+  metadata durably *before* the later `MEMORY_STORED` event emit failed,
+  leaving an orphan a caller's error made look recoverable — fixing
+  `sqlite/document.py`'s `put()` means the write itself refuses first, so
+  nothing durable lands; (2) the SQLite graph store's
+  `upsert_nodes_bulk`/`upsert_edges_bulk` already rolled back a
+  non-finite row atomically before this PR (both build every `json.dumps`
+  call before any write statement runs), but had no test pinning a
+  two-row batch where an earlier row has a prior version and a later row
+  is non-finite — added, and confirmed non-vacuous by mutating the store
+  to commit each row as it's built (which the test catches: the prior
+  row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
+- **A failed idempotency read, and a store failure a Postgres or Bolt
+  backend wraps as `StoreError ... from exc`, audited only the
+  exception's type name; both now audit the actual error, one level of
+  wrapping included.** Before this change, most failure paths already
+  stored the real error: the untyped panic catch stored a driver's raw
+  `str(exc)` (sometimes multi-line, with query text and row values on
+  later lines), and a Trellis-composed message (`StoreError("backend
+  down")`, an orphan-edge refusal) stored that text as-is. Only two
+  paths stored the type alone, which is what the owner's "not just the
+  error type" asked to fix: the failed idempotency read
+  (`"Idempotency check failed: OperationalError"`, naming neither
+  "database is locked" nor a Postgres wrapper's own type), and a
+  `StoreError`/`TrellisError` wrapping a driver error via `from exc`
+  (`"Purge of node n1 failed: DeadlockDetected"` plus a constant
+  `error_code="STORE_ERROR"`, discarding the driver's SQLSTATE,
+  message and constraint that sat on `__cause__`).
+  `error_sanitize.py` gains `summarize_exception(exc) -> dict`:
+  `error_type` (`type(exc).__name__`), `error_code`
+  (`_driver_error_code` — a psycopg `sqlstate`, then a sqlite3
+  `sqlite_errorname`, then a `.code` attribute, then `errno`, first one
+  present), `message` (a `TrellisError`'s own `.message`, run through
+  `sanitize_error_message`; a generic exception's `str()` first line,
+  masked with `_mask_quoted` and then also run through
+  `sanitize_error_message`), and `constraint`
+  (`exc.diag.constraint_name` when present). When `exc.__cause__` is
+  set, the summary also nests one level of the same four fields for
+  the cause, under `cause` — read from `__cause__` only, never the
+  implicit `__context__` a bare `raise` inside an `except` block also
+  sets. All four in-scope catches in `MutationExecutor.execute` — the
+  idempotency-read failure, the `ValidationError` rejection, the typed
+  `(StoreError, TrellisError)` failure, and the untyped panic — now
+  build the stored `message` and the `error_type` / `error_code` /
+  `constraint` / `cause` keys from this summary, added only when not
+  `None`. The panic path's stored `message` itself changes: it was the
+  driver's raw (possibly multi-line) text and is now the masked,
+  sanitized first line only — a behavior change for any reader of
+  existing `mutation.rejected` events, not an additive one.
+  `CommandResult.message` — what callers see — is unchanged on every
+  path; it stays type-only on the idempotency and panic paths.
+  Mutation testing against `error_sanitize.py` and `executor.py`
+  (36 hand-written mutants) now kills 31 of 36; the 5 remaining
+  survivors were assessed as near-equivalent or, in one case
+  (`CommandResult` built from the summary message), unpinnable without
+  leaking raw credential text into the caller-facing message, and are
+  left as a follow-up rather than pinned with a vacuous assertion.
+  ([#837](https://github.com/ronsse/trellis-ai/pull/837))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
@@ -460,6 +1192,72 @@ All notable changes to Trellis will be documented in this file.
   "Confirm approve" button is disabled when the preview predicts a
   rejection and names the CLI bootstrap command.
   ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
+- **`TrellisError` raise sites describe the caught exception instead of
+  quoting it.** Nine sites built their message as `f"...: {exc}"` inside an
+  `except ... as exc:` handler — a pydantic `ValidationError`'s own text
+  embeds `input_value=<the caller's field value>` (Measurement and
+  Observation recording; a policy file's own entry), and an `OSError` /
+  `json.JSONDecodeError` / `ImportError`'s text can carry more of a path,
+  document or module than the raiser intended (`policy_source.py`,
+  `registry.py`). The sharpest case: a rejected Measurement's message
+  becomes the immutable `mutation.rejected` audit event verbatim, so the
+  leak was permanent once written. `trellis.core.error_sanitize` gains four
+  helpers — `describe_os_error`, `describe_json_error`,
+  `describe_validation_error` (pydantic's `errors(include_input=False)`,
+  never `str(exc)`), `describe_import_error` (a `ModuleNotFoundError` names
+  the module that was not found; any other `ImportError` says the import
+  from that module failed, since the module itself exists) — each naming
+  only the exception's own structured fields, and the nine sites now build
+  their message from one of these instead of the caught exception's
+  `str()`. The eight REST routes that construct an `HTTPException` detail
+  or response field directly from a `CommandResult.message` or a caught
+  exception's `.message` — bypassing the `trellis_error_handler` middleware
+  that already sanitizes an uncaught `TrellisError` — now wrap that value in
+  `sanitize_error_message` too, which masks secret-shaped, SQL-shaped and
+  long-token text; it is a deny-list, not a guarantee, so a handler that
+  has not yet adopted a describe helper can still leak text that matches
+  none of those shapes. The secret-pattern deny-list in
+  `sanitize_error_message` now also matches a credential key wrapped in
+  quotes (`"api_key": "..."`), the shape a JSON body or a repr'd mapping
+  takes, which the unquoted `key\s*[=:]` pattern missed entirely. A new AST
+  rule (`tests/unit/test_error_describe_not_quote_rule.py`, built on
+  `tests/ast_rules.py`) flags any `TrellisError`-family raise inside an
+  `except ... as name:` handler that interpolates `name` — or a local
+  variable transitively bound from it — into its message by f-string,
+  `str()`/`repr()`, `.format()` or `%`-formatting, and resolves the
+  `TrellisError` family dynamically across modules rather than from a
+  hardcoded list — `LLMRoutingError` subclasses `ConfigError` from
+  `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
+  would have missed it silently.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -500,13 +1298,99 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
+- **#829 follow-up: the REST pre-validation 422s, `admin.py`'s learning-candidates
+  read failure, and `CommandResult.message` on two more routes still quoted
+  raw exception/message text.** Five sites built a 422 `detail` as
+  `f"...: {exc}"` directly from a `model_validate`/`SectionRequest` failure,
+  before the governed-mutation pipeline and its sanitized rejection path ever
+  ran: `ingest.py`'s `ingest_trace` / `ingest_evidence`, `observations.py`'s
+  `record_observation` / `record_measurement`, and `retrieve.py`'s
+  `assemble_sectioned_pack`. All five now build the detail with
+  `describe_validation_error`, same as the nine sites above.
+  `admin.py`'s `_load_learning_candidates` built
+  `_LearningCandidatesUnavailableError`'s message as `f"...: {exc}"` for an
+  unreadable or malformed candidates file; it now uses `describe_os_error` /
+  `describe_json_error`, falling back to the exception's type name.
+  Separately, `CommandResult.message` reached a REST caller unsanitized
+  through two paths #829 did not cover: `/commands/batch` (every result,
+  including `FAILED`/`REJECTED`, via `_results.py`'s `command_response` —
+  the one projection the `curate`, `extract` and `mutations` routers share)
+  and `/ingest/bulk`'s three per-item `BulkItemResult` constructions (entity,
+  edge, alias), neither of which went through `command_response`. Both now
+  sanitize `message` through `sanitize_error_message`, but only when
+  `status` is `FAILED` or `REJECTED`: a `SUCCESS`/`DUPLICATE` message only
+  restates the caller's own request (a name, id, title or idempotency key),
+  and wrapping it unconditionally would replace an ordinary long name, an
+  email-named entity, or a digest idempotency key with the suppression
+  marker, for no protective value. Fixing the shared
+  `command_response` projection closes `/commands/batch` and, incidentally,
+  `extract.py`'s identical unfiltered construction, in one change. The two
+  `trellis_sdk` sites with the same `f"...: {exc}"` shape
+  (`client.py`/`async_client.py`'s `record_feedback`) are left as-is:
+  `trellis_sdk` has no dependency edge to `trellis` core to reach
+  `error_sanitize` from (by the dual-mode local/remote design), and the
+  exception there describes the SDK's own parse failure on a response its
+  own trusted server just returned, not caller-supplied or server-internal
+  text.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829) follow-up)
+- **Retrieval degrades, instead of failing, when the embedder fails to
+  resolve.** `build_strategies` used to read `registry.embedding_fn` outside
+  its own `try`, so the same raise #830 made quiet on ingest (a bad
+  `TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, a missing provider
+  extra, a missing API key) still propagated uncaught out of every
+  retrieval surface — REST `POST /packs` (and sectioned), MCP
+  `get_context` / `get_sectioned_context`, and `trellis retrieve pack` all
+  re-read that property directly and turned a healthy keyword+graph pack
+  into a 409 / `INTERNAL_ERROR` / exit `5`. The embedder now resolves
+  inside `build_strategies`'s own `try`, and the outcome
+  (`BuildStrategiesResult.embedder_resolve_failure`) flows into
+  `describe_axes` once, so none of the five surfaces re-read
+  `registry.embedding_fn` to render it. **`build_strategies` now returns
+  `BuildStrategiesResult`, a `NamedTuple`, instead of a bare
+  `list[SearchStrategy]`** — existing callers take `.strategies` for the
+  list they used to get back directly. A new axes state,
+  `semantic: "embedder_failed"`, carries `embedder_error_type` and
+  `embedder_setting` (the exception's type name and, when it names one,
+  the broken setting — never its message) and a note pointing at
+  `trellis admin reindex-vectors`, the same recovery step
+  [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config)
+  documents. The failure is recorded as one semantic `StrategyFailure` in
+  `PACK_ASSEMBLED` (tallied by `FailedStrategyReport`) but deliberately
+  excluded from both the required-strategy and all-axes-failed checks
+  below it, so a pack still raises `PackAssemblyError` when every
+  remaining axis has also failed, and still degrades — not raises — when
+  keyword or graph are healthy.
+  ([#838](https://github.com/ronsse/trellis-ai/pull/838))
 
 - **The packaged agent skills no longer teach calls the server rejects or
   ignores.** `record-after-task` showed `"source": "claude-code"` in both
@@ -1793,6 +2677,171 @@ All notable changes to Trellis will be documented in this file.
   same table. Both stores now read `created_at` alongside `edge_id` under
   the same lock that reads the current row and write it back on the new
   version; `valid_from` still advances on every write.
+- **Three follow-ups to #834's embed-on-ingest fix apply its "describe,
+  don't quote; log once" discipline to the paths it didn't cover.**
+  `trellis admin reindex-vectors` read the vector store with an unwrapped
+  `getattr(..., None)`, which only ever absorbed an `AttributeError` the
+  real property never raises, so an untyped backend-construction error
+  escaped as a bare traceback with exit 1; a `ConfigError` already exited
+  5 through the root CLI boundary (`_BoundaryGroup`) on its own, before
+  this change. A new `_resolve_vector_store` helper re-raises a
+  `TrellisError` (a `ConfigError` included) unchanged, keeping its own
+  `error_code` and `setting`, and wraps only an untyped cause in a
+  `StoreError` naming its type alone; both now reach the boundary and
+  exit `EXIT_STORE` (5), regardless of `--format`, with the standard
+  sanitized JSON envelope. `resolve_vector_store` (`trellis.core.vector_metadata`)
+  already logged at `WARNING` with `exc_info=True` on every call while a
+  vector-store backend stayed broken — a full traceback carrying the
+  exception's message on every tag write, demotion and session capture;
+  it now describes the cause (type name, plus the setting for a
+  `ConfigError`) and logs once per distinct cause per process instead.
+  The embed-on-ingest hook had a single `except` block shared by its
+  embed and upsert calls, logged the `embed_on_ingest_failed` event at
+  `ERROR` (`logger.exception`) on every document, and returned the
+  exception's message as the hook's own `reason`; it now splits into two
+  `except` blocks keyed by step (`embed`, `upsert`), describes rather
+  than quotes, and logs the renamed `embed_on_ingest_upsert_failed` event
+  at `WARNING` once per distinct `(step, cause)` per process — so an
+  embedder failure and a vector-store failure of the same error type can
+  no longer hide each other — dropping `doc_id`/`source` from the log
+  line. In both helpers, a `setting` that is not a string degrades to
+  `None` instead of breaking the dedup cache, so every path still
+  degrades rather than raising.
+- **The last two NaN/Infinity gaps #831 and #835 left open are closed.**
+  `DegradableJsonStore._save` — the shared base of `PolicyStore` and
+  `AdvisoryStore`, called out by #835 as unchanged — dumped with a lenient
+  `json.dumps` and still wrote a bare `NaN`/`Infinity` token; it now
+  refuses with the same `allow_nan=False`, before the file is touched, so
+  an existing file survives byte-identical on a refused write. A legacy
+  file some already-shipped build wrote with the non-standard token still
+  reads back clean (the read path, `json.loads`, stays lenient on
+  purpose). In practice only `AdvisoryStore` can drive this refusal
+  through a real write today: `Policy`'s float-capable fields, `metadata`
+  and `PolicyRule.params`, are both `dict[str, Any]`, and Pydantic's own
+  `model_dump(mode="json")` nulls a non-finite float nested under an
+  `Any`-typed value before
+  `_save` ever runs, so a live NaN cannot reach the guard through
+  `Policy`'s public schema — the guard is still wired on the shared base
+  regardless, and a new test pins that directly. Separately,
+  `trellis admin backfill-outcomes --apply` replaying a legacy
+  feedback event with a non-finite relevance score (predating the
+  EventLog's own #831 write guard, so a raw row written before that
+  fix can still hold one) wrote through `OutcomeStore.append_many`,
+  which raises exactly that bare `ValueError` — not a `TrellisError`,
+  so the CLI's global boundary did not catch it, and it surfaced as an
+  untyped traceback. The command now catches it at its own boundary and
+  reports a described failure — a sanitized JSON envelope or an escaped
+  one-line message — exiting `EXIT_INTERNAL` in both `--format text` and
+  `json`. The replay appends in 500-row transactions, so chunks before
+  the refused one may already be committed.
+- **A non-string `embeddings.provider` silently meant "not configured."**
+  `registry.embedding_fn` tested the config value with a bare
+  `if provider:`, so any falsy non-string — notably YAML `provider: off`,
+  which parses to the bool `False` — fell through to the "no embedder"
+  branch with no error, turning semantic search off with nothing to read
+  (`axes.semantic` just read `not_configured`, indistinguishable from an
+  operator who never set the key). `None` and `""` still mean "not
+  configured"; every other non-string (bool, int, list, mapping) now
+  raises `ConfigError(setting="embeddings.provider")`, naming only the
+  value's type, never the value itself — a misplaced mapping can hold a
+  credential. A bool gets an extra hint ("delete the key or set it to
+  null") since `off`/`on`/`yes`/`no` are the likely source. Retrieval
+  still degrades rather than crashing, as for every other
+  embedder-resolve failure (#838): the pack falls back to keyword + graph
+  and reports `axes.semantic == "embedder_failed"` with
+  `embedder_setting == "embeddings.provider"`, so a `provider: off`
+  deployment now reads `embedder_failed` where it used to read
+  `not_configured`. Embed-on-ingest stays fail-soft, and
+  `trellis admin reindex-vectors` now refuses with the `ConfigError`
+  (exit 5) instead of its generic missing-embedder message (exit 1).
+- **Three more "describe, don't quote" (#206) surfaces follow up #829/#836/#837 — MCP, admin-proposals CLI and the SDK.**
+  MCP `server.py`'s three pydantic-validation sites (`save_experience`,
+  `record_observation`, `execute_mutation`) quoted `str(exc)` — including a
+  rejected field's own value — back to the calling agent; they now render
+  through `describe_validation_error`, which never serializes the rejected
+  value at all. A mutation's `CommandResult.message` is now sanitized when,
+  and only when, its status is `FAILED` or `REJECTED` — the same gate #836
+  applied on the REST boundary (`_results.py`), not one already applied
+  elsewhere in this file. The gate covers `save_experience`, `save_knowledge`'s
+  entity create, `save_memory`, `record_observation` and `execute_mutation`
+  in `server.py`, `supersession.py`'s `_execute`, and both link writers in
+  the new `knowledge_links.py` module this PR adds — the code it replaces
+  interpolated `result.message` directly at the two link call sites, not
+  through any helper; `_describe_unsuccessful` did not exist before this PR.
+  `save_knowledge`'s evidence path wrapped a non-SUCCESS `evidence.ingest`
+  result's message in a `MutationError` and quoted it raw in both the McpError
+  message and its `data["message"]` echo; it now sanitizes that message too,
+  and its exemption leaves the MCP exception-text roster, which falls from
+  three hand-read sites to one. SUCCESS and DUPLICATE messages only restate
+  the caller's own request, so they pass through unchanged — this gate is a
+  status-gated deny-list, not a type/location renderer, so clean FAILED/REJECTED
+  text still passes through verbatim too. CLI `admin_proposals.py`'s three
+  broad `except Exception` handlers (`generate-proposals`, `list-proposals`,
+  `show-proposal`) built their JSON `message` as `f"{type(exc).__name__}: {exc}"`,
+  interpolating a raw store/driver exception; they now render through
+  `render_exception_detail`, which passes a `TrellisError`'s own text, or other
+  clean foreign text, through verbatim — only an operator sees this surface's
+  output, on their own terminal. SDK `TrellisClient.record_feedback` /
+  `AsyncTrellisClient.record_feedback` built a `TrellisProtocolError` as
+  `f"...: {exc}"` on a malformed response body; a pydantic `ValidationError`'s
+  own `str()` composes `input_value=<the body's own field value>` into every
+  line by design, so whatever a misbehaving proxy or wire-schema-skewed server
+  sent back was quoted back whole. `trellis_sdk` must not import `trellis.*`
+  (`tests/unit/sdk/test_isolation.py` AST-walks the package), so its fix is a
+  new, dependency-free `trellis_sdk._http.describe_body_parse_error` rather
+  than a call to `trellis.core.error_sanitize.describe_validation_error` — a
+  local port that keeps a JSON decode error's message/line/column and a
+  validation error's `loc`/`type`, dropping pydantic's `msg` outright, since
+  this copy carries no sanitizer to defend a future custom validator's own
+  message. These pydantic and SDK sites are the only ones that now name the
+  exception's type and field location instead of its rendered text; the
+  `CommandResult` sites above are a sanitizer, not a renderer. REST `admin.py`'s
+  `_LearningCandidatesUnavailableError` path was checked and found already
+  routing every exception through
+  `describe_os_error`/`describe_json_error`/`sanitize_error_message`.
+- **`build_strategies()`'s vector-backend init failure is now loud once per
+  cause, not once per pack build.** Degrading to keyword + graph search when
+  `SemanticSearch(registry.knowledge.vector_store, ...)` raised logged
+  `semantic_search_init_failed` with `exc_info=True` on every single build —
+  `StoreRegistry._get` caches only success (#830), so a persistent
+  misconfiguration (a bad `vector_store.provider`, a missing extra, a down
+  backend) re-raised identically on every retrieval call, turning one broken
+  setting into a full traceback per pack. A new
+  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed,
+  mirroring the embedder-resolve helper #838 added to this same module)
+  now logs at WARNING once per distinct `(error_type, setting)` per
+  process, describing the cause — the exception's type name and, for a
+  `ConfigError`, its `setting` — never the exception's message or a
+  traceback, which can echo a DSN or credential. A non-string `setting`
+  (only reachable from a plugin or future caller today) is narrowed to
+  `None` before it reaches the cache key, the same guard #839 added for
+  `embed_ingest_hook.py` and `vector_metadata.py`, so an unhashable
+  `ConfigError.setting` still degrades retrieval instead of raising; the
+  sibling embedder-resolve call site (#838) gets the same guard.
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
+- **The stored `PACK_ASSEMBLED.strategy_failures[].message` is now a
+  sanitized summary, not a raw `str(exc)`.** A strategy's own exception text
+  (a DSN fragment, a credential, a row value) reached this durable audit
+  event verbatim. `StrategyFailure` keeps a raw `.message` — `PackAssemblyError`'s
+  own interpolated text and `trellis_cli.main`'s plain-text render arm both
+  depend on seeing it unsanitized, by design (#493,
+  `test_the_machine_arm_suppresses_a_leaky_axis_message`) — alongside a new
+  `.audit_message`, computed by a module-level helper that calls
+  `summarize_exception(exc)["message"]` and falls back to the suppression
+  marker if summarizing itself raises, so an exotic exception from the open
+  `SearchStrategy` protocol can't turn a degraded build into a crash. When a
+  constructor passes no `audit_message`, the default is now
+  `sanitize_error_message(message)` rather than the raw message, so the
+  stored form is sanitized by construction rather than by caller discipline
+  alone. `build()` and `build_sectioned()` write the event's
+  `strategy_failures[]` through a new `to_audit_event_payload()` serializer
+  that reads `.audit_message`, instead of the raw-message `to_event_payload()`
+  CLI rendering already uses. The axes block an agent-facing pack response
+  carries (`format_failed_axes_note`) never reads either field.
+  `PACK_ASSEMBLED` rows written before this fix keep their raw text — events
+  are immutable — and remain servable verbatim by
+  `GET /api/v1/packs/{pack_id}`.
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 
 ## [0.9.0] - 2026-05-13
 

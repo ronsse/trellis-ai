@@ -94,7 +94,7 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
     ) -> None:
         blob = np.array(vector, dtype=np.float32).tobytes()
         dimensions = len(vector)
-        meta_json = json.dumps(metadata or {})
+        meta_json = json.dumps(metadata or {}, allow_nan=False)
 
         conn = self._conn
         with conn:  # commits on success, rolls back on an exception

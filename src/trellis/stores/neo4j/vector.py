@@ -224,7 +224,7 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
                 f"configured for {self._dimensions}"
             )
             raise ValueError(msg)
-        meta_json = json.dumps(metadata or {})
+        meta_json = json.dumps(metadata or {}, allow_nan=False)
         # Embedding attaches to the CURRENT (valid_to IS NULL) version
         # of the node. No node ⇒ caller mistake; raise.
         cypher = (
@@ -269,7 +269,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
                 {
                     "item_id": spec["item_id"],
                     "vector": vector,
-                    "meta_json": json.dumps(spec.get("metadata") or {}),
+                    "meta_json": json.dumps(
+                        spec.get("metadata") or {}, allow_nan=False
+                    ),
                 }
             )
         self._pre_validate_bulk_item_ids(items)

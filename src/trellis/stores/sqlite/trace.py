@@ -169,6 +169,13 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
         assert row is not None
         return int(row["cnt"])
 
+    def count_by_domain(self) -> dict[str, int]:
+        cursor = self._conn.execute(
+            "SELECT domain, COUNT(*) as cnt FROM traces"
+            " WHERE domain IS NOT NULL GROUP BY domain"
+        )
+        return {row["domain"]: int(row["cnt"]) for row in cursor.fetchall()}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

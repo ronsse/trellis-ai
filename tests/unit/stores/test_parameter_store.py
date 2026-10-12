@@ -168,3 +168,17 @@ def test_a_failed_put_holds_no_write_lock(store: SQLiteParameterStore, tmp_path:
         "SELECT params_version FROM parameter_snapshots ORDER BY params_version",
     )
     assert rows == [("syn-params-1",), ("syn-params-2",)]
+
+
+def test_put_refuses_a_non_finite_value(store: SQLiteParameterStore):
+    ps = _set(values={"k": float("nan")})
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.put(ps)
+    assert store.get(ps.params_version) is None
+
+
+def test_put_refuses_a_non_finite_metadata_value(store: SQLiteParameterStore):
+    ps = _set(values={"k": 1}, metadata={"score": float("-inf")})
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.put(ps)
+    assert store.get(ps.params_version) is None

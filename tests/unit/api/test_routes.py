@@ -27,6 +27,7 @@ from trellis.schemas.trace import Trace
 from trellis.stores.base import VectorStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
 
@@ -75,6 +76,47 @@ def test_health(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
+    assert data["checks"]["api"] is True
+    # Every real backend an agent's request depends on, not a hard-coded
+    # "stores" literal — each key traces to a /readyz probe.
+    assert set(data["backends"].keys()) == {
+        "event_log",
+        "graph_store",
+        "vector_store",
+        "document_store",
+    }
+    for name, backend in data["backends"].items():
+        assert backend["status"] == "ok", (name, backend)
+        assert data["checks"][name] is True
+
+
+def test_health_reports_a_failing_store_as_failing(client, monkeypatch):
+    """P0: /api/v1/health used to return a literal {"api": True, "stores":
+    True} regardless of store state, so an operator debugging empty packs
+    had no reason to suspect a down backend. A broken probe must flip
+    both the per-store check and the overall status, and the HTTP status
+    stays 200 (the dashboard loads /stats and /health in one Promise.all;
+    a non-2xx here would blank the whole dashboard, not just this card)."""
+    registry = app_module._registry
+    assert registry is not None
+
+    def _broken_count() -> int:
+        msg = "graph backend unreachable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(registry.knowledge.graph_store, "count_nodes", _broken_count)
+
+    resp = client.get("/api/v1/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "degraded"
+    assert data["checks"]["graph_store"] is False
+    assert data["backends"]["graph_store"]["status"] == "degraded"
+    assert "graph backend unreachable" in data["backends"]["graph_store"]["error"]
+    # Other stores still report individually — one failure doesn't blank
+    # the whole card.
+    assert data["checks"]["event_log"] is True
+    assert data["backends"]["event_log"]["status"] == "ok"
 
 
 def test_stats_empty(client):
@@ -655,6 +697,41 @@ def test_list_traces(client):
     assert data["traces"][0]["intent"] == "list test"
 
 
+def test_list_traces_until_pages_older_history(client):
+    """``until`` is ``/traces``'s page-older convention, same as /events —
+    there is no offset param to page with instead."""
+    client.post("/api/v1/traces", json=_make_trace(intent="older"))
+    older_at = client.get("/api/v1/traces").json()["traces"][0]["created_at"]
+    client.post("/api/v1/traces", json=_make_trace(intent="newer"))
+
+    resp = client.get("/api/v1/traces", params={"until": older_at})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [t["intent"] for t in data["traces"]] == ["older"]
+    # total is the unfiltered store count, not the paged slice
+    assert data["total"] == 2
+
+
+def test_list_trace_domains_counts_the_whole_store_not_one_page(client):
+    """The domain filter's options come from a server-side count over every
+    stored trace, not the fetched page -- so a domain with zero traces on
+    the current (small) page, but traces elsewhere, still shows up, and one
+    with zero traces anywhere never does."""
+    for _ in range(3):
+        client.post("/api/v1/traces", json=_make_trace(domain="platform"))
+    client.post("/api/v1/traces", json=_make_trace(domain="data"))
+    client.post("/api/v1/traces", json=_make_trace())  # no domain
+
+    resp = client.get("/api/v1/traces/domains")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["domains"] == [
+        {"domain": "platform", "count": 3},
+        {"domain": "data", "count": 1},
+    ]
+
+
 def test_get_trace_not_found(client):
     resp = client.get("/api/v1/traces/nonexistent")
     assert resp.status_code == 404
@@ -1171,6 +1248,7 @@ def _seed_advisories(stores_dir, count):
                     success_rate_with=0.6,
                     success_rate_without=0.0,
                     effect_size=0.6,
+                    evidence_confidence=1.0,
                 ),
                 scope="global",
             )
@@ -1254,6 +1332,43 @@ def test_precedents_empty(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 0
+
+
+def test_list_precedent_domains_counts_every_promoted_precedent(client):
+    """The domain filter's options come from a server-side count over every
+    promoted precedent, not the fetched page -- a domain with zero
+    precedents on the current (small) page, but precedents elsewhere,
+    still shows up, and one with zero precedents anywhere never does."""
+    event_log = app_module._registry.operational.event_log
+    for i in range(3):
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=f"platform-{i}",
+            payload={"domain": "platform", "title": "t"},
+        )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="data-0",
+        payload={"domain": "data", "title": "t"},
+    )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="no-domain-0",
+        payload={"title": "t"},  # no domain
+    )
+
+    resp = client.get("/api/v1/precedents/domains")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["domains"] == [
+        {"domain": "platform", "count": 3},
+        {"domain": "data", "count": 1},
+    ]
+    assert data["truncated"] is False
 
 
 # -- Batch mutations --
@@ -1368,6 +1483,38 @@ def test_batch_refuses_an_unattended_writer(client):
     data = resp.json()
     assert (data["rejected"], data["failed"]) == (1, 0)
     assert [r["status"] for r in data["results"]] == ["rejected"]
+
+
+@pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+def test_batch_refuses_schedule_admin_operations(client, operation):
+    """``schedule.update``/``job.run_request`` are admin-scoped: they are
+    handled only by ``trellis.mutate.build_schedule_executor``, never by
+    the curate-wired executor this route builds. Submitting either here
+    hits the ordinary "no handler registered" ``FAILED`` path — the same
+    refusal ``link.remove`` gets above — not a policy rejection and not a
+    crash.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": operation,
+                    "args": {},
+                    "target_type": "schedule",
+                    "target_id": "tune",
+                }
+            ],
+            "strategy": "continue_on_error",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["failed"], data["rejected"], data["succeeded"]) == (1, 0, 0)
+    (result,) = data["results"]
+    assert result["status"] == "failed"
+    assert "no handler registered" in result["message"].lower()
+    assert operation in result["message"].lower()
 
 
 def test_batch_feedback_record_refuses_an_out_of_range_rating(client):
@@ -2161,6 +2308,122 @@ class TestAdvisoryGenerateOnADegradedStore:
         detail = resp.json()["detail"]
         assert detail["code"] == "stale_store_write"
         assert detail["path"] == str(path)
+
+
+_GENERATE_ENTITY_GOOD = "ar:ent:good"
+
+
+def _seed_generate_entity_correlation_signal(registry: StoreRegistry) -> None:
+    """Seed packs that only clear the advisory gate below the module
+    default ``min_sample_size`` (5).
+
+    ``ar:ent:good`` appears in 3 successful packs (rate_with=1.0); 3 more
+    packs without it all fail (rate_without=0.0, baseline 0 -> effect
+    1.0, comfortably above the 0.15 default ``min_effect_size`` floor).
+    ``AdvisoryGenerator`` refuses both arms below ``min_sample_size``
+    packs, so at the module default neither the 3-pack presence arm nor
+    the 3-pack comparison arm qualifies; a stored override of 3 lets both
+    through (mirrors ``tests/unit/cli/test_worker.py``'s
+    ``_seed_entity_correlation_signal``, which proves the same resolver
+    through the CLI's live-mode entry point rather than this REST one).
+    """
+    event_log = registry.operational.event_log
+    for i in range(3):
+        pack_id = f"ar-ent-with-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "ar-test",
+                "injected_item_ids": [_GENERATE_ENTITY_GOOD],
+                "injected_items": [
+                    {
+                        "item_id": _GENERATE_ENTITY_GOOD,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "success",
+                "success": True,
+                "helpful_item_ids": [_GENERATE_ENTITY_GOOD],
+            },
+        )
+    for i in range(3):
+        pack_id = f"ar-ent-without-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "domain": "ar-test",
+                "injected_item_ids": [f"ar:ent:other{i}"],
+                "injected_items": [
+                    {
+                        "item_id": f"ar:ent:other{i}",
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "outcome": "failure",
+                "success": False,
+                "unhelpful_item_ids": [],
+            },
+        )
+
+
+class TestAdvisoryGenerateSettingsWiring:
+    """Re-gate #867 M26: ``POST /advisories/generate`` must thread a
+    *stored* ``advisory_min_sample_size`` override through to
+    ``resolve_advisory_thresholds`` -- not just accept ``min_sample``/
+    ``min_effect`` as query params, which every other test in this class
+    already exercises. A mutant that drops the call's
+    ``settings_values`` argument (passing ``None`` instead) still returns
+    200 with an empty report every time, because it falls back silently
+    to the module defaults -- this proves the stored value is what
+    actually widens the gate, by seeding a shape that clears it only
+    with the override in place.
+    """
+
+    def test_generate_honours_a_stored_min_sample_size(self, client, tmp_path):
+        registry = app_module._registry
+        _seed_generate_entity_correlation_signal(registry)
+
+        default_resp = client.post("/api/v1/advisories/generate")
+        assert default_resp.status_code == 200, default_resp.text
+        assert default_resp.json()["advisories_generated"] == 0
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("advisory_min_sample_size", 3)
+
+        overridden_resp = client.post("/api/v1/advisories/generate")
+        assert overridden_resp.status_code == 200, overridden_resp.text
+        assert overridden_resp.json()["advisories_generated"] >= 1
 
 
 class TestVectorsResetStatusLine:

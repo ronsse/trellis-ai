@@ -206,7 +206,7 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
                 f"configured for {self._dimensions}"
             )
             raise ValueError(msg)
-        meta_json = json.dumps(metadata or {})
+        meta_json = json.dumps(metadata or {}, allow_nan=False)
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """

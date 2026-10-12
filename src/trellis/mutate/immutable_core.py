@@ -76,8 +76,25 @@ from trellis.mutate.commands import Command, Operation
 #: ``mutate`` imports ``learning``) and this module is not worth
 #: inverting that for. The duplication is bounded two ways, both in
 #: ``tests/unit/test_immutable_core_rule.py``: an equality test that
-#: imports the four live constants, and an AST scan of ``src/`` that
-#: fails on a fifth governing constant nobody added here.
+#: imports the four live constants (a subset check, since the roster also
+#: carries the settings-registry keys below), and an AST scan of ``src/``
+#: that fails on a sixth governing constant nobody added here.
+#:
+#: Two shapes share this one set on purpose. The first four are whole-loop
+#: ``ParameterScope.component_id`` values — moving them moves another
+#: loop's gate. The remaining entries are ``SETTINGS_REGISTRY`` leaf keys
+#: for ``LearningCandidateAutoPromotePolicy`` and its predecessor
+#: ``AutoPromotePolicy``: no ``rule_tuner`` proposal can ever
+#: name one as a ``component_id`` — they are env/settings/config knobs,
+#: not tuner scopes — but the AST scan in
+#: ``tests/unit/test_immutable_core_rule.py`` collects every
+#: ``learning.``-prefixed module-level string under ``src/trellis/learning``
+#: on purpose, by shape rather than by role, because *that* is what caught
+#: the three-against-four roster the scan replaced. Denying a
+#: ``component_id`` no proposal will ever name costs nothing; leaving one
+#: off the roster because it "doesn't really count" is the failure mode
+#: this module exists to close off. If a future knob trips the scan,
+#: add it here rather than narrowing the scan.
 GOVERNING_KEYS: frozenset[str] = frozenset(
     {
         # schema_evolution's thresholds gate the pass that auto-mutates
@@ -92,6 +109,20 @@ GOVERNING_KEYS: frozenset[str] = frozenset(
         # scoring's promote/noise thresholds gate which precedents reach
         # get_lessons at all.
         "learning.scoring",
+        # AutoPromotePolicy's SETTINGS_REGISTRY keys
+        # (trellis.learning.tuners.auto_promote) — not a component_id any
+        # proposal can name, but shaped like one and swept up by the scan.
+        "learning.auto_promote.enabled",
+        "learning.auto_promote.min_sample_size",
+        "learning.auto_promote.min_effect_size",
+        # LearningCandidateAutoPromotePolicy's SETTINGS_REGISTRY keys
+        # (trellis.learning.candidate_auto_promote) — same reasoning.
+        "learning.candidate_auto_promote.enabled",
+        "learning.candidate_auto_promote.mode",
+        "learning.candidate_auto_promote.min_helpful_count",
+        "learning.candidate_auto_promote.min_distinct_sessions",
+        "learning.candidate_auto_promote.require_zero_unhelpful",
+        "learning.candidate_auto_promote.max_promotions_per_run",
     }
 )
 
@@ -129,7 +160,16 @@ def governing_key_refusal(component_id: str) -> str | None:
 #: ``entity.update`` is *not* here: the graph is SCD-2, so an update adds
 #: a version and ``get_node_history`` still returns the prior one.
 #: ``alias.upsert`` *is*, because a rebind detaches the alias from its
-#: previous owner and nothing retains that binding.
+#: previous owner and nothing retains that binding. ``settings.update``
+#: *is* too, for the same reason: ``SettingsStore`` has no SCD-2 or
+#: history read — a write (including a null-value reset) overwrites or
+#: removes the prior override in place, and only the audit event, not the
+#: store, still has it. ``classify_rule.apply`` is here for the identical
+#: reason: ``ClassifyOverridesStore`` keys a row by ``(kind, key)`` and
+#: re-applying that key with a *different* ``target`` silently overwrites
+#: the prior row in place (CLAUDE.md: "a wrong rule hides content").
+#: ``classify_rule.revoke`` removes the row outright with no SCD-2 or
+#: history read either.
 DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
     {
         Operation.ENTITY_MERGE,
@@ -138,6 +178,13 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.LABEL_REMOVE,
         Operation.REDACTION_APPLY,
         Operation.RETENTION_PRUNE,
+        # schedule.update overwrites a flat ``DegradableJsonStore`` row in
+        # place (no SCD-2 history, unlike ``entity.update``) — the same
+        # "a later read cannot recover it" rationale as ``alias.upsert``.
+        Operation.SCHEDULE_UPDATE,
+        Operation.SETTINGS_UPDATE,
+        Operation.CLASSIFY_RULE_APPLY,
+        Operation.CLASSIFY_RULE_REVOKE,
     }
 )
 
@@ -152,7 +199,6 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.EVIDENCE_INGEST,
         Operation.EVIDENCE_ATTACH,
         Operation.PRECEDENT_PROMOTE,
-        Operation.PRECEDENT_UPDATE,
         Operation.ENTITY_CREATE,
         Operation.ENTITY_UPDATE,
         Operation.LINK_CREATE,
@@ -161,6 +207,10 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.OBSERVATION_RECORD,
         Operation.MEASUREMENT_RECORD,
         Operation.RETENTION_RESTORE,
+        # job.run_request only coalesces a ``run_requested_at`` signal for
+        # the dispatcher to pick up — a record character, like
+        # feedback.record / observation.record / measurement.record.
+        Operation.JOB_RUN_REQUEST,
     }
 )
 

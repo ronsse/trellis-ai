@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import pytest
 
 from tests.cli_output import plain
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.stores.base.event_log import EventType
 from trellis_cli.admin import admin_app
 from trellis_cli.admin_proposals import (
@@ -390,3 +391,81 @@ class TestExitCodeRouting:
         assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["error"] == "store_error"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up to trellis-ai#829/#836/#837's "describe, don't quote" sweep
+# (issue #206): all three store-error handlers build their message as
+# ``f"{type(exc).__name__}: {render_exception_detail(exc)}"`` rather than
+# interpolating ``exc`` directly, so a hostile/credential-shaped exception
+# message must not reach the JSON payload whole.
+# ---------------------------------------------------------------------------
+
+#: A credential-shaped planted value — trips the secret-shaped-assignment
+#: leak heuristic in ``trellis.core.error_sanitize.sanitize_error_message``.
+_HOSTILE = "sk-ant-TESTTOKEN-9f8e7d6c5b4a"
+
+
+def _boom_hostile(*_args: object, **_kwargs: object) -> object:
+    msg = f"connection failed: api_key={_HOSTILE}"
+    raise RuntimeError(msg)
+
+
+class TestHostileStoreErrorIsSanitized:
+    """A raw exception message can carry driver/caller text (#206); the
+    three store-error handlers must describe the failure's type rather
+    than quote it back whole."""
+
+    def test_generate_proposals_drops_the_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "trellis_cli.admin_proposals.get_event_log",
+            _boom_hostile,
+        )
+        result = _invoke(["generate-proposals", "--format", "json"])
+        assert result.exit_code == EXIT_STORE, result.output
+        assert _HOSTILE not in result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["error"] == "store_error"
+        assert "RuntimeError" in data["message"]
+        assert SUPPRESSED_MARKER in data["message"]
+
+    def test_list_proposals_drops_the_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "trellis_cli.admin_proposals.get_event_log",
+            _boom_hostile,
+        )
+        result = _invoke(["list-proposals", "--format", "json"])
+        assert result.exit_code == EXIT_STORE, result.output
+        assert _HOSTILE not in result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["error"] == "store_error"
+        assert "RuntimeError" in data["message"]
+        assert SUPPRESSED_MARKER in data["message"]
+
+    def test_show_proposal_drops_the_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "trellis_cli.admin_proposals.get_event_log",
+            _boom_hostile,
+        )
+        result = _invoke(["show-proposal", "anything", "--format", "json"])
+        assert result.exit_code == EXIT_STORE, result.output
+        assert _HOSTILE not in result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["error"] == "store_error"
+        assert "RuntimeError" in data["message"]
+        assert SUPPRESSED_MARKER in data["message"]

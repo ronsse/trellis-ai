@@ -8,12 +8,16 @@ cursor, aggregate per learning-axis cell, apply a rule set, and emit
 """
 
 from trellis.learning.tuners.auto_promote import (
+    AUTO_PROMOTE_ENABLED_SETTING,
+    AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING,
+    AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING,
     DEFAULT_AUTO_MIN_EFFECT_SIZE,
     DEFAULT_AUTO_MIN_SAMPLE_SIZE,
     AutoPromoteOutcome,
     AutoPromotePolicy,
     AutoPromoteReport,
     report_to_dict,
+    resolve_auto_promote_overrides,
     run_auto_promotion,
 )
 from trellis.learning.tuners.promotion import (
@@ -41,6 +45,9 @@ from trellis.learning.tuners.rule_tuner import (
 )
 
 __all__ = [
+    "AUTO_PROMOTE_ENABLED_SETTING",
+    "AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING",
+    "AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING",
     "DEFAULT_AUTO_MIN_EFFECT_SIZE",
     "DEFAULT_AUTO_MIN_SAMPLE_SIZE",
     "DEFAULT_RULES",
@@ -58,6 +65,7 @@ __all__ = [
     "TuningRule",
     "aggregate_outcomes",
     "apply_rules",
+    "resolve_auto_promote_overrides",
     "monitor_post_promotion",
     "preview_promotion",
     "promote_proposal",

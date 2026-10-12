@@ -139,6 +139,15 @@ def test_upsert_without_node_raises(stores):
         vector.upsert("ghost", _vec(0.1, 0.2, 0.3))
 
 
+def test_upsert_refuses_a_non_finite_metadata_value(stores):
+    """``upsert_bulk`` calls ``upsert`` per item, so one fix site covers both."""
+    graph, vector = stores
+    _make_node(graph, "a")
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        vector.upsert("a", _vec(0.1, 0.2, 0.3), metadata={"score": float("nan")})
+    assert vector.get("a") is None
+
+
 def test_upsert_bulk_propagates_missing_node(stores):
     graph, vector = stores
     _make_node(graph, "a")

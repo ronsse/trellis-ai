@@ -57,7 +57,6 @@ _OPS_WITH_SIMPLE_ARGS: list[tuple[Operation, dict[str, Any]]] = [
     # 0.5 keeps this op a member of the valid-commands alphabet.
     (Operation.FEEDBACK_RECORD, {"target_id": "p1", "rating": 0.5}),
     (Operation.PRECEDENT_PROMOTE, {"trace_id": "t1", "title": "x", "description": "y"}),
-    (Operation.PRECEDENT_UPDATE, {"precedent_id": "p1"}),
     (Operation.REDACTION_APPLY, {"target_id": "n1", "reason": "pii"}),
     # ``retention.prune`` shipped with an empty ``set()`` required-args
     # schema, so ``{}`` used to validate against a verb that had no

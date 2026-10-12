@@ -17,6 +17,7 @@ from trellis.retrieve import builder_factory as core_builder_factory
 from trellis_sdk import client as sync_sdk
 from trellis_wire.axes import (
     axis_note_from_payload,
+    format_embedder_failed_note,
     format_failed_axes_note,
     format_misconfigured_semantic_note,
 )
@@ -33,6 +34,10 @@ def test_wire_package_owns_the_canonical_axis_note_renderer() -> None:
     assert (
         core_builder_factory.format_misconfigured_semantic_note
         is wire_axes.format_misconfigured_semantic_note
+    )
+    assert (
+        core_builder_factory.format_embedder_failed_note
+        is wire_axes.format_embedder_failed_note
     )
 
 
@@ -61,6 +66,40 @@ class TestFormatMisconfiguredSemanticNote:
     def test_misconfigured_renders_the_sentence(self) -> None:
         note = format_misconfigured_semantic_note("misconfigured")
         assert note.startswith("**Semantic retrieval misconfigured:**")
+
+
+class TestFormatEmbedderFailedNote:
+    """Q5-A: the embedder itself never resolving, distinct from a
+    resolved embedder whose vector backend failed to initialise."""
+
+    def test_none_error_type_renders_nothing(self) -> None:
+        assert format_embedder_failed_note(None, None) == ""
+
+    def test_none_error_type_renders_nothing_even_with_a_setting(self) -> None:
+        """``error_type`` doubles as the "does this state apply" flag."""
+        assert format_embedder_failed_note(None, "embeddings.provider") == ""
+
+    def test_empty_string_error_type_renders_nothing(self) -> None:
+        assert format_embedder_failed_note("", "embeddings.provider") == ""
+
+    def test_error_type_without_setting_names_only_the_type(self) -> None:
+        note = format_embedder_failed_note("ConfigError", None)
+        assert "(ConfigError)" in note
+        assert note.startswith("**Semantic retrieval unavailable:**")
+        assert "reindex-vectors" in note
+
+    def test_error_type_with_setting_names_both(self) -> None:
+        note = format_embedder_failed_note("BackendNotInstalledError", "backend.openai")
+        assert "(BackendNotInstalledError: backend.openai)" in note
+
+    def test_never_names_exception_message_text(self) -> None:
+        """Describe, don't quote: only the type and the setting key appear."""
+        note = format_embedder_failed_note("ConfigError", "embeddings.provider")
+        assert "embeddings.provider" in note
+        assert "ConfigError" in note
+        # No mechanism exists here to inject message text, but pin the
+        # shape so a future edit can't start threading it through.
+        assert note.count("(") == 1
 
 
 class TestAxisNoteFromPayload:
@@ -126,3 +165,65 @@ class TestAxisNoteFromPayload:
 
     def test_missing_keys_render_nothing(self) -> None:
         assert axis_note_from_payload({}) == ""
+
+    def test_embedder_failed_renders_the_embedder_failed_note(self) -> None:
+        axes = {
+            "available": ["keyword", "graph"],
+            "ran": ["keyword", "graph"],
+            "failed": [],
+            "semantic": "embedder_failed",
+            "embedder_error_type": "ConfigError",
+            "embedder_setting": "embeddings.provider",
+        }
+        note = axis_note_from_payload(axes)
+        assert note.startswith("**Semantic retrieval unavailable:**")
+        assert "(ConfigError: embeddings.provider)" in note
+
+    def test_embedder_failed_without_setting_names_only_the_type(self) -> None:
+        axes = {
+            "failed": [],
+            "semantic": "embedder_failed",
+            "embedder_error_type": "ConfigError",
+        }
+        note = axis_note_from_payload(axes)
+        assert "(ConfigError)" in note
+
+    def test_embedder_failed_joins_with_a_failed_axis_note(self) -> None:
+        axes = {
+            "available": ["keyword", "graph"],
+            "ran": ["graph"],
+            "failed": ["keyword"],
+            "semantic": "embedder_failed",
+            "embedder_error_type": "ConfigError",
+            "embedder_setting": "embeddings.provider",
+        }
+        note = axis_note_from_payload(axes)
+        failed_line, _, embedder_line = note.partition("\n\n")
+        assert failed_line == "**Retrieval axis failed:** keyword."
+        assert embedder_line.startswith("**Semantic retrieval unavailable:**")
+
+    def test_embedder_error_type_outside_embedder_failed_state_is_ignored(self) -> None:
+        """``embedder_error_type``/``embedder_setting`` are only meaningful
+        when ``semantic == "embedder_failed"`` -- a stray value on another
+        state (e.g. a cache artifact) must not leak into the note."""
+        axes = {
+            "failed": [],
+            "semantic": "not_configured",
+            "embedder_error_type": "ConfigError",
+            "embedder_setting": "embeddings.provider",
+        }
+        assert axis_note_from_payload(axes) == ""
+
+    def test_malformed_embedder_setting_is_ignored_not_raised_on(self) -> None:
+        axes = {
+            "failed": [],
+            "semantic": "embedder_failed",
+            "embedder_error_type": "ConfigError",
+            "embedder_setting": 42,
+        }
+        note = axis_note_from_payload(axes)
+        assert note == (
+            "**Semantic retrieval unavailable:** the embedder failed to"
+            " resolve (ConfigError), so this pack has no semantic results."
+            " Fix the setting, then run `trellis admin reindex-vectors`."
+        )

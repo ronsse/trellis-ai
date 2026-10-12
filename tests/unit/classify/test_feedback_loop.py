@@ -45,7 +45,7 @@ class TestApplyNoiseTags:
             {"content_tags": {"domain": ["api"], "signal_quality": "high"}},
         )
 
-        updated = apply_noise_tags([d1], doc_store)
+        result = apply_noise_tags([d1], doc_store)
 
         doc1 = doc_store.get(d1)
         doc2 = doc_store.get(d2)
@@ -53,26 +53,29 @@ class TestApplyNoiseTags:
         assert doc1["metadata"]["content_tags"]["signal_quality"] == "noise"
         assert doc2 is not None
         assert doc2["metadata"]["content_tags"]["signal_quality"] == "high"
-        assert updated == 1
+        assert result.updated == 1
+        assert result.refused_not_document == []
 
     def test_skips_nonexistent_items(self, doc_store: SQLiteDocumentStore) -> None:
-        updated = apply_noise_tags(["nonexistent-id"], doc_store)
-        assert updated == 0
+        result = apply_noise_tags(["nonexistent-id"], doc_store)
+        assert result.updated == 0
+        assert result.refused_not_document == ["nonexistent-id"]
 
     def test_empty_candidates_noop(self, doc_store: SQLiteDocumentStore) -> None:
-        updated = apply_noise_tags([], doc_store)
-        assert updated == 0
+        result = apply_noise_tags([], doc_store)
+        assert result.updated == 0
+        assert result.refused_not_document == []
 
     def test_creates_content_tags_if_missing(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
         d1 = doc_store.put(None, "content without tags", {})
-        updated = apply_noise_tags([d1], doc_store)
+        result = apply_noise_tags([d1], doc_store)
 
         doc = doc_store.get(d1)
         assert doc is not None
         assert doc["metadata"]["content_tags"]["signal_quality"] == "noise"
-        assert updated == 1
+        assert result.updated == 1
 
     def test_preserves_other_tags(self, doc_store: SQLiteDocumentStore) -> None:
         d1 = doc_store.put(
@@ -127,7 +130,7 @@ class TestNoiseTaggingPreservesRecency:
         before = doc_store.get("stale")["updated_at"]
 
         clock["now"] = now
-        assert apply_noise_tags(["stale"], doc_store) == 1
+        assert apply_noise_tags(["stale"], doc_store).updated == 1
 
         doc = doc_store.get("stale")
         assert doc is not None
@@ -211,7 +214,7 @@ class TestNoiseTaggingPreservesRecency:
         )
 
         clock["now"] = now
-        assert apply_noise_tags(["stale"], docs) == 1
+        assert apply_noise_tags(["stale"], docs).updated == 1
 
         report = resolve_candidates(
             RetentionCriteria(

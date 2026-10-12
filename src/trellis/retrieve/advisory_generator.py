@@ -62,8 +62,9 @@ call site's comment always claimed it did.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -73,6 +74,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
+from trellis.core.settings_registry import get_setting, validate_value
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
@@ -103,6 +105,20 @@ logger = structlog.get_logger(__name__)
 #: rate before it meant anything.
 _MIN_SAMPLE_SIZE = 5
 _MIN_EFFECT_SIZE = 0.15
+
+#: Settings-registry wiring for the two thresholds above — env wins over a
+#: stored override, which wins over the module default. Every surface
+#: that builds an :class:`AdvisoryGenerator` without its own explicit
+#: ``min_sample``/``min_effect`` override (the nightly curation worker)
+#: or that wants a settings-store value to be visible as the Query/CLI
+#: default (the REST route, the CLI command) resolves through
+#: :func:`resolve_advisory_thresholds` rather than passing the bare
+#: module constants. See ``trellis.core.settings_registry``'s
+#: ``advisory_min_sample_size`` / ``advisory_min_effect_size`` entries.
+MIN_SAMPLE_SIZE_ENV = "TRELLIS_ADVISORY_MIN_SAMPLE_SIZE"
+MIN_EFFECT_SIZE_ENV = "TRELLIS_ADVISORY_MIN_EFFECT_SIZE"
+MIN_SAMPLE_SIZE_SETTING = "advisory_min_sample_size"
+MIN_EFFECT_SIZE_SETTING = "advisory_min_effect_size"
 _SUCCESS_RATING_THRESHOLD = SUCCESS_RATING_THRESHOLD
 _CONFIDENCE_SCALE = 0.1  # multiplied by sample_size to cap at 1.0
 _MIN_WORD_LENGTH = 3
@@ -112,6 +128,99 @@ _MIN_BIN_COUNT = 2
 #: How many pack ids to carry as evidence on one advisory. Enough for a
 #: reviewer to spot-check the claim, short enough that the row stays small.
 _MAX_REPRESENTATIVE = 5
+
+
+def resolve_advisory_thresholds(
+    settings: Mapping[str, Any] | None = None,
+) -> tuple[int, float]:
+    """Resolve ``(min_sample_size, min_effect_size)``.
+
+    Env beats a settings-store override beats the module default — the
+    same precedence every other read-side knob in this codebase applies
+    (see :mod:`trellis.retrieve.builder_factory`'s ``graph_seeding``). A
+    caller that already received an explicit per-call override (a CLI
+    flag, a query parameter) should use that instead of calling this at
+    all; this is for the common case where nothing was explicitly passed.
+
+    Both values are coerced and bounds-checked through the registry's own
+    ``validate_value`` (the same coercion the governed ``PUT /settings``
+    path uses) — a non-finite or out-of-range value (``nan``, ``inf``, a
+    negative sample size, an effect size outside ``0..1``) falls back to
+    the module default with a warning instead of reaching the generator,
+    which would otherwise either crash (``int(float("inf"))`` raises
+    ``OverflowError``, which a bare ``except ValueError`` does not catch)
+    or silently fail open (a ``nan``/negative effect floor compares false
+    against everything, admitting advisories a real floor would refuse).
+    """
+    sample_spec = get_setting(MIN_SAMPLE_SIZE_SETTING)
+    sample_raw = os.environ.get(MIN_SAMPLE_SIZE_ENV, "").strip()
+    if sample_raw:
+        try:
+            min_sample_size = (
+                int(validate_value(sample_spec, sample_raw))
+                if sample_spec is not None
+                else int(sample_raw)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "advisory_generator.bad_env_int",
+                var=MIN_SAMPLE_SIZE_ENV,
+                error_type=type(exc).__name__,
+            )
+            min_sample_size = _MIN_SAMPLE_SIZE
+    elif settings is not None and MIN_SAMPLE_SIZE_SETTING in settings:
+        sample_stored = settings[MIN_SAMPLE_SIZE_SETTING]
+        try:
+            min_sample_size = (
+                int(validate_value(sample_spec, sample_stored))
+                if sample_spec is not None
+                else int(sample_stored)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "advisory_generator.bad_settings_int",
+                setting=MIN_SAMPLE_SIZE_SETTING,
+                error_type=type(exc).__name__,
+            )
+            min_sample_size = _MIN_SAMPLE_SIZE
+    else:
+        min_sample_size = _MIN_SAMPLE_SIZE
+
+    effect_spec = get_setting(MIN_EFFECT_SIZE_SETTING)
+    effect_raw = os.environ.get(MIN_EFFECT_SIZE_ENV, "").strip()
+    if effect_raw:
+        try:
+            min_effect_size = (
+                float(validate_value(effect_spec, effect_raw))
+                if effect_spec is not None
+                else float(effect_raw)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "advisory_generator.bad_env_float",
+                var=MIN_EFFECT_SIZE_ENV,
+                error_type=type(exc).__name__,
+            )
+            min_effect_size = _MIN_EFFECT_SIZE
+    elif settings is not None and MIN_EFFECT_SIZE_SETTING in settings:
+        effect_stored = settings[MIN_EFFECT_SIZE_SETTING]
+        try:
+            min_effect_size = (
+                float(validate_value(effect_spec, effect_stored))
+                if effect_spec is not None
+                else float(effect_stored)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "advisory_generator.bad_settings_float",
+                setting=MIN_EFFECT_SIZE_SETTING,
+                error_type=type(exc).__name__,
+            )
+            min_effect_size = _MIN_EFFECT_SIZE
+    else:
+        min_effect_size = _MIN_EFFECT_SIZE
+
+    return min_sample_size, min_effect_size
 
 
 @dataclass(slots=True)

@@ -1,5 +1,320 @@
 components:
   schemas:
+    AdminJobLastRun:
+      additionalProperties: false
+      description: 'Most recent job-run record for one catalog job, from the EventLog.
+
+
+        Derived from the latest ``JOB_RUN_STARTED`` / ``JOB_RUN_COMPLETED``
+
+        pair (see ``trellis admin record-job-run``) — never a hardcoded
+
+        literal. All fields ``None`` together means the job has no run
+
+        record the EventLog can see (never run, or run before this build).
+
+        ``started_at`` can be present with the rest ``None`` when a run
+
+        started but the dispatcher never called ``record-job-run`` to close
+
+        it out (crashed before reporting).'
+      properties:
+        duration_ms:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Duration Ms
+        exit_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Exit Code
+        finished_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Finished At
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Id
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      title: AdminJobLastRun
+      type: object
+    AdminJobListResponse:
+      additionalProperties: false
+      description: 'Response for ``GET /api/v1/admin/jobs``.
+
+
+        ``dispatcher_last_seen_at`` is the most recent ``JOB_RUN_STARTED``
+
+        across every catalog job — the only signal this server has that
+
+        *some* dispatcher is polling ``due-jobs`` at all. ``dispatcher_seen``
+
+        is the boolean a UI banner reads directly (recently seen within a
+
+        server-chosen window) rather than re-deriving a staleness threshold
+
+        client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
+
+        no dispatcher has ever reported. ``store_degradation`` is ``None``
+
+        on a clean read and otherwise the same shape ``GET /api/v1/policies``
+
+        and ``GET /api/v1/advisories`` already use (``LoadDegradation.
+
+        to_dict()``, recovery command included) — a caller reading only
+
+        ``jobs``/``count`` would otherwise see catalog defaults presented as
+
+        the operator''s own stored choices with no signal that the file
+
+        behind them is damaged.'
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        dispatcher_last_seen_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dispatcher Last Seen At
+        dispatcher_seen:
+          default: false
+          title: Dispatcher Seen
+          type: boolean
+        jobs:
+          items:
+            $ref: '#/components/schemas/AdminJobSummary'
+          title: Jobs
+          type: array
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
+      title: AdminJobListResponse
+      type: object
+    AdminJobPatchRequest:
+      additionalProperties: false
+      description: 'Body for ``PATCH /api/v1/admin/jobs/{name}``.
+
+
+        Every field is optional with no sentinel beyond Pydantic''s own
+
+        ``model_fields_set``: the route reads which fields were actually
+
+        present in the request body (vs omitted) so a ``PATCH`` changes only
+
+        what the caller named — sending ``"cadence": null`` explicitly
+
+        clears cadence (makes the job manual-only); omitting ``cadence``
+
+        leaves it unchanged. ``extra="forbid"`` (:class:`WireRequestModel`)
+
+        refuses any other field name outright, including a command, argv,
+
+        path or environment variable — there is no such field here to
+
+        forbid *selectively*, which is the point.'
+      properties:
+        cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cadence
+        enabled:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enabled
+        timeout_seconds:
+          anyOf:
+          - maximum: 86400.0
+            minimum: 1.0
+            type: integer
+          - type: 'null'
+          title: Timeout Seconds
+      title: AdminJobPatchRequest
+      type: object
+    AdminJobPatchResponse:
+      additionalProperties: false
+      description: Response for a successful ``PATCH /api/v1/admin/jobs/{name}``.
+      properties:
+        job:
+          $ref: '#/components/schemas/AdminJobSummary'
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - job
+      title: AdminJobPatchResponse
+      type: object
+    AdminJobRunResponse:
+      additionalProperties: false
+      description: 'Response for ``POST /api/v1/admin/jobs/{name}/run``.
+
+
+        Never claims synchronous execution: the write sets
+
+        ``run_requested_at`` and nothing else runs inline.
+
+        ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
+
+        the confirm — a host dispatcher polling for due jobs on its own
+
+        cadence is what actually executes the job, if one is installed.
+
+        ``run_requested_at`` is exactly what the re-read row carries —
+
+        ``None`` on the (expected-unreachable, since a non-success result
+
+        raises before this is built) chance the handler''s own write did not
+
+        stick — never a timestamp this route or the CLI computed itself,
+
+        which would report a value the handler never wrote.'
+      properties:
+        dispatcher_hint:
+          default: Accepted. A host dispatcher, if one is installed, picks this up on its next poll, typically within ~5 minutes.
+          title: Dispatcher Hint
+          type: string
+        name:
+          title: Name
+          type: string
+        run_requested_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Requested At
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - name
+      - run_requested_at
+      title: AdminJobRunResponse
+      type: object
+    AdminJobSummary:
+      additionalProperties: false
+      description: 'One job: catalog identity joined with its schedule-registry row.
+
+
+        ``name``, ``description``, ``host_only``, ``spends_llm`` and
+
+        ``heavy`` are fixed catalog facts (source-reviewed, never writable
+
+        over this API). ``enabled``, ``cadence``, ``timeout_seconds`` and
+
+        ``run_requested_at`` are the mutable schedule-registry row —
+
+        materialized with catalog defaults when no row has been written
+
+        yet, so a job always appears here even before ``init-schedule`` or
+
+        a first ``PATCH``. ``stored`` is ``False`` for exactly that
+
+        materialized-default case (including a row that failed to parse
+
+        out of a degraded store): the catalog default shown is never the
+
+        operator''s own choice, and ``next_due_at`` is always ``None`` for
+
+        such a row — ``due-jobs`` only ever evaluates a *stored* row, so a
+
+        catalog default could never actually fire at the time this field
+
+        would otherwise claim. ``default_cadence`` is the catalog''s own
+
+        default, shown alongside the effective ``cadence`` so an operator
+
+        can tell "customized" from "still the catalog default" without a
+
+        second request. ``next_due_at`` is a display-only estimate
+
+        (``None`` for a manual-only job, a job with no stored row, or when
+
+        no tick could be found).'
+      properties:
+        cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cadence
+        default_cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Default Cadence
+        description:
+          title: Description
+          type: string
+        enabled:
+          title: Enabled
+          type: boolean
+        heavy:
+          title: Heavy
+          type: boolean
+        host_only:
+          title: Host Only
+          type: boolean
+        last_run:
+          anyOf:
+          - $ref: '#/components/schemas/AdminJobLastRun'
+          - type: 'null'
+        loops:
+          items:
+            type: string
+          title: Loops
+          type: array
+        name:
+          title: Name
+          type: string
+        next_due_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Due At
+        run_requested_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Requested At
+        spends_llm:
+          title: Spends Llm
+          type: boolean
+        stored:
+          default: true
+          title: Stored
+          type: boolean
+        timeout_seconds:
+          title: Timeout Seconds
+          type: integer
+      required:
+      - name
+      - description
+      - host_only
+      - spends_llm
+      - heavy
+      - enabled
+      - timeout_seconds
+      title: AdminJobSummary
+      type: object
     AxisReportResponse:
       additionalProperties: false
       description: 'Which retrieval axes this pack has, ran, and did not.
@@ -7,13 +322,29 @@ components:
 
         Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
 
-        and states only, never an exception message.'
+        and states only, never an exception message. ``embedder_error_type`` and
+
+        ``embedder_setting`` are non-``None`` only when ``semantic ==
+
+        "embedder_failed"`` (Q5-A); default to ``None`` so a client built
+
+        against an older server still parses this model.'
       properties:
         available:
           items:
             type: string
           title: Available
           type: array
+        embedder_error_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedder Error Type
+        embedder_setting:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedder Setting
         failed:
           items:
             type: string
@@ -33,6 +364,27 @@ components:
       - failed
       - semantic
       title: AxisReportResponse
+      type: object
+    BackendHealth:
+      additionalProperties: false
+      description: One backend's probe outcome — mirrors ``/readyz``'s per-backend shape.
+      properties:
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        latency_ms:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Latency Ms
+        status:
+          title: Status
+          type: string
+      required:
+      - status
+      title: BackendHealth
       type: object
     BatchCommandItem:
       additionalProperties: false
@@ -390,6 +742,387 @@ components:
       required:
       - status
       title: BulkItemResult
+      type: object
+    ClassifyCandidate:
+      additionalProperties: false
+      description: 'One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
+
+
+        ``kind`` is ``"tag_keyword"`` (``key`` = keyword, ``target`` = domain
+
+        tag) or ``"domain_alias"`` (``key`` = alias, ``target`` = canonical
+
+        tag). ``status`` is ``"open"``, ``"applied"`` (an overlay row exists
+
+        for this ``(kind, key)``) or ``"dismissed"`` (a
+
+        ``CLASSIFY_CANDIDATE_DISMISSED`` event postdates this emission).
+
+
+        ``metrics`` carries the mined candidate''s own kind-specific fields
+
+        verbatim from its ``to_event_payload()`` -- ``support``/``precision``/
+
+        ``recall``/``lift``/``has_write_target`` for ``tag_keyword``;
+
+        ``cooccurrence_rate``/``is_lexical_only``/``documents_gained``/etc. for
+
+        ``domain_alias``. The two kinds'' metric vocabularies differ enough
+
+        that typing each field individually would force every row of one kind
+
+        to carry nulls for the other''s fields; a passthrough dict keeps the
+
+        DTO''s own fields (above) honest about what every row actually has.'
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        emitted_at:
+          title: Emitted At
+          type: string
+        example_count:
+          default: 0
+          title: Example Count
+          type: integer
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        metrics:
+          additionalProperties: true
+          title: Metrics
+          type: object
+        notes:
+          items:
+            type: string
+          title: Notes
+          type: array
+        recurrence_count:
+          default: 0
+          title: Recurrence Count
+          type: integer
+        source_event_id:
+          title: Source Event Id
+          type: string
+        status:
+          title: Status
+          type: string
+        target:
+          title: Target
+          type: string
+      required:
+      - candidate_id
+      - kind
+      - key
+      - target
+      - status
+      - emitted_at
+      - source_event_id
+      title: ClassifyCandidate
+      type: object
+    ClassifyCandidateDismissResponse:
+      additionalProperties: false
+      description: Outcome of dismissing one open candidate.
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - candidate_id
+      title: ClassifyCandidateDismissResponse
+      type: object
+    ClassifyCandidateListResponse:
+      additionalProperties: false
+      description: 'List of mined classify candidates, deduped to their latest emission.
+
+
+        ``store_degradation`` is the overrides store''s own
+
+        ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+
+        an applied-row-derived ``"applied"``/``"dismissed"`` status above is
+
+        read from whatever of that file parsed, so a caller rendering this
+
+        list needs the same "is what I''m showing the whole picture?" signal
+
+        ``GET /settings`` and ``GET /policies`` already carry.'
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/ClassifyCandidate'
+          title: Candidates
+          type: array
+        count:
+          default: 0
+          title: Count
+          type: integer
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
+      title: ClassifyCandidateListResponse
+      type: object
+    ClassifyMineRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/classify/candidates/mine``.
+
+
+        ``use_recommended_defaults`` (default ``True``) mirrors ``trellis
+
+        classify tag-candidates``/``domain-candidates``''s own
+
+        ``_tag_evolution_registry``/``_domain_normalization_registry``: when
+
+        the real, persistent ``ParameterRegistry`` is missing a required
+
+        threshold for a component, mine with that component''s shipped
+
+        ``RECOMMENDED_SEED_VALUES`` instead of hard-failing -- never silent,
+
+        since the response''s ``used_recommended_defaults`` names exactly
+
+        which component(s) this happened for and a ``structlog`` WARN is
+
+        emitted for each. Pin it ``False`` to require every threshold
+
+        pre-seeded (``trellis admin settings`` has no seeding command for
+
+        these yet -- seed via a governed write directly) and get a 400
+
+        naming the missing keys and their recommended values instead of a
+
+        mined set of candidates run against unreviewed defaults.'
+      properties:
+        kinds:
+          items:
+            type: string
+          title: Kinds
+          type: array
+        scan_limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scan Limit
+        use_recommended_defaults:
+          default: true
+          title: Use Recommended Defaults
+          type: boolean
+      title: ClassifyMineRequest
+      type: object
+    ClassifyMineResponse:
+      additionalProperties: false
+      description: Outcome of one mining run, plus the candidates it just emitted.
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/ClassifyCandidate'
+          title: Candidates
+          type: array
+        domain_alias_count:
+          default: 0
+          title: Domain Alias Count
+          type: integer
+        status:
+          default: ok
+          title: Status
+          type: string
+        tag_keyword_count:
+          default: 0
+          title: Tag Keyword Count
+          type: integer
+        used_recommended_defaults:
+          items:
+            type: string
+          title: Used Recommended Defaults
+          type: array
+      title: ClassifyMineResponse
+      type: object
+    ClassifyRuleApplyRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/classify/rules``.
+
+
+        ``source_event_id`` must name the ``TAG_KEYWORD_CANDIDATE`` /
+
+        ``DOMAIN_ALIAS_CANDIDATE`` event this rule was mined from, so the
+
+        applied overlay row -- and its audit event -- stay traceable back to
+
+        the evidence that justified it. ``support``/``precision``/``lift``
+
+        are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
+
+        they are optional only because a caller applying a rule with no
+
+        mined candidate behind it (hand-typed) has none to carry.
+
+
+        Each metric''s range mirrors what :mod:`trellis.learning.tag_evolution`
+
+        computes it from -- ``support`` is a document count (``ge=0``),
+
+        ``precision`` is ``support / keyword_documents`` (``ge=0, le=1``), and
+
+        ``lift`` is ``precision / base_rate`` (``ge=0``, unbounded above).
+
+        ``allow_inf_nan=False`` on the two floats refuses a raw ``NaN``/
+
+        ``Infinity`` a scripted client can still send even though
+
+        ``json.dumps`` never emits one by default -- without it, a float
+
+        field happily accepts either and REST answers 400 from deeper in
+
+        the pipeline instead of a clean 422 at the boundary.
+
+        :class:`~trellis.mutate.handlers.ClassifyRuleApplyHandler` re-checks
+
+        the same ranges itself before any write
+
+        (``_validate_classify_rule_metrics``), so a caller that reaches the
+
+        handler directly -- the CLI, a direct ``MutationExecutor.execute``
+
+        -- is refused the same way even without this field; it buys REST
+
+        callers a cheaper, more specific error, not the only backstop.'
+      properties:
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        lift:
+          anyOf:
+          - minimum: 0.0
+            type: number
+          - type: 'null'
+          title: Lift
+        precision:
+          anyOf:
+          - maximum: 1.0
+            minimum: 0.0
+            type: number
+          - type: 'null'
+          title: Precision
+        source_event_id:
+          title: Source Event Id
+          type: string
+        support:
+          anyOf:
+          - minimum: 0.0
+            type: integer
+          - type: 'null'
+          title: Support
+        target:
+          title: Target
+          type: string
+      required:
+      - kind
+      - key
+      - target
+      - source_event_id
+      title: ClassifyRuleApplyRequest
+      type: object
+    ClassifyRuleListResponse:
+      additionalProperties: false
+      description: 'Effective tag/domain rules, defaults and config.yaml included.
+
+
+        ``store_degradation`` is the overrides store''s own
+
+        ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+
+        a row that failed to parse there is simply missing from ``rules``
+
+        with no other signal, same reasoning as ``ClassifyCandidateListResponse``.'
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        rules:
+          items:
+            $ref: '#/components/schemas/ClassifyRuleRow'
+          title: Rules
+          type: array
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
+      title: ClassifyRuleListResponse
+      type: object
+    ClassifyRuleRow:
+      additionalProperties: false
+      description: 'One effective tag/domain rule, with the source that wins it.
+
+
+        ``source`` is ``"default"`` (built-in), ``"config"``
+
+        (``config.yaml``) or ``"overlay"`` (applied through the governed
+
+        write path) -- the precedence documented in
+
+        ``trellis.classify.factory``. ``applied_at``/``applied_by``/
+
+        ``source_event_id`` are set only for an ``"overlay"`` row.'
+      properties:
+        applied_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Applied At
+        applied_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Applied By
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        source:
+          title: Source
+          type: string
+        source_event_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Event Id
+        target:
+          title: Target
+          type: string
+      required:
+      - kind
+      - key
+      - target
+      - source
+      title: ClassifyRuleRow
       type: object
     CodeProposalListResponse:
       additionalProperties: false
@@ -840,8 +1573,28 @@ components:
       type: object
     HealthResponse:
       additionalProperties: false
-      description: Health check response.
+      description: 'Health check response.
+
+
+        ``checks`` is a flat bool-per-key view (``api`` plus one key per
+
+        probed backend) kept for backward compatibility with existing
+
+        callers; ``backends`` carries the same probe results with latency
+
+        and error detail for a dashboard. Both are derived from the same
+
+        probe run (``trellis_api.routes.health.probe_backends``) — never a
+
+        hard-coded literal.'
       properties:
+        backends:
+          anyOf:
+          - additionalProperties:
+              $ref: '#/components/schemas/BackendHealth'
+            type: object
+          - type: 'null'
+          title: Backends
         checks:
           additionalProperties:
             type: boolean
@@ -1086,6 +1839,88 @@ components:
       - target_id
       title: LinkRequest
       type: object
+    LoopHealthResponse:
+      additionalProperties: false
+      description: 'Response for ``GET /api/v1/loops``: one row per loop.'
+      properties:
+        generated_at:
+          title: Generated At
+          type: string
+        loops:
+          items:
+            $ref: '#/components/schemas/LoopHealthRowResponse'
+          title: Loops
+          type: array
+      required:
+      - generated_at
+      title: LoopHealthResponse
+      type: object
+    LoopHealthRowResponse:
+      additionalProperties: false
+      description: 'One loop''s last-run snapshot, as served by ``GET /api/v1/loops``.
+
+
+        ``last_run_at`` / ``last_status`` / ``counters`` are ``None``
+
+        together exactly when the loop has produced no event the EventLog
+
+        can see — "never run (or ran before this build)", never a bare
+
+        ``0``. ``actuates`` says whether the loop can write without a human
+
+        approving each change; ``what_it_changes`` is the one-line
+
+        plain-English explanation either way.'
+      properties:
+        actuates:
+          title: Actuates
+          type: boolean
+        counters:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Counters
+        description:
+          title: Description
+          type: string
+        job_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Job Name
+        last_run_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Run At
+        last_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Status
+        name:
+          title: Name
+          type: string
+        schedule_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Schedule Status
+        stale:
+          default: false
+          title: Stale
+          type: boolean
+        what_it_changes:
+          title: What It Changes
+          type: string
+      required:
+      - name
+      - description
+      - actuates
+      - what_it_changes
+      title: LoopHealthRowResponse
+      type: object
     MetricsTimeseriesResponse:
       additionalProperties: false
       description: 'Response for ``GET /api/v1/metrics/timeseries``.
@@ -1099,7 +1934,26 @@ components:
 
         (or a metric with no events in the window) yields an empty
 
-        ``series`` list.'
+        ``series`` list.
+
+
+        ``scan_truncated`` / ``scanned_events`` flatten
+
+        :class:`trellis.stores.base.event_log.ScanCoverage` (``truncated`` /
+
+        ``scanned``) into plain scalars rather than nesting that core model
+
+        directly: ``trellis_wire`` has zero dependency on ``trellis`` core by
+
+        design (see ``trellis_wire.base``), so only the two fields the UI
+
+        needs cross the boundary. ``scan_truncated`` is true when the
+
+        underlying EventLog read(s) hit their cap, meaning buckets near the
+
+        recent end of the window may be missing data rather than genuinely
+
+        showing none (P1-8).'
       properties:
         bucket:
           default: day
@@ -1116,6 +1970,15 @@ components:
         metric:
           title: Metric
           type: string
+        scan_truncated:
+          default: false
+          title: Scan Truncated
+          type: boolean
+        scanned_events:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scanned Events
         series:
           items:
             $ref: '#/components/schemas/TimeseriesSeriesResponse'
@@ -1510,6 +2373,113 @@ components:
           type: string
       title: ProposalRejectRequest
       type: object
+    RuntimeResponse:
+      additionalProperties: false
+      description: 'Response body for ``GET /api/v1/runtime`` — the admin Runtime panel.
+
+
+        A read-only snapshot of this process''s effective configuration,
+
+        sourced from the same resolvers the behaviour itself consults
+
+        (``trellis_api.auth.resolve_auth_mode``,
+
+        ``trellis_api.routes.health.resolve_ops_detail``,
+
+        ``trellis_api.observability.resolve_metrics_public``,
+
+        ``trellis_api.app.get_bind_info``) so this view can never drift from
+
+        what a real request gets.
+
+
+        Deliberately excludes anything secret-shaped: ``stores`` is class
+
+        names only, ``embedder`` names only the configuration knob in play
+
+        (never a key or URL), ``llm_routes`` carries tier names only (never a
+
+        provider base URL, credential source, or API-key env name), and the
+
+        two directory fields are plain filesystem paths with no embedded
+
+        credentials. See ``tests/unit/api/test_runtime_route.py``''s
+
+        secret-leakage test for the seeded-secret assertion backing that
+
+        claim.'
+      properties:
+        auth_mode:
+          title: Auth Mode
+          type: string
+        auth_mode_permissive:
+          description: True when a request presenting no credential is granted every scope (auth mode 'off' or 'optional')
+            — the exact condition the UI's warning banner fires on.
+          title: Auth Mode Permissive
+          type: boolean
+        bind_host:
+          title: Bind Host
+          type: string
+        bind_port:
+          title: Bind Port
+          type: integer
+        embedder:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Which knob registry.embedding_fn resolved from (TRELLIS_EMBEDDING_FN or embeddings.provider), the same
+            resolver every retrieval surface calls; null when neither is set. 'unknown (...)' when the knob is set but failed
+            to resolve -- never a key or URL.
+          title: Embedder
+        host_jobs_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: TRELLIS_HOST_JOBS_DIR as seen by this process. Only the host job dispatcher (docs/ops/job-dispatcher.sh.example)
+            resolves an executable path under it — this process never reads the directory itself, so a null here means the
+            variable is unset in this process's environment, not that host-only jobs are unconfigured.
+          title: Host Jobs Dir
+        learning_artifacts_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Learning Artifacts Dir
+        llm_routes:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: 'null'
+          description: 'Tier name each LLM consumer routes to, keyed by consumer name; null means the consumer is unrouted
+            (falls back to the parent llm: block).'
+          title: Llm Routes
+          type: object
+        llm_routes_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Set instead of llm_routes when llm.routes is malformed.
+          title: Llm Routes Error
+        metrics_public:
+          title: Metrics Public
+          type: boolean
+        ops_detail:
+          title: Ops Detail
+          type: string
+        stores:
+          additionalProperties:
+            type: string
+          description: Backend class name per store, keyed by store name.
+          title: Stores
+          type: object
+      required:
+      - auth_mode
+      - auth_mode_permissive
+      - ops_detail
+      - metrics_public
+      - bind_host
+      - bind_port
+      title: RuntimeResponse
+      type: object
     SchemaEvolutionCandidate:
       additionalProperties: false
       description: One WELL_KNOWN_CANDIDATE event as surfaced in the Review queue.
@@ -1678,6 +2648,35 @@ components:
       - intent
       - sections
       title: SectionedPackResponse
+      type: object
+    SettingUpdateRequest:
+      additionalProperties: false
+      description: 'Body for ``PUT``/``POST /api/v1/settings/{name}``.
+
+
+        ``value`` is required but nullable: an explicit ``null`` means "remove
+
+        the override" (``Operation.SETTINGS_UPDATE``''s own contract — there is
+
+        no separate reset verb), while an *absent* field is an ordinary 422,
+
+        so a client cannot reset a setting by typo''ing the field name.'
+      properties:
+        requested_by:
+          default: api:settings
+          title: Requested By
+          type: string
+        value:
+          anyOf:
+          - type: boolean
+          - type: integer
+          - type: number
+          - type: string
+          - type: 'null'
+          title: Value
+      required:
+      - value
+      title: SettingUpdateRequest
       type: object
     StatsResponse:
       additionalProperties: false
@@ -1931,7 +2930,22 @@ components:
 
         ``None`` means the server withheld it — it is ops detail, gated like
 
-        the ``/readyz`` breakdown — not that the server cannot report it.'
+        the ``/readyz`` breakdown — not that the server cannot report it.
+
+
+        ``write_behaviour_settings`` is gated identically (``None`` under the
+
+        same withholding) but, unlike ``write_provenance``, is read fresh on
+
+        every call rather than cached once per process: a settings-store
+
+        override can change between two calls with no restart in between.
+
+        Each row is one :meth:`trellis.core.write_config.WriteBehaviourConfig.describe`
+
+        entry — ``name``, ``env_var``, ``value``, ``default``, ``overridden``,
+
+        and ``overridden_by`` (``"env"`` / ``"settings"`` / ``"default"``).'
       properties:
         api_major:
           title: Api Major
@@ -1955,6 +2969,14 @@ components:
         wire_schema:
           title: Wire Schema
           type: string
+        write_behaviour_settings:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Write Behaviour Settings
         write_provenance:
           anyOf:
           - additionalProperties: true
@@ -2018,6 +3040,157 @@ info:
   version: 0.2.0
 openapi: 3.1.0
 paths:
+  /api/v1/admin/jobs:
+    get:
+      description: 'List every catalog job, joined with its schedule row and last-run status.
+
+
+        A job always appears here even with no schedule-registry row yet
+
+        (materialized with catalog defaults — see ``_job_row_or_default``);
+
+        this route never creates one. ``dispatcher_seen``/
+
+        ``dispatcher_last_seen_at`` answer the UI''s "no dispatcher reporting"
+
+        banner from the EventLog''s own ``JOB_RUN_STARTED`` events, never a
+
+        hardcoded literal. ``store_degradation`` surfaces a degraded schedule
+
+        store the same way ``routes/policies.py`` does, so the UI can show a
+
+        banner instead of silently rendering catalog defaults as if they were
+
+        stored, operator-chosen values (gate #860, blocker 1).'
+      operationId: list_admin_jobs_api_v1_admin_jobs_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobListResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Admin Jobs
+      tags:
+      - admin
+  /api/v1/admin/jobs/{name}:
+    patch:
+      description: 'Edit a catalog job''s mutable schedule fields.
+
+
+        The writable surface is exactly ``enabled``, ``cadence`` (cron-
+
+        validated) and ``timeout_seconds`` (bounded 1..86400) —
+
+        ``AdminJobPatchRequest``''s only fields, with ``extra="forbid"``
+
+        refusing anything else. ``name`` must already be a
+
+        :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise);
+
+        this route never creates or deletes a job. Only fields the caller
+
+        actually set (``body.model_fields_set``) are changed — omitting a
+
+        field leaves it unchanged; an empty body is a no-op that writes
+
+        nothing and emits no event. A write while the schedule store is
+
+        degraded or stale is refused with 409 and the store''s own error
+
+        text. Every applied change emits ``SCHEDULE_UPDATED`` with ``old``/
+
+        ``new`` dicts (only the fields that changed) and the caller''s
+
+        identity.'
+      operationId: patch_admin_job_api_v1_admin_jobs__name__patch
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminJobPatchRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobPatchResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Patch Admin Job
+      tags:
+      - admin
+  /api/v1/admin/jobs/{name}/run:
+    post:
+      description: 'Request an out-of-band run of a catalog job ("Run now").
+
+
+        Writes only ``run_requested_at`` on the schedule-registry row — this
+
+        route never executes the job inline and never claims to.
+
+        :func:`trellis.core.cron.is_job_due` treats a ``run_requested_at``
+
+        newer than the job''s last completed run as always due, so a host
+
+        dispatcher polling ``due-jobs`` on its own cadence (typically within
+
+        ~5 minutes, if one is installed at all — see
+
+        ``docs/ops/job-dispatcher.sh.example``) is what actually picks the
+
+        job up from there. ``name`` must already be a
+
+        :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise). A
+
+        write while the schedule store is degraded or stale is refused with
+
+        409 and the store''s own error text. Emits ``JOB_RUN_REQUESTED`` with
+
+        the caller''s identity.'
+      operationId: run_admin_job_api_v1_admin_jobs__name__run_post
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobRunResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Run Admin Job
+      tags:
+      - admin
   /api/v1/advisories:
     get:
       description: List stored advisories.
@@ -2094,24 +3267,26 @@ paths:
           description: Days of history to analyze
           title: Days
           type: integer
-      - description: Min sample size
+      - description: Min sample size; defaults to the configured setting
         in: query
         name: min_sample
         required: false
         schema:
-          default: 5
-          description: Min sample size
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Min sample size; defaults to the configured setting
           title: Min Sample
-          type: integer
-      - description: Min effect size
+      - description: Min effect size; defaults to the configured setting
         in: query
         name: min_effect
         required: false
         schema:
-          default: 0.15
-          description: Min effect size
+          anyOf:
+          - type: number
+          - type: 'null'
+          description: Min effect size; defaults to the configured setting
           title: Min Effect
-          type: number
       responses:
         '200':
           content:
@@ -2137,6 +3312,318 @@ paths:
       summary: Generate Advisories
       tags:
       - admin
+  /api/v1/analyze:
+    get:
+      description: List the reports available under ``GET /api/v1/analyze/{report}``.
+      operationId: list_analyze_reports_api_v1_analyze_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Analyze Reports Api V1 Analyze Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Analyze Reports
+      tags:
+      - analyze
+  /api/v1/analyze/{report}:
+    get:
+      description: 'Run one allowlisted ``trellis analyze`` report over HTTP.
+
+
+        Query params are validated against the report''s own bounded DTO
+
+        (``extra="forbid"``) rather than FastAPI''s automatic pydantic-model
+
+        binding, because that binding does not reject an unrecognized query
+
+        key — only a manual parse does.'
+      operationId: get_analyze_report_api_v1_analyze__report__get
+      parameters:
+      - in: path
+        name: report
+        required: true
+        schema:
+          title: Report
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Analyze Report
+      tags:
+      - analyze
+  /api/v1/classify/candidates:
+    get:
+      description: 'Recent tag/domain candidates, deduped to each one''s latest emission.
+
+
+        Never invokes a miner — see ``POST /classify/candidates/mine`` for
+
+        that. A candidate already present in the overlay reads ``applied``;
+
+        one with a more recent ``CLASSIFY_CANDIDATE_DISMISSED`` than its
+
+        latest surfacing reads ``dismissed``; otherwise ``open``.'
+      operationId: list_classify_candidates_api_v1_classify_candidates_get
+      parameters:
+      - description: Max candidate events to scan per kind. Never triggers mining.
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 500
+          description: Max candidate events to scan per kind. Never triggers mining.
+          maximum: 5000
+          minimum: 1
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyCandidateListResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Classify Candidates
+      tags:
+      - classify
+  /api/v1/classify/candidates/mine:
+    post:
+      description: 'Run the tag-keyword / domain-alias miners and emit candidate events.
+
+
+        Reuses :func:`trellis.learning.tag_evolution.analyze_tag_keyword_candidates`
+
+        and :func:`trellis.learning.domain_normalization.analyze_domain_alias_candidates`
+
+        directly — the same functions ``trellis classify tag-candidates`` /
+
+        ``domain-candidates`` call — rather than re-implementing the mining
+
+        logic here. Admin-scoped: unlike the read-only listing, this touches
+
+        the corpus scan and, on a missing threshold with
+
+        ``use_recommended_defaults=true``, mines under un-reviewed defaults.'
+      operationId: mine_classify_candidates_api_v1_classify_candidates_mine_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyMineRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyMineResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Mine Classify Candidates
+      tags:
+      - classify
+  /api/v1/classify/candidates/{candidate_id}/dismiss:
+    post:
+      description: 'Mark a candidate dismissed — no store write, audit trail only.
+
+
+        ``CLASSIFY_CANDIDATE_DISMISSED`` carries no dedicated ``Operation``:
+
+        a dismiss changes no state ``MutationExecutor`` governs, only this
+
+        event stream (see the ``EventType`` member''s own docstring), the same
+
+        posture :attr:`~trellis.stores.base.event_log.EventType.JOB_RUN_STARTED`
+
+        has. ``GET /classify/candidates`` excludes a dismissed candidate from
+
+        its "open" listing unless it resurfaces with a newer emission.'
+      operationId: dismiss_classify_candidate_api_v1_classify_candidates__candidate_id__dismiss_post
+      parameters:
+      - in: path
+        name: candidate_id
+        required: true
+        schema:
+          title: Candidate Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyCandidateDismissResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Dismiss Classify Candidate
+      tags:
+      - classify
+  /api/v1/classify/rules:
+    get:
+      description: 'Every effective tag-keyword / domain-alias rule, badged by source.
+
+
+        ``source`` is ``"overlay"`` when the exact ``(kind, key) -> target``
+
+        triple is an applied row in ``classify_overrides.json``, ``"config"``
+
+        when it instead comes from ``config.yaml``, and ``"default"`` for the
+
+        shipped built-ins otherwise (no built-in alias defaults exist today,
+
+        so that branch is defensive for aliases). The badging itself is
+
+        :func:`~trellis.classify.factory.effective_classify_rule_rows`,
+
+        shared with ``trellis classify effective-rules`` so the precedence
+
+        logic lives in one place.
+
+        ``registry.domain_keyword_map()`` / ``domain_alias_map()`` already
+
+        resolve the full precedence (defaults < config.yaml < overlay,
+
+        overlay merged additively per domain) — this route only re-derives
+
+        *which* layer won, never a second merge.'
+      operationId: list_classify_rules_api_v1_classify_rules_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyRuleListResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Classify Rules
+      tags:
+      - classify
+    post:
+      description: 'Apply one mined candidate into the operator overlay.
+
+
+        Routes through ``Operation.CLASSIFY_RULE_APPLY`` — the same governed
+
+        path ``trellis classify apply-rule`` uses — so a denying policy blocks
+
+        both surfaces identically (Stage 2 always runs, CLAUDE.md). The
+
+        candidate''s own metrics (``support``/``precision``/``lift``) are
+
+        carried through onto the audit event so a reviewer never has to join
+
+        back to the original ``TAG_KEYWORD_CANDIDATE`` / ``DOMAIN_ALIAS_CANDIDATE``
+
+        event to see what was approved.'
+      operationId: apply_classify_rule_api_v1_classify_rules_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyRuleApplyRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                title: Response Apply Classify Rule Api V1 Classify Rules Post
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Apply Classify Rule
+      tags:
+      - classify
+  /api/v1/classify/rules/{kind}/{key}:
+    delete:
+      description: 'Revoke one applied rule from the operator overlay.
+
+
+        Refused (400) when ``(kind, key)`` has no overlay row — including
+
+        when the rule comes from ``config.yaml`` instead, which this was
+
+        never written by and cannot un-apply; see
+
+        ``ClassifyRuleRevokeHandler``''s own docstring for the two distinct
+
+        refusal messages.'
+      operationId: revoke_classify_rule_api_v1_classify_rules__kind___key__delete
+      parameters:
+      - in: path
+        name: kind
+        required: true
+        schema:
+          title: Kind
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          title: Key
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                title: Response Revoke Classify Rule Api V1 Classify Rules  Kind   Key  Delete
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Revoke Classify Rule
+      tags:
+      - classify
   /api/v1/code-proposals:
     get:
       description: 'List recent ``PROPOSAL_DRAFTED`` events with their markdown preview.
@@ -2905,7 +4392,16 @@ paths:
       - retrieve
   /api/v1/health:
     get:
-      description: Check API and store health.
+      description: 'Check API and store health.
+
+
+        Reuses the ``/readyz`` probe set (``probe_backends``) so this
+
+        versioned-API view can never read healthy while ``/readyz`` reads
+
+        degraded — before this, ``checks`` was a hard-coded literal that
+
+        never touched a store.'
       operationId: health_api_v1_health_get
       responses:
         '200':
@@ -3077,6 +4573,45 @@ paths:
       summary: Create Link
       tags:
       - curate
+  /api/v1/loops:
+    get:
+      description: 'Is each curation / learning loop actually doing anything?
+
+
+        Reads existing events only (``trellis.ops.loop_health``), plus one
+
+        documented live store read for the tuner''s pending-proposal count.
+
+        A loop with no event yet reports ``last_run_at``/``last_status`` as
+
+        ``null`` — "never run (or ran before this build)" — which is a
+
+        different fact from a real run that counted zero, so the two must
+
+        never render the same. ``schedule_status``/``stale`` are computed
+
+        here (not in ``summarize_loop_health``) from each row''s own
+
+        schedule-registry row, so a loop with no catalog job is never
+
+        "stale", a disabled or manual-only job reads "not_scheduled", and a
+
+        scheduled job''s threshold follows its own cadence rather than a
+
+        fixed constant.'
+      operationId: loop_health_api_v1_loops_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoopHealthResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Loop Health
+      tags:
+      - admin
   /api/v1/measurements:
     get:
       description: Query Measurement nodes by subject / metric_name / observer.
@@ -3181,7 +4716,18 @@ paths:
 
         ``bucket`` (or a non-positive ``days``) returns 422 rather than a
 
-        silent empty result, so a typo surfaces loudly.'
+        silent empty result, so a typo surfaces loudly.
+
+
+        ``scan_truncated`` / ``scanned_events`` carry
+
+        :func:`compute_timeseries`''s :class:`~trellis.stores.base.event_log.ScanCoverage`
+
+        (P1-8): when ``scan_truncated`` is true, the EventLog read hit its
+
+        cap and the window''s recent-end buckets may be missing data rather
+
+        than genuinely empty.'
       operationId: metrics_timeseries_api_v1_metrics_timeseries_get
       parameters:
       - description: One of the five improvement metrics
@@ -3337,6 +4883,17 @@ paths:
       description: List assembled context packs (newest first), summary fields only.
       operationId: list_packs_api_v1_packs_get
       parameters:
+      - description: Upper bound (inclusive) on assembly time. Page older history by passing the oldest created_at you have.
+        in: query
+        name: until
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Upper bound (inclusive) on assembly time. Page older history by passing the oldest created_at you have.
+          title: Until
       - description: Max results
         in: query
         name: limit
@@ -3443,7 +5000,18 @@ paths:
 
         withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
 
-        would-be pack) reach ``admin`` callers only.'
+        would-be pack) reach ``admin`` callers only.
+
+
+        ``feedback`` stays capped at 50 rows, but ``feedback_total`` (the
+
+        true count, read via a bounded ``DEFAULT_SCAN_LIMIT`` over-fetch
+
+        since :meth:`EventLog.count` cannot filter by ``payload_filters``)
+
+        and ``feedback_truncated`` (``feedback_total > len(feedback)``) now
+
+        say when the 50-row list is not the whole picture (P1-9).'
       operationId: get_pack_api_v1_packs__pack_id__get
       parameters:
       - in: path
@@ -3702,6 +5270,37 @@ paths:
       summary: Promote
       tags:
       - curate
+  /api/v1/precedents/domains:
+    get:
+      description: 'Count promoted precedents per ``domain``, for a domain filter''s options.
+
+
+        Unlike the ``domain`` dropdown built from one fetched page of
+
+        precedents, this scans every ``PRECEDENT_PROMOTED`` event (capped at
+
+        :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`, same as any
+
+        other analyzer), so it lists a domain that exists but isn''t on the
+
+        current page, and never offers one with zero precedents left once a
+
+        filter is applied.'
+      operationId: list_precedent_domains_api_v1_precedents_domains_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Precedent Domains Api V1 Precedents Domains Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Count promoted precedents per domain
+      tags:
+      - retrieve
   /api/v1/proposals:
     get:
       description: 'List pending tuner proposals awaiting a human approve / reject.
@@ -3881,6 +5480,67 @@ paths:
       summary: Reject Proposal Route
       tags:
       - admin
+  /api/v1/runtime:
+    get:
+      description: 'Report this process''s effective configuration for the admin UI.
+
+
+        Every field is read straight from the resolver the real enforcement
+
+        uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
+
+        ``resolve_metrics_public``, ``get_bind_info``, and for ``embedder``,
+
+        ``registry.embedding_fn`` itself (the resolver every retrieval
+
+        surface actually calls, not the separate ``llm.embedding:`` block
+
+        nothing else reads) — so this view cannot drift from how the server
+
+        actually behaves. Deliberately excludes anything secret-shaped:
+
+        ``stores`` is class names only, ``embedder`` is the resolved
+
+        embedder''s dotted path or provider name followed by the configuration
+
+        knob in play (``TRELLIS_EMBEDDING_FN``, ``embeddings.provider``, or
+
+        ``embeddings`` when the whole block is malformed), never a key or
+
+        URL, ``llm_routes`` carries tier names
+
+        only (an ``LLMRoute``''s ``block`` — which can hold a literal API key
+
+        — is never touched, and a malformed route is reported by its
+
+        setting path, never the value that failed to validate), and the two
+
+        directory fields are plain paths. Resolving the embedder is wrapped
+
+        whole, and the knob lookup used on both the raise and the
+
+        resolved-to-nothing paths is itself guarded against raising, so an
+
+        unconfigured or misconfigured embedding knob — including a
+
+        non-mapping ``embeddings:`` block — reads as "none configured" or
+
+        "unknown" here, never 500s a panel that exists to show
+
+        configuration, not enforce it.'
+      operationId: runtime_api_v1_runtime_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Runtime
+      tags:
+      - admin
   /api/v1/schema-evolution/candidates:
     get:
       description: 'List the latest ``WELL_KNOWN_CANDIDATE`` event per ``candidate_id``.
@@ -4036,6 +5696,173 @@ paths:
       summary: Search
       tags:
       - retrieve
+  /api/v1/settings:
+    get:
+      description: Every registered setting's metadata, resolved value and provenance.
+      operationId: list_settings_api_v1_settings_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Settings Api V1 Settings Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Settings
+      tags:
+      - settings
+  /api/v1/settings/{name}:
+    post:
+      description: 'Write (or, with ``value: null``, remove) one setting''s override.
+
+
+        Routes through ``Operation.SETTINGS_UPDATE`` -- unknown name, wrong
+
+        type and out-of-range are all refused there, never clamped, and
+
+        Stage 2 runs before the handler ever touches the file. A write for a
+
+        setting whose environment variable is currently set still stores the
+
+        override (so it is ready once the variable is unset); the response
+
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
+      operationId: update_setting_api_v1_settings__name__post
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/CommandResponse'
+                - additionalProperties: true
+                  type: object
+                title: Response Update Setting Api V1 Settings  Name  Post
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Update Setting
+      tags:
+      - settings
+    put:
+      description: 'Write (or, with ``value: null``, remove) one setting''s override.
+
+
+        Routes through ``Operation.SETTINGS_UPDATE`` -- unknown name, wrong
+
+        type and out-of-range are all refused there, never clamped, and
+
+        Stage 2 runs before the handler ever touches the file. A write for a
+
+        setting whose environment variable is currently set still stores the
+
+        override (so it is ready once the variable is unset); the response
+
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
+      operationId: update_setting_api_v1_settings__name__put
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/CommandResponse'
+                - additionalProperties: true
+                  type: object
+                title: Response Update Setting Api V1 Settings  Name  Put
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Update Setting
+      tags:
+      - settings
   /api/v1/stats:
     get:
       description: 'Get store statistics.
@@ -4063,7 +5890,12 @@ paths:
       - admin
   /api/v1/traces:
     get:
-      description: List recent traces.
+      description: 'List recent traces.
+
+
+        ``TraceStore.query`` has no offset — page older history with
+
+        ``until``, mirroring ``GET /events``.'
       operationId: list_traces_api_v1_traces_get
       parameters:
       - in: query
@@ -4082,6 +5914,19 @@ paths:
           - type: string
           - type: 'null'
           title: Agent Id
+      - description: Upper bound (inclusive). Page older history by passing the oldest created_at you have, same convention
+          as GET /events.
+        in: query
+        name: until
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Upper bound (inclusive). Page older history by passing the oldest created_at you have, same convention
+            as GET /events.
+          title: Until
       - in: query
         name: limit
         required: false
@@ -4138,6 +5983,31 @@ paths:
       summary: Ingest Trace
       tags:
       - ingest
+  /api/v1/traces/domains:
+    get:
+      description: 'Count all stored traces per ``domain``, for a domain filter''s options.
+
+
+        Unlike the ``domain`` dropdown built from one fetched page, this counts
+
+        the whole store, so it lists a domain that exists but isn''t on the
+
+        current page, and never offers one that has zero traces.'
+      operationId: list_trace_domains_api_v1_traces_domains_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Trace Domains Api V1 Traces Domains Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Count traces per domain
+      tags:
+      - retrieve
   /api/v1/traces/{trace_id}:
     get:
       description: 'Get a trace and what can show each of its evidence refs.
@@ -4328,7 +6198,26 @@ paths:
 
         this route was written for.  They appear when the API is served from
 
-        an editable install whose working tree has moved on.'
+        an editable install whose working tree has moved on.
+
+
+        ``write_behaviour_settings`` is gated the same way, for the same
+
+        reason — a knob''s ``overridden_by`` sits beside its env-sourced
+
+        counterpart in ``write_provenance.env_flags``, so splitting the gate
+
+        between them would publish half the same fact.  Unlike
+
+        ``write_provenance`` (a stamp frozen once per process) this is read
+
+        fresh from ``<data_dir>/stores/settings.json`` on every call, same as
+
+        ``trellis admin write-config`` — this process''s container may have
+
+        no store configured at all, in which case every row reports
+
+        ``"env"``/``"default"`` and never ``"settings"``.'
       operationId: api_version_api_version_get
       responses:
         '200':

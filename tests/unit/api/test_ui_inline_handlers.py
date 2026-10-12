@@ -36,7 +36,7 @@ def test_no_inline_handler_interpolates_a_value() -> None:
     # The page's static handlers (Refresh, Save, Prev/Next, ...) are inline
     # too. A scan that stopped seeing them would pass whatever the page held.
     assert_hand_read_floor(
-        len(_HANDLER.findall(page)), 38, subject="inline on* handlers in index.html"
+        len(_HANDLER.findall(page)), 55, subject="inline on* handlers in index.html"
     )
     hits = _interpolating(page)
     listing = "\n".join(hits)
@@ -72,7 +72,7 @@ def test_every_data_action_reaches_a_function_with_its_id() -> None:
     known = {name.strip() for name in block.group(1).split(",") if name.strip()}
     used = re.findall(r'data-action="([^"]*)"', page)
 
-    assert_hand_read_floor(len(used), 14, subject="data-action attributes")
+    assert_hand_read_floor(len(used), 17, subject="data-action attributes")
     # A name the listener lacks is a dead button; a key no template uses is
     # a stale entry.
     assert set(used) == known

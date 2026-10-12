@@ -18,6 +18,7 @@ from trellis.core.vector_metadata import (
     sync_vector_metadata,
     vector_metadata_diverges,
 )
+from trellis.errors import ConfigError
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
@@ -229,3 +230,189 @@ class TestResolveVectorStore:
             lambda _self: (_ for _ in ()).throw(RuntimeError("no vector backend"))
         )
         assert resolve_vector_store(registry) is None
+
+
+class TestResolveVectorStoreFailureLogging:
+    """Describe, don't quote; log once — the same discipline #834 gave the
+    embed-on-ingest hook's resolve path, applied here because
+    ``resolve_vector_store`` runs on every tag write across the feedback
+    loop, REST/CLI demotion surfaces and session capture: the prior
+    ``logger.warning(..., exc_info=True)`` put a full traceback carrying
+    the exception's message on every one of those calls while the cause
+    persisted, rather than once per distinct cause per process.
+    """
+
+    def test_reason_names_the_setting_for_a_config_error(self) -> None:
+        """Not just ``None`` — the log names *which* setting is broken.
+
+        A bare ``resolve_vector_store(registry) is None`` assertion alone
+        passes against ANY degrade-to-``None`` implementation, including
+        one that swallows the cause entirely; asserting the logged
+        ``error_type``/``setting`` is what actually pins "describe, don't
+        quote" rather than merely "fails soft" (#839).
+        """
+        from structlog.testing import capture_logs
+
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("unknown vector backend", setting="vector.backend")
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "vector.backend"
+
+    def test_unhashable_setting_degrades_to_none_without_raising(self) -> None:
+        """A ``ConfigError`` whose ``setting`` is not a ``str`` (a list,
+        say — the type hint is not enforced at runtime) must not reach the
+        ``functools.cache``-keyed dedup call with it: ``cache`` hashes its
+        arguments, and a list raises ``TypeError: unhashable type`` there,
+        which would break ``resolve_vector_store``'s fail-soft contract on
+        the very first such failure (#839)."""
+        from structlog.testing import capture_logs
+
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("unknown vector backend", setting=["vector.backend"])  # type: ignore[arg-type]
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] is None
+
+    def test_foreign_setting_attribute_is_ignored(self) -> None:
+        """Only a real ``ConfigError`` contributes a ``setting`` — a
+        same-named attribute on an unrelated exception type is not
+        trusted, pinning the ``isinstance(exc, ConfigError)`` guard rather
+        than a bare ``getattr(exc, "setting", None)``."""
+        from structlog.testing import capture_logs
+
+        class _ForeignError(RuntimeError):
+            def __init__(self, message: str, *, setting: str) -> None:
+                super().__init__(message)
+                self.setting = setting
+
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                _ForeignError("boom", setting="not-a-real-config-setting")
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "_ForeignError"
+        assert matching[0]["setting"] is None
+
+    def test_logged_once_per_distinct_cause(self) -> None:
+        """Two calls against the same persistently-broken registry must
+        produce exactly ONE warning record, not a traceback per write —
+        the pre-fix behaviour logged ``exc_info=True`` unconditionally."""
+        from structlog.testing import capture_logs
+
+        first_registry = MagicMock()
+        type(first_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+        second_registry = MagicMock()
+        type(second_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(first_registry) is None
+            assert resolve_vector_store(second_registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "vector.backend"
+
+    def test_log_never_carries_the_message_text_or_a_traceback(self) -> None:
+        from structlog.testing import capture_logs
+
+        sentinel = "SENTINEL-leak-marker-9f3c-metadata"
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError(sentinel))
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["setting"] is None
+        # No exc_info -> no "exception" key carrying a rendered traceback.
+        # No ``exc_info=True`` -> structlog captures no traceback request at
+        # all, not merely one that got rendered away.
+        assert "exc_info" not in matching[0]
+        for value in matching[0].values():
+            assert sentinel not in str(value)
+
+    def test_logs_again_for_a_different_cause(self) -> None:
+        """Dedup is per-cause, not a global silence switch."""
+        from structlog.testing import capture_logs
+
+        first_registry = MagicMock()
+        type(first_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+        second_registry = MagicMock()
+        type(second_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError("different cause"))
+        )
+
+        with capture_logs() as logs:
+            resolve_vector_store(first_registry)
+            resolve_vector_store(second_registry)
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 2
+        assert {m["error_type"] for m in matching} == {"ConfigError", "RuntimeError"}

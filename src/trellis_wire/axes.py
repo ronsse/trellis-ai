@@ -66,6 +66,33 @@ def format_misconfigured_semantic_note(semantic_state: str) -> str:
     )
 
 
+def format_embedder_failed_note(error_type: str | None, setting: str | None) -> str:
+    """One line for an ``embedder_failed`` semantic axis, or ``""`` otherwise.
+
+    Distinct from :func:`format_misconfigured_semantic_note`: that state is
+    a *resolved* embedder whose vector backend failed to initialise.
+    ``embedder_failed`` (Q5-A) is the embedder itself failing to
+    resolve — ``registry.embedding_fn`` raised rather than returning a
+    callable. ``error_type`` and ``setting`` name the cause; never the
+    exception message (describe, don't quote — same rule
+    :func:`format_misconfigured_semantic_note` follows by naming no
+    exception detail at all). Points at the same recovery step Playbook
+    15 documents.
+
+    ``error_type`` doubles as the "does this state apply" flag: callers
+    pass ``None`` (not just an empty string) when ``semantic`` is not
+    ``"embedder_failed"``.
+    """
+    if not error_type:
+        return ""
+    cause = f"{error_type}: {setting}" if setting else error_type
+    return (
+        f"**Semantic retrieval unavailable:** the embedder failed to resolve"
+        f" ({cause}), so this pack has no semantic results. Fix the setting,"
+        " then run `trellis admin reindex-vectors`."
+    )
+
+
 def axis_note_from_payload(axes: dict[str, Any] | None) -> str:
     """Every markdown axis note a wire-level ``axes`` block calls for.
 
@@ -89,15 +116,22 @@ def axis_note_from_payload(axes: dict[str, Any] | None) -> str:
     failed_names = [str(name) for name in failed] if isinstance(failed, list) else []
     semantic_state = axes.get("semantic")
     semantic_str = semantic_state if isinstance(semantic_state, str) else ""
+    embedder_error_type = axes.get("embedder_error_type")
+    embedder_setting = axes.get("embedder_setting")
     notes = [
         format_failed_axes_note(failed_names),
         format_misconfigured_semantic_note(semantic_str),
+        format_embedder_failed_note(
+            embedder_error_type if semantic_str == "embedder_failed" else None,
+            embedder_setting if isinstance(embedder_setting, str) else None,
+        ),
     ]
     return "\n\n".join(note for note in notes if note)
 
 
 __all__ = [
     "axis_note_from_payload",
+    "format_embedder_failed_note",
     "format_failed_axes_note",
     "format_misconfigured_semantic_note",
 ]

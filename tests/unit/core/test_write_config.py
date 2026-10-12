@@ -11,6 +11,7 @@ a malformed confidence floor, is pinned too.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 import structlog.testing
@@ -21,6 +22,9 @@ from trellis.core.write_config import (
     ENV_VAR_BY_FIELD,
     TRUTHY,
     WriteBehaviourConfig,
+    parse_finite_int,
+    resolve_overridden_by,
+    resolve_write_behaviour,
 )
 from trellis.extract.memory_ingest_hook import memory_extraction_env_enabled
 from trellis.extract.trace_ingest_hook import (
@@ -33,6 +37,8 @@ from trellis.mcp.reconcile import (
     reconcile_timeout_seconds,
 )
 from trellis.retrieve.embed_ingest_hook import embed_on_ingest_enabled
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore
 
 #: Every environment variable this module owns.
 ALL_ENV_VARS = sorted(ENV_VAR_BY_FIELD.values())
@@ -387,7 +393,42 @@ class TestPackHoldoutRate:
             "value": 0.2,
             "default": 0.0,
             "overridden": True,
+            "overridden_by": "env",
         }
+
+
+class TestParseFiniteInt:
+    """``int(float(raw))`` inline has two under-caught failure modes:
+    ``int(float("nan"))`` raises ``ValueError`` on its own, but
+    ``int(float("inf"))`` (and ``"1e999"``, which overflows ``float`` to
+    ``inf``) raises ``OverflowError`` instead — not a ``ValueError``, so a
+    caller that only wraps ``except ValueError`` around the inline
+    expression lets it fly uncaught. ``parse_finite_int`` exists so every
+    env-sourced integer knob in the codebase gets one normalized
+    ``ValueError`` regardless of which non-finite spelling it was given."""
+
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "Infinity", "1e999", "nan"])
+    def test_non_finite_raises_value_error(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            parse_finite_int(raw)
+
+    def test_non_finite_never_raises_overflow_error(self) -> None:
+        try:
+            parse_finite_int("inf")
+        except OverflowError:
+            pytest.fail("OverflowError escaped parse_finite_int")
+        except ValueError:
+            pass
+
+    def test_garbage_string_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="not a number"):
+            parse_finite_int("notanumber")
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"), [("30", 30), ("3e1", 30), ("12.0", 12), (7, 7), (7.0, 7)]
+    )
+    def test_finite_values_parse_to_int(self, raw: object, expected: int) -> None:
+        assert parse_finite_int(raw) == expected
 
 
 class TestDescribe:
@@ -407,6 +448,150 @@ class TestDescribe:
         rows = WriteBehaviourConfig.from_env(env).describe()
         overridden = {row["name"] for row in rows if row["overridden"]}
         assert overridden == {"embed_on_ingest"}
+
+    def test_describe_falls_back_to_env_or_default_when_overridden_by_is_omitted(
+        self,
+    ) -> None:
+        """A caller that never calls ``from_env_and_settings`` / passes no
+        provenance map still gets a legible ``overridden_by`` — it can
+        only ever be "env" or "default" from that caller's point of view,
+        exactly :meth:`WriteBehaviourConfig.describe`'s own fallback rule.
+        """
+        env = {ENV_VAR_BY_FIELD["embed_on_ingest"]: "1"}
+        rows = WriteBehaviourConfig.from_env(env).describe()
+        by_name = {row["name"]: row["overridden_by"] for row in rows}
+        assert by_name["embed_on_ingest"] == "env"
+        assert by_name["trace_extraction"] == "default"
+
+
+class TestEnvSettingsDefaultPrecedence:
+    """PR 2's own failing-before tests: env > settings > default, and
+    :func:`resolve_overridden_by` must agree with what
+    :meth:`WriteBehaviourConfig.from_env_and_settings` actually resolved —
+    the two are asked separately (see ``resolve_overridden_by``'s own
+    docstring for why) and could in principle disagree.
+    """
+
+    def test_env_and_settings_both_set_env_wins(self) -> None:
+        env = {ENV_VAR_BY_FIELD["pack_holdout_rate"]: "0.1"}
+        settings = {"pack_holdout_rate": 0.9}
+        config = WriteBehaviourConfig.from_env_and_settings(settings=settings, env=env)
+        assert config.pack_holdout_rate == 0.1
+
+        provenance = resolve_overridden_by(settings=settings, env=env)
+        assert provenance["pack_holdout_rate"] == "env"
+        rows = config.describe(overridden_by=provenance)
+        (row,) = [r for r in rows if r["name"] == "pack_holdout_rate"]
+        assert row["overridden_by"] == "env"
+        assert row["value"] == 0.1
+
+    def test_settings_set_no_env_settings_wins(self) -> None:
+        settings = {"pack_holdout_rate": 0.4}
+        config = WriteBehaviourConfig.from_env_and_settings(settings=settings, env={})
+        assert config.pack_holdout_rate == 0.4
+
+        provenance = resolve_overridden_by(settings=settings, env={})
+        assert provenance["pack_holdout_rate"] == "settings"
+        rows = config.describe(overridden_by=provenance)
+        (row,) = [r for r in rows if r["name"] == "pack_holdout_rate"]
+        assert row["overridden_by"] == "settings"
+        assert row["value"] == 0.4
+        assert row["overridden"] is True
+
+    def test_neither_set_default_wins(self) -> None:
+        config = WriteBehaviourConfig.from_env_and_settings(settings={}, env={})
+        assert config.pack_holdout_rate == 0.0
+
+        provenance = resolve_overridden_by(settings={}, env={})
+        assert provenance["pack_holdout_rate"] == "default"
+        rows = config.describe(overridden_by=provenance)
+        (row,) = [r for r in rows if r["name"] == "pack_holdout_rate"]
+        assert row["overridden_by"] == "default"
+        assert row["overridden"] is False
+
+    def test_a_blank_env_var_does_not_count_as_env_set(self) -> None:
+        """An env var present but empty is "unset", matching ``from_env``'s
+        own blank-and-unset-both-mean-off parsing — so a settings value
+        still wins underneath it.
+        """
+        env = {ENV_VAR_BY_FIELD["pack_holdout_rate"]: "   "}
+        settings = {"pack_holdout_rate": 0.4}
+        config = WriteBehaviourConfig.from_env_and_settings(settings=settings, env=env)
+        assert config.pack_holdout_rate == 0.4
+        provenance = resolve_overridden_by(settings=settings, env=env)
+        assert provenance["pack_holdout_rate"] == "settings"
+
+    def test_a_bool_settings_value_renders_correctly_both_ways(self) -> None:
+        """Every other precedence test here uses ``pack_holdout_rate``
+        (a float) — eleven of the twelve ``WriteBehaviourConfig`` fields
+        are bool, and ``_settings_as_env_strings`` renders a bool
+        differently (``"true"``/``"false"``) than a float (``str(value)``),
+        so a float-only test suite cannot see a swapped bool rendering.
+        Pin both a ``True`` and a ``False`` settings override through to
+        the resolved config, not just one.
+        """
+        true_config = WriteBehaviourConfig.from_env_and_settings(
+            settings={"memory_extraction": True}, env={}
+        )
+        assert true_config.memory_extraction is True
+
+        false_config = WriteBehaviourConfig.from_env_and_settings(
+            settings={"memory_extraction": False}, env={}
+        )
+        assert false_config.memory_extraction is False
+
+        provenance = resolve_overridden_by(settings={"memory_extraction": True}, env={})
+        assert provenance["memory_extraction"] == "settings"
+
+    def test_resolve_overridden_by_covers_every_write_behaviour_field(self) -> None:
+        provenance = resolve_overridden_by(settings={}, env={})
+        assert set(provenance) == set(ENV_VAR_BY_FIELD)
+        assert set(provenance.values()) <= {"env", "settings", "default"}
+
+    def test_an_out_of_range_settings_value_degrades_like_a_bad_env_value(self) -> None:
+        """A settings override is rendered into the same raw-string shape
+        ``from_env`` parses, so an out-of-range value hits the exact same
+        clamp — not a second, divergent validation rule.
+        """
+        config = WriteBehaviourConfig.from_env_and_settings(
+            settings={"pack_holdout_rate": 2.0}, env={}
+        )
+        # Clamped to the default, same as from_env.
+        assert config.pack_holdout_rate == 0.0
+
+    def test_a_degraded_settings_file_falls_back_and_says_so(
+        self, tmp_path: Path
+    ) -> None:
+        """``load_settings_values`` has no channel to report degradation
+        (its own docstring) — a caller that must surface it reads
+        ``SettingsStore.is_degraded`` directly. Pin both halves: the
+        precedence layer still falls back cleanly (env, then default) off
+        a degraded read, and the degradation itself is visible via the
+        store, not merely absorbed as "no overrides".
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        path = tmp_path / "settings.json"
+        path.write_text("{ not json", encoding="utf-8")
+        store = SettingsStore(path)
+        assert store.is_degraded is True  # visible, not swallowed
+
+        # Falls back to default with no env set at all.
+        config = WriteBehaviourConfig.from_env_and_settings(
+            settings=store.as_values(), env={}
+        )
+        assert config.pack_holdout_rate == 0.0
+        empty_env_provenance = resolve_overridden_by(settings=store.as_values(), env={})
+        assert empty_env_provenance["pack_holdout_rate"] == "default"
+
+        # Falls back to env, not stuck, when an env var is also set.
+        env = {ENV_VAR_BY_FIELD["pack_holdout_rate"]: "0.2"}
+        config = WriteBehaviourConfig.from_env_and_settings(
+            settings=store.as_values(), env=env
+        )
+        assert config.pack_holdout_rate == 0.2
+        set_env_provenance = resolve_overridden_by(settings=store.as_values(), env=env)
+        assert set_env_provenance["pack_holdout_rate"] == "env"
 
 
 class TestLegacyReadersStillWork:
@@ -463,3 +648,111 @@ class TestLegacyReadersStillWork:
         assert embed_on_ingest_enabled() is False
         monkeypatch.setenv(ENV_VAR_BY_FIELD["embed_on_ingest"], "yes")
         assert embed_on_ingest_enabled() is True
+
+
+class TestResolveWriteBehaviourSeam:
+    """:func:`resolve_write_behaviour` is the one call every reader above
+    delegates to (see its own docstring for the full module list) — the
+    per-field env > settings > default math is already proven at the pure
+    dict level by ``TestEnvSettingsDefaultPrecedence``, so what is pinned
+    here is the plumbing that logic was never exercised through: a real
+    ``StoreRegistry``'s ``stores_dir`` reaching a real on-disk
+    ``settings.json`` via :func:`~trellis.stores.settings_store.load_settings_values`,
+    and the never-raises fallback this function's docstring promises.
+    """
+
+    def test_registry_none_resolves_env_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        assert resolve_write_behaviour(None) == WriteBehaviourConfig.from_env()
+
+    def test_registry_with_no_stores_dir_resolves_env_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        registry = StoreRegistry()
+        assert registry.stores_dir is None
+        assert resolve_write_behaviour(registry) == WriteBehaviourConfig.from_env()
+
+    @pytest.mark.parametrize(
+        ("setting_name", "override_value", "expected"),
+        [
+            ("memory_extraction", True, True),
+            ("pack_holdout_rate", 0.4, 0.4),
+            ("reconcile_model", "llama3.2:3b", "llama3.2:3b"),
+        ],
+    )
+    def test_settings_only_override_reaches_the_config_through_a_real_registry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        setting_name: str,
+        override_value: bool | float | str,
+        expected: bool | float | str,
+    ) -> None:
+        monkeypatch.delenv(ENV_VAR_BY_FIELD[setting_name], raising=False)
+        registry = StoreRegistry(stores_dir=tmp_path)
+        SettingsStore(tmp_path / "settings.json").set(setting_name, override_value)
+
+        config = resolve_write_behaviour(registry)
+
+        assert getattr(config, setting_name) == expected
+
+    def test_env_still_beats_settings_through_a_real_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = StoreRegistry(stores_dir=tmp_path)
+        SettingsStore(tmp_path / "settings.json").set("pack_holdout_rate", 0.9)
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.1")
+
+        config = resolve_write_behaviour(registry)
+
+        assert config.pack_holdout_rate == 0.1
+
+    def test_a_corrupt_settings_file_degrades_to_env_default_without_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        (tmp_path / "settings.json").write_text("{ not json", encoding="utf-8")
+        registry = StoreRegistry(stores_dir=tmp_path)
+
+        config = resolve_write_behaviour(registry)
+
+        assert config == WriteBehaviourConfig.from_env()
+
+        # Falls back to env, not stuck, when an env var is also set.
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.2")
+        assert resolve_write_behaviour(registry).pack_holdout_rate == 0.2
+
+    def test_an_exception_reading_settings_is_caught_logged_and_falls_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failure that ``load_settings_values`` itself never raises
+        (its own posture) is still wrapped whole here, per this function's
+        own "never raises" docstring promise — not guarded by a list of
+        exception types, same model as ``resolve_stamp_staleness``.
+        """
+
+        def _boom(stores_dir: Path | None) -> dict[str, object]:
+            msg = "settings store exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.stores.settings_store.load_settings_values", _boom)
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.3")
+        registry = StoreRegistry(stores_dir=tmp_path)
+
+        with structlog.testing.capture_logs() as logs:
+            config = resolve_write_behaviour(registry)
+
+        assert config == WriteBehaviourConfig.from_env()
+        assert config.pack_holdout_rate == 0.3
+        assert any(
+            entry.get("event") == "write_behaviour_settings_read_failed"
+            for entry in logs
+        )

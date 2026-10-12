@@ -48,12 +48,16 @@ from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
-from trellis.core.error_sanitize import render_exception_detail
+from trellis.core.error_sanitize import (
+    describe_validation_error,
+    render_exception_detail,
+    sanitize_error_message,
+)
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
-    WriteBehaviourConfig,
+    resolve_write_behaviour,
 )
 from trellis.core.write_provenance import get_write_provenance
 from trellis.errors import TrellisError
@@ -112,15 +116,18 @@ from trellis.mutate import (
     build_evidence_ingest_command,
     build_evidence_ingest_command_from_args,
     ensure_evidence_document,
+    redirect_unreachable_settings_update,
 )
 from trellis.ops import (
     check_capture_health,
     format_capture_warning,
+    resolve_capture_thresholds,
 )
 from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
     describe_axes,
+    format_embedder_failed_note,
     format_failed_axes_note,
     format_misconfigured_semantic_note,
 )
@@ -150,6 +157,7 @@ from trellis.schemas.trace import Trace
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import load_settings_values
 
 logger = structlog.get_logger(__name__)
 
@@ -220,6 +228,22 @@ def _raise_mutation_failed(
 def _exception_detail(exc: BaseException) -> str:
     """Render a caught exception for a caller-facing message."""
     return render_exception_detail(exc)
+
+
+#: A FAILED/REJECTED ``CommandResult.message`` can carry driver or caller
+#: text (a store's rejection detail); SUCCESS and DUPLICATE only restate
+#: the caller's own request, so they pass through unsanitized, matching
+#: ``_results.py``'s ``_SANITIZED_STATUSES`` on the REST boundary (#836).
+_SANITIZED_RESULT_STATUSES = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
+
+def _result_message(result: CommandResult) -> str:
+    """Sanitize ``result.message`` for a caller-facing reply, gated by
+    ``result.status`` rather than wrapped unconditionally (#836's
+    convention, applied to the MCP tool surface)."""
+    if result.status in _SANITIZED_RESULT_STATUSES:
+        return sanitize_error_message(result.message)
+    return result.message
 
 
 def _record_boundary_rejection(
@@ -474,7 +498,7 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
         memory_extraction_env_enabled,
     )
 
-    if not memory_extraction_env_enabled():
+    if not memory_extraction_env_enabled(registry):
         return None
 
     try:
@@ -810,7 +834,7 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         # fails again, fails loudly again.
         index = MinHashIndex()
         document_store = registry.knowledge.document_store
-        max_docs = WriteBehaviourConfig.from_env().minhash_seed_max_docs
+        max_docs = resolve_write_behaviour(registry).minhash_seed_max_docs
         started = time.perf_counter()
         rows_read = (
             _seed_minhash_index(index, document_store, max_docs=max_docs)
@@ -929,7 +953,13 @@ def _capture_warning_banner(registry: StoreRegistry) -> str:
     context it warns about — see :func:`format_capture_warning`.
     """
     try:
-        warning = check_capture_health(registry.operational.event_log)
+        settings = load_settings_values(registry.stores_dir)
+        threshold, window_hours = resolve_capture_thresholds(settings)
+        warning = check_capture_health(
+            registry.operational.event_log,
+            threshold=threshold,
+            window_hours=window_hours,
+        )
         return format_capture_warning(warning) if warning is not None else ""
     except Exception:
         # GRACEFUL-DEGRADATION: the health check is advisory read-side
@@ -943,14 +973,19 @@ def _axis_note(axes: AxisReport) -> str:
     """Every markdown axis note ``axes`` calls for, joined.
 
     Shared by ``_flat_context`` and ``_sectioned_context``. A failed axis
-    (:func:`format_failed_axes_note`) and a misconfigured semantic axis
-    (:func:`format_misconfigured_semantic_note`) are independent states —
-    ``describe_axes`` can report either, or both, for the same build — so
-    both render when present rather than one shadowing the other.
+    (:func:`format_failed_axes_note`), a misconfigured semantic axis
+    (:func:`format_misconfigured_semantic_note`) and an embedder that
+    failed to resolve (:func:`format_embedder_failed_note`, Q5-A)
+    are independent states — ``describe_axes`` can report any of them,
+    or several together, for the same build — so each renders when
+    present rather than one shadowing another.
     """
     notes = [
         format_failed_axes_note(axes["failed"]),
         format_misconfigured_semantic_note(axes["semantic"]),
+        format_embedder_failed_note(
+            axes["embedder_error_type"], axes["embedder_setting"]
+        ),
     ]
     return "\n\n".join(note for note in notes if note)
 
@@ -1046,10 +1081,16 @@ def _flat_context(
     # surface (#775); this is the markdown equivalent — an agent reading
     # the reply never sees a JSON axes block, so the gap is stated in the
     # one place it will read it. Names only, never the exception text.
+    # Both kwargs come from the builder (set once, inside the try above,
+    # from build_strategies' own resolve attempt) rather than a second
+    # ``registry.embedding_fn`` read, which re-raises on every access when
+    # misconfigured and would turn this line into the same uncaught
+    # failure the try above exists to avoid (Q5-A).
     axes = describe_axes(
         builder,
         pack.retrieval_report.strategies_used,
-        embedder_configured=registry.embedding_fn is not None,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
     )
     axis_note = _axis_note(axes)
 
@@ -1060,12 +1101,29 @@ def _flat_context(
         # single most misleading pack this server can return. The note
         # goes here first, before it goes anywhere else.
         empty = empty_message or f"No context found for: {intent}"
+        # Advisory selection (PackBuilder._select_advisories) does not
+        # depend on whether any items were selected, so an empty pack can
+        # still carry advisories — except while the pack holdout is on
+        # (``holdout_rate > 0``), where ``PackBuilder`` blinds an
+        # item-less pack's advisories too
+        # (``_blind_advisories_for_empty_pack``, R1/#844), so a withheld
+        # pack (zeroed via ``_withhold_flat``) and a genuinely empty one
+        # carry the same nothing and stay look-alike. Render whatever
+        # ``pack.advisories`` holds here too — matching
+        # ``_sectioned_context``, which never special-cases empty sections
+        # before appending advisories — rather than silently dropping the
+        # only content an empty-item response would otherwise carry.
+        adv_md = format_advisories_as_markdown(pack.advisories)
         if builder.holdout_rate > 0:
             # With the pack holdout on, an empty pack may be a withheld one.
             # It must still carry the ``pack_id`` header the capture join
-            # reads, and it must read like every other empty pack, so all
-            # empty packs render through the formatter while the rate is
-            # above zero. At rate 0 the one-liner below is unchanged.
+            # reads, so all empty packs render through the formatter while
+            # the rate is above zero. ``adv_md`` is always empty here too
+            # — this branch's pack has no items and the rate is above
+            # zero, so the builder rule above has already blinded
+            # ``pack.advisories`` — but the append stays in case a future
+            # caller reaches this branch some other way. At rate 0 the
+            # one-liner below is unchanged.
             formatter = (
                 format_pack_as_index_markdown if index else format_pack_as_markdown
             )
@@ -1078,12 +1136,16 @@ def _flat_context(
                 empty_text=empty,
                 axis_note=axis_note,
             )
+            if adv_md:
+                result = f"{result}\n\n{adv_md}"
             return f"{banner}\n\n{result}" if banner else result
         if axis_note:
             empty = f"{empty}\n\n{axis_note}"
         note = format_withholding_note(withholding)
         if note:
             empty = f"{empty}\n\n{note}"
+        if adv_md:
+            empty = f"{empty}\n\n{adv_md}"
         return f"{banner}\n\n{empty}" if banner else empty
 
     item_dicts = [
@@ -1108,6 +1170,14 @@ def _flat_context(
         withholding=withholding,
         axis_note=axis_note,
     )
+    # Advisories ride outside the item budget on both pack shapes — see
+    # ``_sectioned_context``, which appends them after
+    # ``format_sectioned_pack_as_markdown`` and before the capture banner.
+    # Mirrored here (same helper, same position) so the flat path, which
+    # agents actually call, stops building advisories it never shows.
+    adv_md = format_advisories_as_markdown(pack.advisories)
+    if adv_md:
+        result = f"{result}\n\n{adv_md}"
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
@@ -1175,10 +1245,13 @@ def _sectioned_context(
         # section's stands for all. No caller passes sections=[].
         axis_note = ""
         if sectioned_pack.sections:
+            # Builder-sourced, not a second ``registry.embedding_fn`` read
+            # — see the flat path's identical note (Q5-A).
             axes = describe_axes(
                 builder,
                 sectioned_pack.sections[0].retrieval_report.strategies_used,
-                embedder_configured=registry.embedding_fn is not None,
+                embedder_configured=builder.embedder_configured,
+                embedder_resolve_failure=builder.embedder_resolve_failure,
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(
@@ -1400,7 +1473,7 @@ def save_experience(trace_json: str) -> str:
         )
         hint_suffix = f" | fix: {'; '.join(hints)}" if hints else ""
         _raise_invalid_params(
-            f"invalid trace JSON: {exc}{hint_suffix}",
+            f"invalid trace JSON: {describe_validation_error(exc)}{hint_suffix}",
             data={
                 "field": "trace_json",
                 "error_class": type(exc).__name__,
@@ -1426,11 +1499,11 @@ def save_experience(trace_json: str) -> str:
     )
     if result.status != CommandStatus.SUCCESS:
         _raise_mutation_failed(
-            f"failed to store trace: {result.message}",
+            f"failed to store trace: {_result_message(result)}",
             data={
                 "status": result.status.value,
                 "command_id": result.command_id,
-                "message": result.message,
+                "message": _result_message(result),
             },
         )
     if already_ingested:
@@ -1510,11 +1583,19 @@ def _resolve_evidence_pointer(
                 source="mcp:save_knowledge",
             )
         except MutationError as exc:
+            # ensure_evidence_document wraps a non-SUCCESS evidence.ingest
+            # result's CommandResult.message whole (evidence.py); that
+            # message can carry a store's own rejection detail on FAILED
+            # or REJECTED, so it is sanitized here too, unconditionally —
+            # evidence.ingest is built with derive_idempotency=False and
+            # the content-hash dedup returns before execute, so DUPLICATE
+            # cannot reach this raise.
+            detail = sanitize_error_message(str(exc))
             _raise_mutation_failed(
-                f"failed to store evidence: {exc}",
+                f"failed to store evidence: {detail}",
                 data={
                     "command_id": exc.command_id,
-                    "message": str(exc),
+                    "message": detail,
                 },
             )
         return (
@@ -1650,11 +1731,11 @@ def _raise_create_failed(
     the old version is now withheld wherever its successor is served; the
     re-send that finishes the call does not repeat the stamps.
     """
-    message = f"failed to create entity: {create_result.message}"
+    message = f"failed to create entity: {_result_message(create_result)}"
     data: dict[str, Any] = {
         "status": create_result.status.value,
         "command_id": create_result.command_id,
-        "message": create_result.message,
+        "message": _result_message(create_result),
         "evidence_ref": evidence_ref,
     }
     if supersedes is not None:
@@ -2014,7 +2095,7 @@ def save_memory(
     # default: the deterministic-only path below is unchanged. An explicit
     # supersedes= bypasses it: the caller has already said what this replaces,
     # and the judge's verdict is not consulted over that declaration.
-    if reconcile_on_write_enabled() and supersedes is None:
+    if reconcile_on_write_enabled(registry) and supersedes is None:
         return _save_memory_reconciled(
             registry,
             executor,
@@ -2186,11 +2267,11 @@ def _store_new_memory(
         )
     if result.status is not CommandStatus.SUCCESS or result.created_id is None:
         _raise_mutation_failed(
-            f"failed to store memory: {result.message}",
+            f"failed to store memory: {_result_message(result)}",
             data={
                 "status": result.status.value,
                 "command_id": result.command_id,
-                "message": result.message,
+                "message": _result_message(result),
             },
         )
     stored_id = result.created_id
@@ -2236,7 +2317,7 @@ def _compute_reconcile_outcome(
     The model is never a hard dependency: an unbuildable / unavailable client
     yields a fallback ADD outcome rather than raising.
     """
-    model_id = configured_model_id()
+    model_id = configured_model_id(registry)
     try:
         client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
@@ -2257,7 +2338,7 @@ def _compute_reconcile_outcome(
         client,
         new_content=content,
         candidate=candidate,
-        timeout=reconcile_timeout_seconds(),
+        timeout=reconcile_timeout_seconds(registry),
         model_id=model_id,
     )
 
@@ -2508,7 +2589,7 @@ def _save_memory_reconciled(
         outcome = ReconcileOutcome(
             decision=ReconcileDecision.ADD,
             confidence=0.0,
-            model_id=configured_model_id(),
+            model_id=configured_model_id(registry),
             fallback=True,
             fallback_reason=ReconcileFallbackReason.JUDGE_ERROR,
         )
@@ -2898,7 +2979,7 @@ def _require_pack_attribution(
     still joins to nothing, and telling the caller that is more use than
     a message claiming they cited nothing.
     """
-    if not WriteBehaviourConfig.from_env().require_pack_attribution:
+    if not resolve_write_behaviour(registry).require_pack_attribution:
         return
 
     item_ids = lookup_pack_item_ids(registry.operational.event_log, pack_id)
@@ -2981,7 +3062,7 @@ def _require_bodied_attribution(
     for not judging an item they were never shown is the expensive
     mistake, and a gate that cannot be computed must not be enforced.
     """
-    if not WriteBehaviourConfig.from_env().require_bodied_attribution:
+    if not resolve_write_behaviour(registry).require_bodied_attribution:
         return
 
     bodied = lookup_pack_bodied_item_ids(registry.operational.event_log, pack_id)
@@ -3599,7 +3680,12 @@ def record_observation(
     # client (see docstring). Returns structured {"status": "error"}
     # JSON so the caller can branch on the response.
     except Exception as exc:
-        return json.dumps({"status": "error", "message": f"Invalid observation: {exc}"})
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Invalid observation: {describe_validation_error(exc)}",
+            }
+        )
 
     try:
         command = Command(
@@ -3623,7 +3709,7 @@ def record_observation(
         return json.dumps(
             {
                 "status": result.status.value,
-                "message": result.message,
+                "message": _result_message(result),
             }
         )
     return json.dumps(
@@ -3784,7 +3870,7 @@ def execute_mutation(
             )
     except Exception as exc:
         _raise_invalid_params(
-            f"invalid command: {exc}",
+            f"invalid command: {describe_validation_error(exc)}",
             data={"operation": str(op), "error_class": type(exc).__name__},
         )
 
@@ -3807,11 +3893,16 @@ def execute_mutation(
             },
         )
 
+    # A no-op for every operation but settings.update, which this
+    # executor never registers a handler for; see the function's own
+    # docstring for why it rewrites the message, not the status.
+    result = redirect_unreachable_settings_update(result)
+
     response: dict[str, Any] = {
         "status": result.status.value,
         "command_id": result.command_id,
         "operation": str(result.operation),
-        "message": result.message,
+        "message": _result_message(result),
     }
     if result.created_id is not None:
         response["created_id"] = result.created_id
@@ -3935,10 +4026,11 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     singletons below build best-effort: winning the init race is worth
     it, but a build failure must NOT sink the server — the tool paths
     handle it at call time (semantic search → keyword/graph, an embedder
-    that failed to resolve is resolved again by each later call and
-    errors while it still fails, embed-on-ingest is fail-soft, memory
-    extraction is feature-flagged). Forcing them to succeed would make
-    each one a hard http boot dependency the stdio path never had.
+    that failed to resolve degrades to keyword + graph with
+    `semantic: embedder_failed` in the axes block, embed-on-ingest is
+    fail-soft, memory extraction is feature-flagged). Forcing them to
+    succeed would make each one a hard http boot dependency the stdio
+    path never had.
     """
     for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)
@@ -3964,17 +4056,19 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             # not a traceback. This is a startup signal to act on, not
             # evidence every component degrades quietly once the server is
             # serving traffic — the three fail differently at call time:
-            #   - embedding_fn: resolved again by every later call (a raise
-            #     caches nothing), and raises at every retrieval call site
-            #     until the setting is fixed.
+            #   - embedding_fn: build_strategies (retrieve/strategies.py)
+            #     catches the resolve failure too, and degrades to
+            #     keyword + graph with `semantic: embedder_failed` in the
+            #     pack's axes block — it does not raise either.
             #   - vector_store: build_strategies (retrieve/strategies.py)
             #     catches the init failure and degrades retrieval to
             #     keyword + graph, with `semantic: misconfigured` in the
             #     pack's axes block — it does not raise.
             #   - memory_extractor: feature-flagged; see the docstring above.
-            # Only run_embed_on_ingest is fail-soft for an embedder resolve
-            # failure specifically — a broken vector_store still propagates
-            # out of that hook (pre-existing; not this PR's scope).
+            # run_embed_on_ingest is fail-soft for either resolve failure:
+            # an embedder or a vector_store that raises here logs
+            # embed_on_ingest_resolve_failed once per (component, cause)
+            # per process and no-ops, rather than failing the ingest.
             logger.warning(
                 "mcp_prewarm_optional_unavailable",
                 component=label,

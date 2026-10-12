@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, Response, status
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.errors import ConfigError
+from trellis.stores.registry import StoreRegistry
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate_optional
 
@@ -110,6 +111,38 @@ def _probe(name: str, fn: Callable[[], Any]) -> dict[str, Any]:
     return {"status": "ok", "latency_ms": round(latency_ms, 2)}
 
 
+def probe_backends(registry: StoreRegistry) -> dict[str, dict[str, Any]]:
+    """Round-trip the 4 cloud backends an agent's request depends on.
+
+    Single source of truth for the probe set shared by ``/readyz`` and
+    ``/api/v1/health`` (``trellis_api.routes.admin.health``) — adding a
+    probe here reaches both callers, so the versioned API surface can
+    never drift from the orchestrator-probe surface.
+
+    * operational ``event_log`` — every governed mutation emits here
+    * knowledge ``graph_store`` — every entity / link query reads here
+    * knowledge ``vector_store`` — every pack assembly hits here
+    * knowledge ``document_store`` — every retrieval reads here
+    """
+    return {
+        "event_log": _probe("event_log", registry.operational.event_log.count),
+        "graph_store": _probe(
+            "graph_store", registry.knowledge.graph_store.count_nodes
+        ),
+        "vector_store": _probe("vector_store", registry.knowledge.vector_store.count),
+        "document_store": _probe(
+            "document_store", registry.knowledge.document_store.count
+        ),
+    }
+
+
+def overall_backend_status(backends: dict[str, dict[str, Any]]) -> str:
+    """``"ready"`` only when every probe in ``backends`` came back ``"ok"``."""
+    return (
+        "ready" if all(b["status"] == "ok" for b in backends.values()) else "degraded"
+    )
+
+
 @router.get("/readyz", include_in_schema=False)
 def readyz(
     response: Response,
@@ -138,19 +171,8 @@ def readyz(
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "initializing"}
 
-    backends: dict[str, Any] = {
-        "event_log": _probe("event_log", registry.operational.event_log.count),
-        "graph_store": _probe(
-            "graph_store", registry.knowledge.graph_store.count_nodes
-        ),
-        "vector_store": _probe("vector_store", registry.knowledge.vector_store.count),
-        "document_store": _probe(
-            "document_store", registry.knowledge.document_store.count
-        ),
-    }
-    overall = (
-        "ready" if all(b["status"] == "ok" for b in backends.values()) else "degraded"
-    )
+    backends = probe_backends(registry)
+    overall = overall_backend_status(backends)
     if overall != "ready":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     if ctx is None and resolve_ops_detail() != OPS_DETAIL_PUBLIC:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -65,11 +66,15 @@ from trellis.learning.tuners import (
     PostPromotionPolicy,
     RuleTuner,
     report_to_dict,
+    resolve_auto_promote_overrides,
     run_auto_promotion,
 )
 from trellis.llm.routing import LLMConsumer
 from trellis.ops.write_health import record_write_rejection
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import (
     run_advisory_fitness_loop,
     run_effectiveness_feedback,
@@ -86,6 +91,8 @@ from trellis.stores.advisory_source import (
     resolve_advisory_path,
 )
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import EventType
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
     _build_learning_registry_or_exit,
@@ -233,18 +240,59 @@ def _load_auto_promote_config() -> _RawAutoPromoteConfig | None:
 
 
 def _build_auto_promote_policy() -> AutoPromotePolicy:
-    """Build the :class:`AutoPromotePolicy` from config, or a disabled default.
+    """Build the :class:`AutoPromotePolicy`: env > settings > config.yaml > default.
 
-    Absent config => ``AutoPromotePolicy(enabled=False)`` — global default
-    OFF, zero behaviour change versus running the tuner alone.
+    ``config.yaml``'s ``learning.auto_promote`` section (absent => every
+    field at its constructor default, i.e. disabled) supplies the
+    ``config_defaults`` floor; ``SETTINGS_REGISTRY``'s
+    ``learning.auto_promote.*`` entries and their ``TRELLIS_*`` env
+    equivalents can each override ``enabled``/``min_sample_size``/
+    ``min_effect_size`` on top, via :func:`resolve_auto_promote_overrides` —
+    the one resolver every caller of :class:`AutoPromotePolicy` must route
+    through. ``require_baseline`` and the post-promotion monitoring knobs
+    are config.yaml-only; they are not registered settings — only the
+    three tuner knobs above are. A settings-file read failure degrades to
+    config.yaml/defaults alone — advisory, like
+    :func:`trellis.core.write_config.resolve_write_behaviour`.
+    Construction (not this function) is what rejects a resolved value
+    looser than the manual-promotion floors — see
+    :meth:`AutoPromotePolicy.__post_init__`.
     """
     cfg = _load_auto_promote_config()
+    config_defaults = (
+        {}
+        if cfg is None
+        else {
+            "enabled": cfg.enabled,
+            "min_sample_size": cfg.min_sample_size,
+            "min_effect_size": cfg.min_effect_size,
+        }
+    )
+    try:
+        from trellis.stores.settings_store import load_settings_values  # noqa: PLC0415
+
+        stores_dir = _get_registry().stores_dir
+        settings = load_settings_values(stores_dir)
+    except Exception:  # advisory read; never fail a worker pass over this
+        logger.warning("auto_promote_settings_read_failed", exc_info=True)
+        settings = {}
+
+    resolved = resolve_auto_promote_overrides(
+        config_defaults=config_defaults, settings=settings
+    )
+    enabled = bool(resolved["enabled"])
+    min_sample_size = int(resolved["min_sample_size"])
+    min_effect_size = float(resolved["min_effect_size"])
     if cfg is None:
-        return AutoPromotePolicy(enabled=False)
+        return AutoPromotePolicy(
+            enabled=enabled,
+            min_sample_size=min_sample_size,
+            min_effect_size=min_effect_size,
+        )
     return AutoPromotePolicy(
-        enabled=cfg.enabled,
-        min_sample_size=cfg.min_sample_size,
-        min_effect_size=cfg.min_effect_size,
+        enabled=enabled,
+        min_sample_size=min_sample_size,
+        min_effect_size=min_effect_size,
         require_baseline=cfg.require_baseline,
         post_promotion=PostPromotionPolicy(
             min_samples_post_promote=cfg.post_min_samples,
@@ -264,9 +312,13 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
-        # manual gate or a disarmed rollback.
+        # manual gate or a disarmed rollback, and resolve_auto_promote_
+        # overrides rejects a non-finite env/stored value the same way —
+        # both raise with the raw value embedded in str(exc), so the
+        # message here names only the exception type, never the value.
         console.print(
-            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]",
+            "[red]invalid learning.auto_promote config "
+            f"({escape(type(exc).__name__)})[/red]",
             soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
@@ -319,17 +371,20 @@ def tune_cmd(
         else None
     )
 
+    event_log = get_event_log()
     report = run_auto_promotion(
         tuner=tuner,
         parameter_store=get_parameter_store(),
         tuner_state=get_tuner_state_store(),
         outcome_store=get_outcome_store(),
-        event_log=get_event_log(),
+        event_log=event_log,
         policy=policy,
         since=since,
         dry_run=dry_run,
         source="trellis.worker.tune",
     )
+    if not dry_run:
+        _emit_tune_cycle_completed(event_log, report, tuner_name=tuner_name)
 
     if output_format == "json":
         payload = report_to_dict(report)
@@ -339,6 +394,26 @@ def tune_cmd(
         return
 
     _render_text(report, tuner_name=tuner_name)
+
+
+def _emit_tune_cycle_completed(
+    event_log: EventLog, report: Any, *, tuner_name: str
+) -> None:
+    """Make one ``worker tune`` pass durable where the API can read it (e167).
+
+    Mirrors :func:`_emit_curate_cycle_completed`: never called for a dry
+    run (``test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes``
+    pins "writes nothing" as including the EventLog), and wrapped whole
+    so a broken EventLog cannot fail the tuning pass it is reporting on.
+    """
+    try:
+        event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload={"tuner_name": tuner_name, **report_to_dict(report)},
+        )
+    except Exception:
+        logger.warning("worker_tune.cycle_completed_emit_failed", exc_info=True)
 
 
 def _render_text(report: Any, *, tuner_name: str) -> None:
@@ -411,6 +486,11 @@ class CurateCycleResult:
     """
 
     noise_tagged: int = 0
+    #: Admitted ids the demotion gate cleared but ``apply_noise_tags``
+    #: could not resolve as a document (a trace id or other non-document
+    #: id); nothing was written for these, unlike every id counted in
+    #: ``noise_tagged`` (#833).
+    noise_refused_non_document: int = 0
     advisories_generated: int = 0
     #: Findings that cleared the sample floor on the arm carrying them but
     #: had no comparison arm to be measured against, so nothing was emitted
@@ -424,6 +504,14 @@ class CurateCycleResult:
     learning_candidates: int = 0
     candidates_path: str | None = None
     decisions_path: str | None = None
+    #: Surfacing-only digest (#845) of ``promote_guidance`` candidates with
+    #: net-positive grader evidence — ``{"count": int, "top": [...]}``, from
+    #: ``write_learning_review_artifacts``'s ``report["promotion_ready"]``.
+    #: ``{"count": 0, "top": []}`` on a dry run or a skipped stage, same as
+    #: every other zeroed field here: a no-op reads as a no-op.
+    learning_promotion_ready: dict[str, Any] = field(
+        default_factory=lambda: {"count": 0, "top": []}
+    )
     skipped_stages: tuple[str, ...] = field(default_factory=tuple)
     dry_run: bool = False
     #: Set when the advisory file could not be read in full, in which case
@@ -485,6 +573,7 @@ class CurateCycleResult:
         """Flat JSON-friendly view for ``--format json`` and structured logs."""
         return {
             "noise_tagged": self.noise_tagged,
+            "noise_refused_non_document": self.noise_refused_non_document,
             "advisories_generated": self.advisories_generated,
             "advisories_refused": self.advisories_refused,
             "advisories_suppressed": self.advisories_suppressed,
@@ -495,6 +584,7 @@ class CurateCycleResult:
             "learning_candidates": self.learning_candidates,
             "candidates_path": self.candidates_path,
             "decisions_path": self.decisions_path,
+            "learning_promotion_ready": self.learning_promotion_ready,
             "skipped_stages": list(self.skipped_stages),
             "dry_run": self.dry_run,
         }
@@ -514,6 +604,7 @@ def run_curation_cycle(
     skip_advisories: bool = False,
     skip_learning: bool = False,
     no_meta_trace: bool = False,
+    settings: Mapping[str, Any] | None = None,
 ) -> CurateCycleResult:
     """Run one full curation cycle against injected stores.
 
@@ -549,8 +640,17 @@ def run_curation_cycle(
       noise-tag and learning findings name writes (the tags, the review
       files) that a dry run does not make.
 
+    ``settings`` is the settings-store snapshot
+    (:func:`trellis.stores.settings_store.load_settings_values`) this
+    cycle resolves its noise-demotion and advisory-generation thresholds
+    from — ``None`` falls back to each threshold's env var, then its
+    module default, same as every other caller of
+    :func:`~trellis.classify.demotion_gate.resolve_demotion_thresholds` /
+    :func:`~trellis.retrieve.advisory_generator.resolve_advisory_thresholds`.
+
     Returns a :class:`CurateCycleResult` with per-stage counts.
     """
+    started = time.monotonic()
     skipped: list[str] = []
 
     noise = _curate_stage_noise_tags(
@@ -562,6 +662,7 @@ def run_curation_cycle(
         skip=skip_noise_tags,
         no_meta_trace=no_meta_trace,
         skipped=skipped,
+        settings=settings,
     )
     advisory = _curate_stage_advisories(
         event_log,
@@ -571,10 +672,12 @@ def run_curation_cycle(
         skip=skip_advisories,
         no_meta_trace=no_meta_trace,
         skipped=skipped,
+        settings=settings,
     )
     learning = _curate_stage_learning(
         event_log,
         learning_registry,
+        document_store=document_store,
         output_dir=output_dir,
         days=days,
         dry_run=dry_run,
@@ -583,8 +686,9 @@ def run_curation_cycle(
         skipped=skipped,
     )
 
-    return CurateCycleResult(
+    result = CurateCycleResult(
         noise_tagged=noise["noise_tagged"],
+        noise_refused_non_document=noise["noise_refused_non_document"],
         advisories_generated=advisory["advisories_generated"],
         advisories_refused=advisory["advisories_refused"],
         advisories_suppressed=advisory["advisories_suppressed"],
@@ -595,9 +699,56 @@ def run_curation_cycle(
         learning_candidates=learning["learning_candidates"],
         candidates_path=learning["candidates_path"],
         decisions_path=learning["decisions_path"],
+        learning_promotion_ready=learning["learning_promotion_ready"],
         skipped_stages=tuple(skipped),
         dry_run=dry_run,
     )
+    if not dry_run:
+        _emit_curate_cycle_completed(
+            event_log, result, duration_seconds=time.monotonic() - started
+        )
+    return result
+
+
+def _emit_curate_cycle_completed(
+    event_log: EventLog, result: CurateCycleResult, *, duration_seconds: float
+) -> None:
+    """Make one cycle's result durable where the API can read it (e167).
+
+    The nightly cron is the host-side ``curate-nightly.sh``, whose JSON
+    output lands in ``~/.trellis/logs/curate.log`` — a file the API
+    container cannot see and nothing renders. ``GET /api/v1/loops`` (and
+    any other API-side reader) can only see what the EventLog carries,
+    so this is the one place that gap can close: every field
+    ``--format json`` already reports (``status`` included — the same
+    derived field the CLI's own JSON surface adds alongside
+    ``result.to_dict()``), plus how long the cycle took.
+
+    Never called for a dry run: :func:`run_curation_cycle`'s own
+    docstring already promises a dry run makes no finding and no write,
+    and ``test_dry_run_writes_no_finding_and_nothing_else`` pins
+    "nothing else" as including the EventLog's row count.
+
+    Advisory, wrapped whole: an EventLog write that fails here must
+    never fail the cycle it is reporting on (CLAUDE.md's rule for an
+    advisory step on the write path; :func:`record_write_rejection` is
+    the existing instance of the same guard). ``emit`` is the one call
+    that can raise — the ``try`` wraps it alone, no narrower, so a new
+    way for it to fail is covered by construction rather than by an
+    enumerated exception type.
+    """
+    try:
+        event_log.emit(
+            EventType.CURATE_CYCLE_COMPLETED,
+            source="trellis.worker.curate",
+            payload={
+                "status": result.status,
+                **result.to_dict(),
+                "duration_seconds": duration_seconds,
+            },
+        )
+    except Exception:
+        logger.warning("worker_curate.cycle_completed_emit_failed", exc_info=True)
 
 
 def _curate_stage_noise_tags(
@@ -610,6 +761,7 @@ def _curate_stage_noise_tags(
     skip: bool,
     no_meta_trace: bool,
     skipped: list[str],
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, int]:
     """Stage 1 — effectiveness feedback (demote / noise-tag).
 
@@ -622,10 +774,20 @@ def _curate_stage_noise_tags(
     :class:`~trellis.retrieve.strategies.SemanticSearch` keeps serving the
     item's pre-demotion embed-time snapshot (#338, re-opened on this path
     by #381).
+
+    ``noise_tagged`` on a live run is the write count, not the gate's
+    admission: the evidence gate admits on citation evidence alone, with
+    no notion of which store an id belongs to, so an admitted trace id or
+    other non-document id reaches ``apply_noise_tags`` and nothing gets
+    written for it (#833). ``noise_refused_non_document``
+    names that remainder. On a dry run nothing is written either way, so
+    both counts come from a read-only ``document_store.get`` per admitted
+    id — cheap, and honest about what a live run on the same window would
+    actually demote.
     """
     if skip:
         skipped.append("noise_tags")
-        return {"noise_tagged": 0}
+        return {"noise_tagged": 0, "noise_refused_non_document": 0}
 
     from trellis.retrieve.effectiveness import (  # noqa: PLC0415
         analyze_effectiveness,
@@ -637,28 +799,45 @@ def _curate_stage_noise_tags(
         disabled=no_meta_trace,
     ) as record:
         if dry_run:
-            report = analyze_effectiveness(event_log, days=days)
+            report = analyze_effectiveness(
+                event_log, days=days, demotion_settings=settings
+            )
         else:
             report = run_effectiveness_feedback(
                 event_log,
                 document_store,
                 days=days,
                 vector_store=vector_store,
+                demotion_settings=settings,
             )
-        # What the evidence gate admitted, not what the usage-rate rule
-        # proposed (#336). The two differ by ~60% on the reference
-        # deployment, and reporting the proposal here would put a number
-        # in the nightly log that no write ever matched.
         screen = report.demotion_screen
-        noise_tagged = (
-            len(screen.admitted) if screen is not None else len(report.noise_candidates)
-        )
+        if report.noise_tags_written is not None:
+            # A live run: the authoritative write count and the admitted
+            # ids apply_noise_tags could not resolve as a document.
+            noise_tagged = report.noise_tags_written
+            noise_refused_non_document = len(report.noise_refused_not_document)
+        elif screen is not None:
+            # Dry run: nothing is written, so report what a live run would
+            # do on this same admitted set — a read, not a write.
+            noise_refused_non_document = sum(
+                1 for item_id in screen.admitted if document_store.get(item_id) is None
+            )
+            noise_tagged = len(screen.admitted) - noise_refused_non_document
+        else:
+            # No screen at all (a caller that did not screen) — same
+            # fallback as before this fix: report the raw proposal, with
+            # no way to say how much of it would resolve as a document.
+            noise_tagged = len(report.noise_candidates)
+            noise_refused_non_document = 0
         if record.enabled and noise_tagged and not dry_run:
             record.produced_finding(
                 f"curate-noise-tags-d{days}",
                 finding_type="NoiseTagsApplied",
             )
-    return {"noise_tagged": noise_tagged}
+    return {
+        "noise_tagged": noise_tagged,
+        "noise_refused_non_document": noise_refused_non_document,
+    }
 
 
 #: Bloat guard on the ``msg`` carried into the rejection row. Same value as
@@ -735,6 +914,7 @@ def _curate_stage_advisories(
     skip: bool,
     no_meta_trace: bool,
     skipped: list[str],
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Stages 2 & 3 — advisory generation + fitness loop.
 
@@ -795,7 +975,13 @@ def _curate_stage_advisories(
             analyzer_name="cli.worker.curate.advisories",
             disabled=no_meta_trace,
         ) as record:
-            gen = AdvisoryGenerator(event_log, advisory_store).generate(days=days)
+            min_sample_size, min_effect_size = resolve_advisory_thresholds(settings)
+            gen = AdvisoryGenerator(
+                event_log,
+                advisory_store,
+                min_sample_size=min_sample_size,
+                min_effect_size=min_effect_size,
+            ).generate(days=days)
             generated = gen.advisories_generated
             refused = gen.findings_refused_no_comparison_arm
             fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
@@ -859,6 +1045,7 @@ def _curate_stage_learning(
     event_log: EventLog,
     learning_registry: ParameterRegistry,
     *,
+    document_store: DocumentStore,
     output_dir: Path,
     days: int,
     dry_run: bool,
@@ -870,6 +1057,13 @@ def _curate_stage_learning(
 
     Observations are always scored; artifacts are written to disk only
     outside dry-run. Promotion itself stays human-gated.
+
+    ``learning_promotion_ready`` (#845) — the count/top-5 digest of
+    ``promote_guidance`` candidates with net-positive grader evidence — is
+    computed by ``write_learning_review_artifacts`` (it needs
+    ``document_store`` for the readable-name fallback feeding its ``top``
+    entries, and that only runs on a live write), so it is ``{"count": 0,
+    "top": []}`` on a dry run, same as ``candidates_path`` being ``None``.
     """
     if skip:
         skipped.append("learning")
@@ -878,10 +1072,12 @@ def _curate_stage_learning(
             "learning_candidates": 0,
             "candidates_path": None,
             "decisions_path": None,
+            "learning_promotion_ready": {"count": 0, "top": []},
         }
 
     candidates_path: str | None = None
     decisions_path: str | None = None
+    learning_promotion_ready: dict[str, Any] = {"count": 0, "top": []}
     with wrap_cli_meta_analysis(
         agent_suffix="worker",
         analyzer_name="cli.worker.curate.learning",
@@ -895,10 +1091,13 @@ def _curate_stage_learning(
         )
         if not dry_run:
             paths = write_learning_review_artifacts(
-                report=report, output_dir=output_dir
+                report=report, output_dir=output_dir, document_store=document_store
             )
             candidates_path = paths["candidates_path"]
             decisions_path = paths["decisions_template_path"]
+            learning_promotion_ready = (
+                report.get("promotion_ready") or learning_promotion_ready
+            )
         if record.enabled and report["candidate_count"] and not dry_run:
             record.produced_finding(
                 f"curate-learning-d{days}",
@@ -909,6 +1108,7 @@ def _curate_stage_learning(
         "learning_candidates": report["candidate_count"],
         "candidates_path": candidates_path,
         "decisions_path": decisions_path,
+        "learning_promotion_ready": learning_promotion_ready,
     }
 
 
@@ -932,6 +1132,7 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
     console.print(f"[bold]worker curate[/bold] mode={mode}")
     console.print(
         f"  noise-tagged: {result.noise_tagged}  "
+        f"noise refused (not a document): {result.noise_refused_non_document}  "
         f"advisories generated: {result.advisories_generated}  "
         f"refused (no comparison arm): {result.advisories_refused}  "
         f"suppressed: {result.advisories_suppressed}  "
@@ -941,6 +1142,16 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
         f"  learning observations: {result.learning_observations}  "
         f"candidates: {result.learning_candidates}"
     )
+    promotion_ready_count = int(result.learning_promotion_ready.get("count", 0) or 0)
+    if promotion_ready_count:
+        # Surfacing only (#845) — nothing here promotes anything; it just
+        # tells an operator reading the nightly log that candidates are
+        # waiting, which until now nothing did.
+        noun = "candidate" if promotion_ready_count == 1 else "candidates"
+        console.print(
+            f"  {promotion_ready_count} {noun} promotion-ready — review with "
+            "[bold]trellis curate promote-learning[/bold] or the Review tab"
+        )
     if result.advisory_store_degraded:
         # Not dim, and above the skipped line: the zeros in the advisory
         # counts printed above are not a quiet night, and the operator has
@@ -1045,10 +1256,11 @@ def _run_curate_loop(
     result: CurateCycleResult | None = None
     while not flag.stop:
         cycle += 1
+        registry = _get_registry()
         result = run_curation_cycle(
             event_log=get_event_log(),
             document_store=get_document_store(),
-            vector_store=resolve_vector_store(_get_registry()),
+            vector_store=resolve_vector_store(registry),
             advisory_store=_advisory_store_from_data_dir(),
             learning_registry=_build_learning_registry_or_exit(),
             output_dir=output_dir,
@@ -1058,6 +1270,7 @@ def _run_curate_loop(
             skip_advisories=skip_advisories,
             skip_learning=skip_learning,
             no_meta_trace=no_meta_trace,
+            settings=load_settings_values(registry.stores_dir),
         )
         logger.info("worker_curate.cycle", cycle=cycle, **result.to_dict())
         if output_format == "json":
@@ -1226,10 +1439,11 @@ def curate_cmd(
         )
         return
 
+    registry = _get_registry()
     result = run_curation_cycle(
         event_log=get_event_log(),
         document_store=get_document_store(),
-        vector_store=resolve_vector_store(_get_registry()),
+        vector_store=resolve_vector_store(registry),
         advisory_store=_advisory_store_from_data_dir(),
         learning_registry=_build_learning_registry_or_exit(),
         output_dir=output_dir,
@@ -1239,6 +1453,7 @@ def curate_cmd(
         skip_advisories=skip_advisories,
         skip_learning=skip_learning,
         no_meta_trace=no_meta_trace,
+        settings=load_settings_values(registry.stores_dir),
     )
 
     if output_format == "json":
@@ -1901,8 +2116,9 @@ def capture_sessions_cmd(
         strict_mode,
     )
 
+    registry = _get_registry()
     try:
-        report = run_sweep(registry=_get_registry(), dry_run=dry_run)
+        report = run_sweep(registry=registry, dry_run=dry_run)
     except CaptureJudgeUnavailableError as exc:
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
@@ -1928,7 +2144,7 @@ def capture_sessions_cmd(
     else:
         _render_capture_text(payload)
 
-    if failed and strict_mode():
+    if failed and strict_mode(load_settings_values(registry.stores_dir)):
         raise typer.Exit(code=EXIT_INTERNAL)
 
 

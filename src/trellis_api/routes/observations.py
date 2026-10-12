@@ -22,6 +22,10 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_MUTATE
+from trellis.core.error_sanitize import (
+    describe_validation_error,
+    sanitize_error_message,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -75,7 +79,8 @@ def record_observation(body: dict[str, Any]) -> dict[str, Any]:
         obs = Observation.model_validate(body)
     except Exception as exc:
         raise HTTPException(
-            status_code=422, detail=f"Invalid observation: {exc}"
+            status_code=422,
+            detail=f"Invalid observation: {describe_validation_error(exc)}",
         ) from exc
 
     executor = build_curate_executor(get_registry())
@@ -89,7 +94,9 @@ def record_observation(body: dict[str, Any]) -> dict[str, Any]:
         )
     )
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
 
     return {
         "status": "ok",
@@ -134,7 +141,8 @@ def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
         meas = Measurement.model_validate(body)
     except Exception as exc:
         raise HTTPException(
-            status_code=422, detail=f"Invalid measurement: {exc}"
+            status_code=422,
+            detail=f"Invalid measurement: {describe_validation_error(exc)}",
         ) from exc
 
     executor = build_curate_executor(get_registry())
@@ -148,7 +156,9 @@ def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
         )
     )
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
 
     return {
         "status": "ok",

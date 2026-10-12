@@ -78,6 +78,7 @@ def _seed() -> None:
                     success_rate_with=0.7,
                     success_rate_without=0.4,
                     effect_size=0.3,
+                    evidence_confidence=1.0,
                 ),
                 scope="global",
             )
@@ -108,6 +109,24 @@ def _without_pack_id(body: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key != "pack_id"}
 
 
+def _mask_duration(node: Any) -> Any:
+    """``node`` with every ``duration_ms`` masked.
+
+    It is real wall-clock elapsed time for that call's build, so two
+    separately-invoked CLI builds (a withheld preview vs. a greenfield one,
+    run as two different process-in-process ``trellis retrieve pack``
+    invocations) are not expected to report the same value.
+    """
+    if isinstance(node, dict):
+        return {
+            key: "<elapsed>" if key == "duration_ms" else _mask_duration(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_mask_duration(value) for value in node]
+    return node
+
+
 class TestRetrievePack:
     def test_a_withheld_preview_is_an_empty_pack(
         self, monkeypatch: pytest.MonkeyPatch
@@ -127,7 +146,9 @@ class TestRetrievePack:
             "doc-3",
         ]
         assert control["advisories"]
-        assert _without_pack_id(withheld) == _without_pack_id(greenfield)
+        assert _mask_duration(_without_pack_id(withheld)) == _mask_duration(
+            _without_pack_id(greenfield)
+        )
         assert withheld["count"] == 0
         assert len(withheld["pack_id"]) == 26
 
@@ -140,6 +161,47 @@ class TestRetrievePack:
         served = _assembled(control["pack_id"])
         assert (served["holdout"], served["holdout_rate"]) == (False, 0.0)
         assert "holdout_items" not in served
+
+    def test_a_settings_store_override_withholds_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``pack_holdout_rate`` is the one knob a *settings* row, with no
+        env var set at all, actually changes at its real enforcement site
+        (see ``SettingSpec(name="pack_holdout_rate").settings_live`` in
+        ``trellis.core.settings_registry``) — proven end to end here, not
+        just at the ``from_env_and_settings`` unit level.
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        _seed()
+        monkeypatch.delenv(RATE_ENV, raising=False)
+        SettingsStore(_get_registry().stores_dir / "settings.json").set(
+            "pack_holdout_rate", 1.0
+        )
+        withheld = _pack()
+        assert withheld["count"] == 0
+        held = _assembled(withheld["pack_id"])
+        assert (held["holdout"], held["holdout_rate"]) == (True, 1.0)
+
+    def test_env_still_wins_over_a_settings_override_here(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The env > settings precedence holds at this call site too, not
+        just in ``WriteBehaviourConfig.from_env_and_settings``'s own
+        tests: a settings row saying "withhold everything" must not
+        override an explicit env var saying "withhold nothing".
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        _seed()
+        SettingsStore(_get_registry().stores_dir / "settings.json").set(
+            "pack_holdout_rate", 1.0
+        )
+        monkeypatch.setenv(RATE_ENV, "0")
+        served = _pack()
+        assert served["count"] > 0
+        row = _assembled(served["pack_id"])
+        assert (row["holdout"], row["holdout_rate"]) == (False, 0.0)
 
 
 class TestPackQuality:
@@ -204,6 +266,7 @@ class TestWriteConfig:
             "value": 0.25,
             "default": 0.0,
             "overridden": True,
+            "overridden_by": "env",
         }
         assert report["write_provenance"]["env_flags"]["pack_holdout_rate"] == 0.25
 

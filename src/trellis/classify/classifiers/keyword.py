@@ -178,6 +178,8 @@ def _validate_domain_names(domains: Mapping[str, list[str]], *, source: str) -> 
 def build_domain_keyword_map(
     config_domains: Mapping[str, list[str]] | None = None,
     extra_domains: Mapping[str, list[str]] | None = None,
+    *,
+    extra_domains_source: str = "KeywordDomainClassifier(extra_domains=...)",
 ) -> dict[str, list[str]]:
     """Merge built-in defaults, config-supplied, and constructor-supplied maps.
 
@@ -186,6 +188,16 @@ def build_domain_keyword_map(
     ``config.yaml`` ``classify.domain_keywords``) < ``extra_domains``
     (constructor param). Reserved-namespace names in either supplied map are
     rejected loudly (see :func:`_validate_domain_names`).
+
+    ``extra_domains_source`` names where a rejected ``extra_domains`` entry
+    came from, for the error message only. Defaults to the direct
+    constructor-arg wording, since that is what a bare call to this
+    function or :class:`KeywordDomainClassifier` means; a caller merging
+    in a different layer (e.g.
+    :func:`trellis.classify.factory.effective_domain_keywords`, merging in
+    the operator overlay) passes a label naming that layer instead, so the
+    error points a reader at the actual file to fix rather than at a
+    Python constructor argument.
     """
     merged: dict[str, list[str]] = dict(_DEFAULT_DOMAIN_KEYWORDS)
     if config_domains:
@@ -194,9 +206,7 @@ def build_domain_keyword_map(
         )
         merged.update({k: list(v) for k, v in config_domains.items()})
     if extra_domains:
-        _validate_domain_names(
-            extra_domains, source="KeywordDomainClassifier(extra_domains=...)"
-        )
+        _validate_domain_names(extra_domains, source=extra_domains_source)
         merged.update({k: list(v) for k, v in extra_domains.items()})
     return merged
 

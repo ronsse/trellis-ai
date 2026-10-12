@@ -14,14 +14,18 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.ops import capture_health
 from trellis.ops.capture_health import (
     DEFAULT_THRESHOLD,
     DEFAULT_WINDOW_HOURS,
+    THRESHOLD_SETTING,
+    WINDOW_HOURS_SETTING,
     CaptureHealthWarning,
     check_capture_health,
     format_capture_warning,
+    resolve_capture_thresholds,
 )
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -76,10 +80,271 @@ def _memory_stored(event_log: EventLog, requested_by: str = "mcp:save_memory") -
     )
 
 
+class TestResolveCaptureThresholds:
+    """``resolve_capture_thresholds`` is the one path the MCP server's
+    capture-warning banner uses to turn a settings-store snapshot into the
+    ``(threshold, window_hours)`` pair passed to :func:`check_capture_health`.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(self) -> None:
+        assert resolve_capture_thresholds(None) == (
+            DEFAULT_THRESHOLD,
+            DEFAULT_WINDOW_HOURS,
+        )
+
+    def test_a_settings_only_override_is_honoured(self) -> None:
+        settings = {THRESHOLD_SETTING: 7, WINDOW_HOURS_SETTING: 48}
+
+        assert resolve_capture_thresholds(settings) == (7, 48)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", "9")
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "72")
+        settings = {THRESHOLD_SETTING: 7, WINDOW_HOURS_SETTING: 48}
+
+        assert resolve_capture_thresholds(settings) == (9, 72)
+
+    def test_a_negative_settings_value_falls_back_to_the_default(self) -> None:
+        settings = {THRESHOLD_SETTING: -1}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == DEFAULT_THRESHOLD
+
+    def test_a_negative_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-gate #867 M10: the env side of ``_resolve_int_knob`` must
+        reject a negative value exactly as the stored side does above --
+        both go through the same ``validate_value`` bounds check, but
+        only the stored side had a test pinning it before this PR.
+        """
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", "-1")
+
+        threshold, _window_hours = resolve_capture_thresholds(None)
+
+        assert threshold == DEFAULT_THRESHOLD
+
+    def test_zero_is_a_valid_settings_override(self) -> None:
+        """0 disables the check entirely -- it must not be treated as
+        falsy and degraded to the default.
+        """
+        settings = {THRESHOLD_SETTING: 0}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == 0
+
+    def test_an_overflow_class_settings_window_falls_back_to_the_default(
+        self,
+    ) -> None:
+        """B4a: 18,000,000 hours (~2054 years) is syntactically a valid
+        int, but subtracting it from ``datetime.now()`` underflows
+        ``datetime``'s year-1 floor -- it used to reach
+        ``check_capture_health`` unbounded and raise ``OverflowError``
+        on every ``get_context`` call. The registry's own ``maximum`` on
+        ``capture_warn_window_hours`` must refuse it here, before
+        ``check_capture_health`` ever sees it.
+        """
+        settings = {WINDOW_HOURS_SETTING: 18_000_000}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_an_overflow_class_env_window_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "18000000")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_the_exact_maximum_settings_window_is_honoured(self) -> None:
+        """``capture_warn_window_hours``'s registered ``maximum`` is 87,600
+        (10 years). The overflow-class tests above use 18,000,000, which
+        stays on the same side of 87,601 as 87,600 under an off-by-one
+        mutant of that bound -- this pins the boundary itself.
+        """
+        settings = {WINDOW_HOURS_SETTING: 87_600}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == 87_600
+
+    def test_one_past_the_maximum_settings_window_falls_back_to_the_default(
+        self,
+    ) -> None:
+        settings = {WINDOW_HOURS_SETTING: 87_601}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_the_exact_maximum_env_window_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "87600")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == 87_600
+
+    def test_one_past_the_maximum_env_window_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "87601")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_the_exact_maximum_settings_threshold_is_honoured(self) -> None:
+        """``capture_warn_threshold``'s registered ``maximum`` is
+        1,000,000 -- a sanity cap against a typo or overflow-class value,
+        not an operational ceiling. A mutant dropping that bound entirely
+        would still pass every other test in this class; this pins the
+        boundary itself.
+        """
+        settings = {THRESHOLD_SETTING: 1_000_000}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == 1_000_000
+
+    def test_one_past_the_maximum_settings_threshold_falls_back_to_the_default(
+        self,
+    ) -> None:
+        settings = {THRESHOLD_SETTING: 1_000_001}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == DEFAULT_THRESHOLD
+
+
+def _assert_no_env_value_leak(logs: list[dict], event: str, secret: str) -> dict:
+    """SF3 (env half): see the matching helper in
+    ``tests/unit/retrieve/test_advisory_generator.py``. The log line for
+    a malformed env value must carry ``var=<ENV_NAME>`` and
+    ``error_type=...``, never the raw value -- checked both as the full
+    secret and as every 8-character substring of it, so a truncating
+    formatter could not leak a damaging fragment either.
+    """
+    matches = [entry for entry in logs if entry["event"] == event]
+    assert len(matches) == 1, logs
+    entry = matches[0]
+    rendered = repr(entry)
+    assert secret not in rendered, rendered
+    for start in range(len(secret) - 7):
+        chunk = secret[start : start + 8]
+        assert chunk not in rendered, (chunk, rendered)
+    return entry
+
+
+class TestEnvLogLineNeverLeaksTheRawValue:
+    """``_resolve_int_knob`` (via ``resolve_capture_thresholds``) and the
+    unbounded ``_env_int`` (via ``check_capture_health`` with no explicit
+    kwarg) are two independent call sites sharing the
+    ``capture_health.bad_env_int`` event name -- both must stop logging
+    the raw env value.
+    """
+
+    def test_resolve_capture_thresholds_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKECaptureEnvThresholdNeedle000111"
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", needle)
+
+        with capture_logs() as logs:
+            threshold, _window_hours = resolve_capture_thresholds(None)
+
+        assert threshold == DEFAULT_THRESHOLD
+        entry = _assert_no_env_value_leak(logs, "capture_health.bad_env_int", needle)
+        assert entry["var"] == "TRELLIS_CAPTURE_WARN_THRESHOLD"
+        assert "error_type" in entry
+        assert "value" not in entry
+
+    def test_check_capture_health_unbounded_env_fallback_logs_var_not_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exercises the *other* ``bad_env_int`` call site --
+        ``_env_int``, reached only when ``check_capture_health`` is
+        called with no explicit ``threshold`` kwarg so it reads the env
+        var directly rather than through ``resolve_capture_thresholds``.
+        """
+        needle = "sk-proj-FAKECaptureEnvUnboundedNeedle000111"
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", needle)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+
+        with capture_logs() as logs:
+            result = check_capture_health(event_log)
+
+        # nothing seeded, so it falls back to the default and stays healthy
+        assert result is None
+        entry = _assert_no_env_value_leak(logs, "capture_health.bad_env_int", needle)
+        assert entry["var"] == "TRELLIS_CAPTURE_WARN_THRESHOLD"
+        assert "error_type" in entry
+        assert "value" not in entry
+
+
 class TestCheckCaptureHealth:
     def test_empty_log_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
         assert check_capture_health(event_log) is None
+
+    def test_an_overflow_class_explicit_window_hours_degrades_not_crashes(
+        self, tmp_path: Path
+    ) -> None:
+        """B4a defense in depth: an explicit ``window_hours`` kwarg
+        bypasses the registry's bounded resolver entirely (the
+        docstring's "explicit kwargs win over the env knobs" --
+        ``resolve_capture_thresholds`` is never consulted), so a caller
+        passing an overflow-class value directly must still not crash
+        the ``datetime.now() - timedelta(...)`` arithmetic. Every
+        ``get_context`` call runs this, so an unhandled ``OverflowError``
+        here is a traceback on every retrieval, not a banner failing to
+        clear.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        with capture_logs() as logs:
+            result = check_capture_health(
+                event_log, threshold=DEFAULT_THRESHOLD, window_hours=18_000_000
+            )
+        assert result is None  # nothing seeded, so still healthy
+        overflow_logs = [
+            log
+            for log in logs
+            if log.get("event") == "capture_health.window_hours_overflow"
+        ]
+        assert len(overflow_logs) == 1, logs
+        assert overflow_logs[0]["window_hours"] == 18_000_000
+
+    def test_an_overflow_class_explicit_window_hours_still_warns_on_a_real_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        """The test above never seeds a rejection, so it cannot tell a
+        correct fallback (``DEFAULT_WINDOW_HOURS``, 24) from a broken one
+        (0): with nothing in the event log, ``check_capture_health``
+        reports healthy either way. A fallback of 0 collapses the
+        trailing window to ``datetime.now() - timedelta(hours=0)`` --
+        "now" itself -- so a rejection that already happened falls
+        outside it and the banner never fires, exactly the silent-outage
+        failure this check exists to catch. Seeding a real rejection and
+        pinning ``warning.window_hours`` to the true default closes that
+        gap.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, n=DEFAULT_THRESHOLD)
+
+        warning = check_capture_health(
+            event_log, threshold=DEFAULT_THRESHOLD, window_hours=18_000_000
+        )
+
+        assert warning is not None
+        assert warning.window_hours == DEFAULT_WINDOW_HOURS
 
     def test_below_threshold_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")

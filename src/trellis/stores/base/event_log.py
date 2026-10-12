@@ -51,7 +51,6 @@ class EventType(StrEnum):
 
     # Precedent lifecycle
     PRECEDENT_PROMOTED = "precedent.promoted"
-    PRECEDENT_UPDATED = "precedent.updated"
 
     # Policy
     POLICY_CREATED = "policy.created"
@@ -147,6 +146,25 @@ class EventType(StrEnum):
     # Smoothed confidence updates mask fast shifts; this event surfaces
     # them so operators can review before the smoothing absorbs them.
     ADVISORY_DRIFT_DETECTED = "advisory.drift_detected"
+
+    #: One per ``run_curation_cycle`` call (the nightly ``worker curate``
+    #: cron and every ``--interval`` tick), carrying the same counters
+    #: ``--format json`` reports. Before this, the cycle's only durable
+    #: record was a structlog line a cron wrapper piped to a host-only
+    #: log file the API container cannot read — invisible to
+    #: ``GET /api/v1/loops`` and to any operator not tailing that file
+    #: (e167). Emitted fail-soft: a broken EventLog must never fail the
+    #: cycle whose health it is reporting.
+    CURATE_CYCLE_COMPLETED = "curate.cycle_completed"
+
+    #: One per ``worker tune`` invocation (live runs only — see
+    #: :data:`CURATE_CYCLE_COMPLETED`'s dry-run rule, which this mirrors),
+    #: carrying the same :func:`report_to_dict` counters ``--format json``
+    #: reports. A pass that promotes nothing already emits zero
+    #: proposal-level events, so without this ``GET /api/v1/loops`` cannot
+    #: tell "the tuner ran and found nothing to do" from "the tuner has
+    #: never run" (e167).
+    TUNE_CYCLE_COMPLETED = "tune.cycle_completed"
 
     # Classification refresh (stale-tag reclassification — see Gap 1.1)
     TAGS_REFRESHED = "tags.refreshed"
@@ -496,6 +514,110 @@ class EventType(StrEnum):
     #: every autonomous action leaves a self-identifying audit record.
     PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
     PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
+
+    #: Emitted once per ``trellis curate auto-promote-candidates`` run (see
+    #: ``trellis.learning.candidate_auto_promote``). Tier-1 autonomy event
+    #: (c) for the learning-candidate promotion policy, mirroring
+    #: :attr:`PARAMS_AUTO_PROMOTED`. Today every run is report-only — a
+    #: commit mode exists in the schema but is refused at policy
+    #: construction (see the module's "Scope: evaluation only") — so every
+    #: candidate's disposition is one of ``would_promote``,
+    #: ``already_promoted`` (a precedent already exists for it, human or
+    #: automatic) or ``ineligible:<reason>``, and the run writes nothing
+    #: besides this event. Payload carries ``mode``, ``configured_mode``,
+    #: ``dispositions`` (per-candidate), ``counts``, and a
+    #: ``policy_snapshot`` of the knobs that produced this run, so a later
+    #: audit does not have to reconstruct settings state from elsewhere.
+    LEARNING_AUTO_PROMOTE_EVALUATED = "learning.auto_promote_evaluated"
+
+    #: Emitted by the governed settings write path
+    #: (``SettingsUpdateHandler`` / ``Operation.SETTINGS_UPDATE``) on every
+    #: successful set or reset of one ``settings.json`` override. Payload:
+    #: ``{name, old_value, new_value, overridden_by_at_write, changed_by}``.
+    #: ``new_value`` is ``None`` for a reset — ``args["value"] is None``
+    #: means "remove the override", not a separate ``SETTINGS_RESET``
+    #: operation (see the handler's own docstring for why).
+    SETTINGS_UPDATED = "settings.updated"
+
+    #: Emitted by ``trellis admin record-job-run`` at the start and end of
+    #: one dispatcher-driven job execution (see
+    #: ``trellis.stores.schedule_store.ScheduleStore``;
+    #: ``docs/design/p1-ui-control-plane.md`` §(b)). Modeled on
+    #: :attr:`CAPTURE_SWEEP_COMPLETED`: unconditional and fail-soft — a
+    #: job that fails still gets its ``JOB_RUN_COMPLETED`` with a nonzero
+    #: ``exit_code``, because "the dispatcher ran this job and it failed"
+    #: is exactly the fact ``trellis admin due-jobs`` and an operator need,
+    #: and a sweep that adjudicates nothing (crashes before reporting)
+    #: still has to say so via ``JOB_RUN_STARTED`` alone. ``entity_id`` is
+    #: the job name
+    #: (:attr:`ScheduledJob.name <trellis.schemas.schedule.ScheduledJob.name>`).
+    #: These are plain audit telemetry, not a governed mutation — there is
+    #: no state these events gate, only a record of what ran.
+    JOB_RUN_STARTED = "job.run_started"
+    #: Paired with :attr:`JOB_RUN_STARTED`. Carries ``started_at``,
+    #: ``finished_at``, ``duration_ms``, ``exit_code`` and
+    #: ``run_id`` (ties the pair together when a job is dispatched more
+    #: than once in the same second). ``due-jobs`` reads the latest
+    #: completed run per job name as its due-ness anchor.
+    JOB_RUN_COMPLETED = "job.run_completed"
+
+    #: Emitted by the admin REST/CLI schedule-editing surface
+    #: (``PATCH /admin/jobs/{name}``, ``trellis admin schedule set``;
+    #: ``docs/design/p1-ui-control-plane.md`` §(b), plan PR 6) whenever a
+    #: write to :class:`~trellis.stores.schedule_store.ScheduleStore`
+    #: succeeds. ``entity_id`` is ``f"job:{name}"``, matching
+    #: :attr:`JOB_RUN_STARTED`/:attr:`JOB_RUN_COMPLETED`. Payload carries
+    #: ``old`` and ``new`` dicts (only the fields that changed:
+    #: ``enabled``, ``cadence``, ``timeout_seconds``) plus the actor
+    #: identity (``key_id``, ``key_name``) — never a command, argv, path
+    #: or environment variable, which this surface cannot change.
+    SCHEDULE_UPDATED = "schedule.updated"
+    #: Emitted by ``POST /admin/jobs/{name}/run`` / ``trellis admin
+    #: schedule run`` when a "Run now" request is accepted — i.e. the
+    #: store write that sets ``run_requested_at`` succeeded. This is a
+    #: *request*, not an execution: the actual run is still picked up by
+    #: a dispatcher polling ``due-jobs`` on its own cadence (typically
+    #: within ~5 minutes), which then emits :attr:`JOB_RUN_STARTED` /
+    #: :attr:`JOB_RUN_COMPLETED` as usual. ``entity_id`` is
+    #: ``f"job:{name}"``; payload carries ``run_requested_at`` and the
+    #: actor identity.
+    JOB_RUN_REQUESTED = "job.run_requested"
+    #: Emitted by the governed classify-overlay write path
+    #: (``ClassifyRuleApplyHandler`` / ``Operation.CLASSIFY_RULE_APPLY``) on
+    #: every successful apply of a mined ``tag_keyword`` or ``domain_alias``
+    #: candidate into ``classify_overrides.json``
+    #: (:mod:`trellis.stores.classify_overrides_store`). Payload:
+    #: ``{kind, key, target, support, precision, lift, applied_by, key_id,
+    #: key_name, source_event_id, prior_target, prior_applied_by,
+    #: prior_applied_at, prior_source_event_id, config_target}``, plus
+    #: ``requested_by_claim`` when the caller supplied one — the candidate's
+    #: own metrics are copied onto this event (not just referenced by
+    #: ``source_event_id``) so an audit trail reader never has to join back
+    #: to the original :attr:`TAG_KEYWORD_CANDIDATE` /
+    #: :attr:`DOMAIN_ALIAS_CANDIDATE` event to see what was approved.
+    #: ``entity_id`` is the overlay row's own id (``f"{kind}:{key}"``).
+    CLASSIFY_RULE_APPLIED = "classify_rule.applied"
+    #: Emitted by the same write path's revoke handler
+    #: (``ClassifyRuleRevokeHandler`` / ``Operation.CLASSIFY_RULE_REVOKE``) on
+    #: every successful removal of an overlay row. Payload: ``{kind, key,
+    #: target, revoked_by, key_id, key_name, removed_applied_by,
+    #: removed_applied_at, removed_source_event_id, config_target}``, plus
+    #: ``requested_by_claim`` when the caller supplied one. Revoking a rule
+    #: that came from ``config.yaml`` rather than the overlay is refused
+    #: before this event would ever be emitted — see the handler's own
+    #: docstring.
+    CLASSIFY_RULE_REVOKED = "classify_rule.revoked"
+    #: Emitted by ``POST /api/v1/classify/candidates/{id}/dismiss`` (no
+    #: dedicated ``Operation`` — a dismiss changes no store state, only this
+    #: audit trail, so it is plain telemetry like :attr:`JOB_RUN_STARTED`
+    #: rather than a governed mutation). Payload: ``{candidate_id, kind,
+    #: dismissed_by, key_id, key_name}``. ``GET /api/v1/classify/candidates``
+    #: excludes a candidate with a ``CLASSIFY_CANDIDATE_DISMISSED`` event
+    #: more recent than its latest ``TAG_KEYWORD_CANDIDATE`` /
+    #: ``DOMAIN_ALIAS_CANDIDATE`` emission from its "open" listing, the same
+    #: latest-event-wins resolution :mod:`trellis.learning.cooldown` already
+    #: uses for recurrence.
+    CLASSIFY_CANDIDATE_DISMISSED = "classify_candidate.dismissed"
 
 
 class Event(VersionedModel):

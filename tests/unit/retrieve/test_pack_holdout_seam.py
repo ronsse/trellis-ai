@@ -74,8 +74,9 @@ _PER_BUILD = {"pack_id", "assembled_at", "created_at", "updated_at"}
 
 #: The flat ``PACK_ASSEMBLED`` keys at the base this change was cut from
 #: (58be23d4), read off ``PackBuilder._emit_telemetry`` by hand and checked
-#: against a base-checkout probe. At a rate of 0 the two holdout keys are
-#: the only ones this change may add.
+#: against a base-checkout probe. At a rate of 0 the holdout change added
+#: only the two holdout keys; see ``_KEYS_ADDED_SINCE_BASE`` for what a
+#: later change (``duration_ms``) added on top of that.
 _BASE_FLAT_KEYS = frozenset(
     {
         "intent",
@@ -148,6 +149,16 @@ _BASE_SECTIONED_KEYS = frozenset(
 
 _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 
+#: Keys added to both payloads since the ``_BASE_*_KEYS`` snapshot was taken,
+#: by any change, not just this one: the holdout keys (this file's own
+#: subject), plus ``duration_ms`` (real build latency, previously hard-coded
+#: to ``0`` and emitted nowhere) and ``advisories_filtered_legacy``
+#: (decision-ledger D-4, option B — how many matching advisories were
+#: withheld for predating the #394 generator repair). ``_BASE_*_KEYS`` stays
+#: an honest historical snapshot of 58be23d4 rather than being backfilled,
+#: so a *later* addition extends this set, not the base one.
+_KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {"duration_ms", "advisories_filtered_legacy"}
+
 
 def _items() -> list[PackItem]:
     return [
@@ -182,6 +193,7 @@ def _advisory(
             success_rate_with=0.8,
             success_rate_without=0.45,
             effect_size=0.35,
+            evidence_confidence=1.0,
         ),
         scope="global",
     )
@@ -225,8 +237,25 @@ def _payload(event_log: SQLiteEventLog, pack_id: str) -> dict[str, Any]:
     return dict(events[0].payload)
 
 
+def _mask_duration(node: Any) -> Any:
+    """``node`` with every ``duration_ms`` masked.
+
+    It is real wall-clock elapsed time for that call's build, so two
+    separately-executed builds (held vs. greenfield, or rate 0 vs. a rate
+    whose draw still serves) are not expected to report the same value.
+    """
+    if isinstance(node, dict):
+        return {
+            key: "<elapsed>" if key == "duration_ms" else _mask_duration(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_mask_duration(value) for value in node]
+    return node
+
+
 def _comparable(pack: Pack | SectionedPack) -> dict[str, Any]:
-    return pack.model_dump(exclude=_PER_BUILD)
+    return _mask_duration(pack.model_dump(exclude=_PER_BUILD))
 
 
 def _empty_withholding() -> dict[str, Any]:
@@ -373,14 +402,14 @@ class TestFlatWithheld:
 
 
 class TestFlatAtRateZero:
-    def test_only_the_two_keys_are_added(
+    def test_only_keys_since_base_are_added(
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         pack = _builder(event_log, advisory_store, 0.0).build(
             "rotate keys", budget=_BUDGET
         )
         row = _payload(event_log, pack.pack_id)
-        assert set(row) - _BASE_FLAT_KEYS == _HOLDOUT_KEYS
+        assert set(row) - _BASE_FLAT_KEYS == _KEYS_ADDED_SINCE_BASE
         assert set(row) >= _BASE_FLAT_KEYS
         assert row["holdout"] is False
         assert row["holdout_rate"] == 0.0
@@ -404,9 +433,9 @@ class TestFlatAtRateZero:
         # Served (a draw below 1e-12 has probability 1e-12).
         assert tiny_row["holdout"] is False
         assert tiny_row["holdout_rate"] == 1e-12
-        assert {k: v for k, v in tiny_row.items() if k != "holdout_rate"} == {
-            k: v for k, v in zero_row.items() if k != "holdout_rate"
-        }
+        assert _mask_duration(
+            {k: v for k, v in tiny_row.items() if k != "holdout_rate"}
+        ) == _mask_duration({k: v for k, v in zero_row.items() if k != "holdout_rate"})
         assert _comparable(tiny) == _comparable(zero)
 
 
@@ -476,14 +505,14 @@ class TestSectionedWithheld:
         assert held_row["withholding"] == _empty_withholding()
         assert held_row["token_total_estimated"] == 0
 
-    def test_only_the_two_keys_are_added_at_rate_zero(
+    def test_only_keys_since_base_are_added_at_rate_zero(
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         pack = _builder(event_log, advisory_store, 0.0).build_sectioned(
             "rotate keys", sections=_SECTIONS
         )
         row = _payload(event_log, pack.pack_id)
-        assert set(row) - _BASE_SECTIONED_KEYS == _HOLDOUT_KEYS
+        assert set(row) - _BASE_SECTIONED_KEYS == _KEYS_ADDED_SINCE_BASE
         assert set(row) >= _BASE_SECTIONED_KEYS
         assert row["holdout"] is False
         assert row["holdout_rate"] == 0.0
@@ -563,6 +592,104 @@ class TestSessionDedup:
         assert [[i.item_id for i in s.items] for s in again.sections] == [
             [],
             ["doc-delta"],
+        ]
+
+
+class TestNaturallyEmptyPackBlindsAdvisoriesToo:
+    """R1 (#844): advisory selection does not depend on item count, so a
+    pack that genuinely found nothing can still carry advisories (#404's
+    rule) — except while the holdout is live, where that would be the one
+    tell separating a naturally empty pack from a withheld one (both have
+    no items; only the naturally empty one kept its advisories). The
+    builder rule closes that: a served, item-less pack carries no
+    advisories whenever ``holdout_rate > 0``, matching a withheld pack's
+    ``_withhold_flat`` / ``_withhold_sectioned`` zeroing.
+    """
+
+    def test_flat_build_drops_advisories_when_naturally_empty_and_rate_is_live(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(event_log, advisory_store, 1e-12, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        row = _payload(event_log, natural_empty.pack_id)
+
+        assert natural_empty.items == []
+        assert row["holdout"] is False  # a 1e-12 draw is never held out
+        assert natural_empty.advisories == []
+        assert row["advisory_ids"] == []
+        # The telemetry count is untouched: this blinds what the caller is
+        # served, not what the store matched.
+        assert row["advisories_matched"] == 3
+
+    def test_flat_build_keeps_advisories_when_naturally_empty_at_rate_zero(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        """Inert at the default rate: #404's rule is unchanged when the
+        holdout is off."""
+        natural_empty = _builder(event_log, advisory_store, 0.0, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        assert natural_empty.items == []
+        assert len(natural_empty.advisories) == 3
+
+    def test_flat_audit_trail_keeps_the_true_would_be_advisories(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        """A pack that is both naturally item-less and drawn into the
+        holdout must still record the true matched advisories under
+        ``holdout_advisory_ids`` — the blind applies to the served copy
+        only, never to the apart-kept would-be pack."""
+        held = _builder(event_log, advisory_store, 1.0, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        row = _payload(event_log, held.pack_id)
+
+        assert row["holdout"] is True
+        assert held.advisories == []
+        assert row["holdout_advisory_ids"] == [
+            "adv-entity",
+            "adv-approach",
+            "adv-scope",
+        ]
+
+    def test_sectioned_build_drops_advisories_when_naturally_empty_and_rate_is_live(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(
+            event_log, advisory_store, 1e-12, items=[]
+        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        row = _payload(event_log, natural_empty.pack_id)
+
+        assert natural_empty.total_items == 0
+        assert row["holdout"] is False
+        assert natural_empty.advisories == []
+        assert row["advisory_ids"] == []
+        assert row["advisories_matched"] == 3
+
+    def test_sectioned_build_keeps_advisories_when_naturally_empty_at_rate_zero(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(
+            event_log, advisory_store, 0.0, items=[]
+        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        assert natural_empty.total_items == 0
+        assert len(natural_empty.advisories) == 3
+
+    def test_sectioned_audit_trail_keeps_the_true_would_be_advisories(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        held = _builder(event_log, advisory_store, 1.0, items=[]).build_sectioned(
+            "rotate keys", sections=_SECTIONS
+        )
+        row = _payload(event_log, held.pack_id)
+
+        assert row["holdout"] is True
+        assert held.advisories == []
+        assert row["holdout_advisory_ids"] == [
+            "adv-entity",
+            "adv-approach",
+            "adv-scope",
         ]
 
 

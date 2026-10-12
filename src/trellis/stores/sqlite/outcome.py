@@ -133,8 +133,8 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
             o.outcome.error,
             o.cohort,
             o.segment,
-            json.dumps(o.outcome.model_dump(mode="json")),
-            json.dumps(o.metadata),
+            json.dumps(o.outcome.model_dump(mode="json"), allow_nan=False),
+            json.dumps(o.metadata, allow_nan=False),
             o.schema_version,
         )
         return sql, params

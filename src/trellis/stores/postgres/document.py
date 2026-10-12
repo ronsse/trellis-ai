@@ -135,7 +135,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
 
         now = utc_now()
         metadata = metadata or {}
-        metadata_json = json.dumps(metadata)
+        metadata_json = json.dumps(metadata, allow_nan=False)
         chash = _content_hash(content)
 
         # `preserve_updated_at` is bound, not spliced: an f-string here would
