@@ -302,6 +302,37 @@ def _reset_project_stamp(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     resolve_project.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_cli_store_registry() -> Iterator[None]:
+    """Drop the memoized ``StoreRegistry`` singleton around every test.
+
+    :func:`trellis_cli.stores._get_registry` builds a ``StoreRegistry`` once
+    per process and caches it at module scope — correct for a real CLI
+    invocation (one process, one build), but inside the test suite that
+    module scope spans every test function. ``tests/unit/cli/conftest.py``
+    already resets it before each test under ``tests/unit/cli/``, but that
+    reset is scoped to that directory by pytest's own conftest rules, not to
+    the whole suite.
+
+    That gap was invisible while only CLI-boundary code read the cache. It
+    stopped being invisible once ``trellis_cli.worker._advisory_store_from_data_dir``
+    started reading ``stores_dir`` off this same cache instead of calling
+    ``get_data_dir()`` fresh each time: tests under ``tests/unit/stores/``
+    that call it directly and steer it with
+    ``monkeypatch.setenv("TRELLIS_DATA_DIR", ...)`` would silently get
+    whichever registry some earlier test (in any directory) had already
+    built and cached, writing to the wrong directory while asserting on the
+    right one — the same order-dependent flake
+    ``_reset_write_provenance`` above guards against for the write-
+    provenance stamp.
+    """
+    from trellis_cli.stores import _reset_registry
+
+    _reset_registry()
+    yield
+    _reset_registry()
+
+
 @pytest.fixture
 def pin_source_tree(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     """Pin what the write-provenance staleness probe sees.

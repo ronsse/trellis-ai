@@ -1334,6 +1334,27 @@ def test_precedents_empty(client):
     assert data["count"] == 0
 
 
+@pytest.mark.parametrize("limit", [0, -1])
+def test_precedents_refuses_a_non_positive_limit(client, limit):
+    """``limit`` had no lower bound, so ``limit=0`` or a negative value
+    reached ``list_precedents`` unchecked and could still serve a row.
+    ``ge=1`` now refuses it with FastAPI's standard 422, before the
+    handler runs.
+    """
+    resp = client.get("/api/v1/precedents", params={"limit": limit})
+    assert resp.status_code == 422
+
+
+def test_precedents_refuses_an_excessive_limit(client):
+    resp = client.get("/api/v1/precedents", params={"limit": 501})
+    assert resp.status_code == 422
+
+
+def test_precedents_accepts_the_upper_bound(client):
+    resp = client.get("/api/v1/precedents", params={"limit": 500})
+    assert resp.status_code == 200
+
+
 def test_list_precedent_domains_counts_every_promoted_precedent(client):
     """The domain filter's options come from a server-side count over every
     promoted precedent, not the fetched page -- a domain with zero

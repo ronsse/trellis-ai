@@ -414,7 +414,7 @@ def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
 @router.get("/precedents")
 def list_precedents(
     domain: str | None = Query(None),
-    limit: int = Query(20),
+    limit: int = Query(20, ge=1, le=500, description="Max results"),
 ) -> dict[str, Any]:
     """List promoted precedents."""
     registry = get_registry()

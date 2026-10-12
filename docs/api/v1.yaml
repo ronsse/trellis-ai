@@ -5287,11 +5287,15 @@ paths:
           - type: string
           - type: 'null'
           title: Domain
-      - in: query
+      - description: Max results
+        in: query
         name: limit
         required: false
         schema:
           default: 20
+          description: Max results
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       responses:

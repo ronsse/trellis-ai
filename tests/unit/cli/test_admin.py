@@ -34,6 +34,55 @@ class TestAdminInit:
         # setups don't silently skip domains/ontology/security choices.
         assert "setup-decisions.md" in result.stdout
 
+    def test_init_with_dangling_symlink_data_dir_fails_legibly(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A ``--data-dir`` that is a broken symlink names the path, not a traceback.
+
+        ``Path.mkdir(exist_ok=True)`` only forgives an *existing directory* —
+        a dangling symlink makes ``os.mkdir`` raise ``FileExistsError``
+        (something is already at that path) while ``exist_ok``'s own
+        ``is_dir()`` check reads the same broken link as absent (``stat``
+        follows it to nothing), so neither side of that check wins and the
+        raw ``OSError`` used to reach the operator as an unhandled
+        traceback. ``path_is_present`` (not ``.exists()``) is what tells a
+        dangling symlink apart from a genuinely empty path here — see
+        ``trellis.core.path_presence``.
+        """
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        broken_link = tmp_path / "dangling"
+        broken_link.symlink_to(tmp_path / "does-not-exist")
+        assert not broken_link.exists()  # dangling: .exists() reads it as absent
+        assert broken_link.is_symlink()  # but something is there
+
+        result = runner.invoke(app, ["admin", "init", "--data-dir", str(broken_link)])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert "Traceback" not in result.output
+        assert str(broken_link) in plain(result.output)
+
+    def test_a_non_string_data_dir_in_config_exits_store_not_a_traceback(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A malformed ``data_dir:`` (e.g. an int) used to reach the operator
+        as a raw ``TypeError`` out of ``Path(data["data_dir"])``
+        (``StoreRegistry.from_config_dir``). It now raises ``ConfigError``,
+        which the CLI boundary maps to ``EXIT_STORE`` (5) like every other
+        damaged-config-file refusal (#489).
+        """
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text("data_dir: 5\n", encoding="utf-8")
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+
+        # config.yaml already exists, so plain ``init`` (no --force) takes
+        # the branch that resolves the data dir through the registry.
+        result = runner.invoke(app, ["admin", "init"])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert "Traceback" not in result.output
+        assert "data_dir" in plain(result.output)
+
     def test_init_custom_data_dir(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
         custom = str(tmp_path / "custom")
