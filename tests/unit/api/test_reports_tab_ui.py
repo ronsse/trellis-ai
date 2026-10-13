@@ -97,7 +97,7 @@ def test_load_reports_tab_fetch_failure_renders_visible_error() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "outputEl.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--error)" in catch_block
+    assert "color:var(--danger)" in catch_block
 
 
 def test_run_report_fetch_failure_renders_visible_error() -> None:
@@ -110,7 +110,7 @@ def test_run_report_fetch_failure_renders_visible_error() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "outputEl.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--error)" in catch_block
+    assert "color:var(--danger)" in catch_block
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ def test_degraded_status_is_checked_before_the_generic_object_path() -> None:
     generic_object_idx = body.index("const scalarEntries = []")
     assert degraded_idx < generic_object_idx
     degraded_branch = _between(body, "=== 'degraded') {", "\n            }")
-    assert "color:var(--error)" in degraded_branch
+    assert "color:var(--danger)" in degraded_branch
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +201,8 @@ def test_readiness_pill_degraded_branch_names_failing_backends_when_known() -> N
 
 def test_readiness_pill_css_classes_exist() -> None:
     page = _page()
-    assert ".readiness-pill.is-ready { background: var(--success); }" in page
-    assert ".readiness-pill.is-degraded { background: var(--error); }" in page
+    assert ".readiness-pill.is-ready { background: var(--ok); }" in page
+    assert ".readiness-pill.is-degraded { background: var(--danger); }" in page
     assert ".readiness-pill.is-unknown { background: var(--text-dim); }" in page
 
 
