@@ -41,10 +41,18 @@ ops detail inside two of them (``/readyz``'s per-backend breakdown,
 API credentials") — the failure category (malformed / unknown /
 revoked / mismatch) is logged server-side only, so callers cannot
 probe which key ids exist.
+
+:func:`check_bind_is_safe` is the fail-closed bind check (#189): a
+non-loopback listener may only start in ``required`` mode, mirroring
+the posture ``trellis.mcp.auth.resolve_http_settings`` already takes
+for the MCP http transport. ``optional`` is refused here too — unlike
+MCP, which has no such mode — because without a presented credential
+it grants every scope exactly as ``off`` does.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import secrets
 from collections.abc import Callable
@@ -71,6 +79,13 @@ AUTH_MODE_OFF = "off"
 AUTH_MODE_OPTIONAL = "optional"
 AUTH_MODE_REQUIRED = "required"
 _VALID_MODES = frozenset({AUTH_MODE_OFF, AUTH_MODE_OPTIONAL, AUTH_MODE_REQUIRED})
+
+#: Permit a non-loopback bind while auth is not ``required``. Unrecognised
+#: values read as "not allowed" — the escape hatch fails closed, matching
+#: ``trellis.mcp.auth.ALLOW_INSECURE_BIND_ENV``'s parsing.
+ALLOW_INSECURE_BIND_ENV = "TRELLIS_API_ALLOW_INSECURE_BIND"
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 #: ``auto_error=False`` on both headers so the dependency can return
 #: its own 401 with a structured body instead of FastAPI's default.
@@ -112,6 +127,68 @@ def resolve_auth_mode() -> str:
         )
         raise ConfigError(msg, setting=AUTH_MODE_ENV)
     return mode
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether ``host`` names only the local machine.
+
+    Duplicated from ``trellis.mcp.auth._is_loopback`` rather than
+    imported: that module's own docstring states MCP is a peer surface,
+    not a REST client, and nothing in it may import ``trellis_api`` — the
+    reverse import would be the first crack in that boundary for ten
+    lines of logic. ``""`` is deliberately NOT loopback: an empty bind
+    host means ``INADDR_ANY`` (all interfaces), the most exposed bind, so
+    the fail-closed check must treat it as routable.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        # A hostname we can't classify without resolving it. Treat as
+        # routable — the fail-closed check should err toward refusing.
+        return False
+
+
+def check_bind_is_safe(host: str, port: int) -> None:
+    """Refuse a non-loopback bind unless auth is ``required`` (#189).
+
+    Both REST entry points — ``trellis serve`` (``trellis_api.app.main``)
+    and ``trellis admin serve`` (which now delegates to the same
+    function) — call this before ``uvicorn.run``. It reads the same
+    :func:`resolve_auth_mode` request handling uses, so the check and the
+    runtime can never disagree about the effective mode.
+
+    ``off`` and ``optional`` are both refused on a non-loopback host:
+    without a presented credential, ``optional`` grants every scope just
+    as ``off`` does, so a migration-mode deployment is not a safe one to
+    expose. The escape hatch is :data:`ALLOW_INSECURE_BIND_ENV` — set it
+    when the listener is genuinely on a trusted interface (a sidecar
+    proxy terminating auth, a private network with no other tenants).
+    """
+    mode = resolve_auth_mode()
+    if mode == AUTH_MODE_REQUIRED or _is_loopback(host):
+        return
+
+    allowed = os.environ.get(ALLOW_INSECURE_BIND_ENV, "").strip().lower() in _TRUTHY
+    if not allowed:
+        msg = (
+            f"Refusing to bind {host}:{port} with {AUTH_MODE_ENV}={mode} — that"
+            " serves the whole memory system unauthenticated to the network."
+            f" Set {AUTH_MODE_ENV}=required and mint a key with 'trellis admin"
+            f" api-keys create', or set {ALLOW_INSECURE_BIND_ENV}=1 if the"
+            " listener is genuinely on a trusted interface."
+        )
+        raise ConfigError(msg, setting=AUTH_MODE_ENV)
+
+    logger.warning(
+        "api_insecure_bind_allowed",
+        host=host,
+        port=port,
+        mode=mode,
+        override=ALLOW_INSECURE_BIND_ENV,
+        message="REST API is listening off-loopback with permissive authentication.",
+    )
 
 
 def warn_if_unauthenticated() -> None:

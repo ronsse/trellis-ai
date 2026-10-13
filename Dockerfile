@@ -80,4 +80,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/healthz', timeout=2).status==200 else 1)"
 
 ENTRYPOINT ["trellis", "serve"]
+# Binds every interface inside the container's own network namespace —
+# the normal shape for an orchestrator (ECS, K8s, compose) that publishes
+# the port itself. The fail-closed bind check (#189) refuses this combination
+# unless TRELLIS_AUTH_MODE=required is set (mint a key with 'trellis admin
+# api-keys create') or TRELLIS_API_ALLOW_INSECURE_BIND=1 is set for a
+# deployment where the listener is genuinely on a trusted interface. Set one
+# of those in the orchestrator's task/pod env — this image sets neither.
 CMD ["--host", "0.0.0.0", "--port", "8420"]

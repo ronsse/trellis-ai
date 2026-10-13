@@ -229,7 +229,10 @@ trellis admin serve --port 8420
 Serves the REST API (`/api/v1/`), the version/health endpoints, and the web UI
 (`/ui`). This is the surface the SDK (Path 2) and HTTP clients (Path 3) talk to,
 and the way multiple agents share one substrate. By default it binds loopback;
-set `TRELLIS_API_HOST=0.0.0.0` (or `--host 0.0.0.0`) for container deployments.
+set `TRELLIS_API_HOST=0.0.0.0` (or `--host 0.0.0.0`) for container deployments —
+also set `TRELLIS_AUTH_MODE=required` and mint a key with `trellis admin
+api-keys create` first, since a non-loopback bind without it is refused
+(#189; see [operations.md](../agent-guide/operations.md#trellis-admin-serve)).
 
 ### The curation loops — `trellis worker`
 

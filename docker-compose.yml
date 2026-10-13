@@ -20,7 +20,8 @@ services:
       POSTGRES_PASSWORD: trellis
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      # Loopback only: the password below is a fixed default.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
@@ -50,8 +51,18 @@ services:
       TRELLIS_DATA_DIR: /var/lib/trellis
       TRELLIS_KNOWLEDGE_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_knowledge
       TRELLIS_OPERATIONAL_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_operational
+      # The entrypoint binds 0.0.0.0 (see Dockerfile CMD) inside this
+      # container's own network namespace, and auth is unset here (off).
+      # The fail-closed bind check (#189) refuses that combination unless
+      # this override is set. The override is safe here only because the
+      # port below is published on the host's loopback interface; a bare
+      # "8420:8420" would publish it on every host interface, and Docker's
+      # published ports bypass host firewalls such as ufw. Set
+      # TRELLIS_AUTH_MODE=required (and mint a key) instead of this
+      # override before publishing the port anywhere else.
+      TRELLIS_API_ALLOW_INSECURE_BIND: "1"
     ports:
-      - "8420:8420"
+      - "127.0.0.1:8420:8420"
     volumes:
       - ./deploy/config.compose.yaml:/etc/trellis/config.yaml:ro
       - trellis-data:/var/lib/trellis
