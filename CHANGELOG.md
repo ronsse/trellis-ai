@@ -906,8 +906,10 @@ All notable changes to Trellis will be documented in this file.
   to the same `trellis_api.app.main` entry point `serve` uses, so there is
   exactly one call to `uvicorn.run` for the REST API
   (`tests/unit/test_rest_bind_rule.py`). The local `docker-compose.yml`
-  rehearsal stack sets the override, since its container binds `0.0.0.0`
-  inside its own network namespace with auth off.
+  rehearsal stack sets the override and now publishes both the API and
+  Postgres ports on `127.0.0.1` only; before, its bare `"8420:8420"` and
+  `"5432:5432"` mappings published an unauthenticated API and a
+  fixed-password database on every host interface.
 
 - **`retention.restore` re-syncs a restored graph node's vector row, and a
   REJECTED batch now names the whole batch.** A graph-node restore (used

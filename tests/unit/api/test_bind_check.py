@@ -113,6 +113,21 @@ class TestCheckBindIsSafe:
         monkeypatch.setenv("TRELLIS_API_KEY", "legacy-shared-secret")
         check_bind_is_safe("0.0.0.0", 8420)  # noqa: S104 — must not raise
 
+    def test_explicit_off_beats_a_legacy_api_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy key infers required only when no mode is set."""
+        monkeypatch.setenv(AUTH_MODE_ENV, "off")
+        monkeypatch.setenv("TRELLIS_API_KEY", "legacy-shared-secret")
+        with pytest.raises(ConfigError, match="Refusing to bind"):
+            check_bind_is_safe("0.0.0.0", 8420)  # noqa: S104
+
+    def test_empty_host_is_not_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """uvicorn reads an empty host as every interface, so it is refused."""
+        monkeypatch.setenv(AUTH_MODE_ENV, "off")
+        with pytest.raises(ConfigError, match="Refusing to bind"):
+            check_bind_is_safe("", 8420)
+
     def test_invalid_mode_raises_before_the_bind_decision(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

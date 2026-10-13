@@ -55,8 +55,9 @@ when you adapt the file:
 - **`TRELLIS_AUTH_MODE`** — unset → `off`. **The compose stack runs
   unauthenticated** — every `/api/v1` request is accepted with full
   scopes (the startup log emits an `api_auth_permissive` warning to
-  flag this). That is fine for a smoke test reached only through the
-  host's published port; before exposing the API beyond that set
+  flag this). That is fine only because the compose file publishes the
+  port on the host's loopback interface (`127.0.0.1:8420`); before
+  publishing it anywhere else set
   `TRELLIS_AUTH_MODE=required` and mint keys with `trellis admin
   api-keys create`. Because auth is off, there is no separate
   authenticated-admin step in the checklist below — the admin routes
@@ -64,12 +65,14 @@ when you adapt the file:
 - **`TRELLIS_API_ALLOW_INSECURE_BIND`** — the compose file sets this
   to `1`. The container's `ENTRYPOINT` binds `0.0.0.0` (see the `api`
   row above) and, with auth off, the fail-closed bind check (#189)
-  refuses that combination unless this override is set — a container
-  binding every interface *inside its own network namespace* is the
-  normal shape for compose/Kubernetes, not the unauthenticated
-  network exposure the check exists to catch. Drop the override (and
-  set `TRELLIS_AUTH_MODE=required` instead) once you're rehearsing the
-  authenticated posture.
+  refuses that combination unless this override is set. The override
+  is safe here only because both published ports are bound to the
+  host's loopback interface (`127.0.0.1:8420`, `127.0.0.1:5432`). A
+  bare `"8420:8420"` publishes on every host interface, Docker's
+  published ports bypass host firewalls such as ufw, and the result is
+  the unauthenticated network exposure the check exists to catch. Drop
+  the override (and set `TRELLIS_AUTH_MODE=required` instead) before
+  changing the API's port mapping to anything but loopback.
 - **`TRELLIS_OPS_DETAIL`** — unset → backend latencies are included in
   the `/readyz` body (see the readiness output below). Set `false` to
   collapse it to a bare `{"status":"ready"}`.
@@ -83,7 +86,7 @@ secret delivery differ (see the table above).
 
 - Docker Desktop or equivalent with `docker compose` v2+
 - Ports 8420 (API) and 5432 (Postgres) free on the host. If either is
-  taken, remap the host side in `docker-compose.yml` (e.g. `"55432:5432"`)
+  taken, remap the host side in `docker-compose.yml` (e.g. `"127.0.0.1:55432:5432"`)
   or run under a custom project name with an override.
 - ~500 MB for the image + volumes
 
@@ -224,7 +227,7 @@ docker compose down -v    # stop + drop volumes (fresh next boot)
   about `\r`, run `dos2unix deploy/init-db.sql` and re-bring-up.
 - **Port conflicts**: if `5432` is already bound on the host
   (local Postgres install), change the compose mapping to
-  `"55432:5432"` and update any local client.
+  `"127.0.0.1:55432:5432"` and update any local client.
 - **Config changes need a restart**: `config.compose.yaml` is read
   on registry init, not per-request. `docker compose restart api`
   after editing.
