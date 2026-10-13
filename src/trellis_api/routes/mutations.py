@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from trellis.auth import SCOPE_ADMIN, scopes_satisfy
 from trellis.mutate import (
     BatchStrategy,
     Command,
@@ -13,8 +14,10 @@ from trellis.mutate import (
     build_curate_executor,
     build_evidence_ingest_command_from_args,
     redirect_unreachable_settings_update,
+    requires_admin_scope,
 )
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     BatchCommandItem,
@@ -23,6 +26,18 @@ from trellis_wire.dtos import (
 )
 
 router = APIRouter()
+
+
+def _refused_operations(req: BatchCommandRequest) -> list[str]:
+    """Operations in *req* that require the ``admin`` scope, deduplicated
+    and sorted for a stable, readable 403 body."""
+    return sorted(
+        {
+            item.operation
+            for item in req.commands
+            if requires_admin_scope(Operation(item.operation))
+        }
+    )
 
 
 def _build_command(item: BatchCommandItem, requested_by: str) -> Command:
@@ -49,7 +64,10 @@ def _build_command(item: BatchCommandItem, requested_by: str) -> Command:
 
 
 @router.post("/commands/batch", response_model=BatchCommandResponse)
-def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
+def execute_batch(
+    req: BatchCommandRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> BatchCommandResponse:
     """Execute a batch of mutation commands through the governed pipeline.
 
     Supported strategies:
@@ -57,7 +75,22 @@ def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
     - ``sequential`` — execute all, never stop early.
     - ``stop_on_error`` — halt on the first ``FAILED`` or ``REJECTED``.
     - ``continue_on_error`` — execute all, include errors in results.
+
+    A batch containing any operation outside
+    :data:`~trellis.mutate.NON_DESTRUCTIVE_OPERATIONS` (merges, redactions,
+    retention prune, alias rebinds, link/label removal, schedule/settings/
+    classify-rule writes) is refused whole, with no command executed, unless
+    the caller's key carries the ``admin`` scope. ``requested_by`` stays a
+    caller-chosen audit label, unverified against the credential, exactly
+    as it already was.
     """
+    refused = _refused_operations(req)
+    if refused and not scopes_satisfy(ctx.scopes, SCOPE_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(f"operations require the admin scope: {', '.join(refused)}"),
+        )
+
     executor = build_curate_executor(get_registry())
 
     # Build Command objects from the request items

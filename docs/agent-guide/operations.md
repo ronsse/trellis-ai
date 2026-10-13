@@ -3145,7 +3145,7 @@ others. The router → scope map:
 |--------------------|----------------|
 | `retrieve` (search, packs, entities, traces, precedents) | `read` |
 | `ingest` (traces, evidence, vectors, bulk) | `ingest` |
-| `mutations` (`/commands/batch`) | `mutate` |
+| `mutations` (`/commands/batch`) | `mutate`, plus `admin` per operation — see below |
 | `curate` (precedents, links, entities, documents, feedback) | `mutate` |
 | `extract` (`/extract/drafts`) | `mutate` |
 | `admin` (health, stats, effectiveness, advisories, vector reset) | `admin` |
@@ -3156,6 +3156,15 @@ others. The router → scope map:
 | `observations` POSTs (`/observations`, `/measurements`) | `mutate` |
 | `policies` GETs | `read` |
 | `policies` POST / DELETE | `admin` |
+
+`/commands/batch` accepts any `Operation`, and `mutate` alone is not enough
+for all of them: a batch containing any operation outside
+`NON_DESTRUCTIVE_OPERATIONS` (entity merge, redaction, retention prune,
+alias rebind, link/label removal, schedule/settings/classify-rule writes —
+see `trellis.mutate.immutable_core`) is refused whole, with no command
+executed, unless the key carries `admin`. The 403 body names every refused
+operation. `requested_by` on a command stays a caller-chosen audit label;
+holding `admin` does not make it verified.
 
 `/healthz`, `/readyz`, `/api/version`, `/metrics`, and `/ui` stay reachable
 without a credential by default (see [Production exposure](#production-exposure)
@@ -3438,7 +3447,7 @@ All three now route through the same one retrieval path as `get_context` and are
 |------|------|---------|
 | `record_observation` | `subject_entity_id`, `subject_entity_type`, `observer_agent_id`, `content`, `confidence`, `evidence_ref?`, `metadata?` | JSON `{"status": "ok", "observation_id": ...}`. Lands an `Observation` node with a `hasObservation` edge from the subject — see [schemas.md → Observation](schemas.md#observation). Routed through the governed pipeline (`observation.record`). |
 | `query_observations` | `subject_entity_id?`, `observer_agent_id?`, `limit?` | JSON `{"status": "ok", "observations": [...]}` — each entry is the Observation property dict plus `node_id` and `node_type`. |
-| `execute_mutation` | `operation`, `args`, `idempotency_key?`, `actor?` | JSON `CommandResult`. MCP parity with `POST /commands/batch` for a single command; same five-stage governed pipeline, so policy gates and audit events apply identically. One difference: for `trace.ingest` the server sets `metadata.project` before ingest and targets the command at the trace (`target_type: "trace"`, the trace's id), as for `save_experience` ([trace-format.md § Project stamp](trace-format.md#project-stamp)). `operation` accepts the wire value (`"link.create"`) or the enum key (`"LINK_CREATE"`). |
+| `execute_mutation` | `operation`, `args`, `idempotency_key?`, `actor?` | JSON `CommandResult`. MCP parity with `POST /commands/batch` for a single command; same five-stage governed pipeline, so policy gates and audit events apply identically. One difference: for `trace.ingest` the server sets `metadata.project` before ingest and targets the command at the trace (`target_type: "trace"`, the trace's id), as for `save_experience` ([trace-format.md § Project stamp](trace-format.md#project-stamp)). `operation` accepts the wire value (`"link.create"`) or the enum key (`"LINK_CREATE"`). Any operation outside `NON_DESTRUCTIVE_OPERATIONS` (entity merge, redaction, retention prune, alias rebind, link/label removal, schedule/settings/classify-rule writes) is refused before a `Command` is built unless the caller holds `admin`: over HTTP transport this reads the FastMCP access token's scopes; on stdio, the trusted local transport, it is allowed unconditionally. The refusal is the tool's normal error reply (`POLICY_DENIED`), not a fabricated success. `actor` stays a caller-chosen audit label; `admin` does not verify it. |
 
 `session_id` lets `get_context` and the three sectioned tools deduplicate items returned by recent calls in the same session. `max_tokens` defaults to 2000, and `get_items` to 4000. The three sectioned tools default to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset; pass `max_tokens > 0` to override it.
 

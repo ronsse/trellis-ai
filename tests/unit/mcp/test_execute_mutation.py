@@ -7,16 +7,23 @@ in parallel.
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from fastmcp.server.auth import AccessToken
+from fastmcp.server.context import reset_transport, set_transport
+from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.auth import SCOPE_ADMIN, SCOPE_MUTATE
 from trellis.errors import ConfigError
+from trellis.mcp.server import POLICY_DENIED
 from trellis.mcp.server import execute_mutation as _execute_mutation
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.trace import Trace
@@ -25,6 +32,41 @@ from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 
 execute_mutation = unwrap_tool(_execute_mutation)
+
+
+@contextlib.contextmanager
+def _as_stdio() -> Iterator[None]:
+    """Simulate a stdio-shaped call: always exempt from the scope gate."""
+    token = set_transport("stdio")
+    try:
+        yield
+    finally:
+        reset_transport(token)
+
+
+@contextlib.contextmanager
+def _as_http(scopes: list[str] | None) -> Iterator[None]:
+    """Simulate an HTTP-shaped call: non-stdio transport, optional bearer.
+
+    ``scopes=None`` simulates a request with no access token at all
+    (refused); a list simulates a bearer carrying exactly those scopes.
+    """
+    transport_token = set_transport("streamable-http")
+    auth_token = None
+    if scopes is not None:
+        access_token = AccessToken(
+            token="opaque",  # noqa: S106 — placeholder, never read
+            client_id="key-id",
+            scopes=scopes,
+            expires_at=None,
+        )
+        auth_token = auth_context_var.set(AuthenticatedUser(access_token))
+    try:
+        yield
+    finally:
+        reset_transport(transport_token)
+        if auth_token is not None:
+            auth_context_var.reset(auth_token)
 
 
 # ``_suppress_structlog`` and ``temp_registry`` come from conftest.py.
@@ -740,27 +782,53 @@ class TestScheduleAdminOperationsAreNotMcpReachable:
     edit a job's schedule or request a run, so this is the refusal, not
     an oversight (see ``trellis.mutate.schedule_handlers``'s module
     docstring).
+
+    ``schedule.update`` is also in ``DESTRUCTIVE_OPERATIONS``, so a caller
+    without the ``admin`` scope never reaches the executor at all — the
+    scope gate refuses it with ``POLICY_DENIED`` first (see
+    ``TestExecuteMutationRequiresAdminForDestructiveOps``). What this
+    class demonstrates for ``schedule.update`` is the layer *under* that
+    gate: even an ``admin``-scoped caller gets "no handler registered",
+    because ``build_curate_executor`` never wires this operation either
+    way. ``job.run_request`` is not destructive, so no scope is needed to
+    reach that same "no handler registered" result.
     """
 
-    @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
-    def test_no_handler_registered_is_a_plain_failed_result(
-        self, temp_registry: StoreRegistry, operation: str
+    def test_job_run_request_no_handler_registered(
+        self, temp_registry: StoreRegistry
     ) -> None:
-        payload = json.loads(execute_mutation(operation=operation, args={}))
+        payload = json.loads(execute_mutation(operation="job.run_request", args={}))
 
         assert payload["status"] == "failed"
         assert "no handler registered" in payload["message"].lower()
-        assert operation in payload["message"].lower()
+        assert "job.run_request" in payload["message"].lower()
         # Not an McpError: a structured outcome, exactly like any other
         # unhandled operation reaching this executor.
+
+    def test_schedule_update_needs_admin_to_even_reach_no_handler(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # No admin scope: refused before the executor is ever built.
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(operation="schedule.update", args={})
+        assert excinfo.value.error.code == POLICY_DENIED
+
+        # Admin scope (stdio is exempt by design -- see caller_has_scope):
+        # the gate passes, and only then is there no handler.
+        with _as_stdio():
+            payload = json.loads(execute_mutation(operation="schedule.update", args={}))
+        assert payload["status"] == "failed"
+        assert "no handler registered" in payload["message"].lower()
+        assert "schedule.update" in payload["message"].lower()
 
     @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
     def test_screaming_snake_form_is_refused_identically(
         self, temp_registry: StoreRegistry, operation: str
     ) -> None:
-        payload = json.loads(
-            execute_mutation(operation=operation.upper().replace(".", "_"), args={})
-        )
+        with _as_stdio():
+            payload = json.loads(
+                execute_mutation(operation=operation.upper().replace(".", "_"), args={})
+            )
 
         assert payload["status"] == "failed"
         assert "no handler registered" in payload["message"].lower()
@@ -786,15 +854,24 @@ class TestSettingsUpdateIsUnreachable:
     (:func:`~trellis.mutate.redirect_unreachable_settings_update`'s own
     docstring). Only the message changes, to name where the write *is*
     reachable instead of a bare "no handler registered".
+
+    ``settings.update`` is in ``DESTRUCTIVE_OPERATIONS``, so a caller
+    without the ``admin`` scope never reaches that "no handler registered"
+    message at all -- the scope gate refuses it first with
+    ``POLICY_DENIED`` (see
+    ``TestExecuteMutationRequiresAdminForDestructiveOps``). The test below
+    uses an admin-scoped (stdio) context to exercise the layer *under*
+    that gate.
     """
 
     def test_settings_update_is_refused_as_no_handler_registered(
         self, temp_registry: StoreRegistry
     ) -> None:
-        raw = execute_mutation(
-            operation="settings.update",
-            args={"name": "pack_holdout_rate", "value": 0.9},
-        )
+        with _as_stdio():
+            raw = execute_mutation(
+                operation="settings.update",
+                args={"name": "pack_holdout_rate", "value": 0.9},
+            )
         payload = json.loads(raw)
 
         assert payload["status"] == "failed"
@@ -807,3 +884,102 @@ class TestSettingsUpdateIsUnreachable:
         path = resolve_settings_path(temp_registry.stores_dir)
         if path is not None and path.exists():
             assert SettingsStore(path).get("pack_holdout_rate") is None
+
+    def test_settings_update_without_admin_is_policy_denied(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="settings.update",
+                args={"name": "pack_holdout_rate", "value": 0.9},
+            )
+        assert excinfo.value.error.code == POLICY_DENIED
+
+
+# ---------------------------------------------------------------------------
+# Destructive operations require the admin scope
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteMutationRequiresAdminForDestructiveOps:
+    """A ``mutate``-scoped caller cannot reach a destructive operation
+
+    (e.g. ``redaction.apply``) through ``execute_mutation``; only
+    ``admin`` can. Mirrors ``tests/unit/api/test_auth.py``'s REST
+    equivalent. The full parametrised sweep over every operation outside
+    ``NON_DESTRUCTIVE_OPERATIONS``, at both surfaces, lives in
+    ``tests/unit/test_destructive_ops_surface_rule.py``; this class is
+    the four ambient-state shapes the brief calls out by name for this
+    one representative operation.
+    """
+
+    @staticmethod
+    def _redact_target(temp_registry: StoreRegistry) -> str:
+        graph = temp_registry.knowledge.graph_store
+        return graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "secret"}
+        )
+
+    def test_http_mutate_only_token_is_refused(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        node_id = self._redact_target(temp_registry)
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="redaction.apply",
+                args={"target_id": node_id, "reason": "test"},
+            )
+        assert excinfo.value.error.code == POLICY_DENIED
+        assert temp_registry.knowledge.graph_store.get_node(node_id) is not None
+
+    def test_http_admin_token_is_allowed(self, temp_registry: StoreRegistry) -> None:
+        node_id = self._redact_target(temp_registry)
+        with _as_http(scopes=[SCOPE_ADMIN]):
+            raw = execute_mutation(
+                operation="redaction.apply",
+                args={"target_id": node_id, "reason": "test"},
+            )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+        assert temp_registry.knowledge.graph_store.get_node(node_id) is None
+
+    def test_http_with_no_token_is_refused(self, temp_registry: StoreRegistry) -> None:
+        node_id = self._redact_target(temp_registry)
+        with _as_http(scopes=None), pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="redaction.apply",
+                args={"target_id": node_id, "reason": "test"},
+            )
+        assert excinfo.value.error.code == POLICY_DENIED
+        assert temp_registry.knowledge.graph_store.get_node(node_id) is not None
+
+    def test_stdio_shaped_call_is_allowed(self, temp_registry: StoreRegistry) -> None:
+        node_id = self._redact_target(temp_registry)
+        with _as_stdio():
+            raw = execute_mutation(
+                operation="redaction.apply",
+                args={"target_id": node_id, "reason": "test"},
+            )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+        assert temp_registry.knowledge.graph_store.get_node(node_id) is None
+
+    def test_refused_call_emits_nothing_suggesting_the_mutation_ran(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The refusal is the tool's normal McpError shape, not a
+
+        fabricated success-looking payload, and no ``REDACTION_APPLIED``
+        event is emitted.
+        """
+        node_id = self._redact_target(temp_registry)
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="redaction.apply",
+                args={"target_id": node_id, "reason": "test"},
+            )
+        assert excinfo.value.error.code == POLICY_DENIED
+        assert excinfo.value.error.data == {"operation": "redaction.apply"}
+
+        events = temp_registry.operational.event_log.get_events(limit=50)
+        assert not any(e.entity_id == node_id for e in events)

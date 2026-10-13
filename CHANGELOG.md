@@ -890,6 +890,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A destructive mutation now requires the `admin` scope at both generic
+  mutation surfaces, not just `mutate`.** `POST /api/v1/commands/batch` and
+  the MCP tool `execute_mutation` previously accepted any `Operation` —
+  including entity merge, redaction, retention prune, alias rebind,
+  link/label removal, and schedule/settings/classify-rule writes — from a
+  caller holding only `mutate`, the scope an ordinary agent key carries.
+  Both surfaces now refuse any operation outside
+  `trellis.mutate.NON_DESTRUCTIVE_OPERATIONS` unless the caller holds
+  `admin`: gating on membership in that explicit allow-list (rather than on
+  the `DESTRUCTIVE_OPERATIONS` deny-list) means a future `Operation` member
+  nobody has classified yet is refused by default instead of silently
+  allowed. Over REST, a batch containing any such operation is refused
+  whole with HTTP 403 before any command executes, naming every refused
+  operation. Over MCP, the refusal reads the FastMCP access token's scopes
+  when the server is running over HTTP, and is allowed unconditionally on
+  stdio, the trusted local transport with no token to read; the refusal is
+  the tool's ordinary error reply, never a fabricated success. A command's
+  `requested_by`/`actor` field is unchanged by this fix — it stays a
+  caller-chosen audit label, not a verified identity, whether the caller
+  holds `mutate` or `admin`.
 - **The pack-telemetry REST routes now require the `admin` scope, not
   `read`.** `GET /api/v1/events`, `GET /api/v1/events/{event_id}`,
   `GET /api/v1/packs`, `GET /api/v1/packs/{pack_id}`, `GET
