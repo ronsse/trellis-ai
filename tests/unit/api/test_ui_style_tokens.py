@@ -27,6 +27,22 @@ Two literal exceptions are real, not escaped by this test:
   value, not a bypass of it -- and are excluded from the ``box-shadow``
   sweep by construction: the sweep only reads the text after the last of
   the three blocks closes.
+
+The Fonts pass adds the same shape of guard for ``font-size``, scoped
+deliberately narrower than the radius/shadow sweeps above: it reads only
+the ``<style>...</style>`` block (after the token-definition blocks), not
+the rest of the file. Every ``font-size: <number>rem`` literal inside
+that block was hand-converted to a ``--fs-1`` through ``--fs-7`` token
+read for this pass; the admin script below ``</style>`` still carries
+about 96 ``style="font-size:...rem"`` template-literal attributes across
+roughly a dozen renderers, and converting those is deferred rather than
+attempted here -- there is no headless browser on this host to confirm
+each renderer still lays out correctly, and most of those sites were
+untouched by the tokens/components passes too. Scoping the sweep to the
+``<style>`` block (rather than policing inline attributes with a
+per-site allowance list the way the circle-radius exception does) is the
+chosen way to leave that population ungoverned without the guard lying
+about having checked it.
 """
 
 from __future__ import annotations
@@ -43,6 +59,9 @@ _LITERAL_RADIUS_RE = re.compile(r"border-radius:\s*\d+px")
 _CIRCLE_RADIUS_RE = re.compile(r"border-radius:\s*50%")
 _BOX_SHADOW_RGBA_RE = re.compile(r"box-shadow:[^;]*rgba\(")
 _RADIUS_TOKEN_RE = re.compile(r"border-radius:[^;]*var\(--r-")
+_LITERAL_FONT_SIZE_RE = re.compile(r"font-size:\s*[0-9]*\.?[0-9]+(?:rem|px)")
+_FONT_SIZE_TOKEN_RE = re.compile(r"font-size:\s*var\(--fs-")
+_STYLE_CLOSE_RE = re.compile(r"</style>")
 
 # The bare ``:root`` token block through the end of the
 # ``[data-theme="light"]`` block -- the only place a ``box-shadow:
@@ -63,6 +82,20 @@ def _text_after_token_blocks(text: str) -> str:
     match = _TOKEN_BLOCKS_END_RE.search(text)
     assert match is not None, "could not locate the end of the token-definition blocks"
     return text[match.end() :]
+
+
+def _style_block_after_token_blocks(text: str) -> str:
+    """The ``<style>`` element's own text, after the three token blocks.
+
+    Narrower than :func:`_text_after_token_blocks` on purpose -- the
+    font-size sweep must not walk into the ``<script>`` below, which still
+    carries inline ``style="font-size:...rem"`` template-literal
+    attributes this pass does not convert (see the module docstring).
+    """
+    after_tokens = _text_after_token_blocks(text)
+    close = _STYLE_CLOSE_RE.search(after_tokens)
+    assert close is not None, "could not locate the closing </style> tag"
+    return after_tokens[: close.start()]
 
 
 def test_no_literal_pixel_radius_remains() -> None:
@@ -109,9 +142,35 @@ def test_scan_population_is_above_a_hand_read_floor() -> None:
     )
 
 
+def test_no_literal_font_size_in_style_block_remains() -> None:
+    hits = _LITERAL_FONT_SIZE_RE.findall(_style_block_after_token_blocks(_page()))
+    assert hits == [], (
+        f"literal font-size: <N>rem/px found in the <style> block ({hits}) "
+        f"-- use var(--fs-1) through var(--fs-7) instead"
+    )
+
+
+def test_font_size_token_population_is_above_a_hand_read_floor() -> None:
+    # Hand count for this pass: 101 (97 literals the Fonts pass converted,
+    # plus the one explicit --fs-7 card-value rewrite and three --fs-4/5/6
+    # reads the components pass already landed).
+    n_var_font_size = len(
+        _FONT_SIZE_TOKEN_RE.findall(_style_block_after_token_blocks(_page()))
+    )
+    assert_hand_read_floor(
+        n_var_font_size,
+        90,
+        subject="font-size: var(--fs-*) site(s)",
+        hint="hand count for this pass: 101.",
+    )
+
+
 def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     assert _LITERAL_RADIUS_RE.findall(".card { border-radius: 6px; }") == [
         "border-radius: 6px"
     ]
     toast_rule = ".toast { box-shadow: 0 4px 16px rgba(0,0,0,0.25); }"
     assert _BOX_SHADOW_RGBA_RE.findall(toast_rule) != []
+    assert _LITERAL_FONT_SIZE_RE.findall(".card h3 { font-size: 0.75rem; }") == [
+        "font-size: 0.75rem"
+    ]
