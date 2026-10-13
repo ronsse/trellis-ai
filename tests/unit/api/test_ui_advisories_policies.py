@@ -149,13 +149,17 @@ def test_generate_advisories_uses_two_step_confirm_not_window_confirm() -> None:
 
 def test_delete_policy_uses_two_step_confirm_via_data_action() -> None:
     page = _page()
-    confirm = _function_body(page, "confirmDeletePolicy")
-    # The first click only swaps in a second, explicit button -- it never
-    # calls deletePolicy itself.
-    assert "deletePolicy(" not in confirm.replace('data-action="deletePolicy"', "")
-    assert 'data-action="deletePolicy"' in confirm
     render_body = _function_body(page, "renderPolicyRow")
+    # The row's own button only opens the shared confirmation dialog -- it
+    # never calls the destructive deletePolicy() directly.
     assert 'data-action="confirmDeletePolicy"' in render_body
+    assert 'data-action="deletePolicy"' not in render_body
+    confirm = _function_body(page, "confirmDeletePolicy")
+    assert "openConfirmDialog(" in confirm
+    # The destructive call only runs from the dialog's own onConfirm
+    # closure, gated behind its typed-word confirmation -- never off the
+    # row's first click.
+    assert "onConfirm: () => deletePolicy(id)" in confirm
 
 
 def test_create_policy_sends_exactly_one_rule() -> None:

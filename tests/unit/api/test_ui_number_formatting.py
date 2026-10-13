@@ -100,7 +100,9 @@ class TestKnownTroubleSitesUseTheHelper:
         assert "${fmtNum(ev.effect_size, 2)}" in _page()
 
     def test_advisory_confidence_uses_fmt_num(self) -> None:
-        assert "<td>${fmtNum(a.confidence, 2)}</td>" in _page()
+        # The Ledger components pass right-aligns the numeric cell with
+        # class="num"; the fmtNum() call itself is unchanged.
+        assert '<td class="num">${fmtNum(a.confidence, 2)}</td>' in _page()
 
     def test_advisory_evidence_confidence_uses_fmt_num(self) -> None:
         assert "const evidenceConf = fmtNum(ev.evidence_confidence, 2);" in _page()

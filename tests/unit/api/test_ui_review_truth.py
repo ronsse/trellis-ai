@@ -148,20 +148,25 @@ def test_reject_button_routes_through_a_two_step_confirm() -> None:
 
 
 def test_confirm_reject_proposal_shows_a_terminal_warning_and_a_cancel() -> None:
+    """The Ledger components pass moved this off a per-call inline-swap
+    button pair onto the one shared confirmation dialog (``.dialog``,
+    Cancel first in DOM order, typed-word gate) -- Cancel and the warning
+    chrome now live in that shared component rather than being rebuilt
+    here, so this test pins what confirmRejectProposal itself supplies:
+    the terminal warning text and the real, gated call to the terminal
+    action."""
     page = _page()
     body = _between(
         page,
         "function confirmRejectProposal(id) {",
         "async function rejectProposal(id) {",
     )
+    assert "openConfirmDialog(" in body
     assert "Reject is terminal." in body
-    # Confirming calls the real, terminal action; Cancel reloads the
-    # unmodified list rather than leaving the card in the confirm state.
-    assert (
-        'data-action="rejectProposal" data-id="${escHtml(id)}">Confirm reject</button>'
-        in body
-    )
-    assert 'onclick="loadReviewProposals()">Cancel</button>' in body
+    assert "confirmWord: 'reject'" in body
+    # Confirming calls the real, terminal action -- gated behind the
+    # dialog's typed-word match, never off the row's first click.
+    assert "onConfirm: () => rejectProposal(id)" in body
 
 
 def test_confirm_reject_proposal_is_wired_into_id_actions() -> None:

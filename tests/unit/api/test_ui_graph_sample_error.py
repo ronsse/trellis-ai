@@ -58,13 +58,13 @@ def test_auto_load_sample_no_longer_silently_ignores_the_error() -> None:
 
 def test_auto_load_sample_renders_the_error_into_the_warning_banner() -> None:
     """The catch block writes into ``#graph-sample-warning`` using the
-    ``warn-banner`` class (amber caution, not a hard red failure -- see the
-    CSS comment on ``.warn-banner``: a failed convenience load is not a
-    data-integrity problem)."""
+    shared degraded-banner's ``banner-warn`` variant (amber caution, not a
+    hard red failure -- a failed convenience load is not a data-integrity
+    problem)."""
     body = _auto_load_sample_body()
     catch_block = body.split("catch (e)", 1)[1]
     assert "getElementById('graph-sample-warning')" in catch_block
-    assert "warn-banner" in catch_block
+    assert "degraded-banner banner-warn" in catch_block
     assert "${escHtml(e.message)}" in catch_block
 
 
