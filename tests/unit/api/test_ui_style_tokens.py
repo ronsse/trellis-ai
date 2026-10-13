@@ -13,11 +13,13 @@ Two literal exceptions are real, not escaped by this test:
 
 - ``border-radius: 50%`` makes a circle, which no ``--r-*`` token
   represents (a radius token is a corner-rounding amount, not "fully
-  round"). Nine sites use it on purpose -- eight pre-existing dots and
-  avatars, plus the one badge leading dot this pass added -- and this
-  test pins that exact count, so a tenth appearing silently (a literal
-  px radius typed as ``50%`` to dodge the ``Npx`` regex) still has a
-  floor to clear, and a vanished one is worth a look too.
+  round"). Ten sites use it on purpose -- eight pre-existing dots and
+  avatars, the one badge leading dot the tokens pass added, and the
+  round knob on the Ledger components pass's ``.toggle::after`` switch
+  thumb -- and this test pins that exact count, so an eleventh appearing
+  silently (a literal px radius typed as ``50%`` to dodge the ``Npx``
+  regex) still has a floor to clear, and a vanished one is worth a look
+  too.
 - The three token-definition blocks themselves (bare ``:root``, the
   ``prefers-color-scheme`` block, and the ``[data-theme="light"]``
   block) legitimately declare ``--shadow-1`` / ``--shadow-2`` /
@@ -72,11 +74,12 @@ def test_no_literal_pixel_radius_remains() -> None:
 
 
 def test_circle_radius_sites_are_pinned_at_a_hand_count() -> None:
-    # Hand count for this pass: eight pre-existing circular dots/avatars
-    # plus the one badge leading dot this pass added.
+    # Hand count: nine from the tokens pass (eight pre-existing circular
+    # dots/avatars plus the one badge leading dot it added) plus the
+    # components pass's one new round toggle-switch knob.
     hits = _CIRCLE_RADIUS_RE.findall(_page())
-    assert len(hits) == 9, (
-        f"expected exactly 9 border-radius: 50% sites, found {len(hits)} -- "
+    assert len(hits) == 10, (
+        f"expected exactly 10 border-radius: 50% sites, found {len(hits)} -- "
         f"a new one needs a deliberate look (is it really a circle, not a "
         f"literal radius dodging the Npx regex?), and a vanished one may "
         f"mean a site was converted to a token instead of staying a circle"

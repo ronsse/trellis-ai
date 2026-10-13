@@ -38,10 +38,10 @@ def _load_memories_body() -> str:
 
 
 def test_memories_pagination_container_exists_in_markup() -> None:
+    # The Ledger components pass replaced every view-local pager (this one
+    # included) with the one shared `.pager` component.
     page = _page()
-    assert (
-        '<div class="srp-pagination" id="mem-pagination" style="display:none">' in page
-    )
+    assert '<div class="pager" id="mem-pagination" style="display:none">' in page
 
 
 def test_load_memories_no_longer_special_cases_search_pagination() -> None:

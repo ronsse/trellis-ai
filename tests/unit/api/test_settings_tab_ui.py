@@ -49,9 +49,16 @@ def _function_body(page: str, signature: str, next_signature: str) -> str:
 
 
 def test_settings_table_has_a_read_by_column() -> None:
+    # The Settings view renders as a div-grid of `.setting` rows (the
+    # Ledger pass), not a `<table>`; each row's `.meta` strip is what used
+    # to be the table's "Read by" column.
     page = _page()
-    header = _between(page, '<table class="settings-table">', "</thead>")
-    assert "<th>Read by</th>" in header
+    body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert "<span>Read by ${formatSurfaces(s.surfaces)}</span>" in body
 
 
 def test_read_by_cell_renders_the_real_surfaces_field_not_a_fixed_list() -> None:
@@ -152,7 +159,9 @@ def test_a_non_writable_row_never_renders_save_or_reset_actions() -> None:
         "function coerceSettingValue(",
     )
     assert "s.settings_writable === false" in body
-    assert "notWritable ?" in body
+    # The Ledger pass wraps this ternary onto its own line; match the
+    # operator loosely rather than pinning the exact whitespace.
+    assert re.search(r"notWritable\s*\?", body)
     assert "renderSettingActions(s, degraded)" in body  # still the writable branch
 
 

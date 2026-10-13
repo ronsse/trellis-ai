@@ -24,8 +24,9 @@ INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
 _ATTR = re.compile(r"""\s([a-zA-Z][\w:-]*)=("[^"]*"|'[^']*'|[^\s"'>`]+)""")
 _INTERPOLATION = re.compile(r"\$\{([^}]*)\}")
 # The page computes these values itself (badge classes from a fixed map,
-# palette colours, percentages); none is read from the API.
-_COMPUTED = {"class", "style"}
+# palette colours, percentages, a boolean switch's own true/false state);
+# none is read from the API.
+_COMPUTED = {"class", "style", "aria-checked"}
 
 
 def _is_one_eschtml_call(expr: str) -> bool:

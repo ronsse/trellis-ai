@@ -169,8 +169,8 @@
             position: fixed;
             top: 0; left: 0; bottom: 0;
             width: var(--rail);
-            background: var(--surface);
-            border-right: 1px solid var(--border);
+            background: var(--rail-bg);
+            border-right: 1px solid var(--rail-border);
             display: flex;
             flex-direction: column;
             z-index: 300;
@@ -184,16 +184,16 @@
             gap: 0.6rem;
             height: var(--topbar-h);
             padding: 0 0.9rem;
-            border-bottom: 1px solid var(--border);
+            border-bottom: 1px solid var(--rail-border);
             flex: none;
             overflow: hidden;
         }
-        .sidebar-head svg { flex: none; }
+        .sidebar-head svg { flex: none; color: var(--rail-text-active); }
         .sidebar-head .wordmark {
             font-weight: 700;
             font-size: 1.02rem;
             letter-spacing: -0.01em;
-            color: var(--text);
+            color: var(--rail-text-active);
             white-space: nowrap;
             opacity: 1;
             transition: opacity var(--dur) var(--ease);
@@ -218,7 +218,7 @@
             gap: 0.65rem;
             padding: 0.45rem 0.55rem;
             border-radius: var(--r-1);
-            color: var(--text-dim);
+            color: var(--rail-text);
             text-decoration: none;
             font-size: 0.83rem;
             font-weight: 500;
@@ -237,7 +237,7 @@
             flex: none;
             font-family: var(--font-mono);
             font-size: 0.62rem;
-            color: var(--text-dim);
+            color: var(--rail-text);
             opacity: 0.45;
             transition: opacity var(--dur) var(--ease);
         }
@@ -257,9 +257,9 @@
             opacity: 0.85;
         }
         body.nav-collapsed .sidebar-nav a .nav-scope-badge { display: none; }
-        .sidebar-nav a:hover { color: var(--text); background: var(--surface-sunken); }
+        .sidebar-nav a:hover { color: var(--rail-text-active); background: var(--rail-active-bg); }
         .sidebar-nav a:hover > svg { opacity: 1; }
-        .sidebar-nav a.active { color: var(--text); background: var(--accent-tint); }
+        .sidebar-nav a.active { color: var(--rail-text-active); background: var(--rail-active-bg); }
         .sidebar-nav a.active > svg { opacity: 1; color: var(--accent); }
         .sidebar-nav a.active::before {
             content: '';
@@ -278,10 +278,10 @@
 
         .sidebar-foot {
             flex: none;
-            border-top: 1px solid var(--border);
+            border-top: 1px solid var(--rail-border);
             padding: 0.6rem 0.7rem;
             font-size: 0.68rem;
-            color: var(--text-dim);
+            color: var(--rail-text);
             font-family: var(--font-mono);
             white-space: nowrap;
             overflow: hidden;
@@ -405,6 +405,11 @@
             margin-bottom: 0.5rem;
         }
         .card .value { font-size: 2rem; font-weight: 700; }
+        /* "Not measured" and a non-finite ratio are not numbers -- shrink
+           the value text rather than let a long phrase overflow the card
+           at the same size a short count would use. */
+        .card .value.na { font-size: var(--fs-5); font-weight: 500; color: var(--text-dim); }
+        .card .value.inf { font-size: var(--fs-6); font-weight: 600; }
         .card .sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.25rem; }
 
         /* Metric charts (improvement-metrics dashboard) */
@@ -1071,32 +1076,16 @@
         }
         .srp-sort select:focus { border-color: var(--accent); }
 
-        /* Pagination */
-        .srp-pagination {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 0.5rem;
-            padding: 0.6rem 0.75rem;
-            border-top: 1px solid var(--border);
-            font-size: 0.78rem;
-            color: var(--text-dim);
+        /* Pagination: one .pager component (see the block with .setting
+           above) reused by every view -- range text, an optional
+           rows-per-page select where the view already had one, and
+           Newer/Older or Prev/Next as .btn.btn-sm, disabled via the
+           attribute rather than a bespoke opacity rule. */
+        .pager {
             position: sticky;
             bottom: 0;
             background: var(--surface);
         }
-        .srp-pagination button {
-            background: var(--surface-sunken);
-            border: 1px solid var(--border);
-            color: var(--text-dim);
-            padding: 0.2rem 0.6rem;
-            border-radius: var(--r-1);
-            cursor: pointer;
-            font-size: 0.75rem;
-            transition: all var(--dur) var(--ease);
-        }
-        .srp-pagination button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
-        .srp-pagination button:disabled { opacity: 0.3; cursor: default; }
 
         /* View toggle */
         .view-toggle {
@@ -1157,7 +1146,7 @@
             padding: 0.6rem 0.75rem;
             border-bottom: 1px solid var(--border);
         }
-        tr:hover td { background: var(--surface-sunken); }
+        tr:hover td { background: color-mix(in srgb, var(--surface-sunken) 60%, transparent); }
         tr.clickable { cursor: pointer; }
         tr.clickable:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 
@@ -1388,73 +1377,161 @@
         }
         .key-banner .key-status { color: var(--text-dim); font-size: 0.75rem; }
 
-        /* Degraded-store banner (advisories / policies): a store that could
-           only partly read its file must look at least as alarming as an
-           empty one, never the same as "nothing here". */
+        /* Degraded / posture banner (advisories, policies, auth posture,
+           graph library load, dispatcher silence): an icon slot, a 4px
+           left border and an actions column, so a store that could only
+           partly read its file -- or a permissive auth mode -- reads as
+           alarming as the layout implies, not just via a colour. */
         .degraded-banner {
-            display: flex;
-            flex-direction: column;
-            gap: 0.3rem;
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 0.5rem 0.9rem;
+            align-items: start;
             padding: 0.75rem 1.25rem;
             margin-bottom: 1rem;
             background: var(--danger-tint);
             border: 1px solid var(--danger);
+            border-left: 4px solid var(--danger);
             border-radius: var(--r-2);
             font-size: 0.85rem;
         }
+        .degraded-banner svg { width: 18px; height: 18px; color: var(--danger); margin-top: 0.1rem; flex: none; }
+        .degraded-banner .degraded-body { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
         .degraded-banner .degraded-title { color: var(--danger); font-weight: 600; }
         .degraded-banner .degraded-detail { color: var(--text-dim); }
+        .degraded-banner .degraded-actions { display: flex; gap: 0.5rem; align-items: center; }
         .degraded-banner code {
             background: var(--bg);
             padding: 0.1rem 0.4rem;
             border-radius: var(--r-1);
             font-family: var(--font-mono);
         }
-        /* Same shape as .degraded-banner, amber rather than red: a quiet
-           dispatcher is often just "none installed yet", not a data
-           problem, so it reads as a caution, not a failure. */
-        .warn-banner {
-            display: flex;
-            flex-direction: column;
-            gap: 0.3rem;
-            padding: 0.75rem 1.25rem;
-            margin-bottom: 1rem;
-            background: #422006;
-            border: 1px solid var(--warn);
-            border-radius: var(--r-2);
-            font-size: 0.85rem;
+        /* Same shape, amber rather than red: a quiet dispatcher, a missing
+           starting sample, or a permissive auth mode is a caution to look
+           at, not necessarily a failure. */
+        .degraded-banner.banner-warn { background: var(--warn-tint); border-color: var(--warn); border-left-color: var(--warn); }
+        .degraded-banner.banner-warn svg,
+        .degraded-banner.banner-warn .degraded-title { color: var(--warn); }
+        @media (max-width: 560px) {
+            .degraded-banner { grid-template-columns: auto minmax(0, 1fr); }
+            .degraded-banner .degraded-actions { grid-column: 2; }
         }
-        .warn-banner .warn-title { color: var(--warn); font-weight: 600; }
-        .warn-banner .warn-detail { color: var(--text-dim); }
         .field-hint { color: var(--text-dim); font-size: 0.78rem; margin: 0.15rem 0 0.6rem; }
 
-        /* Settings tab: a long description column needs top
-           alignment, and an unsafe/restart row needs to look more
-           consequential than an ordinary one at a glance, not just via a
-           badge a reader could miss. */
-        .settings-table td { vertical-align: top; }
-        tr.risk-high td:first-child { border-left: 3px solid var(--danger); }
-        tr.risk-caution td:first-child { border-left: 3px solid var(--warn); }
-        .settings-table select, .settings-table input[type="number"], .settings-table input[type="text"] {
+        /* Settings: one row per setting as a 3-column grid (name+badges /
+           description+meta / control+actions) rather than a 9-column
+           table -- a long description and a live control don't fit a
+           table cell without either truncating or forcing sideways
+           scroll at phone width. Stacks to one column below 560px. */
+        .settings { display: grid; }
+        .setting {
+            display: grid;
+            grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+            gap: 0.6rem 1rem;
+            padding: 0.9rem 1.1rem;
+            border-bottom: 1px solid var(--border);
+            align-items: start;
+        }
+        .setting:last-child { border-bottom: 0; }
+        .setting .k { font-weight: 600; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+        .setting .k code { color: var(--text-dim); font-weight: 400; }
+        .setting .d { color: var(--text-dim); font-size: 0.82rem; margin: 0.25rem 0 0; max-width: 56ch; }
+        .setting .meta { display: flex; flex-wrap: wrap; gap: 0.35rem 0.7rem; margin-top: 0.4rem; font-size: 0.76rem; color: var(--text-faint); }
+        .setting .meta code { font-size: 0.76rem; }
+        .setting .ctl { display: grid; gap: 0.35rem; min-width: 0; }
+        .setting .ctl label { font-size: 0.72rem; color: var(--text-dim); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+        .setting .act { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+        /* Risk stripe: an inset box-shadow, not a border -- it doesn't add
+           width or shift the grid's own column lines. */
+        .setting.risk-caution { box-shadow: inset 3px 0 0 var(--warn); }
+        .setting.risk-high { box-shadow: inset 3px 0 0 var(--danger); }
+        .setting.pinned { background: color-mix(in srgb, var(--warn-tint) 45%, transparent); }
+        @media (max-width: 560px) {
+            .setting { grid-template-columns: 1fr; }
+            .setting .act { justify-content: flex-start; }
+        }
+        .input {
             width: 100%;
             max-width: 220px;
-            background: var(--bg);
-            border: 1px solid var(--border);
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
             color: var(--text);
             padding: 0.35rem 0.55rem;
             border-radius: var(--r-1);
             font-size: 0.82rem;
         }
-        .settings-table input[type="password"] {
-            width: 100%;
-            max-width: 240px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            color: var(--text);
-            padding: 0.35rem 0.55rem;
-            border-radius: var(--r-1);
-            font-size: 0.82rem;
+        .input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-color: var(--focus-ring); }
+        .input[aria-invalid="true"] { border-color: var(--danger); }
+        .input[readonly] { background: var(--surface-sunken); color: var(--text-dim); border-style: dashed; cursor: not-allowed; }
+        .err { color: var(--danger-ink); font-size: 0.76rem; display: flex; gap: 0.3rem; align-items: center; }
+        .err svg { width: 12px; height: 12px; flex: none; }
+        .err:empty { display: none; }
+
+        /* Toggle: a real switch (role="switch" + aria-checked) for any
+           bool-typed setting, not a 2-option <select>. */
+        .toggle {
+            position: relative;
+            width: 36px;
+            height: 20px;
+            border-radius: var(--r-pill);
+            background: var(--border-strong);
+            border: 0;
+            flex: none;
+            transition: background var(--dur) var(--ease);
         }
+        .toggle::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--surface);
+            box-shadow: var(--shadow-1);
+            transition: transform var(--dur) var(--ease);
+        }
+        .toggle[aria-checked="true"] { background: var(--accent); }
+        .toggle[aria-checked="true"]::after { transform: translateX(16px); }
+        .toggle[disabled] { opacity: 0.5; cursor: not-allowed; }
+        .toggle-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; }
+
+        /* Pagination: one component, reused by every view that pages
+           through rows instead of each keeping its own markup. */
+        .pager { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0; font-size: 0.8rem; color: var(--text-dim); flex-wrap: wrap; }
+        .pager .range { margin-right: auto; }
+        .pager select { border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); border-radius: var(--r-1); padding: 0.15rem 0.4rem; font-size: 0.76rem; }
+
+        /* Confirmation dialog: reused for every destructive action instead
+           of the browser's native confirm() dialog, which the artifact
+           viewer and some browsers suppress without telling the caller. */
+        .dialog-scrim {
+            position: fixed;
+            inset: 0;
+            background: color-mix(in srgb, var(--text) 40%, transparent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            z-index: 500;
+        }
+        .dialog {
+            background: var(--surface-overlay);
+            border: 1px solid var(--border);
+            border-radius: var(--r-2);
+            box-shadow: var(--shadow-3);
+            width: min(100%, 440px);
+            display: grid;
+        }
+        .dialog header { padding: 1rem 1rem 0; display: flex; gap: 0.6rem; align-items: flex-start; }
+        .dialog header svg { width: 20px; height: 20px; color: var(--danger); flex: none; margin-top: 0.1rem; }
+        .dialog h3 { font-size: var(--fs-4); margin: 0; }
+        .dialog .body { padding: 0.75rem 1rem 1rem; display: grid; gap: 0.6rem; font-size: 0.82rem; color: var(--text-dim); }
+        .dialog .body ul { margin: 0; padding-left: 1.2em; display: grid; gap: 0.25rem; }
+        .dialog footer { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0.6rem 1rem; border-top: 1px solid var(--border); background: var(--surface-sunken); border-radius: 0 0 var(--r-2) var(--r-2); }
+
+        /* Tables: right-aligned tabular-nums on numeric columns. */
+        .num, th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
         /* Runtime panel: a small label/value grid, not the big-number
            dashboard tiles (.cards) -- this is configuration echo, not a
@@ -1693,26 +1770,26 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
             <svg width="22" height="22" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <line x1="96" y1="152" x2="48" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
-                <line x1="96" y1="152" x2="144" y2="112" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
-                <line x1="96" y1="152" x2="96" y2="96" stroke="#4f46e5" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
-                <line x1="48" y1="112" x2="40" y2="64" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
-                <line x1="48" y1="112" x2="96" y2="96" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
-                <line x1="144" y1="112" x2="152" y2="64" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
-                <line x1="144" y1="112" x2="96" y2="96" stroke="#6366f1" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
-                <line x1="96" y1="96" x2="40" y2="64" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
-                <line x1="96" y1="96" x2="152" y2="64" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
-                <line x1="96" y1="96" x2="96" y2="40" stroke="#818cf8" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
-                <line x1="40" y1="64" x2="96" y2="40" stroke="#a5b4fc" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
-                <line x1="152" y1="64" x2="96" y2="40" stroke="#a5b4fc" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
-                <circle cx="96" cy="152" r="14" fill="#4f46e5" opacity="0.7"/><circle cx="96" cy="152" r="8" fill="#6366f1"/>
-                <circle cx="48" cy="112" r="12" fill="#4f46e5" opacity="0.7"/><circle cx="48" cy="112" r="7" fill="#818cf8"/>
-                <circle cx="96" cy="96" r="14" fill="#4f46e5" opacity="0.6"/><circle cx="96" cy="96" r="8" fill="#818cf8"/>
-                <circle cx="144" cy="112" r="12" fill="#4f46e5" opacity="0.7"/><circle cx="144" cy="112" r="7" fill="#818cf8"/>
-                <circle cx="40" cy="64" r="11" fill="#6366f1" opacity="0.8"/><circle cx="40" cy="64" r="6" fill="#a5b4fc"/>
-                <circle cx="152" cy="64" r="11" fill="#6366f1" opacity="0.8"/><circle cx="152" cy="64" r="6" fill="#a5b4fc"/>
-                <circle cx="96" cy="40" r="16" fill="#6366f1" opacity="0.25"/>
-                <circle cx="96" cy="40" r="11" fill="#6366f1" opacity="0.8"/><circle cx="96" cy="40" r="6" fill="#c7d2fe"/>
+                <line x1="96" y1="152" x2="48" y2="112" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="96" y1="152" x2="144" y2="112" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="96" y1="152" x2="96" y2="96" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+                <line x1="48" y1="112" x2="40" y2="64" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="48" y1="112" x2="96" y2="96" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="144" y1="112" x2="152" y2="64" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="144" y1="112" x2="96" y2="96" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+                <line x1="96" y1="96" x2="40" y2="64" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="96" y1="96" x2="152" y2="64" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="96" y1="96" x2="96" y2="40" stroke="currentColor" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+                <line x1="40" y1="64" x2="96" y2="40" stroke="currentColor" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+                <line x1="152" y1="64" x2="96" y2="40" stroke="currentColor" stroke-width="5" stroke-linecap="round" opacity="0.8"/>
+                <circle cx="96" cy="152" r="14" fill="currentColor" opacity="0.7"/><circle cx="96" cy="152" r="8" fill="currentColor"/>
+                <circle cx="48" cy="112" r="12" fill="currentColor" opacity="0.7"/><circle cx="48" cy="112" r="7" fill="currentColor"/>
+                <circle cx="96" cy="96" r="14" fill="currentColor" opacity="0.6"/><circle cx="96" cy="96" r="8" fill="currentColor"/>
+                <circle cx="144" cy="112" r="12" fill="currentColor" opacity="0.7"/><circle cx="144" cy="112" r="7" fill="currentColor"/>
+                <circle cx="40" cy="64" r="11" fill="currentColor" opacity="0.8"/><circle cx="40" cy="64" r="6" fill="currentColor"/>
+                <circle cx="152" cy="64" r="11" fill="currentColor" opacity="0.8"/><circle cx="152" cy="64" r="6" fill="currentColor"/>
+                <circle cx="96" cy="40" r="16" fill="currentColor" opacity="0.25"/>
+                <circle cx="96" cy="40" r="11" fill="currentColor" opacity="0.8"/><circle cx="96" cy="40" r="6" fill="currentColor"/>
             </svg>
             <span class="wordmark">Trellis</span>
         </div>
@@ -1782,6 +1859,30 @@
         <div id="loading" class="loading-state"><span class="spinner"></span> Connecting to API...</div>
         <div id="error"></div>
         <div id="toast-region" role="status" aria-live="polite"></div>
+
+        <div id="confirm-dialog-scrim" class="dialog-scrim" hidden>
+            <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-body-wrap">
+                <header>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M10.3 3.9 2.6 17.5A1.8 1.8 0 0 0 4.2 20h15.6a1.8 1.8 0 0 0 1.6-2.5L13.7 3.9a1.8 1.8 0 0 0-3.4 0Z"/>
+                        <path d="M12 9v4"/><path d="M12 16.5h.01"/>
+                    </svg>
+                    <div><h3 id="confirm-dialog-title"></h3></div>
+                </header>
+                <div class="body" id="confirm-dialog-body-wrap">
+                    <p id="confirm-dialog-body"></p>
+                    <ul id="confirm-dialog-list" hidden></ul>
+                    <div id="confirm-dialog-word-wrap" hidden>
+                        <label for="confirm-dialog-word-input">Type <b id="confirm-dialog-word-target"></b> to confirm</label>
+                        <input class="input" id="confirm-dialog-word-input" type="text" autocomplete="off" style="max-width:none">
+                    </div>
+                </div>
+                <footer>
+                    <button type="button" class="btn" id="confirm-dialog-cancel" onclick="closeConfirmDialog()">Cancel</button>
+                    <button type="button" class="btn btn-danger" id="confirm-dialog-confirm">Confirm</button>
+                </footer>
+            </div>
+        </div>
 
         <!-- ============ Dashboard ============ -->
         <div id="view-dashboard" style="display:none">
@@ -1939,10 +2040,10 @@
                     </div>
                 </div>
                 <div id="srp-items"></div>
-                <div class="srp-pagination" id="srp-pagination" style="display:none">
-                    <button id="srp-prev" onclick="searchPage(-1)">&laquo; Prev</button>
-                    <span id="srp-page-info"></span>
-                    <button id="srp-next" onclick="searchPage(1)">Next &raquo;</button>
+                <div class="pager" id="srp-pagination" style="display:none">
+                    <span class="range num" id="srp-page-info"></span>
+                    <button type="button" class="btn btn-sm" id="srp-prev" onclick="searchPage(-1)">&laquo; Prev</button>
+                    <button type="button" class="btn btn-sm" id="srp-next" onclick="searchPage(1)">Next &raquo;</button>
                 </div>
             </div>
             <div class="graph-legend" id="graph-legend"></div>
@@ -1950,10 +2051,14 @@
             <div class="graph-wrapper">
                 <div id="cy" role="img" aria-label="Graph explorer canvas" aria-describedby="cy-text-alt"></div>
                 <div id="cy-load-error" class="degraded-banner" style="display:none">
-                    <span class="degraded-title">Graph library failed to load</span>
-                    <span class="degraded-detail">The graph-rendering script did not load, so this tab
-                        cannot draw the canvas. Reload the page; if this keeps happening, the server may
-                        be missing a static asset it should be serving.</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 2.6 17.5A1.8 1.8 0 0 0 4.2 20h15.6a1.8 1.8 0 0 0 1.6-2.5L13.7 3.9a1.8 1.8 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 16.5h.01"/></svg>
+                    <div class="degraded-body">
+                        <span class="degraded-title">Graph library failed to load</span>
+                        <span class="degraded-detail">The graph-rendering script did not load, so this tab
+                            cannot draw the canvas. Reload the page; if this keeps happening, the server may
+                            be missing a static asset it should be serving.</span>
+                    </div>
+                    <div class="degraded-actions"><button type="button" class="btn btn-sm btn-ghost" onclick="switchView('settings'); return false;">View health</button></div>
                 </div>
                 <div class="graph-toolbar" id="graph-toolbar">
                     <button onclick="graphZoom(1.3)" title="Zoom in" aria-label="Zoom in">+</button>
@@ -1977,14 +2082,9 @@
                 <select id="trace-domain" aria-label="Filter traces by domain">
                     <option value="">All domains</option>
                 </select>
-                <select id="trace-limit" aria-label="Number of traces per page">
-                    <option value="20">20 traces</option>
-                    <option value="50">50 traces</option>
-                    <option value="100">100 traces</option>
-                </select>
                 <button onclick="tracesRefresh()">Refresh</button>
             </div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -1999,10 +2099,15 @@
                     <tbody id="traces-body"></tbody>
                 </table>
             </div>
-            <div class="srp-pagination" id="trace-pagination" style="display:none">
-                <button id="trace-newer" onclick="tracePage('newer')">&laquo; Newer</button>
-                <span id="trace-page-info"></span>
-                <button id="trace-older" onclick="tracePage('older')">Older &raquo;</button>
+            <div class="pager" id="trace-pagination" style="display:none">
+                <span class="range num" id="trace-page-info"></span>
+                <label class="hint">Rows <select id="trace-limit" aria-label="Number of traces per page">
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select></label>
+                <button type="button" class="btn btn-sm" id="trace-newer" onclick="tracePage('newer')">&laquo; Newer</button>
+                <button type="button" class="btn btn-sm" id="trace-older" onclick="tracePage('older')">Older &raquo;</button>
             </div>
             <div id="trace-detail-container"></div>
         </div>
@@ -2027,14 +2132,9 @@
             <div class="search-bar">
                 <input type="text" id="mem-search" placeholder="Search documents (full-text)..." aria-label="Search documents"
                        onkeydown="if(event.key==='Enter'){memOffset=0;loadMemories();}">
-                <select id="mem-limit" onchange="memOffset=0;loadMemories()" aria-label="Number of documents per page">
-                    <option value="25">25 docs</option>
-                    <option value="50" selected>50 docs</option>
-                    <option value="100">100 docs</option>
-                </select>
                 <button onclick="memOffset=0;loadMemories()">Refresh</button>
             </div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -2042,16 +2142,21 @@
                             <th>Doc ID</th>
                             <th>Preview</th>
                             <th>Content tags</th>
-                            <th>Chars</th>
+                            <th class="num">Chars</th>
                         </tr>
                     </thead>
                     <tbody id="memories-body"></tbody>
                 </table>
             </div>
-            <div class="srp-pagination" id="mem-pagination" style="display:none">
-                <button id="mem-prev" onclick="memPage(-1)">&laquo; Prev</button>
-                <span id="mem-page-info"></span>
-                <button id="mem-next" onclick="memPage(1)">Next &raquo;</button>
+            <div class="pager" id="mem-pagination" style="display:none">
+                <span class="range num" id="mem-page-info"></span>
+                <label class="hint">Rows <select id="mem-limit" onchange="memOffset=0;loadMemories()" aria-label="Number of documents per page">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select></label>
+                <button type="button" class="btn btn-sm" id="mem-prev" onclick="memPage(-1)">&laquo; Prev</button>
+                <button type="button" class="btn btn-sm" id="mem-next" onclick="memPage(1)">Next &raquo;</button>
             </div>
             <div id="memory-detail-container"></div>
         </div>
@@ -2065,15 +2170,10 @@
                 <input type="text" id="event-source" placeholder="Source filter..." style="max-width:220px"
                        aria-label="Filter by emitting source"
                        onkeydown="if(event.key==='Enter')eventsRefresh()">
-                <select id="event-limit" onchange="eventsRefresh()" aria-label="Number of events per page">
-                    <option value="50">50 events</option>
-                    <option value="100" selected>100 events</option>
-                    <option value="200">200 events</option>
-                </select>
                 <button onclick="eventsRefresh()">Refresh</button>
             </div>
             <p style="font-size:0.8rem; color:var(--text-dim); margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -2087,10 +2187,15 @@
                     <tbody id="events-body"></tbody>
                 </table>
             </div>
-            <div class="srp-pagination" id="event-pagination" style="display:none">
-                <button id="event-newer" onclick="eventPage('newer')">&laquo; Newer</button>
-                <span id="event-page-info"></span>
-                <button id="event-older" onclick="eventPage('older')">Older &raquo;</button>
+            <div class="pager" id="event-pagination" style="display:none">
+                <span class="range num" id="event-page-info"></span>
+                <label class="hint">Rows <select id="event-limit" onchange="eventsRefresh()" aria-label="Number of events per page">
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>
+                    <option value="200">200</option>
+                </select></label>
+                <button type="button" class="btn btn-sm" id="event-newer" onclick="eventPage('newer')">&laquo; Newer</button>
+                <button type="button" class="btn btn-sm" id="event-older" onclick="eventPage('older')">Older &raquo;</button>
             </div>
             <div id="event-detail-container"></div>
         </div>
@@ -2098,14 +2203,9 @@
         <!-- ============ Packs ============ -->
         <div id="view-packs" style="display:none">
             <div class="search-bar">
-                <select id="pack-limit" onchange="packsRefresh()" aria-label="Number of packs per page">
-                    <option value="25">25 packs</option>
-                    <option value="50" selected>50 packs</option>
-                    <option value="100">100 packs</option>
-                </select>
                 <button onclick="packsRefresh()">Refresh</button>
             </div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -2113,18 +2213,23 @@
                             <th>Intent</th>
                             <th>Domain</th>
                             <th>Agent</th>
-                            <th>Items</th>
-                            <th>Candidates</th>
+                            <th class="num">Items</th>
+                            <th class="num">Candidates</th>
                             <th>Strategies</th>
                         </tr>
                     </thead>
                     <tbody id="packs-body"></tbody>
                 </table>
             </div>
-            <div class="srp-pagination" id="pack-pagination" style="display:none">
-                <button id="pack-newer" onclick="packPage('newer')">&laquo; Newer</button>
-                <span id="pack-page-info"></span>
-                <button id="pack-older" onclick="packPage('older')">Older &raquo;</button>
+            <div class="pager" id="pack-pagination" style="display:none">
+                <span class="range num" id="pack-page-info"></span>
+                <label class="hint">Rows <select id="pack-limit" onchange="packsRefresh()" aria-label="Number of packs per page">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                </select></label>
+                <button type="button" class="btn btn-sm" id="pack-newer" onclick="packPage('newer')">&laquo; Newer</button>
+                <button type="button" class="btn btn-sm" id="pack-older" onclick="packPage('older')">Older &raquo;</button>
             </div>
             <div id="pack-detail-container"></div>
         </div>
@@ -2192,16 +2297,16 @@
             </p>
             <div id="adv-generate-form" style="display:none"></div>
             <div id="adv-generate-result"></div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
                             <th>Id</th>
                             <th>Category</th>
                             <th>Scope</th>
-                            <th>Confidence</th>
-                            <th>Evidence</th>
-                            <th>Effect</th>
+                            <th class="num">Confidence</th>
+                            <th class="num">Evidence</th>
+                            <th class="num">Effect</th>
                             <th>Status</th>
                             <th>Created</th>
                             <th>Fitness-scored</th>
@@ -2229,7 +2334,7 @@
             </div>
             <div id="policy-create-form" style="display:none"></div>
             <div id="policy-create-result"></div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -2264,14 +2369,14 @@
                 <button onclick="loadSchedules()">Refresh</button>
             </div>
             <div id="schedule-edit-form" style="display:none"></div>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
                             <th>Name</th>
                             <th>Enabled</th>
                             <th>Cadence</th>
-                            <th>Timeout</th>
+                            <th class="num">Timeout</th>
                             <th>Flags</th>
                             <th>Last run (UTC)</th>
                             <th>Next due</th>
@@ -2300,15 +2405,15 @@
             </div>
             <div id="tagrules-mine-result"></div>
             <h3 style="margin:1.5rem 0 0.5rem">Open candidates</h3>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
                             <th>Kind</th>
                             <th>Key</th>
                             <th>Target</th>
-                            <th>Support</th>
-                            <th>Precision</th>
+                            <th class="num">Support</th>
+                            <th class="num">Precision</th>
                             <th>Status</th>
                             <th></th>
                         </tr>
@@ -2319,7 +2424,7 @@
             <p class="field-hint" id="tagrules-candidates-total"></p>
 
             <h3 style="margin:1.5rem 0 0.5rem">Effective rules</h3>
-            <div class="status-section" style="padding:0; overflow:hidden">
+            <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
                         <tr>
@@ -2366,22 +2471,7 @@
                 </select>
             </div>
             <div class="status-section" style="padding:0; overflow:hidden">
-                <table class="settings-table">
-                    <thead>
-                        <tr>
-                            <th>Setting</th>
-                            <th>Description</th>
-                            <th>Type / bounds</th>
-                            <th>Read by</th>
-                            <th>Effective value</th>
-                            <th>Stored value</th>
-                            <th>Takes effect</th>
-                            <th>Updated</th>
-                            <th>Change</th>
-                        </tr>
-                    </thead>
-                    <tbody id="settings-body"></tbody>
-                </table>
+                <div class="settings" id="settings-body"></div>
             </div>
             <p class="field-hint" id="settings-total"></p>
         </div>
@@ -2440,13 +2530,21 @@
             document.documentElement.setAttribute('data-theme', next);
             try { localStorage.setItem(THEME_STORAGE, next); } catch { /* private mode */ }
             updateThemeToggleIcon();
+            // The cytoscape style map was read from computed tokens at init
+            // and baked into plain strings, so a theme change alone never
+            // repaints it -- without this, light mode kept rendering
+            // dark-mode node/edge colours.
+            if (cy) cy.style(buildCyStyle());
         }
 
         updateThemeToggleIcon();
         if (window.matchMedia) {
             // No stored override -> follow a live OS theme change too.
             window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
-                if (!document.documentElement.getAttribute('data-theme')) updateThemeToggleIcon();
+                if (!document.documentElement.getAttribute('data-theme')) {
+                    updateThemeToggleIcon();
+                    if (cy) cy.style(buildCyStyle());
+                }
             });
         }
 
@@ -2648,6 +2746,86 @@
             return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
+        // Inline SVG used by every .degraded-banner (never an emoji): a
+        // warning triangle that inherits colour from the banner's own CSS
+        // via currentColor, so the .banner-warn variant repaints it for
+        // free with no separate icon markup.
+        const DEGRADED_BANNER_ICON =
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<path d="M10.3 3.9 2.6 17.5A1.8 1.8 0 0 0 4.2 20h15.6a1.8 1.8 0 0 0 1.6-2.5L13.7 3.9a1.8 1.8 0 0 0-3.4 0Z"/>' +
+            '<path d="M12 9v4"/><path d="M12 16.5h.01"/></svg>';
+
+        // Shared actions column for every .degraded-banner -- "View health"
+        // always opens the Settings tab's Runtime panel, this app's one
+        // general health surface; there is no separate health view per store.
+        const DEGRADED_BANNER_ACTIONS =
+            '<div class="degraded-actions"><button type="button" class="btn btn-sm btn-ghost" ' +
+            'onclick="switchView(\'settings\'); return false;">View health</button></div>';
+
+        // One shared confirmation dialog, reused for every destructive
+        // action in the page (policy delete, tag-rule revoke, proposal
+        // reject, a caution-risk setting toggle) instead of the browser's
+        // native confirm() dialog, which the artifact viewer and some
+        // browsers suppress without telling the caller. A typed-word gate is
+        // optional per call; when given, the danger button stays
+        // disabled until the input matches it exactly.
+        let _dialogReturnFocus = null;
+
+        function _dialogFocusables() {
+            return [...document.querySelectorAll('#confirm-dialog-scrim button, #confirm-dialog-scrim input')]
+                .filter(el => !el.disabled && el.offsetParent !== null);
+        }
+
+        function _dialogKeydown(e) {
+            if (e.key === 'Escape') { e.preventDefault(); closeConfirmDialog(); return; }
+            if (e.key !== 'Tab') return;
+            const focusables = _dialogFocusables();
+            if (!focusables.length) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+
+        function openConfirmDialog({ title, body, consequences, confirmWord, confirmLabel, onConfirm }) {
+            const scrim = document.getElementById('confirm-dialog-scrim');
+            if (!scrim) return;
+            _dialogReturnFocus = document.activeElement;
+            document.getElementById('confirm-dialog-title').textContent = title || 'Confirm';
+            document.getElementById('confirm-dialog-body').textContent = body || '';
+            const listEl = document.getElementById('confirm-dialog-list');
+            listEl.innerHTML = (consequences || []).map(c => `<li>${escHtml(c)}</li>`).join('');
+            listEl.hidden = !consequences || consequences.length === 0;
+            const confirmBtn = document.getElementById('confirm-dialog-confirm');
+            confirmBtn.textContent = confirmLabel || 'Confirm';
+            const wordWrap = document.getElementById('confirm-dialog-word-wrap');
+            const wordInput = document.getElementById('confirm-dialog-word-input');
+            wordInput.value = '';
+            if (confirmWord) {
+                wordWrap.hidden = false;
+                document.getElementById('confirm-dialog-word-target').textContent = confirmWord;
+                confirmBtn.disabled = true;
+                wordInput.oninput = () => { confirmBtn.disabled = wordInput.value.trim() !== confirmWord; };
+            } else {
+                wordWrap.hidden = true;
+                wordInput.oninput = null;
+                confirmBtn.disabled = false;
+            }
+            confirmBtn.onclick = () => { closeConfirmDialog(); if (onConfirm) onConfirm(); };
+            scrim.hidden = false;
+            document.addEventListener('keydown', _dialogKeydown);
+            (confirmWord ? wordInput : document.getElementById('confirm-dialog-cancel')).focus();
+        }
+
+        function closeConfirmDialog() {
+            const scrim = document.getElementById('confirm-dialog-scrim');
+            if (scrim) scrim.hidden = true;
+            document.removeEventListener('keydown', _dialogKeydown);
+            if (_dialogReturnFocus && document.body.contains(_dialogReturnFocus)) _dialogReturnFocus.focus();
+            _dialogReturnFocus = null;
+        }
+
         // Base of the operator docs this build was published alongside --
         // every per-tab help link points at a `#anchor` under this file.
         // tests/unit/api/test_ui_help_links.py pins that each anchor below
@@ -2733,17 +2911,17 @@
         // would end the JS string. A template names the function in
         // data-action and carries the id in data-id; this listener calls it.
         const ID_ACTIONS = {
-            confirmPromoteProposal, confirmRejectProposal, rejectProposal, promoteProposal,
+            confirmPromoteProposal, confirmRejectProposal, promoteProposal,
             draftAdr, copyAdr, downloadAdr,
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
-            confirmDeletePolicy, deletePolicy,
+            confirmDeletePolicy,
             showEditJobForm, cancelEditJobForm, confirmRunJob, cancelRunJob, runJob,
             toggleJobEnabled, confirmEditJob,
             confirmToggleJobEnabled, cancelToggleJobEnabled, resetJobTimeoutToDefault,
             confirmApplyTagCandidate, applyTagCandidate,
             confirmDismissTagCandidate, dismissTagCandidate,
-            confirmRevokeTagRule, revokeTagRule,
+            confirmRevokeTagRule,
             beginSaveSetting, beginResetSetting, confirmSaveSetting, confirmResetSetting,
             cancelSettingWrite,
         };
@@ -2927,13 +3105,25 @@
         // ============================================================
         //  DASHBOARD
         // ============================================================
-        function renderCard(title, value, sub) {
+        function renderCard(title, value, sub, raw) {
             const div = document.createElement('div');
             div.className = 'card fade-in';
             // A raw count gets thousands separators; a pre-formatted string
             // (a percentage, a named non-finite state) is shown as-is.
             const shown = typeof value === 'number' ? value.toLocaleString() : String(value);
-            div.innerHTML = `<h3>${escHtml(title)}</h3><div class="value">${escHtml(shown)}</div><div class="sub">${escHtml(sub)}</div>`;
+            // `raw` is the number a caller's display string was picked
+            // from (omitted when `value` is always a plain count, which
+            // never has a "not measured"/non-finite state). Re-testing it
+            // here -- rather than parsing it back out of `shown` -- means
+            // fmtNum/fmtPct's own strings never need to change, and a
+            // reworded string can never desync the modifier from the
+            // number that produced it.
+            let valueClass = 'value';
+            if (raw !== undefined) {
+                if (raw == null) valueClass += ' na';
+                else if (!Number.isFinite(Number(raw))) valueClass += ' inf';
+            }
+            div.innerHTML = `<h3>${escHtml(title)}</h3><div class="${valueClass}">${escHtml(shown)}</div><div class="sub">${escHtml(sub)}</div>`;
             return div;
         }
 
@@ -3354,18 +3544,18 @@
 
         // Reject is terminal (TUNER_PROPOSAL_REJECTED; unlike a bootstrap
         // promote refusal there is no retry flag that recovers it), so it
-        // gets the same in-page click guard the Approve button already has
-        // via confirmPromoteProposal -- without window.confirm, which this
-        // runtime cannot show (P1-4). One click swaps the row's actions into
-        // a second, explicit confirm; Cancel restores the list unchanged.
+        // goes through the shared confirmation dialog rather than acting on
+        // one click -- never the browser's native confirm() dialog, which
+        // this runtime cannot show reliably (the artifact viewer and some
+        // browsers suppress it).
         function confirmRejectProposal(id) {
-            const card = document.getElementById('proposal-' + id);
-            if (!card) return;
-            const actions = card.querySelector('.review-actions');
-            actions.innerHTML =
-                '<span style="color:var(--danger); font-size:0.82rem;">Reject is terminal.</span> ' +
-                `<button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escHtml(id)}">Confirm reject</button>` +
-                '<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>';
+            openConfirmDialog({
+                title: 'Reject this proposal?',
+                body: 'Reject is terminal. Unlike a bootstrap promote refusal, there is no retry flag that recovers it.',
+                confirmWord: 'reject',
+                confirmLabel: 'Reject proposal',
+                onConfirm: () => rejectProposal(id),
+            });
         }
 
         async function rejectProposal(id) {
@@ -3638,7 +3828,7 @@
                 summary.appendChild(renderCard('Items Scored', (data.item_scores || []).length, 'unique context items'));
 
                 if (data.item_scores && data.item_scores.length > 0) {
-                    let html = '<table><thead><tr><th>Item ID</th><th>Appearances</th><th>Successes</th><th>Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
+                    let html = '<div class="table-wrap"><table><thead><tr><th>Item ID</th><th class="num">Appearances</th><th class="num">Successes</th><th class="num">Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
                     for (const item of data.item_scores) {
                         // A CSS width needs a bounded number even when the rate itself
                         // isn't one (0 appearances can leave success_rate as 0/0); the
@@ -3649,13 +3839,13 @@
                         const cls = item.success_rate >= 0.7 ? 'good' : item.success_rate >= 0.4 ? 'mid' : 'bad';
                         html += `<tr>
                             <td class="mono truncate" title="${escHtml(item.item_id)}">${escHtml(item.item_id)}</td>
-                            <td>${item.appearances}</td>
-                            <td>${item.successes}</td>
-                            <td>${item.failures}</td>
+                            <td class="num">${item.appearances.toLocaleString('en-US')}</td>
+                            <td class="num">${item.successes.toLocaleString('en-US')}</td>
+                            <td class="num">${item.failures.toLocaleString('en-US')}</td>
                             <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${barWidth}%"></div></div><span class="bar-label">${pctLabel}</span></div></td>
                         </tr>`;
                     }
-                    html += '</tbody></table>';
+                    html += '</tbody></table></div>';
                     items.innerHTML = html;
                 } else {
                     items.innerHTML = '<div class="empty-state"><div class="icon">&#x2191;</div><p>No item scores yet. Assemble context packs and provide feedback to see effectiveness data.</p></div>';
@@ -3818,6 +4008,119 @@
         let lastSearchResults = null;
         let selectedSearchIdx = -1;
 
+        function cssVar(name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+
+        // Cytoscape styles are plain strings baked in at the time this
+        // runs, not CSS custom properties -- a map built once at init would
+        // freeze dark-mode colours into light mode. Call this again on
+        // every theme toggle (cy.style(buildCyStyle())) rather than reading
+        // the tokens once. WELL_KNOWN_TYPE_COLORS / nodeColor() (the node
+        // fill palette keyed by entity type) stay their own categorical
+        // hexes on purpose -- that palette distinguishes types from each
+        // other, not light from dark, so it is out of scope here.
+        function buildCyStyle() {
+            const text = cssVar('--text');
+            const textDim = cssVar('--text-dim');
+            const surface = cssVar('--surface');
+            const accent = cssVar('--accent');
+            return [
+                {
+                    selector: 'node',
+                    style: {
+                        'label': 'data(label)',
+                        'background-color': 'data(color)',
+                        'color': text,
+                        'text-valign': 'bottom',
+                        'text-margin-y': 6,
+                        'font-size': 10,
+                        'width': 'data(size)',
+                        'height': 'data(size)',
+                        'border-width': 2,
+                        'border-color': surface,
+                        'text-max-width': 100,
+                        'text-wrap': 'ellipsis',
+                        'text-outline-width': 2,
+                        'text-outline-color': surface,
+                        'transition-property': 'width, height, border-color, opacity',
+                        'transition-duration': '0.2s'
+                    }
+                },
+                {
+                    // Activity labels arrive pre-shortened (displayName); wrap them
+                    // onto two lines instead of cutting them at 100px.
+                    selector: 'node.activity',
+                    style: { 'text-wrap': 'wrap', 'text-max-width': 140 }
+                },
+                {
+                    selector: 'node:selected',
+                    style: {
+                        'border-color': text,
+                        'border-width': 3,
+                    }
+                },
+                {
+                    selector: 'node.seed',
+                    style: { 'width': 44, 'height': 44, 'font-size': 12, 'font-weight': 'bold' }
+                },
+                {
+                    selector: 'node.highlight',
+                    style: {
+                        'border-color': text,
+                        'border-width': 3,
+                    }
+                },
+                {
+                    selector: 'node.dimmed',
+                    style: {
+                        'opacity': 0.15,
+                    }
+                },
+                {
+                    selector: 'edge',
+                    style: {
+                        'width': 1.5,
+                        'line-color': textDim,
+                        'target-arrow-color': textDim,
+                        'target-arrow-shape': 'triangle',
+                        'curve-style': 'bezier',
+                        'arrow-scale': 0.7,
+                        'label': 'data(label)',
+                        'font-size': 9,
+                        'color': textDim,
+                        'text-rotation': 'autorotate',
+                        'text-outline-width': 1.5,
+                        'text-outline-color': surface,
+                        'transition-property': 'line-color, target-arrow-color, width, opacity',
+                        'transition-duration': '0.2s'
+                    }
+                },
+                {
+                    selector: 'edge.highlight',
+                    style: {
+                        'line-color': accent,
+                        'target-arrow-color': accent,
+                        'width': 2.5,
+                    }
+                },
+                {
+                    selector: 'edge.dimmed',
+                    style: {
+                        'opacity': 0.1,
+                    }
+                },
+                {
+                    selector: 'node.hidden',
+                    style: { 'display': 'none' }
+                },
+                {
+                    selector: 'edge.hidden',
+                    style: { 'display': 'none' }
+                }
+            ];
+        }
+
         function initGraph() {
             if (graphInitialized) return;
             graphInitialized = true;
@@ -3846,101 +4149,7 @@
 
             cy = cytoscape({
                 container: document.getElementById('cy'),
-                style: [
-                    {
-                        selector: 'node',
-                        style: {
-                            'label': 'data(label)',
-                            'background-color': 'data(color)',
-                            'color': '#e1e4ed',
-                            'text-valign': 'bottom',
-                            'text-margin-y': 6,
-                            'font-size': 10,
-                            'width': 'data(size)',
-                            'height': 'data(size)',
-                            'border-width': 2,
-                            'border-color': '#0f1117',
-                            'text-max-width': 100,
-                            'text-wrap': 'ellipsis',
-                            'text-outline-width': 2,
-                            'text-outline-color': '#0f1117',
-                            'transition-property': 'width, height, border-color, opacity',
-                            'transition-duration': '0.2s'
-                        }
-                    },
-                    {
-                        // Activity labels arrive pre-shortened (displayName); wrap them
-                        // onto two lines instead of cutting them at 100px.
-                        selector: 'node.activity',
-                        style: { 'text-wrap': 'wrap', 'text-max-width': 140 }
-                    },
-                    {
-                        selector: 'node:selected',
-                        style: {
-                            'border-color': '#ffffff',
-                            'border-width': 3,
-                        }
-                    },
-                    {
-                        selector: 'node.seed',
-                        style: { 'width': 44, 'height': 44, 'font-size': 12, 'font-weight': 'bold' }
-                    },
-                    {
-                        selector: 'node.highlight',
-                        style: {
-                            'border-color': '#ffffff',
-                            'border-width': 3,
-                        }
-                    },
-                    {
-                        selector: 'node.dimmed',
-                        style: {
-                            'opacity': 0.15,
-                        }
-                    },
-                    {
-                        selector: 'edge',
-                        style: {
-                            'width': 1.5,
-                            'line-color': '#3a3d4a',
-                            'target-arrow-color': '#3a3d4a',
-                            'target-arrow-shape': 'triangle',
-                            'curve-style': 'bezier',
-                            'arrow-scale': 0.7,
-                            'label': 'data(label)',
-                            'font-size': 9,
-                            // --text-dim: 5.25:1 on the #1a1d27 canvas (#555870 was 2.41:1)
-                            'color': '#8b8fa3',
-                            'text-rotation': 'autorotate',
-                            'text-outline-width': 1.5,
-                            'text-outline-color': '#1a1d27',
-                            'transition-property': 'line-color, target-arrow-color, width, opacity',
-                            'transition-duration': '0.2s'
-                        }
-                    },
-                    {
-                        selector: 'edge.highlight',
-                        style: {
-                            'line-color': '#6366f1',
-                            'target-arrow-color': '#6366f1',
-                            'width': 2.5,
-                        }
-                    },
-                    {
-                        selector: 'edge.dimmed',
-                        style: {
-                            'opacity': 0.1,
-                        }
-                    },
-                    {
-                        selector: 'node.hidden',
-                        style: { 'display': 'none' }
-                    },
-                    {
-                        selector: 'edge.hidden',
-                        style: { 'display': 'none' }
-                    }
-                ],
+                style: buildCyStyle(),
                 layout: { name: 'cose', animate: false, nodeDimensionsIncludeLabels: true },
                 minZoom: 0.15,
                 maxZoom: 4,
@@ -4175,10 +4384,13 @@
                 // yet" from "the search call failed".
                 const el = document.getElementById('graph-sample-warning');
                 if (el) {
-                    el.innerHTML = `<div class="warn-banner">
-                        <span class="warn-title">Could not load a starting sample</span>
-                        <span class="warn-detail">${escHtml(e.message)} Search or enter
-                            an entity ID above to browse the graph manually.</span>
+                    el.innerHTML = `<div class="degraded-banner banner-warn">${DEGRADED_BANNER_ICON}
+                        <div class="degraded-body">
+                            <span class="degraded-title">Could not load a starting sample</span>
+                            <span class="degraded-detail">${escHtml(e.message)} Search or enter
+                                an entity ID above to browse the graph manually.</span>
+                        </div>
+                        ${DEGRADED_BANNER_ACTIONS}
                     </div>`;
                 }
             }
@@ -4402,19 +4614,41 @@
             loadEntity(entityId);
         }
 
-        // One Cytoscape node per stored node: colour and label from its type.
+        // Mirrors DATASET_ROUTING_PROPERTIES in schemas/well_known.py -- a
+        // node carrying any of these properties points at a system outside
+        // Trellis (a dataset's source_system, connection_ref, etc.), so the
+        // graph panel paints it as a referent rather than by its own type.
+        // This is a display signal, independent of the backend's fuller
+        // graph-shape analytics measure (which also matches locator-shaped
+        // values); it is read once per node, like every other entry in
+        // WELL_KNOWN_TYPE_COLORS, not re-applied on theme toggle.
+        const EXTERNAL_REFERENT_PROPERTIES = new Set([
+            'source_system', 'connection_ref', 'database_name', 'schema_name', 'physical_uri',
+        ]);
+        function isExternalReferent(properties) {
+            if (!properties || typeof properties !== 'object') return false;
+            return Object.keys(properties).some(
+                key => EXTERNAL_REFERENT_PROPERTIES.has(key) && properties[key] !== null && properties[key] !== '',
+            );
+        }
+
+        // One Cytoscape node per stored node: colour and label from its
+        // type, unless it is an external referent, which is coloured by the
+        // --info token instead so it reads as "points outside Trellis"
+        // rather than as whatever entity type it happens to carry.
         function toCyNode(n, isSeed) {
             const type = nodeTypeOf(n);
             const name = (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8);
             const classes = [];
             if (isSeed) classes.push('seed');
             if (type === 'Activity') classes.push('activity');
+            const color = isExternalReferent(n.properties) ? cssVar('--info') : nodeColor(type);
             return {
                 group: 'nodes',
                 data: {
                     id: n.node_id,
                     label: displayName(type, name),
-                    color: nodeColor(type),
+                    color,
                     size: 28, // re-sized by degree once added
                     ...n
                 },
@@ -5039,7 +5273,7 @@
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
-                        <td style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
+                        <td class="num" style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
                     </tr>
                 `).join('');
 
@@ -5300,8 +5534,8 @@
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td class="mono" style="font-size:0.78rem">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
-                        <td>${p.items_count != null ? p.items_count : '-'}</td>
-                        <td>${p.candidates_found != null ? p.candidates_found : '-'}</td>
+                        <td class="num">${p.items_count != null ? p.items_count.toLocaleString('en-US') : '-'}</td>
+                        <td class="num">${p.candidates_found != null ? p.candidates_found.toLocaleString('en-US') : '-'}</td>
                         <td style="font-size:0.75rem">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
                     </tr>
                 `).join('');
@@ -5364,17 +5598,17 @@
                 let injectedHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No items injected</p>';
                 if (injected.length > 0) {
                     injectedHtml = `
-                    <div style="overflow-x:auto"><table>
-                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th><th>Helpful</th><th>Unhelpful</th></tr></thead>
+                    <div class="table-wrap"><table>
+                        <thead><tr><th class="num">#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th class="num">Tokens</th><th>Helpful</th><th>Unhelpful</th></tr></thead>
                         <tbody>${injected.map(it => `
                             <tr>
-                                <td>${it.rank != null ? it.rank : '-'}</td>
+                                <td class="num">${it.rank != null ? it.rank : '-'}</td>
                                 <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
                                 <td><span class="badge badge-info">${escHtml(it.item_type || '')}</span></td>
                                 <td style="font-size:0.78rem">${escHtml(it.strategy_source || '')}</td>
                                 <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
                                 <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
-                                <td>${it.estimated_tokens != null ? it.estimated_tokens : '-'}</td>
+                                <td class="num">${it.estimated_tokens != null ? it.estimated_tokens.toLocaleString('en-US') : '-'}</td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful" aria-label="Mark item helpful"></td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful" aria-label="Mark item unhelpful"></td>
                             </tr>`).join('')}
@@ -5387,14 +5621,14 @@
                     rejectedHtml = `
                     <details style="margin-top:1rem">
                         <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Rejected items (${rejected.length})</summary>
-                        <div style="overflow-x:auto; margin-top:0.5rem"><table>
-                            <thead><tr><th>Item</th><th>Type</th><th>Strategy</th><th>Relevance</th><th>Reason</th></tr></thead>
+                        <div class="table-wrap" style="margin-top:0.5rem"><table>
+                            <thead><tr><th>Item</th><th>Type</th><th>Strategy</th><th class="num">Relevance</th><th>Reason</th></tr></thead>
                             <tbody>${rejected.map(r => `
                                 <tr>
                                     <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.item_type || '')}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.strategy_source || '')}</td>
-                                    <td>${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
+                                    <td class="num">${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.reason || '')}</td>
                                 </tr>`).join('')}
                             </tbody>
@@ -5407,13 +5641,13 @@
                     budgetHtml = `
                     <details style="margin-top:1rem">
                         <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Budget trace (${budgetTrace.length})</summary>
-                        <div style="overflow-x:auto; margin-top:0.5rem"><table>
-                            <thead><tr><th>Item</th><th>Tokens</th><th>Running total</th><th>Included</th></tr></thead>
+                        <div class="table-wrap" style="margin-top:0.5rem"><table>
+                            <thead><tr><th>Item</th><th class="num">Tokens</th><th class="num">Running total</th><th>Included</th></tr></thead>
                             <tbody>${budgetTrace.map(b => `
                                 <tr>
                                     <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
-                                    <td>${b.item_tokens}</td>
-                                    <td>${b.running_total}</td>
+                                    <td class="num">${b.item_tokens.toLocaleString('en-US')}</td>
+                                    <td class="num">${b.running_total.toLocaleString('en-US')}</td>
                                     <td>${b.included ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-danger">no</span>'}</td>
                                 </tr>`).join('')}
                             </tbody>
@@ -6609,11 +6843,14 @@
             const el = document.getElementById(targetId);
             if (!el) return;
             if (!degradation) { el.innerHTML = ''; return; }
-            el.innerHTML = `<div class="degraded-banner">
-                <span class="degraded-title">STORE DEGRADED &mdash; ${escHtml(degradation.reason || 'unknown')}</span>
-                <span class="degraded-detail">${escHtml(degradation.detail || '')}</span>
-                <span class="degraded-detail">${escHtml(String(degradation.rows_loaded ?? 0))} row(s) loaded, ${escHtml(String(degradation.rows_skipped_display ?? 'unknown'))} skipped from <code>${escHtml(degradation.path || '')}</code></span>
-                <span class="degraded-detail">Recovery (operator-run): <code>${escHtml(degradation.recovery || '')}</code></span>
+            el.innerHTML = `<div class="degraded-banner">${DEGRADED_BANNER_ICON}
+                <div class="degraded-body">
+                    <span class="degraded-title">STORE DEGRADED &mdash; ${escHtml(degradation.reason || 'unknown')}</span>
+                    <span class="degraded-detail">${escHtml(degradation.detail || '')}</span>
+                    <span class="degraded-detail">${escHtml(String(degradation.rows_loaded ?? 0))} row(s) loaded, ${escHtml(String(degradation.rows_skipped_display ?? 'unknown'))} skipped from <code>${escHtml(degradation.path || '')}</code></span>
+                    <span class="degraded-detail">Recovery (operator-run): <code>${escHtml(degradation.recovery || '')}</code></span>
+                </div>
+                ${DEGRADED_BANNER_ACTIONS}
             </div>`;
         }
 
@@ -6686,9 +6923,9 @@
                 <td title="${escHtml(a.advisory_id)}"><code>${escHtml(String(a.advisory_id).substring(0, 12))}</code></td>
                 <td>${escHtml(a.category)}</td>
                 <td>${escHtml(scopeCell)}</td>
-                <td>${fmtNum(a.confidence, 2)}</td>
-                <td title="${escHtml(evidenceTitle)}">${evidenceConf}</td>
-                <td title="${escHtml(evidenceTitle)}">${fmtNum(ev.effect_size, 2)}</td>
+                <td class="num">${fmtNum(a.confidence, 2)}</td>
+                <td class="num" title="${escHtml(evidenceTitle)}">${evidenceConf}</td>
+                <td class="num" title="${escHtml(evidenceTitle)}">${fmtNum(ev.effect_size, 2)}</td>
                 <td>${statusBadge}</td>
                 <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
                 <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
@@ -6774,9 +7011,12 @@
                 } else if (data.status === 'error') {
                     resultEl.innerHTML = `<p style="color:var(--danger)">Generate refused (${escHtml(data.code || 'error')}): ${escHtml(data.message || '')}</p>`;
                 } else if (data.status === 'degraded') {
-                    resultEl.innerHTML = `<div class="degraded-banner">
-                        <span class="degraded-title">Generation ran against a degraded advisory store</span>
-                        <span class="degraded-detail">Stored ${escHtml(String(data.advisories_stored ?? 0))} of ${escHtml(String(data.advisories_generated ?? 0))} generated advisories; nothing else was written.</span>
+                    resultEl.innerHTML = `<div class="degraded-banner">${DEGRADED_BANNER_ICON}
+                        <div class="degraded-body">
+                            <span class="degraded-title">Generation ran against a degraded advisory store</span>
+                            <span class="degraded-detail">Stored ${escHtml(String(data.advisories_stored ?? 0))} of ${escHtml(String(data.advisories_generated ?? 0))} generated advisories; nothing else was written.</span>
+                        </div>
+                        ${DEGRADED_BANNER_ACTIONS}
                     </div>`;
                 } else {
                     resultEl.innerHTML = `<p style="color:var(--ok)">Generated ${escHtml(String(data.advisories_generated ?? 0))} advisories (${escHtml(String(data.advisories_stored ?? 0))} stored) over ${escHtml(String(data.analysis_window_days ?? ''))} day(s); ${escHtml(String(data.findings_refused_no_comparison_arm ?? 0))} finding(s) refused for lack of a comparison arm.</p>`;
@@ -6832,12 +7072,13 @@
         }
 
         function confirmDeletePolicy(id) {
-            const cell = document.getElementById('policy-actions-' + id);
-            if (!cell) return;
-            cell.innerHTML =
-                '<span style="color:var(--warn)">Delete this policy?</span> ' +
-                `<button class="btn btn-sm btn-danger" data-action="deletePolicy" data-id="${escHtml(id)}">Confirm delete</button> ` +
-                '<button class="btn btn-ghost btn-sm" onclick="loadPolicies()">Cancel</button>';
+            openConfirmDialog({
+                title: 'Delete this policy?',
+                body: 'This removes the policy row. It does not undo any mutation already allowed or denied under it while it was active.',
+                confirmWord: 'delete',
+                confirmLabel: 'Delete policy',
+                onConfirm: () => deletePolicy(id),
+            });
         }
 
         async function deletePolicy(id) {
@@ -7037,14 +7278,17 @@
             const seenText = lastSeenAt
                 ? `Last job run recorded at ${fmtTime(lastSeenAt)}.`
                 : 'No job run has ever been recorded.';
-            el.innerHTML = `<div class="warn-banner">
-                <span class="warn-title">Dispatcher: not observed</span>
-                <span class="warn-detail">${escHtml(seenText)} Edits here are saved but
-                    nothing runs them until the host dispatcher is installed and
-                    polling. A dispatcher's own polls leave no record, so this is
-                    not proof one isn't running either -- it only means none has
-                    been seen recently. "Run now" still records the request
-                    either way.</span>
+            el.innerHTML = `<div class="degraded-banner banner-warn">${DEGRADED_BANNER_ICON}
+                <div class="degraded-body">
+                    <span class="degraded-title">Dispatcher: not observed</span>
+                    <span class="degraded-detail">${escHtml(seenText)} Edits here are saved but
+                        nothing runs them until the host dispatcher is installed and
+                        polling. A dispatcher's own polls leave no record, so this is
+                        not proof one isn't running either -- it only means none has
+                        been seen recently. "Run now" still records the request
+                        either way.</span>
+                </div>
+                ${DEGRADED_BANNER_ACTIONS}
             </div>`;
         }
 
@@ -7148,7 +7392,7 @@
                     <input type="checkbox" ${enabledAttr} ${disabledAttr} id="sched-enabled-${escHtml(name)}" aria-label="Enable ${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}">
                 </td>
                 <td data-cadence="${escHtml(job.cadence || '')}">${escHtml(cadenceText)}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span>${job.default_cadence && job.default_cadence !== job.cadence ? `<br><span class="field-hint" style="margin:0">catalog default: ${escHtml(job.default_cadence)}</span>` : ''}</td>
-                <td>${escHtml(String(job.timeout_seconds))}s</td>
+                <td class="num">${escHtml(String(job.timeout_seconds))}s</td>
                 <td>${jobFlagBadges(job, dispatcherSeen)}</td>
                 <td>${lastRunText(job.last_run)}</td>
                 <td>${nextDueCell}</td>
@@ -7393,7 +7637,7 @@
 
         function renderTagCandidateRow(c) {
             const m = c.metrics || {};
-            const support = m.support ?? '';
+            const support = typeof m.support === 'number' ? m.support.toLocaleString('en-US') : (m.support ?? '');
             // tag_keyword candidates carry precision, domain_alias ones
             // carry cooccurrence_rate -- both are the same shape of ratio,
             // so one shared, non-finite-safe formatter renders either.
@@ -7402,8 +7646,8 @@
                 <td>${escHtml(c.kind)}</td>
                 <td><code>${escHtml(c.key)}</code></td>
                 <td>${escHtml(c.target)}</td>
-                <td>${escHtml(String(support))}</td>
-                <td>${escHtml(String(precision))}</td>
+                <td class="num">${escHtml(String(support))}</td>
+                <td class="num">${escHtml(String(precision))}</td>
                 <td>${escHtml(c.status)}</td>
                 <td id="tagcand-actions-${escHtml(c.candidate_id)}">
                     <button class="btn btn-sm" data-action="confirmApplyTagCandidate" data-id="${escHtml(c.candidate_id)}">Apply</button>
@@ -7624,18 +7868,18 @@
         // (domain_alias) does not touch a document's tags at all -- so the
         // confirm copy says what stays unchanged, not just what is removed.
         function confirmRevokeTagRule(id) {
-            const cell = document.getElementById('tagrule-actions-' + id);
-            if (!cell) return;
             const r = effectiveRulesCache[id];
-            const risk = r && r.kind === 'domain_alias'
-                ? `Revoke <code>${escHtml(r.key)}</code>? This only stops it affecting future candidate mining ` +
-                  `and this listing's badges &mdash; it does not change the domain on any document already stored.`
-                : `Revoke this rule? Removing the override does not retag any content a reprocessing pass already ` +
-                  `assigned under it &mdash; already-stored domain tags stay exactly as they are.`;
-            cell.innerHTML =
-                `<div style="color:var(--warn); margin-bottom:0.25rem; max-width:28rem">${risk}</div>` +
-                `<button class="btn btn-sm btn-danger" data-action="revokeTagRule" data-id="${escHtml(id)}">Confirm revoke</button> ` +
-                '<button class="btn btn-ghost btn-sm" onclick="loadEffectiveRules()">Cancel</button>';
+            const body = r && r.kind === 'domain_alias'
+                ? `Revoke ${r.key}? This only stops it affecting future candidate mining and this listing's badges.`
+                : 'Revoke this rule? Removing the override does not retag any content a reprocessing pass already assigned under it.';
+            openConfirmDialog({
+                title: 'Revoke this tag rule?',
+                body,
+                consequences: ['Already-stored domain tags on existing content stay exactly as they are.'],
+                confirmWord: 'revoke',
+                confirmLabel: 'Revoke rule',
+                onConfirm: () => revokeTagRule(id),
+            });
         }
 
         async function revokeTagRule(id) {
@@ -7683,9 +7927,15 @@
             const detail = mode === 'optional'
                 ? 'A caller that omits its API key right now is granted every scope. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.'
                 : 'No API key is required right now. Any caller that can reach this server can read and change everything an admin key could. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.';
-            el.innerHTML = `<div class="degraded-banner">
-                <span class="degraded-title">AUTH MODE: ${escHtml(mode.toUpperCase())} &mdash; ${claim}</span>
-                <span class="degraded-detail">${detail}</span>
+            // Auth posture is a caution (set TRELLIS_AUTH_MODE=required), not
+            // a store failure, so it takes the .banner-warn variant rather
+            // than the danger-red default.
+            el.innerHTML = `<div class="degraded-banner banner-warn">${DEGRADED_BANNER_ICON}
+                <div class="degraded-body">
+                    <span class="degraded-title">AUTH MODE: ${escHtml(mode.toUpperCase())} &mdash; ${claim}</span>
+                    <span class="degraded-detail">${detail}</span>
+                </div>
+                ${DEGRADED_BANNER_ACTIONS}
             </div>`;
         }
 
@@ -7775,7 +8025,7 @@
                 populateSettingsGroupFilter(data);
                 renderSettingsTable();
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="9" style="color:var(--danger)">Failed to load settings: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<div class="empty-state" style="color:var(--danger)">Failed to load settings: ${escHtml(err.message)}</div>`;
             }
         }
 
@@ -7882,7 +8132,7 @@
                     (r.description || '').toLowerCase().includes(filterText));
             }
             if (rows.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">No settings match this filter.</div></td></tr>`;
+                tbody.innerHTML = `<div class="empty-state">No settings match this filter.</div>`;
             } else {
                 tbody.innerHTML = rows.map(s => renderSettingRow(s, groups, degraded)).join('');
             }
@@ -7916,34 +8166,100 @@
                         : '';
                     return `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}${refusedAttrs}>${escHtml(v)}</option>`;
                 }).join('');
-                return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>${options}</select>`;
+                return `<select class="input" id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>${options}</select>`;
             }
             if (s.type === 'bool') {
                 const boolVal = currentValue === true || currentValue === 'true';
-                return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>
-                    <option value="true" ${boolVal ? 'selected' : ''}>true</option>
-                    <option value="false" ${!boolVal ? 'selected' : ''}>false</option>
-                </select>`;
+                // onclick carries no interpolated value -- it passes the
+                // element itself, and toggleSettingSwitch() derives both
+                // the setting name (from the id it already rendered) and
+                // the caution flag (from settingsData) at call time. A
+                // quote inside an agent-set label never reaches this
+                // string, because no value is written into it at all.
+                return `<div class="toggle-row">` +
+                    `<button type="button" class="toggle" role="switch" aria-checked="${boolVal ? 'true' : 'false'}" ` +
+                    `id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ` +
+                    `onclick="toggleSettingSwitch(this)" ${disabledAttr}></button>` +
+                    `<span id="${escHtml(inputId)}-label">${boolVal ? 'Enabled' : 'Disabled'}</span></div>`;
             }
             if (s.type === 'int' || s.type === 'float') {
                 const step = s.type === 'int' ? '1' : 'any';
                 const minAttr = s.minimum !== null && s.minimum !== undefined ? `min="${escHtml(String(s.minimum))}"` : '';
                 const maxAttr = s.maximum !== null && s.maximum !== undefined ? `max="${escHtml(String(s.maximum))}"` : '';
-                return `<input type="number" id="${escHtml(inputId)}" step="${escHtml(step)}" ${minAttr} ${maxAttr} value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+                const errId = `setting-rangeerr-${s.name}`;
+                // Likewise: oninput reads the setting name back out of
+                // this.id rather than having it written into the handler
+                // string by the template.
+                return `<input type="number" class="input" id="${escHtml(inputId)}" step="${escHtml(step)}" ${minAttr} ${maxAttr} value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" aria-describedby="${escHtml(errId)}" oninput="validateSettingInput(this.id.replace(/^setting-value-/, ''))" ${disabledAttr}>` +
+                    `<span class="err" id="${escHtml(errId)}"></span>`;
             }
-            return `<input type="text" id="${escHtml(inputId)}" value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+            return `<input type="text" class="input" id="${escHtml(inputId)}" value="${escHtml(rawValue)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+        }
+
+        // Live bounds check as the operator types, rather than only after
+        // Save is clicked -- an exclusive minimum shows the same "> N"
+        // wording formatSettingBounds already uses for the cell, so the
+        // error and the documented bound never disagree.
+        function validateSettingInput(name) {
+            const spec = (settingsData && settingsData.settings || []).find(s => s.name === name);
+            if (!spec) return;
+            const input = document.getElementById('setting-value-' + name);
+            const errEl = document.getElementById('setting-rangeerr-' + name);
+            const saveBtn = document.getElementById('setting-save-' + name);
+            if (!input) return;
+            const raw = input.value;
+            let message = '';
+            if (raw.trim() !== '') {
+                const num = spec.type === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+                if (Number.isNaN(num)) {
+                    message = `Enter a valid ${spec.type} value.`;
+                } else if (spec.minimum !== null && spec.minimum !== undefined &&
+                    (spec.minimum_exclusive ? num <= spec.minimum : num < spec.minimum)) {
+                    message = spec.minimum_exclusive ? `Must be > ${spec.minimum}.` : `Must be at least ${spec.minimum}.`;
+                } else if (spec.maximum !== null && spec.maximum !== undefined && num > spec.maximum) {
+                    message = `Must be at most ${spec.maximum}.`;
+                }
+            }
+            const invalid = !!message;
+            input.setAttribute('aria-invalid', String(invalid));
+            if (errEl) errEl.textContent = message;
+            if (saveBtn) saveBtn.disabled = invalid;
+        }
+
+        // A caution-risk toggle opens the shared confirmation dialog
+        // instead of flipping on click; every other toggle flips at
+        // once -- the admin-key re-prompt on Save still gates the actual
+        // write either way, this only gates the in-page preview flip.
+        // Takes the button element itself (never an interpolated id/name
+        // pair -- see test_ui_inline_handlers.py) and derives the setting
+        // name from the id it was rendered with.
+        function toggleSettingSwitch(btn) {
+            if (!btn || btn.disabled) return;
+            const inputId = btn.id;
+            const name = inputId.replace(/^setting-value-/, '');
+            const next = btn.getAttribute('aria-checked') !== 'true';
+            const flip = () => {
+                btn.setAttribute('aria-checked', next ? 'true' : 'false');
+                const label = document.getElementById(inputId + '-label');
+                if (label) label.textContent = next ? 'Enabled' : 'Disabled';
+            };
+            const spec = (settingsData && settingsData.settings || []).find(s => s.name === name);
+            const isCaution = !!(spec && spec.risk === 'caution');
+            if (!isCaution) { flip(); return; }
+            const settingLabel = (spec && (spec.label || humanizeSettingName(name))) || name;
+            openConfirmDialog({
+                title: `${next ? 'Enable' : 'Disable'} ${settingLabel}?`,
+                body: (spec && spec.risk_note) || 'This changes behaviour for every agent using this instance from the next request.',
+                confirmWord: next ? 'enable' : 'disable',
+                confirmLabel: next ? 'Enable' : 'Disable',
+                onConfirm: flip,
+            });
         }
 
         function renderSettingActions(s, disabled) {
-            const inputId = `setting-value-${s.name}`;
-            const currentValue = (s.stored_value !== null && s.stored_value !== undefined) ? s.stored_value : s.default;
             const disabledAttr = disabled ? 'disabled' : '';
             return `
-                <div class="form-row" style="margin-bottom:0.4rem">
-                    <label for="${escHtml(inputId)}" class="sr-only">New value for ${escHtml(s.name)}</label>
-                    ${renderValueInput(s, inputId, currentValue, disabled)}
-                </div>
-                <button class="btn btn-sm" data-action="beginSaveSetting" data-id="${escHtml(s.name)}" ${disabledAttr}>Save</button>
+                <button class="btn btn-sm" id="setting-save-${escHtml(s.name)}" data-action="beginSaveSetting" data-id="${escHtml(s.name)}" ${disabledAttr}>Save</button>
                 <button class="btn btn-ghost btn-sm" data-action="beginResetSetting" data-id="${escHtml(s.name)}" ${disabledAttr}>Reset to default</button>
                 <div id="setting-error-${escHtml(s.name)}"></div>
             `;
@@ -7951,9 +8267,9 @@
 
         function renderSettingRow(s, groups, degraded) {
             const groupLabel = groups[s.group] || s.group;
-            // Border colour follows risk tier only -- restart cost is its
-            // own flag (s.restart_required) and gets its own badge below,
-            // never folded into this class.
+            // Risk tier picks the stripe colour; restart cost is its own
+            // flag (s.restart_required) with its own badge below, never
+            // folded into this class.
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
             // A garbage environment value for this entry's family, or a
@@ -7967,6 +8283,11 @@
                 ? `<div class="field-hint"><span class="badge badge-danger">unparseable value</span> ${escHtml(s.parse_error)}</div>`
                 : '';
             const notWritable = s.settings_writable === false;
+            // "Pinned" covers both the env-only knob (no settings-store
+            // path at all) and a settings-store knob currently overridden
+            // by an env var -- in either case the operator sees "<value>
+            // (from env)" and a disabled control, never a half-live input.
+            const isPinned = notWritable || s.overridden_by === 'env';
             const liveHtml = notWritable
                 ? '<span class="badge badge-warn">Env only &mdash; read-only here</span>'
                 : (s.restart_required
@@ -7975,25 +8296,42 @@
             const riskNoteHtml = s.risk_note
                 ? `<div class="field-hint" style="margin-top:0.3rem">${escHtml(s.risk_note)}</div>`
                 : '';
-            return `<tr id="setting-row-${escHtml(s.name)}" class="${riskClass}">
-                <td>
-                    <div>${escHtml(s.label || humanizeSettingName(s.name))}</div>
-                    <code>${escHtml(s.name)}</code>
-                    <div style="margin-top:0.3rem">${settingRiskBadge(s.risk)} <span class="badge badge-accent">${escHtml(groupLabel)}</span></div>
-                </td>
-                <td style="max-width:360px; white-space:normal">${escHtml(s.description)}${riskNoteHtml}</td>
-                <td>${escHtml(s.type)}<div class="field-hint">${escHtml(formatSettingBounds(s))}</div></td>
-                <td>${formatSurfaces(s.surfaces)}</td>
-                <td>
-                    <div><code>${escHtml(formatSettingValue(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
-                    ${pinNote ? `<div class="field-hint">${pinNote}</div>` : ''}
+            const inputId = `setting-value-${s.name}`;
+            const currentValue = (s.stored_value !== null && s.stored_value !== undefined) ? s.stored_value : s.default;
+
+            let ctlHtml;
+            let actHtml;
+            if (isPinned) {
+                const pinnedValueText = `${formatSettingValue(s.effective_value)} (from env)`;
+                ctlHtml = `<label for="${escHtml(inputId)}">Effective</label>` +
+                    `<input class="input" id="${escHtml(inputId)}" type="text" value="${escHtml(pinnedValueText)}" readonly aria-readonly="true">` +
+                    (pinNote ? `<span class="hint">${pinNote}</span>` : '');
+                actHtml = '<button type="button" class="btn btn-sm" disabled>Edit</button>';
+            } else {
+                const ctlLabel = s.type === 'bool' ? 'Effective' : 'New value';
+                ctlHtml = `<label for="${escHtml(inputId)}">${ctlLabel}</label>${renderValueInput(s, inputId, currentValue, degraded)}`;
+                actHtml = renderSettingActions(s, degraded);
+            }
+
+            return `<div id="setting-row-${escHtml(s.name)}" class="setting ${riskClass} ${isPinned ? 'pinned' : ''}">
+                <div>
+                    <div class="k">${escHtml(s.label || humanizeSettingName(s.name))} <code>${escHtml(s.name)}</code> ${settingRiskBadge(s.risk)} <span class="badge badge-accent">${escHtml(groupLabel)}</span></div>
+                    <p class="d">${escHtml(s.description)}</p>
+                    ${riskNoteHtml}
                     ${parseErrorHtml}
-                </td>
-                <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
-                <td>${liveHtml}</td>
-                <td>${s.updated_at ? fmtTimeCell(s.updated_at) : '<span class="field-hint">never</span>'}</td>
-                <td id="setting-actions-${escHtml(s.name)}">${notWritable ? '<span class="field-hint">Read-only &mdash; set the env var</span>' : renderSettingActions(s, degraded)}</td>
-            </tr>`;
+                    <div class="meta">
+                        <span>Type <code>${escHtml(s.type)}</code></span>
+                        <span>${escHtml(formatSettingBounds(s))}</span>
+                        <span>Read by ${formatSurfaces(s.surfaces)}</span>
+                        <span>Takes effect ${liveHtml}</span>
+                        <span>Effective <code>${escHtml(formatSettingValue(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</span>
+                        <span>Stored ${(s.stored_value === null || s.stored_value === undefined) ? '(none)' : `<code>${escHtml(String(s.stored_value))}</code>`}</span>
+                        <span>Updated ${s.updated_at ? fmtTimeCell(s.updated_at) : 'never'}</span>
+                    </div>
+                </div>
+                <div class="ctl">${ctlHtml}</div>
+                <div class="act" id="setting-actions-${escHtml(s.name)}">${actHtml}</div>
+            </div>`;
         }
 
         function coerceSettingValue(spec, raw) {
@@ -8051,7 +8389,11 @@
                 return;
             }
             const valueInput = document.getElementById('setting-value-' + name);
-            const rawValue = valueInput ? valueInput.value : '';
+            // A bool setting's control is a switch, not an <input>/<select>
+            // -- its current value lives in aria-checked, never .value.
+            const rawValue = spec.type === 'bool'
+                ? (valueInput ? valueInput.getAttribute('aria-checked') === 'true' : false)
+                : (valueInput ? valueInput.value : '');
             const value = coerceSettingValue(spec, rawValue);
             if (value === null || (typeof value === 'number' && Number.isNaN(value))) {
                 if (cell) cell.innerHTML = `<span style="color:var(--danger)">Enter a valid ${escHtml(spec.type)} value (or use "Reset to default" to clear it).</span>`;
