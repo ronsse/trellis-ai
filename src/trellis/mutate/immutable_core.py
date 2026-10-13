@@ -163,7 +163,7 @@ def governing_key_refusal(component_id: str) -> str | None:
 #:   any command whose operation is **not** in
 #:   :data:`NON_DESTRUCTIVE_OPERATIONS` — the explicit allow-list, not
 #:   this deny-list. A caller holding only ``mutate`` can therefore reach
-#:   every operation this set names.
+#:   none of the operations this set names through either surface.
 #:
 #: Gating either surface on membership *here* instead would fail open
 #: for a future ``Operation`` member nobody has classified yet: a deny-
