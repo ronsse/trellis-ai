@@ -4138,16 +4138,16 @@ paths:
       - retrieve
   /api/v1/events:
     get:
-      description: 'Tail or filter the event log.
+      description: 'Tail or filter the event log. Requires the ``admin`` scope.
 
 
         ``EventLog.get_events`` has no offset — page older history by
 
-        passing the oldest ``occurred_at`` you have as ``until``. On a
+        passing the oldest ``occurred_at`` you have as ``until``. Every
 
-        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+        caller who reaches this route already has ``admin``, so the
 
-        would-be pack) reach ``admin`` callers only.'
+        would-be pack on a withheld pack''s row is never blinded here.'
       operationId: list_events_api_v1_events_get
       parameters:
       - description: Filter by event type value
@@ -4255,18 +4255,20 @@ paths:
     get:
       description: 'Fetch one event by id, reaching the whole log, not just a window.
 
+        Requires the ``admin`` scope.
+
 
         ``GET /events`` pages a recency window via ``until``; an event older
 
         than whatever window a caller has loaded cannot be reached through
 
-        it by id alone. This route does a direct lookup instead. On a
+        it by id alone. This route does a direct lookup instead. Every
 
-        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate``
+        caller who reaches this route already has ``admin``, so the
 
-        (the would-be pack) reach ``admin`` callers only, same as the list
+        would-be pack on a withheld pack''s row is never blinded here, same
 
-        and pack-detail views.'
+        as the list and pack-detail views.'
       operationId: get_event_api_v1_events__event_id__get
       parameters:
       - in: path
@@ -5057,7 +5059,12 @@ paths:
       - observations
   /api/v1/packs:
     get:
-      description: List assembled context packs (newest first), summary fields only.
+      description: 'List assembled context packs (newest first), summary fields only.
+
+
+        Requires the ``admin`` scope: summaries still carry each pack''s
+
+        ``intent`` and other callers'' session metadata.'
       operationId: list_packs_api_v1_packs_get
       parameters:
       - description: Upper bound (inclusive) on assembly time. Page older history by passing the oldest created_at you have.
@@ -5168,16 +5175,18 @@ paths:
     get:
       description: 'Full pack telemetry: what was injected, rejected, and why.
 
+        Requires the ``admin`` scope.
+
 
         Joins related feedback the same way the learning loop does —
 
         ``FEEDBACK_RECORDED.payload["pack_id"]`` (see
 
-        ``trellis.learning.pack_observations.join_pack_feedback``). On a
+        ``trellis.learning.pack_observations.join_pack_feedback``). Every
 
-        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+        caller who reaches this route already has ``admin``, so the
 
-        would-be pack) reach ``admin`` callers only.
+        would-be pack on a withheld pack''s row is never blinded here.
 
 
         ``feedback`` stays capped at 50 rows, but ``feedback_total`` (the

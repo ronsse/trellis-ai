@@ -87,7 +87,7 @@ def test_feedback_rating_badge_reads_the_backend_success_field() -> None:
     must prefer it over recomputing `rating > 0`, which disagreed with the
     backend's own threshold (0.5) for a rating in (0, 0.5)."""
     page = _page()
-    found = re.search(r"fp\.success[^\n]*badge-ok[^\n]*badge-err", page)
+    found = re.search(r"fp\.success[^\n]*badge-ok[^\n]*badge-danger", page)
     assert found is not None, "feedback badge does not branch on fp.success"
 
 

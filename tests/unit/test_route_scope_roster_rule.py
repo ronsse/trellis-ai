@@ -22,9 +22,10 @@ documents it:
   ``create_app``.
 - ``ROUTE_OVERRIDE_ROSTER`` -- the *additional* scope a handful of specific
   routes require on top of their router's baseline (observations' two
-  POSTs, policies' POST/DELETE, classify's mine/apply/revoke/dismiss),
-  hand-read from each route's own ``dependencies=[Depends(require_scope(...))]``
-  kwarg in its route module.
+  POSTs, explore's four pack-telemetry GETs, policies' POST/DELETE,
+  classify's mine/apply/revoke/dismiss), hand-read from each route's own
+  ``dependencies=[Depends(require_scope(...))]`` kwarg in its route
+  module.
 
 ``UNAUTHENTICATED_ROUTERS`` names the two router tags with no scope
 dependency at all (version handshake, liveness/readiness probes) and the
@@ -75,7 +76,7 @@ ROUTER_SCOPE_ROSTER: dict[str, frozenset[str]] = {
     "ingest": frozenset({SCOPE_INGEST}),
     "retrieve": frozenset({SCOPE_READ}),
     "explore": frozenset({SCOPE_READ}),
-    "analyze": frozenset({SCOPE_READ}),
+    "analyze": frozenset({SCOPE_ADMIN}),
     "curate": frozenset({SCOPE_MUTATE}),
     "mutations": frozenset({SCOPE_MUTATE}),
     "policies": frozenset({SCOPE_READ}),
@@ -89,6 +90,10 @@ ROUTER_SCOPE_ROSTER: dict[str, frozenset[str]] = {
 ROUTE_OVERRIDE_ROSTER: dict[tuple[str, str], frozenset[str]] = {
     ("POST", "/api/v1/observations"): frozenset({SCOPE_MUTATE}),
     ("POST", "/api/v1/measurements"): frozenset({SCOPE_MUTATE}),
+    ("GET", "/api/v1/events"): frozenset({SCOPE_ADMIN}),
+    ("GET", "/api/v1/events/{event_id}"): frozenset({SCOPE_ADMIN}),
+    ("GET", "/api/v1/packs"): frozenset({SCOPE_ADMIN}),
+    ("GET", "/api/v1/packs/{pack_id}"): frozenset({SCOPE_ADMIN}),
     ("POST", "/api/v1/policies"): frozenset({SCOPE_ADMIN}),
     ("DELETE", "/api/v1/policies/{policy_id}"): frozenset({SCOPE_ADMIN}),
     ("POST", "/api/v1/classify/candidates/mine"): frozenset({SCOPE_ADMIN}),

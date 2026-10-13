@@ -241,7 +241,13 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     # optional / required — see ``trellis_api.auth``). The map:
     #
     #   retrieve                     -> read
-    #   analyze                      -> read
+    #   explore                      -> read, plus admin on the pack-
+    #                                   telemetry routes (events, packs
+    #                                   detail/list; route-level deps in
+    #                                   routes/explore.py) — documents and
+    #                                   graph history stay read
+    #   analyze                      -> admin (every route replays other
+    #                                   callers' pack telemetry)
     #   ingest                       -> ingest
     #   curate / extract             -> mutate
     #   mutations                    -> mutate, plus admin per command for
@@ -283,7 +289,7 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
         explore.router, prefix="/api/v1", tags=["explore"], dependencies=read_auth
     )
     app.include_router(
-        analyze.router, prefix="/api/v1", tags=["analyze"], dependencies=read_auth
+        analyze.router, prefix="/api/v1", tags=["analyze"], dependencies=admin_auth
     )
     app.include_router(
         curate.router, prefix="/api/v1", tags=["curate"], dependencies=mutate_auth

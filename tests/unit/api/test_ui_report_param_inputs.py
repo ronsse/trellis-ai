@@ -235,4 +235,4 @@ def test_fetch_report_json_falls_back_to_a_typed_error_message() -> None:
 def test_report_param_error_container_exists_in_markup() -> None:
     page = _page()
     assert 'id="report-param-error"' in page
-    assert "color:var(--error)" in _between(page, '<p id="report-param-error"', "</p>")
+    assert "color:var(--danger)" in _between(page, '<p id="report-param-error"', "</p>")
