@@ -243,7 +243,11 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     #   retrieve                     -> read
     #   analyze                      -> read
     #   ingest                       -> ingest
-    #   mutations / curate / extract -> mutate
+    #   curate / extract             -> mutate
+    #   mutations                    -> mutate, plus admin per command for
+    #                                   any operation outside
+    #                                   NON_DESTRUCTIVE_OPERATIONS (route-level
+    #                                   check in routes/mutations.py)
     #   admin                        -> admin
     #   observations                 -> read, plus mutate on its two
     #                                   POST endpoints (route-level deps

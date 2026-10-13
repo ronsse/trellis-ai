@@ -152,15 +152,29 @@ def governing_key_refusal(component_id: str) -> str | None:
 #: Operations that remove or overwrite information the store already
 #: holds, such that a later read cannot recover it.
 #:
-#: This set does **not** enforce anything — :data:`UNATTENDED_WRITERS` is
-#: the enforcement primitive, and it fails closed without consulting this
-#: set at all. What this is for is making the claim *"no unattended
-#: writer may delete, redact or purge"* checkable against the allow-list
-#: rather than merely asserted in prose, which a test does by
-#: intersecting the two. Keeping it out of the enforcement path is
-#: deliberate: a deny-list that gates real traffic is one forgotten enum
-#: member away from being wrong, and this one would rot exactly the way
-#: #443's three-against-six control-key roster did.
+#: This set still does **not** enforce anything itself. Two different
+#: things now gate on the *other* half of the partition instead:
+#:
+#: * :data:`UNATTENDED_WRITERS` is the enforcement primitive for the
+#:   unattended writers below, and it fails closed without consulting
+#:   this set at all.
+#: * The REST ``/commands/batch`` route and the MCP ``execute_mutation``
+#:   tool (:func:`requires_admin_scope`) require the ``admin`` scope for
+#:   any command whose operation is **not** in
+#:   :data:`NON_DESTRUCTIVE_OPERATIONS` — the explicit allow-list, not
+#:   this deny-list. A caller holding only ``mutate`` can therefore reach
+#:   every operation this set names.
+#:
+#: Gating either surface on membership *here* instead would fail open
+#: for a future ``Operation`` member nobody has classified yet: a deny-
+#: list that gates real traffic is one forgotten enum member away from
+#: being wrong, and this one would rot exactly the way #443's
+#: three-against-six control-key roster did. Keeping this set out of
+#: both enforcement paths is deliberate, and what it remains useful for
+#: is making the claim *"no unattended writer may delete, redact or
+#: purge"* checkable against the allow-list rather than merely asserted
+#: in prose, which a test does by intersecting the two, plus the
+#: per-operation rationale below.
 #:
 #: ``entity.update`` is *not* here: the graph is SCD-2, so an update adds
 #: a version and ``get_node_history`` still returns the prior one.
@@ -228,6 +242,29 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.PRECEDENT_REINSTATE,
     }
 )
+
+
+def requires_admin_scope(operation: Operation) -> bool:
+    """Whether a caller-driven surface must require the ``admin`` scope
+    before executing a command naming *operation*.
+
+    ``True`` for everything **not** in :data:`NON_DESTRUCTIVE_OPERATIONS`
+    — gated on membership in that explicit allow-list, not on membership
+    in :data:`DESTRUCTIVE_OPERATIONS`. The difference matters for a
+    future ``Operation`` member: landing in neither set leaves it
+    unclassified (caught by ``tests/unit/test_immutable_core_rule.py``),
+    but if it *were* classified only by the deny-list's absence, an
+    unclassified member would silently read as non-destructive. Gating
+    on the allow-list instead means an unclassified member requires
+    admin until somebody decides otherwise — the same fail-closed shape
+    :data:`UNATTENDED_WRITERS` already takes over the same partition.
+
+    Used by the REST ``/commands/batch`` route and the MCP
+    ``execute_mutation`` tool, both of which accept an ``Operation``
+    chosen by the caller rather than by the code path that invokes them.
+    """
+    return operation not in NON_DESTRUCTIVE_OPERATIONS
+
 
 #: ``Command.requested_by`` → the operations that writer may issue.
 #:

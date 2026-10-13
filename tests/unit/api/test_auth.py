@@ -265,6 +265,157 @@ class TestScopeEnforcement:
 
 
 # ---------------------------------------------------------------------------
+# Destructive operations on /commands/batch require admin
+# ---------------------------------------------------------------------------
+
+
+class TestDestructiveOperationsRequireAdmin:
+    """``/commands/batch`` requires ``admin`` for any operation outside
+    ``NON_DESTRUCTIVE_OPERATIONS`` -- see ``requires_admin_scope``.
+
+    ``redaction.apply`` stands in for the whole destructive set here; the
+    full parametrised sweep over every such operation lives in
+    ``tests/unit/test_destructive_ops_surface_rule.py``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+
+    @staticmethod
+    def _create_entity(client: TestClient, token: str) -> str:
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "auth"},
+                    }
+                ],
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+        created_id = resp.json()["results"][0]["created_id"]
+        assert created_id
+        return created_id
+
+    def test_mutate_key_denied_on_redaction_apply(
+        self, client: TestClient, registry
+    ) -> None:
+        admin_token = _mint(registry, [SCOPE_ADMIN], name="admin")
+        mutate_token = _mint(registry, [SCOPE_MUTATE], name="mutate")
+        node_id = self._create_entity(client, admin_token)
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "redaction.apply",
+                        "target_id": node_id,
+                        "args": {"target_id": node_id, "reason": "test"},
+                    }
+                ],
+            },
+            headers={"X-API-Key": mutate_token},
+        )
+        assert resp.status_code == 403
+        assert "redaction.apply" in resp.json()["detail"]
+
+        # Nothing executed: the entity the mutate-only caller tried to
+        # redact is still there, unredacted.
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+
+    def test_admin_key_executes_redaction_apply(
+        self, client: TestClient, registry
+    ) -> None:
+        admin_token = _mint(registry, [SCOPE_ADMIN], name="admin")
+        node_id = self._create_entity(client, admin_token)
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "redaction.apply",
+                        "target_id": node_id,
+                        "args": {"target_id": node_id, "reason": "test"},
+                    }
+                ],
+            },
+            headers={"X-API-Key": admin_token},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["results"][0]["status"] == "success"
+        assert registry.knowledge.graph_store.get_node(node_id) is None
+
+    def test_mixed_batch_refused_whole_nothing_executes(
+        self, client: TestClient, registry
+    ) -> None:
+        mutate_token = _mint(registry, [SCOPE_MUTATE], name="mutate")
+        before = registry.knowledge.graph_store.count_nodes()
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {
+                            "entity_type": "service",
+                            "name": "should-not-exist",
+                        },
+                    },
+                    {
+                        "operation": "redaction.apply",
+                        "target_id": "whatever",
+                        "args": {"target_id": "whatever", "reason": "test"},
+                    },
+                ],
+            },
+            headers={"X-API-Key": mutate_token},
+        )
+        assert resp.status_code == 403
+        assert "redaction.apply" in resp.json()["detail"]
+
+        # The whole batch was refused before anything ran -- the
+        # non-destructive entity.create ahead of the destructive command
+        # in the batch did not execute either.
+        assert registry.knowledge.graph_store.count_nodes() == before
+
+    def test_mutate_key_unchanged_for_non_destructive_batch(
+        self, client: TestClient, registry
+    ) -> None:
+        mutate_token = _mint(registry, [SCOPE_MUTATE], name="mutate")
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "auth"},
+                    },
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "billing"},
+                    },
+                ],
+            },
+            headers={"X-API-Key": mutate_token},
+        )
+        # A batch holding only operations in NON_DESTRUCTIVE_OPERATIONS is
+        # unaffected by this gate -- it reaches the executor exactly as
+        # before, whatever each individual command's own outcome is.
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["results"][0]["status"] == "success"
+        assert resp.json()["results"][1]["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
 # Legacy shared secret
 # ---------------------------------------------------------------------------
 

@@ -26,6 +26,7 @@ from trellis.mutate.immutable_core import (
     NON_DESTRUCTIVE_OPERATIONS,
     UNATTENDED_WRITERS,
     governing_key_refusal,
+    requires_admin_scope,
     unattended_writer_refusal,
 )
 from trellis.mutate.policy_gate import DefaultPolicyGate
@@ -256,6 +257,7 @@ __all__ = [
     "governing_key_refusal",
     "load_policies",
     "redirect_unreachable_settings_update",
+    "requires_admin_scope",
     "resolve_policy_path",
     "unattended_writer_refusal",
 ]
