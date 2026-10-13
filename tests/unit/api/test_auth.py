@@ -264,6 +264,92 @@ class TestScopeEnforcement:
         assert also_denied.status_code == 403
 
 
+class TestPackTelemetryNeedsAdmin:
+    """Events, packs and analyze reports replay other callers' pack
+    telemetry (intents, served item ids and titles, attribution) — a
+    `read` key (what an agent or connector holds) must not reach them.
+    The content routes on the same routers (documents, graph history)
+    are unaffected and stay on `read`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+
+    @pytest.fixture
+    def seeded_pack_id(self, registry) -> str:
+        """A real PACK_ASSEMBLED row so the detail routes can 200."""
+        from trellis.stores.base.event_log import EventType
+
+        event = registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack-telemetry-1",
+            payload={"intent": "test intent", "items_count": 0},
+        )
+        return event.entity_id
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/v1/events"),
+            ("get", "/api/v1/events/nonexistent"),
+            ("get", "/api/v1/packs"),
+            ("get", "/api/v1/packs/nonexistent"),
+            ("get", "/api/v1/analyze"),
+            ("get", "/api/v1/analyze/holdout"),
+        ],
+    )
+    def test_read_key_is_403(
+        self, client: TestClient, registry, method: str, path: str
+    ) -> None:
+        token = _mint(registry, [SCOPE_READ])
+        resp = getattr(client, method)(path, headers={"X-API-Key": token})
+        assert resp.status_code == 403, resp.text
+        assert "admin" in resp.json()["detail"]
+
+    def test_admin_key_is_200_on_list_routes(
+        self, client: TestClient, registry
+    ) -> None:
+        token = _mint(registry, [SCOPE_ADMIN])
+        for path in ("/api/v1/events", "/api/v1/packs", "/api/v1/analyze"):
+            resp = client.get(path, headers={"X-API-Key": token})
+            assert resp.status_code == 200, (path, resp.text)
+
+    def test_admin_key_is_200_on_detail_routes(
+        self, client: TestClient, registry, seeded_pack_id: str
+    ) -> None:
+        token = _mint(registry, [SCOPE_ADMIN])
+        events = client.get("/api/v1/events", headers={"X-API-Key": token}).json()
+        event_id = events["events"][0]["event_id"]
+        resp = client.get(f"/api/v1/events/{event_id}", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+        resp = client.get(
+            f"/api/v1/packs/{seeded_pack_id}", headers={"X-API-Key": token}
+        )
+        assert resp.status_code == 200, resp.text
+        resp = client.get("/api/v1/analyze/holdout", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+
+    def test_read_key_still_200_on_content_routes(
+        self, client: TestClient, registry
+    ) -> None:
+        """Documents and graph history share a router with the
+        pack-telemetry routes above but are not telemetry — they stay
+        read-scoped."""
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.get("/api/v1/documents", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+        # No such node, but the response is a 404 from the handler, not a
+        # 401/403 from the auth gate — proving the route itself is read.
+        resp = client.get(
+            "/api/v1/graph/history",
+            params={"entity_id": "nonexistent"},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 404, resp.text
+
+
 # ---------------------------------------------------------------------------
 # Legacy shared secret
 # ---------------------------------------------------------------------------

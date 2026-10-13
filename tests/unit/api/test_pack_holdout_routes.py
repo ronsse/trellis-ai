@@ -8,10 +8,10 @@ withholding summary, a greenfield retrieval report — apart from its
 ``pack_id``, and none of it mentions a holdout. ``GET /api/version`` echoes
 the rate in force, as it echoes every write-behaviour knob.
 
-The rows the explore routes read back (``GET /api/v1/events`` and
-``GET /api/v1/packs/{pack_id}``) keep the would-be pack for ``admin``
-callers alone: any other key reads ``holdout`` and ``holdout_rate`` and no
-other ``holdout_*`` key.
+The rows the explore routes read back (``GET /api/v1/events``,
+``GET /api/v1/events/{event_id}`` and ``GET /api/v1/packs/{pack_id}``)
+require the ``admin`` scope: any other key is refused the route outright,
+so the would-be pack on a withheld row never reaches it.
 """
 
 from __future__ import annotations
@@ -440,22 +440,37 @@ def scoped(registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch) -> _Scoped:
     return _Scoped(client, headers, held, served, raw, event_ids)
 
 
-def _as_seen(raw: dict[str, Any], *, admin: bool) -> dict[str, Any]:
-    """The payload a caller should read: the would-be pack is admin-only."""
-    return raw if admin else {k: v for k, v in raw.items() if k not in _WOULD_BE_KEYS}
+class TestOnlyAdminReachesTheWouldBePack:
+    """A key without ``admin`` must not reach these routes at all.
 
-
-class TestOnlyAdminReadsTheWouldBePack:
-    """A key that can read a withheld pack's row must not recover the pack.
-
-    ``holdout`` and ``holdout_rate`` stay readable to every caller; the
-    would-be keys reach ``admin`` callers and the shared secret only, so the
-    operator view is unchanged.
+    They replay other callers' pack telemetry — the would-be pack on a
+    withheld row included — so the guard is the route itself, not a
+    per-field filter: ``read`` and ``every-scope-but-admin`` get 403,
+    and ``admin``/the shared secret get the full, unblinded payload.
     """
 
+    @pytest.mark.parametrize(
+        "caller", sorted(c for c, admin in _CALLERS.items() if not admin)
+    )
+    def test_non_admin_caller_is_refused_every_route(
+        self, caller: str, scoped: _Scoped
+    ) -> None:
+        pack_id = next(iter(scoped.raw))
+        event_id = scoped.event_ids[pack_id]
+        headers = scoped.headers[caller]
+        for response in (
+            scoped.client.get("/api/v1/events", headers=headers),
+            scoped.client.get(f"/api/v1/events/{event_id}", headers=headers),
+            scoped.client.get(f"/api/v1/packs/{pack_id}", headers=headers),
+        ):
+            assert response.status_code == 403, (caller, response.text)
+            assert "admin" in response.json()["detail"]
+
     @pytest.mark.parametrize("include_payload", [True, False])
-    @pytest.mark.parametrize("caller", sorted(_CALLERS))
-    def test_events_carry_the_would_be_pack_to_admin_only(
+    @pytest.mark.parametrize(
+        "caller", sorted(c for c, admin in _CALLERS.items() if admin)
+    )
+    def test_events_carry_the_full_would_be_pack(
         self, caller: str, include_payload: bool, scoped: _Scoped
     ) -> None:
         response = scoped.client.get(
@@ -470,17 +485,18 @@ class TestOnlyAdminReadsTheWouldBePack:
         rows = {row["entity_id"]: row for row in response.json()["events"]}
         assert set(rows) == set(scoped.raw)
         for pack_id, raw in scoped.raw.items():
-            expected = _as_seen(raw, admin=_CALLERS[caller])
             row = rows[pack_id]
             if include_payload:
-                assert row["payload"] == expected, (caller, pack_id)
+                assert row["payload"] == raw, (caller, pack_id)
                 assert row["payload"]["holdout"] is (pack_id in scoped.held)
             else:
                 assert "payload" not in row
-                assert row["payload_keys"] == sorted(expected), (caller, pack_id)
+                assert row["payload_keys"] == sorted(raw), (caller, pack_id)
 
-    @pytest.mark.parametrize("caller", sorted(_CALLERS))
-    def test_pack_detail_carries_the_would_be_pack_to_admin_only(
+    @pytest.mark.parametrize(
+        "caller", sorted(c for c, admin in _CALLERS.items() if admin)
+    )
+    def test_pack_detail_carries_the_full_would_be_pack(
         self, caller: str, scoped: _Scoped
     ) -> None:
         for pack_id, raw in scoped.raw.items():
@@ -488,17 +504,23 @@ class TestOnlyAdminReadsTheWouldBePack:
                 f"/api/v1/packs/{pack_id}", headers=scoped.headers[caller]
             )
             assert response.status_code == 200, response.text
-            payload = response.json()["pack"]["payload"]
-            assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
+            data = response.json()
+            payload = data["pack"]["payload"]
+            assert payload == raw, (caller, pack_id)
             assert payload["holdout"] is (pack_id in scoped.held)
+            # Every caller who reaches this route already has admin, so
+            # the would-be pack is never blinded.
+            assert data["holdout_blinded"] is False, (caller, pack_id)
 
-    @pytest.mark.parametrize("caller", sorted(_CALLERS))
-    def test_event_detail_carries_the_would_be_pack_to_admin_only(
+    @pytest.mark.parametrize(
+        "caller", sorted(c for c, admin in _CALLERS.items() if admin)
+    )
+    def test_event_detail_carries_the_full_would_be_pack(
         self, caller: str, scoped: _Scoped
     ) -> None:
         """``GET /events/{id}`` makes the same promise as the pack-detail
-        and event-list views: a withheld pack's would-be pack reaches
-        ``admin`` callers only, even reached by id rather than by filter."""
+        and event-list views: the would-be pack reaches it unblinded,
+        even reached by id rather than by filter."""
         for pack_id, raw in scoped.raw.items():
             event_id = scoped.event_ids[pack_id]
             response = scoped.client.get(
@@ -506,22 +528,5 @@ class TestOnlyAdminReadsTheWouldBePack:
             )
             assert response.status_code == 200, response.text
             payload = response.json()["event"]["payload"]
-            assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
+            assert payload == raw, (caller, pack_id)
             assert payload["holdout"] is (pack_id in scoped.held)
-
-    @pytest.mark.parametrize("caller", sorted(_CALLERS))
-    def test_pack_detail_names_whether_it_blinded_the_would_be_pack(
-        self, caller: str, scoped: _Scoped
-    ) -> None:
-        """``holdout_blinded`` says *why* a held-out pack's payload reads
-        short to a non-admin caller: it is not "nothing was withheld",
-        it is "something was and this caller can't see it". True only
-        when both hold: the pack was withheld, and this caller is blind."""
-        for pack_id in scoped.raw:
-            response = scoped.client.get(
-                f"/api/v1/packs/{pack_id}", headers=scoped.headers[caller]
-            )
-            assert response.status_code == 200, response.text
-            data = response.json()
-            expected = (pack_id in scoped.held) and not _CALLERS[caller]
-            assert data["holdout_blinded"] is expected, (caller, pack_id)
