@@ -1505,6 +1505,11 @@
         /* Confirmation dialog: reused for every destructive action instead
            of the browser's native confirm() dialog, which the artifact
            viewer and some browsers suppress without telling the caller. */
+        /* The hidden attribute must win over any component's own display
+           rule: .dialog-scrim sets display:flex, which would otherwise
+           override the user-agent [hidden] rule and leave the empty dialog
+           covering the page from load. */
+        [hidden] { display: none !important; }
         .dialog-scrim {
             position: fixed;
             inset: 0;
@@ -4869,7 +4874,11 @@
             const newerBtn = document.getElementById(`${prefix}-newer`);
             const olderBtn = document.getElementById(`${prefix}-older`);
             if (!pag || !info || !newerBtn || !olderBtn) return;
-            if (total <= shownCount && pager.stack.length === 0) {
+            // Shown whenever there are rows, not only when they span more
+            // than one page: the rows-per-page select lives in this footer,
+            // so hiding it on a single page would strand a reader who
+            // picked a larger page size with no way back.
+            if (total === 0 && pager.stack.length === 0) {
                 pag.style.display = 'none';
                 return;
             }
@@ -5282,7 +5291,9 @@
                 // (see GET /documents), so one idiom covers both.
                 const pag = document.getElementById('mem-pagination');
                 const total = data.total || 0;
-                pag.style.display = total > limit ? 'flex' : 'none';
+                // Rows-per-page lives in this footer, so keep it whenever
+                // there are rows (see renderCursorPagerFooter).
+                pag.style.display = total > 0 ? 'flex' : 'none';
                 const totalLabel = data.total_exact === false ? `${fmtNum(total, 0)}+` : fmtNum(total, 0);
                 document.getElementById('mem-page-info').textContent =
                     `${fmtNum(memOffset + 1, 0)}–${fmtNum(memOffset + docs.length, 0)} of ${totalLabel}`;

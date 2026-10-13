@@ -309,3 +309,34 @@ class TestDialogTypedWordGateIsWired:
         assert _CONFIRM_WORD_KEY_RE.findall(defective) == []
         clean = "openConfirmDialog({ confirmWord: 'delete', onConfirm: doIt });"
         assert len(_CONFIRM_WORD_KEY_RE.findall(clean)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. The hidden attribute actually hides. A component rule such as
+#    .dialog-scrim { display: flex } outranks the user-agent [hidden] rule,
+#    so without an author-level override the empty dialog covers the page.
+# ---------------------------------------------------------------------------
+
+_HIDDEN_ATTR_RE = re.compile(r"<[a-z]+\b[^>]*\shidden[\s>]")
+_HIDDEN_OVERRIDE_RE = re.compile(
+    r"\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}"
+)
+
+
+class TestHiddenAttributeWinsOverComponentDisplay:
+    def test_markup_uses_the_hidden_attribute(self) -> None:
+        assert_hand_read_floor(
+            len(_HIDDEN_ATTR_RE.findall(_page())),
+            3,
+            subject="element(s) rendered with the hidden attribute",
+            hint="the dialog scrim, its consequence list and its typed-word wrap",
+        )
+
+    def test_an_important_hidden_rule_is_present(self) -> None:
+        assert _HIDDEN_OVERRIDE_RE.search(_strip_comments(_page())) is not None
+
+    def test_pattern_catches_a_deliberately_defective_subject(self) -> None:
+        defective = "<style>.dialog-scrim { display: flex; }</style>"
+        assert _HIDDEN_OVERRIDE_RE.search(defective) is None
+        assert _HIDDEN_ATTR_RE.findall('<div class="x" hidden>') != []
+        assert _HIDDEN_ATTR_RE.findall('<div aria-hidden="true">') == []
