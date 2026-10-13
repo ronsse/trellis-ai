@@ -156,7 +156,18 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--port` | `8420` | Port to listen on |
-| `--host` | `0.0.0.0` | Host to bind to |
+| `--host` | `127.0.0.1` | Host to bind to |
+
+Both `trellis admin serve` and `trellis serve` refuse to bind a
+non-loopback host (`0.0.0.0`, `::`, a LAN address, …) unless
+`TRELLIS_AUTH_MODE=required` — `off` and `optional` both grant every
+caller full scopes when no credential is presented, so exposing either
+of those off loopback serves the whole memory system unauthenticated
+(#189). The refusal is a `ConfigError` (`EXIT_STORE`) naming both ways
+out: set `TRELLIS_AUTH_MODE=required` and mint a key with `trellis admin
+api-keys create`, or set `TRELLIS_API_ALLOW_INSECURE_BIND=1` when the
+listener is genuinely on a trusted interface (a sidecar proxy
+terminating auth, a private network with no other tenants).
 
 ### Schedule registry + job runs
 

@@ -18,7 +18,7 @@ from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.write_provenance import get_write_provenance
 from trellis.errors import ConfigError, TrellisError
 from trellis.stores.registry import StoreRegistry
-from trellis_api.auth import require_scope, warn_if_unauthenticated
+from trellis_api.auth import check_bind_is_safe, require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
     request_validation_error_handler,
@@ -332,13 +332,17 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     Host/port default to a container-friendly bind. The ``trellis serve``
     CLI subcommand is the preferred entrypoint — it exposes
     ``--host``/``--port``/``--config-dir`` flags and configures structured
-    logging before the server starts.
+    logging before the server starts. ``trellis admin serve`` delegates
+    here too, so this is the sole place that calls ``uvicorn.run`` for
+    the REST API (``tests/unit/test_rest_bind_rule.py``) and the sole
+    place :func:`check_bind_is_safe` needs to guard (#189).
     """
     import uvicorn  # noqa: PLC0415
 
     from trellis_api.logging import configure_logging  # noqa: PLC0415
 
     configure_logging()
+    check_bind_is_safe(host, port)
     app = create_app(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
