@@ -890,6 +890,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A non-loopback REST bind without required auth now refuses to start
+  (#189).** `trellis serve` and `trellis admin serve` both bound any host
+  with no check beyond a startup log line — `TRELLIS_AUTH_MODE=off` (or
+  unset with no legacy `TRELLIS_API_KEY`), and `optional` with no
+  credential presented, both grant every scope to anyone who can reach the
+  port, and the shipped `Dockerfile` binds `0.0.0.0` by default. Both entry
+  points now call `trellis_api.auth.check_bind_is_safe` — the same
+  loopback-detection and fail-closed shape `trellis.mcp.auth.resolve_http_settings`
+  already uses for the MCP HTTP transport — before `uvicorn.run`; a refused
+  bind is a `ConfigError` (`EXIT_STORE`) naming both ways out: set
+  `TRELLIS_AUTH_MODE=required` and mint a key with `trellis admin
+  api-keys create`, or set `TRELLIS_API_ALLOW_INSECURE_BIND=1` when the
+  listener is genuinely on a trusted interface. `admin serve` now delegates
+  to the same `trellis_api.app.main` entry point `serve` uses, so there is
+  exactly one call to `uvicorn.run` for the REST API
+  (`tests/unit/test_rest_bind_rule.py`). The local `docker-compose.yml`
+  rehearsal stack sets the override, since its container binds `0.0.0.0`
+  inside its own network namespace with auth off.
+
 - **`retention.restore` re-syncs a restored graph node's vector row, and a
   REJECTED batch now names the whole batch.** A graph-node restore (used
   for, among others, a demoted-then-pruned precedent) rewrote the node

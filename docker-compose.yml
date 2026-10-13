@@ -50,6 +50,14 @@ services:
       TRELLIS_DATA_DIR: /var/lib/trellis
       TRELLIS_KNOWLEDGE_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_knowledge
       TRELLIS_OPERATIONAL_PG_DSN: postgresql://trellis:trellis@postgres:5432/trellis_operational
+      # The entrypoint binds 0.0.0.0 (see Dockerfile CMD) inside this
+      # container's own network namespace, and auth is unset here (off).
+      # The fail-closed bind check (#189) refuses that combination unless
+      # told the listener is on a trusted interface — which a compose
+      # network, reached only through the published host port below, is.
+      # Set TRELLIS_AUTH_MODE=required (and mint a key) instead of this
+      # override when rehearsing the authenticated posture.
+      TRELLIS_API_ALLOW_INSECURE_BIND: "1"
     ports:
       - "8420:8420"
     volumes:

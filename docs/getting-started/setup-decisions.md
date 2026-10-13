@@ -60,7 +60,7 @@ The full model is [`adr-rest-api-security-model.md`](../design/adr-rest-api-secu
 
 | # | Decision | Status | Where / how | Issue |
 |---|---|---|---|---|
-| 2.1 | **Network bind posture.** A non-loopback bind without an API key should refuse to start (fail closed). | **Planned** | Set `TRELLIS_API_KEY` before `admin serve --host 0.0.0.0`; loopback dev needs nothing | [#189](https://github.com/ronsse/trellis-ai/issues/189) |
+| 2.1 | **Network bind posture.** A non-loopback bind without auth required should refuse to start (fail closed). | **Now** | Enforced automatically: `admin serve`/`serve --host 0.0.0.0` refuses unless `TRELLIS_AUTH_MODE=required` (mint a key with `trellis admin api-keys create`) or `TRELLIS_API_ALLOW_INSECURE_BIND=1` is set; loopback dev needs nothing | [#189](https://github.com/ronsse/trellis-ai/issues/189) |
 | 2.2 | **Scoped credentials.** Which callers get `read` / `ingest` / `mutate` / `admin`? | **Planned** | Per-scope API keys (inclusive scopes: read ⊂ ingest ⊂ mutate ⊂ admin) | [#191](https://github.com/ronsse/trellis-ai/issues/191) |
 | 2.3 | **Static UI.** Authenticate it, or disable it in production. | **Planned** | UI sends `X-API-Key`, or set the disable flag | [#190](https://github.com/ronsse/trellis-ai/issues/190) |
 | 2.4 | **Readiness / metrics exposure.** Detailed health + `/metrics` should not leak topology by default. | **Planned** | Gate detail behind admin scope / internal-only flag | [#192](https://github.com/ronsse/trellis-ai/issues/192) |

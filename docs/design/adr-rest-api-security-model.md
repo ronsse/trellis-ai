@@ -29,7 +29,7 @@ deployment beyond a developer's loopback:
 
 | # | Gap (verified in code) |
 |---|---|
-| 189 | [`app.py`](../../src/trellis_api/app.py) reads `TRELLIS_API_HOST` (default `127.0.0.1`). A container that sets `TRELLIS_API_HOST=0.0.0.0` with `TRELLIS_API_KEY` unset binds the **unauthenticated** API to a routable interface. [`warn_if_unauthenticated()`](../../src/trellis_api/auth.py) only *logs* — it does not refuse. |
+| 189 | **Shipped** — [`check_bind_is_safe()`](../../src/trellis_api/auth.py) now refuses to start a non-loopback bind unless `TRELLIS_AUTH_MODE=required` or the explicit `TRELLIS_API_ALLOW_INSECURE_BIND` override is set; see Layer A below. `warn_if_unauthenticated()` still only *logs*, but it is no longer the only check on the non-loopback path. |
 | 190 | The static UI is mounted unauthenticated at `/ui` and fetches `/api/v1` routes that *are* gated. Turning on `TRELLIS_API_KEY` breaks the UI's `fetch` calls (no header), which pressures operators to leave auth off. |
 | 191 | `require_api_key` grants **all-or-nothing** access. A read-only caller and an admin caller present the same secret and receive the same capability across every `/api/v1` router. |
 | 192 | [`/readyz`](../../src/trellis_api/routes/health.py) returns a per-backend breakdown including `str(exc)` from probe failures; [`/metrics`](../../src/trellis_api/observability.py) is mounted **unauthenticated** by design ("orchestrator scrape jobs need it open"). Both can leak internal topology to untrusted networks. |
@@ -89,6 +89,15 @@ posture** (what an unconfigured loopback dev install sees) and its
 request is denied).
 
 ### Layer A — Network / bind posture (#189)
+
+**Shipped.** [`check_bind_is_safe()`](../../src/trellis_api/auth.py), called
+from `trellis_api.app.main` (the sole entry point both `trellis serve` and
+`trellis admin serve` now delegate to) before `uvicorn.run`, implements the
+decision below — with one difference from the original design: it reads the
+three-value `TRELLIS_AUTH_MODE` (`off`/`optional`/`required`) that Layer B
+shipped under, rather than a plain `TRELLIS_API_KEY` presence check, and
+refuses `optional` too, since that mode also grants every scope when no
+credential is presented.
 
 **Decision.** Startup computes an *effective auth-required* boolean and
 refuses to boot when the API would bind a **non-loopback** interface **without

@@ -55,11 +55,21 @@ when you adapt the file:
 - **`TRELLIS_AUTH_MODE`** — unset → `off`. **The compose stack runs
   unauthenticated** — every `/api/v1` request is accepted with full
   scopes (the startup log emits an `api_auth_permissive` warning to
-  flag this). That is fine for a loopback smoke test; before exposing
-  the API beyond loopback set `TRELLIS_AUTH_MODE=required` and mint
-  keys with `trellis admin api-keys create`. Because auth is off,
-  there is no separate authenticated-admin step in the checklist
-  below — the admin routes answer without a credential here.
+  flag this). That is fine for a smoke test reached only through the
+  host's published port; before exposing the API beyond that set
+  `TRELLIS_AUTH_MODE=required` and mint keys with `trellis admin
+  api-keys create`. Because auth is off, there is no separate
+  authenticated-admin step in the checklist below — the admin routes
+  answer without a credential here.
+- **`TRELLIS_API_ALLOW_INSECURE_BIND`** — the compose file sets this
+  to `1`. The container's `ENTRYPOINT` binds `0.0.0.0` (see the `api`
+  row above) and, with auth off, the fail-closed bind check (#189)
+  refuses that combination unless this override is set — a container
+  binding every interface *inside its own network namespace* is the
+  normal shape for compose/Kubernetes, not the unauthenticated
+  network exposure the check exists to catch. Drop the override (and
+  set `TRELLIS_AUTH_MODE=required` instead) once you're rehearsing the
+  authenticated posture.
 - **`TRELLIS_OPS_DETAIL`** — unset → backend latencies are included in
   the `/readyz` body (see the readiness output below). Set `false` to
   collapse it to a bare `{"status":"ready"}`.
