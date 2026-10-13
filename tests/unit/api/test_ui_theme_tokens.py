@@ -67,10 +67,16 @@ def contrast_ratio(fg_hex: str, bg_hex: str) -> float:
 
 MIN_CONTRAST = 4.5
 
+# Non-text UI elements (focus rings, borders meant to be seen, the solid
+# accent/status colours used as border/outline paint) clear WCAG 1.4.11's
+# lower 3:1 floor instead -- they delineate a control, they don't carry a
+# reading task.
+MIN_CONTRAST_NONTEXT = 3.0
+
 # (foreground token, background token) pairs that a reader actually looks
 # at: body copy on the page/card background, and each badge's text on its
 # own tint. Shared semantic text colours used ad hoc elsewhere (e.g. an
-# inline var(--error) in a template string) are out of scope -- tightening
+# inline var(--danger) in a template string) are out of scope -- tightening
 # those would mean re-shading tokens with dozens of other consumers.
 TEXT_PAIRS = [
     ("text", "bg"),
@@ -79,21 +85,43 @@ TEXT_PAIRS = [
     ("text-dim", "surface"),
 ]
 BADGE_PAIRS = [
-    ("success", "success-tint-bg"),
-    ("warn", "warn-tint-bg"),
-    ("error", "danger-tint-bg"),
-    ("info-tint-fg", "info-tint-bg"),
-    ("accent-tint-fg", "accent-tint-bg"),
+    ("ok-ink", "ok-tint"),
+    ("warn-ink", "warn-tint"),
+    ("danger-ink", "danger-tint"),
+    ("info-ink", "info-tint"),
+    ("accent-ink", "accent-tint"),
+    ("muted-ink", "muted-tint"),
+]
+
+# Non-text pairs: the focus ring and the "strong" border against both
+# surfaces it actually paints on, plus the solid status colours used as a
+# border/outline (not as text) against the surface they sit on.
+NONTEXT_PAIRS = [
+    ("focus-ring", "surface"),
+    ("focus-ring", "bg"),
+    ("border-strong", "surface"),
+    ("border-strong", "bg"),
+    ("accent", "surface"),
+    ("accent", "bg"),
+    ("danger", "surface"),
+    ("ok", "surface"),
 ]
 
 
-def _assert_palette_passes(tokens: dict[str, str], label: str) -> None:
-    for fg, bg in TEXT_PAIRS + BADGE_PAIRS:
+def _assert_pairs_clear_floor(
+    tokens: dict[str, str], label: str, pairs: list[tuple[str, str]], floor: float
+) -> None:
+    for fg, bg in pairs:
         ratio = contrast_ratio(tokens[fg], tokens[bg])
-        assert ratio >= MIN_CONTRAST, (
-            f"{label}: {fg} on {bg} is {ratio:.2f}:1, below {MIN_CONTRAST}:1 "
+        assert ratio >= floor, (
+            f"{label}: {fg} on {bg} is {ratio:.2f}:1, below {floor}:1 "
             f"({tokens[fg]} on {tokens[bg]})"
         )
+
+
+def _assert_palette_passes(tokens: dict[str, str], label: str) -> None:
+    _assert_pairs_clear_floor(tokens, label, TEXT_PAIRS + BADGE_PAIRS, MIN_CONTRAST)
+    _assert_pairs_clear_floor(tokens, label, NONTEXT_PAIRS, MIN_CONTRAST_NONTEXT)
 
 
 def test_dark_palette_clears_contrast_floor() -> None:
@@ -106,6 +134,22 @@ def test_light_palette_via_media_query_clears_contrast_floor() -> None:
 
 def test_light_palette_via_manual_toggle_clears_contrast_floor() -> None:
     _assert_palette_passes(_attr_light_tokens(_page()), "light (data-theme toggle)")
+
+
+def test_shadow_tokens_are_defined_in_every_theme_block() -> None:
+    # Shadows are not hex colours, so they're exempt from the "every colour
+    # on bare :root" sweep above, but they still need to exist consistently
+    # across all three blocks -- a shadow present only in one palette is a
+    # drift bug like any missing colour would be.
+    text = _page()
+    expected = {"shadow-1", "shadow-2", "shadow-3"}
+    for label, tokens in (
+        ("dark (:root)", _root_tokens(text)),
+        ("light (prefers-color-scheme)", _media_light_tokens(text)),
+        ("light (data-theme toggle)", _attr_light_tokens(text)),
+    ):
+        missing = expected - set(tokens)
+        assert not missing, f"{label}: missing shadow tokens {sorted(missing)}"
 
 
 def test_no_colour_is_defined_only_inside_a_theme_block() -> None:

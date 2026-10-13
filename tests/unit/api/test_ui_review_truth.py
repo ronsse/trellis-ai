@@ -107,7 +107,7 @@ def test_reachability_html_distinguishes_true_false_and_null() -> None:
     body = _between(page, "function reachabilityHtml(p) {", "\n        }\n")
     # false: rendered as an error badge with the reasons the server gave.
     assert "p.reachable === false" in body
-    assert "badge-err" in body
+    assert "badge-danger" in body
     assert "unreachable" in body
     assert "p.unreachable_reasons" in body
     # true: a distinct ok badge, not the same markup as false.

@@ -186,7 +186,7 @@ def test_failed_and_refused_statuses_get_distinct_non_default_badges() -> None:
     else_branch = _between(body, "} else {", "\n            }\n")
     status_map_literal = _between(else_branch, "const statusMap = {", "};")
     assert re.search(r"refused:\s*'badge-warn'", status_map_literal)
-    assert re.search(r"failed:\s*'badge-err'", status_map_literal)
+    assert re.search(r"failed:\s*'badge-danger'", status_map_literal)
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ def test_fetch_failure_renders_visible_error_in_loops_rows() -> None:
     assert "loops-rows" not in catch_block  # container ref already captured above
     assert "container.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--error)" in catch_block
+    assert "color:var(--danger)" in catch_block
 
 
 # ---------------------------------------------------------------------------
