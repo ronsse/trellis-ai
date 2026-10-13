@@ -29,6 +29,13 @@ Scope checks are also what FastMCP filters ``tools/list`` on, so a
 ``read``-scoped key does not merely fail to call ``execute_mutation`` —
 it never sees it.
 
+:func:`trellis_scope` decides whether a tool is callable *at all*, which
+is all a check made before the tool body runs can decide. A decision
+that depends on the call's own arguments — ``execute_mutation`` naming
+one destructive operation inside an otherwise ``mutate``-scoped call —
+has to be made from inside the tool, against the same ambient state,
+which is what :func:`caller_has_scope` is for.
+
 One consequence worth knowing: FastMCP's in-memory transport is neither
 stdio nor authenticated, so an in-process host embedding this server
 (``Client(mcp)``) gets an empty tool list until it opts out with
@@ -297,6 +304,63 @@ def trellis_scope(required: str) -> Callable[[AuthContext], bool]:
 
     check.__name__ = f"require_scope_{required}"
     return check
+
+
+def caller_has_scope(scope: str) -> bool:
+    """Whether the *current* MCP caller holds *scope* (``admin`` implies all).
+
+    Unlike :func:`trellis_scope`, which FastMCP calls *before* a tool
+    runs and which is never invoked at all under stdio, this reads
+    ambient state from **inside** a tool's function body. Reach for it
+    when a scope decision depends on something only the tool body knows
+    — e.g. one destructive operation inside an otherwise ``mutate``-
+    scoped batch — rather than something knowable at decoration time.
+    General-purpose and meant to be reused by future per-call checks
+    (read-side included), not special-cased to any one tool.
+
+    * **stdio** — always ``True``. FastMCP's own dispatch (see
+      ``fastmcp.server.server._get_auth_context``) treats stdio as
+      ``skip_auth=True`` for exactly this reason: the parent agent host
+      *is* the trust boundary there, and there is no credential to read.
+      Determined the same way FastMCP determines it internally — the
+      ``_current_transport`` context var set by the stdio run-loop and
+      the http request path — never by guessing from an environment
+      variable, since the transport layer owns none.
+    * **enforcement disabled** (:func:`set_auth_enforced`) — always
+      ``True``, the same escape hatch :func:`trellis_scope` honours, for
+      the same reason: an in-process host driving this server over
+      FastMCP's in-memory transport is its own trust boundary too, and
+      has no credential to present either.
+    * **otherwise (http, enforced)** — read the bearer's
+      :class:`~fastmcp.server.auth.AccessToken` via
+      :func:`fastmcp.server.dependencies.get_access_token` and check its
+      scopes with :func:`trellis.auth.scopes_satisfy`. No token, or a
+      token lacking *scope*, is refused. Fails closed: the absence of
+      proof of a scope is never treated as the presence of it.
+
+    Raises :class:`ValueError` at the call site on an unknown scope, the
+    same contract :func:`trellis_scope` and :func:`scopes_satisfy` take.
+    """
+    if scope not in ALL_SCOPES:
+        msg = f"Unknown scope {scope!r}; known scopes: {sorted(ALL_SCOPES)}"
+        raise ValueError(msg)
+
+    # Mirrors fastmcp.server.server._get_auth_context's own stdio test —
+    # late import avoids a cycle with fastmcp.server.context at module
+    # load, same reason FastMCP's own code imports it late there.
+    from fastmcp.server.context import _current_transport  # noqa: PLC0415
+
+    if _current_transport.get() == TRANSPORT_STDIO:
+        return True
+    if not _auth_state.enforced:
+        return True
+
+    from fastmcp.server.dependencies import get_access_token  # noqa: PLC0415
+
+    token = get_access_token()
+    if token is None:
+        return False
+    return scopes_satisfy(frozenset(token.scopes), scope)
 
 
 class TrellisApiKeyVerifier(TokenVerifier):

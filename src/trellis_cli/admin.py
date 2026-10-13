@@ -539,11 +539,18 @@ def serve(
     ),
     port: int = typer.Option(8420, help="Port to bind"),
 ) -> None:
-    """Start the Trellis REST API server."""
-    try:
-        import uvicorn  # noqa: PLC0415
+    """Start the Trellis REST API server.
 
-        from trellis_api.app import create_app  # noqa: PLC0415
+    Delegates to :func:`trellis_api.app.main` — the same entrypoint
+    ``trellis serve`` uses — so there is exactly one place that calls
+    ``uvicorn.run`` and exactly one place that runs the fail-closed bind
+    check (#189). A refused bind (non-loopback host without
+    ``TRELLIS_AUTH_MODE=required`` or ``TRELLIS_API_ALLOW_INSECURE_BIND``)
+    raises :class:`~trellis.errors.ConfigError`, caught by the root CLI
+    boundary and rendered at ``EXIT_STORE``.
+    """
+    try:
+        from trellis_api.app import main as run_api_server  # noqa: PLC0415
     except ImportError:
         console.print(
             "[red]FastAPI/uvicorn not installed."
@@ -552,8 +559,7 @@ def serve(
         raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
     console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
-    app = create_app(host=host, port=port)
-    uvicorn.run(app, host=host, port=port)
+    run_api_server(host=host, port=port)
 
 
 @admin_app.command()

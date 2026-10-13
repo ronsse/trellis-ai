@@ -3793,7 +3793,22 @@ paths:
 
         - ``stop_on_error`` — halt on the first ``FAILED`` or ``REJECTED``.
 
-        - ``continue_on_error`` — execute all, include errors in results.'
+        - ``continue_on_error`` — execute all, include errors in results.
+
+
+        A batch containing any operation outside
+
+        :data:`~trellis.mutate.NON_DESTRUCTIVE_OPERATIONS` (merges, redactions,
+
+        retention prune, alias rebinds, link/label removal, schedule/settings/
+
+        classify-rule writes) is refused whole, with no command executed, unless
+
+        the caller''s key carries the ``admin`` scope. ``requested_by`` stays a
+
+        caller-chosen audit label, unverified against the credential, exactly
+
+        as it already was.'
       operationId: execute_batch_api_v1_commands_batch_post
       requestBody:
         content:

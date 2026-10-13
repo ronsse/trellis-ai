@@ -13,6 +13,10 @@ contract from the silent-fallback cleanup track (C2 Phase 3):
   (empty intent, unknown operation enum, missing required key, etc.).
 * ``RESOURCE_NOT_FOUND`` (-32001, app-layer) — handler asked for an
   entity that doesn't exist (e.g. ``get_graph`` with an unknown id).
+* ``POLICY_DENIED`` (-32002, app-layer) — the caller's scope does not
+  cover what the call asked for (``execute_mutation`` naming a
+  destructive operation without the ``admin`` scope). Distinct from
+  ``MUTATION_FAILED``: nothing reached the executor.
 * ``MUTATION_FAILED`` (-32003, app-layer) — a mutation went through
   the executor and came back non-success (REJECTED / FAILED). The
   ``data`` field carries the structured executor response.
@@ -46,7 +50,7 @@ if TYPE_CHECKING:
     from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
 
-from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     describe_validation_error,
@@ -81,6 +85,7 @@ from trellis.mcp.auth import (
     TRANSPORT_HTTP,
     HttpSettings,
     TrellisApiKeyVerifier,
+    caller_has_scope,
     resolve_http_settings,
     resolve_transport,
     set_auth_enforced,
@@ -117,6 +122,7 @@ from trellis.mutate import (
     build_evidence_ingest_command_from_args,
     ensure_evidence_document,
     redirect_unreachable_settings_update,
+    requires_admin_scope,
 )
 from trellis.ops import (
     check_capture_health,
@@ -223,6 +229,20 @@ def _raise_mutation_failed(
 ) -> NoReturn:
     """Raise ``McpError(MUTATION_FAILED, …)`` — app-layer code."""
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
+
+
+def _raise_policy_denied(
+    message: str, *, data: dict[str, Any] | None = None
+) -> NoReturn:
+    """Raise ``McpError(POLICY_DENIED, …)`` — app-layer code.
+
+    For a scope decision made *before* anything reaches the executor —
+    today, ``execute_mutation`` refusing a destructive operation without
+    the ``admin`` scope. The call never built a ``Command`` and nothing
+    ran, which is why this is a different code from
+    :func:`_raise_mutation_failed`.
+    """
+    raise McpError(ErrorData(code=POLICY_DENIED, message=message, data=data))
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -3831,6 +3851,14 @@ def execute_mutation(
     project first and the command targets it (``target_type="trace"``),
     as in ``save_experience``.
 
+    A ``mutate``-scoped caller may issue any operation outside
+    :data:`~trellis.mutate.NON_DESTRUCTIVE_OPERATIONS` (merges,
+    redactions, retention prune, alias rebinds, link/label removal,
+    schedule/settings/classify-rule writes) only with the ``admin``
+    scope — refused with ``POLICY_DENIED`` before a ``Command`` is ever
+    built. ``requested_by``/``actor`` stays a caller-chosen audit label,
+    unverified against the credential, exactly as it already was.
+
     Args:
         operation: Operation name. Accepts the wire value
             (e.g. ``"link.create"``) or the enum key
@@ -3853,8 +3881,9 @@ def execute_mutation(
     Raises:
         McpError: With ``INVALID_PARAMS`` for pre-flight argument
             issues (empty operation, unknown enum, non-dict args,
-            ``Command`` construction failure) and ``INTERNAL_ERROR``
-            for unexpected executor-side crashes.
+            ``Command`` construction failure), ``POLICY_DENIED`` for a
+            destructive operation without the ``admin`` scope, and
+            ``INTERNAL_ERROR`` for unexpected executor-side crashes.
     """
     from trellis.mutate.commands import Command  # noqa: PLC0415
 
@@ -3869,6 +3898,12 @@ def execute_mutation(
         _raise_invalid_params(
             f"unknown operation: {operation}",
             data={"field": "operation", "value": operation},
+        )
+
+    if requires_admin_scope(op) and not caller_has_scope(SCOPE_ADMIN):
+        _raise_policy_denied(
+            f"operation {op} is destructive and requires the admin scope",
+            data={"operation": str(op)},
         )
 
     if not isinstance(args, dict):
