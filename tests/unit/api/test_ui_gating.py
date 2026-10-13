@@ -133,6 +133,28 @@ class TestUiDisabled:
         assert _client(registry).get("/api/v1/stats").status_code == 200
 
 
+class TestFontsServed:
+    """The vendored IBM Plex woff2 files sit under the same ``/ui`` mount
+    as the page itself, so they share its posture: unauthenticated, no
+    TRELLIS_AUTH_MODE gate. The console's @font-face rules fetch them
+    before any API key exists in localStorage, so a gate here would be
+    a silent render regression (fallback system font), not an error the
+    page could surface."""
+
+    def test_one_font_file_resolves_with_a_font_content_type(self, registry) -> None:
+        resp = _client(registry).get("/ui/fonts/ibm-plex-sans-latin-400-normal.woff2")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "font/woff2"
+
+    def test_font_mount_needs_no_api_key(
+        self, registry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        monkeypatch.setenv("TRELLIS_API_KEY", "does-not-matter")
+        resp = _client(registry).get("/ui/fonts/ibm-plex-mono-latin-400-normal.woff2")
+        assert resp.status_code == 200
+
+
 class TestStartupValidation:
     """Bad exposure-env values must crash create_app, not lurk."""
 

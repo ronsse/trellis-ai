@@ -381,7 +381,13 @@ def test_success_rate_renders_not_measured_when_there_is_no_feedback() -> None:
         "data.total_feedback === 0\n"
         "                    ? '0 feedback in this window' : 'overall effectiveness'"
     )
-    assert "renderCard('Success Rate', successRateText, successRateSub)" in body
+    # The Fonts pass wires a fourth (raw) argument through this call so
+    # renderCard's .value.na/.value.inf modifiers can see the unformatted
+    # value -- see test_ui_number_formatting.py::TestRenderCardRawArgument.
+    assert (
+        "renderCard('Success Rate', successRateText, successRateSub,"
+        " successRateRaw)" in body
+    )
     # The old unconditional computation must be gone, not merely shadowed —
     # a mutant that left it reachable on some other branch would still
     # read "0.0%" whenever success_rate itself is literally 0.

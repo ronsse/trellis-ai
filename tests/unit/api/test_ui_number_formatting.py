@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 import trellis_api
+from tests.ast_rules import assert_hand_read_floor
 
 INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
 
@@ -40,6 +41,35 @@ def _function_body(page: str, name: str) -> str:
     )
     assert found is not None, f"function {name}() not found"
     return found.group(1)
+
+
+_RENDER_CARD_CALL_RE = re.compile(r"(?<!function )renderCard\(")
+
+
+def _render_card_call_arg_counts(page: str) -> list[int]:
+    """Argument count of every ``renderCard(...)`` call site.
+
+    A hand-rolled bracket-depth walk rather than a single regex: the
+    calls' arguments include nested ``(...)``/``[...]`` expressions (for
+    example ``(data.item_scores || []).length``), and a comma inside one
+    of those must not be counted as a fourth argument.
+    """
+    counts = []
+    for match in _RENDER_CARD_CALL_RE.finditer(page):
+        i = match.end()
+        depth = 1
+        commas_at_top = 0
+        while depth > 0:
+            ch = page[i]
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif ch == "," and depth == 1:
+                commas_at_top += 1
+            i += 1
+        counts.append(commas_at_top + 1)
+    return counts
 
 
 class TestSharedFormattersExist:
@@ -128,3 +158,59 @@ class TestReportsComputedAtUsesFmtTime:
         page = _page()
         assert "fmtTime(data.computed_at, { empty: 'unknown' })" in page
         assert "computed_at: ${escHtml(data.computed_at || 'unknown')}" not in page
+
+
+class TestRenderCardRawArgument:
+    """``renderCard(title, value, sub, raw)``'s fourth parameter drives the
+    ``.value.na``/``.value.inf`` modifiers (null/non-finite), but a
+    parameter nothing calls with is dead on arrival. Exactly one of the
+    nine call sites has a display string that can actually be null or
+    non-finite -- the rest pass a plain count, never routed through
+    fmtNum/fmtPct, so adding raw to them would just be a no-op argument.
+    """
+
+    def test_render_card_still_declares_the_raw_parameter(self) -> None:
+        assert "function renderCard(title, value, sub, raw) {" in _page()
+
+    def test_exactly_one_caller_passes_a_fourth_argument(self) -> None:
+        counts = _render_card_call_arg_counts(_page())
+        assert len(counts) == 9, (
+            f"expected 9 total renderCard(...) call sites, found "
+            f"{len(counts)} -- the floor below assumes this population"
+        )
+        four_arg_calls = [c for c in counts if c == 4]
+        assert_hand_read_floor(
+            len(four_arg_calls),
+            1,
+            subject="renderCard(...) call(s) passing a fourth (raw) argument",
+            hint="hand count: 1.",
+            sole_site_reason=(
+                "the other eight renderCard() callers (Total Packs, With "
+                "Feedback, Items Scored, Traces, Documents, Graph Nodes, "
+                "Graph Edges, Events) all pass a plain integer count that "
+                "never goes through fmtNum/fmtPct and is never null, so "
+                "only the effectiveness dashboard's Success Rate card has "
+                "a raw value worth passing through."
+            ),
+        )
+
+    def test_success_rate_card_raw_mirrors_its_display_branch(self) -> None:
+        page = _page()
+        assert (
+            "const successRateRaw = data.total_feedback === 0"
+            " ? null : data.success_rate;" in page
+        )
+        assert (
+            "renderCard('Success Rate', successRateText, successRateSub,"
+            " successRateRaw)" in page
+        )
+
+    def test_arg_counter_catches_a_deliberately_defective_subject(self) -> None:
+        three_args = "renderCard('Total Packs', data.total_packs, 'context packs')"
+        four_args = "renderCard('Success Rate', text, sub, raw)"
+        nested_parens_three_args = (
+            "renderCard('Items Scored', (data.item_scores || []).length, 'x')"
+        )
+        assert _render_card_call_arg_counts(three_args) == [3]
+        assert _render_card_call_arg_counts(four_args) == [4]
+        assert _render_card_call_arg_counts(nested_parens_three_args) == [3]
