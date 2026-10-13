@@ -55,7 +55,9 @@ def test_load_memories_no_longer_special_cases_search_pagination() -> None:
 def test_load_memories_pagination_runs_unconditionally_on_total() -> None:
     body = _load_memories_body()
     assert "const total = data.total || 0;" in body
-    assert "pag.style.display = total > limit ? 'flex' : 'none';" in body
+    # Shown whenever there are rows: the rows-per-page select lives in
+    # this footer, so a single page must not hide it.
+    assert "pag.style.display = total > 0 ? 'flex' : 'none';" in body
 
 
 def test_load_memories_renders_an_inexact_total_with_a_plus_suffix() -> None:
