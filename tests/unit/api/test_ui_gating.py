@@ -4,10 +4,10 @@ Also covers read-only-mode gating within the mounted page itself: a
 read-scoped key used to hard-block on every admin-scoped tab with no
 warning, and ``throwIfAuthRefused`` told every 403 caller "this UI needs
 an admin-scoped key" even though most of the UI's tabs are read-scoped
-(Traces, Memories, Events, Packs, Graph, Precedents, Reports, and
-Policies for viewing — see app.py's router scope map). The page now
-badges the admin-only tabs once a 403 proves the stored key lacks admin
-scope, instead of claiming the whole UI needs one.
+(Traces, Memories, Graph, Precedents, and Policies for viewing — see
+app.py's router scope map). The page now badges the admin-only tabs
+once a 403 proves the stored key lacks admin scope, instead of claiming
+the whole UI needs one.
 """
 
 from __future__ import annotations
@@ -159,16 +159,15 @@ class TestStartupValidation:
 
 
 # Routes that back each nav tab, cross-referenced against app.py's router ->
-# scope map (admin.py and settings.py routers require "admin"; retrieve.py,
-# explore.py, analyze.py and the default policies.py route require "read").
+# scope map (admin.py, settings.py and analyze.py require "admin"; the
+# default retrieve.py and policies.py routes require "read"; explore.py is
+# split — documents and graph history stay "read", its pack-telemetry
+# routes (events, packs) carry their own route-level "admin" requirement).
 _READ_SCOPE_VIEWS = {
     "graph",
     "traces",
     "precedents",
     "memories",
-    "events",
-    "packs",
-    "reports",
     "policies",
 }
 _ADMIN_SCOPE_VIEWS = {
@@ -179,6 +178,9 @@ _ADMIN_SCOPE_VIEWS = {
     "loops",
     "advisories",
     "settings",
+    "events",
+    "packs",
+    "reports",
 }
 
 
@@ -239,7 +241,7 @@ class TestReadOnlyModeGating:
         )
         assert found is not None
         body = found.group(1)
-        assert "Traces, Memories, Events, Packs, Graph, Precedents, Reports" in body
+        assert "Traces, Memories, Graph, Precedents and Policies" in body
 
     def test_nav_scope_badge_css_class_defined(self) -> None:
         assert ".sidebar-nav a .nav-scope-badge {" in _page()

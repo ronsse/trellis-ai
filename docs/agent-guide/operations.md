@@ -2461,7 +2461,7 @@ Three properties worth knowing:
 - **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
 - **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
 
-**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events`, `GET /api/v1/events/{event_id}` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
+**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events`, `GET /api/v1/events/{event_id}`, `GET /api/v1/packs` and `GET /api/v1/packs/{pack_id}` require the `admin` scope to call at all, so the would-be pack they return is never blinded — every caller who reaches these routes already has `admin`. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
 
 `PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under **no shipped default** (`configure_stderr_logging` pins INFO, the CLI pins WARNING). `trellis -vv` or `TRELLIS_LOG_LEVEL=DEBUG` does enable it — which is precisely the point: the signal existed only for someone who already suspected the problem and went looking.
 
@@ -2648,7 +2648,8 @@ If a command with the same key has already succeeded (in-memory or in the event 
 
 Gap G15: every `trellis analyze <report>` command had a CLI only — the UI
 could not ask "are our learning loops performing or doing anything?" at
-all. Read scope. Each report calls the *exact* library function its CLI
+all. Requires the `admin` scope: every report replays other callers'
+pack telemetry. Each report calls the *exact* library function its CLI
 counterpart calls (never a subprocess, never a re-derivation), so a route
 and its CLI command can disagree about transport but never about
 arithmetic.
@@ -2673,8 +2674,8 @@ Eleven reports: `holdout`, `judged-outcomes`, `advisory-effectiveness`,
 `extractor-fallbacks`, `pack-telemetry`, `token-usage`, `cost`. Three
 families are deliberately absent, not forgotten: `replay` takes a change
 spec rather than bounded query params; `generate-advisories` and
-`apply-noise-tags` are write paths and this router is read-scope only
-end to end; `pack-quality` requires a `--scenarios` YAML file that must
+`apply-noise-tags` are write paths and this router requires the `admin`
+scope end to end regardless; `pack-quality` requires a `--scenarios` YAML file that must
 already exist on the server's local disk, with no shipped default set —
 there is no bounded query-param shape for "a path on the server's
 filesystem," so it is a premise refutation rather than unfinished work.
@@ -3137,6 +3138,9 @@ others. The router → scope map:
 | `curate` (precedents, links, entities, documents, feedback) | `mutate` |
 | `extract` (`/extract/drafts`) | `mutate` |
 | `admin` (health, stats, effectiveness, advisories, vector reset) | `admin` |
+| `explore` (`/documents`, `/graph/history`) | `read` |
+| `explore` (`/events`, `/events/{event_id}`, `/packs`, `/packs/{pack_id}`) | `admin` (route-level, replays other callers' pack telemetry) |
+| `analyze` (`/analyze`, `/analyze/{report}`) | `admin` (every report replays other callers' pack telemetry) |
 | `observations` GETs | `read` |
 | `observations` POSTs (`/observations`, `/measurements`) | `mutate` |
 | `policies` GETs | `read` |
@@ -3190,9 +3194,10 @@ anonymous minimal response.
 key icon in the nav bar to set or clear the key; when any API call
 returns 401, the UI surfaces the key-entry banner automatically. Mint
 a key with `trellis admin api-keys create` — the dashboard's stats /
-health / effectiveness cards are `admin`-scoped, while the graph,
-traces, and precedents views need `read`, so an `admin` key covers the
-whole UI.
+health / effectiveness cards, the Events and Packs tabs, and the
+Reports tab are all `admin`-scoped, while the graph, traces,
+precedents, memories, and policies views need only `read`, so an
+`admin` key covers the whole UI.
 
 ---
 
@@ -3223,10 +3228,21 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 
 ### Explore
 
-| Method | Endpoint | Params/Body | Description |
-|--------|----------|-------------|-------------|
-| GET | `/documents` | `?q=...&limit=50&offset=0&include_chunks=false` | List or search documents, previews only. A search (`q` set) is paged the same way the unfiltered list is — `offset`/`limit` both apply to the matches, not just to the unfiltered case. Nothing in `DocumentStore` counts a query's total matches, so a search captures up to a bounded scan window once and pages that capture; `total_exact: false` on the response means the query matched at least that many documents, so `total` is a floor, not an exact count. |
-| GET | `/events/{event_id}` | — | Get one event by id, independent of whatever recency window a list caller has loaded (`GET /events` pages by `until`, with no `event_id` filter, so an older row is otherwise unreachable by id alone). 404 when absent. Same pack-holdout rule as the list route: the would-be pack on a withheld `PACK_ASSEMBLED` row reaches `admin` callers only. |
+A mixed-scope router: `/documents` and `/graph/history` stay `read`;
+the four pack-telemetry routes below (`/events`, `/events/{event_id}`,
+`/packs`, `/packs/{pack_id}`) each carry their own route-level `admin`
+requirement, because they replay other callers' pack telemetry —
+intents, served item ids and titles, attribution.
+
+| Method | Endpoint | Scope | Params/Body | Description |
+|--------|----------|-------|-------------|-------------|
+| GET | `/documents` | `read` | `?q=...&limit=50&offset=0&include_chunks=false` | List or search documents, previews only. A search (`q` set) is paged the same way the unfiltered list is — `offset`/`limit` both apply to the matches, not just to the unfiltered case. Nothing in `DocumentStore` counts a query's total matches, so a search captures up to a bounded scan window once and pages that capture; `total_exact: false` on the response means the query matched at least that many documents, so `total` is a floor, not an exact count. |
+| GET | `/documents/{doc_id}` | `read` | — | Get one document by id. 404 when absent. |
+| GET | `/graph/history` | `read` | `?entity_id=...` | All versions of a graph node, newest first (SCD-2 audit trail). 404 when the entity has none. |
+| GET | `/events` | `admin` | `?event_type=...&entity_id=...&since=...&until=...&order=desc&limit=100&include_payload=false` | Tail or filter the event log, newest first by default. `GET /events` has no offset — page older history by passing the oldest `occurred_at` you have as `until`. |
+| GET | `/events/{event_id}` | `admin` | — | Get one event by id, independent of whatever recency window a list caller has loaded (`GET /events` pages by `until`, with no `event_id` filter, so an older row is otherwise unreachable by id alone). 404 when absent. |
+| GET | `/packs` | `admin` | `?until=...&limit=50` | List assembled context packs (newest first), summary fields only. |
+| GET | `/packs/{pack_id}` | `admin` | — | Full pack telemetry: what was injected, rejected, and why, plus joined feedback (capped at 50 rows; `feedback_total` and `feedback_truncated` report the true count). 404 when absent. |
 
 ### Curate
 

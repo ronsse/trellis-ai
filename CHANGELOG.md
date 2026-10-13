@@ -890,6 +890,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The pack-telemetry REST routes now require the `admin` scope, not
+  `read`.** `GET /api/v1/events`, `GET /api/v1/events/{event_id}`,
+  `GET /api/v1/packs`, `GET /api/v1/packs/{pack_id}`, `GET
+  /api/v1/analyze` and `GET /api/v1/analyze/{report}` replay other
+  callers' pack telemetry — intents, served item ids and titles,
+  attribution — which a `read` key (what an agent or connector holds)
+  should not be able to read back wholesale. `/documents`,
+  `/documents/{doc_id}` and `/graph/history` are unaffected and stay
+  `read`. The `explore` router's pack-telemetry routes carry their own
+  route-level requirement (it is a mixed-scope router); the `analyze`
+  router, which is pack-telemetry end to end, flips at the
+  `include_router` call. With every reachable caller of these routes
+  now already holding `admin`, the pack-holdout blinding they used to
+  apply to non-admin callers is dead code and has been removed; no
+  route that stays `read` had its holdout blinding touched. The static
+  UI badges the affected tabs (Events, Packs, Reports) as needing an
+  admin-scoped key, the same way it already does for Settings.
+
 - **`retention.restore` re-syncs a restored graph node's vector row, and a
   REJECTED batch now names the whole batch.** A graph-node restore (used
   for, among others, a demoted-then-pruned precedent) rewrote the node

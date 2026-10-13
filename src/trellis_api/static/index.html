@@ -2795,12 +2795,13 @@
         let currentView = 'dashboard';
 
         // Tabs backed by admin-scoped routes (see app.py's router->scope
-        // map: admin.py, settings.py). A key without admin scope 403s on
+        // map: admin.py, settings.py, analyze.py, and the pack-telemetry
+        // routes in explore.py). A key without admin scope 403s on
         // every one of these; rather than let each tab discover that on its
         // own click, the first 403 any fetch sees (throwIfAuthRefused)
         // flips keyIsNonAdmin and this badges them instead of staying quiet
         // until the click happens.
-        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings'];
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings', 'events', 'packs', 'reports'];
         let keyIsNonAdmin = false;
 
         function applyScopeBadges() {
@@ -5709,7 +5710,7 @@
                     error.textContent = /^403/.test(err.message)
                         ? 'Signed in, but this key lacks the admin scope this dashboard needs. '
                           + 'Enter an admin-scoped key in the banner above, or use the sidebar — '
-                          + 'Traces, Memories, Events, Packs, Graph, Precedents, Reports and Policies '
+                          + 'Traces, Memories, Graph, Precedents and Policies '
                           + '(view only) work with a read-scoped key; tabs needing admin are now '
                           + 'marked "admin" in the sidebar.'
                         : 'This Trellis API requires an API key. Enter one in the banner above '
