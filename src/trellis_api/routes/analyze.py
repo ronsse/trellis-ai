@@ -15,7 +15,8 @@ Deliberately excluded, both named by the brief:
 
 * ``replay`` — heavy, takes a change spec rather than bounded query params.
 * ``generate-advisories`` / ``apply-noise-tags`` — write paths; this
-  router is read-scope only end to end.
+  router requires the admin scope end to end and never routes through
+  the governed mutation path either way.
 * ``pack-quality`` — its only entry point (``evaluate_pack`` /
   ``trellis analyze pack-quality``) requires a ``--scenarios`` YAML file
   that must already exist on local disk, with no built-in default
