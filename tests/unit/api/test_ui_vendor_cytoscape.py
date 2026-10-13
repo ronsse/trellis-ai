@@ -47,25 +47,9 @@ class TestVendoredAssetsOnDisk:
         assert "Permission is hereby granted" in text
 
 
-_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
-
-def _page_without_comments() -> str:
-    """The page with CSS/HTML comments stripped.
-
-    The Fonts pass's ``@font-face`` block cites its vendored source --
-    ``@fontsource/...`` served from jsdelivr -- in a CSS comment beside
-    it, for provenance. That is documentation, not a live reference the
-    browser fetches, and is a different claim than this test's: that no
-    page asset is ever *loaded* from a third-party CDN at runtime.
-    """
-    return _HTML_COMMENT_RE.sub("", _CSS_COMMENT_RE.sub("", _page()))
-
-
 class TestScriptTagPointsLocal:
     def test_no_cdn_reference_for_cytoscape(self) -> None:
-        page = _page_without_comments()
+        page = _page()
         assert "unpkg.com" not in page
         assert "cdn.jsdelivr.net" not in page
 
