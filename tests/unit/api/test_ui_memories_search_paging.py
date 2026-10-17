@@ -39,9 +39,12 @@ def _load_memories_body() -> str:
 
 def test_memories_pagination_container_exists_in_markup() -> None:
     # The Ledger components pass replaced every view-local pager (this one
-    # included) with the one shared `.pager` component.
+    # included) with the one shared `.pager` component. Pass 6 then moved
+    # its inline style="display:none" to the shared ".hide" utility class
+    # (always overridden by an explicit pag.style.display set on every
+    # real render).
     page = _page()
-    assert '<div class="pager" id="mem-pagination" style="display:none">' in page
+    assert '<div class="pager hide" id="mem-pagination">' in page
 
 
 def test_load_memories_no_longer_special_cases_search_pagination() -> None:

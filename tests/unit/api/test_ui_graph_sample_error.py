@@ -42,8 +42,11 @@ def test_graph_tab_has_a_sample_warning_container() -> None:
     not conjured by the JS -- the same shape as ``#schedules-dispatcher-banner``,
     which `renderDispatcherBanner` fills the same way."""
     page = _page()
+    # Pass 6 moved the container's inline style="display:none" to the
+    # shared ".hide" utility class (always overridden by switchView()'s
+    # explicit block/none on every call).
     graph_view = re.search(
-        r'<div id="view-graph" style="display:none">(.*?)<div class="search-bar">',
+        r'<div id="view-graph" class="hide">(.*?)<div class="search-bar">',
         page,
         re.DOTALL,
     )

@@ -45,6 +45,20 @@ host, so which renderer a given inline attribute belongs to, and
 whether its layout still reads right, remains unverified by anything
 in this file; only that the literal number is gone and the token read
 is syntactically present.
+
+Pass 6 closes the gap those two paragraphs leave open: every one of the
+95 ``style="font-size:var(--fs-N)"`` attributes the buttons/inline-sizes
+pass had converted to a token *read* is now converted again, from an
+inline read to a reusable ``.fs-1`` through ``.fs-7`` class (the ``<style>``
+block gained exactly those seven one-declaration rules, plus two
+``.value.fs-5`` / ``.value.fs-6`` compound rules needed to keep winning
+against the higher-specificity ``.card .value`` rule at the four sites
+that override a card's default size). Because a class is shared rather
+than repeated per site, the whole-page and style-block-only scans now
+read the same population -- there is no longer an "inline" font-size
+population distinct from the style block's, so the two floor tests below
+converge on one number instead of the style-block test's being strictly
+smaller.
 """
 
 from __future__ import annotations
@@ -64,6 +78,22 @@ _RADIUS_TOKEN_RE = re.compile(r"border-radius:[^;]*var\(--r-")
 _LITERAL_FONT_SIZE_RE = re.compile(r"font-size:\s*[0-9]*\.?[0-9]+(?:rem|px)")
 _FONT_SIZE_TOKEN_RE = re.compile(r"font-size:\s*var\(--fs-")
 _STYLE_CLOSE_RE = re.compile(r"</style>")
+
+# Pass 6: any style="..." attribute (markup or a JS template-string
+# attribute built the same way) that still mentions font-size at all --
+# literal or var(--fs-N) alike. Item 1's target is zero: every site that
+# used to carry one now carries a .fs-N class instead.
+_INLINE_STYLE_FONT_SIZE_RE = re.compile(r'style="[^"]*font-size[^"]*"')
+
+# Pass 6: every style="..." attribute left in the page, inline or in a JS
+# template string. Hand count right after this pass: 105 -- pinned as a
+# ceiling (not a floor) so a future pass can't silently grow the inline
+# population back up without a deliberate look; converting one back out
+# should lower this number, and a legitimate new one-off inline style
+# (below item 2/3's repeat thresholds) should raise it along with this
+# constant in the same change.
+_STYLE_ATTR_RE = re.compile(r'style="[^"]*"')
+_INLINE_STYLE_CEILING = 105
 
 # The bare ``:root`` token block through the end of the
 # ``[data-theme="light"]`` block -- the only place a ``box-shadow:
@@ -167,33 +197,89 @@ def test_no_literal_font_size_anywhere_in_page_remains() -> None:
 
 
 def test_font_size_token_population_is_above_a_hand_read_floor() -> None:
-    # Hand count for this pass: 101 (97 literals the Fonts pass converted,
-    # plus the one explicit --fs-7 card-value rewrite and three --fs-4/5/6
-    # reads the components pass already landed).
+    # Hand count for this pass: 116 (107 carried over from the prior pass,
+    # plus the 7 new .fs-1..fs-7 utility classes and the 2 .value.fs-5 /
+    # .value.fs-6 compound overrides pass 6 added).
     n_var_font_size = len(
         _FONT_SIZE_TOKEN_RE.findall(_style_block_after_token_blocks(_page()))
     )
     assert_hand_read_floor(
         n_var_font_size,
-        90,
+        105,
         subject="font-size: var(--fs-*) site(s) in the <style> block",
-        hint="hand count for this pass: 101.",
+        hint="hand count for this pass: 116.",
     )
 
 
 def test_inline_font_size_token_population_is_above_a_hand_read_floor() -> None:
-    # Whole-page population, so it also counts the <style> block's 101 --
-    # the floor sits below the hand count of 197 (101 in <style> plus the
-    # 96 inline style= attributes this pass converted) for the usual
-    # reason: a legitimately added site must not turn this suite red.
+    # Whole-page population. Pass 6 converted every remaining inline
+    # style="font-size:var(--fs-N)" attribute to a .fs-N class (see the
+    # module docstring), so this scope now reads the same population as
+    # the <style>-block-only test above -- the floor sits below the hand
+    # count of 116 for the usual reason: a legitimately added site must
+    # not turn this suite red.
     n_var_font_size = len(_FONT_SIZE_TOKEN_RE.findall(_page()))
     assert_hand_read_floor(
         n_var_font_size,
-        180,
+        105,
         subject="font-size: var(--fs-*) site(s) in the whole page",
-        hint="hand count for this pass: 197 (101 in the <style> block "
-        "plus 96 inline style= attributes converted by the "
-        "buttons/inline-sizes pass).",
+        hint="hand count for this pass: 116 (no inline font-size style "
+        "attributes remain after pass 6 -- see "
+        "test_no_inline_font_size_style_attribute_remains).",
+    )
+
+
+def test_no_inline_font_size_style_attribute_remains() -> None:
+    hits = _INLINE_STYLE_FONT_SIZE_RE.findall(_page())
+    assert hits == [], (
+        f"a style= attribute still mentions font-size ({hits}) -- use one "
+        f"of the .fs-1 through .fs-7 classes instead, merging into any "
+        f"existing class= on the same tag"
+    )
+
+
+def test_inline_style_attribute_count_stays_at_or_below_hand_read_ceiling() -> None:
+    n_style_attrs = len(_STYLE_ATTR_RE.findall(_page()))
+    assert n_style_attrs <= _INLINE_STYLE_CEILING, (
+        f"found {n_style_attrs} style= attributes, above the pass-6 "
+        f"ceiling of {_INLINE_STYLE_CEILING} -- a new inline style should "
+        f"reuse an existing utility class, or the ceiling needs a "
+        f"deliberate, hand-counted bump alongside the new class(es) that "
+        f"justify it"
+    )
+
+
+_HEX_LITERAL_RE = re.compile(r"#[0-9a-fA-F]{6}\b")
+
+
+def test_no_hex_literal_remains_outside_the_token_blocks() -> None:
+    # Pass 6 moved the graph palette's 26 hex literals (the 10-colour
+    # metrics series and the 16-entry well-known entity-type map) into
+    # --cat-1..--cat-10 / --entity-<type> tokens inside the three theme
+    # blocks, read live via cssVar(). No allowlist is needed: nothing
+    # legitimate remains outside the token-definition blocks.
+    hits = _HEX_LITERAL_RE.findall(_text_after_token_blocks(_page()))
+    assert hits == [], (
+        f"hex colour literal(s) found outside the token-definition blocks "
+        f"({hits}) -- define a --cat-N or --entity-<type> token (or reuse "
+        f"an existing one) instead"
+    )
+
+
+def test_hex_literal_population_inside_token_blocks_above_hand_read_floor() -> None:
+    # Sanity floor for _HEX_LITERAL_RE itself: each of the three theme
+    # blocks defines its own base palette plus, since pass 6, its own
+    # --cat-1..--cat-10 and 16 --entity-* hexes.
+    text = _page()
+    end = _TOKEN_BLOCKS_END_RE.search(text)
+    assert end is not None, "could not locate the end of the token-definition blocks"
+    n_hex = len(_HEX_LITERAL_RE.findall(text[: end.end()]))
+    assert_hand_read_floor(
+        n_hex,
+        150,
+        subject="hex colour literal(s) inside the three theme token blocks",
+        hint="hand count: 189 (base palette hexes across all three blocks, "
+        "plus pass 6's 10 --cat-N and 16 --entity-* per block).",
     )
 
 
@@ -211,3 +297,23 @@ def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     assert _LITERAL_FONT_SIZE_RE.findall('<span style="font-size:0.8rem">x</span>') == [
         "font-size:0.8rem"
     ]
+    # Pass 6: a defective subject for each of the two new guards above --
+    # a regressed inline var(--fs-N) read, and a style= attribute whose
+    # count the ceiling test must actually be capable of noticing.
+    defective_markup = '<span style="font-size:var(--fs-3)">x</span>'
+    assert _INLINE_STYLE_FONT_SIZE_RE.findall(defective_markup) == [
+        'style="font-size:var(--fs-3)"'
+    ]
+    defective_js_string = 'html += `<b style="font-size:var(--fs-2)">x</b>`;'
+    assert _INLINE_STYLE_FONT_SIZE_RE.findall(defective_js_string) == [
+        'style="font-size:var(--fs-2)"'
+    ]
+    assert len(_STYLE_ATTR_RE.findall(defective_markup)) == 1
+    # Pass 6: a hex literal reintroduced outside the token blocks (a
+    # regressed nodeColor()/metricColor() or a stray style="color:#..."
+    # in a renderer) must be caught.
+    assert _HEX_LITERAL_RE.findall("const WRONG = ['#6366f1', '#22c55e'];") == [
+        "#6366f1",
+        "#22c55e",
+    ]
+    assert _HEX_LITERAL_RE.findall("background: var(--cat-1);") == []

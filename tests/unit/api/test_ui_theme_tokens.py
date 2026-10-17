@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 import trellis_api
 
 INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
@@ -107,6 +109,33 @@ NONTEXT_PAIRS = [
     ("ok", "surface"),
 ]
 
+# Graph palette (pass 6): the 10 metric-series slots and the 16 fixed
+# entity-type fills, each painted directly on the graph canvas
+# (--surface-sunken) as a node/legend dot, never as body text -- the 3:1
+# non-text floor applies, same as NONTEXT_PAIRS.
+GRAPH_CAT_TOKENS = [f"cat-{i}" for i in range(1, 11)]
+GRAPH_ENTITY_TOKENS = [
+    "entity-activity",
+    "entity-software-application",
+    "entity-creative-work",
+    "entity-file",
+    "entity-agent",
+    "entity-concept",
+    "entity-person",
+    "entity-organization",
+    "entity-team",
+    "entity-dataset",
+    "entity-project",
+    "entity-product",
+    "entity-event",
+    "entity-place",
+    "entity-observation",
+    "entity-measurement",
+]
+GRAPH_PAIRS = [
+    (tok, "surface-sunken") for tok in GRAPH_CAT_TOKENS + GRAPH_ENTITY_TOKENS
+]
+
 
 def _assert_pairs_clear_floor(
     tokens: dict[str, str], label: str, pairs: list[tuple[str, str]], floor: float
@@ -122,6 +151,7 @@ def _assert_pairs_clear_floor(
 def _assert_palette_passes(tokens: dict[str, str], label: str) -> None:
     _assert_pairs_clear_floor(tokens, label, TEXT_PAIRS + BADGE_PAIRS, MIN_CONTRAST)
     _assert_pairs_clear_floor(tokens, label, NONTEXT_PAIRS, MIN_CONTRAST_NONTEXT)
+    _assert_pairs_clear_floor(tokens, label, GRAPH_PAIRS, MIN_CONTRAST_NONTEXT)
 
 
 def test_dark_palette_clears_contrast_floor() -> None:
@@ -167,6 +197,29 @@ def test_no_colour_is_defined_only_inside_a_theme_block() -> None:
     assert not missing_from_attr, (
         f"tokens overridden under [data-theme=light] but never defined on "
         f"bare :root: {sorted(missing_from_attr)}"
+    )
+
+
+def test_graph_palette_floor_catches_a_deliberately_defective_subject() -> None:
+    # The dark-mode yellow (#fbbf24, --entity-organization's original hex)
+    # is ~1.45:1 against the light --surface-sunken -- well under the 3:1
+    # floor -- proving _assert_pairs_clear_floor() can actually fail, not
+    # just pass every time it is called.
+    defective_tokens = dict(_media_light_tokens(_page()))
+    defective_tokens["cat-1"] = "#fbbf24"
+    with pytest.raises(AssertionError):
+        _assert_pairs_clear_floor(
+            defective_tokens,
+            "defective",
+            [("cat-1", "surface-sunken")],
+            MIN_CONTRAST_NONTEXT,
+        )
+    # The real light-mode value for the same slot clears it.
+    _assert_pairs_clear_floor(
+        dict(_media_light_tokens(_page())),
+        "light (prefers-color-scheme)",
+        [("cat-1", "surface-sunken")],
+        MIN_CONTRAST_NONTEXT,
     )
 
 

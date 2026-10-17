@@ -398,8 +398,11 @@ def test_nav_data_views_and_view_containers_match_bidirectionally() -> None:
     nav = _between(page, '<nav class="sidebar-nav">', "\n        </nav>")
     nav_views = set(re.findall(r'data-view="([a-z0-9_-]+)"', nav))
     assert nav_views, "expected at least one nav data-view entry"
+    # Pass 6 converted each container's inline style="display:none" (always
+    # overridden by switchView()'s explicit block/none on every call,
+    # dashboard's initial render included) to the shared ".hide" class.
     container_views = set(
-        re.findall(r'<div id="view-([a-z0-9_-]+)" style="display:none">', page)
+        re.findall(r'<div id="view-([a-z0-9_-]+)" class="hide">', page)
     )
     assert container_views, "expected at least one view-<name> container"
     missing_containers = nav_views - container_views

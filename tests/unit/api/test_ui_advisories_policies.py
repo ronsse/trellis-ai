@@ -70,7 +70,7 @@ def test_load_advisories_checks_the_sentinel_error_before_counting_rows() -> Non
     # The error branch renders text, not a silently empty <tbody>.
     error_branch = body[status_check : body.find("return;", status_check)]
     assert "escHtml(data.message" in error_branch
-    assert "color:var(--danger)" in error_branch
+    assert "text-danger" in error_branch  # pass 6: replaces color:var(--danger)
 
 
 def test_load_advisories_distinguishes_degraded_from_healthy_empty() -> None:

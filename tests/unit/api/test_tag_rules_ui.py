@@ -218,7 +218,7 @@ def test_candidates_fetch_failure_renders_visible_error() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "tbody.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--danger)" in catch_block
+    assert "text-danger" in catch_block  # pass 6: replaces color:var(--danger)
 
 
 def test_rules_fetch_failure_renders_visible_error() -> None:
@@ -231,7 +231,7 @@ def test_rules_fetch_failure_renders_visible_error() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "tbody.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--danger)" in catch_block
+    assert "text-danger" in catch_block  # pass 6: replaces color:var(--danger)
 
 
 def test_mine_reads_the_responses_actual_count_field_names() -> None:
