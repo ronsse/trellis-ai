@@ -1095,3 +1095,46 @@ def test_every_surface_label_reaches_the_advisory_loader(
         factory.load_advisory_store = original  # type: ignore[assignment]
 
     assert seen == [surface]
+
+
+class TestResolveIntKnobWarningEventNames:
+    """Pins ``_resolve_int_knob``'s warning event names before any
+    refactor moves its body into a shared ``trellis.core.knobs`` helper.
+    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
+    call site had no test naming ``builder_factory.bad_env_int`` /
+    ``builder_factory.bad_settings_int`` at all.
+    """
+
+    def test_bad_env_value_logs_builder_factory_bad_env_int(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        import trellis.retrieve.builder_factory as factory_mod
+
+        monkeypatch.setenv(BODY_ITEMS_ENV, "not-an-int")
+
+        with capture_logs() as logs:
+            value = factory_mod._resolve_body_items(None)
+
+        assert value == DEFAULT_BODY_ITEMS
+        lines = [e for e in logs if e["event"] == "builder_factory.bad_env_int"]
+        assert len(lines) == 1
+        assert lines[0]["var"] == BODY_ITEMS_ENV
+        assert "value" not in lines[0]
+
+    def test_bad_settings_value_logs_builder_factory_bad_settings_int(self) -> None:
+        from structlog.testing import capture_logs
+
+        import trellis.retrieve.builder_factory as factory_mod
+
+        settings = {factory_mod.BODY_ITEMS_SETTING: "not-an-int"}
+
+        with capture_logs() as logs:
+            value = factory_mod._resolve_body_items(settings)
+
+        assert value == DEFAULT_BODY_ITEMS
+        lines = [e for e in logs if e["event"] == "builder_factory.bad_settings_int"]
+        assert len(lines) == 1
+        assert lines[0]["setting"] == factory_mod.BODY_ITEMS_SETTING
+        assert "value" not in lines[0]

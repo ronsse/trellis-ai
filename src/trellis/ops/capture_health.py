@@ -99,56 +99,23 @@ def _resolve_int_knob(
     default: int,
     settings: Mapping[str, Any] | None,
 ) -> int:
-    """Coerce and bounds-check through the registry's own ``validate_value``.
+    """Resolve one integer knob: env var, then a stored setting, then default.
 
-    Both the env and the stored value go through the same coercion the
-    governed ``PUT /settings`` path uses, so a non-finite value (``nan``,
-    ``inf``) is rejected instead of crashing later with ``OverflowError``
-    (uncaught by a bare ``except ValueError``), and a negative value is
-    rejected by the setting's registered ``minimum`` rather than by a
-    second, easy-to-miss floor check duplicated on every return.
-
-    Imported lazily: ``trellis.core.settings_registry`` itself imports
-    the learning tuners, which import ``trellis.ops.parameter_reachability``,
-    which imports this package's ``__init__`` -- a module-level import
-    here would close that cycle and fail with a partially-initialized
-    module on whichever side runs first.
+    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
+    shared implementation; see its docstring for the coercion and
+    precedence rules). ``warning_prefix="capture_health"`` keeps this
+    caller's event names — ``capture_health.bad_env_int`` /
+    ``capture_health.bad_settings_int`` — exactly what they were before.
     """
-    from trellis.core.settings_registry import (  # noqa: PLC0415
-        get_setting,
-        validate_value,
-    )
+    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
 
-    spec = get_setting(setting_name)
-    raw_env = os.environ.get(env_var, "").strip()
-    if raw_env:
-        try:
-            return (
-                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "capture_health.bad_env_int",
-                var=env_var,
-                error_type=type(exc).__name__,
-            )
-            return default
-    if settings is not None and setting_name in settings:
-        raw_setting = settings[setting_name]
-        try:
-            return (
-                int(validate_value(spec, raw_setting))
-                if spec is not None
-                else int(raw_setting)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "capture_health.bad_settings_int",
-                setting=setting_name,
-                error_type=type(exc).__name__,
-            )
-            return default
-    return default
+    return resolve_int_knob(
+        env_var=env_var,
+        setting_name=setting_name,
+        default=default,
+        settings=settings,
+        warning_prefix="capture_health",
+    )
 
 
 def resolve_capture_thresholds(

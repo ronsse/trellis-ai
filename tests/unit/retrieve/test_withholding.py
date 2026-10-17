@@ -420,6 +420,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
             "non_absence_reasons": [],
             "section_filtered": 0,
             "served_count": 1,
+            "class_prior_detail": [],
         }
 
     def test_a_sectioned_pack_carries_the_summary_too(self, tmp_path: Path) -> None:
@@ -601,6 +602,100 @@ class TestTheNoteIsRenderedInTheHeader:
             )
         )
         assert "1 item matched this intent but was not served" in note
+
+
+class TestClassPriorNoteNamesFormAndAxis:
+    """The withholding note must say *which* form and axis the class prior
+    gate withheld, not only the bare reason code and count — a reader
+    cannot tell which imported class was involved from ``class_prior 2``
+    alone. Never an item id or excerpt."""
+
+    def test_the_note_names_form_and_axis_instead_of_the_bare_reason(self) -> None:
+        summary = summarize_withheld(
+            [
+                RejectedItem(
+                    item_id="c1",
+                    item_type="document",
+                    reason="class_prior",
+                    strategy_source="keyword",
+                ),
+                RejectedItem(
+                    item_id="c2",
+                    item_type="document",
+                    reason="class_prior",
+                    strategy_source="keyword",
+                ),
+            ],
+            served_item_ids=[],
+            class_prior_forms={"c1": "conversation", "c2": "conversation"},
+        )
+        note = format_withholding_note(summary)
+        assert "2 conversation documents on keyword (class prior)" in note
+        assert "class_prior 2" not in note
+        assert "c1" not in note
+        assert "c2" not in note
+
+    def test_an_id_missing_from_class_prior_forms_degrades_to_unknown(self) -> None:
+        """A form mapping gap is a display nicety, not a reason to raise."""
+        summary = summarize_withheld(
+            [
+                RejectedItem(
+                    item_id="c1",
+                    item_type="document",
+                    reason="class_prior",
+                    strategy_source="keyword",
+                ),
+            ],
+            served_item_ids=[],
+            class_prior_forms={},
+        )
+        note = format_withholding_note(summary)
+        assert "1 unknown document on keyword (class prior)" in note
+
+    def test_the_detail_round_trips_through_the_event_payload(self) -> None:
+        """``as_telemetry`` -> ``withholding_from_payload`` -> the rendered
+        note must agree, because the event payload is the only channel
+        between the builder (which has the source ``PackItem``) and any
+        reader reconstructing the summary later."""
+        summary = summarize_withheld(
+            [
+                RejectedItem(
+                    item_id="c1",
+                    item_type="document",
+                    reason="class_prior",
+                    strategy_source="semantic",
+                ),
+            ],
+            served_item_ids=[],
+            class_prior_forms={"c1": "conversation"},
+        )
+        payload = summary.as_telemetry()
+        assert payload["class_prior_detail"] == [
+            {"form": "conversation", "axis": "semantic", "count": 1}
+        ]
+        rebuilt = withholding_from_payload(payload)
+        assert rebuilt is not None
+        note = format_withholding_note(rebuilt)
+        assert "1 conversation document on semantic (class prior)" in note
+
+    def test_a_payload_from_an_older_server_renders_the_bare_reason(self) -> None:
+        """No ``class_prior_detail`` key at all (an event emitted before
+        this change) must still render, falling back to the bare reason —
+        never raise on an old payload."""
+        rebuilt = withholding_from_payload(
+            {
+                "total": 1,
+                "by_reason": {"class_prior": 1},
+                "withheld_item_ids": ["c1"],
+                "non_absence_reasons": [],
+                "section_filtered": 0,
+                "served_count": 0,
+            }
+        )
+        assert rebuilt is not None
+        assert rebuilt.class_prior_detail == ()
+        note = format_withholding_note(rebuilt)
+        assert "class_prior 1" in note
 
 
 class TestWithheldContentIsNotCopiedIntoAServedSurface:

@@ -72,7 +72,6 @@ change what the path does.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -80,7 +79,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.core.settings_registry import get_setting, validate_value
+from trellis.core.knobs import resolve_int_knob
 
 logger = structlog.get_logger(__name__)
 
@@ -123,47 +122,24 @@ def _resolve_int_threshold(
     default: int,
     settings: Mapping[str, Any] | None,
 ) -> int:
-    """Coerce and bounds-check through the registry's own ``validate_value``.
+    """Resolve one integer knob: env var, then a stored setting, then default.
 
-    Routing both the env and the stored value through the same coercion the
-    governed ``PUT /settings`` path already uses closes three gaps at once:
-    a non-finite value (``nan``/``inf``) is rejected instead of crashing
-    later with ``OverflowError`` (``int(float("inf"))`` raises that, which a
-    bare ``except ValueError`` does not catch), a value below the setting's
-    registered ``minimum`` is rejected instead of silently honoured, and a
-    malformed stored value is logged exactly as loudly as a malformed env
-    one instead of failing (and falling back) in silence.
+    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
+    shared implementation; see its docstring for the coercion and
+    precedence rules). ``warning_prefix="demotion_gate"`` keeps this
+    caller's event names — ``demotion_gate.bad_env_int`` /
+    ``demotion_gate.bad_settings_int`` — exactly what they were before.
+    Kept under its original name (``_resolve_int_threshold``, not
+    ``_resolve_int_knob``) since that is this module's own near-copy
+    spelling, which the other four callers' docstrings already name.
     """
-    spec = get_setting(setting_name)
-    raw_env = os.environ.get(env_var, "").strip()
-    if raw_env:
-        try:
-            return (
-                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "demotion_gate.bad_env_int",
-                var=env_var,
-                error_type=type(exc).__name__,
-            )
-            return default
-    if settings is not None and setting_name in settings:
-        raw_setting = settings[setting_name]
-        try:
-            return (
-                int(validate_value(spec, raw_setting))
-                if spec is not None
-                else int(raw_setting)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "demotion_gate.bad_settings_int",
-                setting=setting_name,
-                error_type=type(exc).__name__,
-            )
-            return default
-    return default
+    return resolve_int_knob(
+        env_var=env_var,
+        setting_name=setting_name,
+        default=default,
+        settings=settings,
+        warning_prefix="demotion_gate",
+    )
 
 
 def resolve_demotion_thresholds(
