@@ -625,7 +625,9 @@ class TestBuildSectioned:
             sections=[SectionRequest(name="all")],
         )
 
-        served_ids = [item.item_id for section in pack.sections for item in section.items]
+        served_ids = [
+            item.item_id for section in pack.sections for item in section.items
+        ]
         assert served_ids == []
 
         withholding = pack.metadata["withholding"]

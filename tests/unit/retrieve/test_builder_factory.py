@@ -653,7 +653,7 @@ class TestClassPriorWiring:
         # near-duplicates to the pack's own semantic-dedup gate — a flat
         # repeated phrase would trip that gate and confound this test with
         # a second, unrelated rejection reason.
-        rng = random.Random(1234)
+        rng = random.Random(1234)  # noqa: S311 - test RNG, not crypto
         vocabulary = [f"item{i}" for i in range(500)]
 
         def _turn() -> str:

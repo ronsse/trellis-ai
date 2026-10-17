@@ -141,16 +141,12 @@ class TestResolveClassPriorConfig:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
-        config = resolve_class_prior_config(
-            settings={"class_prior_mode": "withhold"}
-        )
+        config = resolve_class_prior_config(settings={"class_prior_mode": "withhold"})
         assert config.mode == "withhold"
 
     def test_env_overrides_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(CLASS_PRIOR_MODE_ENV, "withhold")
-        config = resolve_class_prior_config(
-            settings={"class_prior_mode": "off"}
-        )
+        config = resolve_class_prior_config(settings={"class_prior_mode": "off"})
         assert config.mode == "withhold"
 
     def test_unrecognised_env_mode_degrades_to_off(

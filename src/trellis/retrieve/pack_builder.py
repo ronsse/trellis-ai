@@ -1051,7 +1051,9 @@ class PackBuilder:
         # stays rejected as superseded, and the successor is rejected as
         # class_prior — neither one reaches the pack.
         all_items, class_prior_rejected = self._apply_class_prior_pool(
-            all_items, config=class_prior_config, strategy_by_item_id=strategy_by_item_id
+            all_items,
+            config=class_prior_config,
+            strategy_by_item_id=strategy_by_item_id,
         )
         rejected.extend(class_prior_rejected)
 
@@ -1373,7 +1375,9 @@ class PackBuilder:
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected = self._apply_class_prior_pool(
-            all_items, config=class_prior_config, strategy_by_item_id=strategy_by_item_id
+            all_items,
+            config=class_prior_config,
+            strategy_by_item_id=strategy_by_item_id,
         )
         rejected.extend(class_prior_rejected)
 

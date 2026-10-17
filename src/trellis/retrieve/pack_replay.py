@@ -659,8 +659,7 @@ def replay_class_prior(
     """
     mode_is_off = config.mode == "off" or not config.forms or not config.axes
     applied_config = (
-        f"mode={config.mode} forms={sorted(config.forms)} "
-        f"axes={sorted(config.axes)}"
+        f"mode={config.mode} forms={sorted(config.forms)} axes={sorted(config.axes)}"
     )
     since = datetime.now(tz=UTC) - timedelta(days=days)
     feedback_events, pack_payloads, _ = join_pack_feedback(
