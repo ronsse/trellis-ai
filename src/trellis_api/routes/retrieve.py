@@ -23,10 +23,12 @@ from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     AxisReportResponse,
+    DefaultValidationError,
     PackRequest,
     PackResponse,
     SectionedPackRequest,
     SectionedPackResponse,
+    StringDetailError,
 )
 
 logger = structlog.get_logger(__name__)
@@ -243,7 +245,22 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     )
 
 
-@router.post("/packs/sectioned", response_model=SectionedPackResponse)
+@router.post(
+    "/packs/sectioned",
+    response_model=SectionedPackResponse,
+    responses={
+        422: {
+            "description": (
+                "``req`` itself fails pydantic validation "
+                "(DefaultValidationError -- ``detail`` is a list of "
+                "field errors), or ``sections`` is empty or one entry "
+                "fails ``SectionRequest`` validation (StringDetailError "
+                "-- ``detail`` is a plain string)."
+            ),
+            "model": DefaultValidationError | StringDetailError,
+        },
+    },
+)
 def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
     """Assemble a sectioned pack with independently budgeted sections.
 

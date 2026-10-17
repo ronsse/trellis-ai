@@ -29,8 +29,22 @@ from trellis.stores.base import VectorStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
-from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
-from trellis_wire.dtos import BatchCommandBodyError, BatchOperationNameError
+from trellis_api.routes import (
+    admin,
+    curate,
+    explore,
+    ingest,
+    mutations,
+    observations,
+    policies,
+    retrieve,
+)
+from trellis_wire.dtos import (
+    BatchCommandBodyError,
+    BatchOperationNameError,
+    DefaultValidationError,
+    StringDetailError,
+)
 
 
 @pytest.fixture
@@ -3452,6 +3466,64 @@ class TestVectorsResetStatusLine:
         # spec can carry that, for the same reason the code split is —
         # this arm shares its status with the unconfigured one.
         assert "interface" in refusal_409, refusal_409
+
+
+#: ``(module, path, method, expected 422 model)`` for every route that
+#: hand-raises a plain-string-``detail`` ``HTTPException(422, ...)`` --
+#: FastAPI's own auto-generated 422 (a list of field errors) is the
+#: *wrong* shape for that arm, so each of these must declare its real
+#: union (or, for ``run_admin_job``, the lone string-detail shape) rather
+#: than leaving the route to FastAPI's default. A dropped ``responses=``
+#: regenerates ``docs/api/v1.yaml`` back to the generic shape silently,
+#: the same drift #484 and the vectors/reset test above both caught.
+_STRING_DETAIL_422_ROUTES: tuple[tuple[object, str, str, object], ...] = (
+    (admin, "/metrics/timeseries", "GET", DefaultValidationError | StringDetailError),
+    (admin, "/admin/jobs/{name}", "PATCH", DefaultValidationError | StringDetailError),
+    (admin, "/admin/jobs/{name}/run", "POST", StringDetailError),
+    (explore, "/events", "GET", DefaultValidationError | StringDetailError),
+    (ingest, "/traces", "POST", DefaultValidationError | StringDetailError),
+    (ingest, "/evidence", "POST", DefaultValidationError | StringDetailError),
+    (ingest, "/vectors", "POST", DefaultValidationError | StringDetailError),
+    (
+        observations,
+        "/observations",
+        "POST",
+        DefaultValidationError | StringDetailError,
+    ),
+    (
+        observations,
+        "/measurements",
+        "POST",
+        DefaultValidationError | StringDetailError,
+    ),
+    (retrieve, "/packs/sectioned", "POST", DefaultValidationError | StringDetailError),
+)
+
+
+def test_string_detail_422_routes_declare_their_real_shape():
+    """Every hand-raised string-``detail`` 422 names its actual shape.
+
+    Each router below pairs a plain-string ``HTTPException(422, ...)``
+    with FastAPI's own default list-of-field-errors 422 (or, for
+    ``run_admin_job``, has no default-shape arm at all) -- so the
+    ``responses={422: ...}`` override is load-bearing, not decorative.
+    Reads ``route.responses`` directly (what ``generate_openapi.py``
+    reads), the same seam ``test_the_spec_declares_every_refusal`` pins
+    for ``/vectors/reset``.
+    """
+    for module, path, method, expected_model in _STRING_DETAIL_422_ROUTES:
+        route = next(
+            r
+            for r in module.router.routes
+            if getattr(r, "path", None) == path and method in r.methods
+        )
+        assert 422 in route.responses, (path, method, route.responses)
+        assert route.responses[422]["model"] == expected_model, (
+            path,
+            method,
+            route.responses[422],
+        )
+        assert route.responses[422]["description"], (path, method)
 
 
 class _UnresettableVectorStore(VectorStore):

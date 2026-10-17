@@ -1003,7 +1003,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("report_only", "commit"),
         refused_values=("commit",),
         refused_reason=(
-            "commit mode cannot be set through Settings; only the "
+            'learning.candidate_auto_promote.mode="commit" cannot be set '
+            "through Settings; only the "
             f"{CANDIDATE_AUTO_PROMOTE_MODE_ENV} environment variable can, "
             "and construction still refuses it unless auto-demotion "
             "(learning.precedent_auto_demote.enabled) is also on"
@@ -1173,7 +1174,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("report_only", "commit"),
         refused_values=("commit",),
         refused_reason=(
-            "commit mode cannot be set through Settings; only the "
+            'learning.precedent_auto_demote.mode="commit" cannot be set '
+            "through Settings; only the "
             f"{PRECEDENT_AUTO_DEMOTE_MODE_ENV} environment variable can"
         ),
     ),

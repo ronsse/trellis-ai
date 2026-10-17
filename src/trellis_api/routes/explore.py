@@ -22,6 +22,7 @@ from trellis.auth import SCOPE_ADMIN
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import require_scope
+from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 router = APIRouter()
 
@@ -194,7 +195,19 @@ def _parse_event_type(event_type: str | None) -> EventType | None:
 @router.get(
     "/events",
     dependencies=_ADMIN_ONLY,
-    responses={403: {"description": "The caller's key lacks the admin scope."}},
+    responses={
+        403: {"description": "The caller's key lacks the admin scope."},
+        422: {
+            "description": (
+                "A query parameter fails its declared type "
+                "(DefaultValidationError -- ``detail`` is a list of field "
+                "errors), or an unknown `event_type` or an `order` outside "
+                "{'asc', 'desc'} (StringDetailError -- ``detail`` is a "
+                "plain string naming the bad value)."
+            ),
+            "model": DefaultValidationError | StringDetailError,
+        },
+    },
 )
 def list_events(
     event_type: str | None = Query(None, description="Filter by event type value"),

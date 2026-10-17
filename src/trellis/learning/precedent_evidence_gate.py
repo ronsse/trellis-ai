@@ -569,44 +569,6 @@ class PrecedentDemotionOutcome:
     unhelpful_count: int = 0
 
 
-def emit_precedent_demotion_failure_event(
-    event_log: EventLog,
-    *,
-    error: BaseException,
-    source: str = "precedent_evidence_gate",
-) -> str | None:
-    """Record a run that never produced outcomes at all.
-
-    Mirrors
-    :func:`trellis.learning.candidate_auto_promote.emit_candidate_auto_promote_failure_event`:
-    reuses :attr:`EventType.LEARNING_AUTO_DEMOTE_EVALUATED` rather than a
-    new event type, never includes ``str(error)`` (only ``error.type``),
-    and swallows its own emission failure rather than masking the
-    original exception.
-    """
-    payload: dict[str, Any] = {
-        "outcome": "failed",
-        "error": {
-            "type": type(error).__name__,
-            "message": "withheld — see error.type",
-        },
-    }
-    try:
-        event = event_log.emit(
-            EventType.LEARNING_AUTO_DEMOTE_EVALUATED,
-            source,
-            payload=payload,
-        )
-    except Exception:
-        logger.warning(
-            "precedent_demotion_failure_event_emit_failed",
-            exc_info=True,
-            original_error_type=type(error).__name__,
-        )
-        return None
-    return event.event_id
-
-
 def judge_current_precedents(
     event_log: EventLog,
     graph_store: GraphStore,
@@ -779,7 +741,6 @@ __all__ = [
     "PrecedentDemotionOutcome",
     "discover_current_precedents",
     "discover_current_precedents_with_coverage",
-    "emit_precedent_demotion_failure_event",
     "gather_precedent_citation_evidence",
     "join_precedent_citation_events",
     "judge_current_precedents",

@@ -495,6 +495,36 @@ class BatchOperationNameError(WireModel):
     detail: str
 
 
+class DefaultValidationError(WireModel):
+    """FastAPI's own default 422 shape: ``detail`` is a list of field
+    errors (``loc`` / ``msg`` / ``type`` / ...), generated automatically
+    for any route with query/path/body params FastAPI itself validates.
+
+    Structurally identical to :class:`BatchCommandBodyError` -- that
+    model stays separately named and documented for ``/commands/batch``
+    specifically; this one is the reusable, route-agnostic declaration
+    for any other route whose 422 can be *either* that default shape
+    *or* a hand-raised plain-string-``detail`` shape
+    (:class:`StringDetailError`), so the two can be declared together
+    via a ``model`` union without re-deriving the list shape per route.
+    """
+
+    detail: list[BatchCommandBodyErrorItem]
+
+
+class StringDetailError(WireModel):
+    """A 422 whose ``detail`` is a plain string, not FastAPI's default
+    list-of-field-errors shape -- the shape of a hand-raised
+    ``HTTPException(422, detail="...")`` guarding an input check FastAPI's
+    own query/body validation cannot express (an unknown enum-like value,
+    an empty list, an out-of-range computed field, ...). Reused across
+    every route with this pattern instead of one model per route, since
+    the shape itself carries no route-specific fields.
+    """
+
+    detail: str
+
+
 # -- Bulk ingest (entities + edges + aliases in one request) --
 
 
