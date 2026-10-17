@@ -4040,7 +4040,14 @@ def execute_mutation(
     no principal to derive from (stdio, or enforcement disabled) current
     behaviour is unchanged and ``actor`` passes through as before. The
     claimed ``actor`` rides along separately as
-    ``metadata["requested_by_claim"]`` whenever it is overridden.
+    ``metadata["requested_by_claim"]`` whenever it is overridden. This
+    tool has no caller-settable ``metadata`` parameter: ``Command.metadata``
+    here is always this server's own ``{"requested_by_claim": ...}`` or
+    ``{}``, never merged with caller input, so there is no
+    ``trellis.mutate.reject_reserved_metadata`` call site here the way
+    REST ``/commands/batch`` needs one for its per-item ``metadata`` body
+    field -- running that guard on this function's own stamp would
+    reject its own legitimate ``requested_by_claim`` key.
 
     Args:
         operation: Operation name. Accepts the wire value
