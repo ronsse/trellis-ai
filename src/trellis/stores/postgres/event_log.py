@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.errors import StoreError
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.postgres.base import PostgresStoreBase
@@ -108,7 +109,9 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # Append
     # ------------------------------------------------------------------
 
-    def append(self, event: Event) -> None:
+    def _append(self, event: Event) -> None:
+        """Called by ``EventLog.append`` only, after it has scrubbed
+        ``event`` -- see the base class."""
         with self._mapped_conn("append") as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -141,12 +144,18 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # ------------------------------------------------------------------
 
     def has_idempotency_key(self, key: str) -> bool:
-        """Efficient single-row check for an idempotency key."""
+        """Efficient single-row check for an idempotency key.
+
+        ``key`` is scrubbed before the lookup; see the SQLite backend's
+        twin method and the base class's ``has_idempotency_key``
+        docstring for why this is defense in depth, not a path the
+        shipped system exercises.
+        """
         with self._mapped_conn("has_idempotency_key") as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM events WHERE event_type = %s "
                 "AND payload->>'idempotency_key' = %s LIMIT 1",
-                (str(EventType.MUTATION_EXECUTED), key),
+                (str(EventType.MUTATION_EXECUTED), scrub_jsonb_unsafe(key)),
             )
             return cur.fetchone() is not None
 
@@ -173,6 +182,13 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         order: EventOrder = "asc",
         payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
+        """Query events with filters.
+
+        ``entity_id``, ``source`` and each ``payload_filters`` value are
+        scrubbed the same way ``append`` scrubs the corresponding stored
+        field -- see the SQLite backend's twin method for the full
+        rationale.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -181,10 +197,10 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(str(event_type))
         if entity_id is not None:
             clauses.append("entity_id = %s")
-            params.append(entity_id)
+            params.append(scrub_jsonb_unsafe(entity_id))
         if source is not None:
             clauses.append("source = %s")
-            params.append(source)
+            params.append(scrub_jsonb_unsafe(source))
         if since is not None:
             clauses.append("occurred_at >= %s")
             params.append(since)
@@ -197,7 +213,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                 # ints / bools must coerce to str. JSONB makes this
                 # GIN-indexable but no index is required for correctness.
                 clauses.append("payload->>%s = %s")
-                params.extend([key, value])
+                params.extend([key, scrub_jsonb_unsafe(value)])
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"

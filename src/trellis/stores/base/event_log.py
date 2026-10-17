@@ -18,6 +18,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel, VersionedModel, utc_now
 from trellis.core.ids import generate_ulid
+from trellis.core.text_safety import scrub_jsonb_unsafe
 
 logger = structlog.get_logger(__name__)
 
@@ -653,9 +654,54 @@ class Event(VersionedModel):
 class EventLog(ABC):
     """Abstract interface for an append-only event log."""
 
-    @abstractmethod
     def append(self, event: Event) -> None:
-        """Append event (immutable, no updates)."""
+        """Scrub, then append (immutable, no updates).
+
+        The one seam every write path -- a direct ``append(Event(...))``
+        and the ``emit()`` convenience helper alike -- runs through before
+        a byte reaches a backend. Postgres ``text``/``jsonb`` columns
+        reject a NUL byte or a lone UTF-16 surrogate outright; SQLite
+        accepts both silently, which is exactly why a per-backend fix
+        would stay invisible in the SQLite-only local suite. Replacing
+        the hazard here, once, closes it for every backend without
+        touching a single one of the ~75 ``event_log.emit(...)`` call
+        sites, and a new backend gets it for free because this method is
+        no longer abstract -- only :meth:`_append` is.
+
+        Scrubs ``payload``, ``metadata``, ``entity_id``, ``entity_type``
+        and ``source``: the fields a caller's free text can reach.
+        ``event_id`` (a ULID), ``occurred_at``/``recorded_at``
+        (datetimes) and ``event_type`` (a closed ``StrEnum``) carry no
+        caller-supplied text, so they are left alone. Mutates ``event``
+        in place -- ``Event`` is not a frozen model -- so ``emit()``'s
+        return value reflects exactly what got persisted, and never runs
+        on a read path: ``get_event``/``get_events`` reconstruct ``Event``
+        straight from stored rows and must hand back a legacy hazardous
+        row byte-for-byte, not a newly-scrubbed copy of it.
+
+        For ``entity_id``/``entity_type``/``source`` (plain ``str`` fields)
+        a lone surrogate never reaches this point at all: pydantic-core's
+        own string validator refuses to construct a ``str`` field from one,
+        raising before ``append`` runs. A NUL byte passes that validator
+        fine, so it is the hazard this scrub actually removes for those
+        three fields; both hazards still reach ``payload``/``metadata``
+        (``dict[str, Any]`` -- pydantic does not deep-validate ``Any``
+        values), which is where the scrub does its full job.
+        """
+        event.payload = scrub_jsonb_unsafe(event.payload)
+        event.metadata = scrub_jsonb_unsafe(event.metadata)
+        if event.entity_id is not None:
+            event.entity_id = scrub_jsonb_unsafe(event.entity_id)
+        if event.entity_type is not None:
+            event.entity_type = scrub_jsonb_unsafe(event.entity_type)
+        event.source = scrub_jsonb_unsafe(event.source)
+        self._append(event)
+
+    @abstractmethod
+    def _append(self, event: Event) -> None:
+        """Backend-specific persistence. Called only by :meth:`append`,
+        which has already scrubbed ``event`` -- never call this directly
+        with an unscrubbed ``Event``."""
 
     @abstractmethod
     def get_events(
@@ -707,13 +753,23 @@ class EventLog(ABC):
 
         Default implementation queries events. Backends should override
         with a targeted index query for performance.
+
+        ``key`` is scrubbed before comparison, matching what ``append``
+        already did to any ``idempotency_key`` that reached storage via
+        ``payload``. In practice a hazardous key never gets this far --
+        ``CommandValidator.validate`` refuses one at Stage 1, by design:
+        a key replaced with U+FFFD would no longer match the *raw* retry
+        key a later caller sends, so it is rejected rather than stored.
+        The scrub here is defense in depth for a caller outside that
+        governed path, not a case the shipped system exercises.
         """
+        scrubbed_key = scrub_jsonb_unsafe(key)
         events = self.get_events(
             event_type=EventType.MUTATION_EXECUTED,
             source="mutation_executor",
             limit=100,
         )
-        return any(e.payload.get("idempotency_key") == key for e in events)
+        return any(e.payload.get("idempotency_key") == scrubbed_key for e in events)
 
     def get_event(self, event_id: str) -> Event | None:
         """Fetch one event by id, independent of any caller's list window.

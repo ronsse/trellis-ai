@@ -9,10 +9,45 @@ from typing import Any
 
 import structlog
 
+from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
+
+
+def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
+    """Build a SQL fragment that matches ``column_sql`` against ``value``,
+    scrubbed-aware.
+
+    A SQLite row written before this module scrubbed on write (or by any
+    direct writer that bypasses ``EventLog.append``) can still hold the
+    *raw* NUL byte or lone surrogate a caller's filter value carries.
+    When scrubbing the filter would change it, match either form --
+    ``column_sql IN (?, ?)`` with the raw value first, the scrubbed value
+    second -- so a legacy raw-stored row and a post-fix scrubbed-stored
+    row are both reachable from the one value a caller actually has.
+    When the value has no hazard, scrubbing is a no-op and a plain
+    ``column_sql = ?`` is returned unchanged.
+
+    A value holding a lone surrogate gets only the scrubbed equality:
+    Python's ``sqlite3`` cannot bind one (UTF-8 encoding raises), so the
+    raw arm would turn every such filter into an exception. A legacy
+    ``payload_json`` value can still hold one as a JSON ``\\ud800``
+    escape; a filter for it now misses that row rather than raising.
+
+    Postgres never needs this: a Postgres ``text``/``jsonb`` column can
+    never have stored a raw NUL or lone surrogate in the first place
+    (the write raises), so its filters stay a plain scrubbed equality.
+    """
+    scrubbed = scrub_jsonb_unsafe(value)
+    if scrubbed == value:
+        return f"{column_sql} = ?", [value]
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"{column_sql} = ?", [scrubbed]
+    return f"{column_sql} IN (?, ?)", [value, scrubbed]
 
 
 _CREATE_TABLE = """\
@@ -54,8 +89,9 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
     # -- mutations -----------------------------------------------------------
 
-    def append(self, event: Event) -> None:
-        """Append event (immutable, no updates).
+    def _append(self, event: Event) -> None:
+        """Append event (immutable, no updates). Called by ``EventLog.append``
+        only, after it has scrubbed ``event`` -- see the base class.
 
         An INSERT that fails (a duplicate ``event_id``, say) has already
         taken the database's write lock, so it is rolled back rather than
@@ -91,12 +127,22 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
     # -- idempotency ---------------------------------------------------------
 
     def has_idempotency_key(self, key: str) -> bool:
-        """Efficient single-row check for an idempotency key."""
+        """Efficient single-row check for an idempotency key.
+
+        ``key`` is matched scrub-aware (``_scrub_match_clause``) so it
+        agrees with what ``append`` would have stored for it, and also
+        finds a legacy row stored before that scrub existed; see the
+        base class's ``has_idempotency_key`` docstring for why this
+        never bites in practice (Stage 1 validation refuses a
+        hazardous key outright).
+        """
+        clause, value_params = _scrub_match_clause(
+            "json_extract(payload_json, '$.idempotency_key')", key
+        )
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT 1 FROM events WHERE event_type = ? "
-            "AND json_extract(payload_json, '$.idempotency_key') = ? LIMIT 1",
-            (str(EventType.MUTATION_EXECUTED), key),
+            f"SELECT 1 FROM events WHERE event_type = ? AND {clause} LIMIT 1",
+            [str(EventType.MUTATION_EXECUTED), *value_params],
         )
         return cur.fetchone() is not None
 
@@ -121,7 +167,19 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         order: EventOrder = "asc",
         payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
-        """Query events with filters."""
+        """Query events with filters.
+
+        ``entity_id``, ``source`` and each ``payload_filters`` value are
+        matched scrub-aware (``_scrub_match_clause``): scrubbed the same
+        way ``append`` scrubs the corresponding stored field, so a
+        caller filtering by the raw string it originally handed
+        ``emit()`` matches a post-fix (scrubbed-on-write) row, *and*
+        also matches the raw value directly, so a legacy row written
+        before this module scrubbed on write stays findable too.
+        ``payload_filters`` keys are left alone: they are JSON field
+        names chosen by code, not caller free text, and no shipped
+        caller names one containing either hazard.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -129,11 +187,13 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             clauses.append("event_type = ?")
             params.append(str(event_type))
         if entity_id is not None:
-            clauses.append("entity_id = ?")
-            params.append(entity_id)
+            clause, value_params = _scrub_match_clause("entity_id", entity_id)
+            clauses.append(clause)
+            params.extend(value_params)
         if source is not None:
-            clauses.append("source = ?")
-            params.append(source)
+            clause, value_params = _scrub_match_clause("source", source)
+            clauses.append(clause)
+            params.extend(value_params)
         if since is not None:
             clauses.append("occurred_at >= ?")
             params.append(since.isoformat())
@@ -148,8 +208,12 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
                 # under ``payload_json``; ``json_extract`` returns the
                 # underlying scalar so plain string comparison matches
                 # JSON string values.
-                clauses.append("json_extract(payload_json, '$.' || ?) = ?")
-                params.extend([key, value])
+                clause, value_params = _scrub_match_clause(
+                    "json_extract(payload_json, '$.' || ?)", value
+                )
+                clauses.append(clause)
+                params.append(key)
+                params.extend(value_params)
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"

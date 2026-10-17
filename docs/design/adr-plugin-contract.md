@@ -59,6 +59,11 @@ Wiring the remaining groups is a follow-up when there's a concrete
 plugin author asking for it — don't pay the consumer-wiring cost
 until the first consumer appears.
 
+An `event_log` plugin implements `_append`, not `append`: `EventLog.append`
+is the concrete scrubbing template every backend shares, and overriding it
+bypasses the NUL/lone-surrogate scrub the base class guarantees before a
+byte reaches storage.
+
 ### Entry-point value syntax
 
 Both forms are supported:
