@@ -12,9 +12,11 @@ from trellis.mutate import (
     CommandBatch,
     CommandStatus,
     Operation,
+    ReservedMetadataKeyError,
     build_curate_executor,
     build_evidence_ingest_command_from_args,
     redirect_unreachable_settings_update,
+    reject_reserved_metadata,
     requires_admin_scope,
 )
 from trellis_api.app import get_registry
@@ -65,7 +67,17 @@ def _build_command(
     requested_by: str,
     requested_by_claim: str | None,
 ) -> Command:
-    metadata = dict(item.metadata)
+    """Build one batch item's :class:`Command`.
+
+    *item.metadata* is caller-supplied and passes through
+    :func:`~trellis.mutate.reject_reserved_metadata` first -- which
+    raises :class:`~trellis.mutate.ReservedMetadataKeyError` for a
+    planted ``requested_by_claim``/``key_id``/``key_name``/
+    ``write_provenance``/``handler_warnings`` -- *before* the
+    server-derived ``requested_by_claim`` override below is applied, so
+    the guard only ever sees what the caller actually sent.
+    """
+    metadata = reject_reserved_metadata(item.metadata)
     if requested_by_claim is not None:
         metadata["requested_by_claim"] = requested_by_claim
     if operation is Operation.EVIDENCE_INGEST and isinstance(
@@ -93,6 +105,14 @@ def _build_command(
     "/commands/batch",
     response_model=BatchCommandResponse,
     responses={
+        400: {
+            "description": (
+                "A command's own ``metadata`` named a key reserved for "
+                "server-side audit stamping (``requested_by_claim``, "
+                "``key_id``, ``key_name``, ``write_provenance``, "
+                "``handler_warnings``); ``detail`` names the key."
+            )
+        },
         403: {
             "description": (
                 "The batch names an operation outside "
@@ -133,6 +153,14 @@ def execute_batch(
     :func:`trellis_api.routes._principal.resolve_requested_by`); the
     body's own claim rides along as each command's
     ``metadata["requested_by_claim"]``.
+
+    A command's own ``metadata`` is otherwise free-form decoration, with
+    one exception: it may not name a key reserved for server-side audit
+    stamping (``requested_by_claim``, ``key_id``, ``key_name``,
+    ``write_provenance``, ``handler_warnings`` --
+    :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). A batch
+    containing one is refused whole with 400, naming the key, before any
+    command executes.
     """
     operations = [_parse_operation(item.operation) for item in req.commands]
 
@@ -155,11 +183,25 @@ def execute_batch(
         ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
     )
 
-    # Build Command objects from the request items
-    commands = [
-        _build_command(item, operation, requested_by, requested_by_claim)
-        for item, operation in zip(req.commands, operations, strict=True)
-    ]
+    # Build Command objects from the request items. A command's own
+    # metadata is caller-supplied, so _build_command rejects a reserved
+    # key (requested_by_claim/key_id/key_name/write_provenance/
+    # handler_warnings) before this server's own stamp is merged onto it
+    # -- see reject_reserved_metadata's docstring for why a planted one
+    # is a forgery, not harmless decoration.
+    try:
+        commands = [
+            _build_command(item, operation, requested_by, requested_by_claim)
+            for item, operation in zip(req.commands, operations, strict=True)
+        ]
+    except ReservedMetadataKeyError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"metadata key {exc.key!r} is reserved for server-side "
+                "audit stamping and may not be set by the caller"
+            ),
+        ) from None
 
     batch = CommandBatch(
         commands=commands,

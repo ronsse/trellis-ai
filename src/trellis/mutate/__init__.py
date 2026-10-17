@@ -37,6 +37,11 @@ from trellis.mutate.policy_source import (
     load_policies,
     resolve_policy_path,
 )
+from trellis.mutate.reserved_metadata import (
+    RESERVED_COMMAND_METADATA_KEYS,
+    ReservedMetadataKeyError,
+    reject_reserved_metadata,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
@@ -235,6 +240,7 @@ __all__ = [
     "NON_DESTRUCTIVE_OPERATIONS",
     "POLICY_FILENAME",
     "POLICY_GATE_SURFACE",
+    "RESERVED_COMMAND_METADATA_KEYS",
     "UNATTENDED_WRITERS",
     "BatchStrategy",
     "Command",
@@ -246,6 +252,7 @@ __all__ = [
     "MutationExecutor",
     "Operation",
     "OperationRegistry",
+    "ReservedMetadataKeyError",
     "build_classify_rules_executor",
     "build_curate_executor",
     "build_evidence_ingest_command",
@@ -257,6 +264,7 @@ __all__ = [
     "governing_key_refusal",
     "load_policies",
     "redirect_unreachable_settings_update",
+    "reject_reserved_metadata",
     "requires_admin_scope",
     "resolve_policy_path",
     "unattended_writer_refusal",
