@@ -59,7 +59,7 @@
             --dur: 150ms; --ease: cubic-bezier(.2,.7,.2,1);
             --rail: 228px; --rail-collapsed: 52px; --topbar-h: 48px;
 
-            /* Graph palette (pass 6): the 10-slot metrics series and the
+            /* Graph palette: the 10-slot metrics series and the
                well-known entity-type fills, as tokens so light mode can use
                WCAG-safe shades instead of inheriting dark-mode hues as-is. */
             --cat-1: #6366f1; --cat-2: #22c55e; --cat-3: #f59e0b; --cat-4: #3b82f6; --cat-5: #ec4899;
@@ -1931,7 +1931,7 @@
         .dv-copy:hover { opacity: 1; color: var(--accent); border-color: var(--border); }
         .dv-copy.done { opacity: 1; color: var(--ok); }
 
-        /* Type-scale utilities (Ledger pass 6): replace a repeated inline
+        /* Type-scale utilities: replace a repeated inline
            font-size style attribute with a class carrying the same single
            declaration, so the cascade still lands on the --fs-N token. */
         .fs-1 { font-size: var(--fs-1); }
@@ -1947,14 +1947,14 @@
         .value.fs-5 { font-size: var(--fs-5); }
         .value.fs-6 { font-size: var(--fs-6); }
 
-        /* Text-colour utilities (Ledger pass 6): the four inline color:
+        /* Text-colour utilities: the four inline color:
            values repeated three or more times across the page. */
         .text-dim { color: var(--text-dim); }
         .text-danger { color: var(--danger); }
         .text-warn { color: var(--warn); }
         .text-ok { color: var(--ok); }
 
-        /* Small layout utilities (Ledger pass 6): each replaces one exact
+        /* Small layout utilities: each replaces one exact
            inline declaration set repeated five or more times. */
         .hide { display: none; }
         .m-0 { margin: 0; }
@@ -3467,7 +3467,7 @@
         // renders as an annotated events strip (grouped bars by event type).
 
         // Series palette — stable order so a group keeps its colour across
-        // refreshes. Pass 6: the 10 slots are --cat-1..--cat-10 (defined in
+        // refreshes. The 10 slots are --cat-1..--cat-10 (defined in
         // all three theme blocks), read live so a chart drawn after a theme
         // toggle picks up the mode it was drawn in.
         const SERIES_COLOR_COUNT = 10;
@@ -4319,7 +4319,7 @@
         // SoftwareApplication, CreativeWork, File, Agent, Concept) sit apart
         // from each other and from the hashed hues of `concept`, `gotcha` and
         // `system` (179, 61 and 194), the most common open-vocabulary types.
-        // Pass 6: each fixed colour is a `--entity-<kebab-type>` token (all
+        // Each fixed colour is a `--entity-<kebab-type>` token (all
         // three theme blocks), read live rather than a frozen hex, so light
         // mode can use a WCAG-safe shade of the same categorical colour.
         const WELL_KNOWN_ENTITY_TYPES = [
@@ -4380,7 +4380,7 @@
         // freeze dark-mode colours into light mode. Call this again on
         // every theme toggle (cy.style(buildCyStyle())) rather than reading
         // the tokens once. nodeColor()'s categorical fills (the `--entity-*`
-        // tokens, pass 6) are a separate axis from these edge/border/text
+        // tokens) are a separate axis from these edge/border/text
         // colours -- they distinguish entity types from each other, not
         // light from dark -- so they are not rebuilt here; see the comment
         // at isExternalReferent() for why per-node colour is read once, not
