@@ -219,6 +219,39 @@ def test_emit_payload_nul_found_by_the_raw_payload_filter(tmp_path: Path) -> Non
         store.close()
 
 
+def test_lone_surrogate_filter_matches_scrubbed_row_without_raising(
+    tmp_path: Path,
+) -> None:
+    """``sqlite3`` cannot bind a lone surrogate, so the raw arm of the
+    scrub-aware match must be left out for one: the filter finds the
+    scrubbed row instead of raising ``UnicodeEncodeError``, for every
+    filtered column and the idempotency key.
+    """
+    store = SQLiteEventLog(tmp_path / "events.db")
+    try:
+        event = store.emit(
+            EventType.MUTATION_EXECUTED,
+            # ``Event`` refuses a lone surrogate in its own str fields, so
+            # those carry the stored (scrubbed) form; payload values reach
+            # ``append`` raw and are scrubbed there.
+            source="src\ufffd",
+            entity_id="ent\ufffd",
+            payload={"idempotency_key": "key\ud800", "pack_id": "pk\udc00"},
+        )
+        assert [e.event_id for e in store.get_events(entity_id="ent\udfff")] == [
+            event.event_id
+        ]
+        assert [e.event_id for e in store.get_events(source="src\ud800")] == [
+            event.event_id
+        ]
+        found = store.get_events(payload_filters={"pack_id": "pk\udc00"})
+        assert [e.event_id for e in found] == [event.event_id]
+        assert store.has_idempotency_key("key\ud800")
+        assert store.get_events(entity_id="ent\x00\ud800") == []
+    finally:
+        store.close()
+
+
 def test_feedback_id_in_event_log_finds_legacy_raw_row(tmp_path: Path) -> None:
     """Real caller: ``_feedback_id_in_event_log`` pushes ``feedback_id``
     into ``payload_filters``. A legacy FEEDBACK_RECORDED row holding a

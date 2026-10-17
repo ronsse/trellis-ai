@@ -30,6 +30,11 @@ def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
     When the value has no hazard, scrubbing is a no-op and a plain
     ``column_sql = ?`` is returned unchanged.
 
+    A value holding a lone surrogate gets only the scrubbed equality:
+    Python's ``sqlite3`` cannot bind one (UTF-8 encoding raises), so no
+    SQLite row can hold the raw form, and binding it would turn a miss
+    into an exception.
+
     Postgres never needs this: a Postgres ``text``/``jsonb`` column can
     never have stored a raw NUL or lone surrogate in the first place
     (the write raises), so its filters stay a plain scrubbed equality.
@@ -37,6 +42,10 @@ def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
     scrubbed = scrub_jsonb_unsafe(value)
     if scrubbed == value:
         return f"{column_sql} = ?", [value]
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return f"{column_sql} = ?", [scrubbed]
     return f"{column_sql} IN (?, ?)", [value, scrubbed]
 
 
