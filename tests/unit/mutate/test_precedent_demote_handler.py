@@ -858,6 +858,69 @@ class TestVectorSyncFailureSurfacesAsAWarning:
             for w in result.warnings
         )
 
+    def test_demote_reports_a_vector_sync_failure_in_the_event_payload(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``CommandResult.warnings`` is a synchronous read, but a
+        consumer of the event log (rather than the command response)
+        needs its own way to see the semantic path went stale -- the
+        ``PRECEDENT_DEMOTED`` event itself must carry the failure, not
+        only a log line.
+
+        Defective subject: drop the ``vector_sync_failed`` key from
+        ``PrecedentDemoteHandler``'s event payload and this assertion
+        finds nothing.
+        """
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        self._break_vector_upsert(registry, monkeypatch)
+
+        result = build_curate_executor(registry).execute(
+            _demote(node_id, reason="stale")
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_DEMOTED
+        )
+        assert len(events) == 1
+        assert events[0].payload["vector_sync_failed"] is True
+
+    def test_reinstate_reports_a_vector_sync_failure_in_the_event_payload(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        executor = build_curate_executor(registry)
+        executor.execute(_demote(node_id, reason="stale"))
+        self._break_vector_upsert(registry, monkeypatch)
+
+        result = executor.execute(_reinstate(node_id, reason="back"))
+
+        assert result.status == CommandStatus.SUCCESS
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_REINSTATED
+        )
+        assert len(events) == 1
+        assert events[0].payload["vector_sync_failed"] is True
+
+    def test_demote_event_payload_omits_the_key_on_success(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Control case: a healthy sync must not grow the key at all, so a
+        payload with no vector backend trouble stays byte-identical to
+        before this fix existed."""
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+
+        build_curate_executor(registry).execute(_demote(node_id, reason="stale"))
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_DEMOTED
+        )
+        assert len(events) == 1
+        assert "vector_sync_failed" not in events[0].payload
+
 
 class TestVectorSyncRoutesThroughTheSharedMirror:
     """The demote/reinstate vector stamp must go through the same mirror
