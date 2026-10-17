@@ -654,6 +654,29 @@ class Event(VersionedModel):
 class EventLog(ABC):
     """Abstract interface for an append-only event log."""
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Refuse any subclass that redefines the scrub-then-delegate ``append``.
+
+        ``tests/unit/stores/test_event_log_append_seam_rule.py`` hand-reads
+        the backends registered in ``_BUILTIN_BACKENDS``, but that AST rule
+        is blind to two shapes: a subclass of an already-concrete backend
+        (``class X(SQLiteEventLog)``) and an out-of-tree entry-point
+        plugin, neither of which is in that hand-read set. This closes
+        both at class-creation time instead of at the AST-scanned set:
+        any class in the ``EventLog`` hierarchy that defines ``append`` in
+        its own body fails to import, full stop.
+        """
+        super().__init_subclass__(**kwargs)
+        if "append" in cls.__dict__:
+            message = (
+                f"{cls.__name__} defines `append`, which bypasses "
+                f"EventLog.append's scrub-then-delegate template and would "
+                f"silently store a raw NUL byte or lone surrogate. "
+                f"Implement `_append` instead -- `EventLog.append` scrubs "
+                f"the event, then calls `_append`."
+            )
+            raise TypeError(message)
+
     def append(self, event: Event) -> None:
         """Scrub, then append (immutable, no updates).
 
