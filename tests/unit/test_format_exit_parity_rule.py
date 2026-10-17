@@ -872,6 +872,13 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     every module that imports it, which is
     :func:`test_helpers_resolve_across_module_boundaries_in_trellis_cli`'s
     subject, not this one's.
+
+    ``main``'s third entry, ``_render_command_validation_failure``,
+    arrived the same way as its two siblings: it renders an uncaught
+    pydantic ``ValidationError`` from building a CLI ``Command`` on the
+    caller's surface, then raises ``typer.Exit`` below the format branch
+    with no ``return``, reached from ``_BoundaryGroup.invoke`` rather
+    than from a command body. Admitted deliberately, per this docstring.
     """
     roster = _real_roster()
     helpers_by_module = {key: set(names) for key, names in roster.must.items() if names}
@@ -888,14 +895,19 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # deliberately, per this docstring.
         "classify": {"effective_rules"},
         "ingest": {"_fail"},
-        # These two are the shared boundary's renderers — #459's for
-        # ``TrellisError`` and #493's for ``PackAssemblyError``. Same
-        # shape as the others (render on the caller's surface, then
-        # exit below the format branch), reached from
-        # ``_BoundaryGroup.invoke`` rather than from a command body. Both
-        # admitted deliberately, per this docstring: each exits on every
-        # path and defines no ``return``.
-        "main": {"_render_boundary_failure", "_render_pack_assembly_failure"},
+        # These three are the shared boundary's renderers — #459's for
+        # ``TrellisError``, #493's for ``PackAssemblyError``, and this
+        # change's for a pydantic ``ValidationError`` while building a CLI
+        # ``Command``. Same shape as the others (render on the caller's
+        # surface, then exit below the format branch), reached from
+        # ``_BoundaryGroup.invoke`` rather than from a command body. All
+        # three admitted deliberately, per this docstring: each exits on
+        # every path and defines no ``return``.
+        "main": {
+            "_render_boundary_failure",
+            "_render_pack_assembly_failure",
+            "_render_command_validation_failure",
+        },
         "policy": {"_exit_on_refused_write"},
     }, (
         f"the must-exit helper roster changed: {helpers_by_module}. An "

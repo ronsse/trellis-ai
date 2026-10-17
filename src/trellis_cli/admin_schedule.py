@@ -42,6 +42,7 @@ from trellis.mutate import (
     Operation,
     build_schedule_executor,
 )
+from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis.schedule.catalog import JOB_CATALOG
 from trellis.schemas.schedule import ScheduledJob
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
@@ -78,12 +79,6 @@ def _audit_identity() -> dict[str, str | None]:
     return {"key_id": None, "key_name": f"cli:{user}" if user else "cli"}
 
 
-#: ``metadata["rejection_reason"]`` values that mean "the store itself
-#: refused the write" — see ``trellis_api.routes.admin``'s matching set
-#: for the HTTP-side rationale.
-_STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
-
-
 def _cli_result_failure(result: CommandResult) -> tuple[int, str, str]:
     """Map a non-SUCCESS schedule-admin ``CommandResult`` to (exit_code, code, message).
 
@@ -101,7 +96,7 @@ def _cli_result_failure(result: CommandResult) -> tuple[int, str, str]:
     the only ``REJECTED`` case that gets its own.
     """
     reason = result.metadata.get("rejection_reason")
-    if result.status == CommandStatus.REJECTED and reason in _STORE_REFUSAL_REASONS:
+    if result.status == CommandStatus.REJECTED and reason in STORE_REFUSAL_REASONS:
         return EXIT_STORE, str(reason), result.message
     if result.status == CommandStatus.REJECTED:
         return EXIT_VALIDATION, "validation_error", result.message

@@ -46,6 +46,7 @@ from trellis.learning.precedent_auto_demote import (
 )
 from trellis.learning.tuners.auto_promote import resolve_auto_promote_overrides
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
+from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis.ops.capture_health import resolve_capture_thresholds
 from trellis.retrieve.builder_factory import (
     _graph_seeding_enabled,
@@ -522,7 +523,7 @@ def _execute_command(cmd: Command) -> CommandResponse:
     result = build_settings_executor(get_registry()).execute(cmd)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         reason = result.metadata.get("rejection_reason")
-        if reason in ("degraded_store_write", "stale_store_write"):
+        if reason in STORE_REFUSAL_REASONS:
             # 409, matching routes/policies.py's precedent for the same
             # error class: the write did not happen and the file on disk
             # is unharmed, but "fix your input" (400) is the wrong

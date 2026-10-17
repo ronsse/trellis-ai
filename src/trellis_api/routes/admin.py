@@ -60,6 +60,7 @@ from trellis.mutate import (
     build_curate_executor,
     build_schedule_executor,
 )
+from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis.ops.loop_health import JOB_LOOPS, LoopHealthRow, summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
@@ -1722,12 +1723,6 @@ def _get_schedule_store() -> ScheduleStore:
     return ScheduleStore(stores_dir / "schedule.json")
 
 
-#: ``metadata["rejection_reason"]`` values that mean "the store itself
-#: refused the write" — these map to 409 (retryable / operator-actionable)
-#: rather than 422 (fix the request body).
-_STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
-
-
 def _schedule_result_http_error(result: CommandResult) -> HTTPException:
     """Map a non-SUCCESS schedule-admin ``CommandResult`` to an HTTPException.
 
@@ -1750,7 +1745,7 @@ def _schedule_result_http_error(result: CommandResult) -> HTTPException:
     non-REJECTED failure (a defect, not an expected refusal) reads 500.
     """
     reason = result.metadata.get("rejection_reason")
-    if result.status == CommandStatus.REJECTED and reason in _STORE_REFUSAL_REASONS:
+    if result.status == CommandStatus.REJECTED and reason in STORE_REFUSAL_REASONS:
         return HTTPException(
             status_code=409,
             detail={
