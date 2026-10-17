@@ -94,6 +94,7 @@ dropped, in both modes.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
@@ -122,6 +123,14 @@ from trellis.stores.base.graph import GraphStore
 logger = structlog.get_logger(__name__)
 
 PrecedentAutoDemoteMode = Literal["report_only", "commit"]
+
+#: Run-level status vocabulary shared by the emitted event's ``outcome``
+#: and ``report_to_dict``'s ``status`` (see :func:`_run_status`). Named
+#: the same three values as
+#: :data:`trellis.learning.candidate_auto_promote.RunStatus` — kept as
+#: a separate alias rather than imported, matching this module's
+#: existing by-value-copy relationship to its sibling.
+RunStatus = Literal["ok", "degraded", "failed"]
 
 
 def sanitize_configured_mode(value: object) -> str | None:
@@ -239,6 +248,25 @@ class PrecedentAutoDemotePolicy:
         return self.mode
 
 
+@functools.cache
+def _warn_mode_refused_in_settings_once(setting: str, stored_mode: str) -> None:
+    """Emit ``precedent_auto_demote_mode_refused_in_settings`` once per cause.
+
+    By-value copy of :func:`trellis.learning.candidate_auto_promote.
+    _warn_mode_refused_in_settings_once` -- same reason: ``GET /settings``
+    (``trellis_api/routes/settings.py``) resolves this family once per
+    request, not once per job run, so a stored refused ``mode`` would
+    otherwise log a fresh warning on every poll instead of once per
+    distinct cause per process. ``cache_clear()`` is test-facing only.
+    """
+    logger.warning(
+        "precedent_auto_demote_mode_refused_in_settings",
+        setting=setting,
+        stored_mode=stored_mode,
+        env_override=PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+    )
+
+
 def resolve_precedent_auto_demote_overrides(
     *,
     settings: Mapping[str, bool | int | float | str] | None = None,
@@ -319,10 +347,8 @@ def resolve_precedent_auto_demote_overrides(
             msg = spec.refused_reason or (
                 f"{PRECEDENT_AUTO_DEMOTE_MODE_SETTING}={stored_mode!r} is not accepted."
             )
-            logger.warning(
-                "precedent_auto_demote_mode_refused_in_settings",
-                setting=PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
-                env_override=PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+            _warn_mode_refused_in_settings_once(
+                PRECEDENT_AUTO_DEMOTE_MODE_SETTING, stored_mode
             )
             raise ConfigError(msg, setting=PRECEDENT_AUTO_DEMOTE_MODE_SETTING)
 
@@ -481,6 +507,29 @@ def _gate_outcome_to_disposition(outcome: PrecedentDemotionOutcome) -> tuple[str
     return f"ineligible:{outcome.disposition}", outcome.reason
 
 
+def _run_status(*, succeeded: int, attempt_failed: int) -> RunStatus:
+    """Classify one run's outcome for the emitted event and ``--format json``.
+
+    Mirrors :func:`trellis.learning.candidate_auto_promote._run_status`
+    (no ``skipped`` parameter here: this gate never drops a precedent
+    silently, see :func:`report_to_dict`'s docstring). ``succeeded`` and
+    ``attempt_failed`` both count precedents for which a governed
+    ``PRECEDENT_DEMOTE`` write was actually attempted --
+    :attr:`PrecedentAutoDemoteReport.demoted_count` and
+    :attr:`PrecedentAutoDemoteReport.refused_count` respectively. A
+    precedent that was never attempted (``would_demote`` in report-only
+    mode, ``skipped_rate_limited``, ``deduplicated``, ``already_demoted``,
+    ``ineligible:*``, ``skipped_incomplete_evidence``) affects neither.
+    ``"failed"`` requires at least one attempt.
+    """
+    attempted = succeeded + attempt_failed
+    if attempted and not succeeded:
+        return "failed"
+    if attempt_failed:
+        return "degraded"
+    return "ok"
+
+
 def _emit_evaluated_event(
     event_log: EventLog,
     *,
@@ -515,7 +564,8 @@ def _emit_evaluated_event(
     )
     ineligible = sum(1 for o in outcomes if o.disposition.startswith("ineligible:"))
     payload: dict[str, Any] = {
-        "outcome": "ok",
+        # See ``_run_status`` for the ok | degraded | failed vocabulary.
+        "outcome": _run_status(succeeded=demoted, attempt_failed=refused),
         "mode": effective_mode,
         "configured_mode": sanitize_configured_mode(configured_mode),
         "min_unhelpful_citations": MIN_UNHELPFUL_CITATIONS,
@@ -843,26 +893,37 @@ def _outcome_to_dict(outcome: PrecedentAutoDemoteOutcome) -> dict[str, Any]:
 def report_to_dict(report: PrecedentAutoDemoteReport) -> dict[str, Any]:
     """Serialise a :class:`PrecedentAutoDemoteReport` for ``--format json``.
 
-    ``status`` is always ``"ok"``: this report is only ever built from a
-    run that reached :func:`judge_current_precedents` and produced
-    outcomes — a run that failed before that point never reaches this
-    function, and is reported instead through
+    ``status`` is one of ``"ok"`` | ``"degraded"`` | ``"failed"``, via
+    :func:`_run_status` (same vocabulary and same function the emitted
+    event's own ``outcome`` uses, see :func:`_emit_evaluated_event`):
+    ``"failed"`` when at least one precedent's demotion was actually
+    attempted (:attr:`PrecedentAutoDemoteReport.demoted_count` +
+    :attr:`PrecedentAutoDemoteReport.refused_count`) and none of those
+    attempts succeeded; ``"degraded"`` when some attempts succeeded and
+    some were refused; ``"ok"`` otherwise -- including a report-only run,
+    where nothing is ever attempted. A run that failed before reaching
+    :func:`judge_current_precedents` never builds a report at all, and is
+    reported instead through
     :func:`emit_precedent_auto_demote_failure_event`'s own
     ``"refused"``/``"failed"`` event payload. Named here, rather than
     left implicit, so this JSON shape and the CLI's exit code are both
     read off the same flag (``tests/unit/test_format_exit_parity_rule.py``).
 
     Unlike :func:`trellis.learning.candidate_auto_promote.report_to_dict`,
-    there is no ``"degraded"`` case here: that sibling's ``skipped_count``
-    exists because an id-less candidate never becomes an outcome at all,
-    while this gate never drops a precedent silently — a truncated scan's
-    casualties are still named, individually, as
-    ``"skipped_incomplete_evidence"`` outcomes (counted in
-    ``skipped_incomplete_evidence_count``), not folded into a run-level
-    flag. Both commands exit 0 for a completed run regardless of status.
+    there is no skipped-count-driven ``"degraded"`` case here: that
+    sibling's ``skipped_count`` exists because an id-less candidate never
+    becomes an outcome at all, while this gate never drops a precedent
+    silently — a truncated scan's casualties are still named,
+    individually, as ``"skipped_incomplete_evidence"`` outcomes (counted
+    in ``skipped_incomplete_evidence_count``), not folded into a
+    run-level flag. ``"degraded"``/``"failed"`` here come only from a
+    commit-mode write actually being refused. Both commands exit 0 for a
+    completed run regardless of status.
     """
     return {
-        "status": "ok",
+        "status": _run_status(
+            succeeded=report.demoted_count, attempt_failed=report.refused_count
+        ),
         "enabled": report.enabled,
         "mode": report.mode,
         "configured_mode": sanitize_configured_mode(report.configured_mode),

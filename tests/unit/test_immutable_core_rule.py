@@ -38,15 +38,36 @@ than left to be discovered:
   proposal will ever name is free. Under-collection costs a learning loop
   whose stop is tunable by another learning loop, which is the whole
   defect.
+* **Two stated limits of the ``requested_by=`` scan itself, left alone on
+  purpose.** First, resolution goes at most one ``from <module> import
+  <NAME>`` hop beyond a module's own constants and locals
+  (:func:`_one_hop_imported_constants`, :func:`_function_local_names`) —
+  a name threaded through a second function call, or imported from a
+  module that itself imports it from a third, is unreadable here, not
+  resolved. Second, the completeness checks below only ever look for the
+  ``auto:`` and ``worker:`` prefixes — a ``cli:``/``api:``/``mcp:``
+  identity is not rostered by this rule at all, because those callers are
+  attended (a human or an external caller is in the loop) and
+  unattendedness, not any particular prefix spelling, is what
+  :data:`UNATTENDED_WRITERS` exists to bound. Neither limit is closed by
+  widening the scan; both are closed, for ``requested_by=`` sites the scan
+  cannot read at all, by requiring every one of them under ``src/`` to be
+  named with a reason in :data:`_ALLOWED_UNREADABLE_SITES` below, so a
+  site a deeper resolver *would* have read as ``auto:``/``worker:`` cannot
+  pass by going unread instead.
 
 Both scans and both seams were mutation-tested rather than assumed:
-eighteen mutants — the ``AnnAssign`` branch dropped, module-level
+twenty mutants — the ``AnnAssign`` branch dropped, module-level
 scoping widened to a full ``walk``, constant resolution of
 ``requested_by`` dropped, unreadable sites swallowed, the scan pointed at
 ``source=``, ``startswith`` loosened to a substring test, each predicate
 neutered, each roster entry corrupted, each seam's check and each seam's
-emission removed, and the executor's rejection ``reason`` mislabelled —
-and all eighteen die, each against a named test here or in
+emission removed, the executor's rejection ``reason`` mislabelled, the
+unreadable-site allow-list check (:func:`_unallowed_unreadable_sites`)
+made to accept everything, and the count-mismatch check
+(:func:`_mismatched_allow_list_counts`) made to always report nothing —
+and all twenty die, each against a named
+test here or in
 ``tests/unit/mutate/test_immutable_core.py``. The substring mutant is
 worth noting: it survived the first sweep, because no decoy carried
 ``learning.`` anywhere but at the start. The embedded-prefix decoy exists
@@ -58,7 +79,9 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator, Mapping
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -277,9 +300,55 @@ def _enclosing_function(
     return None
 
 
+def _enclosing_qualname(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> str:
+    """The dotted ``def``/``class`` chain enclosing *node*, or ``"<module>"``.
+
+    Walks every ``FunctionDef``/``AsyncFunctionDef``/``ClassDef`` ancestor,
+    nearest first, and joins their names outer-to-inner -- a method reads
+    ``"Class.method"``, a nested function reads ``"outer.inner"``. This is
+    not Python's own ``__qualname__`` (no ``<locals>`` marker for a nested
+    function), because nothing here needs to match the runtime value,
+    only to name a lexical scope uniquely enough that two different
+    functions never collide. A site with no enclosing def or class is
+    module-level and reads ``"<module>"``, never the empty string, so an
+    allow-list entry can name it without a blank component.
+    """
+    parts: list[str] = []
+    current: ast.AST | None = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parts.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(parts)) if parts else "<module>"
+
+
+@dataclass(frozen=True)
+class _UnreadableSite:
+    """One ``requested_by=`` site the scan could not resolve to a value.
+
+    *key* -- ``(path, qualname, expr)`` -- is what
+    :data:`_ALLOWED_UNREADABLE_SITES` is keyed on and deliberately excludes
+    *line*: an unrelated edit that shifts a line inside an already-listed
+    function must not change a site's identity. *line* is carried only for
+    human-readable messages.
+    """
+
+    path: str
+    qualname: str
+    expr: str
+    line: int
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.path, self.qualname, self.expr)
+
+    def describe(self) -> str:
+        return f"{self.path}:{self.line} ({self.qualname}): requested_by={self.expr}"
+
+
 def _requested_by_sites(
     path: Path, tree: ast.Module, repo_root: Path
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[_UnreadableSite]]:
     """``({identity: "path:line"}, [unreadable sites])`` for one module.
 
     Module-level constants are resolved, because **both** real worker
@@ -307,7 +376,12 @@ def _requested_by_sites(
     constants.update(_one_hop_imported_constants(tree, repo_root))
     parents = _parent_map(tree)
     found: dict[str, str] = {}
-    unreadable: list[str] = []
+    unreadable: list[_UnreadableSite] = []
+    # Repo-root-relative, not `path`'s absolute form: this is also the
+    # first component of an allow-list key (_ALLOWED_UNREADABLE_SITES
+    # below), and an absolute path is only ever correct on the machine
+    # that produced it.
+    rel_path = str(path.relative_to(repo_root))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -324,13 +398,20 @@ def _requested_by_sites(
             if resolved is not None:
                 found.setdefault(resolved, where)
             else:
-                unreadable.append(f"{where}: requested_by={ast.unparse(value)}")
+                unreadable.append(
+                    _UnreadableSite(
+                        path=rel_path,
+                        qualname=_enclosing_qualname(node, parents),
+                        expr=ast.unparse(value),
+                        line=node.lineno,
+                    )
+                )
     return found, unreadable
 
 
 def unattended_writer_identities(
     root: Path, repo_root: Path | None = None
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[_UnreadableSite]]:
     """Every ``requested_by=`` identity submitted from *root*.
 
     *repo_root* anchors the one-hop import resolution in
@@ -343,7 +424,7 @@ def unattended_writer_identities(
     if repo_root is None:
         repo_root = root
     found: dict[str, str] = {}
-    unreadable: list[str] = []
+    unreadable: list[_UnreadableSite] = []
     for path, tree in iter_modules(root):
         module_found, module_unreadable = _requested_by_sites(path, tree, repo_root)
         for identity, where in module_found.items():
@@ -390,6 +471,277 @@ def auto_prefixed_identities(
     """
     found, _ = unattended_writer_identities(root, repo_root)
     return {k: v for k, v in found.items() if k.startswith("auto:")}
+
+
+# ---------------------------------------------------------------------------
+# Unreadable-site allow-list
+# ---------------------------------------------------------------------------
+#
+# worker_prefixed_identities() and auto_prefixed_identities() both scan all
+# of src/ and both discard the `unreadable` half of
+# unattended_writer_identities()'s return value -- a prefix filter cannot
+# tell which unreadable site would have read "auto:" or "worker:" without
+# being able to read it, so there was previously nothing here for either
+# completeness check to assert on. That let a worker or an auto-loop writer
+# thread its identity through something this scan cannot resolve and submit
+# completely unseen by either check.
+#
+# Closing that requires naming every unreadable site rather than inferring
+# which ones matter, so each key below is a
+# (repo-relative path, enclosing function/method qualname, ast.unparse(value))
+# triple -- a module-level site uses the qualname "<module>" -- paired
+# with (expected count, a human-written reason). A key the live scan
+# produces that is not listed here fails
+# test_every_unreadable_site_under_src_is_allow_listed_with_a_reason below;
+# so does a listed key whose live count disagrees with what is recorded
+# here, in either direction -- zero means the site moved, resolved, or
+# was deleted, and a count above what is listed means a *new* identical
+# call was planted inside a function this allow-list already covers for
+# one -- the same both-directions shape every other roster in this module
+# uses. Keying on path + qualname + expression rather than the exact line
+# is deliberate the other way around from this allow-list's first
+# version: a line-keyed entry breaks on any unrelated edit that merely
+# shifts a line inside an already-listed function, which made the
+# allow-list a merge-conflict tax on the whole repo (an unrelated PR
+# touching a REST route file's `requested_by=` line was all it took).
+# Dropping the line does not widen what passes, because the count check
+# still catches a second identical call added inside an already-listed
+# function -- the one gap a path-only key would have reopened.
+
+_PASSTHROUGH_REASON = (
+    "a requested_by parameter (or an already-validated request/batch "
+    "field) threaded straight through from the caller -- a CLI option, an "
+    "API request body, an SDK client argument, or an extractor's own "
+    "dispatch parameter -- not a static identity this scan could ever "
+    "resolve without becoming interprocedural"
+)
+
+_DYNAMIC_PREFIX_REASON = (
+    "an f-string whose literal prefix is visibly not auto:/worker: even "
+    "though the scan cannot resolve the value it interpolates at runtime"
+)
+
+_ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
+    ("src/trellis/extract/commands.py", "_apply_confidence_gate", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/extract/commands.py", "reconcile_node_roles", "batch.requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/extract/commands.py", "result_to_batch", "requested_by"): (
+        4,
+        _PASSTHROUGH_REASON,
+    ),
+    (
+        "src/trellis/extract/memory_ingest_hook.py",
+        "run_memory_extraction",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    (
+        "src/trellis/extract/trace_ingest_hook.py",
+        "extract_trace_batch",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    (
+        "src/trellis/extract/trace_ingest_hook.py",
+        "run_trace_extraction",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis/ingest_corpus/sync.py", "_apply_record", "requested_by"): (
+        3,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/ingest_corpus/sync.py", "sync_records", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/learning/scoring.py", "submit_learning_promotion", "requested_by"): (
+        3,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_link_domains", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_link_relates_to", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/server.py", "execute_mutation", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "_stamp_document", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "_stamp_entity", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "supersede_document", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "supersede_entity", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    (
+        "src/trellis/mutate/evidence_ingest.py",
+        "build_evidence_ingest_command",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    (
+        "src/trellis/mutate/evidence_ingest.py",
+        "build_evidence_ingest_command_from_args",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis/mutate/name_aliases.py", "_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "demote", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "promote", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "reinstate", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/extract.py", "submit_drafts", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_alias_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_edge_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_entity_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/mutations.py", "_build_command", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/mutations.py", "execute_batch", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    (
+        "src/trellis_api/routes/settings.py",
+        "update_setting",
+        "f'api:settings:{principal}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
+    ("src/trellis_cli/admin_settings.py", "set_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "set_setting_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "unset_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "unset_setting_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/classify.py", "apply_rule", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/classify.py", "revoke_rule", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "demote_precedent", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "promote", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "prune", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "redact", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "reinstate_precedent", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "restore", "requested_by"): (1, _PASSTHROUGH_REASON),
+    (
+        "src/trellis_cli/demo.py",
+        "_run_extractor_on_fixture",
+        "f'cli:demo-load:{source_hint}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
+    (
+        "src/trellis_cli/extract_refresh.py",
+        "_run_refresh",
+        "f'cli:extract-refresh:{source_name}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
+    (
+        "src/trellis_sdk/async_client.py",
+        "AsyncTrellisClient.submit_drafts",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_sdk/client.py", "TrellisClient.submit_drafts", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+}
+
+
+def _unallowed_unreadable_sites(
+    unreadable: Iterable[_UnreadableSite],
+    allowed: Mapping[tuple[str, str, str], tuple[int, str]],
+) -> list[_UnreadableSite]:
+    """Every *unreadable* site whose key the allow-list does not carry at all.
+
+    Keyed on (path, qualname, expr) -- no line number -- so an unrelated
+    edit that only shifts a line inside an already-listed function can
+    never trip this check; see
+    test_a_blank_line_above_an_already_listed_site_does_not_break_the_check.
+    A pure membership test, pulled out of the test body so a mutant can
+    be planted against it directly: return everything unconditionally,
+    or return nothing, and a test below must go red either way.
+    """
+    return [site for site in unreadable if site.key not in allowed]
+
+
+def _mismatched_allow_list_counts(
+    unreadable: Iterable[_UnreadableSite],
+    allowed: Mapping[tuple[str, str, str], tuple[int, str]],
+) -> list[tuple[tuple[str, str, str], int, int]]:
+    """``(key, expected, observed)`` for every listed key whose live count
+    disagrees with what :data:`_ALLOWED_UNREADABLE_SITES` expects.
+
+    *observed* of 0 is a stale entry -- the site moved, resolved, or was
+    deleted. *observed* above *expected* is a second identical call
+    planted inside a function the allow-list already covers for one --
+    exactly the gap a line-keyed allow-list could not see, because a new
+    call at a new line was a brand new key there; see
+    test_a_second_identical_call_in_an_already_listed_function_fails_via_count.
+    Both directions are the same failure here: the human-recorded
+    expectation and the live tree disagree, so both are reported by one
+    count comparison rather than two separate membership tests.
+    """
+    observed = Counter(site.key for site in unreadable)
+    return [
+        (key, expected, observed.get(key, 0))
+        for key, (expected, _reason) in allowed.items()
+        if observed.get(key, 0) != expected
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +840,7 @@ def test_every_unattended_writer_identity_is_in_the_allow_list() -> None:
         "the scan cannot read the identity these sites submit under, so it "
         "cannot certify the allow-list is complete. Bind the value to a "
         "module-level constant, or widen the resolver deliberately: "
-        + "; ".join(unreadable)
+        + "; ".join(site.describe() for site in unreadable)
     )
 
     missing = set(discovered) - set(UNATTENDED_WRITERS)
@@ -518,6 +870,13 @@ def test_no_worker_identity_anywhere_in_src_escapes_the_allow_list() -> None:
     ``worker:``-prefixed identity submitted from anywhere else in ``src/``
     is the same thing in a different directory, and the allow-list has to
     bind it too.
+
+    This scan discards ``unreadable`` the same way
+    :func:`test_every_auto_writer_identity_is_in_the_allow_list` does, and
+    for the same reason stated there;
+    :func:`test_every_unreadable_site_under_src_is_allow_listed_with_a_reason`
+    covers that population once, for both prefixes together, rather than
+    duplicating the same ``src/``-wide scan here.
     """
     root = _repo_root()
     discovered = worker_prefixed_identities(root / _SRC_ROOT, repo_root=root)
@@ -555,6 +914,12 @@ def test_every_auto_writer_identity_is_in_the_allow_list() -> None:
     # reading them — the same reason
     # :func:`test_no_worker_identity_anywhere_in_src_escapes_the_allow_list`
     # does not check it either.
+    # ``unreadable`` is not simply dropped, though: every site it can
+    # carry under ``src/`` is required to be named, with a reason, in
+    # :data:`_ALLOWED_UNREADABLE_SITES`, checked once by
+    # :func:`test_every_unreadable_site_under_src_is_allow_listed_with_a_reason`
+    # below rather than here, since that population is the same ``src/``
+    # scan this test and the worker one above both already run.
     auto_entries = {k for k in UNATTENDED_WRITERS if k.startswith("auto:")}
 
     missing = set(discovered) - auto_entries
@@ -568,6 +933,51 @@ def test_every_auto_writer_identity_is_in_the_allow_list() -> None:
     assert not stale, (
         "UNATTENDED_WRITERS binds auto: identities that nothing under "
         f"{_SRC_ROOT} submits under any more: " + ", ".join(sorted(stale))
+    )
+
+
+def test_every_unreadable_site_under_src_is_allow_listed_with_a_reason() -> None:
+    """Neither prefix completeness check gets an unreadable site for free.
+
+    :func:`test_no_worker_identity_anywhere_in_src_escapes_the_allow_list`
+    and :func:`test_every_auto_writer_identity_is_in_the_allow_list` both
+    scan all of ``src/`` and both discard ``unreadable`` — deliberately,
+    their own docstrings say, because a prefix filter cannot tell which
+    unreadable site would have read ``auto:``/``worker:`` without being
+    able to read it. That leaves a real gap: a worker or an auto-loop
+    writer could thread its identity through a local the scan cannot
+    resolve and submit completely unseen by either completeness check.
+
+    This closes it the only way available — by naming every unreadable
+    site the live tree carries today and requiring a human-written reason
+    for each in :data:`_ALLOWED_UNREADABLE_SITES`, so a *new* one (this
+    writer's own, or anyone else's) fails loudly instead of silently
+    joining the rest.
+    """
+    root = _repo_root()
+    _, unreadable = unattended_writer_identities(root / _SRC_ROOT, repo_root=root)
+
+    missing = _unallowed_unreadable_sites(unreadable, _ALLOWED_UNREADABLE_SITES)
+    assert not missing, (
+        "an unreadable requested_by= site is not on the allow-list, so "
+        "neither the worker:- nor the auto:-prefix completeness check "
+        "can certify it is not one of theirs; read it and either resolve "
+        "it (bind the value to a module-level constant, or widen the "
+        "resolver deliberately) or add it here with a reason: "
+        + "; ".join(sorted(site.describe() for site in missing))
+    )
+
+    mismatched = _mismatched_allow_list_counts(unreadable, _ALLOWED_UNREADABLE_SITES)
+    assert not mismatched, (
+        "_ALLOWED_UNREADABLE_SITES disagrees with the live scan's count for "
+        "at least one key — 0 observed means the site moved, resolved, or "
+        "was deleted; more than expected means a new identical call was "
+        "planted inside a function this allow-list already covers for one; "
+        "re-count rather than leave the entry as-is: "
+        + "; ".join(
+            f"{key} expected {expected}, observed {observed}"
+            for key, expected, observed in sorted(mismatched)
+        )
     )
 
 
@@ -698,6 +1108,28 @@ def submit(who: str) -> None:
     execute(Command(requested_by=who))                   # 5  UNREADABLE
 '''
 
+_DUPLICATED_UNREADABLE_TREE = '''
+"""A worker whose identity the scan cannot read, planted twice."""
+
+
+def submit(who: str) -> None:
+    execute(Command(requested_by=who))                   # 5  UNREADABLE #1
+    execute(Command(requested_by=who))                   # 6  UNREADABLE #2
+'''
+
+_LINE_SHIFTED_UNREADABLE_TREE = _UNREADABLE_TREE.replace(
+    "def submit(who: str) -> None:\n    execute",
+    "def submit(who: str) -> None:\n\n    execute",
+)
+
+_UNALLOWLISTED_UNREADABLE_TREE = '''
+"""A worker whose identity the scan cannot read and nobody allow-listed."""
+
+
+def submit(who: str) -> None:
+    execute(Command(requested_by=who))                   # 5  UNREADABLE, unlisted
+'''
+
 _AUTO_PROMOTE_TREE = '''
 """Synthetic auto-identity module: a keyword-only default."""
 AUTO_PROMOTE_REQUESTED_BY = "auto:planted-promote"
@@ -811,7 +1243,94 @@ def test_the_worker_scan_reports_an_identity_it_cannot_read(tmp_path: Path) -> N
 
     assert not found
     assert len(unreadable) == 1
-    assert unreadable[0].endswith(":5: requested_by=who"), unreadable
+    site = unreadable[0]
+    assert site.line == 5, unreadable
+    assert site.expr == "who", unreadable
+    assert site.qualname == "submit", unreadable
+
+
+def test_an_unlisted_unreadable_site_fails_the_allow_list_check(
+    tmp_path: Path,
+) -> None:
+    """The gap this item closes, caught directly rather than inferred.
+
+    Same shape as :data:`_UNREADABLE_TREE` above; the only difference is
+    this tree's site has no matching entry in
+    :data:`_ALLOWED_UNREADABLE_SITES`, so
+    :func:`_unallowed_unreadable_sites` must report it — proving that an
+    unreadable ``requested_by=`` planted anywhere under ``src/`` cannot
+    pass unnoticed the way discarding ``unreadable`` entirely used to let
+    it.
+    """
+    root = _render(tmp_path, "unlisted_unreadable", _UNALLOWLISTED_UNREADABLE_TREE)
+    _, unreadable = unattended_writer_identities(root)
+
+    missing = _unallowed_unreadable_sites(unreadable, _ALLOWED_UNREADABLE_SITES)
+    assert len(missing) == 1
+    assert missing[0].line == 5, missing
+    assert missing[0].expr == "who", missing
+    assert missing[0].qualname == "submit", missing
+
+
+def test_a_second_identical_call_in_an_already_listed_function_fails_via_count(
+    tmp_path: Path,
+) -> None:
+    """A duplicate inside an already-listed function is a count mismatch.
+
+    This is exactly the gap a line-keyed allow-list could not close: a
+    second identical call sits at a new line, so a line-keyed entry reads
+    it as a brand new, unlisted site rather than as a duplicate of one
+    already covered. Keying on (path, qualname, expr) instead collapses
+    both calls onto the same key, which means :func:`_unallowed_unreadable_sites`
+    has nothing new to report — proving the duplicate is caught
+    specifically by :func:`_mismatched_allow_list_counts` comparing the
+    live count (2) against the allow-list's recorded expectation (1), not
+    by the unlisted-key path.
+    """
+    root = _render(tmp_path, "duplicated_unreadable", _DUPLICATED_UNREADABLE_TREE)
+    _, unreadable = unattended_writer_identities(root)
+    assert len(unreadable) == 2
+
+    key = unreadable[0].key
+    assert unreadable[1].key == key
+    allowed = {key: (1, "test fixture: single call expected")}
+
+    assert not _unallowed_unreadable_sites(unreadable, allowed)
+
+    mismatched = _mismatched_allow_list_counts(unreadable, allowed)
+    assert mismatched == [(key, 1, 2)], mismatched
+
+
+def test_a_blank_line_above_an_already_listed_site_does_not_break_the_check(
+    tmp_path: Path,
+) -> None:
+    """An unrelated line shift inside an already-listed function must pass.
+
+    This is the merge-conflict tax the new key design exists to remove:
+    the old line-keyed allow-list broke on exactly this edit even though
+    the site's identity never changed. Parses the same source twice, once
+    with a blank line inserted above the call, and shows the computed
+    ``.key`` is identical in both renders despite ``.line`` moving from 5
+    to 6 — so an allow-list built from the unshifted render still passes
+    both check functions against the shifted one.
+    """
+    base_root = _render(tmp_path, "line_shift_base", _UNREADABLE_TREE)
+    _, base_unreadable = unattended_writer_identities(base_root)
+    assert len(base_unreadable) == 1
+    assert base_unreadable[0].line == 5
+    key = base_unreadable[0].key
+
+    shifted_root = _render(
+        tmp_path, "line_shift_shifted", _LINE_SHIFTED_UNREADABLE_TREE
+    )
+    _, shifted_unreadable = unattended_writer_identities(shifted_root)
+    assert len(shifted_unreadable) == 1
+    assert shifted_unreadable[0].line == 6
+    assert shifted_unreadable[0].key == key
+
+    allowed = {key: (1, "test fixture: line-shift tolerance")}
+    assert not _unallowed_unreadable_sites(shifted_unreadable, allowed)
+    assert not _mismatched_allow_list_counts(shifted_unreadable, allowed)
 
 
 def test_the_scan_resolves_a_keyword_default_and_a_lazy_import(
@@ -847,7 +1366,10 @@ def test_the_scan_resolves_a_keyword_default_and_a_lazy_import(
     assert found["auto:planted-promote"].endswith("promote_planted.py:6")
     assert found["auto:planted-demote"].endswith("demote_planted.py:9")
     assert len(unreadable) == 1
-    assert unreadable[0].endswith("demote_planted.py:13: requested_by=who"), unreadable
+    assert unreadable[0].path.endswith("demote_planted.py"), unreadable
+    assert unreadable[0].line == 13, unreadable
+    assert unreadable[0].expr == "who", unreadable
+    assert unreadable[0].qualname == "run_unresolvable", unreadable
 
 
 @pytest.mark.parametrize(

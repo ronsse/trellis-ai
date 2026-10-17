@@ -84,7 +84,10 @@ def test_load_reports_tab_does_not_auto_run_a_report() -> None:
     )
     try_block = _between(body, "onReportPickerChange();", "} catch (err) {")
     assert "runReport()" not in try_block
-    assert "empty-state" in try_block
+    # Pass 5 moved every empty-state site onto the shared
+    # ``emptyStateHtml()`` component (brief row 3); this call site's own
+    # source no longer spells the literal class name.
+    assert "emptyStateHtml(" in try_block
 
 
 def test_load_reports_tab_fetch_failure_renders_visible_error() -> None:
@@ -206,10 +209,14 @@ def test_readiness_pill_degraded_branch_names_failing_backends_when_known() -> N
 
 
 def test_readiness_pill_css_classes_exist() -> None:
+    # Pass 5 (topbar polish) turned the pill from a solid colour swatch
+    # into a dot-plus-text pill (brief row 1): the status colour now
+    # lives on the ``::before`` dot, not the pill's own background, so
+    # the status word stays legible against ``--text-dim``.
     page = _page()
-    assert ".readiness-pill.is-ready { background: var(--ok); }" in page
-    assert ".readiness-pill.is-degraded { background: var(--danger); }" in page
-    assert ".readiness-pill.is-unknown { background: var(--text-dim); }" in page
+    assert ".readiness-pill.is-ready::before { background: var(--ok); }" in page
+    assert ".readiness-pill.is-degraded::before { background: var(--danger); }" in page
+    assert ".readiness-pill.is-unknown::before { background: var(--text-dim); }" in page
 
 
 # ---------------------------------------------------------------------------

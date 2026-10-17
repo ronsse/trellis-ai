@@ -1133,12 +1133,17 @@ def auto_promote_candidates(
     candidate's disposition — ``would_promote``, ``already_promoted`` (a
     precedent already exists for it, human-approved or from an earlier
     automatic run), or ``ineligible:<reason>`` — and carries
-    ``outcome: "ok"`` (or ``"degraded"`` if any candidate was skipped for
-    having no usable id). A run that never got that far carries
+    ``outcome: "ok"`` / ``"degraded"`` / ``"failed"`` (see
+    :func:`~trellis.learning.candidate_auto_promote._run_status`:
+    ``"failed"`` means every submission this run attempted was refused,
+    ``"degraded"`` means some were, or a candidate was skipped for having
+    no usable id). A run that never got that far carries
     ``outcome: "refused"`` (a :class:`~trellis.errors.ConfigError` —
     e.g. a stored or env ``mode="commit"`` without ``--dry-run``, exit 5)
     or ``outcome: "failed"`` (a malformed ``--candidates`` file, or a
-    non-finite env override, exit 2 or 1) instead.
+    non-finite env override, exit 2 or 1) instead — the same ``"failed"``
+    string covers both a completed run with no successful attempt and a
+    run that never reached one; the event's other fields disambiguate.
     ``learning.candidate_auto_promote.mode`` can only be set to
     ``commit`` once ``learning.precedent_auto_demote.enabled`` is also
     true — demotion is commit mode's safety rollback. Without that,

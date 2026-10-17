@@ -1534,14 +1534,33 @@ emitted event, and the Loop Health row. In `commit` mode each
 human Review-queue approval uses (`submit_learning_promotion`), capped
 by `max_promotions_per_run`.
 
+This command only ever reads the sibling demotion policy's `enabled`
+flag, never its `mode`. A refused stored or env value for
+`learning.precedent_auto_demote.mode` (a hand-edited `settings.json`,
+or an env override the setting's `refused_values` rejects) still blocks
+a non-`--dry-run` run of this command with the same `ConfigError` it
+would raise against `evaluate-precedent-demotion` itself — resolving
+the sibling policy's settings is all-or-nothing, so a refused `mode`
+has nowhere to go but up, even though `mode` itself plays no part in
+this command's own check. `--dry-run` holds that refusal back the same
+way it holds back this command's own.
+
 Every run — including one that fails before evaluating a single
-candidate — emits exactly one `LEARNING_AUTO_PROMOTE_EVALUATED` event,
-carrying `outcome: "ok"` (or `"degraded"` if a candidate was skipped
-for having no usable id) for a completed run, or `outcome: "refused"`
-(the `ConfigError` case, exit 5) / `"failed"` (a malformed
-`--candidates` file or similar, exit 2 or 1) for one that never reached
-evaluation — never zero events, so a silent exit cannot read as "this
-job never ran" to `trellis.ops.loop_health`.
+candidate — emits exactly one `LEARNING_AUTO_PROMOTE_EVALUATED` event.
+For a completed run, `outcome` (and the matching `--format json`
+`status`) is one of `"ok"` / `"degraded"` / `"failed"`, shared with the
+demotion command below: `"failed"` means every candidate this run
+actually attempted to submit failed submission (and at least one was
+attempted — a run with nothing to attempt is never `"failed"`);
+`"degraded"` means some, but not all, attempted submissions failed, or
+a candidate was skipped for having no usable id; otherwise `"ok"`. A
+candidate that was never attempted (`would_promote`,
+`already_promoted`, `ineligible:run_cap_reached`, ...) affects neither
+count. For a run that never reached evaluation at all, `outcome` is
+instead `"refused"` (the `ConfigError` case, exit 5) or `"failed"` (a
+malformed `--candidates` file or similar, exit 2 or 1) — never zero
+events, so a silent exit cannot read as "this job never ran" to
+`trellis.ops.loop_health`.
 
 Both policies ship `enabled=False` by default: nothing commits
 unattended until an operator turns both on.
@@ -1638,7 +1657,18 @@ select `commit`.
 Every run — including one that fails before evaluating a single
 precedent — emits exactly one `LEARNING_AUTO_DEMOTE_EVALUATED` event,
 mirroring the promotion event's `outcome`/`configured_mode`/
-`policy_snapshot` shape. Both this report and the promotion report's
+`policy_snapshot` shape, including the completed-run `"ok"` /
+`"degraded"` / `"failed"` vocabulary described above:
+`"failed"` means every demotion this run actually attempted was
+refused (and at least one was attempted); `"degraded"` means some,
+but not all, attempted demotions were refused — a precedent that was
+never attempted (`would_demote` in report-only mode,
+`skipped_rate_limited`, `deduplicated`, `already_demoted`,
+`ineligible:*`, `skipped_incomplete_evidence`) affects neither count,
+and this gate never folds a dropped-silently case into `"degraded"`
+the way the promotion job's skipped-id count does, because this scan
+never drops a precedent silently — see `skipped_incomplete_evidence`
+above. Both this report and the promotion report's
 JSON carry a top-level `status` key derived from the same flag that
 drives the exit code.
 
