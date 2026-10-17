@@ -41,7 +41,7 @@ Starts the Trellis REST API and the static dashboard UI in one uvicorn process. 
 | | Default | Notes |
 |---|---|---|
 | Port | `8420` | `--port` or `TRELLIS_API_PORT`. |
-| Bind address | `127.0.0.1` (loopback) | Loopback-only on a fresh install so the API isn't exposed before you've configured auth. For containers that must listen on the pod IP, pass `--host 0.0.0.0` or set `TRELLIS_API_HOST=0.0.0.0`. |
+| Bind address | `127.0.0.1` (loopback) | Loopback-only on a fresh install so the API isn't exposed before you've configured auth. For containers that must listen on the pod IP, pass `--host 0.0.0.0` or set `TRELLIS_API_HOST=0.0.0.0` — but set `TRELLIS_AUTH_MODE=required` and mint a key with `trellis admin api-keys create` first: a non-loopback bind without it is refused with a `ConfigError` (`EXIT_STORE`), since `off`/`optional` both grant every caller full scopes with no credential (#189). The escape hatch is `TRELLIS_API_ALLOW_INSECURE_BIND=1`, for a listener genuinely on a trusted interface. |
 
 ### Authentication (env-driven)
 

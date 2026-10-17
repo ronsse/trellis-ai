@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -168,7 +168,18 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     (a CLI ``--host``/``--port`` flag) — see :func:`get_bind_info`, which
     the Runtime panel route reads instead of re-deriving from the
     environment.
+
+    Runs :func:`~trellis_api.auth.check_bind_is_safe` first, before
+    anything else — including before the previous ``global`` bookkeeping
+    below, so a refused bind leaves no trace of having started. This is
+    the construction point every entry point funnels through: ``trellis
+    serve`` / ``trellis admin serve`` (via :func:`main`), and also the
+    bare ``uvicorn trellis_api.app:create_app --factory`` invocation,
+    which bypasses :func:`main` — and therefore the check that used to
+    live only there — entirely (#189 follow-up).
     """
+    check_bind_is_safe(host, port)
+
     global _bind_host, _bind_port
     _bind_host, _bind_port = host, port
 
@@ -330,7 +341,12 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     return app
 
 
-def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def main(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    *,
+    on_bind_ok: Callable[[], None] | None = None,
+) -> None:
     """Run the API server.
 
     Host/port default to a container-friendly bind. The ``trellis serve``
@@ -338,17 +354,52 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     ``--host``/``--port``/``--config-dir`` flags and configures structured
     logging before the server starts. ``trellis admin serve`` delegates
     here too, so this is the sole place that calls ``uvicorn.run`` for
-    the REST API (``tests/unit/test_rest_bind_rule.py``) and the sole
-    place :func:`check_bind_is_safe` needs to guard (#189).
+    the REST API (``tests/unit/test_rest_bind_rule.py``). The fail-closed
+    bind check itself now runs inside :func:`create_app` (#189 follow-up),
+    so it has already passed by the time ``app`` below exists.
+
+    ``on_bind_ok``, if given, runs once :func:`create_app` returns — i.e.
+    once the bind check has already passed — and before ``uvicorn.run``.
+    ``trellis admin serve`` passes its "Starting Trellis API server..."
+    message here instead of printing it before calling this function, so
+    a refused bind stays silent instead of being announced first.
     """
     import uvicorn  # noqa: PLC0415
 
     from trellis_api.logging import configure_logging  # noqa: PLC0415
 
     configure_logging()
-    check_bind_is_safe(host, port)
     app = create_app(host=host, port=port)
+    if on_bind_ok is not None:
+        on_bind_ok()
     uvicorn.run(app, host=host, port=port)
+
+
+def console_main() -> None:
+    """Console-script entry point for the standalone ``trellis-api`` binary.
+
+    :func:`main` is also called directly by ``trellis serve`` and
+    ``trellis admin serve``, which depend on a :class:`TrellisError` (a
+    refused bind, #189, included) propagating out of it uncaught so
+    ``trellis_cli``'s own Typer boundary can render and exit it
+    consistently with every other CLI command. The bare ``trellis-api``
+    script has no such boundary — nothing calls it through Typer — so
+    without this wrapper the same refusal surfaced as a raw Python
+    traceback instead. This catches the same ``TrellisError`` family the
+    CLI boundary does, prints one line to stderr, and exits with the same
+    code that boundary would have used
+    (:func:`trellis_cli.exit_codes.exit_code_for`; ``EXIT_STORE`` for a
+    ``ConfigError``) instead of letting the traceback escape.
+    """
+    import sys  # noqa: PLC0415
+
+    try:
+        main()
+    except TrellisError as exc:
+        from trellis_cli.exit_codes import exit_code_for  # noqa: PLC0415
+
+        print(f"{exc.code} — {exc.message}", file=sys.stderr)
+        raise SystemExit(exit_code_for(exc)) from None
 
 
 if __name__ == "__main__":
