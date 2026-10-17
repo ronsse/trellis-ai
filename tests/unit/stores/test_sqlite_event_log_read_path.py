@@ -145,9 +145,9 @@ def test_legacy_row_is_found_by_the_raw_filter(tmp_path: Path) -> None:
 def test_legacy_row_not_found_by_a_pure_scrubbed_filter_but_a_fresh_write_is(
     tmp_path: Path,
 ) -> None:
-    """The true boundary the deleted "pre-existing gap" docstring got
-    wrong: a legacy row stores *raw* bytes, so a filter value with no
-    hazard character in it (the already-replaced form) cannot find it --
+    """The boundary of the scrub-aware match: a legacy row stores *raw*
+    bytes, so a filter value with no hazard character in it (the
+    already-replaced form) cannot find it --
     scrubbing is one-directional and U+FFFD cannot be un-replaced back
     into the NUL byte actually on disk. That is not a gap in this fix;
     no real caller searches with a string it never wrote.
@@ -288,9 +288,41 @@ def test_feedback_id_in_event_log_finds_legacy_raw_row(tmp_path: Path) -> None:
         store.close()
 
 
+def test_has_idempotency_key_finds_legacy_raw_row(tmp_path: Path) -> None:
+    """Defensive today -- Stage 1 validation refuses a hazardous key before
+    the lookup runs -- but the raw arm must hold for a legacy row that
+    stored the key with a raw NUL."""
+    store = SQLiteEventLog(tmp_path / "events.db")
+    try:
+        now = utc_now().isoformat()
+        store._conn.execute(
+            "INSERT INTO events "
+            "(event_id, event_type, source, entity_id, entity_type, "
+            "occurred_at, recorded_at, payload_json, metadata_json, "
+            "schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-idem",
+                str(EventType.MUTATION_EXECUTED),
+                "executor",
+                None,
+                None,
+                now,
+                now,
+                json.dumps({"idempotency_key": "key\x00one"}),
+                "{}",
+                "1.0",
+            ),
+        )
+        store._conn.commit()
+        assert store.has_idempotency_key("key\x00one") is True
+        assert store.has_idempotency_key("key") is False
+    finally:
+        store.close()
+
+
 def test_row_to_event_uses_isoformat_timestamps_directly() -> None:
     """Sanity check on the fixture above: the timestamps round-trip
     through ``datetime.fromisoformat`` exactly as ``_row_to_event`` reads
-    them, so the two tests above are reading a realistic row shape."""
+    them, so the raw-SQL fixtures above read a realistic row shape."""
     now = utc_now()
     assert datetime.fromisoformat(now.isoformat()) == now

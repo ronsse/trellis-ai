@@ -31,9 +31,10 @@ def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
     ``column_sql = ?`` is returned unchanged.
 
     A value holding a lone surrogate gets only the scrubbed equality:
-    Python's ``sqlite3`` cannot bind one (UTF-8 encoding raises), so no
-    SQLite row can hold the raw form, and binding it would turn a miss
-    into an exception.
+    Python's ``sqlite3`` cannot bind one (UTF-8 encoding raises), so the
+    raw arm would turn every such filter into an exception. A legacy
+    ``payload_json`` value can still hold one as a JSON ``\\ud800``
+    escape; a filter for it now misses that row rather than raising.
 
     Postgres never needs this: a Postgres ``text``/``jsonb`` column can
     never have stored a raw NUL or lone surrogate in the first place
