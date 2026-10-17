@@ -22,31 +22,34 @@ mutations.
 
 from __future__ import annotations
 
+import re
 from typing import Any
-
-_SURROGATE_RANGE_LOW = 0xD800
-_SURROGATE_RANGE_HIGH = 0xDFFF
 
 #: Stands in for a replaced NUL byte or lone surrogate: a visible
 #: character, so the result keeps the original's length and positions.
 REPLACEMENT_CHAR = "\ufffd"
 
-
-def _is_unsafe_char(ch: str) -> bool:
-    return ch == "\x00" or _SURROGATE_RANGE_LOW <= ord(ch) <= _SURROGATE_RANGE_HIGH
+#: A NUL byte or an unpaired UTF-16 surrogate (U+D800-U+DFFF), compiled
+#: once. A per-call ``any(... for ch in value)`` walks every character in
+#: Python; ``re``'s C scan loop finds the same hazard (or its absence) far
+#: faster, and lets the common "no hazard" case skip the walk entirely in
+#: both :func:`contains_nul_or_lone_surrogate` and
+#: :func:`replace_nul_and_lone_surrogates` -- both return ``value``
+#: unchanged, with no further work, the moment ``search`` finds nothing.
+_UNSAFE_CHAR_RE = re.compile("[\x00\ud800-\udfff]")
 
 
 def contains_nul_or_lone_surrogate(value: str) -> bool:
     """True if ``value`` has a NUL byte or an unpaired UTF-16 surrogate."""
-    return any(_is_unsafe_char(ch) for ch in value)
+    return _UNSAFE_CHAR_RE.search(value) is not None
 
 
 def replace_nul_and_lone_surrogates(value: str) -> str:
     """``value`` with each NUL byte and lone surrogate replaced by
     :data:`REPLACEMENT_CHAR`; ``value`` itself when it holds neither."""
-    if not contains_nul_or_lone_surrogate(value):
+    if _UNSAFE_CHAR_RE.search(value) is None:
         return value
-    return "".join(REPLACEMENT_CHAR if _is_unsafe_char(ch) else ch for ch in value)
+    return _UNSAFE_CHAR_RE.sub(REPLACEMENT_CHAR, value)
 
 
 def scrub_jsonb_unsafe(value: Any) -> Any:
@@ -66,6 +69,11 @@ def scrub_jsonb_unsafe(value: Any) -> Any:
     pinning the behaviour without a second implementation to drift from,
     and :class:`~trellis.stores.base.event_log.EventLog` calls it from
     its ``append`` template so every backend gets it for free.
+
+    Two dict keys that collide after scrubbing keep only the last value:
+    ``{"a\\x00": 1, "a\\ufffd": 2}`` becomes ``{"a\\ufffd": 2}``, the same
+    last-write-wins a Python dict comprehension always gives a repeated
+    key.
     """
     if isinstance(value, str):
         return replace_nul_and_lone_surrogates(value)
