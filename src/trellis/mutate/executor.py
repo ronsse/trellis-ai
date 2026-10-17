@@ -942,7 +942,7 @@ class MutationExecutor:
                 event_type,
                 "mutation_executor",
                 entity_id=_jsonb_safe_or_original(command.target_id),
-                entity_type=command.target_type,
+                entity_type=_jsonb_safe_or_original(command.target_type),
                 payload=_jsonb_safe_or_original(payload),
             )
         except _audit_emit_failure_classes() as exc:

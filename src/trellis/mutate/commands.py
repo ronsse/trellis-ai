@@ -10,6 +10,7 @@ from pydantic import Field
 
 from trellis.core.base import VersionedModel, utc_now
 from trellis.core.ids import generate_ulid
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 
 
 class Operation(StrEnum):
@@ -235,6 +236,16 @@ class OperationRegistry:
         missing = required - set(command.args.keys())
         if missing:
             return False, [f"Missing required args: {', '.join(sorted(missing))}"]
+        # Lookup keys are refused rather than scrubbed for the audit log: a
+        # replaced key would no longer match the raw key a later lookup sends.
+        unsafe = [
+            f"{field} contains a NUL byte or lone surrogate"
+            for field in ("idempotency_key", "target_id", "target_type")
+            if (value := getattr(command, field))
+            and contains_nul_or_lone_surrogate(value)
+        ]
+        if unsafe:
+            return False, unsafe
         # The one value checked here: a feedback rating is a 0.0-1.0 score,
         # and POST /api/v1/commands/batch and MCP ``execute_mutation`` pass
         # caller args straight through. The chained comparison is False for

@@ -14,10 +14,12 @@ import pytest
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import PolicyViolationError, StoreError, ValidationError
 from trellis.mutate import build_curate_executor
+from trellis.mutate import executor as executor_module
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
     CommandBatch,
+    CommandResult,
     CommandStatus,
     Operation,
 )
@@ -601,11 +603,9 @@ class TestRejectionPayloadIsJsonbSafe:
         assert "\ud800" not in scrubbed_claim
         assert len(scrubbed_claim) == len(claim)  # escaped, not dropped
 
-    def test_hazard_nested_in_cause_and_a_dict_key_is_escaped(self) -> None:
-        """The walk covers a nested ``cause`` dict and dict *keys*, not
-        only the top-level ``message`` -- the same shape
-        ``trellis.mutate.handlers._find_unsafe_jsonb_string`` walks for
-        the Apply/Revoke audit probe."""
+    def test_hazard_nested_in_cause_is_escaped(self) -> None:
+        """The walk covers a nested ``cause`` dict, not only the
+        top-level ``message``."""
         event_log = MagicMock()
         handler = MagicMock()
         exc = StoreError("backend rejected the write", store="pg")
@@ -624,12 +624,60 @@ class TestRejectionPayloadIsJsonbSafe:
         assert "\x00" not in cause_message
         assert "\ud800" not in cause_message
 
+    def test_dict_keys_and_nested_values_are_escaped(self) -> None:
+        value = {"k\x00": {"\ud800": ["a\x00", ("b\ud800",)]}, "ok": 1}
+
+        assert executor_module._scrub_jsonb_unsafe(value) == {
+            "k\ufffd": {"\ufffd": ["a\ufffd", ["b\ufffd"]]},
+            "ok": 1,
+        }
+
+    def test_entity_type_is_escaped_on_a_rejection_event(self) -> None:
+        event_log = MagicMock()
+        executor = MutationExecutor(event_log=event_log, handlers={})
+
+        executor.execute(_cmd(target_type="doc\x00"))
+
+        assert event_log.emit.call_args.kwargs["entity_type"] == "doc\ufffd"
+
+    @pytest.mark.parametrize("field", ["idempotency_key", "target_id", "target_type"])
+    def test_an_unsafe_lookup_key_is_refused_at_validation(self, field: str) -> None:
+        handler = _handler()
+        executor = MutationExecutor(
+            event_log=MagicMock(), handlers={Operation.ENTITY_CREATE: handler}
+        )
+
+        result = executor.execute(_cmd(**{field: "k\x00z"}))
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "validate"
+        assert field in result.message
+        handler.handle.assert_not_called()
+
+    def test_an_unsafe_idempotency_key_never_runs_and_never_shadows(
+        self, tmp_path: Path
+    ) -> None:
+        """Across executors sharing one log, a retried unsafe key never
+        runs, and the honest key its replacement would spell still runs."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _handler()
+
+        def run(key: str) -> CommandResult:
+            executor = MutationExecutor(
+                event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+            )
+            return executor.execute(_cmd(idempotency_key=key))
+
+        assert run("k\x00z").status == CommandStatus.REJECTED
+        assert run("k\x00z").status == CommandStatus.REJECTED
+        assert run("k\ufffdz").status == CommandStatus.SUCCESS
+        handler.handle.assert_called_once()
+
     def test_a_failing_scrub_never_fails_the_write(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The scrub is advisory: if it raises, the command still succeeds
         and its event is emitted with the unscrubbed payload."""
-        import trellis.mutate.executor as executor_module
 
         def _boom(value: object) -> object:
             raise RuntimeError
