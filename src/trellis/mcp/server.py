@@ -3947,6 +3947,11 @@ def query_observations(
     props: dict[str, Any] = {}
     if subject_entity_id.strip():
         props["subject_entity_id"] = subject_entity_id.strip()
+    # observer_agent_id is an identifier, not free text: every producer
+    # sets it to an opaque agent handle, this filter matches it exactly,
+    # and OBSERVATION_RECORD's Stage 1 validate() now refuses a hazardous
+    # one at write time (see NESTED_ID_ARG_PATHS in mutate/commands.py) so
+    # it can never land here unfindable.
     if observer_agent_id.strip():
         props["observer_agent_id"] = observer_agent_id.strip()
 

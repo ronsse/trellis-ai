@@ -228,3 +228,22 @@ class TestBackfillNameAliasesCommand:
         assert payload["status"] == "error"
         assert payload["failed"] == 1
         assert payload["failures"][0]["reason"] == "policy"
+
+    def test_validate_rejection_uses_validation_exit(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A NUL-bearing node id is refused at Stage 1 validate, not Stage 2
+        policy, so the exit code must be EXIT_VALIDATION (2), not the
+        EXIT_POLICY (3) a policy denial gets."""
+        _seed(tmp_path, monkeypatch, [("alpha\x00bad", "Alpha")])
+
+        result = runner.invoke(
+            app,
+            ["admin", "backfill-name-aliases", "--format", "json"],
+        )
+
+        assert result.exit_code == 2
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["failed"] == 1
+        assert payload["failures"][0]["reason"] == "validation"

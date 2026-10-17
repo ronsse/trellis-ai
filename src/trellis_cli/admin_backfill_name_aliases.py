@@ -97,11 +97,17 @@ def register(app: Typer) -> None:
         if truncated:
             exit_code = EXIT_VALIDATION
         elif report.failed:
-            exit_code = (
-                EXIT_POLICY
-                if all(failure.reason == "policy" for failure in report.failures)
-                else EXIT_STORE
-            )
+            # Mirrors trellis_cli.exit_codes.refusal_exit_code: a uniform
+            # cause maps to that cause's exit code, and a mix (or a
+            # store/protocol failure) falls to EXIT_STORE as the most
+            # conservative "don't retry with the same input" signal.
+            reasons = {failure.reason for failure in report.failures}
+            if reasons == {"policy"}:
+                exit_code = EXIT_POLICY
+            elif reasons == {"validation"}:
+                exit_code = EXIT_VALIDATION
+            else:
+                exit_code = EXIT_STORE
         if exit_code:
             raise typer.Exit(code=exit_code)
 

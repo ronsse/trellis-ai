@@ -473,7 +473,7 @@ class TestNestedIdArgPathsNulSafety:
         """Same discipline as ``TestIdBearingArgNulSafety``'s floor, for the
         nested mapping."""
         assert len(NESTED_ID_ARG_PATHS) == 7
-        assert len(_NESTED_ID_PATHS) == 9
+        assert len(_NESTED_ID_PATHS) == 11
 
     def test_mapping_is_pinned_by_full_content(self) -> None:
         assert {
@@ -485,12 +485,14 @@ class TestNestedIdArgPathsNulSafety:
                 {
                     ("observation", "observation_id"),
                     ("observation", "subject_entity_id"),
+                    ("observation", "observer_agent_id"),
                 }
             ),
             Operation.MEASUREMENT_RECORD: frozenset(
                 {
                     ("measurement", "measurement_id"),
                     ("measurement", "subject_entity_id"),
+                    ("measurement", "observer_agent_id"),
                 }
             ),
             Operation.RETENTION_RESTORE: frozenset({("item_ids", None)}),

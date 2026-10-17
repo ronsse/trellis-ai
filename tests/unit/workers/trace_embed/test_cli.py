@@ -99,6 +99,46 @@ class TestEmbedTracesCLI:
         assert payload["skipped_invalid"] == 1
         assert payload["failed"] == 0
 
+    def test_only_skipped_empty_exits_non_zero_and_reports_partial(
+        self, registry, tmp_path, cli_runner
+    ) -> None:
+        """``skipped_empty`` alone must flip ``status`` to ``partial`` in
+        both formats, matching the exit code the CLI already returns for
+        it (src/trellis_cli/worker.py): a green ``status: ok`` next to a
+        non-zero exit would be a payload that disagrees with the process
+        result a scheduler actually observes."""
+        from .conftest import make_trace
+
+        good = make_trace(0)
+        empty = make_trace(1)
+        for trace in (good, empty):
+            registry.operational.trace_store.append(trace)
+        # Nothing to render: no intent, no outcome, no step errors. Written
+        # as a direct store update (like TestPermanentlyInvalidRowDoesNotPin
+        # TheWatermark in test_resume.py) because Trace itself requires a
+        # non-empty intent.
+        blanked = empty.model_copy(update={"intent": "", "outcome": None, "steps": []})
+        registry.operational.trace_store._conn.execute(
+            "UPDATE traces SET trace_json = ? WHERE trace_id = ?",
+            (blanked.model_dump_json(), blanked.trace_id),
+        )
+        registry.operational.trace_store._conn.commit()
+
+        payload, result = _run_json(
+            cli_runner, "--watermark", str(tmp_path / "wm.json")
+        )
+        assert result.exit_code == 1, result.output
+        assert payload["status"] == "partial"
+        assert payload["skipped_empty"] == 1
+        assert payload["failed"] == 0
+        assert payload["skipped_invalid"] == 0
+
+        text_result = cli_runner.invoke(
+            worker_app,
+            ["embed-traces", "--watermark", str(tmp_path / "wm-text.json")],
+        )
+        assert text_result.exit_code == 1, text_result.output
+
     def test_missing_embedder_exits_non_zero(
         self, registry, tmp_path, monkeypatch, cli_runner
     ) -> None:

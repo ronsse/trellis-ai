@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
+from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis.learning import submit_learning_promotion
 from trellis.learning.candidate_auto_promote import (
     AUTO_PROMOTE_REQUESTED_BY,
@@ -458,6 +459,70 @@ class TestCurateRedact:
         # 3. And the error was printed rather than lost to a MarkupError
         #    somewhere upstream of it.
         assert "Node not found" in rendered
+
+    def test_redact_purges_a_stored_nul_id(self) -> None:
+        """A row an id-minting bug stored with a raw NUL byte, before the
+        Stage 1 hazard refusal existed, must still be purgeable through the
+        CLI -- cleaning up exactly that kind of row is the main reason to
+        redact one. Inserted directly into SQLite (never through a governed
+        write) so the fixture reaches the state a minting bug would have
+        left, not the state ``entity.create`` would refuse to write today.
+
+        The audit event's own ``target_id`` is asserted scrubbed, not raw:
+        REDACTION_APPLIED is emitted by the handler directly, outside
+        ``MutationExecutor._emit_event``'s scrub, but ``EventLog.append``
+        scrubs ``entity_id``/``payload`` on every ``emit()`` call -- this
+        one included -- before any backend sees them. SQLite would accept
+        a raw NUL in a JSON string silently where Postgres jsonb refuses
+        it (see ``core/text_safety.py``'s module docstring), so asserting
+        the raw byte here would pass on this backend and fail in
+        production.
+        """
+        hazard_id = "junk\x00mint"
+        graph = curate_cli._get_registry().knowledge.graph_store
+        now = datetime.now(UTC).isoformat()
+        graph._conn.execute(
+            "INSERT INTO nodes (version_id, node_id, node_type, node_role, "
+            "generation_spec_json, document_ids_json, properties_json, "
+            "created_at, updated_at, valid_from, valid_to) "
+            "VALUES (?, ?, 'person', 'semantic', NULL, NULL, '{}', ?, ?, ?, NULL)",
+            (f"{hazard_id}-v1", hazard_id, now, now, now),
+        )
+        graph._conn.commit()
+        assert graph.get_node(hazard_id) is not None
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "redact",
+                hazard_id,
+                "--yes",
+                "--reason",
+                "defect-minted NUL id",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert graph.get_node(hazard_id) is None
+
+        events = [
+            e
+            for e in curate_cli._get_registry().operational.event_log.get_events(
+                event_type=EventType.REDACTION_APPLIED
+            )
+            if e.payload.get("command_id") == data["command_id"]
+        ]
+        assert len(events) == 1
+        assert events[0].payload["reason"] == "defect-minted NUL id"
+        assert events[0].payload["target_id"] == replace_nul_and_lone_surrogates(
+            hazard_id
+        )
+        assert "\x00" not in events[0].payload["target_id"]
+        assert "\x00" not in events[0].entity_id
 
 
 class TestCurateDemotePrecedent:

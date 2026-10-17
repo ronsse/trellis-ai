@@ -2241,7 +2241,9 @@ def embed_traces_cmd(
         "--reset-watermark",
         help=(
             "Forget the cursor and re-scan from the beginning. Costs time, "
-            "never rows — traces that already have a vector row are skipped."
+            "never rows — traces that already have a vector row are "
+            "skipped. A partial status from a row with nothing to render "
+            "recurs after the reset: the row is still there."
         ),
     ),
     no_step_errors: bool = typer.Option(

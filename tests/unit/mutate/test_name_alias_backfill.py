@@ -293,3 +293,22 @@ class TestGovernedNameAliasBackfill:
             )
             is None
         )
+
+    def test_validate_rejection_is_reported_as_validation_not_policy(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A NUL-bearing node id makes ``Command.target_id`` hazardous, so
+        Stage 1 validate rejects it before the policy gate ever runs. That
+        must read ``reason="validation"``, distinct from an actual policy
+        refusal -- the two have different remedies and the CLI maps them
+        to different exit codes."""
+        _add(registry, "alpha\x00bad", "Alpha")
+
+        report = backfill_name_aliases(
+            registry.knowledge.graph_store,
+            _executor(registry),
+            max_nodes=1,
+        )
+
+        assert report.failed == 1
+        assert report.failures[0].reason == "validation"

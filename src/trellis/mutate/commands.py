@@ -140,20 +140,25 @@ class CommandBatch(VersionedModel):
 #: exact-match lookup key -- never scanned generically, because free-text
 #: args (names, descriptions, reasons, comments) must stay accepted. Found
 #: by reading every handler in ``mutate/handlers.py``: the value each key
-#: names is either minted fresh (``entity.create``'s ``entity_id`` and its
-#: ``entity_type`` -- stored verbatim as the node's ``node_type`` and
-#: compared exactly against ``"precedent"`` -- and ``entity.update``'s
-#: ``entity_type``, stored the same way, ``alias.upsert``'s owner
-#: ``entity_id``, ``link.create``'s edge endpoints and its ``edge_kind`` -- stored
-#: as ``edge_type`` and filtered on exactly by ``get_edges`` --,
-#: ``precedent.promote``'s trace-sourced ``trace_id``) or read back later
-#: by an exact-match query against a stored event's ``entity_id``/payload
-#: field (``precedent.demote``/``reinstate``, ``label.add``/``remove``'s
-#: ``target_id`` and its ``label`` -- checked for list membership against
-#: the stored ``labels`` property --, and ``feedback.record``'s
-#: ``target_id`` and its join key ``pack_id`` -- see ``_was_auto_promoted``,
-#: ``_is_promoted_precedent_event`` in handlers.py and
-#: ``join_pack_feedback`` in ``learning/pack_observations.py``).
+#: names is either minted fresh (``entity.create``'s ``entity_id``,
+#: ``alias.upsert``'s owner ``entity_id``, ``link.create``'s edge endpoints
+#: and its ``edge_kind`` -- stored as ``edge_type`` and filtered on exactly
+#: by ``get_edges`` --, ``precedent.promote``'s trace-sourced ``trace_id``),
+#: an exact-match lookup key against a node that must already exist
+#: (``entity.update``'s ``entity_id``: the id ``EntityUpdateHandler`` reads
+#: with ``get_node`` and rewrites a new version of via
+#: ``_rewrite_current_node`` -- neither minted nor read back from a stored
+#: event), or read back later by an exact-match query against a stored
+#: event's ``entity_id``/payload field (``precedent.demote``/``reinstate``,
+#: ``label.add``/``remove``'s ``target_id`` and its ``label`` -- checked for
+#: list membership against the stored ``labels`` property --, and
+#: ``feedback.record``'s ``target_id`` and its join key ``pack_id`` -- see
+#: ``_was_auto_promoted``, ``_is_promoted_precedent_event`` in handlers.py
+#: and ``join_pack_feedback`` in ``learning/pack_observations.py``).
+#: ``entity_type`` (both ``entity.create``'s and ``entity.update``'s) fits
+#: none of those three: it is stored verbatim as the node's ``node_type``,
+#: never minted and never read back from an event, and is compared exactly
+#: against ``"precedent"`` by the retype/lifecycle guards in both handlers.
 #:
 #: A key is deliberately absent when: the handler already refuses a NUL
 #: itself (``classify_rule.apply``/``revoke``'s ``key``/``target``/
@@ -163,14 +168,20 @@ class CommandBatch(VersionedModel):
 #: -- leaving it out also keeps governed redaction able to purge a row an
 #: id-minting bug stored before this check existed); or the value is free
 #: text/classification, not an identifier (``alias.upsert``'s
-#: ``source_system``, every ``reason``/``name``/``description``). One
-#: lookup key is left out on purpose: ``alias.upsert``'s ``raw_id``. The
-#: name-alias backfill (``mutate/name_aliases.py``) and ``entity.create``'s
-#: own alias binding derive it from the entity's free-text name, which may
-#: hold a NUL, so refusing it would fail every backfill pass for such an
-#: entity while the create path stores the same value anyway. This
-#: mapping's size has a hand-read floor (``tests/unit/mutate/test_commands.py``)
-#: so deleting an entry fails a test.
+#: ``source_system``, every ``reason``/``name``/``description``). A few
+#: lookup keys are left out because they are name-derived, not an
+#: identifier any caller chooses: ``alias.upsert``'s ``raw_id`` and its
+#: ``stale_owner_name_key``, and the name-alias binding ``entity.create``
+#: and ``entity.update`` each perform on their own ``name`` arg
+#: (``_bind_entity_name_alias`` in handlers.py, which derives one key from
+#: the name and passes it as both ``raw_id`` and ``stale_owner_name_key``
+#: to ``bind_alias_if_absent``). The name-alias backfill
+#: (``mutate/name_aliases.py``) and that internal binding both derive the
+#: key from the entity's free-text name, which may hold a NUL, so refusing
+#: it would fail every backfill pass for such an entity while the
+#: create/update path stores the same value anyway. This mapping's size
+#: has a hand-read floor (``tests/unit/mutate/test_commands.py``) so
+#: deleting an entry fails a test.
 #:
 #: An id that arrives nested inside a sub-object or a list in ``args`` --
 #: rather than as a bare top-level string -- cannot be named here, because
@@ -217,8 +228,18 @@ ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
 #: ``observation.observation_id`` is the node's own id and
 #: ``.subject_entity_id`` is an edge endpoint (``ObservationRecordHandler``);
 #: ``measurement.record``'s matching pair plays the same two roles
-#: (``MeasurementRecordHandler``); ``retention.restore``'s ``item_ids`` is a
-#: list of ids used for exact-match restore lookups
+#: (``MeasurementRecordHandler``). Both also carry ``observer_agent_id``,
+#: a third role this mapping scans for: an exact-match lookup key, not an
+#: edge endpoint or a primary key. Every producer sets it to an opaque
+#: agent handle (a dotted module path or a ``source:name`` id, never
+#: free-form prose -- see ``trellis_workers.extract.query_pattern_observer``
+#: and MCP's ``record_observation``), and MCP's ``query_observations`` plus
+#: the REST ``/observations`` list/get routes filter on it with the same
+#: exact-match ``properties=`` query every other scanned id uses; a
+#: hazard-bearing value stored unchecked would be as permanently
+#: unfindable through that filter as an unscanned ``target_id`` is through
+#: a lookup (see this module's ``validate()``). ``retention.restore``'s
+#: ``item_ids`` is a list of ids used for exact-match restore lookups
 #: (``RetentionRestoreHandler``). Same hand-read floor discipline as
 #: ``ID_BEARING_ARG_KEYS`` (``tests/unit/mutate/test_commands.py``).
 NESTED_ID_ARG_PATHS: dict[Operation, frozenset[tuple[str, str | None]]] = {
@@ -227,10 +248,18 @@ NESTED_ID_ARG_PATHS: dict[Operation, frozenset[tuple[str, str | None]]] = {
     Operation.ENTITY_CREATE: frozenset({("document_ids", None)}),
     Operation.ENTITY_UPDATE: frozenset({("document_ids", None)}),
     Operation.OBSERVATION_RECORD: frozenset(
-        {("observation", "observation_id"), ("observation", "subject_entity_id")}
+        {
+            ("observation", "observation_id"),
+            ("observation", "subject_entity_id"),
+            ("observation", "observer_agent_id"),
+        }
     ),
     Operation.MEASUREMENT_RECORD: frozenset(
-        {("measurement", "measurement_id"), ("measurement", "subject_entity_id")}
+        {
+            ("measurement", "measurement_id"),
+            ("measurement", "subject_entity_id"),
+            ("measurement", "observer_agent_id"),
+        }
     ),
     Operation.RETENTION_RESTORE: frozenset({("item_ids", None)}),
 }
@@ -339,10 +368,29 @@ class OperationRegistry:
             return False, [f"Missing required args: {', '.join(sorted(missing))}"]
         # Lookup keys are refused rather than scrubbed for the audit log: a
         # replaced key would no longer match the raw key a later lookup sends.
+        # ``target_id`` is exempted for ``redaction.apply``: its handler
+        # never reads ``Command.target_id`` -- it reads ``args["target_id"]``
+        # directly (deliberately absent from ID_BEARING_ARG_KEYS, see that
+        # mapping's docstring), so this field is descriptive only here. It
+        # rides the generic MUTATION_EXECUTED/REJECTED event's ``entity_id``
+        # (scrubbed there -- see ``_jsonb_safe_or_original`` in executor.py)
+        # and the success ``CommandResult.target_id`` echo, neither of which
+        # is a lookup a rewritten value could miss. Refusing it anyway would
+        # be the one thing standing between a NUL-minted row and the purge
+        # that exists to remove it -- redaction is the main reason to target
+        # such a row at all. ``target_type`` and ``idempotency_key`` stay
+        # checked for every operation, redaction included: some handlers
+        # (``settings.update``, ``classify_rule.apply``/``revoke``) compare
+        # ``Command.target_id``/``target_type`` for an exact match, and a
+        # rewritten ``idempotency_key`` would never match a later retry's
+        # raw one.
         unsafe = [
             f"{field} contains a NUL byte or lone surrogate"
             for field in ("idempotency_key", "target_id", "target_type")
-            if (value := getattr(command, field))
+            if not (
+                field == "target_id" and command.operation is Operation.REDACTION_APPLY
+            )
+            and (value := getattr(command, field))
             and contains_nul_or_lone_surrogate(value)
         ]
         # Same discipline, extended to the id-bearing args a handler reads
