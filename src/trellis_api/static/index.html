@@ -610,12 +610,6 @@
             background: var(--bg);
             border: 1px solid var(--border);
         }
-        button.btn-danger {
-            border-color: var(--danger);
-            color: var(--danger);
-            background: transparent;
-        }
-        button.btn-danger:hover { background: var(--danger-tint); }
         .review-rationale {
             width: 100%;
             margin-top: 0.5rem;
@@ -731,6 +725,11 @@
             color: var(--text-dim);
         }
         #error { color: var(--danger); text-align: center; padding: 1rem; display: none; }
+        /* A 403 here means the stored key is fine but lacks admin scope --
+           routine (most keys are read-scoped), not a failure, so it reads
+           dimmed rather than as the same red text a real connectivity or
+           server error gets. */
+        #error.admin-gate { color: var(--text-dim); }
         /* Visually hidden but still reachable by screen readers -- used for
            text alternatives (e.g. the graph canvas) that have no on-screen
            equivalent worth also rendering for sighted users. */
@@ -795,9 +794,15 @@
             border-color: var(--accent);
         }
         .search-bar input { flex: 1; min-width: 180px; }
-        .search-bar button, button.btn {
+        /* One button system: .btn is the base (every push-button site
+           carries it), modifiers layer on top and are declared after the
+           base so equal-specificity, single-class selectors resolve by
+           source order instead of a brittle compound-selector tie
+           (previously .search-bar button vs button.btn, which silently
+           depended on which selector happened to be written second). */
+        .btn {
             background: var(--accent);
-            color: white;
+            color: var(--accent-on);
             border: none;
             padding: 0.6rem 1.2rem;
             border-radius: var(--r-1);
@@ -806,17 +811,34 @@
             transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
             white-space: nowrap;
         }
-        .search-bar button:hover, button.btn:hover {
+        .btn:hover {
             background: var(--accent-hover);
             box-shadow: 0 0 12px var(--focus-ring);
         }
-        button.btn-ghost {
+        /* .btn-primary is .btn's own look restated as an explicit name --
+           most buttons in this console are the single primary action in
+           their row, so there is no separate "neutral default" to
+           distinguish it from. */
+        .btn-primary {
+            background: var(--accent);
+            color: var(--accent-on);
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+            box-shadow: 0 0 12px var(--focus-ring);
+        }
+        .btn-danger {
+            background: var(--danger);
+            color: var(--text-inverse);
+        }
+        .btn-danger:hover { background: color-mix(in srgb, var(--danger) 85%, black); }
+        .btn-ghost {
             background: transparent;
             border: 1px solid var(--border);
             color: var(--text-dim);
         }
-        button.btn-ghost:hover { background: var(--surface-sunken); color: var(--text); }
-        button.btn-sm {
+        .btn-ghost:hover { background: var(--surface-sunken); color: var(--text); }
+        .btn-sm {
             padding: 0.3rem 0.6rem;
             font-size: var(--fs-2);
             border-radius: var(--r-1);
@@ -1955,14 +1977,14 @@
                         <option value="domain">By domain</option>
                         <option value="intent_family">By intent family</option>
                     </select>
-                    <button onclick="loadMetrics()">Refresh</button>
+                    <button class="btn" onclick="loadMetrics()">Refresh</button>
                 </div>
             </div>
             <p class="field-hint">
                 Time window picks how far back the scan goes; grouping splits each metric's
                 series by domain or intent family instead of reporting one combined line.
             </p>
-            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
                 Trends computed from the event log on read. Each metric uses the
                 same formula as the evaluation suite that regression-tests retrieval
                 quality, so a trend here and a number from that suite describe the
@@ -1977,10 +1999,10 @@
             <div class="section-header">
                 <h2>Review Queue</h2>
                 <div class="search-bar" style="margin:0">
-                    <button onclick="loadReview()">Refresh</button>
+                    <button class="btn" onclick="loadReview()">Refresh</button>
                 </div>
             </div>
-            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
                 Human-decision inbox. Every change on this tab is applied only when
                 you approve or reject it here.
             </p>
@@ -2020,19 +2042,19 @@
                         <option value="30" selected>Last 30 days</option>
                         <option value="90">Last 90 days</option>
                     </select>
-                    <button onclick="loadEvolution()">Refresh</button>
+                    <button class="btn" onclick="loadEvolution()">Refresh</button>
                 </div>
             </div>
             <div class="cards" id="evo-summary"></div>
             <div class="status-section">
                 <h2>Item Scores</h2>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items ranked by success rate across context packs</p>
+                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Items ranked by success rate across context packs</p>
                 <div id="evo-items"></div>
             </div>
             <div class="status-section" id="evo-noise-section" style="display:none">
                 <h2>Usage-Rule Proposals</h2>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write below, or the scheduled nightly curation run, actually tags anything. <code style="font-family:var(--font-mono); font-size:0.85em; cursor:help;" title="CLI equivalent: trellis analyze apply-noise-tags">CLI equivalent</code></p>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
+                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write below, or the scheduled nightly curation run, actually tags anything. <code style="font-family:var(--font-mono); font-size:var(--fs-1); cursor:help;" title="CLI equivalent: trellis analyze apply-noise-tags">CLI equivalent</code></p>
+                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
                 <div id="evo-noise"></div>
                 <div id="evo-noise-apply" style="margin-top:0.75rem">
                     <button class="btn btn-sm" onclick="showApplyNoiseTagsConfirm()">Apply noise tags&hellip;</button>
@@ -2046,7 +2068,7 @@
             <div id="graph-sample-warning"></div>
             <div class="search-bar">
                 <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." aria-label="Search graph entities" onkeydown="if(event.key==='Enter')searchGraph()">
-                <button onclick="searchGraph()">Search</button>
+                <button class="btn" onclick="searchGraph()">Search</button>
                 <input type="text" id="graph-entity-id" placeholder="Or enter entity ID..." aria-label="Load entity by ID" style="max-width:280px" onkeydown="if(event.key==='Enter')loadEntity(this.value)">
                 <select id="graph-depth" aria-label="Graph traversal depth">
                     <option value="1">Depth 1</option>
@@ -2129,7 +2151,7 @@
                 <select id="trace-domain" aria-label="Filter traces by domain">
                     <option value="">All domains</option>
                 </select>
-                <button onclick="tracesRefresh()">Refresh</button>
+                <button class="btn" onclick="tracesRefresh()">Refresh</button>
             </div>
             <div class="status-section table-wrap" style="padding:0">
                 <table>
@@ -2169,7 +2191,7 @@
                     <option value="20">20 items</option>
                     <option value="50">50 items</option>
                 </select>
-                <button onclick="loadPrecedents()">Refresh</button>
+                <button class="btn" onclick="loadPrecedents()">Refresh</button>
             </div>
             <div id="precedents-container"></div>
         </div>
@@ -2179,7 +2201,7 @@
             <div class="search-bar">
                 <input type="text" id="mem-search" placeholder="Search documents (full-text)..." aria-label="Search documents"
                        onkeydown="if(event.key==='Enter'){memOffset=0;loadMemories();}">
-                <button onclick="memOffset=0;loadMemories()">Refresh</button>
+                <button class="btn" onclick="memOffset=0;loadMemories()">Refresh</button>
             </div>
             <div class="status-section table-wrap" style="padding:0">
                 <table>
@@ -2217,9 +2239,9 @@
                 <input type="text" id="event-source" placeholder="Source filter..." style="max-width:220px"
                        aria-label="Filter by emitting source"
                        onkeydown="if(event.key==='Enter')eventsRefresh()">
-                <button onclick="eventsRefresh()">Refresh</button>
+                <button class="btn" onclick="eventsRefresh()">Refresh</button>
             </div>
-            <p style="font-size:0.8rem; color:var(--text-dim); margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
+            <p style="font-size:var(--fs-3); color:var(--text-dim); margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
             <div class="status-section table-wrap" style="padding:0">
                 <table>
                     <thead>
@@ -2250,7 +2272,7 @@
         <!-- ============ Packs ============ -->
         <div id="view-packs" style="display:none">
             <div class="search-bar">
-                <button onclick="packsRefresh()">Refresh</button>
+                <button class="btn" onclick="packsRefresh()">Refresh</button>
             </div>
             <div class="status-section table-wrap" style="padding:0">
                 <table>
@@ -2286,10 +2308,10 @@
             <div class="section-header">
                 <h2>Loop Health</h2>
                 <div class="search-bar" style="margin:0">
-                    <button onclick="loadLoops()">Refresh</button>
+                    <button class="btn" onclick="loadLoops()">Refresh</button>
                 </div>
             </div>
-            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
                 Is each curation / learning loop actually doing anything? Each row reads the
                 EventLog's most recent cycle for that loop &mdash; a loop that has never produced
                 one reads "Not measured", never a bare zero indistinguishable from "ran and did
@@ -2302,28 +2324,28 @@
             <div class="section-header">
                 <h2>Reports</h2>
                 <div class="search-bar" style="margin:0; gap:0.5rem; align-items:center">
-                    <label style="font-size:0.75rem; color:var(--text-dim); display:flex; align-items:center; gap:0.3rem">
+                    <label style="font-size:var(--fs-2); color:var(--text-dim); display:flex; align-items:center; gap:0.3rem">
                         <input type="checkbox" id="report-raw-toggle" onchange="renderReportOutput()"> raw JSON
                     </label>
-                    <button onclick="loadReportsTab()">Refresh list</button>
+                    <button class="btn" onclick="loadReportsTab()">Refresh list</button>
                 </div>
             </div>
-            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
                 Read-only analyze reports &mdash; the same library functions
                 <code class="mono">trellis analyze &lt;report&gt;</code> calls on the CLI. An
                 unmeasured value reads "not measured", never a bare zero.
             </p>
             <div style="display:flex; flex-wrap:wrap; gap:1rem; align-items:flex-end; margin-bottom:0.75rem">
-                <label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">
+                <label style="display:flex; flex-direction:column; font-size:var(--fs-2); color:var(--text-dim); gap:0.2rem">
                     report
-                    <select id="report-picker" onchange="onReportPickerChange()" style="font-size:0.85rem; min-width:14rem"></select>
+                    <select id="report-picker" onchange="onReportPickerChange()" style="font-size:var(--fs-4); min-width:14rem"></select>
                 </label>
                 <div id="report-params" style="display:flex; flex-wrap:wrap; gap:0.75rem"></div>
-                <button onclick="runReport()">Run</button>
+                <button class="btn" onclick="runReport()">Run</button>
             </div>
-            <p id="report-param-error" style="font-size:0.78rem; color:var(--danger); margin-bottom:0.5rem"></p>
-            <p id="report-description" style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem"></p>
-            <div id="report-meta" class="mono" style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.75rem"></div>
+            <p id="report-param-error" style="font-size:var(--fs-2); color:var(--danger); margin-bottom:0.5rem"></p>
+            <p id="report-description" style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem"></p>
+            <div id="report-meta" class="mono" style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem"></div>
             <div id="report-output"></div>
         </div>
 
@@ -2332,8 +2354,8 @@
             <div class="search-bar">
                 <input type="text" id="adv-scope" placeholder="Filter by scope (exact match)" aria-label="Filter advisories by scope">
                 <input type="number" id="adv-min-confidence" placeholder="Min confidence" aria-label="Minimum confidence" min="0" max="1" step="0.05" style="max-width:140px">
-                <button onclick="loadAdvisories()">Refresh</button>
-                <button onclick="showGenerateAdvisoriesForm()">Generate advisories&hellip;</button>
+                <button class="btn" onclick="loadAdvisories()">Refresh</button>
+                <button class="btn" onclick="showGenerateAdvisoriesForm()">Generate advisories&hellip;</button>
             </div>
             <p class="field-hint">
                 This is the full advisory store, not a record of what was served: this route does
@@ -2376,8 +2398,8 @@
                 every command.
             </p>
             <div class="search-bar">
-                <button onclick="loadPolicies()">Refresh</button>
-                <button onclick="showCreatePolicyForm()">New policy&hellip;</button>
+                <button class="btn" onclick="loadPolicies()">Refresh</button>
+                <button class="btn" onclick="showCreatePolicyForm()">New policy&hellip;</button>
             </div>
             <div id="policy-create-form" style="display:none"></div>
             <div id="policy-create-result"></div>
@@ -2413,7 +2435,7 @@
                 mean the job has started.
             </p>
             <div class="search-bar">
-                <button onclick="loadSchedules()">Refresh</button>
+                <button class="btn" onclick="loadSchedules()">Refresh</button>
             </div>
             <div id="schedule-edit-form" style="display:none"></div>
             <div class="status-section table-wrap" style="padding:0">
@@ -2447,8 +2469,8 @@
             </p>
             <div id="tagrules-candidates-banner"></div>
             <div class="search-bar">
-                <button onclick="loadTagRules()">Refresh</button>
-                <button onclick="confirmMineTagCandidates()">Mine candidates&hellip;</button>
+                <button class="btn" onclick="loadTagRules()">Refresh</button>
+                <button class="btn" onclick="confirmMineTagCandidates()">Mine candidates&hellip;</button>
             </div>
             <div id="tagrules-mine-result"></div>
             <h3 style="margin:1.5rem 0 0.5rem">Open candidates</h3>
@@ -2494,7 +2516,7 @@
             <div class="status-section">
                 <div class="search-bar" style="margin-bottom:0.6rem">
                     <h3 style="margin:0; flex:1">Runtime</h3>
-                    <button onclick="loadRuntime()">Refresh</button>
+                    <button class="btn" onclick="loadRuntime()">Refresh</button>
                 </div>
                 <p class="field-hint">
                     Read-only snapshot of what this API process actually resolves right now &mdash;
@@ -2511,7 +2533,7 @@
                 so one of them can show a different effective value for the same setting.
             </p>
             <div class="search-bar">
-                <button onclick="loadSettings()">Refresh</button>
+                <button class="btn" onclick="loadSettings()">Refresh</button>
                 <input type="search" id="settings-filter" placeholder="Filter by name or description&hellip;" aria-label="Filter settings by name or description" oninput="renderSettingsTable()">
                 <select id="settings-group-filter" aria-label="Filter settings by group" onchange="renderSettingsTable()">
                     <option value="">All groups</option>
@@ -3006,6 +3028,26 @@
             return `<div class="loading-state"><span class="spinner"></span> ${escHtml(msg || 'Loading...')}</div>`;
         }
 
+        // A panel backed by an admin-scoped route renders a 403 differently
+        // from every other failure: the key is fine, it just lacks a scope
+        // this panel needs, which is routine (most keys are read-scoped) and
+        // not evidence anything is broken -- so it reads as a dimmed one-line
+        // note, never as the same red "Failed to load" text a genuine error
+        // (a 500, a dropped connection) gets.
+        function isAdminScopeError(err) {
+            return /^403\b/.test(err.message);
+        }
+
+        function loadFailureText(err, label) {
+            return isAdminScopeError(err)
+                ? `${label} needs an admin-scoped key.`
+                : `Failed to load ${label}: ${err.message}`;
+        }
+
+        function loadFailureColor(err) {
+            return isAdminScopeError(err) ? 'var(--text-dim)' : 'var(--danger)';
+        }
+
         // -- View switching --
         // Nav DOM order is the single source of truth for the view list, the
         // digit/Alt+digit shortcuts below, and their on-screen key hints --
@@ -3026,7 +3068,7 @@
         // own click, the first 403 any fetch sees (throwIfAuthRefused)
         // flips keyIsNonAdmin and this badges them instead of staying quiet
         // until the click happens.
-        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings', 'events', 'packs', 'reports'];
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings', 'events', 'packs', 'reports', 'schedules'];
         let keyIsNonAdmin = false;
 
         function applyScopeBadges() {
@@ -3184,10 +3226,10 @@
             // failed probe must show the reason, not just a red badge.
             let extra = '';
             if (detail && typeof detail.latency_ms === 'number') {
-                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${fmtNum(detail.latency_ms, 1)}ms</span>`;
+                extra += ` <span style="color:var(--text-dim); font-size:var(--fs-3)">${fmtNum(detail.latency_ms, 1)}ms</span>`;
             }
             if (detail && detail.error) {
-                extra += ` <span style="color:var(--danger); font-size:0.8rem">${escHtml(detail.error)}</span>`;
+                extra += ` <span style="color:var(--danger); font-size:var(--fs-3)">${escHtml(detail.error)}</span>`;
             }
             div.innerHTML = `<span>${escHtml(name)}${extra}</span><span class="badge ${cls}">${label}</span>`;
             return div;
@@ -3291,7 +3333,7 @@
         // CSS scales it responsively.
         function renderTrendChart(meta, result) {
             const card = chartCard(meta.title, meta.sub);
-            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            if (result.err) return chartEmpty(card, loadFailureText(result.err, meta.title));
             appendScanWarning(card, result.data);
             const series = (result.data.series || []).filter(s => s.points.length > 0);
             if (series.length === 0) return chartEmpty(card, 'No data in this window yet.');
@@ -3382,7 +3424,7 @@
         function renderEventsStrip(result) {
             const card = chartCard('Parameter promotions',
                 'governance events per day — promote / created / rejected / degraded counts');
-            if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            if (result.err) return chartEmpty(card, loadFailureText(result.err, 'Parameter promotions'));
             appendScanWarning(card, result.data);
             const series = (result.data.series || []).filter(s => s.points.length > 0);
             if (series.length === 0) return chartEmpty(card, 'No governance events in this window yet.');
@@ -3470,8 +3512,9 @@
             return `<div class="empty-state"><p style="color:var(--text-dim)">${escHtml(msg)}</p></div>`;
         }
 
-        function reviewError(msg) {
-            return `<div class="empty-state"><p style="color:var(--danger)">${escHtml(msg)}</p></div>`;
+        function reviewError(err, label) {
+            return `<div class="empty-state"><p style="color:${loadFailureColor(err)}">` +
+                `${escHtml(loadFailureText(err, label))}</p></div>`;
         }
 
         async function loadReview() {
@@ -3536,8 +3579,8 @@
                         </div>
                     </div>`).join('');
             } catch (err) {
-                setCountError('review-proposals-count', 'Failed to load proposals: ' + err.message);
-                body.innerHTML = reviewError('Failed to load proposals: ' + err.message);
+                setCountError('review-proposals-count', loadFailureText(err, 'Proposals'));
+                body.innerHTML = reviewError(err, 'proposals');
             }
         }
 
@@ -3678,7 +3721,7 @@
                 // UTC (scoring.py's `_utc_now`); fmtTime() labels it rather
                 // than silently relabelling it as the browser's local zone
                 // (P1-6).
-                const header = `<p style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem;">` +
+                const header = `<p style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem;">` +
                     `${escHtml(items.length)} candidate(s)` +
                     (data.generated_at_utc ? ` &middot; generated ${escHtml(fmtTime(data.generated_at_utc))}` : '') +
                     (data.artifacts_dir ? ` &middot; ${escHtml(data.artifacts_dir)}` : '') +
@@ -3702,7 +3745,7 @@
                     const cid = c.candidate_id || ('cand-' + i);
                     const promotable = c.promotable === true;
                     const approveControl = promotable
-                        ? `<label style="font-size:0.82rem; display:flex; align-items:center; gap:0.4rem;">
+                        ? `<label style="font-size:var(--fs-3); display:flex; align-items:center; gap:0.4rem;">
                             <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
                         </label>
                         <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>`
@@ -3710,7 +3753,7 @@
                             <span class="badge badge-warn">report-only — not promotable</span>
                             <span class="review-tooltip" title="This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is report-only: it informs reviewers but is not a promotable precedent, so there is deliberately no Approve control here.">Why no approve?</span>
                         </div>
-                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">
+                        <p style="color:var(--text-dim); font-size:var(--fs-2); margin:0.25rem 0 0">
                             This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is
                             report-only: it informs reviewers but is not a promotable precedent, so there is
                             deliberately no Approve control here.
@@ -3733,8 +3776,8 @@
                         <button class="btn btn-sm" onclick="submitLearningPromotions()">Submit approved promotions</button>
                      </div>`;
             } catch (err) {
-                setCountError('review-learning-count', 'Failed to load learning candidates: ' + err.message);
-                body.innerHTML = reviewError('Failed to load learning candidates: ' + err.message);
+                setCountError('review-learning-count', loadFailureText(err, 'Learning candidates'));
+                body.innerHTML = reviewError(err, 'learning candidates');
             }
         }
 
@@ -3778,12 +3821,12 @@
                             <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
                             <span class="review-tooltip" title="Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.">Why no approve?</span>
                         </div>
-                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.</p>
+                        <p style="color:var(--text-dim); font-size:var(--fs-2); margin:0.25rem 0 0">Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.</p>
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
                     </div>`).join('');
             } catch (err) {
-                setCountError('review-schema-count', 'Failed to load schema-evolution candidates: ' + err.message);
-                body.innerHTML = reviewError('Failed to load schema-evolution candidates: ' + err.message);
+                setCountError('review-schema-count', loadFailureText(err, 'Schema-evolution candidates'));
+                body.innerHTML = reviewError(err, 'schema-evolution candidates');
             }
         }
 
@@ -3835,15 +3878,15 @@
                     <div class="review-card fade-in">
                         <h4>${escHtml(p.source_file || p.proposal_id)}</h4>
                         <div class="review-meta">
-                            <span class="mono" style="font-size:0.7rem">${escHtml(p.proposal_id)}</span>
+                            <span class="mono" style="font-size:var(--fs-1)">${escHtml(p.proposal_id)}</span>
                             <span>events: ${escHtml(p.source_event_count)}</span>
                             ${fmtTimeCell(p.generated_at)}
                         </div>
                         ${p.markdown_preview ? `<div class="adr-panel">${escHtml(p.markdown_preview)}</div>` : ''}
                     </div>`).join('');
             } catch (err) {
-                setCountError('review-code-count', 'Failed to load code proposals: ' + err.message);
-                body.innerHTML = reviewError('Failed to load code proposals: ' + err.message);
+                setCountError('review-code-count', loadFailureText(err, 'Code proposals'));
+                body.innerHTML = reviewError(err, 'code proposals');
             }
         }
 
@@ -3908,7 +3951,7 @@
                 cancelApplyNoiseTags();
                 document.getElementById('evo-noise-apply-result').innerHTML = '';
             } catch (err) {
-                summary.innerHTML = `<div class="empty-state"><div class="icon">&#x2191;</div><p>Could not load effectiveness data: ${escHtml(err.message)}</p></div>`;
+                summary.innerHTML = `<div class="empty-state"><div class="icon">&#x2191;</div><p style="color:${loadFailureColor(err)}">${escHtml(loadFailureText(err, 'Effectiveness data'))}</p></div>`;
             }
         }
 
@@ -3942,7 +3985,7 @@
                 summaryLine += data.noise_tags_written != null
                     ? `; ${data.noise_tags_written} noise tags written`
                     : '; 0 noise tags written so far (read-only view)';
-                noise.innerHTML = `<p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
+                noise.innerHTML = `<p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
                     data.noise_candidates.map(id => {
                         const admitted = admittedSet.has(id);
                         const cls = admitted ? 'badge-warn' : 'badge-info';
@@ -3958,7 +4001,7 @@
             const el = document.getElementById('evo-noise-apply');
             if (!el) return;
             el.innerHTML =
-                '<p style="font-size:0.8rem; color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits as noise, so packs stop serving them by default. Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can tag fewer items than were proposed. Confirm?</p>' +
+                '<p style="font-size:var(--fs-3); color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits as noise, so packs stop serving them by default. Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can tag fewer items than were proposed. Confirm?</p>' +
                 '<button class="btn btn-sm btn-danger" onclick="runApplyNoiseTags()">Confirm: apply noise tags</button> ' +
                 '<button class="btn btn-ghost btn-sm" onclick="cancelApplyNoiseTags()">Cancel</button>';
         }
@@ -4634,10 +4677,10 @@
                 <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
                     <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
                     <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
-                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
+                    <span class="mono" style="color:var(--text-dim); font-size:var(--fs-1); flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
                 </span>
                 <span style="display:flex; align-items:center; gap:0.5rem; flex-shrink:0">
-                    <span style="font-size:0.7rem; color:var(--text-dim)">${created}</span>
+                    <span style="font-size:var(--fs-1); color:var(--text-dim)">${created}</span>
                     <span class="badge badge-accent">${escHtml(type)}</span>
                 </span>
             </div>`;
@@ -4832,8 +4875,8 @@
                     <span><span class="legend-dot" style="background:${color}; width:12px; height:12px; margin-right:0.3rem"></span>${escHtml(name)}</span>
                     <span class="badge badge-accent">${escHtml(nodeType)}</span>
                 </h3>
-                <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
-                ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:0.85rem">No properties</p>'}
+                <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
+                ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:var(--fs-4)">No properties</p>'}
                 <div class="detail-actions">
                     <button class="btn btn-ghost btn-sm" data-act="center">Center on node</button>
                     <button class="btn btn-ghost btn-sm" data-act="expand">Expand neighbors</button>
@@ -5008,7 +5051,7 @@
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
                         <td>${t.domain ? escHtml(t.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
-                        <td class="mono" style="font-size:0.78rem">${t.agent_id ? escHtml(t.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td class="mono" style="font-size:var(--fs-2)">${t.agent_id ? escHtml(t.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td>${outcomeBadge(t.outcome)}</td>
                     </tr>
                 `).join('');
@@ -5071,12 +5114,12 @@
                     }
                     stepsHtml += '</ul>';
                 } else {
-                    stepsHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No steps recorded</p>';
+                    stepsHtml = '<p style="color:var(--text-dim); font-size:var(--fs-4)">No steps recorded</p>';
                 }
 
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
-                metaHtml += `<div class="card"><h3>Source</h3><div class="value" style="font-size:1.2rem">${sourceBadge(t.source)}</div></div>`;
-                metaHtml += `<div class="card"><h3>Outcome</h3><div class="value" style="font-size:1.2rem">${outcomeBadge(outcome.status)}</div>${outcome.summary ? `<div class="sub">${escHtml(outcome.summary)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Source</h3><div class="value" style="font-size:var(--fs-6)">${sourceBadge(t.source)}</div></div>`;
+                metaHtml += `<div class="card"><h3>Outcome</h3><div class="value" style="font-size:var(--fs-6)">${outcomeBadge(outcome.status)}</div>${outcome.summary ? `<div class="sub">${escHtml(outcome.summary)}</div>` : ''}</div>`;
                 metaHtml += `<div class="card"><h3>Steps</h3><div class="value">${steps.length}</div></div>`;
                 metaHtml += `<div class="card"><h3>Evidence</h3><div class="value">${evidence.length}</div></div>`;
                 metaHtml += `<div class="card"><h3>Artifacts</h3><div class="value">${artifacts.length}</div></div>`;
@@ -5088,7 +5131,7 @@
                 let evidenceHtml = '';
                 if (evidence.length > 0) {
                     const links = data.evidence_links || {};
-                    evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Evidence Used</h4>';
+                    evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Evidence Used</h4>';
                     for (const e of evidence) {
                         const link = links[e.evidence_id] || {};
                         let entry = `<span class="mono truncate">${escHtml(e.evidence_id)}</span>`;
@@ -5104,11 +5147,11 @@
 
                 let feedbackHtml = '';
                 if (feedback.length > 0) {
-                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Feedback</h4>';
+                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Feedback</h4>';
                     for (const f of feedback) {
                         feedbackHtml += `<div class="status-row">
                             <span>${f.label ? `<span class="badge badge-info">${escHtml(f.label)}</span> ` : ''}${f.comment ? escHtml(f.comment) : ''}</span>
-                            <span style="font-size:0.75rem; color:var(--text-dim)">${f.rating != null ? `Rating: ${f.rating}` : ''} ${escHtml(f.given_by)}</span>
+                            <span style="font-size:var(--fs-2); color:var(--text-dim)">${f.rating != null ? `Rating: ${f.rating}` : ''} ${escHtml(f.given_by)}</span>
                         </div>`;
                     }
                     feedbackHtml += '</div>';
@@ -5118,13 +5161,13 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>${escHtml(t.intent)}</span>
-                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(t.trace_id)}</span>
+                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(t.trace_id)}</span>
                         </h3>
-                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
                             ${ctx.domain ? `Domain: ${escHtml(ctx.domain)} &middot; ` : ''}${ctx.agent_id ? `Agent: ${escHtml(ctx.agent_id)} &middot; ` : ''}${escHtml(fmtTime(ctx.started_at))}${ctx.ended_at ? ` &rarr; ${escHtml(fmtTime(ctx.ended_at))}` : ''}
                         </div>
                         ${metaHtml}
-                        <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Steps</h4>
+                        <h4 style="font-size:var(--fs-4); margin-bottom:0.75rem">Steps</h4>
                         ${stepsHtml}
                         ${evidenceHtml}
                         ${feedbackHtml}
@@ -5270,7 +5313,7 @@
                         <div class="precedent-meta">
                             ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
                             ${fmtTimeCell(p.occurred_at)}
-                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
+                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:var(--fs-1)" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
                         </div>
                     </div>
                 `).join('')}</div>`;
@@ -5327,7 +5370,7 @@
                 body.innerHTML = docs.map(d => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
                         <td style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
-                        <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
+                        <td class="mono truncate" style="max-width:220px; font-size:var(--fs-2)" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
                         <td class="num" style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
@@ -5385,15 +5428,15 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>Document</span>
-                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(d.doc_id)}</span>
+                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(d.doc_id)}</span>
                         </h3>
-                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
                             Created ${escHtml(fmtTime(d.created_at))}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${escHtml(fmtTime(d.updated_at))}` : ''}
                             ${d.content_hash ? ` &middot; <span class="mono">${escHtml(String(d.content_hash).slice(0, 16))}…</span>` : ''}
                         </div>
                         ${metaHtml}
-                        <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem">Content</h4>
-                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:0.82rem">${escHtml(d.content || '')}</pre>
+                        <h4 style="font-size:var(--fs-4); margin:1rem 0 0.5rem">Content</h4>
+                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:var(--fs-3)">${escHtml(d.content || '')}</pre>
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -5484,21 +5527,22 @@
                 body.innerHTML = events.map((e, i) => {
                     const badge = EVENT_BADGE[e.event_type] || 'badge-info';
                     const entityCell = e.entity_id
-                        ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:0.75rem" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
+                        ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:var(--fs-2)" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
                         : '<span style="color:var(--text-dim)">-</span>';
                     const oldestAttr = i === events.length - 1 ? ` data-oldest-stamp="${escHtml(e.occurred_at)}"` : '';
                     return `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}"${oldestAttr}>
                         <td style="white-space:nowrap">${fmtTimeCell(e.occurred_at)}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
-                        <td style="font-size:0.8rem">${escHtml(e.source)}</td>
+                        <td style="font-size:var(--fs-3)">${escHtml(e.source)}</td>
                         <td>${entityCell}</td>
-                        <td style="font-size:0.8rem">${eventSummary(e)}</td>
+                        <td style="font-size:var(--fs-3)">${eventSummary(e)}</td>
                     </tr>`;
                 }).join('');
                 renderCursorPagerFooter('event', eventPager, events.length, data.total || 0);
             } catch (err) {
-                body.innerHTML = `<tr><td colspan="5" style="color:var(--danger); text-align:center; padding:2rem">Failed to load events: ${escHtml(err.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="5" style="color:${loadFailureColor(err)}; text-align:center; padding:2rem">` +
+                    `${escHtml(loadFailureText(err, 'Events'))}</td></tr>`;
             }
         }
 
@@ -5521,14 +5565,14 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span><span class="badge ${EVENT_BADGE[e.event_type] || 'badge-info'}">${escHtml(e.event_type)}</span> ${escHtml(e.source)}</span>
-                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(e.event_id)}</span>
+                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(e.event_id)}</span>
                         </h3>
-                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
                             ${escHtml(fmtTime(e.occurred_at))}${e.entity_id ? ` &middot; Entity: <span class="mono">${escHtml(e.entity_id)}</span>` : ''}${e.entity_type ? ` (${escHtml(e.entity_type)})` : ''}
                             ${packLink}
                         </div>
-                        <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Payload</h4>
-                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:0.78rem">${escHtml(JSON.stringify(e.payload || {}, null, 2))}</pre>
+                        <h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Payload</h4>
+                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:var(--fs-2)">${escHtml(JSON.stringify(e.payload || {}, null, 2))}</pre>
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -5582,7 +5626,7 @@
                 const packs = data.packs || [];
 
                 if (packs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></div><p>No packs assembled yet</p><p style="font-size:var(--fs-3); color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
                     renderCursorPagerFooter('pack', packPager, 0, data.total || 0);
                     return;
                 }
@@ -5592,15 +5636,16 @@
                         <td style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
-                        <td class="mono" style="font-size:0.78rem">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td class="mono" style="font-size:var(--fs-2)">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td class="num">${p.items_count != null ? p.items_count.toLocaleString('en-US') : '-'}</td>
                         <td class="num">${p.candidates_found != null ? p.candidates_found.toLocaleString('en-US') : '-'}</td>
-                        <td style="font-size:0.75rem">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
+                        <td style="font-size:var(--fs-2)">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
                     </tr>
                 `).join('');
                 renderCursorPagerFooter('pack', packPager, packs.length, data.total || 0);
             } catch (err) {
-                body.innerHTML = `<tr><td colspan="7" style="color:var(--danger); text-align:center; padding:2rem">Failed to load packs: ${escHtml(err.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="7" style="color:${loadFailureColor(err)}; text-align:center; padding:2rem">` +
+                    `${escHtml(loadFailureText(err, 'Packs'))}</td></tr>`;
             }
         }
 
@@ -5641,20 +5686,20 @@
                 // was withheld for measurement, not because it is empty.
                 let noticeHtml = '';
                 if (pack.sectioned) {
-                    noticeHtml += `<p style="color:var(--text-dim); font-size:0.85rem"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
+                    noticeHtml += `<p style="color:var(--text-dim); font-size:var(--fs-4)"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
                 }
                 if (data.holdout_blinded) {
-                    noticeHtml += `<p style="color:var(--text-dim); font-size:0.85rem"><span class="badge badge-info">holdout</span> This pack is in the measurement holdout; its payload is blinded for your access level.</p>`;
+                    noticeHtml += `<p style="color:var(--text-dim); font-size:var(--fs-4)"><span class="badge badge-info">holdout</span> This pack is in the measurement holdout; its payload is blinded for your access level.</p>`;
                 }
 
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
                 metaHtml += `<div class="card"><h3>Items</h3><div class="value">${payload.items_count != null ? payload.items_count : '-'}</div><div class="sub">of ${payload.candidates_found != null ? payload.candidates_found : '?'} candidates</div></div>`;
-                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:1.1rem">${payload.budget_max_items ?? '-'} items</div><div class="sub">${payload.budget_max_tokens ?? '-'} tokens max</div></div>`;
-                metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:0.95rem">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:var(--fs-5)">${payload.budget_max_items ?? '-'} items</div><div class="sub">${payload.budget_max_tokens ?? '-'} tokens max</div></div>`;
+                metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:var(--fs-5)">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
                 metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${escHtml(feedbackValueText)}</div><div class="sub">${feedbackSubText}</div></div>`;
                 metaHtml += '</div>';
 
-                let injectedHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No items injected</p>';
+                let injectedHtml = '<p style="color:var(--text-dim); font-size:var(--fs-4)">No items injected</p>';
                 if (injected.length > 0) {
                     injectedHtml = `
                     <div class="table-wrap"><table>
@@ -5662,11 +5707,11 @@
                         <tbody>${injected.map(it => `
                             <tr>
                                 <td class="num">${it.rank != null ? it.rank : '-'}</td>
-                                <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
+                                <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
                                 <td><span class="badge badge-info">${escHtml(it.item_type || '')}</span></td>
-                                <td style="font-size:0.78rem">${escHtml(it.strategy_source || '')}</td>
-                                <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
-                                <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
+                                <td style="font-size:var(--fs-2)">${escHtml(it.strategy_source || '')}</td>
+                                <td style="font-size:var(--fs-2)">${escHtml(it.selection_reason || '')}</td>
+                                <td style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
                                 <td class="num">${it.estimated_tokens != null ? it.estimated_tokens.toLocaleString('en-US') : '-'}</td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful" aria-label="Mark item helpful"></td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful" aria-label="Mark item unhelpful"></td>
@@ -5679,16 +5724,16 @@
                 if (rejected.length > 0) {
                     rejectedHtml = `
                     <details style="margin-top:1rem">
-                        <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Rejected items (${rejected.length})</summary>
+                        <summary style="cursor:pointer; font-size:var(--fs-4); font-weight:600">Rejected items (${rejected.length})</summary>
                         <div class="table-wrap" style="margin-top:0.5rem"><table>
                             <thead><tr><th>Item</th><th>Type</th><th>Strategy</th><th class="num">Relevance</th><th>Reason</th></tr></thead>
                             <tbody>${rejected.map(r => `
                                 <tr>
-                                    <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
-                                    <td style="font-size:0.78rem">${escHtml(r.item_type || '')}</td>
-                                    <td style="font-size:0.78rem">${escHtml(r.strategy_source || '')}</td>
+                                    <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
+                                    <td style="font-size:var(--fs-2)">${escHtml(r.item_type || '')}</td>
+                                    <td style="font-size:var(--fs-2)">${escHtml(r.strategy_source || '')}</td>
                                     <td class="num">${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
-                                    <td style="font-size:0.78rem">${escHtml(r.reason || '')}</td>
+                                    <td style="font-size:var(--fs-2)">${escHtml(r.reason || '')}</td>
                                 </tr>`).join('')}
                             </tbody>
                         </table></div>
@@ -5699,12 +5744,12 @@
                 if (budgetTrace.length > 0) {
                     budgetHtml = `
                     <details style="margin-top:1rem">
-                        <summary style="cursor:pointer; font-size:0.9rem; font-weight:600">Budget trace (${budgetTrace.length})</summary>
+                        <summary style="cursor:pointer; font-size:var(--fs-4); font-weight:600">Budget trace (${budgetTrace.length})</summary>
                         <div class="table-wrap" style="margin-top:0.5rem"><table>
                             <thead><tr><th>Item</th><th class="num">Tokens</th><th class="num">Running total</th><th>Included</th></tr></thead>
                             <tbody>${budgetTrace.map(b => `
                                 <tr>
-                                    <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
+                                    <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
                                     <td class="num">${b.item_tokens.toLocaleString('en-US')}</td>
                                     <td class="num">${b.running_total.toLocaleString('en-US')}</td>
                                     <td>${b.included ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-danger">no</span>'}</td>
@@ -5716,7 +5761,7 @@
 
                 let feedbackHtml = '';
                 if (feedback.length > 0) {
-                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Feedback</h4>';
+                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Feedback</h4>';
                     for (const f of feedback) {
                         const fp = f.payload || {};
                         // fp.success is the backend's own SUCCESS_RATING_THRESHOLD-derived
@@ -5725,7 +5770,7 @@
                         // agreeing with the backend for a rating in (0, 0.5).
                         feedbackHtml += `<div class="status-row">
                             <span>${fp.rating != null ? `<span class="badge ${fp.success ? 'badge-ok' : 'badge-danger'}">rating: ${escHtml(fp.rating)}</span> ` : ''}${fp.comment ? escHtml(fp.comment) : ''}</span>
-                            <span style="font-size:0.75rem; color:var(--text-dim)">${timeAgo(f.occurred_at)}</span>
+                            <span style="font-size:var(--fs-2); color:var(--text-dim)">${timeAgo(f.occurred_at)}</span>
                         </div>`;
                     }
                     feedbackHtml += '</div>';
@@ -5740,12 +5785,12 @@
                 // success when omitted, so this form never invents a float.
                 const feedbackFormHtml = `
                     <div style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
-                        <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Record feedback</h4>
+                        <h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Record feedback</h4>
                         <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
                         <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
                             <button class="btn btn-sm" data-act="submitPackFeedbackHelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 11v9H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M7 11l4-7a2 2 0 0 1 2 2v4h5.5a2 2 0 0 1 1.9 2.7l-2 6A2 2 0 0 1 16.5 20H7"/></svg>Helpful overall</button>
                             <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 13V4H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1z"/><path d="M7 13l4 7a2 2 0 0 0 2-2v-4h5.5a2 2 0 0 0 1.9-2.7l-2-6A2 2 0 0 0 16.5 4H7"/></svg>Not helpful</button>
-                            <span id="pack-feedback-status" style="font-size:0.8rem"></span>
+                            <span id="pack-feedback-status" style="font-size:var(--fs-3)"></span>
                         </div>
                     </div>`;
 
@@ -5753,14 +5798,14 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>${escHtml(pack.intent || '(no intent)')}</span>
-                            <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(packId)}</span>
+                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(packId)}</span>
                         </h3>
-                        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
+                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
                             ${pack.domain ? `Domain: ${escHtml(pack.domain)} &middot; ` : ''}${pack.agent_id ? `Agent: ${escHtml(pack.agent_id)} &middot; ` : ''}${escHtml(fmtTime(pack.created_at))}
                         </div>
                         ${noticeHtml}
                         ${metaHtml}
-                        <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Injected items</h4>
+                        <h4 style="font-size:var(--fs-4); margin-bottom:0.75rem">Injected items</h4>
                         ${injectedHtml}
                         ${rejectedHtml}
                         ${budgetHtml}
@@ -5845,17 +5890,17 @@
                 const data = await fetchJSON(`/graph/history?entity_id=${encodeURIComponent(nodeId)}`);
                 const versions = data.versions || [];
                 el.innerHTML = `
-                    <h4 style="font-size:0.85rem; margin:0.75rem 0 0.5rem">History (${versions.length} version${versions.length === 1 ? '' : 's'})</h4>
+                    <h4 style="font-size:var(--fs-4); margin:0.75rem 0 0.5rem">History (${versions.length} version${versions.length === 1 ? '' : 's'})</h4>
                     ${versions.map(v => `
                         <div style="border-left:2px solid ${v.valid_to ? 'var(--border)' : 'var(--accent)'}; padding:0.25rem 0 0.25rem 0.6rem; margin-bottom:0.5rem">
-                            <div style="font-size:0.75rem; color:var(--text-dim)">
+                            <div style="font-size:var(--fs-2); color:var(--text-dim)">
                                 ${escHtml(fmtTime(v.valid_from))} &rarr; ${v.valid_to ? escHtml(fmtTime(v.valid_to)) : '<span style="color:var(--accent)">current</span>'}
                             </div>
-                            <pre style="white-space:pre-wrap; word-break:break-word; font-size:0.72rem; margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
+                            <pre style="white-space:pre-wrap; word-break:break-word; font-size:var(--fs-2); margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
                         </div>`).join('')}
                 `;
             } catch (err) {
-                el.innerHTML = `<p style="color:var(--danger); font-size:0.8rem">Failed to load history: ${escHtml(err.message)}</p>`;
+                el.innerHTML = `<p style="color:var(--danger); font-size:var(--fs-3)">Failed to load history: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -5959,10 +6004,10 @@
                             Your knowledge graph is empty. Load sample data to explore the dashboard,
                             graph visualization, and trace inspector.
                         </p>
-                        <code style="display:inline-block;background:var(--surface-sunken);padding:0.5rem 1rem;border-radius: var(--r-1);color:var(--accent);font-size:0.9rem">
+                        <code style="display:inline-block;background:var(--surface-sunken);padding:0.5rem 1rem;border-radius: var(--r-1);color:var(--accent);font-size:var(--fs-4)">
                             trellis demo load
                         </code>
-                        <p style="color:var(--text-dim);font-size:0.8rem;margin-top:0.75rem">
+                        <p style="color:var(--text-dim);font-size:var(--fs-3);margin-top:0.75rem">
                             Then refresh this page to see your data.
                         </p>
                     `;
@@ -5972,13 +6017,13 @@
 
                 const healthEl = document.getElementById('health-rows');
                 if (!healthOutcome.ok) {
-                    healthEl.innerHTML = `<div style="color:var(--danger); padding:0.5rem 0; font-size:0.9rem">Failed to load health checks: ${escHtml(healthOutcome.error.message)}</div>`;
+                    healthEl.innerHTML = `<div style="color:var(--danger); padding:0.5rem 0; font-size:var(--fs-4)">Failed to load health checks: ${escHtml(healthOutcome.error.message)}</div>`;
                 } else {
                     const health = healthOutcome.value;
                     const checks = health.checks || {};
                     const healthBackends = health.backends || {};
                     if (Object.keys(checks).length === 0) {
-                        healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:0.9rem">No health checks configured</div>';
+                        healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:var(--fs-4)">No health checks configured</div>';
                     } else {
                         for (const [name, ok] of Object.entries(checks)) {
                             healthEl.appendChild(renderStatusRow(name, ok, healthBackends[name]));
@@ -5999,11 +6044,12 @@
                 // sends the reader off to debug DNS, ports and firewalls while
                 // the actual fix — the key banner fetchJSON has already opened —
                 // sits a few pixels above this message.
+                error.classList.toggle('admin-gate', /^403/.test(err.message));
                 if (/^40[13]\b/.test(err.message)) {
                     error.textContent = /^403/.test(err.message)
                         ? 'Signed in, but this key lacks the admin scope this dashboard needs. '
                           + 'Enter an admin-scoped key in the banner above, or use the sidebar — '
-                          + 'Traces, Memories, Graph, Precedents and Policies '
+                          + 'Traces, Memories, Graph, Precedents, Policies and Tag rules '
                           + '(view only) work with a read-scoped key; tabs needing admin are now '
                           + 'marked "admin" in the sidebar.'
                         : 'This Trellis API requires an API key. Enter one in the banner above '
@@ -6057,8 +6103,8 @@
                 container.innerHTML = `<div class="status-section" style="padding:0.25rem 1.25rem">` +
                     loops.map(renderLoopRow).join('') + `</div>`;
             } catch (err) {
-                container.innerHTML = `<div style="color:var(--danger); padding:1.5rem; text-align:center">` +
-                    `Failed to load loop health: ${escHtml(err.message)}</div>`;
+                container.innerHTML = `<div style="color:${loadFailureColor(err)}; padding:1.5rem; text-align:center">` +
+                    `${escHtml(loadFailureText(err, 'Loop health'))}</div>`;
             }
         }
 
@@ -6188,8 +6234,8 @@
                 outputEl.innerHTML = '<div class="empty-state"><p>Pick a report above and click Run.</p></div>';
             } catch (err) {
                 picker.innerHTML = '';
-                outputEl.innerHTML = `<div style="color:var(--danger); padding:1.5rem; text-align:center">` +
-                    `Failed to load report list: ${escHtml(err.message)}</div>`;
+                outputEl.innerHTML = `<div style="color:${loadFailureColor(err)}; padding:1.5rem; text-align:center">` +
+                    `${escHtml(loadFailureText(err, 'Report list'))}</div>`;
             }
         }
 
@@ -6199,7 +6245,7 @@
             // route and `trellis analyze <name>` both use) is secondary
             // text here, not the primary label.
             document.getElementById('report-description').innerHTML =
-                `${escHtml(reportDescriptions[name] || '')} <code style="font-size:0.72rem; color:var(--text-dim)">${escHtml(name)}</code>`;
+                `${escHtml(reportDescriptions[name] || '')} <code style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(name)}</code>`;
             const errorEl = document.getElementById('report-param-error');
             if (errorEl) errorEl.textContent = '';
             const paramsEl = document.getElementById('report-params');
@@ -6207,7 +6253,7 @@
             const properties = (reportSchemas[name] && reportSchemas[name].properties) || {};
             const entries = Object.entries(defaults);
             if (entries.length === 0) {
-                paramsEl.innerHTML = '<span style="font-size:0.75rem; color:var(--text-dim)">no parameters</span>';
+                paramsEl.innerHTML = '<span style="font-size:var(--fs-2); color:var(--text-dim)">no parameters</span>';
                 return;
             }
             paramsEl.innerHTML = entries
@@ -6230,14 +6276,14 @@
 
         function reportParamFieldHtml(key, val, fieldSchema) {
             const inner = reportParamInnerSchema(fieldSchema);
-            const label = `<label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">${escHtml(key)}`;
+            const label = `<label style="display:flex; flex-direction:column; font-size:var(--fs-2); color:var(--text-dim); gap:0.2rem">${escHtml(key)}`;
 
             if (Array.isArray(inner.enum)) {
                 const options = inner.enum.map(opt =>
                     `<option value="${escHtml(opt)}" ${opt === val ? 'selected' : ''}>${escHtml(opt)}</option>`
                 ).join('');
                 return `${label}<select class="report-param-input" data-kind="enum" data-param="${escHtml(key)}" ` +
-                    `style="font-size:0.8rem; width:8rem">${options}</select></label>`;
+                    `style="font-size:var(--fs-3); width:8rem">${options}</select></label>`;
             }
             if (inner.type === 'boolean') {
                 return `${label}<input type="checkbox" class="report-param-input" data-kind="boolean" ` +
@@ -6261,13 +6307,13 @@
                     `data-min-exclusive="${inner.exclusiveMinimum !== undefined ? escHtml(inner.exclusiveMinimum) : ''}" ` +
                     `data-max="${inner.maximum !== undefined ? escHtml(inner.maximum) : ''}" ` +
                     `data-max-exclusive="${inner.exclusiveMaximum !== undefined ? escHtml(inner.exclusiveMaximum) : ''}" ` +
-                    `style="font-size:0.8rem; width:8rem"${minAttr}${maxAttr} ` +
+                    `style="font-size:var(--fs-3); width:8rem"${minAttr}${maxAttr} ` +
                     // escHtml(null) is '', so a default-less param renders an empty input rather
                     // than the literal text "null".
                     `value="${escHtml(val)}"></label>`;
             }
             return `${label}<input type="text" class="report-param-input" data-kind="string" data-param="${escHtml(key)}" ` +
-                `value="${escHtml(val)}" style="font-size:0.8rem; width:8rem"></label>`;
+                `value="${escHtml(val)}" style="font-size:var(--fs-3); width:8rem"></label>`;
         }
 
         // Mirrors the bounds the server's own pydantic Field(ge=/le=/gt=/lt=)
@@ -6375,7 +6421,7 @@
             if (!lastReportPayload) return;
             const raw = document.getElementById('report-raw-toggle').checked;
             if (raw) {
-                outputEl.innerHTML = `<pre class="mono" style="white-space:pre-wrap; font-size:0.78rem">` +
+                outputEl.innerHTML = `<pre class="mono" style="white-space:pre-wrap; font-size:var(--fs-2)">` +
                     `${escHtml(JSON.stringify(lastReportPayload.data, null, 2))}</pre>`;
                 return;
             }
@@ -6408,9 +6454,9 @@
                 html += '<div class="cards">' + scalarEntries.map(([key, val]) => `
                     <div class="card">
                         <h3>${escHtml(key)}</h3>
-                        <div class="value" style="font-size:1.3rem">` +
+                        <div class="value" style="font-size:var(--fs-6)">` +
                         (val === null
-                            ? '<span style="color:var(--text-dim); font-size:0.9rem">not measured</span>'
+                            ? '<span style="color:var(--text-dim); font-size:var(--fs-4)">not measured</span>'
                             : escHtml(val)) +
                         `</div>
                     </div>`).join('') + '</div>';
@@ -6418,10 +6464,10 @@
             if (complexEntries.length) {
                 html += complexEntries.map(([key, val]) => `
                     <details style="margin-top:0.5rem">
-                        <summary style="cursor:pointer; font-size:0.85rem">${escHtml(key)}` +
+                        <summary style="cursor:pointer; font-size:var(--fs-4)">${escHtml(key)}` +
                         (Array.isArray(val) ? ` <span class="badge badge-info">${val.length}</span>` : '') +
                         `</summary>
-                        <pre class="mono" style="white-space:pre-wrap; font-size:0.75rem">${escHtml(JSON.stringify(val, null, 2))}</pre>
+                        <pre class="mono" style="white-space:pre-wrap; font-size:var(--fs-2)">${escHtml(JSON.stringify(val, null, 2))}</pre>
                     </details>`).join('');
             }
             if (!html) {
@@ -6949,7 +6995,8 @@
                 }
                 totalEl.textContent = `${data.count ?? rows.length} advisor${(data.count ?? rows.length) === 1 ? 'y' : 'ies'} (route total)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="9" style="color:var(--danger)">Failed to load advisories: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" style="color:${loadFailureColor(err)}">` +
+                    `${escHtml(loadFailureText(err, 'Advisories'))}</td></tr>`;
             }
         }
 
@@ -7379,7 +7426,8 @@
                     : `<tr><td colspan="8"><div class="empty-state">No catalog jobs.</div></td></tr>`;
                 totalEl.textContent = `${data.count ?? rows.length} job(s) in the catalog`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--danger)">Failed to load schedules: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" style="color:${loadFailureColor(err)}">` +
+                    `${escHtml(loadFailureText(err, 'Schedules'))}</td></tr>`;
             }
         }
 
@@ -8084,7 +8132,8 @@
                 populateSettingsGroupFilter(data);
                 renderSettingsTable();
             } catch (err) {
-                tbody.innerHTML = `<div class="empty-state" style="color:var(--danger)">Failed to load settings: ${escHtml(err.message)}</div>`;
+                tbody.innerHTML = `<div class="empty-state" style="color:${loadFailureColor(err)}">` +
+                    `${escHtml(loadFailureText(err, 'Settings'))}</div>`;
             }
         }
 
@@ -8365,7 +8414,19 @@
                 ctlHtml = `<label for="${escHtml(inputId)}">Effective</label>` +
                     `<input class="input" id="${escHtml(inputId)}" type="text" value="${escHtml(pinnedValueText)}" readonly aria-readonly="true">` +
                     (pinNote ? `<span class="hint">${pinNote}</span>` : '');
-                actHtml = '<button type="button" class="btn btn-sm" disabled>Edit</button>';
+                // The env var decides the effective value either way, but a
+                // stored override can still be sitting underneath it (set
+                // before the var was exported, or left behind after it was
+                // unset and re-set) -- with no way to clear it, it silently
+                // takes over the moment the env var goes away. Reuses
+                // beginResetSetting/confirmResetSetting verbatim: a reset
+                // IS a clear (value: null), there is no separate verb.
+                const hasStoredValue = s.stored_value !== null && s.stored_value !== undefined;
+                actHtml = hasStoredValue
+                    ? `<button class="btn btn-ghost btn-sm" data-action="beginResetSetting" data-id="${escHtml(s.name)}">Clear stored value</button>` +
+                        `<span class="hint">The environment variable wins either way; this only clears the stored value underneath it.</span>` +
+                        `<div id="setting-error-${escHtml(s.name)}"></div>`
+                    : '<button type="button" class="btn btn-sm" disabled>Edit</button>';
             } else {
                 const ctlLabel = s.type === 'bool' ? 'Effective' : 'New value';
                 ctlHtml = `<label for="${escHtml(inputId)}">${ctlLabel}</label>${renderValueInput(s, inputId, currentValue, degraded)}`;
