@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.mutate.commands import (
+    POLICY_REFUSAL_REASONS,
+    STORE_REFUSAL_REASONS,
     BatchStrategy,
     Command,
     CommandBatch,
@@ -142,19 +144,18 @@ def _classify_result(
     if result.status is CommandStatus.DUPLICATE:
         return _verify_duplicate(graph_store, command)
     if result.status is CommandStatus.REJECTED:
-        # Distinguish a validate-stage refusal from an actual policy
-        # refusal using the same field trellis_cli.exit_codes.refusal_exit_code
-        # reads for the identical purpose: ``metadata["rejection_reason"]``.
-        # ``ALIAS_UPSERT`` never raises a handler ValidationError or
-        # PolicyViolationError, so the only reasons reachable here are
-        # ``immutable_core``, ``validate`` (both input-shape refusals) and
-        # ``policy_violation``; only the latter is a policy refusal.
-        policy_refused = result.metadata.get("rejection_reason") == "policy_violation"
-        return BackfillFailure(
-            stage="bind",
-            reason="policy" if policy_refused else "validation",
-            entity_id=entity_id,
-        )
+        # Classify with the same shared sets trellis_cli.exit_codes
+        # .refusal_exit_code reads for the identical purpose, so a reason
+        # added to the pipeline is categorized for both callers in one
+        # place rather than reimplemented here.
+        rejection_reason = result.metadata.get("rejection_reason")
+        if rejection_reason in POLICY_REFUSAL_REASONS:
+            reason: FailureReason = "policy"
+        elif rejection_reason in STORE_REFUSAL_REASONS:
+            reason = "store"
+        else:
+            reason = "validation"
+        return BackfillFailure(stage="bind", reason=reason, entity_id=entity_id)
     return BackfillFailure(stage="bind", reason="store", entity_id=entity_id)
 
 

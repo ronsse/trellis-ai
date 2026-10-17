@@ -14,7 +14,9 @@ failure paths including the concurrent-purge race and a failing emit.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,7 +29,8 @@ from trellis.mutate.handlers import (
     create_curate_handlers,
 )
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.graph import GraphStore
 from trellis.stores.registry import StoreRegistry
 
 
@@ -235,6 +238,37 @@ class TestRedactionApplyHandler:
             RedactionApplyHandler(registry).handle(_redact("nonexistent"))
         assert exc_info.value.code == "target_not_found"
         assert str(exc_info.value) == "Node not found: nonexistent"
+
+    def test_nul_target_id_with_not_found_graph_is_rejected_not_failed(self) -> None:
+        """A raw-NUL id reads as a miss, never a store crash.
+
+        ``target_id`` is exempt from the Stage 1 NUL/surrogate scan for
+        ``redaction.apply``, so a value like ``"x\\x00y"`` can reach this
+        handler. On a store backend that can't hold a NUL (Postgres), the
+        guarded store methods already answer "not found" rather than
+        raising a driver error — this test pins the handler's own half of
+        that contract: given a store that reports the node missing, the
+        result is the ordinary ``target_not_found`` rejection, not a
+        wrapped execution failure, and no other graph method is touched
+        past the initial lookup.
+        """
+        graph = MagicMock(spec=GraphStore)
+        graph.get_node.return_value = None
+        registry = SimpleNamespace(
+            knowledge=SimpleNamespace(graph_store=graph, vector_store=MagicMock()),
+            operational=SimpleNamespace(event_log=MagicMock(spec=EventLog)),
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            RedactionApplyHandler(registry).handle(_redact("x\x00y"))
+
+        assert exc_info.value.code == "target_not_found"
+        assert str(exc_info.value) == "Node not found: x\x00y"
+        graph.get_node.assert_called_once_with("x\x00y")
+        graph.get_node_history.assert_not_called()
+        graph.get_edges.assert_not_called()
+        graph.get_aliases.assert_not_called()
+        graph.delete_node.assert_not_called()
 
     def test_missing_target_through_executor_is_rejected(
         self, registry: StoreRegistry

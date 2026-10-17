@@ -100,6 +100,23 @@ class Command(VersionedModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+#: The sole ``metadata["rejection_reason"]`` value a policy-gate refusal
+#: carries. A frozenset of one so a reader comparing it against
+#: :data:`STORE_REFUSAL_REASONS` sees the same shape, and so a second
+#: policy-labelled reason, if one is ever added, is one line here instead
+#: of a second hand-maintained check at each caller.
+POLICY_REFUSAL_REASONS = frozenset({"policy_violation"})
+
+#: ``metadata["rejection_reason"]`` values that mean the deployment's store
+#: is the obstacle -- degraded or stale -- rather than the command's own
+#: input. Shared so :func:`trellis_cli.exit_codes.refusal_exit_code` and
+#: the name-alias backfill's per-failure labelling
+#: (:func:`trellis.mutate.name_aliases._classify_result`) classify a
+#: reason exactly once; a reason added to the pipeline is categorized for
+#: both callers by changing it here.
+STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
+
+
 class CommandResult(VersionedModel):
     """Result of executing a command through the pipeline.
 
@@ -108,7 +125,8 @@ class CommandResult(VersionedModel):
     ``immutable_core``, ``validate`` (the operation registry's arg check),
     or a handler's ``ValidationError.code`` (``handler_validate`` when it
     set none). A caller holding only the result, such as the CLI choosing
-    an exit code, can then tell a policy refusal from any other.
+    an exit code, can then tell a policy refusal from any other using
+    :data:`POLICY_REFUSAL_REASONS` and :data:`STORE_REFUSAL_REASONS`.
     """
 
     command_id: str
@@ -231,10 +249,10 @@ ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
 #: (``MeasurementRecordHandler``). Both also carry ``observer_agent_id``,
 #: a third role this mapping scans for: an exact-match lookup key, not an
 #: edge endpoint or a primary key. Every producer sets it to an opaque
-#: agent handle (a dotted module path or a ``source:name`` id, never
-#: free-form prose -- see ``trellis_workers.extract.query_pattern_observer``
-#: and MCP's ``record_observation``), and MCP's ``query_observations`` plus
-#: the REST ``/observations`` list/get routes filter on it with the same
+#: agent handle -- see ``trellis_workers.extract.query_pattern_observer``
+#: and MCP's ``record_observation`` -- and MCP's ``query_observations``
+#: plus the REST ``GET /observations`` and ``GET /measurements`` routes
+#: (there is no get-by-id route for either) filter on it with the same
 #: exact-match ``properties=`` query every other scanned id uses; a
 #: hazard-bearing value stored unchecked would be as permanently
 #: unfindable through that filter as an unscanned ``target_id`` is through

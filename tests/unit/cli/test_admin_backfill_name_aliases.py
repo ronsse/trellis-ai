@@ -247,3 +247,37 @@ class TestBackfillNameAliasesCommand:
         assert payload["status"] == "error"
         assert payload["failed"] == 1
         assert payload["failures"][0]["reason"] == "validation"
+
+    def test_policy_and_validation_mix_does_not_exit_store(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A batch with one policy refusal and one Stage-1 validation refusal,
+        and zero store failures, must not exit EXIT_STORE (5): the old
+        uniform-reasons-set check fell through to EXIT_STORE as soon as the
+        failures disagreed, which this mix is built to trigger."""
+        stores_dir = _seed(
+            tmp_path,
+            monkeypatch,
+            [("alpha", "Alpha"), ("beta\x00bad", "Beta")],
+        )
+        PolicyStore(stores_dir / "policies.json").add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="alias.upsert", action="deny")],
+            )
+        )
+        _reset_registry()
+
+        result = runner.invoke(
+            app,
+            ["admin", "backfill-name-aliases", "--format", "json"],
+        )
+
+        assert result.exit_code != 5
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["bound"] == 0
+        assert payload["failed"] == 2
+        reasons = {failure["reason"] for failure in payload["failures"]}
+        assert reasons == {"policy", "validation"}
