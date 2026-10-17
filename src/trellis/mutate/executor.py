@@ -10,7 +10,7 @@ from typing import Any, Protocol
 import structlog
 
 from trellis.core.error_sanitize import summarize_exception
-from trellis.core.text_safety import contains_nul_or_lone_surrogate
+from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis.errors import (
     IdempotencyError,
     PolicyViolationError,
@@ -128,53 +128,40 @@ def _audit_warnings(audit_warning: str | None) -> list[str]:
     return [] if audit_warning is None else [audit_warning]
 
 
-#: Stands in for a scrubbed NUL byte or unpaired UTF-16 surrogate, same
-#: choice as ``trellis_api.routes._principal._scrub_claim`` -- it is a
-#: visible character, so a scrubbed field still looks like text rather
-#: than silently losing a character.
-_SCRUB_REPLACEMENT_CHAR = "�"
-
-
 def _scrub_jsonb_unsafe(value: Any) -> Any:
-    """Escape every NUL byte / unpaired UTF-16 surrogate reachable from *value*.
+    """A copy of *value* with every NUL byte and lone surrogate replaced.
 
-    A rejected command's own key or target can carry either hazard (issue
-    #869): ``_validate_classify_rule_identifier`` refuses it before any row
-    is written, but the refusal is itself an audited ``mutation.rejected``
-    event, and the string that caused the refusal rides along in
-    ``command.target_id`` and in the exception's own message. Postgres's
-    ``jsonb`` column refuses a ``\\u0000`` or lone-surrogate *escape*
-    outright, even though ``json.dumps(..., ensure_ascii=True)`` already
-    renders the hazard as plain ASCII text before the column ever sees a
-    raw code point -- so the audit event for the very refusal meant to
-    stop a bad write is itself lost, on the one backend where it matters
-    (SQLite's text columns accept both silently).
-
-    Walks ``str`` leaves, ``dict`` (keys and values), ``list`` and
-    ``tuple`` at any depth; every other type (``int``, ``bool``, ``None``,
-    an already-``CommandStatus`` enum member) is returned unchanged, since
-    neither hazard can occur outside a ``str``. Escapes rather than drops,
-    character for character, so a scrubbed field keeps its length and
-    shape instead of silently shrinking. Applied once, at the single seam
-    every emitted event already passes through
-    (:meth:`MutationExecutor._emit_event`), to the copy handed to
-    :meth:`~trellis.stores.base.event_log.EventLog.emit` -- never to
-    ``command`` itself or to the ``CommandResult`` a caller reads, so what
-    the pipeline reports is unaffected.
+    Postgres ``jsonb`` refuses either, so an audit event carrying one --
+    for instance the ``mutation.rejected`` event for a command refused
+    because its key held a NUL -- would itself be lost. Walks ``str``
+    leaves, ``dict`` keys and values, ``list`` and ``tuple`` at any depth;
+    other types pass through. Applied in :meth:`MutationExecutor._emit_event`
+    to the payload handed to ``emit`` only, never to ``command`` or the
+    ``CommandResult``.
     """
     if isinstance(value, str):
-        return "".join(
-            _SCRUB_REPLACEMENT_CHAR if contains_nul_or_lone_surrogate(ch) else ch
-            for ch in value
-        )
+        return replace_nul_and_lone_surrogates(value)
     if isinstance(value, dict):
         return {
             _scrub_jsonb_unsafe(key): _scrub_jsonb_unsafe(item)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return type(value)(_scrub_jsonb_unsafe(item) for item in value)
+        # A list either way: the event log serialises both as a JSON array,
+        # and ``type(value)(...)`` would break on a namedtuple.
+        return [_scrub_jsonb_unsafe(item) for item in value]
     return value
+
+
+def _jsonb_safe_or_original(value: Any) -> Any:
+    """:func:`_scrub_jsonb_unsafe`, wrapped whole: the scrub is advisory,
+    and an exception escaping it would fail the write it annotates, so any
+    failure hands back *value* unchanged."""
+    try:
+        return _scrub_jsonb_unsafe(value)
+    except Exception:
+        logger.warning("audit_payload_scrub_failed", value_type=type(value).__name__)
+        return value
 
 
 def _handler_warnings(command: Command) -> list[str]:
@@ -949,19 +936,14 @@ class MutationExecutor:
         # makes the default posture verifiably transparent.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
-        # Scrubbed on the copy handed to ``emit`` only -- see
-        # ``_scrub_jsonb_unsafe``'s own docstring for why this must sit
-        # here rather than upstream of the branch that built ``payload``.
-        # ``_scrub_jsonb_unsafe`` returns ``None`` for a ``None`` entity_id
-        # unchanged, same as every other non-``str``/``dict``/``list``
-        # leaf.
+        # Scrubbed on the copy handed to ``emit`` only; see _scrub_jsonb_unsafe.
         try:
             self._event_log.emit(
                 event_type,
                 "mutation_executor",
-                entity_id=_scrub_jsonb_unsafe(command.target_id),
+                entity_id=_jsonb_safe_or_original(command.target_id),
                 entity_type=command.target_type,
-                payload=_scrub_jsonb_unsafe(payload),
+                payload=_jsonb_safe_or_original(payload),
             )
         except _audit_emit_failure_classes() as exc:
             # No traceback, and no text Trellis did not write; see the

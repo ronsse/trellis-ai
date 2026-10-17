@@ -25,13 +25,30 @@ from __future__ import annotations
 _SURROGATE_RANGE_LOW = 0xD800
 _SURROGATE_RANGE_HIGH = 0xDFFF
 
+#: Stands in for a replaced NUL byte or lone surrogate: a visible
+#: character, so the result keeps the original's length and positions.
+REPLACEMENT_CHAR = "\ufffd"
+
+
+def _is_unsafe_char(ch: str) -> bool:
+    return ch == "\x00" or _SURROGATE_RANGE_LOW <= ord(ch) <= _SURROGATE_RANGE_HIGH
+
 
 def contains_nul_or_lone_surrogate(value: str) -> bool:
     """True if ``value`` has a NUL byte or an unpaired UTF-16 surrogate."""
-    return any(
-        ch == "\x00" or _SURROGATE_RANGE_LOW <= ord(ch) <= _SURROGATE_RANGE_HIGH
-        for ch in value
-    )
+    return any(_is_unsafe_char(ch) for ch in value)
 
 
-__all__ = ["contains_nul_or_lone_surrogate"]
+def replace_nul_and_lone_surrogates(value: str) -> str:
+    """``value`` with each NUL byte and lone surrogate replaced by
+    :data:`REPLACEMENT_CHAR`; ``value`` itself when it holds neither."""
+    if not contains_nul_or_lone_surrogate(value):
+        return value
+    return "".join(REPLACEMENT_CHAR if _is_unsafe_char(ch) else ch for ch in value)
+
+
+__all__ = [
+    "REPLACEMENT_CHAR",
+    "contains_nul_or_lone_surrogate",
+    "replace_nul_and_lone_surrogates",
+]

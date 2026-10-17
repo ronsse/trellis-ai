@@ -624,6 +624,38 @@ class TestRejectionPayloadIsJsonbSafe:
         assert "\x00" not in cause_message
         assert "\ud800" not in cause_message
 
+    def test_a_failing_scrub_never_fails_the_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The scrub is advisory: if it raises, the command still succeeds
+        and its event is emitted with the unscrubbed payload."""
+        import trellis.mutate.executor as executor_module
+
+        def _boom(value: object) -> object:
+            raise RuntimeError
+
+        monkeypatch.setattr(executor_module, "_scrub_jsonb_unsafe", _boom)
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.return_value = ("created-id", "created")
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.SUCCESS
+        event_log.emit.assert_called_once()
+
+    def test_a_namedtuple_in_the_payload_is_scrubbed_as_a_list(self) -> None:
+        from collections import namedtuple
+
+        from trellis.mutate.executor import _scrub_jsonb_unsafe
+
+        pair = namedtuple("pair", "a b")
+        assert _scrub_jsonb_unsafe({"k": pair("x\x00", 1)}) == {"k": ["x\ufffd", 1]}
+
 
 class TestIdempotencyCacheEviction:
     """Gap 4.1 — FIFO eviction replaces silent .clear(); loud warning when

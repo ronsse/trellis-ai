@@ -16,7 +16,7 @@ module rather than reintroducing a body passthrough.
 from __future__ import annotations
 
 from trellis.core.elision import elide_text
-from trellis.core.text_safety import contains_nul_or_lone_surrogate
+from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis_api.auth import AuthContext
 
 #: ``requested_by_claim`` is attacker-controlled free text, so it is bounded
@@ -24,8 +24,6 @@ from trellis_api.auth import AuthContext
 #: event, short enough that one claim cannot inflate the event without
 #: limit.
 _CLAIM_MAX_CHARS = 200
-
-_REPLACEMENT_CHAR = "�"
 
 
 def _scrub_claim(claim: str) -> str:
@@ -45,10 +43,7 @@ def _scrub_claim(claim: str) -> str:
     surrogate pair that arrived already merged into one code point and
     manufacture a fresh lone surrogate at the boundary.
     """
-    scrubbed = "".join(
-        _REPLACEMENT_CHAR if contains_nul_or_lone_surrogate(ch) else ch for ch in claim
-    )
-    return elide_text(scrubbed, _CLAIM_MAX_CHARS)
+    return elide_text(replace_nul_and_lone_surrogates(claim), _CLAIM_MAX_CHARS)
 
 
 def resolve_requested_by(

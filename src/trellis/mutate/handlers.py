@@ -13,7 +13,10 @@ import structlog
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
-from trellis.core.text_safety import contains_nul_or_lone_surrogate
+from trellis.core.text_safety import (
+    contains_nul_or_lone_surrogate,
+    replace_nul_and_lone_surrogates,
+)
 from trellis.core.vector_metadata import (
     VectorSyncOutcome,
     resolve_vector_store,
@@ -1297,27 +1300,16 @@ def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> 
         raise ValidationError(msg, errors=[msg], code="unsafe_audit_payload")
 
 
-#: Same replacement character as ``trellis_api.routes._principal._scrub_claim``.
-_STRANDED_LEGACY_FIELD_REPLACEMENT = "�"
-
-
 def _scrub_stranded_legacy_field(value: str) -> str:
-    """Escape a NUL byte or lone surrogate in a value read off an existing
+    """Replace a NUL byte or lone surrogate in a value read off an existing
     overlay row, rather than refusing the payload it rides in on.
 
-    ``existing.applied_by``/``existing.source_event_id`` can predate
-    ``_validate_classify_rule_identifier`` (issue #864) or have been
-    written by hand-editing the overlay file -- a value this call did not
-    just submit and cannot fix by resubmitting different input. Refusing
-    Apply or Revoke's audit payload over it (issue #869) strands the row:
-    it can be neither revoked nor re-applied. Escaping, character for
-    character, matches the convention ``_scrub_claim`` already uses for
-    caller-supplied free text.
+    ``existing.applied_by``/``existing.source_event_id`` may predate the
+    identifier validator or come from a hand-edited overlay file. The
+    caller cannot fix such a value by resubmitting, so refusing the audit
+    payload over it would leave the row impossible to revoke or re-apply.
     """
-    return "".join(
-        _STRANDED_LEGACY_FIELD_REPLACEMENT if contains_nul_or_lone_surrogate(ch) else ch
-        for ch in value
-    )
+    return replace_nul_and_lone_surrogates(value)
 
 
 _CLASSIFY_RULE_IDENTITY_FIELD_CODES = (
