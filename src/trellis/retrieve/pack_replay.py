@@ -573,32 +573,29 @@ class ClassPriorReplayReport(TrellisModel):
     """
 
     window_days: int
-    #: ``mode=... forms=... axes=... factor=...``, from the
+    #: ``mode=... forms=... axes=...``, from the
     #: :class:`~trellis.retrieve.class_prior.ClassPriorConfig` replayed.
     applied_config: str = ""
     attributed_packs: int = 0
     #: Servings whose ``document_form`` and axis (``strategy_source``) both
     #: matched ``config`` — the population every count below is drawn from.
     matched_servings: int = 0
-    #: ``withhold`` only: matched servings cited helpful. These would no
-    #: longer be served.
+    #: Matched servings cited helpful. These would no longer be served.
     helpful_lost: int = 0
-    #: ``withhold`` only: matched servings cited unhelpful — the removals
-    #: the rule is for.
+    #: Matched servings cited unhelpful — the removals the rule is for.
     unhelpful_removed: int = 0
-    #: ``withhold`` only: the gross token cost of every matched serving,
-    #: summed. Not a repriced pack — see ``notes``.
+    #: The gross token cost of every matched serving, summed. Not a
+    #: repriced pack — see ``notes``.
     tokens_freed: int = 0
-    #: ``demote`` only: servings whose position among the items their own
-    #: pack actually served would move, under ``relevance_score * factor``
-    #: for matched items against ``relevance_score`` unchanged for the rest.
-    rank_changes: int = 0
 
     notes: list[str] = Field(default_factory=list)
 
 
 def _class_prior_notes(
-    *, mode: str, matched_servings: int, mode_is_off: bool
+    *,
+    matched_servings: int,
+    mode_is_off: bool,
+    saw_document_form: bool,
 ) -> list[str]:
     """Caveats that travel with the class-prior counts."""
     if mode_is_off:
@@ -619,20 +616,21 @@ def _class_prior_notes(
             "never served and nobody rated it."
         ),
     ]
-    if mode == "demote":
-        notes.append(
-            "rank_changes counts reordering only among items the original "
-            "pack already served. Demote can also change which items are "
-            "admitted at all, by lowering a matched item below the budget "
-            "cutoff — this arm does not model that, because the event "
-            "records no score for a candidate the budget walk rejected."
-        )
     if matched_servings == 0:
-        notes.append(
-            "No served item in the window matched config.forms on an axis "
-            "in config.axes, so every count above is zero because nothing "
-            "was eligible, not because the rule found nothing to do."
-        )
+        if not saw_document_form:
+            notes.append(
+                "No served item in the window carries a document_form at "
+                "all, so every count above is zero because there is no "
+                "history yet for this rule to grade, not because the rule "
+                "found nothing to do."
+            )
+        else:
+            notes.append(
+                "No served item in the window matched config.forms on an "
+                "axis in config.axes, so every count above is zero because "
+                "nothing was eligible, not because the rule found nothing "
+                "to do."
+            )
     return notes
 
 
@@ -662,7 +660,7 @@ def replay_class_prior(
     mode_is_off = config.mode == "off" or not config.forms or not config.axes
     applied_config = (
         f"mode={config.mode} forms={sorted(config.forms)} "
-        f"axes={sorted(config.axes)} factor={config.factor}"
+        f"axes={sorted(config.axes)}"
     )
     since = datetime.now(tz=UTC) - timedelta(days=days)
     feedback_events, pack_payloads, _ = join_pack_feedback(
@@ -682,7 +680,7 @@ def replay_class_prior(
     helpful_lost = 0
     unhelpful_removed = 0
     tokens_freed = 0
-    rank_changes = 0
+    saw_document_form = False
 
     if not mode_is_off:
         for pack_id in attributed:
@@ -708,6 +706,8 @@ def replay_class_prior(
                 )
 
             for row in rows:
+                if isinstance(row.get("document_form"), str):
+                    saw_document_form = True
                 if not _matched(row):
                     continue
                 item_id = row["item_id"]
@@ -720,31 +720,6 @@ def replay_class_prior(
                 elif item_id in unhelpful:
                     unhelpful_removed += 1
 
-            if config.mode == "demote":
-                row_count = len(rows)
-
-                def _rank(row: Mapping[str, Any], *, sentinel: int = row_count) -> int:
-                    raw_rank = row.get("rank")
-                    return raw_rank if isinstance(raw_rank, int) else sentinel
-
-                original_order = sorted(rows, key=_rank)
-
-                def _score(row: Mapping[str, Any]) -> float:
-                    raw_score = row.get("relevance_score")
-                    base = (
-                        float(raw_score) if isinstance(raw_score, int | float) else 0.0
-                    )
-                    return base * config.factor if _matched(row) else base
-
-                demoted_order = sorted(original_order, key=_score, reverse=True)
-                rank_changes += sum(
-                    1
-                    for original, demoted in zip(
-                        original_order, demoted_order, strict=True
-                    )
-                    if original["item_id"] != demoted["item_id"]
-                )
-
     report = ClassPriorReplayReport(
         window_days=days,
         applied_config=applied_config,
@@ -753,11 +728,10 @@ def replay_class_prior(
         helpful_lost=helpful_lost,
         unhelpful_removed=unhelpful_removed,
         tokens_freed=tokens_freed,
-        rank_changes=rank_changes,
         notes=_class_prior_notes(
-            mode=config.mode,
             matched_servings=matched_servings,
             mode_is_off=mode_is_off,
+            saw_document_form=saw_document_form,
         ),
     )
     logger.debug(

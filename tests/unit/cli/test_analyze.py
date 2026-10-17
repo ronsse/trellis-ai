@@ -444,8 +444,9 @@ class TestReplay:
         self._seed_class_prior(temp_stores)
         result = runner.invoke(app, ["analyze", "replay", "--class-prior"])
         assert result.exit_code == 0
-        assert "Class-Prior Replay" in result.stdout
-        assert "mode=off" in result.stdout
+        rendered = plain(result.stdout)
+        assert "Class-Prior Replay" in rendered
+        assert "mode=off" in rendered
 
 
 class TestValue:

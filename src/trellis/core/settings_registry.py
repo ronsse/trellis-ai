@@ -30,11 +30,11 @@ fields; ``graph_seeding``
 (:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
 ``filter_legacy_advisories``
 (:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
-catalog entries outside ``WriteBehaviourConfig``; ``class_prior_mode`` and
-``class_prior_factor`` (:mod:`trellis.retrieve.class_prior`) the same way —
-the gate's other two fields, ``forms``/``axes``, stay env-only since this
-module has no list-typed field, so they are deliberately not catalog
-entries; eight more read-side knobs, also outside ``WriteBehaviourConfig``:
+catalog entries outside ``WriteBehaviourConfig``; ``class_prior_mode``
+(:mod:`trellis.retrieve.class_prior`) the same way — the gate's other two
+fields, ``forms``/``axes``, stay env-only since this module has no
+list-typed field, so they are deliberately not catalog entries; eight more
+read-side knobs, also outside ``WriteBehaviourConfig``:
 the knowledge-graph
 subgraph depth cap, the two noise-demotion evidence thresholds, the two
 advisory-generation thresholds, and the three capture-health knobs (the
@@ -622,18 +622,17 @@ _SPECS: tuple[SettingSpec, ...] = (
             "names (keyword only, by default) — a judgment about the "
             "whole document form, not a per-item one. 'off' (the "
             "default) serves this class exactly like everything else. "
-            "'demote' multiplies its relevance score by the configured "
-            "factor before budget enforcement, so it still competes but "
-            "usually loses to a stronger match; nothing is dropped. "
             "'withhold' drops it from the pack outright, recorded under "
             "a rejection reason distinct from noise/archived/superseded. "
-            "Measured on the live store: this class took about 11% of "
-            "pack tokens on the keyword axis while being marked helpful "
-            "0 of 83 times and unhelpful on 44% of rows there, and only "
-            "1.2% of these documents have ever been marked helpful at "
-            "all — but other namespaces are helpful 8-25% of the time, "
-            "so this must stay scoped to one document form rather than "
-            "widened store-wide."
+            "Withholds conversation parent documents; their chunks carry "
+            "no document form and are never touched. Measured on the "
+            "live store: this class took about 11% of pack tokens on "
+            "the keyword axis while being marked helpful 0 of 83 times "
+            "and unhelpful on 44% of rows there, and only 1.2% of these "
+            "documents have ever been marked helpful at all — but other "
+            "namespaces are helpful 8-25% of the time, so this must stay "
+            "scoped to one document form rather than widened "
+            "store-wide."
         ),
         # Which document forms and axes this reaches is set by
         # TRELLIS_CLASS_PRIOR_FORMS / TRELLIS_CLASS_PRIOR_AXES — env-only,
@@ -646,42 +645,12 @@ _SPECS: tuple[SettingSpec, ...] = (
         risk="caution",
         risk_note=(
             "'withhold' removes matching items from every pack on the "
-            "configured axes before an operator sees them; 'demote' only "
-            "reorders and drops nothing."
+            "configured axes before an operator sees them."
         ),
         group="retrieval",
         settings_live=True,
         env_var="TRELLIS_CLASS_PRIOR_MODE",
-        enum=("off", "demote", "withhold"),
-    ),
-    SettingSpec(
-        name="class_prior_factor",
-        label="Conversation document prior factor",
-        type="float",
-        default=0.5,
-        description=(
-            "Multiplier applied to an item's relevance score when "
-            "class_prior_mode is 'demote', before budget enforcement. "
-            "Must be strictly between 0 and 1; 0.5 roughly halves the "
-            "item's chance of beating a competing item for the same "
-            "budget slot without removing it outright. Has no effect in "
-            "'off' or 'withhold' mode."
-        ),
-        # No maximum_exclusive field exists on SettingSpec, so a stored
-        # 1.0 passes _check_bounds here even though the gate's own
-        # ClassPriorConfig requires factor < 1.0 strictly; the resolver in
-        # trellis.retrieve.class_prior, resolve_class_prior_config,
-        # re-checks the open interval and degrades to the default with a
-        # logged warning rather than accepting 1.0 as a no-op multiplier.
-        surfaces=("mcp", "api", "cli"),
-        restart_required=False,
-        risk="low",
-        group="retrieval",
-        settings_live=True,
-        env_var="TRELLIS_CLASS_PRIOR_FACTOR",
-        minimum=0.0,
-        minimum_exclusive=True,
-        maximum=1.0,
+        enum=("off", "withhold"),
     ),
     SettingSpec(
         name="learning.auto_promote.enabled",

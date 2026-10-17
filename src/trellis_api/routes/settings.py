@@ -158,8 +158,8 @@ def _effective_values(
       ``capture_strict`` (imported locally -- ``trellis_api`` otherwise
       has no reason to load the worker package at import time).
     * :func:`trellis.retrieve.class_prior.resolve_class_prior_config` for
-      ``class_prior_mode`` / ``class_prior_factor`` -- like the knobs
-      above, it never raises, so it needs no degrade-to-default handling.
+      ``class_prior_mode`` -- like the knobs above, it never raises, so it
+      needs no degrade-to-default handling.
 
     ``graph_max_subgraph_depth`` is the one entry in this second group
     that is *not* settings-live: :data:`trellis.stores.base.graph.MAX_SUBGRAPH_DEPTH`
@@ -222,7 +222,6 @@ def _effective_values(
 
     class_prior_config = resolve_class_prior_config(settings=settings_values)
     effective["class_prior_mode"] = class_prior_config.mode
-    effective["class_prior_factor"] = class_prior_config.factor
 
     # The three auto-promote/demote families resolve env > settings >
     # default here, through the same resolver functions every other

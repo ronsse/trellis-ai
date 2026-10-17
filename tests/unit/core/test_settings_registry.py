@@ -91,7 +91,6 @@ class TestCatalogMembership:
                 "graph_seeding",
                 "filter_legacy_advisories",
                 "class_prior_mode",
-                "class_prior_factor",
                 "graph_max_subgraph_depth",
                 "noise_demotion_min_attributed_packs",
                 "noise_demotion_min_unhelpful_citations",
@@ -105,8 +104,8 @@ class TestCatalogMembership:
             | _PRECEDENT_AUTO_DEMOTE_NAMES
         )
 
-    def test_thirtysix_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 36
+    def test_thirtyfive_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 35
 
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the

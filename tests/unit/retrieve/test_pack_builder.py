@@ -419,30 +419,6 @@ class TestClassPriorGate:
         assert by_reason.get(CLASS_PRIOR_REJECTION_REASON) == 1
         assert "c1" in summary.withheld_item_ids
 
-    def test_demote_mode_reorders_but_drops_nothing(self) -> None:
-        from trellis.retrieve.class_prior import ClassPriorConfig
-
-        items = [
-            _form_item("c1", 0.9, form="conversation"),
-            _form_item("m1", 0.8, form="capture"),
-        ]
-        strategy = _make_strategy("keyword", items)
-        config = ClassPriorConfig(mode="demote", factor=0.5)
-        builder = PackBuilder(
-            strategies=[strategy],
-            class_prior_config=config,
-            content_floor=ContentFloorConfig(mode="off"),
-        )
-        pack = builder.build("q")
-
-        assert pack.retrieval_report.rejected_items == []
-        assert len(pack.items) == 2
-        # c1 (conversation, demoted to 0.45) now ranks behind m1 (0.8).
-        assert [item.item_id for item in pack.items] == ["m1", "c1"]
-        demoted = next(item for item in pack.items if item.item_id == "c1")
-        assert demoted.relevance_score == pytest.approx(0.45)
-        assert demoted.metadata["class_prior"]["mode"] == "demote"
-
     def test_a_document_of_another_form_is_never_touched(self) -> None:
         from trellis.retrieve.class_prior import ClassPriorConfig
 
@@ -473,6 +449,52 @@ class TestClassPriorGate:
         pack = builder.build("q")
         assert [item.item_id for item in pack.items] == ["c1"]
         assert pack.retrieval_report.rejected_items == []
+
+    def test_withheld_successor_never_revives_its_superseded_loser(self) -> None:
+        """The gate must run after supersession is resolved, not before.
+
+        A loser whose declared successor is absent from the pool is kept
+        (that absence is #613's "retrievable on demand" half). If this
+        gate dropped its matching item per strategy, before the merged
+        pool reached ``partition_superseded``, the successor below would
+        look absent by the time supersession ran, and the loser would be
+        revived. Running the gate over the merged, post-supersession pool
+        is what keeps a withheld successor's loser withheld too.
+        """
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_REJECTION_REASON,
+            ClassPriorConfig,
+        )
+        from trellis.retrieve.lifecycle import SUPERSEDED_REJECTION_REASON
+        from trellis.schemas.classification import LIFECYCLE_KEY
+
+        succ = _form_item("succ", 0.5, form="conversation")
+        loser = _form_item("loser", 0.9, form=None).model_copy(
+            update={
+                "metadata": {
+                    LIFECYCLE_KEY: {
+                        "state": "superseded",
+                        "superseded_by": "succ",
+                    }
+                }
+            }
+        )
+        strategy = _make_strategy("keyword", [succ, loser])
+        config = ClassPriorConfig(mode="withhold")
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+
+        assert [item.item_id for item in pack.items] == []
+        reasons = {
+            rejected.item_id: rejected.reason
+            for rejected in pack.retrieval_report.rejected_items
+        }
+        assert reasons.get("succ") == CLASS_PRIOR_REJECTION_REASON
+        assert reasons.get("loser") == SUPERSEDED_REJECTION_REASON
 
 
 class TestBuildSectioned:
@@ -568,6 +590,49 @@ class TestBuildSectioned:
         withholding = pack.metadata["withholding"]
         assert withholding["by_reason"].get(CLASS_PRIOR_REJECTION_REASON) == 1
         assert "c1" in withholding["withheld_item_ids"]
+
+    def test_withheld_successor_never_revives_its_superseded_loser(self) -> None:
+        """The build_sectioned() path needs the same post-supersession
+        ordering build() does — see the twin test in TestClassPriorGate for
+        the full rationale."""
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_REJECTION_REASON,
+            ClassPriorConfig,
+        )
+        from trellis.retrieve.lifecycle import SUPERSEDED_REJECTION_REASON
+        from trellis.schemas.classification import LIFECYCLE_KEY
+
+        succ = _form_item("succ", 0.5, form="conversation")
+        loser = _form_item("loser", 0.9, form=None).model_copy(
+            update={
+                "metadata": {
+                    LIFECYCLE_KEY: {
+                        "state": "superseded",
+                        "superseded_by": "succ",
+                    }
+                }
+            }
+        )
+        strategy = _make_strategy("keyword", [succ, loser])
+        config = ClassPriorConfig(mode="withhold")
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build_sectioned(
+            intent="test",
+            sections=[SectionRequest(name="all")],
+        )
+
+        served_ids = [item.item_id for section in pack.sections for item in section.items]
+        assert served_ids == []
+
+        withholding = pack.metadata["withholding"]
+        assert withholding["by_reason"].get(CLASS_PRIOR_REJECTION_REASON) == 1
+        assert withholding["by_reason"].get(SUPERSEDED_REJECTION_REASON) == 1
+        assert "succ" in withholding["withheld_item_ids"]
+        assert "loser" in withholding["withheld_item_ids"]
 
     def test_cross_section_dedup(self) -> None:
         """Item in multiple sections kept only in highest-scoring one."""

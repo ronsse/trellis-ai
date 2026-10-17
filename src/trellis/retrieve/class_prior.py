@@ -44,22 +44,33 @@ reused by value across the same writer/reader boundary.
 
 **The collect seam.** :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`
 and :meth:`~trellis.retrieve.pack_builder.PackBuilder.build_sectioned` both
-call :func:`apply_class_prior` once per strategy, immediately after
-``_apply_collect_gates`` — the same seam noise/archived/demoted run at,
-because the strategy set is open (pluggable ``SearchStrategy`` protocols)
-and a rule that must hold for all of them cannot live inside any one of
-them. ``strategy_name`` is passed explicitly for the same reason
-``_apply_collect_gates`` takes it: ``_promote_strategy_source`` has not
-stamped the item yet at this point in the pipeline.
+call :func:`apply_class_prior` once per strategy represented in the merged
+candidate pool, via ``PackBuilder._apply_class_prior_pool`` — because the
+strategy set is open (pluggable ``SearchStrategy`` protocols) and a rule
+that must hold for all of them cannot live inside any one of them. Unlike
+the other collect-seam gates, this one runs *after*
+:func:`~trellis.retrieve.lifecycle.partition_superseded`, not immediately
+after ``_apply_collect_gates``: applying it per strategy, before the pool
+is merged and supersession resolved, let a withheld successor un-supersede
+its own loser (the loser looked kept, since nothing had rejected the
+successor yet). ``strategy_name`` is still passed explicitly rather than
+read off the promoted ``strategy_source`` field, because the sectioned
+path never runs that promotion and a directly-constructed ``PackItem``
+(most tests) carries no ``metadata["source_strategy"]`` either.
+
+**Parents only, by design.** The gate matches ``metadata["document_form"]``,
+which :mod:`trellis.ingest_corpus.conversations` stamps only on the parent
+document it writes, never on the chunks derived from it — and this module
+does not resolve a chunk's form through ``parent_doc_id`` either. Withholds
+conversation parent documents; their chunks carry no document form and are
+never touched. The reason is measured, not assumed: the comment beside the
+chunk metadata dict in ``sync.py`` records a stamped parent cited helpful
+at 0.005 against 0.082 for a chunk, so parents are the weak half and chunks
+are exactly what this gate must leave alone.
 
 **Modes.**
 
 * ``"off"`` (default) — no-op.
-* ``"demote"`` — multiplies ``relevance_score`` by :attr:`ClassPriorConfig.factor`
-  (a configured value in ``(0, 1)``) before budget enforcement, so a
-  matching item competes for its slot at a handicap instead of being
-  removed. Nothing is dropped; :func:`~trellis.schemas.pack.RejectedItem`
-  is never constructed for a demoted item.
 * ``"withhold"`` — drops the item and records it as a
   :class:`~trellis.schemas.pack.RejectedItem` under
   :data:`CLASS_PRIOR_REJECTION_REASON`, a reason code distinct from
@@ -67,23 +78,30 @@ stamped the item yet at this point in the pipeline.
   :func:`~trellis.retrieve.withholding.summarize_withheld`'s first-reason
   attribution can tell this gate's drops apart from every other one.
 
-**What "touched" means for served vs. withheld items.** A served item this
-gate demoted gets ``metadata["class_prior"]`` stamped on it — mode, the
-matched form, the axis and the factor applied — the same shape
-``metadata["graph_selection"]`` uses, so a later measurement can split
-served items by whether this rule touched them.
-:class:`~trellis.schemas.pack.RejectedItem` carries no ``metadata`` field
-(by design — see its docstring: one constructor, four copied fields), so a
-withheld item's "which rule touched it" is its ``reason`` string, exactly
-the mechanism every other collect-seam gate already uses for the same
-purpose.
+There was a third mode, ``"demote"``, that rescaled ``relevance_score``
+instead of dropping the item. It was removed: production always wires the
+RRF reranker (:mod:`trellis.retrieve.rerankers.rrf`), which rebuilds each
+item's score from its *within-axis rank*, not from the collect-seam score
+this module could rescale — so a reorder applied here was usually undone
+before the pack was built, and a mode that silently fails to do what it
+documents is worse than no mode. A demote mode would need a seam *after*
+reranking, which this module does not have access to; that is why there
+isn't one.
+
+**What "touched" means for a withheld item.** There is no ``metadata``
+stamp for this gate — a demoted item used to carry one, but demote is
+gone. :class:`~trellis.schemas.pack.RejectedItem` carries no ``metadata``
+field (by design — see its docstring: one constructor, four copied
+fields), so a withheld item's "which rule touched it" is its ``reason``
+string, exactly the mechanism every other collect-seam gate already uses
+for the same purpose.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeGuard
+from typing import Any, Literal
 
 import structlog
 
@@ -92,7 +110,7 @@ from trellis.schemas.pack import PackItem, RejectedItem
 
 logger = structlog.get_logger(__name__)
 
-ClassPriorMode = Literal["off", "demote", "withhold"]
+ClassPriorMode = Literal["off", "withhold"]
 
 #: Distinct from every other collect-seam reason
 #: (``noise``/``archived``/``demoted``/``superseded``/``dedup``/...) so the
@@ -105,33 +123,31 @@ CLASS_PRIOR_REJECTION_REASON = "class_prior"
 CONVERSATION_DOCUMENT_FORM = "conversation"
 
 CLASS_PRIOR_MODE_ENV = "TRELLIS_CLASS_PRIOR_MODE"
-CLASS_PRIOR_FACTOR_ENV = "TRELLIS_CLASS_PRIOR_FACTOR"
 #: Comma-separated document forms. Env-only: :class:`SettingSpec` has no
 #: list-typed field, so this (and the axes knob below) cannot be a
-#: settings-store entry the way ``mode``/``factor`` are — see
+#: settings-store entry the way ``mode`` is — see
 #: ``src/trellis/core/settings_registry.py``'s module docstring and the
-#: ``class_prior_mode``/``class_prior_factor`` entries there.
+#: ``class_prior_mode`` entry there.
 CLASS_PRIOR_FORMS_ENV = "TRELLIS_CLASS_PRIOR_FORMS"
 #: Comma-separated retrieval axis names (``keyword``, ``semantic``, ``graph``).
+#: Case-insensitive: each name is lower-cased before matching, with a
+#: warning (not a refusal — the strategy set is open) when a normalised
+#: name is outside :data:`KNOWN_AXES`.
 CLASS_PRIOR_AXES_ENV = "TRELLIS_CLASS_PRIOR_AXES"
 
-#: Settings-store keys for the two scalar knobs (env > settings > default,
+#: Settings-store key for the one scalar knob (env > settings > default,
 #: same precedence every other ``settings_live=True`` entry uses).
 CLASS_PRIOR_MODE_SETTING = "class_prior_mode"
-CLASS_PRIOR_FACTOR_SETTING = "class_prior_factor"
 
-_VALID_MODES: frozenset[str] = frozenset({"off", "demote", "withhold"})
-DEFAULT_FACTOR = 0.5
+_VALID_MODES: frozenset[str] = frozenset({"off", "withhold"})
 DEFAULT_FORMS: frozenset[str] = frozenset({CONVERSATION_DOCUMENT_FORM})
 DEFAULT_AXES: frozenset[str] = frozenset({"keyword"})
 
-
-def _valid_factor(value: object) -> TypeGuard[float]:
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and 0.0 < value < 1.0
-    )
+#: The built-in strategies' well-known names, used only to decide whether
+#: to log a warning on an axis name that matches none of them — the
+#: strategy set itself stays open (see the module docstring), so this is
+#: advisory, never a closed enum :func:`apply_class_prior` enforces.
+KNOWN_AXES: frozenset[str] = frozenset({"keyword", "semantic", "graph"})
 
 
 @dataclass(frozen=True)
@@ -147,14 +163,10 @@ class ClassPriorConfig:
     mode: ClassPriorMode = "off"
     forms: frozenset[str] = field(default_factory=lambda: DEFAULT_FORMS)
     axes: frozenset[str] = field(default_factory=lambda: DEFAULT_AXES)
-    factor: float = DEFAULT_FACTOR
 
     def __post_init__(self) -> None:
         if self.mode not in _VALID_MODES:
             msg = f"mode must be one of {sorted(_VALID_MODES)}; got {self.mode!r}"
-            raise ValueError(msg)
-        if not _valid_factor(self.factor):
-            msg = f"factor must be in (0, 1); got {self.factor!r}"
             raise ValueError(msg)
 
 
@@ -176,8 +188,8 @@ def resolve_class_prior_config(
     and :func:`trellis.retrieve.pack_builder._filter_legacy_advisories_enabled`
     already use.
 
-    ``mode``/``factor`` are settings-store aware (``settings`` is the
-    already-loaded ``name -> value`` mapping, e.g. from
+    ``mode`` is settings-store aware (``settings`` is the already-loaded
+    ``name -> value`` mapping, e.g. from
     :func:`trellis.stores.settings_store.load_settings_values`); ``forms``/
     ``axes`` are env-only (see :data:`CLASS_PRIOR_FORMS_ENV`'s docstring)
     and fall straight to their defaults when unset.
@@ -188,15 +200,28 @@ def resolve_class_prior_config(
     in this package takes.
     """
     mode = _resolve_mode(settings)
-    factor = _resolve_factor(settings)
 
     forms_raw = os.environ.get(CLASS_PRIOR_FORMS_ENV, "").strip()
     forms = _parse_csv(forms_raw) if forms_raw else DEFAULT_FORMS
 
     axes_raw = os.environ.get(CLASS_PRIOR_AXES_ENV, "").strip()
-    axes = _parse_csv(axes_raw) if axes_raw else DEFAULT_AXES
+    if axes_raw:
+        axes = frozenset(name.lower() for name in _parse_csv(axes_raw))
+        _warn_unknown_axes(axes)
+    else:
+        axes = DEFAULT_AXES
 
-    return ClassPriorConfig(mode=mode, forms=forms, axes=axes, factor=factor)
+    return ClassPriorConfig(mode=mode, forms=forms, axes=axes)
+
+
+def _warn_unknown_axes(axes: frozenset[str]) -> None:
+    unknown = sorted(axes - KNOWN_AXES)
+    if unknown:
+        logger.warning(
+            "class_prior_axes_env_unrecognised",
+            var=CLASS_PRIOR_AXES_ENV,
+            names=unknown,
+        )
 
 
 def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
@@ -204,6 +229,11 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
     if raw:
         if raw in _VALID_MODES:
             return raw  # type: ignore[return-value]
+        if raw == "demote":
+            # Named demote mode removed entirely (see the module
+            # docstring); never resolve to withhold for it.
+            logger.warning("class_prior_mode_demote_removed", var=CLASS_PRIOR_MODE_ENV)
+            return "off"
         logger.warning(
             "class_prior_mode_env_unrecognised",
             var=CLASS_PRIOR_MODE_ENV,
@@ -212,40 +242,15 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
         )
         return "off"
     value = (settings or {}).get(CLASS_PRIOR_MODE_SETTING)
-    if isinstance(value, str) and value in _VALID_MODES:
-        return value  # type: ignore[return-value]
+    if isinstance(value, str):
+        if value in _VALID_MODES:
+            return value  # type: ignore[return-value]
+        if value == "demote":
+            logger.warning(
+                "class_prior_mode_demote_removed", setting=CLASS_PRIOR_MODE_SETTING
+            )
+            return "off"
     return "off"
-
-
-def _resolve_factor(settings: dict[str, Any] | None) -> float:
-    raw = os.environ.get(CLASS_PRIOR_FACTOR_ENV, "").strip()
-    if raw:
-        try:
-            value = float(raw)
-        except ValueError:
-            value = float("nan")
-        if _valid_factor(value):
-            return value
-        logger.warning(
-            "class_prior_factor_env_unrecognised",
-            var=CLASS_PRIOR_FACTOR_ENV,
-            value=raw,
-            effective=DEFAULT_FACTOR,
-        )
-        return DEFAULT_FACTOR
-    stored = (settings or {}).get(CLASS_PRIOR_FACTOR_SETTING)
-    if stored is not None and not _valid_factor(stored):
-        # Reachable only if something stored a value validate_value's own
-        # settings-layer bounds let through but this module's stricter
-        # open-interval contract refuses (see settings_registry.py's
-        # ``class_prior_factor`` entry: there is no ``maximum_exclusive``
-        # field, so 1.0 itself passes the stored-value check there).
-        logger.warning(
-            "class_prior_factor_setting_out_of_range",
-            value=stored,
-            effective=DEFAULT_FACTOR,
-        )
-    return stored if _valid_factor(stored) else DEFAULT_FACTOR
 
 
 def apply_class_prior(
@@ -256,10 +261,9 @@ def apply_class_prior(
 ) -> tuple[list[PackItem], list[RejectedItem]]:
     """Apply ``config`` to ``items`` collected from ``strategy_name``.
 
-    Returns ``(kept, rejected)`` — ``kept`` in input order, demoted items
-    replaced by a re-scored copy; ``rejected`` holding a
-    :class:`RejectedItem` per withheld item. ``items`` itself is never
-    mutated.
+    Returns ``(kept, rejected)`` — ``kept`` in input order; ``rejected``
+    holding a :class:`RejectedItem` per withheld item. ``items`` itself is
+    never mutated.
 
     ``config.mode == "off"``, or ``strategy_name`` outside
     ``config.axes``, or an empty ``config.forms``, each short-circuit to
@@ -277,27 +281,9 @@ def apply_class_prior(
         if form is None or form not in config.forms:
             kept.append(item)
             continue
-        if config.mode == "withhold":
-            rejected.append(
-                RejectedItem.from_pack_item(
-                    item, CLASS_PRIOR_REJECTION_REASON, strategy_source=strategy_name
-                )
-            )
-            continue
-        # demote
-        stamped_metadata = dict(item.metadata)
-        stamped_metadata["class_prior"] = {
-            "mode": "demote",
-            "form": form,
-            "axis": strategy_name,
-            "factor": config.factor,
-        }
-        kept.append(
-            item.model_copy(
-                update={
-                    "relevance_score": item.relevance_score * config.factor,
-                    "metadata": stamped_metadata,
-                }
+        rejected.append(
+            RejectedItem.from_pack_item(
+                item, CLASS_PRIOR_REJECTION_REASON, strategy_source=strategy_name
             )
         )
     return kept, rejected
@@ -305,16 +291,14 @@ def apply_class_prior(
 
 __all__ = [
     "CLASS_PRIOR_AXES_ENV",
-    "CLASS_PRIOR_FACTOR_ENV",
-    "CLASS_PRIOR_FACTOR_SETTING",
     "CLASS_PRIOR_FORMS_ENV",
     "CLASS_PRIOR_MODE_ENV",
     "CLASS_PRIOR_MODE_SETTING",
     "CLASS_PRIOR_REJECTION_REASON",
     "CONVERSATION_DOCUMENT_FORM",
     "DEFAULT_AXES",
-    "DEFAULT_FACTOR",
     "DEFAULT_FORMS",
+    "KNOWN_AXES",
     "OFF",
     "ClassPriorConfig",
     "ClassPriorMode",

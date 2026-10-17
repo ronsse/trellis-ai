@@ -982,6 +982,7 @@ class PackBuilder:
             merged_filters["include_structural"] = True
 
         class_prior_config = self._effective_class_prior_config()
+        strategy_by_item_id: dict[int, str] = {}
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -995,11 +996,9 @@ class PackBuilder:
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                 )
-                items, class_prior_rejected = apply_class_prior(
-                    items, config=class_prior_config, strategy_name=strategy.name
-                )
                 rejected.extend(gate_rejected)
-                rejected.extend(class_prior_rejected)
+                for item in items:
+                    strategy_by_item_id[id(item)] = strategy.name
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1043,6 +1042,18 @@ class PackBuilder:
         # after the promote above, so each row carries its item's axis.
         all_items, superseded = partition_superseded(all_items)
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
+
+        # The class-level serving prior runs after supersession is resolved,
+        # not inside the per-strategy loop above: applying it earlier let a
+        # withheld successor un-supersede its own loser (the loser stays
+        # kept because, from the loop's point of view, nothing rejected the
+        # successor yet). Running it here means a withheld successor's loser
+        # stays rejected as superseded, and the successor is rejected as
+        # class_prior — neither one reaches the pack.
+        all_items, class_prior_rejected = self._apply_class_prior_pool(
+            all_items, config=class_prior_config, strategy_by_item_id=strategy_by_item_id
+        )
+        rejected.extend(class_prior_rejected)
 
         # Deduplicate by item_id (keep highest relevance_score)
         deduped, dedup_rejected = self._deduplicate_tracked(all_items)
@@ -1312,6 +1323,7 @@ class PackBuilder:
             merged_filters["include_structural"] = True
 
         class_prior_config = self._effective_class_prior_config()
+        strategy_by_item_id: dict[int, str] = {}
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -1325,11 +1337,9 @@ class PackBuilder:
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                 )
-                items, class_prior_rejected = apply_class_prior(
-                    items, config=class_prior_config, strategy_name=strategy.name
-                )
                 rejected.extend(gate_rejected)
-                rejected.extend(class_prior_rejected)
+                for item in items:
+                    strategy_by_item_id[id(item)] = strategy.name
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1360,6 +1370,12 @@ class PackBuilder:
         # 1a. Pairwise supersession gate (#613) — see build().
         all_items, superseded = partition_superseded(all_items)
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
+
+        # 1b. Class-level serving prior, after supersession — see build().
+        all_items, class_prior_rejected = self._apply_class_prior_pool(
+            all_items, config=class_prior_config, strategy_by_item_id=strategy_by_item_id
+        )
+        rejected.extend(class_prior_rejected)
 
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
@@ -2164,11 +2180,6 @@ class PackBuilder:
                 "rank": item.rank,
                 "selection_reason": item.selection_reason,
                 "score_breakdown": item.score_breakdown,
-                # Plain final score, beside score_breakdown's components —
-                # read by trellis.retrieve.pack_replay.replay_class_prior
-                # to recompute rank order under a demoted score, which no
-                # component in score_breakdown alone reconstructs.
-                "relevance_score": item.relevance_score,
                 "estimated_tokens": item.estimated_tokens,
                 "strategy_source": item.strategy_source,
                 "injected_advisory_ids": list(item.injected_advisory_ids),
@@ -2799,6 +2810,53 @@ class PackBuilder:
         return agent_id.startswith(META_AGENT_PREFIX)
 
     @staticmethod
+    def _apply_class_prior_pool(
+        items: list[PackItem],
+        *,
+        config: ClassPriorConfig,
+        strategy_by_item_id: dict[int, str],
+    ) -> tuple[list[PackItem], list[RejectedItem]]:
+        """Apply the class-level serving prior over the merged, de-superseded pool.
+
+        Runs once per strategy represented in ``items`` rather than inside
+        the per-strategy collection loop, because this gate must see the
+        outcome of :func:`~trellis.retrieve.lifecycle.partition_superseded`:
+        applying it earlier let a withheld successor un-supersede its own
+        loser (the loser looked kept, from the loop's point of view, since
+        nothing had rejected the successor yet).
+
+        ``strategy_by_item_id`` maps ``id(item)`` to the strategy that
+        collected it, recorded during the collection loop rather than read
+        off ``item.strategy_source``: the sectioned path never promotes
+        that field from metadata, and a directly-constructed
+        :class:`PackItem` (as most tests build) carries no
+        ``metadata["source_strategy"]`` either. The identity-keyed lookup
+        works regardless of either.
+
+        ``items`` itself is never mutated; ``config.mode == "off"`` returns
+        it unchanged (same object, not a copy), matching
+        :func:`~trellis.retrieve.class_prior.apply_class_prior`'s own
+        off-is-a-no-op contract at the per-strategy level.
+        """
+        if config.mode == "off":
+            return items, []
+        order = {id(item): idx for idx, item in enumerate(items)}
+        groups: dict[str, list[PackItem]] = {}
+        for item in items:
+            name = strategy_by_item_id.get(id(item), item.strategy_source or "")
+            groups.setdefault(name, []).append(item)
+        kept: list[PackItem] = []
+        rejected: list[RejectedItem] = []
+        for name, group in groups.items():
+            group_kept, group_rejected = apply_class_prior(
+                group, config=config, strategy_name=name
+            )
+            kept.extend(group_kept)
+            rejected.extend(group_rejected)
+        kept.sort(key=lambda it: order[id(it)])
+        return kept, rejected
+
+    @staticmethod
     def _promote_strategy_source(items: list[PackItem]) -> list[PackItem]:
         """Promote metadata source_strategy to the first-class field."""
         result: list[PackItem] = []
@@ -2901,11 +2959,14 @@ class PackBuilder:
         :func:`~trellis.retrieve.telemetry.analyze_pack_telemetry` would
         bucket all of them under ``"unknown"``.
 
-        Both call sites also run :func:`~trellis.retrieve.class_prior.apply_class_prior`
-        immediately after this, on the same per-strategy ``items`` — a
-        fourth, default-off collect-seam gate kept in its own module rather
-        than folded in here, since it is a class-level prior rather than a
-        per-item judgment like the three above.
+        :func:`~trellis.retrieve.class_prior.apply_class_prior` is a fourth,
+        default-off collect-seam gate kept in its own module rather than
+        folded in here, since it is a class-level prior rather than a
+        per-item judgment like the three above. Both call sites apply it
+        later, over the merged pool via :meth:`_apply_class_prior_pool`,
+        after :func:`~trellis.retrieve.lifecycle.partition_superseded` —
+        not immediately after this method — so a withheld successor cannot
+        un-supersede its own loser.
         """
         kept, archived = partition_archived(items)
         kept, noisy = partition_by_signal_quality(kept, signal_quality_spec)

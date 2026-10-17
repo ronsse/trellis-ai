@@ -895,10 +895,10 @@ def replay(
         "--class-prior",
         help=(
             "Replay trellis.retrieve.class_prior instead of a width policy: "
-            "reports matched servings, helpful lost, unhelpful removed, "
-            "tokens freed and, for demote mode, rank changes. Resolves "
-            "mode/forms/axes/factor the same way PackBuilder does, so this "
-            "replays whatever the gate is actually configured to do."
+            "reports matched servings, helpful lost, unhelpful removed, and "
+            "tokens freed. Resolves mode/forms/axes the same way PackBuilder "
+            "does, so this replays whatever the gate is actually configured "
+            "to do."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -1069,7 +1069,6 @@ def _render_class_prior_replay(report: Any) -> None:
     console.print(f"  helpful lost:       {report.helpful_lost}")
     console.print(f"  unhelpful removed:  {report.unhelpful_removed}")
     console.print(f"  tokens freed:       {report.tokens_freed:,}")
-    console.print(f"  rank changes:       {report.rank_changes}")
 
     if report.notes:
         console.print()

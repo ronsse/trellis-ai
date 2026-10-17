@@ -334,9 +334,10 @@ def _class_prior_pack_event(
     rows: list[dict[str, Any]],
 ) -> Event:
     """A flat PACK_ASSEMBLED whose ``injected_items`` carry the extra
-    ``document_form`` / ``relevance_score`` fields :func:`replay_class_prior`
-    reads. Each row: ``item_id``, ``form``, ``axis``, ``tokens``, ``score``,
-    ``rank``.
+    ``document_form`` field :func:`replay_class_prior` reads. Each row:
+    ``item_id``, ``form``, ``axis``, ``tokens``, ``score``, ``rank`` — the
+    unused ``score``/``rank`` keys are dead data callers may still pass,
+    kept only so existing fixtures need no trimming.
     """
     return Event(
         event_type=EventType.PACK_ASSEMBLED,
@@ -351,7 +352,6 @@ def _class_prior_pack_event(
                     "item_type": "document",
                     "rank": row["rank"],
                     "estimated_tokens": row["tokens"],
-                    "relevance_score": row["score"],
                     "strategy_source": row["axis"],
                     "document_form": row["form"],
                 }
@@ -387,7 +387,6 @@ def test_off_mode_reports_all_zero_counts_and_the_off_note() -> None:
     assert report.helpful_lost == 0
     assert report.unhelpful_removed == 0
     assert report.tokens_freed == 0
-    assert report.rank_changes == 0
     assert any('mode is "off"' in note for note in report.notes)
 
 
@@ -457,7 +456,6 @@ def test_withhold_counts_helpful_lost_unhelpful_removed_and_tokens_freed() -> No
     assert report.helpful_lost == 1
     assert report.unhelpful_removed == 1
     assert report.tokens_freed == 50 + 80
-    assert report.rank_changes == 0
     assert any("it cannot grade one" in note for note in report.notes)
 
 
@@ -487,49 +485,49 @@ def test_axis_scoping_excludes_a_matching_form_on_another_axis() -> None:
     assert report.matched_servings == 0
     assert report.helpful_lost == 0
     assert report.tokens_freed == 0
+    # document_form IS present on the one row in this window — it just
+    # doesn't match on this axis — so the note says nothing was eligible,
+    # never that there is no history to grade.
+    assert any("nothing was eligible" in note for note in report.notes)
+    assert not any("no history yet" in note for note in report.notes)
 
 
-def test_demote_counts_rank_changes_among_served_items_only() -> None:
-    config = ClassPriorConfig(mode="demote", factor=0.5)
+def test_no_document_form_in_the_window_says_no_history_yet_not_nothing_eligible() -> (
+    None
+):
+    """A pack assembled before this gate existed carries no document_form
+    on any row. Zero matched servings there must read as "there is no
+    history yet for this rule to grade" — a stronger and different claim
+    than "nothing was eligible", which implies the field was there to look
+    at and simply never matched."""
+    config = ClassPriorConfig(mode="withhold")
     log = _FakeEventLog()
-    # Original order by rank: c1 (conv, 0.9), m1 (capture, 0.8), m2 (capture, 0.7).
-    # Demoted scores: c1 -> 0.45 (matched), m1 -> 0.8, m2 -> 0.7 (unchanged).
-    # New order: m1, m2, c1 — a full rotation, so every position differs.
     log.append(
-        _class_prior_pack_event(
-            "pack-0",
-            [
-                {
-                    "item_id": "c1",
-                    "form": "conversation",
-                    "axis": "keyword",
-                    "tokens": 50,
-                    "score": 0.9,
-                    "rank": 1,
-                },
-                {
-                    "item_id": "m1",
-                    "form": "capture",
-                    "axis": "keyword",
-                    "tokens": 30,
-                    "score": 0.8,
-                    "rank": 2,
-                },
-                {
-                    "item_id": "m2",
-                    "form": "capture",
-                    "axis": "keyword",
-                    "tokens": 20,
-                    "score": 0.7,
-                    "rank": 3,
-                },
-            ],
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="pack_builder",
+            entity_id="pack-0",
+            entity_type="pack",
+            payload={
+                "pack_id": "pack-0",
+                "injected_items": [
+                    {
+                        "item_id": "c1",
+                        "item_type": "document",
+                        "rank": 1,
+                        "estimated_tokens": 50,
+                        "strategy_source": "keyword",
+                        # No "document_form" key at all — the pre-feature shape.
+                    }
+                ],
+                "budget_trace": [],
+            },
         )
     )
-    log.append(_feedback_event("pack-0", ["m1"]))
+    log.append(_feedback_event("pack-0", ["c1"]))
 
     report = replay_class_prior(log, config=config)
 
-    assert report.matched_servings == 1
-    assert report.rank_changes == 3
-    assert any("admitted at all" in note for note in report.notes)
+    assert report.matched_servings == 0
+    assert any("no history yet" in note for note in report.notes)
+    assert not any("nothing was eligible" in note for note in report.notes)
