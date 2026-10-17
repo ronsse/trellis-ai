@@ -543,11 +543,13 @@ def serve(
 
     Delegates to :func:`trellis_api.app.main` — the same entrypoint
     ``trellis serve`` uses — so there is exactly one place that calls
-    ``uvicorn.run`` and exactly one place that runs the fail-closed bind
-    check (#189). A refused bind (non-loopback host without
+    ``uvicorn.run``. The fail-closed bind check (#189) runs inside
+    ``create_app``, which ``main`` calls before this command's own
+    "Starting..." banner is printed — passed through as ``on_bind_ok``
+    below — so a refused bind (non-loopback host without
     ``TRELLIS_AUTH_MODE=required`` or ``TRELLIS_API_ALLOW_INSECURE_BIND``)
-    raises :class:`~trellis.errors.ConfigError`, caught by the root CLI
-    boundary and rendered at ``EXIT_STORE``.
+    never gets announced: it raises :class:`~trellis.errors.ConfigError`
+    first, caught by the root CLI boundary and rendered at ``EXIT_STORE``.
     """
     try:
         from trellis_api.app import main as run_api_server  # noqa: PLC0415
@@ -558,8 +560,10 @@ def serve(
         )
         raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
-    console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
-    run_api_server(host=host, port=port)
+    def _announce_bind_ok() -> None:
+        console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
+
+    run_api_server(host=host, port=port, on_bind_ok=_announce_bind_ok)
 
 
 @admin_app.command()
