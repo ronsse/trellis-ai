@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.feedback.models import PackFeedback
@@ -19,6 +19,8 @@ from trellis.mutate import (
 )
 from trellis.mutate.handlers import precedent_already_demoted_message
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import resolve_requested_by
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     CommandResponse,
@@ -50,8 +52,23 @@ def _execute_command(cmd: Command) -> CommandResponse:
 
 
 @router.post("/precedents", response_model=CommandResponse)
-def promote(req: PromoteRequest) -> CommandResponse:
-    """Promote a trace to a precedent."""
+def promote(
+    req: PromoteRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> CommandResponse:
+    """Promote a trace to a precedent.
+
+    ``requested_by`` is derived from the authenticated principal when one
+    is present (see
+    :func:`trellis_api.routes._principal.resolve_requested_by`) rather
+    than trusted from the body -- a mutate-scoped key must not be able to
+    claim ``requested_by="auto:learning_candidate"`` and forge the
+    auto-promote origin ``_was_auto_promoted`` relies on. The body's own
+    claim rides along as ``metadata["requested_by_claim"]``.
+    """
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_PROMOTE,
         args={
@@ -61,7 +78,12 @@ def promote(req: PromoteRequest) -> CommandResponse:
         },
         target_id=req.trace_id,
         target_type="trace",
-        requested_by=req.requested_by,
+        metadata=(
+            {"requested_by_claim": requested_by_claim}
+            if requested_by_claim is not None
+            else {}
+        ),
+        requested_by=requested_by,
     )
     return _execute_command(cmd)
 
@@ -69,7 +91,11 @@ def promote(req: PromoteRequest) -> CommandResponse:
 @router.post(
     "/precedents/{target_id:path}/demote", response_model=PrecedentDemoteResponse
 )
-def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteResponse:
+def demote(
+    target_id: str,
+    req: PrecedentDemoteRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> PrecedentDemoteResponse:
     """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
 
     SCD-2 rewrite, not a purge, so the pre-demotion version stays
@@ -88,13 +114,26 @@ def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteRespon
     Re-approving its learning candidate instead of reinstating it is
     refused too -- see
     :func:`trellis.learning.scoring.submit_learning_promotion`.
+
+    ``requested_by`` is derived from the authenticated principal when one
+    is present (see
+    :func:`trellis_api.routes._principal.resolve_requested_by`); the
+    body's own claim rides along as ``metadata["requested_by_claim"]``.
     """
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_DEMOTE,
         args={"target_id": target_id, "reason": req.reason},
         target_id=target_id,
         target_type="precedent",
-        requested_by=req.requested_by,
+        metadata=(
+            {"requested_by_claim": requested_by_claim}
+            if requested_by_claim is not None
+            else {}
+        ),
+        requested_by=requested_by,
     )
     result = build_curate_executor(get_registry()).execute(cmd)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
@@ -114,7 +153,11 @@ def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteRespon
 
 
 @router.post("/precedents/{target_id:path}/reinstate", response_model=CommandResponse)
-def reinstate(target_id: str, req: PrecedentReinstateRequest) -> CommandResponse:
+def reinstate(
+    target_id: str,
+    req: PrecedentReinstateRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> CommandResponse:
     """Reinstate a demoted precedent, stamping it ``Lifecycle.state="current"``.
 
     The reversal verb :func:`demote` shipped without: an SCD-2 rewrite in
@@ -129,13 +172,26 @@ def reinstate(target_id: str, req: PrecedentReinstateRequest) -> CommandResponse
     moved the state to ``"current"`` on the first call. Human-only: a
     ``requested_by`` equal to the automatic demotion policy's own
     identity is refused outright.
+
+    ``requested_by`` is derived from the authenticated principal when one
+    is present (see
+    :func:`trellis_api.routes._principal.resolve_requested_by`); the
+    body's own claim rides along as ``metadata["requested_by_claim"]``.
     """
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_REINSTATE,
         args={"target_id": target_id, "reason": req.reason},
         target_id=target_id,
         target_type="precedent",
-        requested_by=req.requested_by,
+        metadata=(
+            {"requested_by_claim": requested_by_claim}
+            if requested_by_claim is not None
+            else {}
+        ),
+        requested_by=requested_by,
     )
     return _execute_command(cmd)
 
