@@ -2875,7 +2875,7 @@
             return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC').replace(/Z$/, ' UTC');
         }
 
-        // Row 5 (W2-pass5): the topbar's as-of clock, in both zones at
+        // The topbar's as-of clock, in both zones at
         // once -- UTC (the zone every table cell is in) and local (the
         // operator's own) -- so reading it needs no mental conversion.
         // Driven by fetchJSON() via markDataFetched() below, so it
@@ -3134,7 +3134,7 @@
                 `</div>`;
         }
 
-        // Row 3 (W2-pass5): one visual shape for every "nothing to show"
+        // One visual shape for every "nothing to show"
         // site -- an icon, a bold one-line title, a sentence naming the
         // confirmed cause (and the CLI command that changes it, only when
         // the code path this view reads actually has one), and at most
@@ -4087,7 +4087,8 @@
                         title: 'No item scores yet',
                         bodyHtml: `Effectiveness needs packs with recorded feedback. Assemble one ` +
                             `(<code>POST /packs</code> or the <code>get_context</code> MCP tool), then grade ` +
-                            `it with <code>trellis curate feedback --pack-id &lt;id&gt;</code>.`,
+                            `it with the <code>record_feedback</code> MCP tool, naming helpful and unhelpful item ids ` +
+                            `(<code>trellis curate feedback --pack-id &lt;id&gt;</code> records a pack-level grade only).`,
                     });
                 }
 
@@ -6269,7 +6270,7 @@
                 if (loops.length === 0) {
                     container.innerHTML = emptyStateHtml({
                         title: 'No loops reported',
-                        body: 'The loop catalog is fixed in the server (precedent promotion, tuner, feedback intake and the learning auto-promote/demote pair); it has no CLI command that adds to it from here.',
+                        body: 'The loop catalog is fixed in the server, and this deployment returned an empty one.',
                     });
                     return;
                 }

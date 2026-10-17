@@ -1,4 +1,4 @@
-"""Guards for the operator-console polish pass (W2 pass 5): topbar, tables,
+"""Guards for the operator-console polish pass: topbar, tables,
 empty/loading states, timestamps and the one shared pager.
 
 Static assertions on ``index.html``'s own markup/script -- no browser, no
@@ -393,7 +393,7 @@ def test_exactly_two_new_date_iso_parses_exist() -> None:
 
 
 def test_no_date_object_chains_straight_into_locale_string() -> None:
-    # Row 5's "one formatter, not ad-hoc toLocaleString calls" -- every
+    # The "one formatter, not ad-hoc toLocaleString calls" -- every
     # `.toLocaleString(` call in the file operates on a Number (row 2's
     # thousands-separator requirement), never directly on a `new Date(...)`
     # result.
