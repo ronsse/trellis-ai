@@ -193,6 +193,101 @@ class TestGetContextRunId:
         assert self._pack_payload(temp_registry)["run_id"] is None
 
 
+class TestGetContextRetrievalPhase:
+    """``retrieval_phase`` and ``refresh`` reach PACK_ASSEMBLED through the MCP seam.
+
+    ``retrieval_phase`` distinguishes a pre-work pack from a post-hoc one
+    retrieved after a stop hook; an unknown value must be refused at the
+    MCP boundary, not silently stored, mirroring ``TestGetContextRunId``.
+    """
+
+    @staticmethod
+    def _pack_payload(registry: StoreRegistry) -> dict[str, Any]:
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_unknown_value_raises_invalid_params(self) -> None:
+        with pytest.raises(McpError) as excinfo:
+            get_context("deploy platform", retrieval_phase="bogus")
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "retrieval_phase" in excinfo.value.error.message
+        assert excinfo.value.error.data == {"retrieval_phase": "bogus"}
+
+    def test_unknown_value_raises_invalid_params_on_sectioned_path(self) -> None:
+        with pytest.raises(McpError) as excinfo:
+            get_context(
+                "deploy platform",
+                retrieval_phase="bogus",
+                sections=[{"name": "All"}],
+            )
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert "retrieval_phase" in excinfo.value.error.message
+
+    def test_unknown_value_is_not_silently_stored(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+        with pytest.raises(McpError):
+            get_context("deploy platform", retrieval_phase="bogus")
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 0
+
+    @pytest.mark.parametrize("phase", ["pre_work", "mid_task", "post_hoc"])
+    def test_allowed_value_round_trips_to_the_event(
+        self, temp_registry: StoreRegistry, phase: str
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context("deploy platform", retrieval_phase=phase)
+
+        assert self._pack_payload(temp_registry)["retrieval_phase"] == phase
+
+    def test_allowed_value_round_trips_on_the_sectioned_path(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context(
+            "deploy platform",
+            retrieval_phase="post_hoc",
+            sections=[{"name": "All"}],
+        )
+
+        assert self._pack_payload(temp_registry)["retrieval_phase"] == "post_hoc"
+
+    def test_omitted_retrieval_phase_is_none(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context("deploy platform")
+
+        assert self._pack_payload(temp_registry)["retrieval_phase"] is None
+
+    def test_refresh_true_is_recorded_true_through_the_mcp_seam(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context("deploy platform", session_id="sess-rp", refresh=True)
+
+        assert self._pack_payload(temp_registry)["refresh"] is True
+
+    def test_omitted_refresh_is_recorded_false_through_the_mcp_seam(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
+
+        get_context("deploy platform")
+
+        assert self._pack_payload(temp_registry)["refresh"] is False
+
+
 class TestGetContextRefresh:
     """``refresh`` bypasses session dedup end-to-end through the MCP tool (#258)."""
 

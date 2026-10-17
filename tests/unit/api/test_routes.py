@@ -960,6 +960,59 @@ def test_bulk_ingest_edge_allow_dangling(client):
     assert data["edges"]["rejected"] == 0
 
 
+def test_bulk_ingest_alias_requires_admin_scope_not_just_ingest(client, monkeypatch):
+    """/ingest/bulk must refuse an alias.upsert the same way /commands/batch
+
+    does: a caller holding only ``ingest`` (not ``admin``) is refused
+    whole, nothing executed, naming the operation that needs admin.
+    """
+    from trellis.auth import SCOPE_INGEST, generate_api_key
+
+    monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+    token, record = generate_api_key("ingest-only", [SCOPE_INGEST])
+    app_module.get_registry().operational.api_key_store.create(record)
+
+    resp = client.post(
+        "/api/v1/ingest/bulk",
+        json={
+            "aliases": [
+                {
+                    "entity_id": "ent-1",
+                    "source_system": "crm",
+                    "raw_id": "raw-1",
+                }
+            ],
+        },
+        headers={"X-API-Key": token},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "alias.upsert" in resp.json()["detail"]
+
+
+def test_bulk_ingest_alias_admin_scope_passes_the_gate(client, monkeypatch):
+    """Admin reaches the executor -- never the 403 the scope gate raises."""
+    from trellis.auth import SCOPE_ADMIN, generate_api_key
+
+    monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+    token, record = generate_api_key("admin-key", [SCOPE_ADMIN])
+    app_module.get_registry().operational.api_key_store.create(record)
+
+    resp = client.post(
+        "/api/v1/ingest/bulk",
+        json={
+            "aliases": [
+                {
+                    "entity_id": "ent-1",
+                    "source_system": "crm",
+                    "raw_id": "raw-1",
+                }
+            ],
+        },
+        headers={"X-API-Key": token},
+    )
+    assert resp.status_code != 403, resp.text
+
+
 def test_assemble_pack(client):
     resp = client.post(
         "/api/v1/packs",

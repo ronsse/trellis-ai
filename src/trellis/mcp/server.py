@@ -86,6 +86,7 @@ from trellis.mcp.auth import (
     HttpSettings,
     TrellisApiKeyVerifier,
     caller_has_scope,
+    current_principal_id,
     resolve_http_settings,
     resolve_transport,
     set_auth_enforced,
@@ -151,7 +152,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
     index_render_overhead_tokens,
 )
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import (
     format_withholding_note,
@@ -200,6 +201,23 @@ def _raise_invalid_params(
 ) -> NoReturn:
     """Raise ``McpError(INVALID_PARAMS, …)`` — short for the common case."""
     raise McpError(ErrorData(code=INVALID_PARAMS, message=message, data=data))
+
+
+def _check_retrieval_phase(retrieval_phase: str | None) -> None:
+    """Refuse a stated-but-unrecognised ``retrieval_phase`` at the tool boundary.
+
+    ``None`` (not stated) always passes. Checked here, before the call
+    reaches :class:`PackBuilder`, so an unknown value is refused with
+    ``INVALID_PARAMS`` and a clear message rather than surfacing as an
+    opaque ``INTERNAL_ERROR`` once the library's own ``ValueError`` is
+    caught by the generic exception handler below.
+    """
+    if retrieval_phase is not None and retrieval_phase not in RETRIEVAL_PHASES:
+        _raise_invalid_params(
+            f"retrieval_phase must be one of {sorted(RETRIEVAL_PHASES)} or "
+            f"omitted; got {retrieval_phase!r}",
+            data={"retrieval_phase": retrieval_phase},
+        )
 
 
 def _raise_internal(
@@ -1024,6 +1042,7 @@ def _flat_context(
     operation: str = "get_context",
     refresh: bool = False,
     index: bool = False,
+    retrieval_phase: str | None = None,
 ) -> str:
     """Assemble a flat pack through the one PackBuilder-backed path.
 
@@ -1034,6 +1053,9 @@ def _flat_context(
 
     ``refresh=True`` bypasses session dedup for this call (client
     compaction signal), forwarded to :meth:`PackBuilder.build`.
+
+    ``retrieval_phase`` (optional) is forwarded to :meth:`PackBuilder.build`
+    unchanged — validated by the caller before this helper runs.
 
     ``index=True`` (#305) assembles and renders the pack as an id index —
     one compact line per item, no excerpt bodies. Still the one
@@ -1052,6 +1074,7 @@ def _flat_context(
     outage degrades to the surviving axes; only a total retrieval failure
     (``PackAssemblyError``) surfaces as ``INTERNAL_ERROR``.
     """
+    _check_retrieval_phase(retrieval_phase)
     # The index renderer spends tokens on its heading before the first
     # item line, and re-budgets the lines it is given. Reserve that here
     # so the builder's walk cannot admit a tail the rendering then drops:
@@ -1081,6 +1104,7 @@ def _flat_context(
             limit_per_strategy=max(20, max_items),
             refresh=refresh,
             index_mode=index,
+            retrieval_phase=retrieval_phase,
         )
     except McpError:
         raise
@@ -1221,6 +1245,7 @@ def _sectioned_context(
     tool: str,
     run_id: str = "",
     refresh: bool = False,
+    retrieval_phase: str | None = None,
 ) -> str:
     """Assemble a sectioned pack through the one PackBuilder-backed path.
 
@@ -1233,7 +1258,10 @@ def _sectioned_context(
     ``refresh=True`` bypasses session dedup for this call (client
     compaction signal), forwarded to :meth:`PackBuilder.build_sectioned`.
     ``run_id`` is forwarded for the same reason as on the flat path.
+    ``retrieval_phase`` (optional) is forwarded unchanged — validated by
+    the caller before this helper runs.
     """
+    _check_retrieval_phase(retrieval_phase)
     try:
         builder = _build_pack_builder(registry)
         sections = [SectionRequest.model_validate(s) for s in section_specs]
@@ -1244,6 +1272,7 @@ def _sectioned_context(
             session_id=session_id or None,
             run_id=run_id or None,
             refresh=refresh,
+            retrieval_phase=retrieval_phase,
         )
         section_dicts = [
             {
@@ -1327,6 +1356,7 @@ def get_context(
     sections: list[dict[str, Any]] | None = None,
     refresh: bool = False,
     index: bool = False,
+    retrieval_phase: str | None = None,
 ) -> str:
     """Get relevant context from the experience graph for a task or question.
 
@@ -1373,6 +1403,11 @@ def get_context(
             packs in that session, so pass ``refresh=True`` on a
             follow-up full retrieval that needs them back. Flat layout
             only — combining with ``sections`` is an error.
+        retrieval_phase: Optional — when in the task this retrieval
+            happens, relative to the work it's meant to inform: one of
+            "pre_work", "mid_task", "post_hoc". Pass "post_hoc" when
+            retrieving after the work is done, e.g. to check conclusions.
+            Leave unset when you don't know.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -1408,6 +1443,7 @@ def get_context(
             tool="get_context",
             run_id=run_id,
             refresh=refresh,
+            retrieval_phase=retrieval_phase,
         )
 
     return _flat_context(
@@ -1420,6 +1456,7 @@ def get_context(
         operation="get_context",
         refresh=refresh,
         index=index,
+        retrieval_phase=retrieval_phase,
     )
 
 
@@ -3339,6 +3376,7 @@ def search(
     limit: int = 10,
     max_tokens: int = 2000,
     index: bool = False,
+    retrieval_phase: str | None = None,
 ) -> str:
     """Search the experience graph for documents and entities.
 
@@ -3357,6 +3395,10 @@ def search(
             real pack, so a survey counts as a serve for session dedup —
             use ``get_context(..., refresh=True)`` if a later retrieval
             in the same session needs the surveyed items back.
+        retrieval_phase: Optional — when in the task this search happens:
+            one of "pre_work", "mid_task", "post_hoc". Pass "post_hoc"
+            when searching after the work is done, e.g. to check
+            conclusions. Leave unset when you don't know.
     """
     if not query or not query.strip():
         _raise_invalid_params(
@@ -3375,6 +3417,7 @@ def search(
         empty_message=f"No results found for: {query}",
         operation="search",
         index=index,
+        retrieval_phase=retrieval_phase,
     )
 
 
@@ -3389,6 +3432,7 @@ def get_objective_context(
     domain: str = "",
     max_tokens: int = 0,
     session_id: str = "",
+    retrieval_phase: str | None = None,
 ) -> str:
     """Retrieve objective-level context for a workflow.
 
@@ -3411,6 +3455,10 @@ def get_objective_context(
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded from the result, preventing repetition across calls.
+        retrieval_phase: Optional — when in the task this retrieval
+            happens: one of "pre_work", "mid_task", "post_hoc". Pass
+            "post_hoc" when retrieving after the work is done, e.g. to
+            check conclusions. Leave unset when you don't know.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -3447,6 +3495,7 @@ def get_objective_context(
         domain=domain,
         session_id=session_id,
         tool="get_objective_context",
+        retrieval_phase=retrieval_phase,
     )
 
 
@@ -3462,6 +3511,7 @@ def get_task_context(
     domain: str = "",
     max_tokens: int = 0,
     session_id: str = "",
+    retrieval_phase: str | None = None,
 ) -> str:
     """Retrieve task-level context for a specific agent step.
 
@@ -3485,6 +3535,10 @@ def get_task_context(
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded, preventing repetition across calls.
+        retrieval_phase: Optional — when in the task this retrieval
+            happens: one of "pre_work", "mid_task", "post_hoc". Pass
+            "post_hoc" when retrieving after the work is done, e.g. to
+            check conclusions. Leave unset when you don't know.
     """
     if not intent or not intent.strip():
         _raise_invalid_params(
@@ -3524,6 +3578,7 @@ def get_task_context(
         domain=domain,
         session_id=session_id,
         tool="get_task_context",
+        retrieval_phase=retrieval_phase,
     )
 
 
@@ -3539,6 +3594,7 @@ def get_sectioned_context(
     domain: str = "",
     max_tokens: int = 0,
     session_id: str = "",
+    retrieval_phase: str | None = None,
 ) -> str:
     """Retrieve context organized into independently budgeted sections.
 
@@ -3569,6 +3625,10 @@ def get_sectioned_context(
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded, preventing repetition across calls.
+        retrieval_phase: Optional — when in the task this retrieval
+            happens: one of "pre_work", "mid_task", "post_hoc". Pass
+            "post_hoc" when retrieving after the work is done, e.g. to
+            check conclusions. Leave unset when you don't know.
 
     Example sections:
         [
@@ -3603,6 +3663,7 @@ def get_sectioned_context(
         domain=domain,
         session_id=session_id,
         tool="get_sectioned_context",
+        retrieval_phase=retrieval_phase,
     )
 
 
@@ -3856,8 +3917,13 @@ def execute_mutation(
     redactions, retention prune, alias rebinds, link/label removal,
     schedule/settings/classify-rule writes) only with the ``admin``
     scope — refused with ``POLICY_DENIED`` before a ``Command`` is ever
-    built. ``requested_by``/``actor`` stays a caller-chosen audit label,
-    unverified against the credential, exactly as it already was.
+    built. ``requested_by`` is derived from the authenticated principal
+    (:func:`~trellis.mcp.auth.current_principal_id`) when one is present
+    — ``mcp:<key id>`` — never from the caller-supplied ``actor``; with
+    no principal to derive from (stdio, or enforcement disabled) current
+    behaviour is unchanged and ``actor`` passes through as before. The
+    claimed ``actor`` rides along separately as
+    ``metadata["requested_by_claim"]`` whenever it is overridden.
 
     Args:
         operation: Operation name. Accepts the wire value
@@ -3901,6 +3967,12 @@ def execute_mutation(
         )
 
     if requires_admin_scope(op) and not caller_has_scope(SCOPE_ADMIN):
+        logger.warning(
+            "execute_mutation_scope_refused",
+            tool="execute_mutation",
+            required_scope=SCOPE_ADMIN,
+            operation=str(op),
+        )
         _raise_policy_denied(
             f"operation {op} is destructive and requires the admin scope",
             data={"operation": str(op)},
@@ -3913,6 +3985,11 @@ def execute_mutation(
         )
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
+    requested_by_claim: str | None = None
+    principal = current_principal_id()
+    if principal is not None:
+        requested_by_claim = requested_by
+        requested_by = f"mcp:{principal}"
 
     # Stamped before ingest, as in save_experience: a stored trace is
     # immutable. Targeted as there too: the target is what an
@@ -3921,12 +3998,18 @@ def execute_mutation(
     # precedent.demote/precedent.reinstate are also special-cased here.
     target_id, target_type, args = _resolve_execute_mutation_target(op, args)
 
+    command_metadata = (
+        {"requested_by_claim": requested_by_claim}
+        if requested_by_claim is not None
+        else {}
+    )
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
             command = build_evidence_ingest_command_from_args(
                 args,
                 requested_by=requested_by,
                 idempotency_key=idempotency_key,
+                command_metadata=command_metadata,
             )
         else:
             command = Command(
@@ -3936,6 +4019,7 @@ def execute_mutation(
                 args=dict(args),
                 idempotency_key=idempotency_key,
                 requested_by=requested_by,
+                metadata=command_metadata,
             )
     except Exception as exc:
         _raise_invalid_params(

@@ -6,6 +6,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Packs record `retrieval_phase` and `refresh`.** `get_context`,
+  `search`, `get_objective_context`, `get_task_context`, and
+  `get_sectioned_context` take an optional `retrieval_phase` —
+  `"pre_work"`, `"mid_task"`, or `"post_hoc"` — refused with
+  `INVALID_PARAMS` (library callers get `ValueError`) when the value
+  is unrecognised, never silently stored. Both it (`null` when
+  unstated) and `refresh` (always `true`/`false`) now land in the
+  `PACK_ASSEMBLED` event payload, flat and sectioned alike, outside
+  the telemetry the pack-effect holdout branch replaces — the same
+  posture `index_mode` already had — so a `post_hoc` pack (most often
+  a stop hook grading after the work is done) can be told apart from
+  one that could have changed the outcome, and an unchanged re-serve
+  (`refresh=false`) from a forced re-injection (`refresh=true`).
+  `refresh` was already threaded through `PackBuilder.build()` /
+  `build_sectioned()` for session-dedup bypass; this change is what
+  makes it observable in the event.
+
 - **Precedent auto-demotion, and a real `commit` mode for
   learning-candidate auto-promotion — both ship `enabled=False`.**
   `trellis.learning.precedent_auto_demote.PrecedentAutoDemotePolicy`

@@ -363,6 +363,34 @@ def caller_has_scope(scope: str) -> bool:
     return scopes_satisfy(frozenset(token.scopes), scope)
 
 
+def current_principal_id() -> str | None:
+    """The current MCP caller's key id, or ``None`` with no credential to derive from.
+
+    Mirrors :func:`caller_has_scope`'s own transport detection exactly,
+    for the same reason an audited identity needs it: **stdio** and
+    **enforcement disabled** both mean there is no credential to derive
+    an identity from (the parent host is the trust boundary), so both
+    return ``None`` -- a caller reading this is expected to fall back to
+    its own caller-supplied audit label in that case, unchanged from
+    before this function existed. Under **http, enforced**, the bearer's
+    :class:`~fastmcp.server.auth.AccessToken` carries ``client_id``,
+    which :func:`TrellisApiKeyVerifier.verify_token` sets to the
+    presented key's ``ApiKeyRecord.key_id`` -- the MCP-transport
+    equivalent of the REST boundary's ``AuthContext.key_id``.
+    """
+    from fastmcp.server.context import _current_transport  # noqa: PLC0415
+
+    if _current_transport.get() == TRANSPORT_STDIO:
+        return None
+    if not _auth_state.enforced:
+        return None
+
+    from fastmcp.server.dependencies import get_access_token  # noqa: PLC0415
+
+    token = get_access_token()
+    return token.client_id if token is not None else None
+
+
 class TrellisApiKeyVerifier(TokenVerifier):
     """Verify ``Authorization: Bearer trellis_ak_…`` against the key store.
 
