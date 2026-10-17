@@ -176,7 +176,10 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     serve`` / ``trellis admin serve`` (via :func:`main`), and also the
     bare ``uvicorn trellis_api.app:create_app --factory`` invocation,
     which bypasses :func:`main` — and therefore the check that used to
-    live only there — entirely (#189 follow-up).
+    live only there — entirely (#189 follow-up). Under ``--factory`` the
+    check sees the defaults (``TRELLIS_API_HOST``), not uvicorn's own
+    ``--host`` flag, which never reaches this function: set
+    ``TRELLIS_API_HOST`` to the address uvicorn binds.
     """
     check_bind_is_safe(host, port)
 

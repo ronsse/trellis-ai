@@ -160,9 +160,10 @@ def check_bind_is_safe(host: str, port: int) -> None:
     point every entry point funnels through, including ``trellis serve``
     / ``trellis admin serve`` (via ``trellis_api.app.main``) and the bare
     ``uvicorn trellis_api.app:create_app --factory`` invocation, which
-    bypasses ``main`` entirely. It reads the same :func:`resolve_auth_mode`
-    request handling uses, so the check and the runtime can never disagree
-    about the effective mode.
+    bypasses ``main`` entirely (there it checks ``TRELLIS_API_HOST``,
+    since uvicorn's own ``--host`` flag never reaches ``create_app``). It
+    reads the same :func:`resolve_auth_mode` request handling uses, so the
+    check and the runtime can never disagree about the effective mode.
 
     ``off`` and ``optional`` are both refused on a non-loopback host:
     without a presented credential, ``optional`` grants every scope just
