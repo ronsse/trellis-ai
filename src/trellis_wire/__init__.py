@@ -26,9 +26,12 @@ guarded by parity tests (see ``tests/unit/wire/test_parity.py``).
 from trellis_wire.base import WireModel, WireRequestModel
 from trellis_wire.dtos import (
     AxisReportResponse,
+    BatchCommandBodyError,
+    BatchCommandBodyErrorItem,
     BatchCommandItem,
     BatchCommandRequest,
     BatchCommandResponse,
+    BatchOperationNameError,
     BulkAliasItem,
     BulkEdgeItem,
     BulkEntityItem,
@@ -100,6 +103,9 @@ __all__ = [
     "BatchCommandItem",
     "BatchCommandRequest",
     "BatchCommandResponse",
+    "BatchCommandBodyError",
+    "BatchCommandBodyErrorItem",
+    "BatchOperationNameError",
     # Bulk ingest
     "BulkEntityItem",
     "BulkEdgeItem",

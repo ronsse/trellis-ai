@@ -32,6 +32,7 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import resolve_requested_by
 from trellis_wire.dtos import (
     BulkAliasItem,
     BulkEdgeItem,
@@ -191,7 +192,22 @@ def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
 # ── Bulk ingest (entities + edges + aliases in one request) ─────────────
 
 
-def _entity_command(item: BulkEntityItem, requested_by: str) -> Command:
+def _claim_metadata(requested_by_claim: str | None) -> dict[str, Any]:
+    """A fresh ``metadata`` dict carrying the body's claim, when present.
+
+    Fresh per call: several commands in a bulk batch would otherwise
+    share one dict instance.
+    """
+    return (
+        {"requested_by_claim": requested_by_claim}
+        if requested_by_claim is not None
+        else {}
+    )
+
+
+def _entity_command(
+    item: BulkEntityItem, requested_by: str, requested_by_claim: str | None
+) -> Command:
     args: dict[str, Any] = {
         "entity_type": item.entity_type,
         "name": item.name,
@@ -207,11 +223,14 @@ def _entity_command(item: BulkEntityItem, requested_by: str) -> Command:
         args=args,
         target_type="entity",
         idempotency_key=item.idempotency_key,
+        metadata=_claim_metadata(requested_by_claim),
         requested_by=requested_by,
     )
 
 
-def _edge_command(item: BulkEdgeItem, requested_by: str) -> Command:
+def _edge_command(
+    item: BulkEdgeItem, requested_by: str, requested_by_claim: str | None
+) -> Command:
     return Command(
         operation=Operation.LINK_CREATE,
         args={
@@ -224,11 +243,14 @@ def _edge_command(item: BulkEdgeItem, requested_by: str) -> Command:
         target_id=item.source_id,
         target_type="entity",
         idempotency_key=item.idempotency_key,
+        metadata=_claim_metadata(requested_by_claim),
         requested_by=requested_by,
     )
 
 
-def _alias_command(item: BulkAliasItem, requested_by: str) -> Command:
+def _alias_command(
+    item: BulkAliasItem, requested_by: str, requested_by_claim: str | None
+) -> Command:
     return Command(
         operation=Operation.ALIAS_UPSERT,
         args={
@@ -241,6 +263,7 @@ def _alias_command(item: BulkAliasItem, requested_by: str) -> Command:
         },
         target_id=item.entity_id,
         target_type="alias",
+        metadata=_claim_metadata(requested_by_claim),
         requested_by=requested_by,
     )
 
@@ -312,6 +335,14 @@ def ingest_bulk(
     member, and this route must require the same scope the equivalent
     command needs through ``/commands/batch`` rather than letting the
     router-level ``ingest`` scope stand in for it.
+
+    ``requested_by`` is derived from the authenticated principal when one
+    is present (see
+    :func:`trellis_api.routes._principal.resolve_requested_by`), the same
+    rule ``/commands/batch`` applies -- a mutate-scoped caller cannot
+    stamp an arbitrary ``requested_by`` onto a bulk-ingested entity or
+    edge. The body's own claim rides along as each command's
+    ``metadata["requested_by_claim"]``.
     """
     if (
         req.aliases
@@ -333,6 +364,9 @@ def ingest_bulk(
 
     registry = get_registry()
     executor = build_curate_executor(registry)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
 
     response = BulkIngestResponse(
         batch_id=generate_ulid(),
@@ -352,7 +386,7 @@ def ingest_bulk(
                 BulkItemResult(status="skipped", name=entity.name, message="halted")
             )
             continue
-        entity_cmd = _entity_command(entity, req.requested_by)
+        entity_cmd = _entity_command(entity, requested_by, requested_by_claim)
         entity_result = executor.execute(entity_cmd)
         _record_status(response.entities, entity_result.status)
         response.entities.results.append(
@@ -382,7 +416,7 @@ def ingest_bulk(
                 )
             )
             continue
-        edge_cmd = _edge_command(edge, req.requested_by)
+        edge_cmd = _edge_command(edge, requested_by, requested_by_claim)
         edge_result = executor.execute(edge_cmd)
         _record_status(response.edges, edge_result.status)
         response.edges.results.append(
@@ -412,7 +446,9 @@ def ingest_bulk(
                 )
             )
             continue
-        result = executor.execute(_alias_command(alias, req.requested_by))
+        result = executor.execute(
+            _alias_command(alias, requested_by, requested_by_claim)
+        )
         _record_status(response.aliases, result.status)
         response.aliases.results.append(
             BulkItemResult(

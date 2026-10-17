@@ -16,16 +16,20 @@ Pipeline:
 5. :class:`MutationExecutor` runs the batch.  All mutations flow
    through the governed pipeline — never direct store writes.
 
-The ``requested_by`` field on the audit trail takes the form
-``"{extractor_name}@{extractor_version}"`` so downstream
-effectiveness analysis can attribute drafts to a specific client
-release.
+With no authenticated principal, the ``requested_by`` field on the
+audit trail takes the form ``"{extractor_name}@{extractor_version}"``
+(or the body's own claim, when given) so downstream effectiveness
+analysis can attribute drafts to a specific client release. With a
+principal, the audit trail records ``api:<key id or name>`` instead,
+and that extractor identity rides along as
+``metadata["requested_by_claim"]`` on every command in the batch --
+see :func:`trellis_api.routes._principal.resolve_requested_by`.
 """
 
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends, Header
 
 from trellis.extract.commands import result_to_batch
 from trellis.mutate import CommandStatus, build_curate_executor
@@ -34,6 +38,8 @@ from trellis.wire.translate import (
     extraction_batch_to_core_result,
 )
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import resolve_requested_by
 from trellis_api.routes._results import command_response
 from trellis_wire import (
     DraftSubmissionRequest,
@@ -52,6 +58,7 @@ def submit_drafts(
         default=None,
         alias="Idempotency-Key",
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> DraftSubmissionResult:
     """Submit a client-extracted draft batch for governed ingestion.
 
@@ -60,11 +67,19 @@ def submit_drafts(
     closer to the transport layer and more visible on the client
     side, so it wins.  When neither is present the submission is
     still processed, but without deduplication.
+
+    ``requested_by`` is derived from the authenticated principal when
+    one is present (see
+    :func:`trellis_api.routes._principal.resolve_requested_by`) rather
+    than trusted from the body or the client-asserted extractor id;
+    the body's own claim rides along as each command's
+    ``metadata["requested_by_claim"]``.
     """
     batch = req.batch
     effective_key = idempotency_key or batch.idempotency_key
     extractor_id = f"{batch.extractor_name}@{batch.extractor_version}"
-    requested_by = req.requested_by or extractor_id
+    claimed_requested_by = req.requested_by or extractor_id
+    requested_by, requested_by_claim = resolve_requested_by(ctx, claimed_requested_by)
 
     executor = build_curate_executor(get_registry())
 
@@ -79,14 +94,18 @@ def submit_drafts(
         strategy=batch_strategy_to_core(req.strategy),
     )
 
-    # Stamp the idempotency key on every command in the batch so
-    # replays dedupe at the MutationExecutor layer.  Scoping to
+    # Stamp the idempotency key and the body's requested_by claim on
+    # every command in the batch so replays dedupe, and the claim
+    # survives, at the MutationExecutor layer.  Scoping the key to
     # ``{key}:{i}`` keeps each command's key distinct while still
     # tying it to the submission.  Core Command models are mutable
     # (TrellisModel doesn't set frozen=True).
-    if effective_key:
+    if effective_key or requested_by_claim is not None:
         for i, cmd in enumerate(command_batch.commands):
-            cmd.idempotency_key = f"{effective_key}:{i}"
+            if effective_key:
+                cmd.idempotency_key = f"{effective_key}:{i}"
+            if requested_by_claim is not None:
+                cmd.metadata["requested_by_claim"] = requested_by_claim
 
     results = executor.execute_batch(command_batch)
 

@@ -83,6 +83,7 @@ from trellis.mutate import (
     Operation,
     build_classify_rules_executor,
 )
+from trellis.mutate.handlers import _contains_nul_or_lone_surrogate
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.classify_overrides_store import (
@@ -95,6 +96,7 @@ from trellis_cli.exit_codes import (
     EXIT_INTERNAL,
     EXIT_OK,
     EXIT_STORE,
+    EXIT_VALIDATION,
     refusal_exit_code,
 )
 from trellis_cli.output import build_console, emit_json
@@ -957,6 +959,48 @@ def _render_classify_overrides_degradation(degraded: dict[str, Any] | None) -> N
     console.print(f"    recovery: {escape(degraded['recovery'])}", soft_wrap=True)
 
 
+def _reject_unsafe_cli_string(value: str, *, field: str, output_format: str) -> None:
+    """Refuse a NUL byte or unpaired UTF-16 surrogate in a CLI argument.
+
+    ``Command(...)`` raises *pydantic's own* ``ValidationError`` -- not
+    ``trellis.errors.ValidationError``, the type
+    ``_execute_classify_command``/``refusal_exit_code`` know how to map
+    to an exit code -- for either hazard in a plain ``str`` field (issue
+    #869 F6), uncaught, before a ``CommandResult`` exists to render.
+    This check runs first so the same input instead exits
+    :data:`EXIT_VALIDATION` -- the code this CLI already uses for bad
+    input -- with a ``--format json`` payload shaped like
+    ``_execute_classify_command``'s own, rather than a traceback and
+    exit 1.
+
+    Reuses ``_contains_nul_or_lone_surrogate``, the same walker the REST
+    dismiss route (``classify_rules.py``) and the Apply/Revoke audit
+    probe (``handlers.py``) use, rather than re-deriving the check --
+    and never echoes the raw value, for the same reason neither of
+    those does.
+    """
+    if not _contains_nul_or_lone_surrogate(value):
+        return
+    message = (
+        f"{field} contains a NUL byte or an unpaired UTF-16 surrogate "
+        "and cannot be processed"
+    )
+    if output_format == "json":
+        emit_json(
+            {
+                "status": CommandStatus.REJECTED.value,
+                "command_id": None,
+                "operation": None,
+                "message": message,
+                "created_id": None,
+                "warnings": [],
+            }
+        )
+    else:
+        console.print(f"[red]✗ {escape(message)}[/red]", soft_wrap=True)
+    raise typer.Exit(code=EXIT_VALIDATION)
+
+
 def _execute_classify_command(cmd: Command, output_format: str) -> None:
     """Submit *cmd*, render the result, and exit non-zero on refusal/failure.
 
@@ -1125,6 +1169,14 @@ def apply_rule(
     uses -- so a denying policy, a degraded store, or a malformed
     candidate is refused identically on both surfaces.
     """
+    # Unlike the float-NaN case below, this one *does* need a pre-check:
+    # a NUL byte or lone surrogate in ``key``/``requested_by`` makes
+    # ``Command(...)`` itself raise pydantic's own ``ValidationError`` --
+    # there is no ``CommandResult`` yet for ``_execute_classify_command``
+    # to render, so skipping the check here means an uncaught traceback
+    # and exit 1, not a parseable refusal (issue #869 F6).
+    _reject_unsafe_cli_string(key, field="key", output_format=output_format)
+    _reject_unsafe_cli_string(requested_by, field="--by", output_format=output_format)
     # Click's FLOAT type parses via Python's ``float()``, which happily
     # accepts "nan"/"inf"/"-inf" from the command line -- unlike the REST
     # DTO's ``allow_inf_nan=False``, nothing upstream of this command stops
@@ -1181,6 +1233,12 @@ def revoke_rule(
     (see ``ClassifyRuleRevokeHandler``'s docstring for the two distinct
     refusal messages).
     """
+    # Same pre-check as ``apply_rule``, same reason (issue #869 F6):
+    # ``Command(...)`` raises an uncaught pydantic ``ValidationError``
+    # on a NUL byte or lone surrogate before any ``CommandResult``
+    # exists.
+    _reject_unsafe_cli_string(key, field="key", output_format=output_format)
+    _reject_unsafe_cli_string(requested_by, field="--by", output_format=output_format)
     _print_revoke_rule_risk_warning(kind, key)
     cmd = Command(
         operation=Operation.CLASSIFY_RULE_REVOKE,
