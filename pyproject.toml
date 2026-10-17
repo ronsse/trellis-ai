@@ -95,8 +95,8 @@ dev = [
     # derive them; `scripts/check_tool_pins.py` fails CI on any divergence.
     # Do not write "matches X" here — three such comments were carried
     # verbatim across Dependabot bumps that broke what they asserted (#378).
-    "ruff==0.16.8",
-    "mypy==2.3.1",
+    "ruff==0.16.10",
+    "mypy==2.4.0",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
 ]
@@ -143,7 +143,7 @@ all = [
 [project.scripts]
 trellis = "trellis_cli.main:app"
 trellis-mcp = "trellis.mcp.server:main"
-trellis-api = "trellis_api.app:main"
+trellis-api = "trellis_api.app:console_main"
 # The capture sweep names itself `trellis-session-capture` in its own --help;
 # ship the script so that name resolves. Also reachable as
 # `trellis worker capture-sessions` and `python -m trellis_workers.session_capture`.

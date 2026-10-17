@@ -152,12 +152,21 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: Keys added to both payloads since the ``_BASE_*_KEYS`` snapshot was taken,
 #: by any change, not just this one: the holdout keys (this file's own
 #: subject), plus ``duration_ms`` (real build latency, previously hard-coded
-#: to ``0`` and emitted nowhere) and ``advisories_filtered_legacy``
+#: to ``0`` and emitted nowhere), ``advisories_filtered_legacy``
 #: (decision-ledger D-4, option B — how many matching advisories were
-#: withheld for predating the #394 generator repair). ``_BASE_*_KEYS`` stays
-#: an honest historical snapshot of 58be23d4 rather than being backfilled,
-#: so a *later* addition extends this set, not the base one.
-_KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {"duration_ms", "advisories_filtered_legacy"}
+#: withheld for predating the #394 generator repair), and ``retrieval_phase``
+#: / ``refresh`` (when in the task this pack was fetched, and whether the
+#: caller bypassed session dedup — both passed as explicit kwargs outside
+#: the swappable holdout telemetry dict, like ``index_mode``, so they ride
+#: every row including a withheld one). ``_BASE_*_KEYS`` stays an honest
+#: historical snapshot of 58be23d4 rather than being backfilled, so a
+#: *later* addition extends this set, not the base one.
+_KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
+    "duration_ms",
+    "advisories_filtered_legacy",
+    "retrieval_phase",
+    "refresh",
+}
 
 
 def _items() -> list[PackItem]:

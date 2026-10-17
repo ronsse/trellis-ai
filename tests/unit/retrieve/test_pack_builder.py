@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -3151,6 +3152,132 @@ class TestIndexMode:
         assert first.items
         second = builder.build("q", session_id="s1", index_mode=True)
         assert second.items == []
+
+
+class TestRetrievalPhaseAndRefresh:
+    """``retrieval_phase`` and ``refresh`` always ride the PACK_ASSEMBLED row.
+
+    ``retrieval_phase`` says when in the task a pack was fetched relative
+    to the work it informs (unstated when ``None``); ``refresh`` records
+    whether the caller bypassed session dedup. Neither is stored on the
+    ``Pack``/``SectionedPack`` schema — both are explicit kwargs threaded
+    straight to the emit call, mirroring ``index_mode`` (#305).
+    """
+
+    @staticmethod
+    def _pack_payload(event_log: SQLiteEventLog) -> dict:
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
+        assert len(events) == 1
+        return events[0].payload
+
+    def _builder(
+        self, event_log: SQLiteEventLog | None = None, *, holdout_rate: float = 0.0
+    ) -> PackBuilder:
+        return PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])],
+            event_log=event_log,
+            holdout_rate=holdout_rate,
+        )
+
+    # -- flat ----------------------------------------------------------
+
+    def test_flat_payload_always_carries_both_keys_with_defaults(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(session_event_log).build("q")
+        payload = self._pack_payload(session_event_log)
+        assert payload["retrieval_phase"] is None
+        assert payload["refresh"] is False
+
+    @pytest.mark.parametrize("phase", sorted(pack_builder_module.RETRIEVAL_PHASES))
+    def test_flat_each_allowed_value_round_trips(
+        self, session_event_log: SQLiteEventLog, phase: str
+    ) -> None:
+        self._builder(session_event_log).build("q", retrieval_phase=phase)
+        assert self._pack_payload(session_event_log)["retrieval_phase"] == phase
+
+    def test_flat_unknown_value_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="retrieval_phase"):
+            self._builder().build("q", retrieval_phase="before_lunch")
+
+    def test_flat_unknown_value_is_refused_not_silently_stored(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        # The build must raise before anything is emitted.
+        with pytest.raises(ValueError, match="retrieval_phase"):
+            self._builder(session_event_log).build("q", retrieval_phase="later")
+        events = session_event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert events == []
+
+    def test_flat_refresh_true_is_recorded_true(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(session_event_log).build("q", refresh=True)
+        assert self._pack_payload(session_event_log)["refresh"] is True
+
+    def test_flat_keys_survive_a_withheld_pack(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        # holdout_rate=1.0 swaps in ``_withheld_flat_telemetry``'s dict —
+        # retrieval_phase/refresh are passed outside it, like index_mode,
+        # so they must still be the caller's values, not dropped/reset.
+        self._builder(session_event_log, holdout_rate=1.0).build(
+            "q", retrieval_phase="post_hoc", refresh=True
+        )
+        payload = self._pack_payload(session_event_log)
+        assert payload["holdout"] is True
+        assert payload["retrieval_phase"] == "post_hoc"
+        assert payload["refresh"] is True
+
+    # -- sectioned -------------------------------------------------------
+
+    _SECTIONS: ClassVar[list[SectionRequest]] = [
+        SectionRequest(name="s", max_items=5, max_tokens=4000)
+    ]
+
+    def test_sectioned_payload_always_carries_both_keys_with_defaults(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(session_event_log).build_sectioned("q", sections=self._SECTIONS)
+        payload = self._pack_payload(session_event_log)
+        assert payload["retrieval_phase"] is None
+        assert payload["refresh"] is False
+
+    @pytest.mark.parametrize("phase", sorted(pack_builder_module.RETRIEVAL_PHASES))
+    def test_sectioned_each_allowed_value_round_trips(
+        self, session_event_log: SQLiteEventLog, phase: str
+    ) -> None:
+        self._builder(session_event_log).build_sectioned(
+            "q", sections=self._SECTIONS, retrieval_phase=phase
+        )
+        assert self._pack_payload(session_event_log)["retrieval_phase"] == phase
+
+    def test_sectioned_unknown_value_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="retrieval_phase"):
+            self._builder().build_sectioned(
+                "q", sections=self._SECTIONS, retrieval_phase="before_lunch"
+            )
+
+    def test_sectioned_refresh_true_is_recorded_true(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(session_event_log).build_sectioned(
+            "q", sections=self._SECTIONS, refresh=True
+        )
+        assert self._pack_payload(session_event_log)["refresh"] is True
+
+    def test_sectioned_keys_survive_a_withheld_pack(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        self._builder(session_event_log, holdout_rate=1.0).build_sectioned(
+            "q", sections=self._SECTIONS, retrieval_phase="mid_task", refresh=True
+        )
+        payload = self._pack_payload(session_event_log)
+        assert payload["holdout"] is True
+        assert payload["retrieval_phase"] == "mid_task"
+        assert payload["refresh"] is True
 
 
 class TestLatencyTelemetry:
