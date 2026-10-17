@@ -770,19 +770,20 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="int",
         default=12,
         description=(
-            "How many ranked pack items get a full-body excerpt before "
-            "graduated disclosure demotes the rest to a lighter summary "
-            "form instead of dropping them. Raising it gives more items "
-            "a full body at the cost of a larger pack for the same item "
-            "count; lowering it summarizes sooner. Applies to every "
+            "How many ranked pack items keep their excerpt before "
+            "graduated disclosure turns the rest into one-line pointers "
+            "(label plus the size of the withheld body, fetchable with "
+            "get_items) instead of dropping them. Raising it gives more "
+            "items a body at the cost of a larger pack for the same item "
+            "count; lowering it switches to pointers sooner. Applies to every "
             "surface that assembles a pack through build_pack_builder "
             "(mcp, REST, the CLI's operator preview, the pack-quality "
             "evaluator). Default 12."
         ),
         risk_note=(
             "Raising this increases the token cost of a pack with the "
-            "same item count, since more items render in full rather "
-            "than summarized."
+            "same item count, since more items render with a body "
+            "rather than as a pointer."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
