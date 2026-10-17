@@ -13,7 +13,10 @@ import structlog
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
-from trellis.core.text_safety import contains_nul_or_lone_surrogate
+from trellis.core.text_safety import (
+    contains_nul_or_lone_surrogate,
+    replace_nul_and_lone_surrogates,
+)
 from trellis.core.vector_metadata import (
     VectorSyncOutcome,
     resolve_vector_store,
@@ -1267,16 +1270,19 @@ def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> 
     ``_validate_classify_rule_identifier`` already refuses a NUL or
     control character in ``key``/``target``/``source_event_id`` directly,
     but the payload also carries fields that validator never sees --
-    caller identity (``command.metadata``'s ``key_id``/``key_name``), a
-    prior row's own fields (e.g. ``existing.source_event_id``, which may
-    predate that validator or have been written by hand-editing the
-    overlay file), and whatever a future field adds -- so this is the
-    backstop that checks every string in the payload, dict keys
-    included, at any nesting depth, rather than one named field at a
-    time. Called before the write it would otherwise follow
-    (``store.put`` in Apply, ``store.remove`` in Revoke), so a refusal
-    here leaves the prior state -- row present or absent -- exactly as
-    it was, with no row written and no event emitted.
+    caller identity (``command.metadata``'s ``key_id``/``key_name``) and
+    whatever a future field adds -- so this is the backstop that checks
+    every string in the payload, dict keys included, at any nesting
+    depth, rather than one named field at a time. (A prior row's own
+    ``applied_by``/``source_event_id``, which may predate that validator
+    or have been written by hand-editing the overlay file, is scrubbed
+    by :func:`_scrub_stranded_legacy_field` before it ever reaches this
+    probe -- issue #869 -- so this backstop no longer refuses on a value
+    this call cannot fix by resubmitting different input.) Called before
+    the write it would otherwise follow (``store.put`` in Apply,
+    ``store.remove`` in Revoke), so a refusal here leaves the prior state
+    -- row present or absent -- exactly as it was, with no row written
+    and no event emitted.
 
     Raises:
         ValidationError: some string value or dict key, at any nesting
@@ -1292,6 +1298,18 @@ def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> 
             f"store: {value!r}"
         )
         raise ValidationError(msg, errors=[msg], code="unsafe_audit_payload")
+
+
+def _scrub_stranded_legacy_field(value: str) -> str:
+    """Replace a NUL byte or lone surrogate in a value read off an existing
+    overlay row, rather than refusing the payload it rides in on.
+
+    ``existing.applied_by``/``existing.source_event_id`` may predate the
+    identifier validator or come from a hand-edited overlay file. The
+    caller cannot fix such a value by resubmitting, so refusing the audit
+    payload over it would leave the row impossible to revoke or re-apply.
+    """
+    return replace_nul_and_lone_surrogates(value)
 
 
 _CLASSIFY_RULE_IDENTITY_FIELD_CODES = (
@@ -1616,12 +1634,18 @@ class ClassifyRuleApplyHandler:
             "key_name": command.metadata.get("key_name"),
             "source_event_id": source_event_id,
             "prior_target": existing.target if existing is not None else None,
-            "prior_applied_by": existing.applied_by if existing is not None else None,
+            "prior_applied_by": (
+                _scrub_stranded_legacy_field(existing.applied_by)
+                if existing is not None
+                else None
+            ),
             "prior_applied_at": (
                 existing.applied_at.isoformat() if existing is not None else None
             ),
             "prior_source_event_id": (
-                existing.source_event_id if existing is not None else None
+                _scrub_stranded_legacy_field(existing.source_event_id)
+                if existing is not None
+                else None
             ),
             "config_target": config_target,
         }
@@ -1821,9 +1845,11 @@ class ClassifyRuleRevokeHandler:
             "revoked_by": command.requested_by,
             "key_id": command.metadata.get("key_id"),
             "key_name": command.metadata.get("key_name"),
-            "removed_applied_by": existing.applied_by,
+            "removed_applied_by": _scrub_stranded_legacy_field(existing.applied_by),
             "removed_applied_at": existing.applied_at.isoformat(),
-            "removed_source_event_id": existing.source_event_id,
+            "removed_source_event_id": _scrub_stranded_legacy_field(
+                existing.source_event_id
+            ),
             "config_target": config_target,
         }
         requested_by_claim = command.args.get("requested_by_claim")
@@ -1832,11 +1858,13 @@ class ClassifyRuleRevokeHandler:
 
         # Built and probed BEFORE the store write, with the same two
         # probes Apply runs, in the same order. A NUL byte or lone
-        # surrogate can reach this payload inside a str the type guard
-        # above lets through (``command.metadata``'s identity fields),
-        # or through ``existing``'s own ``source_event_id``/``applied_by``,
-        # which may have been written by an earlier build or by
-        # hand-editing the overlay file. No current field can carry a
+        # surrogate can still reach this payload inside a str the type
+        # guard above lets through (``command.metadata``'s identity
+        # fields) -- ``existing``'s own ``source_event_id``/``applied_by``
+        # are pre-scrubbed above instead, since those may have been
+        # written by an earlier build or by hand-editing the overlay
+        # file, a value this call cannot fix by resubmitting different
+        # input (issue #869). No current field can carry a
         # non-finite float here; the serializability probe is a
         # backstop for whatever this payload gains next. Discovering
         # either failure only after
