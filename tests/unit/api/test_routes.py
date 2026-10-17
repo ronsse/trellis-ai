@@ -1786,6 +1786,13 @@ class TestReinstatePrecedentRoute:
         where the automatic policy may demote what it itself promoted,
         the automatic identity reinstating anything is refused outright.
 
+        ``auto:learning_candidate_demote`` is rostered in
+        ``UNATTENDED_WRITERS`` for exactly ``precedent.demote`` (#693-ish
+        hardening), so ``MutationExecutor``'s Stage 1 roster check now
+        refuses this before the route's handler ever runs -- the
+        handler's own human-only check is defense in depth, unreachable
+        for this identity now, and not exercised by this test.
+
         Defective subject: a route/handler that drops this check
         reinstates the node anyway -- both the status code and the
         unchanged-lifecycle assertion below catch it.
@@ -1801,7 +1808,10 @@ class TestReinstatePrecedentRoute:
             },
         )
         assert resp.status_code == 400, resp.text
-        assert "human-only" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "unattended_writer_operation_not_allowed" in detail
+        assert "auto:learning_candidate_demote" in detail
+        assert "precedent.reinstate" in detail
 
         graph = app_module._registry.knowledge.graph_store
         node = graph.get_node(node_id)
@@ -2891,6 +2901,62 @@ def _seed_generate_entity_correlation_signal(registry: StoreRegistry) -> None:
                 "unhelpful_item_ids": [],
             },
         )
+
+
+class TestAssemblePackBudgetDefaultsWiring:
+    """``rest_pack_max_items``/``rest_pack_max_tokens`` -- resolved from the
+    request's own ``model_fields_set``, never from ``PackRequest``'s field
+    defaults, so ``PackRequest``'s committed OpenAPI schema is untouched.
+    A caller that omits both keys gets the settings-registry
+    default/override; a caller that supplies either key always wins.
+    ``PACK_ASSEMBLED.payload["budget_max_items"/"budget_max_tokens"]`` is
+    the budget actually applied, read directly rather than inferred from
+    how many documents came back.
+    """
+
+    @staticmethod
+    def _applied_budget(registry: StoreRegistry) -> tuple[int, int]:
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=1
+        )
+        return event.payload["budget_max_items"], event.payload["budget_max_tokens"]
+
+    def test_identity_no_settings_file_keeps_the_dto_defaults(self, client) -> None:
+        """No settings.json at all: the resolved budget is exactly
+        ``PackRequest``'s own shipped defaults (50 / 8000) -- zero
+        behaviour change from before this PR.
+        """
+        resp = client.post("/api/v1/packs", json={"intent": "identity check"})
+
+        assert resp.status_code == 200
+        assert self._applied_budget(app_module._registry) == (50, 8000)
+
+    def test_a_settings_only_override_changes_the_default_budget(self, client) -> None:
+        registry = app_module._registry
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("rest_pack_max_items", 7)
+        SettingsStore(settings_path).set("rest_pack_max_tokens", 1234)
+
+        resp = client.post("/api/v1/packs", json={"intent": "overridden"})
+
+        assert resp.status_code == 200
+        assert self._applied_budget(registry) == (7, 1234)
+
+    def test_an_explicit_caller_value_still_wins_over_settings(self, client) -> None:
+        registry = app_module._registry
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("rest_pack_max_items", 7)
+        SettingsStore(settings_path).set("rest_pack_max_tokens", 1234)
+
+        resp = client.post(
+            "/api/v1/packs",
+            json={"intent": "explicit wins", "max_items": 3, "max_tokens": 999},
+        )
+
+        assert resp.status_code == 200
+        assert self._applied_budget(registry) == (3, 999)
 
 
 class TestAdvisoryGenerateSettingsWiring:

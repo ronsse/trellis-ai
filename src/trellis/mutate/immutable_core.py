@@ -288,6 +288,14 @@ UNATTENDED_WRITERS: Mapping[str, frozenset[Operation]] = {
     "worker:session-capture": frozenset(
         {Operation.ENTITY_CREATE, Operation.LINK_CREATE}
     ),
+    # trellis/learning/candidate_auto_promote.py — run_candidate_auto_promotion,
+    # via trellis/learning/scoring.py::submit_learning_promotion, the same
+    # three-command sequence the human Review-queue approval path uses.
+    "auto:learning_candidate": frozenset(
+        {Operation.ENTITY_CREATE, Operation.LINK_CREATE, Operation.PRECEDENT_PROMOTE}
+    ),
+    # trellis/learning/precedent_auto_demote.py — run_precedent_auto_demotion.
+    "auto:learning_candidate_demote": frozenset({Operation.PRECEDENT_DEMOTE}),
 }
 
 

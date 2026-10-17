@@ -188,6 +188,56 @@ class TestUnattendedWriterAllowList:
             assert unattended_writer_refusal(command) is not None
 
 
+_AUTO_PROMOTE = "auto:learning_candidate"
+_AUTO_DEMOTE = "auto:learning_candidate_demote"
+
+
+class TestAutoLearningLoopIdentities:
+    """The auto-promote and auto-demote jobs are two different writers.
+
+    Both reach :class:`MutationExecutor` with no human in the loop, so the
+    roster is the only thing stopping one job from reaching into the
+    other's operation. ``test_every_rostered_writer_is_refused_something``
+    above already proves each identity is refused *something*, but an
+    entry widened to cover one extra operation still satisfies that
+    check — it would just have one less operation left to test against.
+    These pin the exact set, so broadening either one fails here first.
+    """
+
+    def test_the_demoter_cannot_promote(self) -> None:
+        command = Command(
+            operation=Operation.PRECEDENT_PROMOTE, args={}, requested_by=_AUTO_DEMOTE
+        )
+        assert unattended_writer_refusal(command) is not None
+
+    def test_the_promoter_cannot_demote(self) -> None:
+        command = Command(
+            operation=Operation.PRECEDENT_DEMOTE, args={}, requested_by=_AUTO_PROMOTE
+        )
+        assert unattended_writer_refusal(command) is not None
+
+    def test_the_demoter_is_restricted_to_exactly_precedent_demote(self) -> None:
+        assert UNATTENDED_WRITERS[_AUTO_DEMOTE] == frozenset(
+            {Operation.PRECEDENT_DEMOTE}
+        )
+
+    def test_the_promoter_holds_exactly_the_operations_its_write_path_issues(
+        self,
+    ) -> None:
+        """Mirrors ``submit_learning_promotion``'s own command sequence:
+        one ``ENTITY_CREATE``, then per-edge ``LINK_CREATE``, then
+        ``PRECEDENT_PROMOTE`` — the same three the human Review-queue
+        approval path uses.
+        """
+        assert UNATTENDED_WRITERS[_AUTO_PROMOTE] == frozenset(
+            {
+                Operation.ENTITY_CREATE,
+                Operation.LINK_CREATE,
+                Operation.PRECEDENT_PROMOTE,
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # Seam 2 — the governing-key deny-list, in the tuner
 # ---------------------------------------------------------------------------

@@ -193,6 +193,136 @@ class TestGetContextRunId:
         assert self._pack_payload(temp_registry)["run_id"] is None
 
 
+class TestGetContextSearchBudgetDefaultsWiring:
+    """``get_context_max_tokens``/``get_context_max_items``/``search_max_tokens`` --
+    settings-registry knobs for the flat (non-sectioned) path only. The
+    ``sections=`` layout keeps resolving its budget from
+    ``registry.budget_config`` alone (see
+    ``_GET_CONTEXT_SECTIONS_LEGACY_MAX_TOKENS``'s docstring in
+    ``mcp/server.py``) -- proven here, not just asserted, by showing that
+    a settings override moving the flat path leaves the sectioned path's
+    resolved budget unchanged.
+    """
+
+    @staticmethod
+    def _pack_payload(registry: StoreRegistry) -> dict[str, Any]:
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 1
+        return events[0].payload
+
+    def test_get_context_identity_no_settings_file_keeps_shipped_defaults(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """No settings.json at all: the resolved flat budget is exactly
+        the pre-this-PR literals (50 items / 2000 tokens) -- zero
+        behaviour change.
+        """
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+
+        get_context("deploy platform")
+
+        payload = self._pack_payload(temp_registry)
+        assert payload["budget_max_items"] == 50
+        assert payload["budget_max_tokens"] == 2000
+
+    def test_get_context_settings_only_override_changes_the_default_budget(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+        assert temp_registry.stores_dir is not None
+        store = SettingsStore(temp_registry.stores_dir / "settings.json")
+        store.set("get_context_max_tokens", 777)
+        store.set("get_context_max_items", 3)
+
+        get_context("deploy platform")
+
+        payload = self._pack_payload(temp_registry)
+        assert payload["budget_max_items"] == 3
+        assert payload["budget_max_tokens"] == 777
+
+    def test_get_context_explicit_max_tokens_still_wins_over_settings(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "get_context_max_tokens", 777
+        )
+
+        get_context("deploy platform", max_tokens=321)
+
+        assert self._pack_payload(temp_registry)["budget_max_tokens"] == 321
+
+    def test_sections_layout_ignores_the_get_context_max_tokens_override(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+
+        get_context("deploy platform", sections=[{"name": "All"}])
+
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "get_context_max_tokens", 99999
+        )
+        get_context("deploy platform", sections=[{"name": "All"}])
+
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert len(events) == 2
+        baseline, overridden = events[0].payload, events[1].payload
+        assert (
+            overridden["token_budget_effective"] == baseline["token_budget_effective"]
+        )
+
+    def test_search_identity_no_settings_file_keeps_shipped_default(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+
+        search("deploy platform")
+
+        assert self._pack_payload(temp_registry)["budget_max_tokens"] == 2000
+
+    def test_search_settings_only_override_changes_the_default_budget(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "search_max_tokens", 555
+        )
+
+        search("deploy platform")
+
+        assert self._pack_payload(temp_registry)["budget_max_tokens"] == 555
+
+    def test_search_explicit_max_tokens_still_wins_over_settings(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        temp_registry.knowledge.document_store.put("doc1", "deploy the platform safely")
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "search_max_tokens", 555
+        )
+
+        search("deploy platform", max_tokens=111)
+
+        assert self._pack_payload(temp_registry)["budget_max_tokens"] == 111
+
+
 class TestGetContextRetrievalPhase:
     """``retrieval_phase`` and ``refresh`` reach PACK_ASSEMBLED through the MCP seam.
 

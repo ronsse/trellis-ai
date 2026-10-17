@@ -24,17 +24,22 @@ from tests.ast_rules import (
     construction_names,
 )
 from trellis.retrieve.builder_factory import (
+    BODY_ITEMS_ENV,
+    EXCERPT_MAX_CHARS_ENV,
     GRAPH_SEEDING_ENV,
     SEMANTIC_AXIS_NOTES,
     build_pack_builder,
     describe_axes,
 )
+from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS
+from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_builder import FILTER_LEGACY_ADVISORIES_ENV, PackBuilder
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
     EmbedderResolveFailure,
     GraphSearch,
+    KeywordSearch,
     NamespaceSeedExtractor,
     build_strategies,
 )
@@ -541,6 +546,112 @@ class TestFilterLegacyAdvisoriesWiring:
 
         messages = {a.message for a in pack.advisories}
         assert messages == {"post-repair row"}
+
+
+class TestDisclosureBodyItemsWiring:
+    """``disclosure_body_items`` -- env > settings > :data:`DEFAULT_BODY_ITEMS`,
+    resolved once per build and handed to :class:`DisclosureConfig`. Same
+    shape as :class:`TestGraphSeedingWiring`, proved on ``builder._disclosure``
+    rather than a behavioural pack-shape difference, because graduated
+    disclosure only changes rendering once a pack has more than
+    ``body_items`` candidates -- a weaker, flakier signal than the resolved
+    config value itself.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    def test_identity_no_settings_file_keeps_the_shipped_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(BODY_ITEMS_ENV, raising=False)
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        assert builder._disclosure.body_items == DEFAULT_BODY_ITEMS == 12
+
+    def test_a_settings_only_override_changes_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(BODY_ITEMS_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "disclosure_body_items", 3
+        )
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert builder._disclosure.body_items == 3
+
+    def test_env_still_beats_a_settings_override_here(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "disclosure_body_items", 3
+        )
+        monkeypatch.setenv(BODY_ITEMS_ENV, "9")
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert builder._disclosure.body_items == 9
+
+
+class TestExcerptMaxCharsWiring:
+    """``excerpt_max_chars`` -- env > settings > :data:`EXCERPT_MAX_CHARS`,
+    resolved once per build in :func:`build_pack_builder` and threaded into
+    every strategy :func:`build_strategies` constructs. Proved on the
+    keyword axis, the one axis every registry in this file has (no embedder
+    is configured, so the semantic axis never builds; see
+    ``TestBuildPackBuilder.test_wires_the_axes_the_deployment_has``).
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    @staticmethod
+    def _keyword_axis(builder: PackBuilder) -> KeywordSearch:
+        axes = [s for s in builder._strategies if isinstance(s, KeywordSearch)]
+        assert len(axes) == 1
+        return axes[0]
+
+    def test_identity_no_settings_file_keeps_the_shipped_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(EXCERPT_MAX_CHARS_ENV, raising=False)
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        resolved = self._keyword_axis(builder)._excerpt_max_chars
+        assert resolved == EXCERPT_MAX_CHARS == 500
+
+    def test_a_settings_only_override_changes_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(EXCERPT_MAX_CHARS_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "excerpt_max_chars", 42
+        )
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert self._keyword_axis(builder)._excerpt_max_chars == 42
+
+    def test_env_still_beats_a_settings_override_here(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "excerpt_max_chars", 42
+        )
+        monkeypatch.setenv(EXCERPT_MAX_CHARS_ENV, "77")
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert self._keyword_axis(builder)._excerpt_max_chars == 77
 
 
 def _src_root() -> Path:

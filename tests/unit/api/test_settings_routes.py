@@ -925,6 +925,55 @@ class TestGraphSeedingEffectiveValue:
         assert row["overridden_by"] == "env"
 
 
+class TestPackBudgetKnobsEffectiveValue:
+    """The seven pack-size/excerpt knobs (pack-budget-knobs PR) each need
+    their own ``effective[spec.name]`` entry in ``_effective_values`` --
+    none is a ``WriteBehaviourConfig`` field, same as ``graph_seeding`` /
+    ``filter_legacy_advisories`` above. Missing one is a ``KeyError`` that
+    500s this route for *every* setting, not just the missing one, which
+    is what caught this the first time (re-gate for this PR).
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "default"),
+        [
+            ("get_context_max_tokens", 2000),
+            ("get_context_max_items", 50),
+            ("search_max_tokens", 2000),
+            ("rest_pack_max_items", 50),
+            ("rest_pack_max_tokens", 8000),
+            ("disclosure_body_items", 12),
+            ("excerpt_max_chars", 500),
+        ],
+    )
+    def test_defaults_when_nothing_is_set(
+        self, client: TestClient, name: str, default: int
+    ) -> None:
+        row = _entry(client.get("/api/v1/settings").json(), name)
+        assert row["effective_value"] == default
+        assert row["overridden_by"] == "default"
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("get_context_max_tokens", 777),
+            ("get_context_max_items", 3),
+            ("search_max_tokens", 555),
+            ("rest_pack_max_items", 7),
+            ("rest_pack_max_tokens", 1234),
+            ("disclosure_body_items", 3),
+            ("excerpt_max_chars", 42),
+        ],
+    )
+    def test_a_settings_only_override_is_previewed(
+        self, client: TestClient, registry: StoreRegistry, name: str, value: int
+    ) -> None:
+        _store(registry).set(name, value)
+        row = _entry(client.get("/api/v1/settings").json(), name)
+        assert row["effective_value"] == value
+        assert row["overridden_by"] == "settings"
+
+
 # ---------------------------------------------------------------------------
 # A garbage auto-promote env value must degrade that family's entries, not
 # 500 the whole route -- resolve_auto_promote_overrides and
