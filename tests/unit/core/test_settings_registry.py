@@ -132,6 +132,16 @@ class TestCatalogMembership:
     def test_fortytwo_entries_total(self) -> None:
         assert len(SETTINGS_REGISTRY) == 42
 
+    def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
+        """A dropped mode must not linger in the registry as an allowed
+        value -- that's a second way the setting could still resolve to
+        it, independent of the resolver-level degrade tested in
+        ``test_class_prior.py``.
+        """
+        spec = SETTINGS_REGISTRY["class_prior_mode"]
+        assert spec.enum == ("off", "withhold")
+        assert "demote" not in spec.enum
+
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the
         pre-this-PR state, where they were explicitly excluded pending
