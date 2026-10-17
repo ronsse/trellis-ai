@@ -603,15 +603,15 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
-    ("src/trellis_api/routes/curate.py", "demote", "req.requested_by"): (
+    ("src/trellis_api/routes/curate.py", "demote", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
-    ("src/trellis_api/routes/curate.py", "promote", "req.requested_by"): (
+    ("src/trellis_api/routes/curate.py", "promote", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
-    ("src/trellis_api/routes/curate.py", "reinstate", "req.requested_by"): (
+    ("src/trellis_api/routes/curate.py", "reinstate", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
