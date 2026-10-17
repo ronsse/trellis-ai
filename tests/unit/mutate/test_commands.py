@@ -6,6 +6,7 @@ import pytest
 
 from trellis.mutate.commands import (
     ID_BEARING_ARG_KEYS,
+    NESTED_ID_ARG_PATHS,
     BatchStrategy,
     Command,
     CommandBatch,
@@ -21,6 +22,14 @@ _ID_BEARING_PAIRS = sorted(
     (op, key) for op, keys in ID_BEARING_ARG_KEYS.items() for key in keys
 )
 
+#: Every (operation, arg, inner_key) path NESTED_ID_ARG_PATHS declares,
+#: flattened for parametrization the same way as _ID_BEARING_PAIRS above.
+_NESTED_ID_PATHS = sorted(
+    (op, arg, inner_key)
+    for op, paths in NESTED_ID_ARG_PATHS.items()
+    for arg, inner_key in paths
+)
+
 
 def _base_args(registry: OperationRegistry, operation: Operation) -> dict[str, object]:
     """A minimal args dict that satisfies *operation*'s required schema,
@@ -33,6 +42,23 @@ def _base_args(registry: OperationRegistry, operation: Operation) -> dict[str, o
         args["rating"] = 0.5
     for key in ID_BEARING_ARG_KEYS.get(operation, frozenset()):
         args.setdefault(key, "test_value")
+    return args
+
+
+def _args_with_nested_value(
+    registry: OperationRegistry,
+    operation: Operation,
+    arg: str,
+    inner_key: str | None,
+    value: str,
+) -> dict[str, object]:
+    """``_base_args`` with *arg* overridden to the shape
+    ``NESTED_ID_ARG_PATHS`` scans: a one-element list holding *value* when
+    *inner_key* is ``None``, else a dict carrying *value* at *inner_key*.
+    Other fields *arg*'s real schema would require are left out — Stage 1
+    validate() never reads them, only the handler does."""
+    args = _base_args(registry, operation)
+    args[arg] = [value] if inner_key is None else {inner_key: value}
     return args
 
 
@@ -315,7 +341,7 @@ class TestIdBearingArgNulSafety:
         [
             (Operation.ENTITY_CREATE, "name"),
             (Operation.PRECEDENT_DEMOTE, "reason"),
-            (Operation.LABEL_ADD, "label"),
+            (Operation.ALIAS_UPSERT, "source_system"),
         ],
     )
     def test_hazard_in_free_text_arg_still_accepted(
@@ -342,4 +368,94 @@ class TestIdBearingArgNulSafety:
         a silent shrink is the one failure mode this test exists to catch.
         """
         assert len(ID_BEARING_ARG_KEYS) == 10
-        assert len(_ID_BEARING_PAIRS) == 12
+        assert len(_ID_BEARING_PAIRS) == 17
+
+    def test_mapping_is_pinned_by_full_content(self) -> None:
+        """Content equality, not just size — a count floor cannot tell
+        ``feedback.record``'s ``pack_id`` apart from a same-sized swap to
+        ``comment``; this does."""
+        assert {
+            Operation.ENTITY_CREATE: frozenset({"entity_id", "entity_type"}),
+            Operation.ENTITY_UPDATE: frozenset({"entity_id"}),
+            Operation.ALIAS_UPSERT: frozenset({"entity_id", "raw_id"}),
+            Operation.LINK_CREATE: frozenset({"source_id", "target_id", "edge_kind"}),
+            Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
+            Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
+            Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
+            Operation.LABEL_ADD: frozenset({"target_id", "label"}),
+            Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
+            Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),
+        } == ID_BEARING_ARG_KEYS
+
+
+class TestNestedIdArgPathsNulSafety:
+    """The nested counterpart to ``TestIdBearingArgNulSafety``: an id that
+    arrives inside a sub-object or a list in ``args`` rather than as a bare
+    top-level string (see ``NESTED_ID_ARG_PATHS``'s docstring)."""
+
+    @pytest.fixture
+    def registry(self) -> OperationRegistry:
+        return OperationRegistry()
+
+    @pytest.mark.parametrize(("operation", "arg", "inner_key"), _NESTED_ID_PATHS)
+    @pytest.mark.parametrize("hazard", ["\x00", "\ud800"], ids=["nul", "surrogate"])
+    def test_rejects_hazard_in_nested_id_arg(
+        self,
+        registry: OperationRegistry,
+        operation: Operation,
+        arg: str,
+        inner_key: str | None,
+        hazard: str,
+    ) -> None:
+        args = _args_with_nested_value(
+            registry, operation, arg, inner_key, f"bad{hazard}value"
+        )
+        valid, errors = registry.validate(Command(operation=operation, args=args))
+
+        assert valid is False
+        assert any(repr(arg) in e and "NUL byte or lone surrogate" in e for e in errors)
+
+    @pytest.mark.parametrize(("operation", "arg", "inner_key"), _NESTED_ID_PATHS)
+    def test_honest_value_in_nested_id_arg_passes(
+        self,
+        registry: OperationRegistry,
+        operation: Operation,
+        arg: str,
+        inner_key: str | None,
+    ) -> None:
+        args = _args_with_nested_value(registry, operation, arg, inner_key, "honest")
+        valid, errors = registry.validate(Command(operation=operation, args=args))
+
+        assert valid is True, f"{operation}/{arg}/{inner_key}: {errors}"
+        assert errors == []
+
+    def test_retention_prune_criteria_is_not_scanned(self) -> None:
+        """``criteria`` has no id field at all (see ``NESTED_ID_ARG_PATHS``'s
+        docstring), so ``retention.prune`` is deliberately absent here."""
+        assert Operation.RETENTION_PRUNE not in NESTED_ID_ARG_PATHS
+
+    def test_mapping_hand_read_floor(self) -> None:
+        """Same discipline as ``TestIdBearingArgNulSafety``'s floor, for the
+        nested mapping."""
+        assert len(NESTED_ID_ARG_PATHS) == 6
+        assert len(_NESTED_ID_PATHS) == 8
+
+    def test_mapping_is_pinned_by_full_content(self) -> None:
+        assert {
+            Operation.TRACE_INGEST: frozenset({("trace", "trace_id")}),
+            Operation.EVIDENCE_INGEST: frozenset({("evidence", "doc_id")}),
+            Operation.ENTITY_CREATE: frozenset({("document_ids", None)}),
+            Operation.OBSERVATION_RECORD: frozenset(
+                {
+                    ("observation", "observation_id"),
+                    ("observation", "subject_entity_id"),
+                }
+            ),
+            Operation.MEASUREMENT_RECORD: frozenset(
+                {
+                    ("measurement", "measurement_id"),
+                    ("measurement", "subject_entity_id"),
+                }
+            ),
+            Operation.RETENTION_RESTORE: frozenset({("item_ids", None)}),
+        } == NESTED_ID_ARG_PATHS

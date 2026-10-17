@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
@@ -109,12 +110,13 @@ class TraceEmbedReport:
     embedded: int = 0
     skipped_existing: int = 0
     skipped_empty: int = 0
-    #: Rows Stage 1 permanently refuses (e.g. a NUL byte or lone surrogate in
-    #: a stored trace id) rather than a transient failure. Counted separately
-    #: from ``failed`` because the pass advances past these -- see
-    #: ``_process_one``: a validation rejection cannot ever become a success
-    #: on retry, so holding the watermark behind it forever would re-reject
-    #: the same row every pass without ever making progress.
+    #: Rows classified permanently invalid before anything is rendered or
+    #: executed (e.g. a NUL byte or lone surrogate already stored in the
+    #: trace id) rather than a transient failure. Counted separately from
+    #: ``failed`` because the pass advances past these -- see
+    #: ``_process_one``: the same hazard rejects the row identically on
+    #: every retry, so holding the watermark behind it forever would
+    #: re-reject the same row every pass without ever making progress.
     skipped_invalid: int = 0
     failed: int = 0
     stopped_early: bool = False
@@ -129,7 +131,7 @@ class TraceEmbedReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "ok" if self.failed == 0 else "partial",
+            "status": "partial" if self.failed or self.skipped_invalid else "ok",
             "scanned": self.scanned,
             "embedded": self.embedded,
             "skipped_existing": self.skipped_existing,
@@ -431,18 +433,28 @@ def _process_one(
     """Handle one trace. ``True`` iff it ends the pass confirmed embedded.
 
     A dry run returns ``False`` for anything it *would* have written: nothing
-    was confirmed, so the cursor must not move past it.
+    was confirmed, so the cursor must not move past it. The one exception is
+    a trace classified ``skipped_invalid`` below -- a dry run reports that
+    row the same way a real pass would, because the row can never be
+    embedded, dry run or not.
 
-    A Stage-1 ``validate`` rejection is the one exception to "failure stops
-    the cursor": it is permanent -- the same hazard (e.g. a NUL byte or lone
-    surrogate already stored in this trace's id) rejects it identically on
-    every retry, so refusing to advance would pin the watermark on this row
-    forever and re-emit a rejection event every pass. Counted under
-    ``skipped_invalid`` and returns ``True`` so the cursor moves past it, the
-    same way an already-embedded trace does.
+    A trace whose stored id holds a NUL byte or lone surrogate is classified
+    before anything is rendered or sent to the executor: the same hazard
+    rejects it identically on every retry (``OperationRegistry.validate``
+    refuses it unconditionally), so refusing to advance would pin the
+    watermark on this row forever and re-attempt the same row every pass
+    without ever making progress. Counted under ``skipped_invalid`` and
+    returns ``True`` so the cursor moves past it, the same way an
+    already-embedded trace does. Every other non-``SUCCESS`` result from the
+    executor is a plain failure: it holds the cursor, because nothing about
+    it says the next attempt cannot succeed.
     """
     if trace_is_embedded(vector_store, trace.trace_id):
         report.skipped_existing += 1
+        return True
+
+    if contains_nul_or_lone_surrogate(trace.trace_id):
+        report.skipped_invalid += 1
         return True
 
     content = render_trace_summary(trace, include_step_errors=include_step_errors)
@@ -469,17 +481,6 @@ def _process_one(
             created_at=trace.created_at.isoformat(),
         )
     )
-    if (
-        result.status is CommandStatus.REJECTED
-        and result.metadata.get("rejection_reason") == "validate"
-    ):
-        # Permanent, not transient -- see the docstring above. No per-trace
-        # log line and no trace id in ``failures``: the id is exactly the
-        # hazardous value this rejection exists to keep out of a rendered
-        # report, so the pass-level count below is the only signal.
-        report.skipped_invalid += 1
-        return True
-
     if result.status is not CommandStatus.SUCCESS:
         report.failed += 1
         report.failures.append(
