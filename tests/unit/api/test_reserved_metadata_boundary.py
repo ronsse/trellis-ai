@@ -156,6 +156,49 @@ class TestAPlantedReservedKeyIsRefusedWholeNamingItself:
         assert _executed_events(registry) == []
 
 
+class TestBatchLevelMetadataIsGuardedToo:
+    """``CommandBatch.metadata`` (``req.metadata`` -- distinct from any one
+    command's own) is caller-supplied the same way, and gets the same
+    guard in ``execute_batch`` even though no handler reads it today."""
+
+    def test_a_planted_key_in_batch_metadata_is_refused_naming_the_key(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "probe"},
+                    }
+                ],
+                "metadata": {"write_provenance": "forged-build"},
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "write_provenance" in resp.json()["detail"]
+        assert _executed_events(registry) == []
+
+    def test_ordinary_batch_metadata_still_passes(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "probe"},
+                    }
+                ],
+                "metadata": {"note": "decoration"},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(_executed_events(registry)) == 1
+
+
 class TestHonestUseIsUnaffected:
     """Item 4(c)/(d): the guard changes nothing about the two behaviours
     it sits beside -- an honest ``requested_by`` claim still rides along,

@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
@@ -109,6 +110,14 @@ class TraceEmbedReport:
     embedded: int = 0
     skipped_existing: int = 0
     skipped_empty: int = 0
+    #: Rows classified permanently invalid before anything is rendered or
+    #: executed (e.g. a NUL byte or lone surrogate already stored in the
+    #: trace id) rather than a transient failure. Counted separately from
+    #: ``failed`` because the pass advances past these -- see
+    #: ``_process_one``: the same hazard rejects the row identically on
+    #: every retry, so holding the watermark behind it forever would
+    #: re-reject the same row every pass without ever making progress.
+    skipped_invalid: int = 0
     failed: int = 0
     stopped_early: bool = False
     #: More traces remained after ``max_scan`` cut this pass. Reported, not
@@ -122,11 +131,12 @@ class TraceEmbedReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "ok" if self.failed == 0 else "partial",
+            "status": "partial" if self.failed or self.skipped_invalid else "ok",
             "scanned": self.scanned,
             "embedded": self.embedded,
             "skipped_existing": self.skipped_existing,
             "skipped_empty": self.skipped_empty,
+            "skipped_invalid": self.skipped_invalid,
             "failed": self.failed,
             "stopped_early": self.stopped_early,
             "more_remaining": self.more_remaining,
@@ -394,11 +404,21 @@ def run_trace_embed_pass(
         watermark.cursor.created_at.isoformat() if watermark.cursor else None
     )
 
+    _log_skipped_invalid(report)
+
     logger.info(
         "trace_embed_pass_completed",
         **{k: v for k, v in report.to_dict().items() if k != "failures"},
     )
     return report
+
+
+def _log_skipped_invalid(report: TraceEmbedReport) -> None:
+    """One warning naming the count -- never a trace id, which is exactly
+    the hazardous value ``skipped_invalid`` exists to keep out of a log
+    line. Split out so the branch stays off ``run_trace_embed_pass``."""
+    if report.skipped_invalid:
+        logger.warning("trace_embed_skipped_invalid", count=report.skipped_invalid)
 
 
 def _process_one(
@@ -413,8 +433,29 @@ def _process_one(
     """Handle one trace. ``True`` iff it ends the pass confirmed embedded.
 
     A dry run returns ``False`` for anything it *would* have written: nothing
-    was confirmed, so the cursor must not move past it.
+    was confirmed, so the cursor must not move past it. The one exception is
+    a trace classified ``skipped_invalid`` below -- a dry run reports that
+    row the same way a real pass would, because the row can never be
+    embedded, dry run or not.
+
+    A trace whose stored id holds a NUL byte or lone surrogate is classified
+    before anything is rendered or sent to the executor: the same hazard
+    rejects it identically on every retry (``OperationRegistry.validate``
+    refuses it unconditionally), so refusing to advance would pin the
+    watermark on this row forever and re-attempt the same row every pass
+    without ever making progress. Counted under ``skipped_invalid`` and
+    returns ``True`` so the cursor moves past it, the same way an
+    already-embedded trace does. Every other non-``SUCCESS`` result from the
+    executor is a plain failure: it holds the cursor, because nothing about
+    it says the next attempt cannot succeed.
     """
+    # Before the vector-store lookup, not after it: a backend that binds the
+    # id as a SQL parameter (Postgres refuses a NUL in a text value) would
+    # raise on the lookup itself and fail the whole pass.
+    if contains_nul_or_lone_surrogate(trace.trace_id):
+        report.skipped_invalid += 1
+        return True
+
     if trace_is_embedded(vector_store, trace.trace_id):
         report.skipped_existing += 1
         return True
@@ -474,6 +515,7 @@ def summarize(
         total.embedded += r.embedded
         total.skipped_existing += r.skipped_existing
         total.skipped_empty += r.skipped_empty
+        total.skipped_invalid += r.skipped_invalid
         total.failed += r.failed
         total.failures.extend(r.failures)
     return total.to_dict()

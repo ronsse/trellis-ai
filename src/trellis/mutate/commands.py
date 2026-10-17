@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -135,6 +136,106 @@ class CommandBatch(VersionedModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+#: Operation-specific ``args`` keys whose value is a stored identifier or an
+#: exact-match lookup key -- never scanned generically, because free-text
+#: args (names, descriptions, reasons, comments) must stay accepted. Found
+#: by reading every handler in ``mutate/handlers.py``: the value each key
+#: names is either minted fresh (``entity.create``'s ``entity_id`` and its
+#: ``entity_type`` -- stored verbatim as the node's ``node_type`` and
+#: compared exactly against ``"precedent"`` -- and ``entity.update``'s
+#: ``entity_type``, stored the same way, ``alias.upsert``'s owner
+#: ``entity_id``, ``link.create``'s edge endpoints and its ``edge_kind`` -- stored
+#: as ``edge_type`` and filtered on exactly by ``get_edges`` --,
+#: ``precedent.promote``'s trace-sourced ``trace_id``) or read back later
+#: by an exact-match query against a stored event's ``entity_id``/payload
+#: field (``precedent.demote``/``reinstate``, ``label.add``/``remove``'s
+#: ``target_id`` and its ``label`` -- checked for list membership against
+#: the stored ``labels`` property --, and ``feedback.record``'s
+#: ``target_id`` and its join key ``pack_id`` -- see ``_was_auto_promoted``,
+#: ``_is_promoted_precedent_event`` in handlers.py and
+#: ``join_pack_feedback`` in ``learning/pack_observations.py``).
+#:
+#: A key is deliberately absent when: the handler already refuses a NUL
+#: itself (``classify_rule.apply``/``revoke``'s ``key``/``target``/
+#: ``source_event_id``, via ``_validate_classify_rule_identifier``); the
+#: value only ever looks up a node that must already exist, and a failed
+#: lookup refuses cleanly either way (``redaction.apply``'s ``target_id``
+#: -- leaving it out also keeps governed redaction able to purge a row an
+#: id-minting bug stored before this check existed); or the value is free
+#: text/classification, not an identifier (``alias.upsert``'s
+#: ``source_system``, every ``reason``/``name``/``description``). One
+#: lookup key is left out on purpose: ``alias.upsert``'s ``raw_id``. The
+#: name-alias backfill (``mutate/name_aliases.py``) and ``entity.create``'s
+#: own alias binding derive it from the entity's free-text name, which may
+#: hold a NUL, so refusing it would fail every backfill pass for such an
+#: entity while the create path stores the same value anyway. This
+#: mapping's size has a hand-read floor (``tests/unit/mutate/test_commands.py``)
+#: so deleting an entry fails a test.
+#:
+#: An id that arrives nested inside a sub-object or a list in ``args`` --
+#: rather than as a bare top-level string -- cannot be named here, because
+#: the scan below reads ``command.args.get(key)`` directly. Those are
+#: ``NESTED_ID_ARG_PATHS``'s job: ``trace.ingest``'s ``trace.trace_id``,
+#: ``evidence.ingest``'s ``evidence.doc_id``, ``entity.create``'s and
+#: ``entity.update``'s ``document_ids``, ``observation.record``'s
+#: ``observation.observation_id`` and ``.subject_entity_id``,
+#: ``measurement.record``'s matching pair, and
+#: ``retention.restore``'s ``item_ids``. The one nested arg left
+#: deliberately unscanned is ``retention.prune``'s ``criteria``:
+#: ``RetentionCriteria`` carries no id field at all (``noise_documents``,
+#: ``unconfirmed_mints``, ``lifecycle_states``, ``older_than_days``,
+#: ``max_items``), so there is nothing in it a hazard could occupy.
+ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
+    Operation.ENTITY_CREATE: frozenset({"entity_id", "entity_type"}),
+    Operation.ENTITY_UPDATE: frozenset({"entity_id", "entity_type"}),
+    Operation.ALIAS_UPSERT: frozenset({"entity_id"}),
+    Operation.LINK_CREATE: frozenset({"source_id", "target_id", "edge_kind"}),
+    Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
+    Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
+    Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
+    Operation.LABEL_ADD: frozenset({"target_id", "label"}),
+    Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
+    Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),
+}
+
+
+#: The nested counterpart to ``ID_BEARING_ARG_KEYS`` above: an id a handler
+#: stores as a primary key, an edge endpoint or an exact-match lookup key,
+#: but that arrives nested inside a dict/model sub-object or as an element
+#: of a list, never as a bare top-level string. ``(arg, inner_key)`` means
+#: ``args[arg]`` is a mapping or a pydantic model and ``inner_key`` is the
+#: field to read inside it; ``(arg, None)`` means ``args[arg]`` IS the list
+#: of ids to check, element by element. Verified against the handler that
+#: stores each one: ``trace.ingest``'s ``trace.trace_id`` is
+#: ``TraceStore.append``'s primary key (``TraceIngestHandler``);
+#: ``evidence.ingest``'s ``evidence.doc_id`` is ``put_document``'s and the
+#: vector store's key (``EvidenceIngestHandler`` -- ``evidence`` is always
+#: a dict there, never a model); ``entity.create``'s ``document_ids`` is a
+#: list of ids stored verbatim on the new node with no existence check
+#: (``EntityCreateHandler``), and ``entity.update``'s replaces it verbatim
+#: on the new version (``EntityUpdateHandler``); ``observation.record``'s
+#: ``observation.observation_id`` is the node's own id and
+#: ``.subject_entity_id`` is an edge endpoint (``ObservationRecordHandler``);
+#: ``measurement.record``'s matching pair plays the same two roles
+#: (``MeasurementRecordHandler``); ``retention.restore``'s ``item_ids`` is a
+#: list of ids used for exact-match restore lookups
+#: (``RetentionRestoreHandler``). Same hand-read floor discipline as
+#: ``ID_BEARING_ARG_KEYS`` (``tests/unit/mutate/test_commands.py``).
+NESTED_ID_ARG_PATHS: dict[Operation, frozenset[tuple[str, str | None]]] = {
+    Operation.TRACE_INGEST: frozenset({("trace", "trace_id")}),
+    Operation.EVIDENCE_INGEST: frozenset({("evidence", "doc_id")}),
+    Operation.ENTITY_CREATE: frozenset({("document_ids", None)}),
+    Operation.ENTITY_UPDATE: frozenset({("document_ids", None)}),
+    Operation.OBSERVATION_RECORD: frozenset(
+        {("observation", "observation_id"), ("observation", "subject_entity_id")}
+    ),
+    Operation.MEASUREMENT_RECORD: frozenset(
+        {("measurement", "measurement_id"), ("measurement", "subject_entity_id")}
+    ),
+    Operation.RETENTION_RESTORE: frozenset({("item_ids", None)}),
+}
+
+
 class OperationRegistry:
     """Registry of valid operations and their argument schemas."""
 
@@ -244,6 +345,45 @@ class OperationRegistry:
             if (value := getattr(command, field))
             and contains_nul_or_lone_surrogate(value)
         ]
+        # Same discipline, extended to the id-bearing args a handler reads
+        # directly rather than through Command's own typed fields -- see
+        # ID_BEARING_ARG_KEYS's docstring for which keys and why. Only a
+        # str value is checked; a missing or non-string value is left to
+        # the schema/handler validation that already covers it.
+        unsafe.extend(
+            f"args[{key!r}] contains a NUL byte or lone surrogate"
+            for key in ID_BEARING_ARG_KEYS.get(command.operation, frozenset())
+            if isinstance(value := command.args.get(key), str)
+            and contains_nul_or_lone_surrogate(value)
+        )
+        # Same discipline once more, for an id nested inside a sub-object or
+        # a list rather than a bare top-level string -- see
+        # NESTED_ID_ARG_PATHS's docstring for which paths and why. A missing
+        # arg, a non-str inner value, or a container of the wrong shape is
+        # left alone: the schema/handler validation downstream already
+        # covers those.
+        for arg, inner_key in NESTED_ID_ARG_PATHS.get(command.operation, frozenset()):
+            container = command.args.get(arg)
+            if inner_key is None:
+                if not isinstance(container, (list, tuple)):
+                    continue
+                unsafe.extend(
+                    f"args[{arg!r}] contains a NUL byte or lone surrogate"
+                    for element in container
+                    if isinstance(element, str)
+                    and contains_nul_or_lone_surrogate(element)
+                )
+                continue
+            nested = (
+                container.get(inner_key)
+                if isinstance(container, Mapping)
+                else getattr(container, inner_key, None)
+            )
+            if isinstance(nested, str) and contains_nul_or_lone_surrogate(nested):
+                unsafe.append(
+                    f"args[{arg!r}][{inner_key!r}] contains a NUL byte or "
+                    "lone surrogate"
+                )
         if unsafe:
             return False, unsafe
         # The one value checked here: a feedback rating is a 0.0-1.0 score,

@@ -8,8 +8,12 @@ which reads treat each reserved key as authoritative.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
+import trellis.mutate.reserved_metadata as reserved_metadata_module
+import trellis_api.routes.mutations as mutations_module
 from trellis.mutate.reserved_metadata import (
     RESERVED_COMMAND_METADATA_KEYS,
     ReservedMetadataKeyError,
@@ -89,3 +93,71 @@ class TestGuardOrderingSupportsServerSideStamping:
         already_merged = {**caller_metadata, "requested_by_claim": "api:key-123"}
         with pytest.raises(ReservedMetadataKeyError):
             reject_reserved_metadata(already_merged)
+
+
+def _backtick_tokens(text: str) -> set[str]:
+    return set(re.findall(r"``([a-z_]+)``", text))
+
+
+def _enumerated_keys_after(text: str, anchor: str) -> set[str]:
+    """Backtick-wrapped tokens inside the parenthesised list right after
+    *anchor* -- the shape both of ``mutations.py``'s prose blocks use for
+    their one-line enumeration of the reserved keys.
+
+    *anchor*'s own words may themselves be wrapped onto separate source
+    lines (docstrings and the 400 ``description`` tuple-of-literals both
+    reflow at whatever column the prose happens to hit), so the words are
+    matched with ``\\s+`` between them rather than the literal substring.
+    """
+    anchor_pattern = r"\s+".join(re.escape(word) for word in anchor.split())
+    match = re.search(rf"{anchor_pattern}\s*\(([^)]*)\)", text)
+    assert match, f"could not find {anchor!r} in:\n{text}"
+    return _backtick_tokens(match.group(1))
+
+
+def _bulleted_keys(text: str) -> set[str]:
+    """One key (or a key/key pair) per leading ``* ``key`` -- ...`` bullet
+    line -- the shape ``reserved_metadata.py``'s own module docstring uses,
+    one reserved key (or pair) documented per bullet rather than in a
+    single inline list."""
+    keys: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("* ") and "--" in stripped:
+            head = stripped.split("--", 1)[0]
+            keys |= _backtick_tokens(head)
+    return keys
+
+
+class TestReservedKeyDocstringsNameExactlyTheFrozenset:
+    """``RESERVED_COMMAND_METADATA_KEYS`` cannot generate this prose, so
+    nothing keeps it in sync by construction. These are the three places
+    that stay hand-written on purpose (the route's OpenAPI-facing 400
+    description, its function docstring, and this module's own docstring)
+    -- each must name every key in the frozenset, and no key outside it,
+    or a future change to the set silently stops matching what an agent
+    reading the docs, or the generated OpenAPI spec, is told.
+    """
+
+    def test_route_responses_400_description(self) -> None:
+        route = next(
+            r for r in mutations_module.router.routes if r.path == "/commands/batch"
+        )
+        description = route.responses[400]["description"]
+        assert (
+            _enumerated_keys_after(description, "server-side audit stamping")
+            == RESERVED_COMMAND_METADATA_KEYS
+        )
+
+    def test_route_function_docstring(self) -> None:
+        doc = mutations_module.execute_batch.__doc__
+        assert doc is not None
+        assert (
+            _enumerated_keys_after(doc, "server-side audit stamping")
+            == RESERVED_COMMAND_METADATA_KEYS
+        )
+
+    def test_reserved_metadata_module_docstring(self) -> None:
+        doc = reserved_metadata_module.__doc__
+        assert doc is not None
+        assert _bulleted_keys(doc) == RESERVED_COMMAND_METADATA_KEYS

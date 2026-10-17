@@ -2314,10 +2314,12 @@ def embed_traces_cmd(
     else:
         _render_embed_traces_text(payload)
 
-    if report.failed or report.skipped_empty:
+    if report.failed or report.skipped_empty or report.skipped_invalid:
         # A pass that left traces unreachable did not do the job it was
         # scheduled to do, and a green exit would hide exactly the silent gap
-        # this worker exists to close.
+        # this worker exists to close. A permanently invalid row advances the
+        # cursor, but the pass that moved past it still exits non-zero so the
+        # one-time skip is not silent.
         raise typer.Exit(code=EXIT_INTERNAL)
 
 
@@ -2328,7 +2330,8 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         f"  traces: {payload['scanned']} scanned  "
         f"{payload['embedded']} embedded  "
         f"{payload['skipped_existing']} already embedded  "
-        f"{payload['skipped_empty']} nothing to render"
+        f"{payload['skipped_empty']} nothing to render  "
+        f"{payload['skipped_invalid']} permanently invalid"
     )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "

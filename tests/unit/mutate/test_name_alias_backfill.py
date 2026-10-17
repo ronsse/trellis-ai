@@ -17,6 +17,7 @@ from trellis.mutate.name_aliases import (
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -185,6 +186,25 @@ class TestGovernedNameAliasBackfill:
         winner = graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "old name")
         assert winner is not None
         assert winner["entity_id"] == "successor"
+
+    def test_a_name_holding_a_nul_still_binds(self, registry: StoreRegistry) -> None:
+        """An entity name is free text and may hold a NUL; the alias key is
+        derived from it, so Stage 1 must not refuse ``raw_id`` -- that would
+        fail every backfill pass for this entity."""
+        _add(registry, "alpha", "Foo\x00Bar")
+        graph = registry.knowledge.graph_store
+
+        report = backfill_name_aliases(graph, _executor(registry), max_nodes=1)
+
+        assert report.failed == 0
+        assert report.bound == 1
+        # The key bound is the name's own normal form, NUL included -- not a
+        # stripped or replaced variant a later lookup by name would miss.
+        row = graph.resolve_alias(
+            NAME_ALIAS_SOURCE_SYSTEM, normalize_entity_name("Foo\x00Bar")
+        )
+        assert row is not None
+        assert row["entity_id"] == "alpha"
 
     def test_alias_write_outage_is_failed_not_skipped(
         self, registry: StoreRegistry, monkeypatch

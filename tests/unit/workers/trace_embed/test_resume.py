@@ -246,6 +246,248 @@ class TestStateIsTheAuthority:
         assert _embedded_trace_ids(registry, traces) == {t.trace_id for t in traces}
 
 
+class TestPermanentlyInvalidRowDoesNotPinTheWatermark:
+    """A hazardous trace id (a NUL byte or lone surrogate, as SQLite can
+    already hold one — see ``trellis.mutate.commands``) rejects identically
+    on every retry. Unlike the renderer failure above, holding the cursor
+    behind it would never recover: it would re-reject the same row, and only
+    that row, forever. The fix is to advance past it like an already-embedded
+    trace, counted separately so the gap stays visible.
+    """
+
+    def test_a_permanently_rejected_row_is_skipped_and_the_cursor_advances(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        from trellis.stores.base.event_log import EventType
+
+        from .conftest import make_trace
+
+        good_a = make_trace(0)
+        # Seeded directly against the store, bypassing the governed mutation
+        # pipeline — the only way this id reaches the store at all. A
+        # trace.ingest command carrying this trace_id is refused by
+        # OperationRegistry.validate() at Stage 1 (see commands.py's
+        # NESTED_ID_ARG_PATHS), so a row shaped like this can only be a
+        # pre-existing one, never a new write.
+        bad = make_trace(1).model_copy(update={"trace_id": "bad\x00trace"})
+        good_b = make_trace(2)
+        for trace in (good_a, bad, good_b):
+            registry.operational.trace_store.append(trace)
+
+        first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert first.scanned == 3
+        assert first.embedded == 2
+        assert first.skipped_invalid == 1
+        assert first.failed == 0
+        assert first.to_dict()["status"] == "partial", (
+            "a permanent skip still advances the cursor, but the pass that "
+            "made it must not report green — a bug that rejected every row "
+            "would look identical to this one-row skip otherwise"
+        )
+
+        # The cursor is past ALL three, including the invalid row — not
+        # pinned behind it.
+        saved = TraceEmbedWatermark(watermark_path).cursor
+        assert saved == TraceCursor(
+            created_at=good_b.created_at, trace_id=good_b.trace_id
+        )
+        assert _embedded_trace_ids(registry, [good_a, good_b]) == {
+            good_a.trace_id,
+            good_b.trace_id,
+        }
+
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, limit=50
+        )
+        assert rejected == [], (
+            "the worker classifies the hazard itself, before building a "
+            "command — the row never reaches the executor, so nothing here "
+            "ever submits it to the governed pipeline and no audit event "
+            "is emitted for it"
+        )
+
+        # A second pass finds nothing left behind the cursor: no re-read,
+        # and still no rejection event for the same row.
+        second = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert second.scanned == 0
+        assert second.skipped_invalid == 0
+        assert (
+            registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_REJECTED, limit=50
+            )
+            == []
+        )
+
+    def test_a_hazardous_id_is_never_looked_up_in_the_vector_store(
+        self, registry, watermark_path, monkeypatch
+    ) -> None:
+        from .conftest import make_trace
+
+        bad = make_trace(0).model_copy(update={"trace_id": "bad\x00trace"})
+        registry.operational.trace_store.append(bad)
+        vector_store = registry.knowledge.vector_store
+        looked_up: list[str] = []
+        real_get = vector_store.get
+
+        def recording_get(item_id: str):  # type: ignore[no-untyped-def]
+            looked_up.append(item_id)
+            return real_get(item_id)
+
+        monkeypatch.setattr(vector_store, "get", recording_get)
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert report.skipped_invalid == 1
+        assert not any("\x00" in item_id for item_id in looked_up), (
+            "a backend that binds the id as a SQL parameter raises on a NUL, "
+            "so the hazard must be classified before the embedded-row lookup"
+        )
+
+    def test_a_dry_run_reports_a_hazardous_row_as_skipped_invalid_not_embedded(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        """Classification happens before the dry-run branch, so a dry run
+        tells the same story a real pass would: this row can never be
+        embedded, dry run or not — it must not be counted as ``embedded``
+        just because nothing was actually written."""
+        from .conftest import make_trace
+
+        good = make_trace(0)
+        bad = make_trace(1).model_copy(update={"trace_id": "bad\x00trace"})
+        for trace in (good, bad):
+            registry.operational.trace_store.append(trace)
+
+        report = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+        assert report.skipped_invalid == 1
+        assert report.embedded == 1, (
+            "the honest trace still counts as 'would embed'; only the "
+            "hazardous row must not be reported that way"
+        )
+        assert recorder.texts == [], "a dry run embeds nothing"
+        assert TraceEmbedWatermark(watermark_path).cursor is None, (
+            "a dry run never advances the cursor, permanent skip or not"
+        )
+
+
+class TestOnlyAHazardousIdIsPermanent:
+    """A REJECTED or FAILED result is an ordinary failure — it pins the
+    cursor — unless the worker's own pre-check already classified the row as
+    permanently invalid. Nothing about *where in the pipeline* a rejection
+    originates changes that; only the hazard check does.
+    """
+
+    def test_a_dry_run_with_a_hazardous_row_first_saves_no_cursor(
+        self, registry, watermark_path
+    ) -> None:
+        from .conftest import make_trace
+
+        bad = make_trace(0).model_copy(update={"trace_id": "bad\x00trace"})
+        registry.operational.trace_store.append(bad)
+        registry.operational.trace_store.append(make_trace(1))
+
+        report = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+
+        assert report.skipped_invalid == 1
+        assert TraceEmbedWatermark(watermark_path).cursor is None
+
+    def test_a_stage_one_rejection_for_an_honest_id_pins_the_cursor(
+        self, registry, watermark_path, recorder, monkeypatch
+    ) -> None:
+        """A bug that makes ``OperationRegistry.validate`` refuse a command
+        for reasons unrelated to the trace id must not be mistaken for the
+        hazardous-id case: it is counted as ``failed``, and the cursor stays
+        behind it so the next pass retries."""
+        from trellis.mutate.commands import OperationRegistry
+
+        traces = seed_traces(registry, 3)
+        poison = traces[1]
+        original_validate = OperationRegistry.validate
+
+        def fake_validate(self, command):
+            evidence = command.args.get("evidence") or {}
+            trace_id = evidence.get("trace_id") if isinstance(evidence, dict) else None
+            if trace_id == poison.trace_id:
+                return False, ["staged Stage-1 rejection for this test"]
+            return original_validate(self, command)
+
+        monkeypatch.setattr(OperationRegistry, "validate", fake_validate)
+
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert report.failed == 1
+        assert report.skipped_invalid == 0
+        assert report.embedded == 2, (
+            "the rejected trace is still a plain failure, not a permanent "
+            "skip: the trace after it is still attempted and still embeds"
+        )
+
+        saved = TraceEmbedWatermark(watermark_path).cursor
+        assert saved == TraceCursor(
+            created_at=traces[0].created_at, trace_id=traces[0].trace_id
+        )
+
+    def test_a_handler_stage_rejection_pins_the_cursor(
+        self, registry, watermark_path, recorder, monkeypatch
+    ) -> None:
+        """A REJECTED that originates in the handler, not the registry's own
+        Stage-1 check, is still an ordinary failure."""
+        from trellis.errors import ValidationError
+        from trellis.mutate.handlers import EvidenceIngestHandler
+
+        traces = seed_traces(registry, 3)
+        poison = traces[1]
+        original_handle = EvidenceIngestHandler.handle
+
+        def fake_handle(self, command):
+            evidence = command.args.get("evidence") or {}
+            trace_id = evidence.get("trace_id") if isinstance(evidence, dict) else None
+            if trace_id == poison.trace_id:
+                msg = "staged handler-stage rejection for this test"
+                raise ValidationError(msg, code="staged_handler_rejection")
+            return original_handle(self, command)
+
+        monkeypatch.setattr(EvidenceIngestHandler, "handle", fake_handle)
+
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert report.failed == 1
+        assert report.skipped_invalid == 0
+        assert report.embedded == 2, (
+            "the rejected trace is still a plain failure, not a permanent "
+            "skip: the trace after it is still attempted and still embeds"
+        )
+
+        saved = TraceEmbedWatermark(watermark_path).cursor
+        assert saved == TraceCursor(
+            created_at=traces[0].created_at, trace_id=traces[0].trace_id
+        )
+
+
+class TestSkippedInvalidWarningFiresOnce:
+    def test_the_warning_names_the_count_and_never_an_id(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from .conftest import make_trace
+
+        good = make_trace(0)
+        bad_a = make_trace(1).model_copy(update={"trace_id": "bad\x00one"})
+        bad_b = make_trace(2).model_copy(update={"trace_id": "bad\x00two"})
+        for trace in (good, bad_a, bad_b):
+            registry.operational.trace_store.append(trace)
+
+        with capture_logs() as logs:
+            report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert report.skipped_invalid == 2
+        warnings = [e for e in logs if e["event"] == "trace_embed_skipped_invalid"]
+        assert len(warnings) == 1, "one pass-level warning, not one per skipped row"
+        assert warnings[0]["count"] == 2
+        assert "trace_id" not in warnings[0]
+
+
 class TestCollectionHasNoGaps:
     @pytest.mark.parametrize("page_size", [1, 2, 3, 7, 200])
     def test_paging_reaches_every_trace(

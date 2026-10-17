@@ -78,6 +78,27 @@ class TestEmbedTracesCLI:
         assert payload["failed"] == 3
         assert len(payload["failures"]) == 3
 
+    def test_a_permanently_invalid_row_exits_non_zero(
+        self, registry, tmp_path, cli_runner
+    ) -> None:
+        """A hazardous trace id advances the cursor, but the pass that moved
+        past it must still exit non-zero — a scheduler that only watches the
+        exit code must see this, not just the JSON payload."""
+        from .conftest import make_trace
+
+        good = make_trace(0)
+        bad = make_trace(1).model_copy(update={"trace_id": "bad\x00trace"})
+        for trace in (good, bad):
+            registry.operational.trace_store.append(trace)
+
+        payload, result = _run_json(
+            cli_runner, "--watermark", str(tmp_path / "wm.json")
+        )
+        assert result.exit_code == 1, result.output
+        assert payload["status"] == "partial"
+        assert payload["skipped_invalid"] == 1
+        assert payload["failed"] == 0
+
     def test_missing_embedder_exits_non_zero(
         self, registry, tmp_path, monkeypatch, cli_runner
     ) -> None:
