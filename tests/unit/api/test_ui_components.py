@@ -130,10 +130,15 @@ _GRAPH_PANEL_PAGER_ID = "srp-pagination"
 
 
 def test_every_non_graph_view_pager_shares_the_pager_component() -> None:
+    # Pass 6 converted each of these divs' inline style="display:none"
+    # (always overridden by an explicit pag.style.display set on every
+    # real render -- see renderCursorPagerFooter/renderPagination) to the
+    # shared ".hide" utility class, so "pager" plus an optional trailing
+    # "hide" is still exactly the shared component, not a view-local one.
     page = _page()
     for prefix in _PAGER_VIEW_PREFIXES:
         div_match = re.search(
-            rf'<div class="pager" id="{prefix}-pagination"[^>]*>(.*?)</div>',
+            rf'<div class="pager(?: hide)?" id="{prefix}-pagination"[^>]*>(.*?)</div>',
             page,
             re.DOTALL,
         )
@@ -169,7 +174,7 @@ def test_every_non_graph_view_pager_shares_the_pager_component() -> None:
 
 def test_only_the_graph_panel_pager_is_exempt_from_the_shared_pattern() -> None:
     page = _page()
-    all_ids = set(re.findall(r'<div class="pager" id="([\w-]+)"', page))
+    all_ids = set(re.findall(r'<div class="pager(?: hide)?" id="([\w-]+)"', page))
     expected = {f"{p}-pagination" for p in _PAGER_VIEW_PREFIXES} | {
         _GRAPH_PANEL_PAGER_ID
     }
@@ -196,15 +201,17 @@ def test_pager_pattern_catches_a_deliberately_defective_subject() -> None:
     """
     assert (
         re.search(
-            r'<div class="pager" id="trace-pagination"[^>]*>(.*?)</div>',
+            r'<div class="pager(?: hide)?" id="trace-pagination"[^>]*>(.*?)</div>',
             defective,
             re.DOTALL,
         )
         is None
     )
 
+    # The real shape after pass 6: the footer starts hidden via the
+    # shared ".hide" class rather than an inline style.
     fixed = """
-            <div class="pager" id="trace-pagination" style="display:none">
+            <div class="pager hide" id="trace-pagination">
                 <span class="range num" id="t-info"></span>
                 <label class="hint">Rows <select id="t-limit"></select></label>
                 <button class="btn btn-sm" id="t-new">&laquo; Newer</button>
@@ -212,7 +219,9 @@ def test_pager_pattern_catches_a_deliberately_defective_subject() -> None:
             </div>
     """
     m = re.search(
-        r'<div class="pager" id="trace-pagination"[^>]*>(.*?)</div>', fixed, re.DOTALL
+        r'<div class="pager(?: hide)?" id="trace-pagination"[^>]*>(.*?)</div>',
+        fixed,
+        re.DOTALL,
     )
     assert m is not None
     buttons = re.findall(
@@ -407,3 +416,98 @@ def test_timestamp_formatter_pattern_catches_a_deliberately_defective_subject() 
 
     fixed = "const shown = fmtTime(t.created_at, { empty: '-' });"
     assert re.search(r"new Date\([^)]*\)\s*\.toLocaleString", fixed) is None
+
+
+def test_card_renderer_wires_na_and_inf_from_the_raw_value() -> None:
+    # Ledger pass 6 item 5: ".card .value.na"/".value.inf" CSS exists, and
+    # renderCard() already adds those classes from a caller-supplied `raw`
+    # argument in the same branch that picks the display string -- the
+    # "no renderer wires this" premise does not hold for this file. This
+    # guard pins that wiring so a future refactor of renderCard() can't
+    # quietly drop it.
+    page = _page()
+    assert ".card .value.na" in page
+    assert ".card .value.inf" in page
+
+    body = _function_body(page, "renderCard")
+    assert "raw" in body, "renderCard() dropped its raw parameter"
+    assert "' na'" in body, "renderCard() no longer adds the na modifier class"
+    assert "' inf'" in body, "renderCard() no longer adds the inf modifier class"
+    # fmtNum/fmtPct themselves must stay pure formatters -- the na/inf
+    # decision belongs to the renderer, not the string formatter (brief:
+    # "keeping fmtNum/fmtPct pure"). Neither function appends or even
+    # mentions the CSS modifier classes.
+    for fn in ("fmtNum", "fmtPct"):
+        fn_body = _function_body(page, fn)
+        assert "' na'" not in fn_body, (
+            f"{fn}() appends a na class -- that decision belongs to the renderer"
+        )
+        assert "' inf'" not in fn_body, (
+            f"{fn}() appends an inf class -- that decision belongs to the renderer"
+        )
+
+    # At least one real call site exercises the wiring with a 4th `raw`
+    # argument -- defined-but-unused would pass the checks above too.
+    assert re.search(r"renderCard\([^)]*,\s*\w+Raw\)", page), (
+        "no renderCard(...) call site passes a raw value -- the na/inf "
+        "wiring is defined but never exercised"
+    )
+
+
+def test_na_inf_wiring_pattern_catches_a_deliberately_defective_subject() -> None:
+    wired = (
+        "function renderCard(title, value, sub, raw) {\n"
+        "  let valueClass = 'value';\n"
+        "  if (raw !== undefined) {\n"
+        "    if (raw == null) valueClass += ' na';\n"
+        "    else if (!Number.isFinite(Number(raw))) valueClass += ' inf';\n"
+        "  }\n"
+        "}"
+    )
+    assert "' na'" in wired
+    assert "' inf'" in wired
+
+    defective = (
+        "function renderCard(title, value, sub) {\n  let valueClass = 'value';\n}"
+    )
+    assert "raw" not in defective
+    assert "' na'" not in defective
+    assert "' inf'" not in defective
+
+
+def test_every_column_header_th_has_scope() -> None:
+    # Ledger pass 6 item 6: every <th> in a column-header row gets
+    # scope="col" (this file hand-checked to have no row-header <th>
+    # sites -- every table's first body cell is a <td>, not a <th>).
+    page = _page()
+    th_tags = re.findall(r"<th(?:\s[^<>]*)?>", page)
+    assert_hand_read_floor(
+        len(th_tags),
+        70,
+        subject="<th> site(s)",
+        hint="hand count for this pass: 83 (74 source-line occurrences, "
+        "several lines carrying more than one <th> in a JS template "
+        "string table header row).",
+    )
+    missing = [tag for tag in th_tags if "scope=" not in tag]
+    assert missing == [], (
+        f"{len(missing)} <th> site(s) have no scope attribute: {missing[:5]}"
+    )
+
+
+def test_th_scope_pattern_catches_a_deliberately_defective_subject() -> None:
+    defective = '<thead><tr><th>Intent</th><th class="num">Count</th></tr></thead>'
+    th_tags = re.findall(r"<th(?:\s[^<>]*)?>", defective)
+    assert len(th_tags) == 2
+    assert all("scope=" not in tag for tag in th_tags)
+
+    fixed = (
+        '<thead><tr><th scope="col">Intent</th>'
+        '<th scope="col" class="num">Count</th></tr></thead>'
+    )
+    th_tags_fixed = re.findall(r"<th(?:\s[^<>]*)?>", fixed)
+    assert len(th_tags_fixed) == 2
+    assert all("scope=" in tag for tag in th_tags_fixed)
+
+    # <thead> itself must never be mistaken for a <th> site.
+    assert re.findall(r"<th(?:\s[^<>]*)?>", "<thead>") == []

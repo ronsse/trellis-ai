@@ -58,6 +58,18 @@
             --r-1: 3px; --r-2: 4px; --r-pill: 999px;
             --dur: 150ms; --ease: cubic-bezier(.2,.7,.2,1);
             --rail: 228px; --rail-collapsed: 52px; --topbar-h: 48px;
+
+            /* Graph palette (pass 6): the 10-slot metrics series and the
+               well-known entity-type fills, as tokens so light mode can use
+               WCAG-safe shades instead of inheriting dark-mode hues as-is. */
+            --cat-1: #6366f1; --cat-2: #22c55e; --cat-3: #f59e0b; --cat-4: #3b82f6; --cat-5: #ec4899;
+            --cat-6: #14b8a6; --cat-7: #a78bfa; --cat-8: #ef4444; --cat-9: #84cc16; --cat-10: #f97316;
+            --entity-activity: #60a5fa; --entity-software-application: #94a3b8;
+            --entity-creative-work: #c084fc; --entity-file: #4ade80; --entity-agent: #f87171;
+            --entity-concept: #fb923c; --entity-person: #f472b6; --entity-organization: #fbbf24;
+            --entity-team: #a3e635; --entity-dataset: #e879f9; --entity-project: #38bdf8;
+            --entity-product: #fda4af; --entity-event: #facc15; --entity-place: #34d399;
+            --entity-observation: #22d3ee; --entity-measurement: #a8a29e;
         }
 
         @media (prefers-color-scheme: light) {
@@ -103,6 +115,15 @@
                 --shadow-1: 0 1px 0 rgba(20,25,31,0.06);
                 --shadow-2: 0 1px 2px rgba(20,25,31,0.08), 0 0 0 1px rgba(20,25,31,0.04);
                 --shadow-3: 0 8px 24px rgba(20,25,31,0.14), 0 0 0 1px rgba(20,25,31,0.06);
+
+                --cat-1: #6366f1; --cat-2: #1a9a49; --cat-3: #b67507; --cat-4: #3b82f6; --cat-5: #eb3f94;
+                --cat-6: #109385; --cat-7: #916ef9; --cat-8: #ef4444; --cat-9: #5d9010; --cat-10: #db5d06;
+                --entity-activity: #2583f8; --entity-software-application: #7286a2;
+                --entity-creative-work: #ac5cfb; --entity-file: #1c9749; --entity-agent: #f64040;
+                --entity-concept: #d76304; --entity-person: #f03999; --entity-organization: #ac7d03;
+                --entity-team: #639312; --entity-dataset: #db30f6; --entity-project: #078dc8;
+                --entity-product: #fb364e; --entity-event: #a08103; --entity-place: #20956a;
+                --entity-observation: #0d93a7; --entity-measurement: #8b837e;
             }
         }
         :root[data-theme="light"] {
@@ -147,6 +168,15 @@
             --shadow-1: 0 1px 0 rgba(20,25,31,0.06);
             --shadow-2: 0 1px 2px rgba(20,25,31,0.08), 0 0 0 1px rgba(20,25,31,0.04);
             --shadow-3: 0 8px 24px rgba(20,25,31,0.14), 0 0 0 1px rgba(20,25,31,0.06);
+
+            --cat-1: #6366f1; --cat-2: #1a9a49; --cat-3: #b67507; --cat-4: #3b82f6; --cat-5: #eb3f94;
+            --cat-6: #109385; --cat-7: #916ef9; --cat-8: #ef4444; --cat-9: #5d9010; --cat-10: #db5d06;
+            --entity-activity: #2583f8; --entity-software-application: #7286a2;
+            --entity-creative-work: #ac5cfb; --entity-file: #1c9749; --entity-agent: #f64040;
+            --entity-concept: #d76304; --entity-person: #f03999; --entity-organization: #ac7d03;
+            --entity-team: #639312; --entity-dataset: #db30f6; --entity-project: #078dc8;
+            --entity-product: #fb364e; --entity-event: #a08103; --entity-place: #20956a;
+            --entity-observation: #0d93a7; --entity-measurement: #8b837e;
         }
         /* IBM Plex Sans (400/500/600) and IBM Plex Mono (400/500), Latin
            subset, woff2 only -- vendored rather than linked so the console
@@ -1900,6 +1930,40 @@
         .dv-val:hover .dv-copy { opacity: 0.7; }
         .dv-copy:hover { opacity: 1; color: var(--accent); border-color: var(--border); }
         .dv-copy.done { opacity: 1; color: var(--ok); }
+
+        /* Type-scale utilities (Ledger pass 6): replace a repeated inline
+           font-size style attribute with a class carrying the same single
+           declaration, so the cascade still lands on the --fs-N token. */
+        .fs-1 { font-size: var(--fs-1); }
+        .fs-2 { font-size: var(--fs-2); }
+        .fs-3 { font-size: var(--fs-3); }
+        .fs-4 { font-size: var(--fs-4); }
+        .fs-5 { font-size: var(--fs-5); }
+        .fs-6 { font-size: var(--fs-6); }
+        .fs-7 { font-size: var(--fs-7); }
+        /* .card .value (two classes) outranks a bare .fs-N (one class);
+           these compound rules match that specificity so the four sites
+           that override a card's default --fs-7 value keep doing so. */
+        .value.fs-5 { font-size: var(--fs-5); }
+        .value.fs-6 { font-size: var(--fs-6); }
+
+        /* Text-colour utilities (Ledger pass 6): the four inline color:
+           values repeated three or more times across the page. */
+        .text-dim { color: var(--text-dim); }
+        .text-danger { color: var(--danger); }
+        .text-warn { color: var(--warn); }
+        .text-ok { color: var(--ok); }
+
+        /* Small layout utilities (Ledger pass 6): each replaces one exact
+           inline declaration set repeated five or more times. */
+        .hide { display: none; }
+        .m-0 { margin: 0; }
+        .p-0 { padding: 0; }
+        .mb-sm { margin-bottom: 0.5rem; }
+        .mb-md { margin-bottom: 0.75rem; }
+        .mb-lg { margin-bottom: 1rem; }
+        .mt-lg { margin-top: 1rem; }
+        .pad-center-lg { padding: 1.5rem; text-align: center; }
     </style>
     <script>
         // Applied before first paint so a stored manual override doesn't
@@ -1994,7 +2058,7 @@
         </header>
 
     <!-- API key banner (shown on demand or after a 401) -->
-    <div class="key-banner" id="key-banner" style="display:none">
+    <div class="key-banner hide" id="key-banner">
         <span class="key-banner-msg" id="key-banner-msg"></span>
         <input type="password" id="api-key-input" placeholder="API key (trellis_ak_...)" aria-label="API key" autocomplete="off"
                onkeydown="if(event.key==='Enter')saveApiKey()">
@@ -2044,7 +2108,7 @@
         </div>
 
         <!-- ============ Dashboard ============ -->
-        <div id="view-dashboard" style="display:none">
+        <div id="view-dashboard" class="hide">
             <div class="cards" id="stats-cards"></div>
             <div class="status-section">
                 <h2>Store Health</h2>
@@ -2053,10 +2117,10 @@
         </div>
 
         <!-- ============ Metrics ============ -->
-        <div id="view-metrics" style="display:none">
+        <div id="view-metrics" class="hide">
             <div class="section-header">
                 <h2>Metrics</h2>
-                <div class="search-bar" style="margin:0">
+                <div class="search-bar m-0">
                     <select id="metrics-days" aria-label="Metrics time window in days">
                         <option value="7">Last 7 days</option>
                         <option value="30" selected>Last 30 days</option>
@@ -2074,7 +2138,7 @@
                 Time window picks how far back the scan goes; grouping splits each metric's
                 series by domain or intent family instead of reporting one combined line.
             </p>
-            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
+            <p class="fs-3 text-dim mb-lg">
                 Trends computed from the event log on read. Each metric uses the
                 same formula as the evaluation suite that regression-tests retrieval
                 quality, so a trend here and a number from that suite describe the
@@ -2085,14 +2149,14 @@
         </div>
 
         <!-- ============ Review (human-decision inbox) ============ -->
-        <div id="view-review" style="display:none">
+        <div id="view-review" class="hide">
             <div class="section-header">
                 <h2>Review Queue</h2>
-                <div class="search-bar" style="margin:0">
+                <div class="search-bar m-0">
                     <button class="btn" onclick="loadReview()">Refresh</button>
                 </div>
             </div>
-            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
+            <p class="fs-3 text-dim mb-lg">
                 Human-decision inbox. Every change on this tab is applied only when
                 you approve or reject it here.
             </p>
@@ -2123,10 +2187,10 @@
         </div>
 
         <!-- ============ Evolution ============ -->
-        <div id="view-effectiveness" style="display:none">
+        <div id="view-effectiveness" class="hide">
             <div class="section-header">
                 <h2>Pack Effectiveness</h2>
-                <div class="search-bar" style="margin:0">
+                <div class="search-bar m-0">
                     <select id="evo-days" aria-label="Pack-effectiveness time window in days">
                         <option value="7">Last 7 days</option>
                         <option value="30" selected>Last 30 days</option>
@@ -2138,13 +2202,13 @@
             <div class="cards" id="evo-summary"></div>
             <div class="status-section">
                 <h2>Item Scores</h2>
-                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Items ranked by success rate across context packs</p>
+                <p class="fs-3 text-dim mb-lg">Items ranked by success rate across context packs</p>
                 <div id="evo-items"></div>
             </div>
-            <div class="status-section" id="evo-noise-section" style="display:none">
+            <div class="status-section hide" id="evo-noise-section">
                 <h2>Usage-Rule Proposals</h2>
-                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write below, or the scheduled nightly curation run, actually tags anything. <code style="font-family:var(--font-mono); font-size:var(--fs-1); cursor:help;" title="CLI equivalent: trellis analyze apply-noise-tags">CLI equivalent</code></p>
-                <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
+                <p class="fs-3 text-dim mb-lg">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write below, or the scheduled nightly curation run, actually tags anything. <code class="fs-1" style="font-family:var(--font-mono); cursor:help" title="CLI equivalent: trellis analyze apply-noise-tags">CLI equivalent</code></p>
+                <p class="fs-3 text-dim mb-lg">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
                 <div id="evo-noise"></div>
                 <div id="evo-noise-apply" style="margin-top:0.75rem">
                     <button class="btn btn-sm" onclick="showApplyNoiseTagsConfirm()">Apply noise tags&hellip;</button>
@@ -2154,7 +2218,7 @@
         </div>
 
         <!-- ============ Graph Explorer ============ -->
-        <div id="view-graph" style="display:none">
+        <div id="view-graph" class="hide">
             <div id="graph-sample-warning"></div>
             <div class="search-bar">
                 <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." aria-label="Search graph entities" onkeydown="if(event.key==='Enter')searchGraph()">
@@ -2199,7 +2263,7 @@
                     </div>
                 </div>
                 <div id="srp-items"></div>
-                <div class="pager" id="srp-pagination" style="display:none">
+                <div class="pager hide" id="srp-pagination">
                     <span class="range num" id="srp-page-info"></span>
                     <button type="button" class="btn btn-sm" id="srp-prev" onclick="searchPage(-1)">&laquo; Prev</button>
                     <button type="button" class="btn btn-sm" id="srp-next" onclick="searchPage(1)">Next &raquo;</button>
@@ -2209,7 +2273,7 @@
             <div class="graph-breadcrumbs" id="graph-breadcrumbs"></div>
             <div class="graph-wrapper">
                 <div id="cy" role="img" aria-label="Graph explorer canvas" aria-describedby="cy-text-alt"></div>
-                <div id="cy-load-error" class="degraded-banner" style="display:none">
+                <div id="cy-load-error" class="degraded-banner hide">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 2.6 17.5A1.8 1.8 0 0 0 4.2 20h15.6a1.8 1.8 0 0 0 1.6-2.5L13.7 3.9a1.8 1.8 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 16.5h.01"/></svg>
                     <div class="degraded-body">
                         <span class="degraded-title">Graph library failed to load</span>
@@ -2232,33 +2296,33 @@
                 entities and their relationships. Use the search box above or the entity-ID field to
                 load nodes; results also appear as a list in the panel next to the search box, which is
                 a text-equivalent way to browse the same entities and relationships shown in the canvas.</div>
-            <div id="node-detail" class="node-detail" style="display:none"></div>
+            <div id="node-detail" class="node-detail hide"></div>
         </div>
 
         <!-- ============ Traces ============ -->
-        <div id="view-traces" style="display:none">
+        <div id="view-traces" class="hide">
             <div class="search-bar">
                 <select id="trace-domain" aria-label="Filter traces by domain">
                     <option value="">All domains</option>
                 </select>
                 <button class="btn" onclick="tracesRefresh()">Refresh</button>
             </div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th class="num">Time</th>
-                            <th>Intent</th>
-                            <th>Source</th>
-                            <th>Domain</th>
-                            <th>Agent</th>
-                            <th>Outcome</th>
+                            <th scope="col" class="num">Time</th>
+                            <th scope="col">Intent</th>
+                            <th scope="col">Source</th>
+                            <th scope="col">Domain</th>
+                            <th scope="col">Agent</th>
+                            <th scope="col">Outcome</th>
                         </tr>
                     </thead>
                     <tbody id="traces-body"></tbody>
                 </table>
             </div>
-            <div class="pager" id="trace-pagination" style="display:none">
+            <div class="pager hide" id="trace-pagination">
                 <span class="range num" id="trace-page-info"></span>
                 <label class="hint">Rows <select id="trace-limit" aria-label="Number of traces per page">
                     <option value="20">20</option>
@@ -2272,7 +2336,7 @@
         </div>
 
         <!-- ============ Precedents ============ -->
-        <div id="view-precedents" style="display:none">
+        <div id="view-precedents" class="hide">
             <div class="search-bar">
                 <select id="prec-domain" aria-label="Filter precedents by domain">
                     <option value="">All domains</option>
@@ -2287,27 +2351,27 @@
         </div>
 
         <!-- ============ Memories ============ -->
-        <div id="view-memories" style="display:none">
+        <div id="view-memories" class="hide">
             <div class="search-bar">
                 <input type="text" id="mem-search" placeholder="Search documents (full-text)..." aria-label="Search documents"
                        onkeydown="if(event.key==='Enter'){memOffset=0;loadMemories();}">
                 <button class="btn" onclick="memOffset=0;loadMemories()">Refresh</button>
             </div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th class="num">Time</th>
-                            <th>Doc ID</th>
-                            <th>Preview</th>
-                            <th>Content tags</th>
-                            <th class="num">Chars</th>
+                            <th scope="col" class="num">Time</th>
+                            <th scope="col">Doc ID</th>
+                            <th scope="col">Preview</th>
+                            <th scope="col">Content tags</th>
+                            <th scope="col" class="num">Chars</th>
                         </tr>
                     </thead>
                     <tbody id="memories-body"></tbody>
                 </table>
             </div>
-            <div class="pager" id="mem-pagination" style="display:none">
+            <div class="pager hide" id="mem-pagination">
                 <span class="range num" id="mem-page-info"></span>
                 <label class="hint">Rows <select id="mem-limit" onchange="memOffset=0;loadMemories()" aria-label="Number of documents per page">
                     <option value="25">25</option>
@@ -2321,7 +2385,7 @@
         </div>
 
         <!-- ============ Events ============ -->
-        <div id="view-events" style="display:none">
+        <div id="view-events" class="hide">
             <div class="search-bar">
                 <select id="event-type" onchange="eventsRefresh()" aria-label="Filter by event type">
                     <option value="">All event types</option>
@@ -2331,22 +2395,22 @@
                        onkeydown="if(event.key==='Enter')eventsRefresh()">
                 <button class="btn" onclick="eventsRefresh()">Refresh</button>
             </div>
-            <p style="font-size:var(--fs-3); color:var(--text-dim); margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
-            <div class="status-section table-wrap" style="padding:0">
+            <p class="fs-3 text-dim" style="margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th class="num">Time</th>
-                            <th>Type</th>
-                            <th>Source</th>
-                            <th>Entity</th>
-                            <th>Summary</th>
+                            <th scope="col" class="num">Time</th>
+                            <th scope="col">Type</th>
+                            <th scope="col">Source</th>
+                            <th scope="col">Entity</th>
+                            <th scope="col">Summary</th>
                         </tr>
                     </thead>
                     <tbody id="events-body"></tbody>
                 </table>
             </div>
-            <div class="pager" id="event-pagination" style="display:none">
+            <div class="pager hide" id="event-pagination">
                 <span class="range num" id="event-page-info"></span>
                 <label class="hint">Rows <select id="event-limit" onchange="eventsRefresh()" aria-label="Number of events per page">
                     <option value="50">50</option>
@@ -2360,27 +2424,27 @@
         </div>
 
         <!-- ============ Packs ============ -->
-        <div id="view-packs" style="display:none">
+        <div id="view-packs" class="hide">
             <div class="search-bar">
                 <button class="btn" onclick="packsRefresh()">Refresh</button>
             </div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th class="num">Time</th>
-                            <th>Intent</th>
-                            <th>Domain</th>
-                            <th>Agent</th>
-                            <th class="num">Items</th>
-                            <th class="num">Candidates</th>
-                            <th>Strategies</th>
+                            <th scope="col" class="num">Time</th>
+                            <th scope="col">Intent</th>
+                            <th scope="col">Domain</th>
+                            <th scope="col">Agent</th>
+                            <th scope="col" class="num">Items</th>
+                            <th scope="col" class="num">Candidates</th>
+                            <th scope="col">Strategies</th>
                         </tr>
                     </thead>
                     <tbody id="packs-body"></tbody>
                 </table>
             </div>
-            <div class="pager" id="pack-pagination" style="display:none">
+            <div class="pager hide" id="pack-pagination">
                 <span class="range num" id="pack-page-info"></span>
                 <label class="hint">Rows <select id="pack-limit" onchange="packsRefresh()" aria-label="Number of packs per page">
                     <option value="25">25</option>
@@ -2394,14 +2458,14 @@
         </div>
 
         <!-- ============ Loops (per-loop health) ============ -->
-        <div id="view-loops" style="display:none">
+        <div id="view-loops" class="hide">
             <div class="section-header">
                 <h2>Loop Health</h2>
-                <div class="search-bar" style="margin:0">
+                <div class="search-bar m-0">
                     <button class="btn" onclick="loadLoops()">Refresh</button>
                 </div>
             </div>
-            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
+            <p class="fs-3 text-dim mb-lg">
                 Is each curation / learning loop actually doing anything? Each row reads the
                 EventLog's most recent cycle for that loop &mdash; a loop that has never produced
                 one reads "Not measured", never a bare zero indistinguishable from "ran and did
@@ -2410,36 +2474,36 @@
             <div id="loops-rows"></div>
         </div>
 
-        <div id="view-reports" style="display:none">
+        <div id="view-reports" class="hide">
             <div class="section-header">
                 <h2>Reports</h2>
                 <div class="search-bar" style="margin:0; gap:0.5rem; align-items:center">
-                    <label style="font-size:var(--fs-2); color:var(--text-dim); display:flex; align-items:center; gap:0.3rem">
+                    <label class="fs-2 text-dim" style="display:flex; align-items:center; gap:0.3rem">
                         <input type="checkbox" id="report-raw-toggle" onchange="renderReportOutput()"> raw JSON
                     </label>
                     <button class="btn" onclick="loadReportsTab()">Refresh list</button>
                 </div>
             </div>
-            <p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem;">
+            <p class="fs-3 text-dim mb-lg">
                 Read-only analyze reports &mdash; the same library functions
                 <code class="mono">trellis analyze &lt;report&gt;</code> calls on the CLI. An
                 unmeasured value reads "not measured", never a bare zero.
             </p>
             <div style="display:flex; flex-wrap:wrap; gap:1rem; align-items:flex-end; margin-bottom:0.75rem">
-                <label style="display:flex; flex-direction:column; font-size:var(--fs-2); color:var(--text-dim); gap:0.2rem">
+                <label class="fs-2 text-dim" style="display:flex; flex-direction:column; gap:0.2rem">
                     report
-                    <select id="report-picker" onchange="onReportPickerChange()" style="font-size:var(--fs-4); min-width:14rem"></select>
+                    <select id="report-picker" onchange="onReportPickerChange()" class="fs-4" style="min-width:14rem"></select>
                 </label>
                 <div id="report-params" style="display:flex; flex-wrap:wrap; gap:0.75rem"></div>
                 <button class="btn" onclick="runReport()">Run</button>
             </div>
-            <p id="report-param-error" style="font-size:var(--fs-2); color:var(--danger); margin-bottom:0.5rem"></p>
-            <p id="report-description" style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem"></p>
-            <div id="report-meta" class="mono" style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem"></div>
+            <p id="report-param-error" class="fs-2 text-danger mb-sm"></p>
+            <p id="report-description" class="fs-2 text-dim mb-md"></p>
+            <div id="report-meta" class="mono fs-2 text-dim mb-md"></div>
             <div id="report-output"></div>
         </div>
 
-        <div id="view-advisories" style="display:none">
+        <div id="view-advisories" class="hide">
             <div id="advisories-banner"></div>
             <div class="search-bar">
                 <input type="text" id="adv-scope" placeholder="Filter by scope (exact match)" aria-label="Filter advisories by scope">
@@ -2454,21 +2518,21 @@
                 Loops tab); "boosted" from that step is not a persisted field, so status /
                 confidence / fitness-scored-at below are the real, queryable state.
             </p>
-            <div id="adv-generate-form" style="display:none"></div>
+            <div id="adv-generate-form" class="hide"></div>
             <div id="adv-generate-result"></div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th>Id</th>
-                            <th>Category</th>
-                            <th>Scope</th>
-                            <th class="num">Confidence</th>
-                            <th class="num">Evidence</th>
-                            <th class="num">Effect</th>
-                            <th>Status</th>
-                            <th class="num">Created</th>
-                            <th class="num">Fitness-scored</th>
+                            <th scope="col">Id</th>
+                            <th scope="col">Category</th>
+                            <th scope="col">Scope</th>
+                            <th scope="col" class="num">Confidence</th>
+                            <th scope="col" class="num">Evidence</th>
+                            <th scope="col" class="num">Effect</th>
+                            <th scope="col">Status</th>
+                            <th scope="col" class="num">Created</th>
+                            <th scope="col" class="num">Fitness-scored</th>
                         </tr>
                     </thead>
                     <tbody id="advisories-body"></tbody>
@@ -2477,7 +2541,7 @@
             <p class="field-hint" id="advisories-total"></p>
         </div>
 
-        <div id="view-policies" style="display:none">
+        <div id="view-policies" class="hide">
             <div id="policies-banner"></div>
             <p class="field-hint">
                 Deny wins: every policy whose scope and operation match a command is evaluated,
@@ -2491,19 +2555,19 @@
                 <button class="btn" onclick="loadPolicies()">Refresh</button>
                 <button class="btn" onclick="showCreatePolicyForm()">New policy&hellip;</button>
             </div>
-            <div id="policy-create-form" style="display:none"></div>
+            <div id="policy-create-form" class="hide"></div>
             <div id="policy-create-result"></div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th>Id</th>
-                            <th>Type</th>
-                            <th>Scope</th>
-                            <th>Rules</th>
-                            <th>Enforcement</th>
-                            <th class="num">Created</th>
-                            <th></th>
+                            <th scope="col">Id</th>
+                            <th scope="col">Type</th>
+                            <th scope="col">Scope</th>
+                            <th scope="col">Rules</th>
+                            <th scope="col">Enforcement</th>
+                            <th scope="col" class="num">Created</th>
+                            <th scope="col"></th>
                         </tr>
                     </thead>
                     <tbody id="policies-body"></tbody>
@@ -2512,7 +2576,7 @@
             <p class="field-hint" id="policies-total"></p>
         </div>
 
-        <div id="view-schedules" style="display:none">
+        <div id="view-schedules" class="hide">
             <div id="schedules-store-banner"></div>
             <div id="schedules-dispatcher-banner"></div>
             <p class="field-hint">
@@ -2527,19 +2591,19 @@
             <div class="search-bar">
                 <button class="btn" onclick="loadSchedules()">Refresh</button>
             </div>
-            <div id="schedule-edit-form" style="display:none"></div>
-            <div class="status-section table-wrap" style="padding:0">
+            <div id="schedule-edit-form" class="hide"></div>
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Enabled</th>
-                            <th>Cadence</th>
-                            <th class="num">Timeout</th>
-                            <th>Flags</th>
-                            <th>Last run (UTC)</th>
-                            <th>Next due</th>
-                            <th></th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Enabled</th>
+                            <th scope="col">Cadence</th>
+                            <th scope="col" class="num">Timeout</th>
+                            <th scope="col">Flags</th>
+                            <th scope="col">Last run (UTC)</th>
+                            <th scope="col">Next due</th>
+                            <th scope="col"></th>
                         </tr>
                     </thead>
                     <tbody id="schedules-body"></tbody>
@@ -2548,7 +2612,7 @@
             <p class="field-hint" id="schedules-total"></p>
         </div>
 
-        <div id="view-tagrules" style="display:none">
+        <div id="view-tagrules" class="hide">
             <p class="field-hint">
                 Mined keyword/alias candidates only ever propose &mdash; applying one here
                 writes it to the operator overlay through the same governed path as any
@@ -2564,17 +2628,17 @@
             </div>
             <div id="tagrules-mine-result"></div>
             <h3 style="margin:1.5rem 0 0.5rem">Open candidates</h3>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th>Kind</th>
-                            <th>Key</th>
-                            <th>Target</th>
-                            <th class="num">Support</th>
-                            <th class="num">Precision</th>
-                            <th>Status</th>
-                            <th></th>
+                            <th scope="col">Kind</th>
+                            <th scope="col">Key</th>
+                            <th scope="col">Target</th>
+                            <th scope="col" class="num">Support</th>
+                            <th scope="col" class="num">Precision</th>
+                            <th scope="col">Status</th>
+                            <th scope="col"></th>
                         </tr>
                     </thead>
                     <tbody id="tagrules-candidates-body"></tbody>
@@ -2583,16 +2647,16 @@
             <p class="field-hint" id="tagrules-candidates-total"></p>
 
             <h3 style="margin:1.5rem 0 0.5rem">Effective rules</h3>
-            <div class="status-section table-wrap" style="padding:0">
+            <div class="status-section table-wrap p-0">
                 <table>
                     <thead>
                         <tr>
-                            <th>Kind</th>
-                            <th>Key</th>
-                            <th>Target</th>
-                            <th>Source</th>
-                            <th class="num">Applied</th>
-                            <th></th>
+                            <th scope="col">Kind</th>
+                            <th scope="col">Key</th>
+                            <th scope="col">Target</th>
+                            <th scope="col">Source</th>
+                            <th scope="col" class="num">Applied</th>
+                            <th scope="col"></th>
                         </tr>
                     </thead>
                     <tbody id="tagrules-rules-body"></tbody>
@@ -2601,7 +2665,7 @@
             <p class="field-hint" id="tagrules-rules-total"></p>
         </div>
 
-        <div id="view-settings" style="display:none">
+        <div id="view-settings" class="hide">
             <div id="runtime-auth-banner"></div>
             <div class="status-section">
                 <div class="search-bar" style="margin-bottom:0.6rem">
@@ -3383,10 +3447,10 @@
             // failed probe must show the reason, not just a red badge.
             let extra = '';
             if (detail && typeof detail.latency_ms === 'number') {
-                extra += ` <span style="color:var(--text-dim); font-size:var(--fs-3)">${fmtNum(detail.latency_ms, 1)}ms</span>`;
+                extra += ` <span class="fs-3 text-dim">${fmtNum(detail.latency_ms, 1)}ms</span>`;
             }
             if (detail && detail.error) {
-                extra += ` <span style="color:var(--danger); font-size:var(--fs-3)">${escHtml(detail.error)}</span>`;
+                extra += ` <span class="fs-3 text-danger">${escHtml(detail.error)}</span>`;
             }
             div.innerHTML = `<span>${escHtml(name)}${extra}</span><span class="badge ${cls}">${label}</span>`;
             return div;
@@ -3399,11 +3463,11 @@
         // metrics (1-4) render as line charts; parameter_promotions (5)
         // renders as an annotated events strip (grouped bars by event type).
 
-        // Series palette — stable order so a group keeps its colour across refreshes.
-        const SERIES_COLORS = [
-            '#6366f1', '#22c55e', '#f59e0b', '#3b82f6', '#ec4899',
-            '#14b8a6', '#a78bfa', '#ef4444', '#84cc16', '#f97316'
-        ];
+        // Series palette — stable order so a group keeps its colour across
+        // refreshes. Pass 6: the 10 slots are --cat-1..--cat-10 (defined in
+        // all three theme blocks), read live so a chart drawn after a theme
+        // toggle picks up the mode it was drawn in.
+        const SERIES_COLOR_COUNT = 10;
 
         // Trend metrics (line charts). Each: title + sub describing the formula.
         const TREND_METRICS = [
@@ -3417,7 +3481,7 @@
               sub: 'items demoted to noise per day', pct: false }
         ];
 
-        function metricColor(i) { return SERIES_COLORS[i % SERIES_COLORS.length]; }
+        function metricColor(i) { return cssVar(`--cat-${(i % SERIES_COLOR_COUNT) + 1}`); }
 
         async function loadMetrics() {
             const container = document.getElementById('metric-charts');
@@ -3732,14 +3796,14 @@
         function reachabilityHtml(p) {
             if (p.reachable === false) {
                 const reasons = (p.unreachable_reasons || []).map(r => escHtml(r)).join('; ');
-                return `<div class="review-kv" style="color:var(--danger)">` +
+                return `<div class="review-kv text-danger">` +
                     `<span class="badge badge-danger">unreachable</span> ${reasons || 'no reason given'}</div>`;
             }
             if (p.reachable === true) {
                 return '<div class="review-kv"><span class="badge badge-ok">reachable</span></div>';
             }
             return '<div class="review-kv"><span class="badge badge-warn">not checked</span> ' +
-                '<span style="color:var(--text-dim)">no in-tree parameter reader claims this component</span></div>';
+                '<span class="text-dim">no in-tree parameter reader claims this component</span></div>';
         }
 
         // -- Section 1: Tuner proposals --
@@ -3765,7 +3829,7 @@
                         ${reachabilityHtml(p)}
                         <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
                         <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
-                        <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
+                        <div class="review-predict hide" id="predict-${escHtml(p.proposal_id)}"></div>
                         <div class="review-actions">
                             <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escHtml(p.proposal_id)}"${p.reachable === false ? ' disabled' : ''}>Approve</button>
                             <button class="btn btn-sm btn-danger" data-action="confirmRejectProposal" data-id="${escHtml(p.proposal_id)}">Reject</button>
@@ -3800,7 +3864,7 @@
                     `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
                     (pv.effect_size == null ? '' : ` (effect_size ${fmtNum(pv.effect_size, 4)})`) +
                     (isNoBaseline
-                        ? '<br><span style="color:var(--text-dim)">First promotion for this scope: use ' +
+                        ? '<br><span class="text-dim">First promotion for this scope: use ' +
                           '<code style="font-family:var(--font-mono)">trellis metrics promote --allow-no-baseline</code>.</span>'
                         : '');
                 const actions = card.querySelector('.review-actions');
@@ -3811,7 +3875,7 @@
                     `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
             } catch (err) {
                 predict.style.display = 'block';
-                predict.innerHTML = `<span style="color:var(--danger)">Preview failed: ${escHtml(err.message)}</span>`;
+                predict.innerHTML = `<span class="text-danger">Preview failed: ${escHtml(err.message)}</span>`;
             }
         }
 
@@ -3916,7 +3980,7 @@
                 // UTC (scoring.py's `_utc_now`); fmtTime() labels it rather
                 // than silently relabelling it as the browser's local zone
                 // (P1-6).
-                const header = `<p style="font-size:var(--fs-2); color:var(--text-dim); margin-bottom:0.75rem;">` +
+                const header = `<p class="fs-2 text-dim mb-md">` +
                     `${escHtml(items.length)} candidate(s)` +
                     (data.generated_at_utc ? ` &middot; generated ${escHtml(fmtTime(data.generated_at_utc))}` : '') +
                     (data.artifacts_dir ? ` &middot; ${escHtml(data.artifacts_dir)}` : '') +
@@ -3940,7 +4004,7 @@
                     const cid = c.candidate_id || ('cand-' + i);
                     const promotable = c.promotable === true;
                     const approveControl = promotable
-                        ? `<label style="font-size:var(--fs-3); display:flex; align-items:center; gap:0.4rem;">
+                        ? `<label class="fs-3" style="display:flex; align-items:center; gap:0.4rem">
                             <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
                         </label>
                         <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>`
@@ -3948,7 +4012,7 @@
                             <span class="badge badge-warn">report-only — not promotable</span>
                             <span class="review-tooltip" title="This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is report-only: it informs reviewers but is not a promotable precedent, so there is deliberately no Approve control here.">Why no approve?</span>
                         </div>
-                        <p style="color:var(--text-dim); font-size:var(--fs-2); margin:0.25rem 0 0">
+                        <p class="fs-2 text-dim" style="margin:0.25rem 0 0">
                             This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is
                             report-only: it informs reviewers but is not a promotable precedent, so there is
                             deliberately no Approve control here.
@@ -4016,8 +4080,8 @@
                             <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
                             <span class="review-tooltip" title="Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.">Why no approve?</span>
                         </div>
-                        <p style="color:var(--text-dim); font-size:var(--fs-2); margin:0.25rem 0 0">Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.</p>
-                        <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
+                        <p class="fs-2 text-dim" style="margin:0.25rem 0 0">Promotion is a one-way change to the canonical entity vocabulary, made in source after the ADR is reviewed, never from this page -- so there is deliberately no approve button here.</p>
+                        <div class="adr-panel hide" id="adr-${escHtml(c.candidate_id)}"></div>
                     </div>`).join('');
             } catch (err) {
                 setCountError('review-schema-count', loadFailureText(err, 'Schema-evolution candidates'));
@@ -4073,7 +4137,7 @@
                     <div class="review-card fade-in">
                         <h4>${escHtml(p.source_file || p.proposal_id)}</h4>
                         <div class="review-meta">
-                            <span class="mono" style="font-size:var(--fs-1)">${escHtml(p.proposal_id)}</span>
+                            <span class="mono fs-1">${escHtml(p.proposal_id)}</span>
                             <span>events: ${escHtml(p.source_event_count)}</span>
                             ${fmtTimeCell(p.generated_at)}
                         </div>
@@ -4119,7 +4183,7 @@
                 summary.appendChild(renderCard('Items Scored', (data.item_scores || []).length, 'unique context items'));
 
                 if (data.item_scores && data.item_scores.length > 0) {
-                    let html = '<div class="table-wrap"><table><thead><tr><th>Item ID</th><th class="num">Appearances</th><th class="num">Successes</th><th class="num">Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
+                    let html = '<div class="table-wrap"><table><thead><tr><th scope="col">Item ID</th><th scope="col" class="num">Appearances</th><th scope="col" class="num">Successes</th><th scope="col" class="num">Failures</th><th scope="col" style="width:30%">Success Rate</th></tr></thead><tbody>';
                     for (const item of data.item_scores) {
                         // A CSS width needs a bounded number even when the rate itself
                         // isn't one (0 appearances can leave success_rate as 0/0); the
@@ -4190,7 +4254,7 @@
                 summaryLine += data.noise_tags_written != null
                     ? `; ${data.noise_tags_written} noise tags written`
                     : '; 0 noise tags written so far (read-only view)';
-                noise.innerHTML = `<p style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
+                noise.innerHTML = `<p class="fs-3 text-dim mb-md">${summaryLine}</p>` +
                     data.noise_candidates.map(id => {
                         const admitted = admittedSet.has(id);
                         const cls = admitted ? 'badge-warn' : 'badge-info';
@@ -4206,7 +4270,7 @@
             const el = document.getElementById('evo-noise-apply');
             if (!el) return;
             el.innerHTML =
-                '<p style="font-size:var(--fs-3); color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits as noise, so packs stop serving them by default. Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can tag fewer items than were proposed. Confirm?</p>' +
+                '<p class="fs-3 text-warn" style="margin-bottom:0.4rem">This tags every item the evidence gate admits as noise, so packs stop serving them by default. Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can tag fewer items than were proposed. Confirm?</p>' +
                 '<button class="btn btn-sm btn-danger" onclick="runApplyNoiseTags()">Confirm: apply noise tags</button> ' +
                 '<button class="btn btn-ghost btn-sm" onclick="cancelApplyNoiseTags()">Cancel</button>';
         }
@@ -4230,10 +4294,10 @@
                 // with noise_tags_written populated, so re-fetching the GET
                 // route here would only revert that field back to null.
                 renderNoiseSection(data);
-                resultEl.innerHTML = `<p style="color:var(--ok)">Wrote noise tags to ${escHtml(String(data.noise_candidates_tagged ?? 0))} item(s) of ${escHtml(String(data.noise_candidates_proposed ?? 0))} proposed; ${escHtml(String(data.noise_candidates_refused_not_document ?? 0))} refused (not a document).</p>`;
+                resultEl.innerHTML = `<p class="text-ok">Wrote noise tags to ${escHtml(String(data.noise_candidates_tagged ?? 0))} item(s) of ${escHtml(String(data.noise_candidates_proposed ?? 0))} proposed; ${escHtml(String(data.noise_candidates_refused_not_document ?? 0))} refused (not a document).</p>`;
             } catch (err) {
                 cancelApplyNoiseTags();
-                resultEl.innerHTML = `<p style="color:var(--danger)">Apply failed: ${escHtml(err.message)}</p>`;
+                resultEl.innerHTML = `<p class="text-danger">Apply failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -4252,31 +4316,26 @@
         // SoftwareApplication, CreativeWork, File, Agent, Concept) sit apart
         // from each other and from the hashed hues of `concept`, `gotcha` and
         // `system` (179, 61 and 194), the most common open-vocabulary types.
-        const WELL_KNOWN_TYPE_COLORS = new Map([
-            ['Activity', '#60a5fa'],
-            ['SoftwareApplication', '#94a3b8'],
-            ['CreativeWork', '#c084fc'],
-            ['File', '#4ade80'],
-            ['Agent', '#f87171'],
-            ['Concept', '#fb923c'],
-            ['Person', '#f472b6'],
-            ['Organization', '#fbbf24'],
-            ['Team', '#a3e635'],
-            ['Dataset', '#e879f9'],
-            ['Project', '#38bdf8'],
-            ['Product', '#fda4af'],
-            ['Event', '#facc15'],
-            ['Place', '#34d399'],
-            ['Observation', '#22d3ee'],
-            ['Measurement', '#a8a29e'],
-        ]);
+        // Pass 6: each fixed colour is a `--entity-<kebab-type>` token (all
+        // three theme blocks), read live rather than a frozen hex, so light
+        // mode can use a WCAG-safe shade of the same categorical colour.
+        const WELL_KNOWN_ENTITY_TYPES = [
+            'Activity', 'SoftwareApplication', 'CreativeWork', 'File', 'Agent', 'Concept',
+            'Person', 'Organization', 'Team', 'Dataset', 'Project', 'Product', 'Event',
+            'Place', 'Observation', 'Measurement',
+        ];
+        function entityTypeCssVar(type) {
+            return '--entity-' + type.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+        }
 
         // Any other type gets a hue hashed (FNV-1a) from its stored string, so
         // it keeps its colour across loads. Hues 228-257 are skipped: that band
         // is the indigo of the page accent and the edge highlight.
         function nodeColor(type) {
-            const fixed = WELL_KNOWN_TYPE_COLORS.get(type);
-            if (fixed) return fixed;
+            if (WELL_KNOWN_ENTITY_TYPES.includes(type)) {
+                const fixed = cssVar(entityTypeCssVar(type));
+                if (fixed) return fixed;
+            }
             let h = 0x811c9dc5;
             for (let i = 0; i < type.length; i++) {
                 h ^= type.charCodeAt(i);
@@ -4317,10 +4376,12 @@
         // runs, not CSS custom properties -- a map built once at init would
         // freeze dark-mode colours into light mode. Call this again on
         // every theme toggle (cy.style(buildCyStyle())) rather than reading
-        // the tokens once. WELL_KNOWN_TYPE_COLORS / nodeColor() (the node
-        // fill palette keyed by entity type) stay their own categorical
-        // hexes on purpose -- that palette distinguishes types from each
-        // other, not light from dark, so it is out of scope here.
+        // the tokens once. nodeColor()'s categorical fills (the `--entity-*`
+        // tokens, pass 6) are a separate axis from these edge/border/text
+        // colours -- they distinguish entity types from each other, not
+        // light from dark -- so they are not rebuilt here; see the comment
+        // at isExternalReferent() for why per-node colour is read once, not
+        // repainted on toggle.
         function buildCyStyle() {
             const text = cssVar('--text');
             const textDim = cssVar('--text-dim');
@@ -4764,7 +4825,7 @@
 
                 if (lastSearchResults.length === 0) {
                     countEl.textContent = 'No results';
-                    itemsEl.innerHTML = '<div style="padding:1.5rem; text-align:center; color:var(--text-dim)">No entities found. Try a different term or clear filters.</div>';
+                    itemsEl.innerHTML = '<div class="text-dim pad-center-lg">No entities found. Try a different term or clear filters.</div>';
                     return;
                 }
 
@@ -4775,7 +4836,7 @@
                 renderPagination();
             } catch (err) {
                 countEl.textContent = 'Error';
-                itemsEl.innerHTML = `<div style="color:var(--danger); padding:1rem; text-align:center">Search failed: ${escHtml(err.message)}</div>`;
+                itemsEl.innerHTML = `<div class="text-danger" style="padding:1rem; text-align:center">Search failed: ${escHtml(err.message)}</div>`;
             }
         }
 
@@ -4829,7 +4890,7 @@
         function renderSearchResults() {
             const itemsEl = document.getElementById('srp-items');
             if (!lastSearchResults || lastSearchResults.length === 0) {
-                itemsEl.innerHTML = '<div style="padding:1.5rem; text-align:center; color:var(--text-dim)">No results</div>';
+                itemsEl.innerHTML = '<div class="text-dim pad-center-lg">No results</div>';
                 return;
             }
 
@@ -4882,10 +4943,10 @@
                 <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
                     <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
                     <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
-                    <span class="mono" style="color:var(--text-dim); font-size:var(--fs-1); flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
+                    <span class="mono fs-1 text-dim" style="flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
                 </span>
                 <span style="display:flex; align-items:center; gap:0.5rem; flex-shrink:0">
-                    <span style="font-size:var(--fs-1); color:var(--text-dim)">${created}</span>
+                    <span class="fs-1 text-dim">${created}</span>
                     <span class="badge badge-accent">${escHtml(type)}</span>
                 </span>
             </div>`;
@@ -4921,8 +4982,8 @@
         // graph panel paints it as a referent rather than by its own type.
         // This is a display signal, independent of the backend's fuller
         // graph-shape analytics measure (which also matches locator-shaped
-        // values); it is read once per node, like every other entry in
-        // WELL_KNOWN_TYPE_COLORS, not re-applied on theme toggle.
+        // values); it is read once per node, like every other entity-type
+        // colour in nodeColor(), not re-applied on theme toggle.
         const EXTERNAL_REFERENT_PROPERTIES = new Set([
             'source_system', 'connection_ref', 'database_name', 'schema_name', 'physical_uri',
         ]);
@@ -5042,7 +5103,7 @@
                     cy.fit(undefined, 40);
                 }
 
-                info.innerHTML = `<span>${nodes.length} nodes</span><span>${edges.length} edges</span><span>Seed: ${escHtml(entityName)}</span><span style="color:var(--text-dim)">Hover to highlight &middot; Double-click to expand &middot; Click background to dismiss</span>`;
+                info.innerHTML = `<span>${nodes.length} nodes</span><span>${edges.length} edges</span><span>Seed: ${escHtml(entityName)}</span><span class="text-dim">Hover to highlight &middot; Double-click to expand &middot; Click background to dismiss</span>`;
 
                 // Show seed node detail
                 if (data.entity) {
@@ -5055,7 +5116,7 @@
                     });
                 }
             } catch (err) {
-                info.innerHTML = `<span style="color:var(--danger)">Failed to load entity: ${escHtml(err.message)}</span>`;
+                info.innerHTML = `<span class="text-danger">Failed to load entity: ${escHtml(err.message)}</span>`;
             }
         }
 
@@ -5080,8 +5141,8 @@
                     <span><span class="legend-dot" style="background:${color}; width:12px; height:12px; margin-right:0.3rem"></span>${escHtml(name)}</span>
                     <span class="badge badge-accent">${escHtml(nodeType)}</span>
                 </h3>
-                <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
-                ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:var(--fs-4)">No properties</p>'}
+                <div class="mono fs-3 text-dim mb-md">${escHtml(nodeId)}</div>
+                ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p class="fs-4 text-dim">No properties</p>'}
                 <div class="detail-actions">
                     <button class="btn btn-ghost btn-sm" data-act="center">Center on node</button>
                     <button class="btn btn-ghost btn-sm" data-act="expand">Expand neighbors</button>
@@ -5259,14 +5320,14 @@
                         <td class="num">${fmtTimeCell(t.created_at)}</td>
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
-                        <td>${t.domain ? escHtml(t.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
-                        <td class="mono" style="font-size:var(--fs-2)">${t.agent_id ? escHtml(t.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td>${t.domain ? escHtml(t.domain) : '<span class="text-dim">-</span>'}</td>
+                        <td class="mono fs-2">${t.agent_id ? escHtml(t.agent_id) : '<span class="text-dim">-</span>'}</td>
                         <td>${outcomeBadge(t.outcome)}</td>
                     </tr>
                 `).join('');
                 renderCursorPagerFooter('trace', tracePager, traces.length, data.total || 0);
             } catch (err) {
-                body.innerHTML = `<tr><td colspan="6" style="color:var(--danger); text-align:center; padding:2rem">Failed to load traces: ${escHtml(err.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="6" class="text-danger" style="text-align:center; padding:2rem">Failed to load traces: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -5278,7 +5339,7 @@
                 const data = await fetchJSON(`/traces/${encodeURIComponent(traceId)}`);
                 const t = data.trace;
                 if (!t) {
-                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Trace <span class="mono">${escHtml(traceId)}</span> was not found.</p></div>`;
+                    container.innerHTML = `<div class="trace-detail"><p class="text-dim">Trace <span class="mono">${escHtml(traceId)}</span> was not found.</p></div>`;
                     return;
                 }
 
@@ -5316,19 +5377,19 @@
                                     <span class="step-duration">${dur}</span>
                                 </div>
                                 ${durBar}
-                                ${hasError ? `<div class="step-body" style="color:var(--danger)">${escHtml(s.error)}</div>` : ''}
+                                ${hasError ? `<div class="step-body text-danger">${escHtml(s.error)}</div>` : ''}
                                 ${argsStr ? `<div class="step-body"><strong>Args</strong><pre>${escHtml(argsStr)}</pre></div>` : ''}
                                 ${resultStr ? `<div class="step-body"><strong>Result</strong><pre>${escHtml(resultStr)}</pre></div>` : ''}
                             </li>`;
                     }
                     stepsHtml += '</ul>';
                 } else {
-                    stepsHtml = '<p style="color:var(--text-dim); font-size:var(--fs-4)">No steps recorded</p>';
+                    stepsHtml = '<p class="fs-4 text-dim">No steps recorded</p>';
                 }
 
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
-                metaHtml += `<div class="card"><h3>Source</h3><div class="value" style="font-size:var(--fs-6)">${sourceBadge(t.source)}</div></div>`;
-                metaHtml += `<div class="card"><h3>Outcome</h3><div class="value" style="font-size:var(--fs-6)">${outcomeBadge(outcome.status)}</div>${outcome.summary ? `<div class="sub">${escHtml(outcome.summary)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Source</h3><div class="value fs-6">${sourceBadge(t.source)}</div></div>`;
+                metaHtml += `<div class="card"><h3>Outcome</h3><div class="value fs-6">${outcomeBadge(outcome.status)}</div>${outcome.summary ? `<div class="sub">${escHtml(outcome.summary)}</div>` : ''}</div>`;
                 metaHtml += `<div class="card"><h3>Steps</h3><div class="value">${steps.length}</div></div>`;
                 metaHtml += `<div class="card"><h3>Evidence</h3><div class="value">${evidence.length}</div></div>`;
                 metaHtml += `<div class="card"><h3>Artifacts</h3><div class="value">${artifacts.length}</div></div>`;
@@ -5340,7 +5401,7 @@
                 let evidenceHtml = '';
                 if (evidence.length > 0) {
                     const links = data.evidence_links || {};
-                    evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Evidence Used</h4>';
+                    evidenceHtml = '<div class="mt-lg"><h4 class="fs-4 mb-sm">Evidence Used</h4>';
                     for (const e of evidence) {
                         const link = links[e.evidence_id] || {};
                         let entry = `<span class="mono truncate">${escHtml(e.evidence_id)}</span>`;
@@ -5356,11 +5417,11 @@
 
                 let feedbackHtml = '';
                 if (feedback.length > 0) {
-                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Feedback</h4>';
+                    feedbackHtml = '<div class="mt-lg"><h4 class="fs-4 mb-sm">Feedback</h4>';
                     for (const f of feedback) {
                         feedbackHtml += `<div class="status-row">
                             <span>${f.label ? `<span class="badge badge-info">${escHtml(f.label)}</span> ` : ''}${f.comment ? escHtml(f.comment) : ''}</span>
-                            <span style="font-size:var(--fs-2); color:var(--text-dim)">${f.rating != null ? `Rating: ${f.rating}` : ''} ${escHtml(f.given_by)}</span>
+                            <span class="fs-2 text-dim">${f.rating != null ? `Rating: ${f.rating}` : ''} ${escHtml(f.given_by)}</span>
                         </div>`;
                     }
                     feedbackHtml += '</div>';
@@ -5370,13 +5431,13 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>${escHtml(t.intent)}</span>
-                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(t.trace_id)}</span>
+                            <span class="mono fs-2 text-dim">${escHtml(t.trace_id)}</span>
                         </h3>
-                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
+                        <div class="fs-3 text-dim mb-lg">
                             ${ctx.domain ? `Domain: ${escHtml(ctx.domain)} &middot; ` : ''}${ctx.agent_id ? `Agent: ${escHtml(ctx.agent_id)} &middot; ` : ''}${escHtml(fmtTime(ctx.started_at))}${ctx.ended_at ? ` &rarr; ${escHtml(fmtTime(ctx.ended_at))}` : ''}
                         </div>
                         ${metaHtml}
-                        <h4 style="font-size:var(--fs-4); margin-bottom:0.75rem">Steps</h4>
+                        <h4 class="fs-4 mb-md">Steps</h4>
                         ${stepsHtml}
                         ${evidenceHtml}
                         ${feedbackHtml}
@@ -5524,7 +5585,7 @@
                         <div class="precedent-meta">
                             ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
                             ${fmtTimeCell(p.occurred_at)}
-                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:var(--fs-1)" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
+                            ${p.entity_id ? `<span class="mono entity-link fs-1" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
                         </div>
                     </div>
                 `).join('')}</div>`;
@@ -5589,7 +5650,7 @@
                 body.innerHTML = docs.map(d => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
                         <td class="num" style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
-                        <td class="mono truncate" style="max-width:220px; font-size:var(--fs-2)" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
+                        <td class="mono truncate fs-2" style="max-width:220px" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
                         <td class="num" style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
@@ -5610,7 +5671,7 @@
                 document.getElementById('mem-prev').disabled = memOffset === 0;
                 document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
             } catch (err) {
-                body.innerHTML = `<tr><td colspan="5" style="color:var(--danger); text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="5" class="text-danger" style="text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -5628,7 +5689,7 @@
                 const data = await fetchJSON(`/documents/${encodeURIComponent(docId)}`);
                 const d = data.document;
                 if (!d) {
-                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Document <span class="mono">${escHtml(docId)}</span> was not found.</p></div>`;
+                    container.innerHTML = `<div class="trace-detail"><p class="text-dim">Document <span class="mono">${escHtml(docId)}</span> was not found.</p></div>`;
                     return;
                 }
 
@@ -5647,15 +5708,15 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>Document</span>
-                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(d.doc_id)}</span>
+                            <span class="mono fs-2 text-dim">${escHtml(d.doc_id)}</span>
                         </h3>
-                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
+                        <div class="fs-3 text-dim mb-lg">
                             Created ${escHtml(fmtTime(d.created_at))}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${escHtml(fmtTime(d.updated_at))}` : ''}
                             ${d.content_hash ? ` &middot; <span class="mono">${escHtml(String(d.content_hash).slice(0, 16))}…</span>` : ''}
                         </div>
                         ${metaHtml}
-                        <h4 style="font-size:var(--fs-4); margin:1rem 0 0.5rem">Content</h4>
-                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:var(--fs-3)">${escHtml(d.content || '')}</pre>
+                        <h4 class="fs-4" style="margin:1rem 0 0.5rem">Content</h4>
+                        <pre class="fs-3" style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1)">${escHtml(d.content || '')}</pre>
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -5687,7 +5748,7 @@
             if (s.rating != null) parts.push(`rating: ${escHtml(s.rating)}`);
             if (s.items_count != null) parts.push(`${s.items_count} items`);
             if (parts.length === 0 && e.payload_keys && e.payload_keys.length > 0) {
-                parts.push(`<span style="color:var(--text-dim)">${escHtml(e.payload_keys.slice(0, 5).join(', '))}</span>`);
+                parts.push(`<span class="text-dim">${escHtml(e.payload_keys.slice(0, 5).join(', '))}</span>`);
             }
             return parts.join(' &middot; ');
         }
@@ -5750,16 +5811,16 @@
                 body.innerHTML = events.map((e, i) => {
                     const badge = EVENT_BADGE[e.event_type] || 'badge-info';
                     const entityCell = e.entity_id
-                        ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:var(--fs-2)" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
-                        : '<span style="color:var(--text-dim)">-</span>';
+                        ? `<span class="mono truncate fs-2" style="max-width:200px; display:inline-block" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
+                        : '<span class="text-dim">-</span>';
                     const oldestAttr = i === events.length - 1 ? ` data-oldest-stamp="${escHtml(e.occurred_at)}"` : '';
                     return `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}"${oldestAttr}>
                         <td class="num" style="white-space:nowrap">${fmtTimeCell(e.occurred_at)}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
-                        <td style="font-size:var(--fs-3)">${escHtml(e.source)}</td>
+                        <td class="fs-3">${escHtml(e.source)}</td>
                         <td>${entityCell}</td>
-                        <td style="font-size:var(--fs-3)">${eventSummary(e)}</td>
+                        <td class="fs-3">${eventSummary(e)}</td>
                     </tr>`;
                 }).join('');
                 renderCursorPagerFooter('event', eventPager, events.length, data.total || 0);
@@ -5788,14 +5849,14 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span><span class="badge ${EVENT_BADGE[e.event_type] || 'badge-info'}">${escHtml(e.event_type)}</span> ${escHtml(e.source)}</span>
-                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(e.event_id)}</span>
+                            <span class="mono fs-2 text-dim">${escHtml(e.event_id)}</span>
                         </h3>
-                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
+                        <div class="fs-3 text-dim mb-lg">
                             ${escHtml(fmtTime(e.occurred_at))}${e.entity_id ? ` &middot; Entity: <span class="mono">${escHtml(e.entity_id)}</span>` : ''}${e.entity_type ? ` (${escHtml(e.entity_type)})` : ''}
                             ${packLink}
                         </div>
-                        <h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Payload</h4>
-                        <pre style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1); font-size:var(--fs-2)">${escHtml(JSON.stringify(e.payload || {}, null, 2))}</pre>
+                        <h4 class="fs-4 mb-sm">Payload</h4>
+                        <pre class="fs-2" style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1)">${escHtml(JSON.stringify(e.payload || {}, null, 2))}</pre>
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -5862,11 +5923,11 @@
                     <tr class="clickable" tabindex="0" role="button" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}"${i === packs.length - 1 ? ` data-oldest-stamp="${escHtml(p.created_at)}"` : ''}>
                         <td class="num" style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
-                        <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
-                        <td class="mono" style="font-size:var(--fs-2)">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
+                        <td>${p.domain ? escHtml(p.domain) : '<span class="text-dim">-</span>'}</td>
+                        <td class="mono fs-2">${p.agent_id ? escHtml(p.agent_id) : '<span class="text-dim">-</span>'}</td>
                         <td class="num">${p.items_count != null ? p.items_count.toLocaleString('en-US') : '-'}</td>
                         <td class="num">${p.candidates_found != null ? p.candidates_found.toLocaleString('en-US') : '-'}</td>
-                        <td style="font-size:var(--fs-2)">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
+                        <td class="fs-2">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
                     </tr>
                 `).join('');
                 renderCursorPagerFooter('pack', packPager, packs.length, data.total || 0);
@@ -5913,32 +5974,32 @@
                 // was withheld for measurement, not because it is empty.
                 let noticeHtml = '';
                 if (pack.sectioned) {
-                    noticeHtml += `<p style="color:var(--text-dim); font-size:var(--fs-4)"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
+                    noticeHtml += `<p class="fs-4 text-dim"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
                 }
                 if (data.holdout_blinded) {
-                    noticeHtml += `<p style="color:var(--text-dim); font-size:var(--fs-4)"><span class="badge badge-info">holdout</span> This pack is in the measurement holdout; its payload is blinded for your access level.</p>`;
+                    noticeHtml += `<p class="fs-4 text-dim"><span class="badge badge-info">holdout</span> This pack is in the measurement holdout; its payload is blinded for your access level.</p>`;
                 }
 
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
                 metaHtml += `<div class="card"><h3>Items</h3><div class="value">${payload.items_count != null ? payload.items_count : '-'}</div><div class="sub">of ${payload.candidates_found != null ? payload.candidates_found : '?'} candidates</div></div>`;
-                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:var(--fs-5)">${payload.budget_max_items ?? '-'} items</div><div class="sub">${payload.budget_max_tokens ?? '-'} tokens max</div></div>`;
-                metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:var(--fs-5)">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
+                metaHtml += `<div class="card"><h3>Budget</h3><div class="value fs-5">${payload.budget_max_items ?? '-'} items</div><div class="sub">${payload.budget_max_tokens ?? '-'} tokens max</div></div>`;
+                metaHtml += `<div class="card"><h3>Strategies</h3><div class="value fs-5">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
                 metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${escHtml(feedbackValueText)}</div><div class="sub">${feedbackSubText}</div></div>`;
                 metaHtml += '</div>';
 
-                let injectedHtml = '<p style="color:var(--text-dim); font-size:var(--fs-4)">No items injected</p>';
+                let injectedHtml = '<p class="fs-4 text-dim">No items injected</p>';
                 if (injected.length > 0) {
                     injectedHtml = `
                     <div class="table-wrap"><table>
-                        <thead><tr><th class="num">#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th class="num">Tokens</th><th>Helpful</th><th>Unhelpful</th></tr></thead>
+                        <thead><tr><th scope="col" class="num">#</th><th scope="col">Item</th><th scope="col">Type</th><th scope="col">Strategy</th><th scope="col">Reason</th><th scope="col">Scores</th><th scope="col" class="num">Tokens</th><th scope="col">Helpful</th><th scope="col">Unhelpful</th></tr></thead>
                         <tbody>${injected.map(it => `
                             <tr>
                                 <td class="num">${it.rank != null ? it.rank : '-'}</td>
-                                <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
+                                <td class="mono truncate fs-2" style="max-width:240px" title="${escHtml(it.item_id)}">${escHtml(it.item_id)}</td>
                                 <td><span class="badge badge-info">${escHtml(it.item_type || '')}</span></td>
-                                <td style="font-size:var(--fs-2)">${escHtml(it.strategy_source || '')}</td>
-                                <td style="font-size:var(--fs-2)">${escHtml(it.selection_reason || '')}</td>
-                                <td style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
+                                <td class="fs-2">${escHtml(it.strategy_source || '')}</td>
+                                <td class="fs-2">${escHtml(it.selection_reason || '')}</td>
+                                <td class="fs-2 text-dim">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
                                 <td class="num">${it.estimated_tokens != null ? it.estimated_tokens.toLocaleString('en-US') : '-'}</td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful" aria-label="Mark item helpful"></td>
                                 <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful" aria-label="Mark item unhelpful"></td>
@@ -5950,17 +6011,17 @@
                 let rejectedHtml = '';
                 if (rejected.length > 0) {
                     rejectedHtml = `
-                    <details style="margin-top:1rem">
-                        <summary style="cursor:pointer; font-size:var(--fs-4); font-weight:600">Rejected items (${rejected.length})</summary>
+                    <details class="mt-lg">
+                        <summary class="fs-4" style="cursor:pointer; font-weight:600">Rejected items (${rejected.length})</summary>
                         <div class="table-wrap" style="margin-top:0.5rem"><table>
-                            <thead><tr><th>Item</th><th>Type</th><th>Strategy</th><th class="num">Relevance</th><th>Reason</th></tr></thead>
+                            <thead><tr><th scope="col">Item</th><th scope="col">Type</th><th scope="col">Strategy</th><th scope="col" class="num">Relevance</th><th scope="col">Reason</th></tr></thead>
                             <tbody>${rejected.map(r => `
                                 <tr>
-                                    <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
-                                    <td style="font-size:var(--fs-2)">${escHtml(r.item_type || '')}</td>
-                                    <td style="font-size:var(--fs-2)">${escHtml(r.strategy_source || '')}</td>
+                                    <td class="mono truncate fs-2" style="max-width:240px" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
+                                    <td class="fs-2">${escHtml(r.item_type || '')}</td>
+                                    <td class="fs-2">${escHtml(r.strategy_source || '')}</td>
                                     <td class="num">${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
-                                    <td style="font-size:var(--fs-2)">${escHtml(r.reason || '')}</td>
+                                    <td class="fs-2">${escHtml(r.reason || '')}</td>
                                 </tr>`).join('')}
                             </tbody>
                         </table></div>
@@ -5970,13 +6031,13 @@
                 let budgetHtml = '';
                 if (budgetTrace.length > 0) {
                     budgetHtml = `
-                    <details style="margin-top:1rem">
-                        <summary style="cursor:pointer; font-size:var(--fs-4); font-weight:600">Budget trace (${budgetTrace.length})</summary>
+                    <details class="mt-lg">
+                        <summary class="fs-4" style="cursor:pointer; font-weight:600">Budget trace (${budgetTrace.length})</summary>
                         <div class="table-wrap" style="margin-top:0.5rem"><table>
-                            <thead><tr><th>Item</th><th class="num">Tokens</th><th class="num">Running total</th><th>Included</th></tr></thead>
+                            <thead><tr><th scope="col">Item</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Running total</th><th scope="col">Included</th></tr></thead>
                             <tbody>${budgetTrace.map(b => `
                                 <tr>
-                                    <td class="mono truncate" style="max-width:240px; font-size:var(--fs-2)" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
+                                    <td class="mono truncate fs-2" style="max-width:240px" title="${escHtml(b.item_id)}">${escHtml(b.item_id)}</td>
                                     <td class="num">${b.item_tokens.toLocaleString('en-US')}</td>
                                     <td class="num">${b.running_total.toLocaleString('en-US')}</td>
                                     <td>${b.included ? '<span class="badge badge-ok">yes</span>' : '<span class="badge badge-danger">no</span>'}</td>
@@ -5988,7 +6049,7 @@
 
                 let feedbackHtml = '';
                 if (feedback.length > 0) {
-                    feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Feedback</h4>';
+                    feedbackHtml = '<div class="mt-lg"><h4 class="fs-4 mb-sm">Feedback</h4>';
                     for (const f of feedback) {
                         const fp = f.payload || {};
                         // fp.success is the backend's own SUCCESS_RATING_THRESHOLD-derived
@@ -5997,7 +6058,7 @@
                         // agreeing with the backend for a rating in (0, 0.5).
                         feedbackHtml += `<div class="status-row">
                             <span>${fp.rating != null ? `<span class="badge ${fp.success ? 'badge-ok' : 'badge-danger'}">rating: ${escHtml(fp.rating)}</span> ` : ''}${fp.comment ? escHtml(fp.comment) : ''}</span>
-                            <span style="font-size:var(--fs-2); color:var(--text-dim)">${timeAgo(f.occurred_at)}</span>
+                            <span class="fs-2 text-dim">${timeAgo(f.occurred_at)}</span>
                         </div>`;
                     }
                     feedbackHtml += '</div>';
@@ -6012,12 +6073,12 @@
                 // success when omitted, so this form never invents a float.
                 const feedbackFormHtml = `
                     <div style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
-                        <h4 style="font-size:var(--fs-4); margin-bottom:0.5rem">Record feedback</h4>
+                        <h4 class="fs-4 mb-sm">Record feedback</h4>
                         <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
                         <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
                             <button class="btn btn-sm" data-act="submitPackFeedbackHelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 11v9H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M7 11l4-7a2 2 0 0 1 2 2v4h5.5a2 2 0 0 1 1.9 2.7l-2 6A2 2 0 0 1 16.5 20H7"/></svg>Helpful overall</button>
                             <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 13V4H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1z"/><path d="M7 13l4 7a2 2 0 0 0 2-2v-4h5.5a2 2 0 0 0 1.9-2.7l-2-6A2 2 0 0 0 16.5 4H7"/></svg>Not helpful</button>
-                            <span id="pack-feedback-status" style="font-size:var(--fs-3)"></span>
+                            <span id="pack-feedback-status" class="fs-3"></span>
                         </div>
                     </div>`;
 
@@ -6025,14 +6086,14 @@
                     <div class="trace-detail fade-in">
                         <h3>
                             <span>${escHtml(pack.intent || '(no intent)')}</span>
-                            <span class="mono" style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(packId)}</span>
+                            <span class="mono fs-2 text-dim">${escHtml(packId)}</span>
                         </h3>
-                        <div style="font-size:var(--fs-3); color:var(--text-dim); margin-bottom:1rem">
+                        <div class="fs-3 text-dim mb-lg">
                             ${pack.domain ? `Domain: ${escHtml(pack.domain)} &middot; ` : ''}${pack.agent_id ? `Agent: ${escHtml(pack.agent_id)} &middot; ` : ''}${escHtml(fmtTime(pack.created_at))}
                         </div>
                         ${noticeHtml}
                         ${metaHtml}
-                        <h4 style="font-size:var(--fs-4); margin-bottom:0.75rem">Injected items</h4>
+                        <h4 class="fs-4 mb-md">Injected items</h4>
                         ${injectedHtml}
                         ${rejectedHtml}
                         ${budgetHtml}
@@ -6080,15 +6141,15 @@
                             // PackFeedbackResponse's docstring, this must not
                             // read as the feedback having driven behavior yet.
                             statusEl.innerHTML = resp.event_log_in_sync
-                                ? '<span style="color:var(--ok)">Feedback recorded.</span>'
-                                : '<span style="color:var(--warn)">Feedback written to the durable log; a reconcile is owed before it reaches the event log.</span>';
+                                ? '<span class="text-ok">Feedback recorded.</span>'
+                                : '<span class="text-warn">Feedback written to the durable log; a reconcile is owed before it reaches the event log.</span>';
                         }
                         await loadPackDetail(packId);
                     } catch (err) {
                         // Absence must not read as success (#849): show the
                         // error and re-enable the buttons rather than
                         // silently resetting the form.
-                        if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger)">Failed to record feedback: ${escHtml(err.message)}</span>`;
+                        if (statusEl) statusEl.innerHTML = `<span class="text-danger">Failed to record feedback: ${escHtml(err.message)}</span>`;
                         buttons.forEach(b => { b.disabled = false; });
                     }
                 }
@@ -6117,17 +6178,17 @@
                 const data = await fetchJSON(`/graph/history?entity_id=${encodeURIComponent(nodeId)}`);
                 const versions = data.versions || [];
                 el.innerHTML = `
-                    <h4 style="font-size:var(--fs-4); margin:0.75rem 0 0.5rem">History (${versions.length} version${versions.length === 1 ? '' : 's'})</h4>
+                    <h4 class="fs-4" style="margin:0.75rem 0 0.5rem">History (${versions.length} version${versions.length === 1 ? '' : 's'})</h4>
                     ${versions.map(v => `
                         <div style="border-left:2px solid ${v.valid_to ? 'var(--border)' : 'var(--accent)'}; padding:0.25rem 0 0.25rem 0.6rem; margin-bottom:0.5rem">
-                            <div style="font-size:var(--fs-2); color:var(--text-dim)">
+                            <div class="fs-2 text-dim">
                                 ${escHtml(fmtTime(v.valid_from))} &rarr; ${v.valid_to ? escHtml(fmtTime(v.valid_to)) : '<span style="color:var(--accent)">current</span>'}
                             </div>
-                            <pre style="white-space:pre-wrap; word-break:break-word; font-size:var(--fs-2); margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
+                            <pre class="fs-2" style="white-space:pre-wrap; word-break:break-word; margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
                         </div>`).join('')}
                 `;
             } catch (err) {
-                el.innerHTML = `<p style="color:var(--danger); font-size:var(--fs-3)">Failed to load history: ${escHtml(err.message)}</p>`;
+                el.innerHTML = `<p class="fs-3 text-danger">Failed to load history: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -6204,7 +6265,7 @@
                 const cardsEl = document.getElementById('stats-cards');
                 let stats = null;
                 if (!statsOutcome.ok) {
-                    cardsEl.innerHTML = `<div class="card" style="grid-column:1/-1"><p style="color:var(--danger); margin:0">Failed to load stats: ${escHtml(statsOutcome.error.message)}</p></div>`;
+                    cardsEl.innerHTML = `<div class="card" style="grid-column:1/-1"><p class="text-danger m-0">Failed to load stats: ${escHtml(statsOutcome.error.message)}</p></div>`;
                 } else {
                     stats = statsOutcome.value;
                     cardsEl.appendChild(renderCard('Traces', stats.traces, 'agent work records'));
@@ -6235,8 +6296,8 @@
                         icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21v-9"/><path d="M12 12C7 12 5 9 5 5c4 0 7 2 7 7z"/><path d="M12 12c5 0 7-3 7-7-4 0-7 2-7 7z"/></svg>',
                         title: 'Welcome to Trellis',
                         body: 'Your knowledge graph is empty. Load sample data to explore the dashboard, graph visualization, and trace inspector.',
-                        actionHtml: '<code style="display:inline-block;background:var(--surface-sunken);padding:0.5rem 1rem;border-radius:var(--r-1);color:var(--accent);font-size:var(--fs-4)">trellis demo load</code>' +
-                            '<p style="color:var(--text-dim);font-size:var(--fs-3);margin-top:0.75rem">Then refresh this page to see your data.</p>',
+                        actionHtml: '<code class="fs-4" style="display:inline-block; background:var(--surface-sunken); padding:0.5rem 1rem; border-radius:var(--r-1); color:var(--accent)">trellis demo load</code>' +
+                            '<p class="fs-3 text-dim" style="margin-top:0.75rem">Then refresh this page to see your data.</p>',
                     });
                     const dashboard = document.getElementById('view-dashboard');
                     dashboard.insertBefore(banner, dashboard.firstChild);
@@ -6244,13 +6305,13 @@
 
                 const healthEl = document.getElementById('health-rows');
                 if (!healthOutcome.ok) {
-                    healthEl.innerHTML = `<div style="color:var(--danger); padding:0.5rem 0; font-size:var(--fs-4)">Failed to load health checks: ${escHtml(healthOutcome.error.message)}</div>`;
+                    healthEl.innerHTML = `<div class="fs-4 text-danger" style="padding:0.5rem 0">Failed to load health checks: ${escHtml(healthOutcome.error.message)}</div>`;
                 } else {
                     const health = healthOutcome.value;
                     const checks = health.checks || {};
                     const healthBackends = health.backends || {};
                     if (Object.keys(checks).length === 0) {
-                        healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:var(--fs-4)">No health checks configured</div>';
+                        healthEl.innerHTML = '<div class="fs-4 text-dim" style="padding:0.5rem 0">No health checks configured</div>';
                     } else {
                         for (const [name, ok] of Object.entries(checks)) {
                             healthEl.appendChild(renderStatusRow(name, ok, healthBackends[name]));
@@ -6347,7 +6408,7 @@
             let whenHtml;
             let statusBadge = '';
             if (!loop.last_run_at) {
-                whenHtml = '<span style="color:var(--text-dim)">Not measured &mdash; no event seen yet</span>';
+                whenHtml = '<span class="text-dim">Not measured &mdash; no event seen yet</span>';
                 statusBadge = '<span class="badge badge-info">never run</span>';
             } else {
                 whenHtml = `<span title="${escHtml(loop.last_run_at)}">` +
@@ -6368,11 +6429,11 @@
             const countersHtml = loop.counters
                 ? Object.entries(loop.counters).map(([k, v]) => {
                       const display = (v === null || v === undefined)
-                          ? '<span style="color:var(--text-dim)" title="not reported by the build that ran">&mdash;</span>'
+                          ? '<span class="text-dim" title="not reported by the build that ran">&mdash;</span>'
                           : escHtml(v);
                       return `<span class="mono" style="margin-right:0.75rem">${escHtml(k)}: ${display}</span>`;
                   }).join('')
-                : '<span style="color:var(--text-dim)">not measured</span>';
+                : '<span class="text-dim">not measured</span>';
 
             // Names the catalog job that drives this loop, with a
             // link back to its Schedules row -- the reverse of the
@@ -6386,7 +6447,7 @@
             // what_it_changes (both stay plain operator prose) -- see
             // LoopHealthRow.operator_hint's docstring.
             const operatorHint = loop.operator_hint
-                ? `<div class="loop-row-desc" style="color:var(--text-dim)">${escHtml(loop.operator_hint)}</div>`
+                ? `<div class="loop-row-desc text-dim">${escHtml(loop.operator_hint)}</div>`
                 : '';
 
             return `
@@ -6481,7 +6542,7 @@
             // route and `trellis analyze <name>` both use) is secondary
             // text here, not the primary label.
             document.getElementById('report-description').innerHTML =
-                `${escHtml(reportDescriptions[name] || '')} <code style="font-size:var(--fs-2); color:var(--text-dim)">${escHtml(name)}</code>`;
+                `${escHtml(reportDescriptions[name] || '')} <code class="fs-2 text-dim">${escHtml(name)}</code>`;
             const errorEl = document.getElementById('report-param-error');
             if (errorEl) errorEl.textContent = '';
             const paramsEl = document.getElementById('report-params');
@@ -6489,7 +6550,7 @@
             const properties = (reportSchemas[name] && reportSchemas[name].properties) || {};
             const entries = Object.entries(defaults);
             if (entries.length === 0) {
-                paramsEl.innerHTML = '<span style="font-size:var(--fs-2); color:var(--text-dim)">no parameters</span>';
+                paramsEl.innerHTML = '<span class="fs-2 text-dim">no parameters</span>';
                 return;
             }
             paramsEl.innerHTML = entries
@@ -6512,14 +6573,14 @@
 
         function reportParamFieldHtml(key, val, fieldSchema) {
             const inner = reportParamInnerSchema(fieldSchema);
-            const label = `<label style="display:flex; flex-direction:column; font-size:var(--fs-2); color:var(--text-dim); gap:0.2rem">${escHtml(key)}`;
+            const label = `<label class="fs-2 text-dim" style="display:flex; flex-direction:column; gap:0.2rem">${escHtml(key)}`;
 
             if (Array.isArray(inner.enum)) {
                 const options = inner.enum.map(opt =>
                     `<option value="${escHtml(opt)}" ${opt === val ? 'selected' : ''}>${escHtml(opt)}</option>`
                 ).join('');
-                return `${label}<select class="report-param-input" data-kind="enum" data-param="${escHtml(key)}" ` +
-                    `style="font-size:var(--fs-3); width:8rem">${options}</select></label>`;
+                return `${label}<select class="report-param-input fs-3" data-kind="enum" data-param="${escHtml(key)}" ` +
+                    `style="width:8rem">${options}</select></label>`;
             }
             if (inner.type === 'boolean') {
                 return `${label}<input type="checkbox" class="report-param-input" data-kind="boolean" ` +
@@ -6538,18 +6599,18 @@
                 const minAttr = min !== undefined ? ` min="${escHtml(min)}"` : '';
                 const maxAttr = max !== undefined ? ` max="${escHtml(max)}"` : '';
                 return `${label}<input type="number" step="${escHtml(inner.type === 'integer' ? '1' : 'any')}" ` +
-                    `class="report-param-input" data-kind="${escHtml(inner.type)}" data-param="${escHtml(key)}" ` +
+                    `class="report-param-input fs-3" data-kind="${escHtml(inner.type)}" data-param="${escHtml(key)}" ` +
                     `data-min="${inner.minimum !== undefined ? escHtml(inner.minimum) : ''}" ` +
                     `data-min-exclusive="${inner.exclusiveMinimum !== undefined ? escHtml(inner.exclusiveMinimum) : ''}" ` +
                     `data-max="${inner.maximum !== undefined ? escHtml(inner.maximum) : ''}" ` +
                     `data-max-exclusive="${inner.exclusiveMaximum !== undefined ? escHtml(inner.exclusiveMaximum) : ''}" ` +
-                    `style="font-size:var(--fs-3); width:8rem"${minAttr}${maxAttr} ` +
+                    `style="width:8rem"${minAttr}${maxAttr} ` +
                     // escHtml(null) is '', so a default-less param renders an empty input rather
                     // than the literal text "null".
                     `value="${escHtml(val)}"></label>`;
             }
-            return `${label}<input type="text" class="report-param-input" data-kind="string" data-param="${escHtml(key)}" ` +
-                `value="${escHtml(val)}" style="font-size:var(--fs-3); width:8rem"></label>`;
+            return `${label}<input type="text" class="report-param-input fs-3" data-kind="string" data-param="${escHtml(key)}" ` +
+                `value="${escHtml(val)}" style="width:8rem"></label>`;
         }
 
         // Mirrors the bounds the server's own pydantic Field(ge=/le=/gt=/lt=)
@@ -6647,7 +6708,7 @@
                 renderReportOutput();
             } catch (err) {
                 metaEl.textContent = '';
-                outputEl.innerHTML = `<div style="color:var(--danger); padding:1.5rem; text-align:center">` +
+                outputEl.innerHTML = `<div class="text-danger pad-center-lg">` +
                     `Failed to run report: ${escHtml(err.message)}</div>`;
             }
         }
@@ -6657,7 +6718,7 @@
             if (!lastReportPayload) return;
             const raw = document.getElementById('report-raw-toggle').checked;
             if (raw) {
-                outputEl.innerHTML = `<pre class="mono" style="white-space:pre-wrap; font-size:var(--fs-2)">` +
+                outputEl.innerHTML = `<pre class="mono fs-2" style="white-space:pre-wrap">` +
                     `${escHtml(JSON.stringify(lastReportPayload.data, null, 2))}</pre>`;
                 return;
             }
@@ -6669,7 +6730,7 @@
                 return emptyStateHtml({ title: 'No data returned', body: 'This report ran successfully and returned an empty result.' });
             }
             if (typeof data === 'object' && !Array.isArray(data) && data.status === 'degraded') {
-                return `<div style="color:var(--danger); padding:1rem">` +
+                return `<div class="text-danger" style="padding:1rem">` +
                     `Backing store is degraded, so this report refuses to run rather than ` +
                     `scoring an incomplete set: ${escHtml(JSON.stringify(data.store_degradation || {}))}</div>`;
             }
@@ -6690,9 +6751,9 @@
                 html += '<div class="cards">' + scalarEntries.map(([key, val]) => `
                     <div class="card">
                         <h3>${escHtml(key)}</h3>
-                        <div class="value" style="font-size:var(--fs-6)">` +
+                        <div class="value fs-6">` +
                         (val === null
-                            ? '<span style="color:var(--text-dim); font-size:var(--fs-4)">not measured</span>'
+                            ? '<span class="fs-4 text-dim">not measured</span>'
                             : escHtml(val)) +
                         `</div>
                     </div>`).join('') + '</div>';
@@ -6700,10 +6761,10 @@
             if (complexEntries.length) {
                 html += complexEntries.map(([key, val]) => `
                     <details style="margin-top:0.5rem">
-                        <summary style="cursor:pointer; font-size:var(--fs-4)">${escHtml(key)}` +
+                        <summary class="fs-4" style="cursor:pointer">${escHtml(key)}` +
                         (Array.isArray(val) ? ` <span class="badge badge-info">${val.length}</span>` : '') +
                         `</summary>
-                        <pre class="mono" style="white-space:pre-wrap; font-size:var(--fs-2)">${escHtml(JSON.stringify(val, null, 2))}</pre>
+                        <pre class="mono fs-2" style="white-space:pre-wrap">${escHtml(JSON.stringify(val, null, 2))}</pre>
                     </details>`).join('');
             }
             if (!html) {
@@ -7216,7 +7277,7 @@
                 // !res.ok check cannot see it, so it is checked explicitly
                 // rather than falling through to "0 advisories".
                 if (data.status === 'error') {
-                    tbody.innerHTML = `<tr><td colspan="9" style="color:var(--danger)">Advisories unavailable: ${escHtml(data.message || 'unknown error')}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="9" class="text-danger">Advisories unavailable: ${escHtml(data.message || 'unknown error')}</td></tr>`;
                     return;
                 }
                 renderDegradedBanner('advisories-banner', data.store_degradation);
@@ -7316,7 +7377,7 @@
             const actions = document.getElementById('adv-gen-actions');
             if (!actions) return;
             actions.innerHTML =
-                '<p style="color:var(--warn)">This scans history now and writes new advisories to the store. Confirm?</p>' +
+                '<p class="text-warn">This scans history now and writes new advisories to the store. Confirm?</p>' +
                 '<button class="btn btn-sm btn-danger" onclick="runGenerateAdvisories()">Confirm generate</button> ' +
                 '<button class="btn btn-ghost btn-sm" onclick="cancelGenerateAdvisories()">Cancel</button>';
         }
@@ -7354,9 +7415,9 @@
                 const data = await generateAdvisoriesRequest(qs);
                 cancelGenerateAdvisories();
                 if (data.detail && data.detail.code === 'stale_store_write') {
-                    resultEl.innerHTML = `<p style="color:var(--danger)">Generate refused: ${escHtml(data.detail.message || 'stale_store_write')}</p>`;
+                    resultEl.innerHTML = `<p class="text-danger">Generate refused: ${escHtml(data.detail.message || 'stale_store_write')}</p>`;
                 } else if (data.status === 'error') {
-                    resultEl.innerHTML = `<p style="color:var(--danger)">Generate refused (${escHtml(data.code || 'error')}): ${escHtml(data.message || '')}</p>`;
+                    resultEl.innerHTML = `<p class="text-danger">Generate refused (${escHtml(data.code || 'error')}): ${escHtml(data.message || '')}</p>`;
                 } else if (data.status === 'degraded') {
                     resultEl.innerHTML = `<div class="degraded-banner">${DEGRADED_BANNER_ICON}
                         <div class="degraded-body">
@@ -7366,7 +7427,7 @@
                         ${DEGRADED_BANNER_ACTIONS}
                     </div>`;
                 } else {
-                    resultEl.innerHTML = `<p style="color:var(--ok)">Generated ${escHtml(String(data.advisories_generated ?? 0))} advisories (${escHtml(String(data.advisories_stored ?? 0))} stored) over ${escHtml(String(data.analysis_window_days ?? ''))} day(s); ${escHtml(String(data.findings_refused_no_comparison_arm ?? 0))} finding(s) refused for lack of a comparison arm.</p>`;
+                    resultEl.innerHTML = `<p class="text-ok">Generated ${escHtml(String(data.advisories_generated ?? 0))} advisories (${escHtml(String(data.advisories_stored ?? 0))} stored) over ${escHtml(String(data.analysis_window_days ?? ''))} day(s); ${escHtml(String(data.findings_refused_no_comparison_arm ?? 0))} finding(s) refused for lack of a comparison arm.</p>`;
                 }
                 loadAdvisories();
             } catch (err) {
@@ -7375,7 +7436,7 @@
                         '<button class="btn btn-sm btn-danger" onclick="runGenerateAdvisories()">Confirm generate</button> ' +
                         '<button class="btn btn-ghost btn-sm" onclick="cancelGenerateAdvisories()">Cancel</button>';
                 }
-                resultEl.innerHTML = `<p style="color:var(--danger)">Generate failed: ${escHtml(err.message)}</p>`;
+                resultEl.innerHTML = `<p class="text-danger">Generate failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -7403,7 +7464,7 @@
                 }
                 totalEl.textContent = `${data.count ?? rows.length} polic${(data.count ?? rows.length) === 1 ? 'y' : 'ies'} (route total)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="7" style="color:var(--danger)">Failed to load policies: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Failed to load policies: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -7442,7 +7503,7 @@
             } catch (err) {
                 if (cell) {
                     cell.innerHTML =
-                        `<span style="color:var(--danger)">Delete failed: ${escHtml(err.message)}</span> ` +
+                        `<span class="text-danger">Delete failed: ${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-sm btn-danger" data-action="confirmDeletePolicy" data-id="${escHtml(id)}">Retry</button>`;
                 }
             }
@@ -7526,11 +7587,11 @@
             const op = document.getElementById('pol-operation').value.trim();
             if (!op) {
                 document.getElementById('policy-create-result').innerHTML =
-                    '<p style="color:var(--danger)">Operation pattern is required.</p>';
+                    '<p class="text-danger">Operation pattern is required.</p>';
                 return;
             }
             actions.innerHTML =
-                '<p style="color:var(--warn)">This writes a new policy now; it applies to matching commands immediately. Confirm?</p>' +
+                '<p class="text-warn">This writes a new policy now; it applies to matching commands immediately. Confirm?</p>' +
                 '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
                 '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
         }
@@ -7555,10 +7616,10 @@
             try {
                 const r = await postJSON('/policies', body);
                 cancelCreatePolicyForm();
-                resultEl.innerHTML = `<p style="color:var(--ok)">${escHtml(r.message || 'Policy created')}.</p>`;
+                resultEl.innerHTML = `<p class="text-ok">${escHtml(r.message || 'Policy created')}.</p>`;
                 loadPolicies();
             } catch (err) {
-                resultEl.innerHTML = `<p style="color:var(--danger)">Create failed: ${escHtml(err.message)}</p>`;
+                resultEl.innerHTML = `<p class="text-danger">Create failed: ${escHtml(err.message)}</p>`;
                 if (actions) {
                     actions.innerHTML =
                         '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
@@ -7733,12 +7794,12 @@
                 : '';
             const notRunningNote = dispatcherSeen
                 ? ''
-                : '<br><span class="field-hint" style="margin:0">no dispatcher observed &mdash; may not run</span>';
+                : '<br><span class="field-hint m-0">no dispatcher observed &mdash; may not run</span>';
             const nextDueCell = job.next_due_at
                 ? `<span${neverCompletedHint}>${escHtml(fmtTime(job.next_due_at))}</span>${notRunningNote}`
-                : (job.stored ? '&mdash;' : '<span class="field-hint" style="margin:0">not scheduled, no stored row</span>');
+                : (job.stored ? '&mdash;' : '<span class="field-hint m-0">not scheduled, no stored row</span>');
             const drivesLoops = job.loops && job.loops.length
-                ? `<br><span class="field-hint" style="margin:0">drives: ${job.loops.map(l => escHtml(LOOP_LABELS[l] || l)).join(', ')} &mdash; ` +
+                ? `<br><span class="field-hint m-0">drives: ${job.loops.map(l => escHtml(LOOP_LABELS[l] || l)).join(', ')} &mdash; ` +
                   `<a href="#" onclick="switchView('loops'); return false;">see Loops</a></span>`
                 : '';
             return `<tr id="sched-row-${escHtml(name)}">
@@ -7747,7 +7808,7 @@
                     <label for="sched-enabled-${escHtml(name)}" class="sr-only">Enable ${escHtml(name)}</label>
                     <input type="checkbox" ${enabledAttr} ${disabledAttr} id="sched-enabled-${escHtml(name)}" aria-label="Enable ${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}">
                 </td>
-                <td data-cadence="${escHtml(job.cadence || '')}">${escHtml(cadenceText)}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span>${job.default_cadence && job.default_cadence !== job.cadence ? `<br><span class="field-hint" style="margin:0">catalog default: ${escHtml(job.default_cadence)}</span>` : ''}</td>
+                <td data-cadence="${escHtml(job.cadence || '')}">${escHtml(cadenceText)}<br><span class="field-hint m-0">${escHtml(describeCron(job.cadence))}</span>${job.default_cadence && job.default_cadence !== job.cadence ? `<br><span class="field-hint m-0">catalog default: ${escHtml(job.default_cadence)}</span>` : ''}</td>
                 <td class="num">${escHtml(String(job.timeout_seconds))}s</td>
                 <td>${jobFlagBadges(job, dispatcherSeen)}</td>
                 <td>${lastRunText(job.last_run)}</td>
@@ -7792,7 +7853,7 @@
             const cell = document.getElementById('sched-actions-' + name);
             if (!cell) return;
             cell.innerHTML =
-                `<span style="color:var(--warn)">${escHtml(toggleEnabledConsequence(name, requested))}</span> ` +
+                `<span class="text-warn">${escHtml(toggleEnabledConsequence(name, requested))}</span> ` +
                 `<button class="btn btn-sm btn-danger" data-action="confirmToggleJobEnabled" data-id="${escHtml(name)}">Confirm</button> ` +
                 `<button class="btn btn-ghost btn-sm" data-action="cancelToggleJobEnabled" data-id="${escHtml(name)}">Cancel</button>`;
         }
@@ -7809,7 +7870,7 @@
                 // Inline, not alert() (gate #860, F5): a modal here would
                 // block the rest of the table and is unreadable by a test.
                 if (cell) {
-                    cell.innerHTML = `<span style="color:var(--danger)">Failed to update ${escHtml(name)}: ${escHtml(err.message)}</span> ` +
+                    cell.innerHTML = `<span class="text-danger">Failed to update ${escHtml(name)}: ${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>`;
                 }
                 if (checkbox) checkbox.checked = !checked;
@@ -7882,7 +7943,7 @@
                 if (timeoutRaw !== '') {
                     const t = Number(timeoutRaw);
                     if (!Number.isInteger(t) || t < 1 || t > 86400) {
-                        resultEl.innerHTML = '<p style="color:var(--danger)">Timeout must be an integer between 1 and 86400.</p>';
+                        resultEl.innerHTML = '<p class="text-danger">Timeout must be an integer between 1 and 86400.</p>';
                         return;
                     }
                     body.timeout_seconds = t;
@@ -7897,7 +7958,7 @@
                 cancelEditJobForm();
                 loadSchedules();
             } catch (err) {
-                resultEl.innerHTML = `<p style="color:var(--danger)">Save failed: ${escHtml(err.message)}</p>`;
+                resultEl.innerHTML = `<p class="text-danger">Save failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -7916,7 +7977,7 @@
                 cancelEditJobForm();
                 loadSchedules();
             } catch (err) {
-                if (resultEl) resultEl.innerHTML = `<p style="color:var(--danger)">Save failed: ${escHtml(err.message)}</p>`;
+                if (resultEl) resultEl.innerHTML = `<p class="text-danger">Save failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -7930,7 +7991,7 @@
                 ? ' This job spends LLM credit or is a heavy rebuild &mdash; running it out of band still costs the same as its normal run.'
                 : '';
             cell.innerHTML =
-                `<span style="color:var(--warn)">Request an out-of-band run of ${escHtml(name)}?${warning}</span> ` +
+                `<span class="text-warn">Request an out-of-band run of ${escHtml(name)}?${warning}</span> ` +
                 `<button class="btn btn-sm btn-danger" data-action="runJob" data-id="${escHtml(name)}">Confirm run</button> ` +
                 `<button class="btn btn-ghost btn-sm" data-action="cancelRunJob" data-id="${escHtml(name)}">Cancel</button>`;
         }
@@ -7943,13 +8004,13 @@
             try {
                 const r = await postJSON(`/admin/jobs/${encodeURIComponent(name)}/run`, undefined);
                 if (cell) {
-                    cell.innerHTML = `<span style="color:var(--ok)">${escHtml(r.dispatcher_hint || 'Run requested.')}</span>`;
+                    cell.innerHTML = `<span class="text-ok">${escHtml(r.dispatcher_hint || 'Run requested.')}</span>`;
                 }
                 setTimeout(loadSchedules, 1500);
             } catch (err) {
                 if (cell) {
                     cell.innerHTML =
-                        `<span style="color:var(--danger)">Run request failed: ${escHtml(err.message)}</span> ` +
+                        `<span class="text-danger">Run request failed: ${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-sm btn-danger" data-action="confirmRunJob" data-id="${escHtml(name)}">Retry</button>`;
                 }
             }
@@ -7991,7 +8052,7 @@
                 }
                 totalEl.textContent = `${rows.length} open candidate${rows.length === 1 ? '' : 's'} (${data.count ?? all.length} total mined)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="7" style="color:var(--danger)">Failed to load candidates: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Failed to load candidates: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -8068,7 +8129,7 @@
             if (!cell) return;
             const c = tagCandidatesCache[candidateId];
             if (!c) {
-                cell.innerHTML = '<span style="color:var(--danger)">Candidate no longer listed -- refresh.</span>';
+                cell.innerHTML = '<span class="text-danger">Candidate no longer listed -- refresh.</span>';
                 return;
             }
             const risk = c.kind === 'domain_alias'
@@ -8082,7 +8143,7 @@
                   `existing content is never auto-tagged with domain at write time; it only reaches already-stored ` +
                   `content if an administrator later runs a separate, explicitly opted-in reprocessing pass.`;
             cell.innerHTML =
-                `<div style="color:var(--warn); margin-bottom:0.25rem; max-width:32rem">${risk}</div>` +
+                `<div class="text-warn" style="margin-bottom:0.25rem; max-width:32rem">${risk}</div>` +
                 `<button class="btn btn-sm" data-action="applyTagCandidate" data-id="${escHtml(candidateId)}">Confirm apply</button> ` +
                 `<button class="btn btn-ghost btn-sm" onclick="loadTagRuleCandidates()">Cancel</button>`;
         }
@@ -8091,7 +8152,7 @@
             const cell = document.getElementById('tagcand-actions-' + candidateId);
             const c = tagCandidatesCache[candidateId];
             if (!c) {
-                if (cell) cell.innerHTML = '<span style="color:var(--danger)">Candidate no longer listed -- refresh.</span>';
+                if (cell) cell.innerHTML = '<span class="text-danger">Candidate no longer listed -- refresh.</span>';
                 return;
             }
             if (cell) cell.innerHTML = loadingHtml('Applying...');
@@ -8109,7 +8170,7 @@
                 await loadTagRules();
             } catch (err) {
                 if (cell) {
-                    cell.innerHTML = `<span style="color:var(--danger)">Apply failed: ${escHtml(err.message)}</span> ` +
+                    cell.innerHTML = `<span class="text-danger">Apply failed: ${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-sm" data-action="applyTagCandidate" data-id="${escHtml(candidateId)}">Retry</button>`;
                 }
                 const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
@@ -8127,11 +8188,11 @@
             if (!cell) return;
             const c = tagCandidatesCache[candidateId];
             if (!c) {
-                cell.innerHTML = '<span style="color:var(--danger)">Candidate no longer listed -- refresh.</span>';
+                cell.innerHTML = '<span class="text-danger">Candidate no longer listed -- refresh.</span>';
                 return;
             }
             cell.innerHTML =
-                `<span style="color:var(--warn)">Dismiss <code>${escHtml(c.key)}</code> &rarr; ` +
+                `<span class="text-warn">Dismiss <code>${escHtml(c.key)}</code> &rarr; ` +
                 `<code>${escHtml(c.target)}</code>? A later mining run can resurface the same candidate as open ` +
                 `again &mdash; this only drops it from today's open list.</span> ` +
                 `<button class="btn btn-ghost btn-sm" data-action="dismissTagCandidate" data-id="${escHtml(candidateId)}">Confirm dismiss</button> ` +
@@ -8145,7 +8206,7 @@
                 await postJSON(`/classify/candidates/${encodeURIComponent(candidateId)}/dismiss`);
                 await loadTagRuleCandidates();
             } catch (err) {
-                if (cell) cell.innerHTML = `<span style="color:var(--danger)">Dismiss failed: ${escHtml(err.message)}</span>`;
+                if (cell) cell.innerHTML = `<span class="text-danger">Dismiss failed: ${escHtml(err.message)}</span>`;
             }
         }
 
@@ -8156,7 +8217,7 @@
         function confirmMineTagCandidates() {
             const resultEl = document.getElementById('tagrules-mine-result');
             resultEl.innerHTML =
-                '<p style="color:var(--warn)">Scan now for new keyword/alias candidates? This only proposes ' +
+                '<p class="text-warn">Scan now for new keyword/alias candidates? This only proposes ' +
                 'candidates for review above &mdash; nothing is written to any rule or document until you ' +
                 'explicitly apply one.</p>' +
                 '<button class="btn btn-sm" onclick="mineTagCandidates()">Confirm mine</button> ' +
@@ -8178,10 +8239,10 @@
                 const defaultsNote = (r.used_recommended_defaults || []).length > 0
                     ? ` (unreviewed defaults used for: ${r.used_recommended_defaults.map(escHtml).join(', ')})`
                     : '';
-                resultEl.innerHTML = `<p style="color:var(--ok)">Mined ${r.tag_keyword_count ?? 0} tag-keyword and ${r.domain_alias_count ?? 0} domain-alias candidate(s).${defaultsNote}</p>`;
+                resultEl.innerHTML = `<p class="text-ok">Mined ${r.tag_keyword_count ?? 0} tag-keyword and ${r.domain_alias_count ?? 0} domain-alias candidate(s).${defaultsNote}</p>`;
                 await loadTagRuleCandidates();
             } catch (err) {
-                resultEl.innerHTML = `<p style="color:var(--danger)">Mine failed: ${escHtml(err.message)}</p>`;
+                resultEl.innerHTML = `<p class="text-danger">Mine failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -8207,7 +8268,7 @@
                 }
                 totalEl.textContent = `${data.count ?? rows.length} effective rule${(data.count ?? rows.length) === 1 ? '' : 's'}`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="6" style="color:var(--danger)">Failed to load rules: ${escHtml(err.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="6" class="text-danger">Failed to load rules: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -8249,7 +8310,7 @@
             const cell = document.getElementById('tagrule-actions-' + id);
             const r = effectiveRulesCache[id];
             if (!r) {
-                if (cell) cell.innerHTML = '<span style="color:var(--danger)">Rule no longer listed -- refresh.</span>';
+                if (cell) cell.innerHTML = '<span class="text-danger">Rule no longer listed -- refresh.</span>';
                 return;
             }
             if (cell) cell.innerHTML = loadingHtml('Revoking...');
@@ -8258,7 +8319,7 @@
                 await loadEffectiveRules();
             } catch (err) {
                 if (cell) {
-                    cell.innerHTML = `<span style="color:var(--danger)">Revoke failed: ${escHtml(err.message)}</span> ` +
+                    cell.innerHTML = `<span class="text-danger">Revoke failed: ${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-sm btn-danger" data-action="confirmRevokeTagRule" data-id="${escHtml(id)}">Retry</button>`;
                 }
                 const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
@@ -8316,7 +8377,7 @@
                 .map(([consumer, tier]) => `<li>${escHtml(humanizeSettingName(consumer))}: ${tier ? `<code>${escHtml(tier)}</code>` : '<span class="field-hint">unrouted</span>'}</li>`)
                 .join('');
             const llmErrorHtml = data.llm_routes_error
-                ? `<p class="field-hint" style="color:var(--danger)">LLM routing is misconfigured: ${escHtml(data.llm_routes_error)}</p>`
+                ? `<p class="field-hint text-danger">LLM routing is misconfigured: ${escHtml(data.llm_routes_error)}</p>`
                 : '';
             el.innerHTML = `
                 <div class="info-grid">
@@ -8362,7 +8423,7 @@
                 renderRuntimePanel(data);
             } catch (err) {
                 renderAuthBanner(null);
-                if (el) el.innerHTML = `<p style="color:var(--danger)">Failed to load runtime info: ${escHtml(err.message)}</p>`;
+                if (el) el.innerHTML = `<p class="text-danger">Failed to load runtime info: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -8767,7 +8828,7 @@
             const keyInput = document.getElementById('setting-adminkey-' + name);
             const adminKey = keyInput ? keyInput.value.trim() : '';
             if (!adminKey) {
-                if (cell) cell.innerHTML = '<span style="color:var(--danger)">Admin key is required to save.</span>';
+                if (cell) cell.innerHTML = '<span class="text-danger">Admin key is required to save.</span>';
                 return;
             }
             const valueInput = document.getElementById('setting-value-' + name);
@@ -8778,7 +8839,7 @@
                 : (valueInput ? valueInput.value : '');
             const value = coerceSettingValue(spec, rawValue);
             if (value === null || (typeof value === 'number' && Number.isNaN(value))) {
-                if (cell) cell.innerHTML = `<span style="color:var(--danger)">Enter a valid ${escHtml(spec.type)} value (or use "Reset to default" to clear it).</span>`;
+                if (cell) cell.innerHTML = `<span class="text-danger">Enter a valid ${escHtml(spec.type)} value (or use "Reset to default" to clear it).</span>`;
                 return;
             }
             await runSettingWrite(name, value, adminKey, cell);
@@ -8789,7 +8850,7 @@
             const keyInput = document.getElementById('setting-adminkey-' + name);
             const adminKey = keyInput ? keyInput.value.trim() : '';
             if (!adminKey) {
-                if (cell) cell.innerHTML = '<span style="color:var(--danger)">Admin key is required to reset.</span>';
+                if (cell) cell.innerHTML = '<span class="text-danger">Admin key is required to reset.</span>';
                 return;
             }
             // A "Reset to default" sends value:null -- SETTINGS_UPDATE's own
@@ -8837,7 +8898,7 @@
             } catch (err) {
                 if (cell) {
                     cell.innerHTML =
-                        `<span style="color:var(--danger)">${escHtml(err.message)}</span> ` +
+                        `<span class="text-danger">${escHtml(err.message)}</span> ` +
                         `<button class="btn btn-ghost btn-sm" data-action="cancelSettingWrite" data-id="${escHtml(name)}">Dismiss</button>`;
                 }
                 // A 409 (degraded/stale store) carries store_degradation in

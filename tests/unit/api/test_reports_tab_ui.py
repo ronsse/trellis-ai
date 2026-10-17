@@ -119,7 +119,7 @@ def test_run_report_fetch_failure_renders_visible_error() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "outputEl.innerHTML" in catch_block
     assert "err.message" in catch_block
-    assert "color:var(--danger)" in catch_block
+    assert "text-danger" in catch_block  # pass 6: replaces color:var(--danger)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ def test_degraded_status_is_checked_before_the_generic_object_path() -> None:
     generic_object_idx = body.index("const scalarEntries = []")
     assert degraded_idx < generic_object_idx
     degraded_branch = _between(body, "=== 'degraded') {", "\n            }")
-    assert "color:var(--danger)" in degraded_branch
+    assert "text-danger" in degraded_branch  # pass 6: replaces color:var(--danger)
 
 
 # ---------------------------------------------------------------------------
