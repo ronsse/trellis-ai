@@ -594,12 +594,15 @@ class ClassPriorReplayReport(TrellisModel):
     #: pack — see ``notes``. A serving in ``still_served_by_other_axis``
     #: contributes nothing here: withhold frees none of its tokens.
     tokens_freed: int = 0
-    #: Matched servings the off pack's own ``rejected_items`` shows losing
-    #: a dedup to a copy of the same id on an axis outside ``config.axes``
-    #: (the shape :mod:`trellis.retrieve.withholding` calls a non-absence).
-    #: The gate is axis-scoped: withholding the configured-axis copy lets
-    #: that other copy win dedup and still serve the id, so it is neither
-    #: removed, nor a token saving, nor a helpful/unhelpful loss.
+    #: Matched servings for which the off pack's own ``rejected_items`` has
+    #: a dedup row for a copy of the same id on an axis outside
+    #: ``config.axes`` (the shape :mod:`trellis.retrieve.withholding` calls
+    #: a non-absence). The gate is axis-scoped: withholding the
+    #: configured-axis copy lets that other copy win dedup and may still
+    #: serve the id, so none of these count as removed, as a token saving,
+    #: or as a helpful/unhelpful loss. Under budget pressure that other
+    #: copy can still miss the cut, so this count is an upper bound on
+    #: survivals, not a tally of them.
     still_served_by_other_axis: int = 0
 
     notes: list[str] = Field(default_factory=list)
@@ -651,9 +654,11 @@ def _class_prior_notes(
             f"{still_served_by_other_axis} matched serving(s) are not "
             "counted as removed, as freed tokens, or as a helpful/unhelpful "
             "loss: the gate is axis-scoped, and the off pack's own "
-            "rejected_items shows the same id losing a dedup to a copy on "
-            "an axis outside config.axes, which withhold would still "
-            "serve. See still_served_by_other_axis."
+            "rejected_items has a dedup row for a copy of the same id on "
+            "an axis outside config.axes, which withhold may still serve. "
+            "Under budget pressure that copy can miss the cut, so this "
+            "count is an upper bound on survivals, not a tally of them. "
+            "See still_served_by_other_axis."
         )
     return notes
 

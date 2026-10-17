@@ -18,18 +18,25 @@ Three families, in the order they matter:
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from trellis.retrieve.class_prior import OFF, ClassPriorConfig
+from trellis.retrieve.excerpts import ContentFloorConfig
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.pack_replay import (
     ReplayPolicy,
     replay_class_prior,
     replay_pack_value,
 )
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS
+from trellis.retrieve.strategies import SearchStrategy
+from trellis.schemas.pack import PackBudget, PackItem
 from trellis.stores.base.event_log import Event, EventLog, EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
 class _FakeEventLog(EventLog):
@@ -621,3 +628,152 @@ def test_a_dedup_loss_on_a_configured_axis_does_not_suppress_removal() -> None:
     assert report.still_served_by_other_axis == 0
     assert report.helpful_lost == 1
     assert report.tokens_freed == 50
+
+
+# --------------------------------------------------------------------------
+# 4. The builder-to-replay contract, built end to end
+# --------------------------------------------------------------------------
+#
+# Every scenario above hand-builds the PACK_ASSEMBLED payload, so none of
+# them pins the one fact replay's ``_served_by_other_axis`` actually
+# depends on: that a dedup row in a real pack's own ``rejected_items``
+# carries the *loser's* ``strategy_source``, not the winner's
+# (``pack_builder.py``'s ``_deduplicate_tracked``). These two build the OFF
+# pack through the real ``PackBuilder``, write its event to a real event
+# log, and replay over it — closing that gap.
+
+
+def _axis_strategy(name: str, items: list[PackItem]) -> SearchStrategy:
+    """A fake axis whose ``search`` hands back a fresh copy of ``items`` —
+    a real strategy never returns the same :class:`PackItem` instance
+    twice, and dedup's "loser" bookkeeping must not depend on identity."""
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.side_effect = lambda *a, **k: [
+        item.model_copy(deep=True) for item in items
+    ]
+    return strategy
+
+
+def _conversation_item(
+    item_id: str, score: float, axis: str, *, noise: bool = False
+) -> PackItem:
+    metadata: dict[str, Any] = {
+        "source_strategy": axis,
+        "document_form": "conversation",
+    }
+    if noise:
+        metadata["content_tags"] = {"signal_quality": "noise"}
+    return PackItem(
+        item_id=item_id,
+        item_type="document",
+        excerpt=f"{item_id} distinct body words here " * 6,
+        relevance_score=score,
+        metadata=metadata,
+    )
+
+
+def _cite_unhelpful(log: SQLiteEventLog, pack_id: str, item_id: str) -> None:
+    log.append(
+        Event(
+            event_type=EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "rating": 0.2,
+                "success": False,
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": [item_id],
+            },
+        )
+    )
+
+
+def test_builder_dedup_row_feeds_replay_still_served_by_other_axis(
+    tmp_path: Path,
+) -> None:
+    """A conversation parent is found by keyword (~0.9) and by semantic
+    (~0.4); with ``axes={keyword}`` the keyword copy wins dedup and the
+    pack's own ``rejected_items`` records the semantic copy as the dedup
+    loser. Replaying withhold over that real event must report the item as
+    still served by the unconfigured axis, not as removed — it must fail
+    if ``pack_builder.py``'s dedup-loser row stamped the *winning* copy's
+    axis (``strategy_source=existing.strategy_source``) instead of the
+    loser's own.
+    """
+    strategies = [
+        _axis_strategy("keyword", [_conversation_item("conv", 0.9, "keyword")]),
+        _axis_strategy("semantic", [_conversation_item("conv", 0.4, "semantic")]),
+    ]
+    log = SQLiteEventLog(tmp_path / "events.db")
+    builder = PackBuilder(
+        strategies=strategies,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+        class_prior_config=ClassPriorConfig(mode="off", axes=frozenset({"keyword"})),
+    )
+    off_pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    assert [item.item_id for item in off_pack.items] == ["conv"]
+    rejected = off_pack.retrieval_report.rejected_items
+    assert [(r.item_id, r.reason, r.strategy_source) for r in rejected] == [
+        ("conv", "dedup", "semantic")
+    ]
+
+    events = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
+    assert len(events) == 1
+    pack_id = events[0].payload.get("pack_id") or events[0].entity_id
+    _cite_unhelpful(log, pack_id, "conv")
+
+    report = replay_class_prior(
+        log, config=ClassPriorConfig(mode="withhold", axes=frozenset({"keyword"}))
+    )
+
+    assert report.still_served_by_other_axis == 1
+    assert report.unhelpful_removed == 0
+    assert report.tokens_freed == 0
+
+
+def test_builder_noise_rejected_other_axis_copy_does_not_block_removal(
+    tmp_path: Path,
+) -> None:
+    """Converse shape: the semantic copy is rejected for a non-dedup
+    reason (noise), so dedup never runs between the two copies and the
+    keyword copy serves alone. Replaying withhold must then count the
+    citation as a removal — it must fail if the ``reason == "dedup"``
+    condition in ``_served_by_other_axis`` (``pack_replay.py``) were
+    deleted, since the surviving noise-rejected row would then be
+    (wrongly) read as a dedup loss on an axis outside ``config.axes``.
+    """
+    strategies = [
+        _axis_strategy("keyword", [_conversation_item("conv", 0.9, "keyword")]),
+        _axis_strategy(
+            "semantic", [_conversation_item("conv", 0.4, "semantic", noise=True)]
+        ),
+    ]
+    log = SQLiteEventLog(tmp_path / "events.db")
+    builder = PackBuilder(
+        strategies=strategies,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+        class_prior_config=ClassPriorConfig(mode="off", axes=frozenset({"keyword"})),
+    )
+    off_pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    assert [item.item_id for item in off_pack.items] == ["conv"]
+    rejected = off_pack.retrieval_report.rejected_items
+    assert [(r.item_id, r.reason, r.strategy_source) for r in rejected] == [
+        ("conv", "noise", "semantic")
+    ]
+
+    events = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
+    assert len(events) == 1
+    pack_id = events[0].payload.get("pack_id") or events[0].entity_id
+    _cite_unhelpful(log, pack_id, "conv")
+
+    report = replay_class_prior(
+        log, config=ClassPriorConfig(mode="withhold", axes=frozenset({"keyword"}))
+    )
+
+    assert report.unhelpful_removed == 1
+    assert report.still_served_by_other_axis == 0

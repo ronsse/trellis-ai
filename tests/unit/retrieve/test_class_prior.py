@@ -215,7 +215,9 @@ class TestResolveClassPriorConfig:
         assert config.axes == frozenset({"keyword", "not_a_real_axis"})
         lines = [e for e in logs if e["event"] == "class_prior_axes_env_unrecognised"]
         assert len(lines) == 1
-        assert lines[0]["names"] == ["not_a_real_axis"]
+        assert lines[0]["var"] == CLASS_PRIOR_AXES_ENV
+        assert lines[0]["unknown_count"] == 1
+        assert "names" not in lines[0]
 
     def test_axes_env_known_names_raise_no_warning(
         self, monkeypatch: pytest.MonkeyPatch
@@ -317,7 +319,8 @@ class TestResolveClassPriorConfig:
         lines = [e for e in logs if e["event"] == "class_prior_forms_env_unrecognised"]
         assert len(lines) == 1
         assert lines[0]["var"] == CLASS_PRIOR_FORMS_ENV
-        assert lines[0]["names"] == ["not_a_real_form"]
+        assert lines[0]["unknown_count"] == 1
+        assert "names" not in lines[0]
 
     def test_forms_env_known_names_raise_no_warning(
         self, monkeypatch: pytest.MonkeyPatch

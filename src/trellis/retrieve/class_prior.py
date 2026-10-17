@@ -71,12 +71,14 @@ are exactly what this gate must leave alone.
 **Modes.**
 
 * ``"off"`` (default) — no-op.
-* ``"withhold"`` — drops the item and records it as a
+* ``"withhold"`` — withholds the item from the configured axes
+  (:attr:`ClassPriorConfig.axes`) and records it as a
   :class:`~trellis.schemas.pack.RejectedItem` under
   :data:`CLASS_PRIOR_REJECTION_REASON`, a reason code distinct from
   ``noise``/``archived``/``demoted``/``superseded`` so
   :func:`~trellis.retrieve.withholding.summarize_withheld`'s first-reason
-  attribution can tell this gate's drops apart from every other one.
+  attribution can tell this gate's drops apart from every other one. An
+  unconfigured axis that found the same document may still serve it.
 
 There was a third mode, ``"demote"``, that rescaled ``relevance_score``
 instead of dropping the item. It was removed: production always wires the
@@ -239,7 +241,7 @@ def _warn_unknown_axes(axes: frozenset[str]) -> None:
         logger.warning(
             "class_prior_axes_env_unrecognised",
             var=CLASS_PRIOR_AXES_ENV,
-            names=unknown,
+            unknown_count=len(unknown),
         )
 
 
@@ -249,7 +251,7 @@ def _warn_unknown_forms(forms: frozenset[str]) -> None:
         logger.warning(
             "class_prior_forms_env_unrecognised",
             var=CLASS_PRIOR_FORMS_ENV,
-            names=unknown,
+            unknown_count=len(unknown),
         )
 
 
