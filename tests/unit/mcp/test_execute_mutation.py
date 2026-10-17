@@ -36,13 +36,36 @@ execute_mutation = unwrap_tool(_execute_mutation)
 
 
 @contextlib.contextmanager
-def _as_stdio() -> Iterator[None]:
-    """Simulate a stdio-shaped call: always exempt from the scope gate."""
+def _as_stdio(*, bearer_client_id: str | None = None) -> Iterator[None]:
+    """Simulate a stdio-shaped call: always exempt from the scope gate.
+
+    ``bearer_client_id``, when given, also installs an authenticated
+    bearer token (same mechanism ``_as_http`` uses) *alongside* the
+    stdio transport. Without it, a test proves nothing about whether
+    stdio detection actually short-circuits ``current_principal_id``
+    ahead of the token check: with no token present either way, deleting
+    the stdio branch would fall through to ``get_access_token() is
+    None`` and return ``None`` regardless, keeping the test green. With
+    a bearer installed, the stdio branch is the only thing standing
+    between the call and a derived ``mcp:<client_id>`` principal, so
+    removing it changes the observed behaviour.
+    """
     token = set_transport("stdio")
+    auth_token = None
+    if bearer_client_id is not None:
+        access_token = AccessToken(
+            token="opaque",  # noqa: S106 — placeholder, never read
+            client_id=bearer_client_id,
+            scopes=[SCOPE_MUTATE],
+            expires_at=None,
+        )
+        auth_token = auth_context_var.set(AuthenticatedUser(access_token))
     try:
         yield
     finally:
         reset_transport(token)
+        if auth_token is not None:
+            auth_context_var.reset(auth_token)
 
 
 @contextlib.contextmanager
@@ -1083,7 +1106,12 @@ class TestExecuteMutationRequestedByIsAuditedFromThePrincipal:
     ) -> None:
         """No principal to derive from (stdio) -- unchanged from before
 
-        ``current_principal_id`` existed.
+        ``current_principal_id`` existed. Carries a bearer token
+        alongside the stdio transport (see ``_as_stdio``'s docstring):
+        if ``current_principal_id`` ever lost its stdio early-return,
+        this token is what would let it derive
+        ``mcp:stdio-mutant-key`` instead of falling through to ``None``
+        by coincidence, and the assertion below would catch it.
         """
         graph = temp_registry.knowledge.graph_store
         source_id = graph.upsert_node(
@@ -1093,7 +1121,7 @@ class TestExecuteMutationRequestedByIsAuditedFromThePrincipal:
             node_id=None, node_type="concept", properties={"name": "s"}
         )
 
-        with _as_stdio():
+        with _as_stdio(bearer_client_id="stdio-mutant-key"):
             raw = execute_mutation(
                 operation="link.create",
                 args={

@@ -19,11 +19,14 @@ from trellis.mutate import (
 )
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import resolve_requested_by
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
+    BatchCommandBodyError,
     BatchCommandItem,
     BatchCommandRequest,
     BatchCommandResponse,
+    BatchOperationNameError,
 )
 
 logger = structlog.get_logger(__name__)
@@ -54,24 +57,6 @@ def _refused_operations(operations: list[Operation]) -> list[str]:
     """Wire values in *operations* that require the ``admin`` scope,
     deduplicated and sorted for a stable, readable 403 body."""
     return sorted({op.value for op in operations if requires_admin_scope(op)})
-
-
-def _resolve_requested_by(ctx: AuthContext, claimed: str) -> tuple[str, str | None]:
-    """The audit ``requested_by`` for this batch, and the body's own claim.
-
-    When a principal is authenticated (a real key, or the legacy shared
-    secret), the audit label is derived from it -- ``api:<key name or
-    id>`` -- never from the caller-chosen *claimed* body value, so a
-    careless or hostile body cannot forge who the audit trail blames.
-    With no principal (auth mode ``off``, or ``optional`` with no
-    credential presented) there is nothing to derive from, so current
-    behaviour is unchanged: *claimed* passes through verbatim and the
-    second element is ``None``.
-    """
-    principal = ctx.key_id or ctx.name
-    if principal is None:
-        return claimed, None
-    return f"api:{principal}", claimed
 
 
 def _build_command(
@@ -117,14 +102,13 @@ def _build_command(
         },
         422: {
             "description": (
-                "A pydantic body-validation failure, or a command names "
-                "an operation outside the Operation enum."
+                "A pydantic body-validation failure (BatchCommandBodyError -- "
+                "``detail`` is a list of field errors), or a command names "
+                "an operation outside the Operation enum "
+                "(BatchOperationNameError -- ``detail`` is a plain string "
+                "naming the bad value; see ``_parse_operation``)."
             ),
-            "content": {
-                "application/json": {
-                    "schema": {"$ref": "#/components/schemas/HTTPValidationError"}
-                }
-            },
+            "model": BatchCommandBodyError | BatchOperationNameError,
         },
     },
 )
@@ -146,8 +130,9 @@ def execute_batch(
     classify-rule writes) is refused whole, with no command executed, unless
     the caller's key carries the ``admin`` scope. ``requested_by`` is
     derived from the authenticated principal when one is present (see
-    :func:`_resolve_requested_by`); the body's own claim rides along as
-    each command's ``metadata["requested_by_claim"]``.
+    :func:`trellis_api.routes._principal.resolve_requested_by`); the
+    body's own claim rides along as each command's
+    ``metadata["requested_by_claim"]``.
     """
     operations = [_parse_operation(item.operation) for item in req.commands]
 
@@ -166,7 +151,7 @@ def execute_batch(
 
     executor = build_curate_executor(get_registry())
 
-    requested_by, requested_by_claim = _resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
 
     # Build Command objects from the request items
     commands = [

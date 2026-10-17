@@ -167,6 +167,36 @@ class TestListCandidates:
         resp = client.post("/api/v1/classify/candidates/does-not-exist/dismiss")
         assert resp.status_code == 404
 
+    def test_dismiss_nul_in_candidate_id_is_400_not_500(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Issue #869 F4: a NUL reaching the audit payload used to fail
+
+        inside ``event_log.emit`` (a Postgres ``jsonb`` column refuses
+        ``\\u0000`` outright -- SQLite accepts it, which is why this
+        failure mode was invisible to the default test run) and surface
+        as an uncaught 500. The route now checks the payload itself
+        before emitting, so the refusal is a clean 400 -- on every
+        backend, not just Postgres -- and nothing is ever written.
+        """
+        candidate_id = "bad\x00cand"
+        _emit_tag_keyword_candidate(registry, candidate_id=candidate_id)
+
+        # The NUL must be percent-encoded to form a valid URL at all (an
+        # HTTP client refuses a raw NUL in the request line); FastAPI
+        # decodes it straight back to ``"\x00"`` in the path parameter,
+        # which is the shape this guard exists to catch.
+        resp = client.post(
+            "/api/v1/classify/candidates/bad%00cand/dismiss",
+        )
+        assert resp.status_code == 400, resp.text
+        assert "NUL" in resp.json()["detail"]
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_CANDIDATE_DISMISSED, order="asc", limit=10
+        )
+        assert events == []
+
     def test_dismiss_spreads_identity_and_dismissed_by_prefers_key_id(
         self,
         client: TestClient,
@@ -195,6 +225,36 @@ class TestListCandidates:
         payload = events[-1].payload
         assert payload["key_id"] == key_id
         assert payload["dismissed_by"] == key_id
+
+    def test_dismiss_nul_in_key_name_is_400_not_500(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same issue #869 F4 guard, reached through ``key_name`` instead
+
+        of ``candidate_id``: an admin key minted with a NUL in its own
+        name (the ``dismissed_by``/``key_name`` fallback when no
+        ``key_id`` -- here both are present, but the payload walk checks
+        every field) lands in the audit payload the same way.
+        """
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, record = generate_api_key("bad\x00name", [SCOPE_ADMIN])
+        registry.operational.api_key_store.create(record)
+        _emit_tag_keyword_candidate(registry)
+
+        resp = client.post(
+            "/api/v1/classify/candidates/cand-1/dismiss",
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "NUL" in resp.json()["detail"]
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_CANDIDATE_DISMISSED, order="asc", limit=10
+        )
+        assert events == []
 
     def test_applied_candidate_reads_status_applied(
         self, client: TestClient, registry: StoreRegistry

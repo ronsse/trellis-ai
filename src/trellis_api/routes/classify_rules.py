@@ -68,6 +68,7 @@ from trellis.mutate import (
     Operation,
     build_classify_rules_executor,
 )
+from trellis.mutate.handlers import _find_unsafe_jsonb_string
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.base.event_log import Event, EventLog, EventType
@@ -701,17 +702,35 @@ def dismiss_classify_candidate(
     kind, _event = found
     identity = _audit_identity(ctx)
     dismissed_by = identity["key_id"] or identity["key_name"] or "unknown"
+    payload = {
+        "candidate_id": candidate_id,
+        "kind": kind,
+        "dismissed_by": dismissed_by,
+        **identity,
+    }
+    # No MutationExecutor on this path (a dismiss writes only this event,
+    # not a governed store), so nothing already runs
+    # ``_validate_jsonb_safe_payload``'s check for us -- the same NUL
+    # byte or unpaired UTF-16 surrogate it exists to catch would
+    # otherwise reach a Postgres ``jsonb`` column and fail the emit,
+    # answering 500 rather than 400 (issue #869 F4). Reuses the
+    # Apply/Revoke audit probe's own walker rather than re-deriving it.
+    unsafe = _find_unsafe_jsonb_string(payload)
+    if unsafe is not None:
+        path, value = unsafe
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"dismiss: audit payload {path} contains a NUL byte or "
+                f"an unpaired UTF-16 surrogate: {value!r}"
+            ),
+        )
     registry.operational.event_log.emit(
         EventType.CLASSIFY_CANDIDATE_DISMISSED,
         source="api:classify:dismiss",
         entity_id=candidate_id,
         entity_type=kind,
-        payload={
-            "candidate_id": candidate_id,
-            "kind": kind,
-            "dismissed_by": dismissed_by,
-            **identity,
-        },
+        payload=payload,
     )
     return ClassifyCandidateDismissResponse(
         status="ok",

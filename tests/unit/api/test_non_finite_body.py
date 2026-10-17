@@ -19,6 +19,11 @@ pins.
 The client is built by :func:`~trellis_api.app.create_app`, so "the handler
 exists" and "the handler is wired" are the same test.
 
+The same handler has a second echo-shaped defect (issue #869 F5): a lone
+UTF-16 surrogate instead of a non-finite float, answering 400 rather than
+422 because there is no finite-token substitute for an unparseable code
+point. ``TestLoneSurrogateAnswers400`` covers it.
+
 Every id here is synthetic.
 """
 
@@ -48,6 +53,8 @@ if TYPE_CHECKING:
 FEEDBACK = "/api/v1/feedback"
 PACK_FEEDBACK = "/api/v1/packs/pk-synthetic-1/feedback"
 MEASUREMENTS = "/api/v1/measurements"
+PRECEDENTS = "/api/v1/precedents"
+INGEST_BULK = "/api/v1/ingest/bulk"
 
 #: The bare tokens Python's ``json`` module accepts, sent exactly as written.
 NON_FINITE = ["NaN", "Infinity", "-Infinity"]
@@ -246,3 +253,55 @@ class TestMeasurementValue:
         [node] = registry.knowledge.graph_store.query(node_type=MEASUREMENT)
         assert node["properties"]["metric_value"] == 1e308
         assert registry.operational.event_log.count() > 0
+
+
+class TestLoneSurrogateAnswers400:
+    """A lone UTF-16 surrogate in any string field answers 400, not 500.
+
+    Issue #869 F5. pydantic-core rejects an escaped lone surrogate
+    (``"\\ud800"``) while decoding the JSON body into *any* ``str``
+    field, with a ``string_unicode`` error whose own ``input`` carries
+    the raw surrogate forward. FastAPI's default handler (and this
+    module's own ``request_validation_error_handler`` before this fix)
+    echoes that ``input`` back in the 422 body; ``JSONResponse.render``
+    calls ``str.encode("utf-8")`` on the result, which refuses a lone
+    surrogate outright ("surrogates not allowed") -- raising *while
+    building the error response*, past every handler, so the catch-all
+    answers 500.
+
+    The fix lives once in ``request_validation_error_handler`` (wired
+    for every route in :func:`trellis_api.app.create_app`), so any two
+    routes with a plain ``str`` body field prove it; one ingest route
+    (``/ingest/bulk``) and one curate route (``/precedents``) per the
+    brief. Neither route-specific try/except matters here -- the body
+    never reaches the route function at all.
+    """
+
+    def test_ingest_bulk_entity_name_answers_400_and_ingests_nothing(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        logs: list[dict[str, Any]],
+    ) -> None:
+        body = '{"entities": [{"entity_type": "service", "name": "\\ud800"}]}'
+        resp = _post(client, INGEST_BULK, body)
+        assert (resp.status_code, _unhandled(logs)) == (400, [])
+        # Naming the problem, never echoing the raw value.
+        detail = resp.json()["detail"]
+        assert "surrogate" in detail
+        assert "\ud800" not in resp.text
+        assert registry.operational.event_log.count() == 0
+
+    def test_precedents_title_answers_400_and_promotes_nothing(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        logs: list[dict[str, Any]],
+    ) -> None:
+        body = '{"trace_id": "tr-synthetic-1", "title": "\\ud800", "description": "d"}'
+        resp = _post(client, PRECEDENTS, body)
+        assert (resp.status_code, _unhandled(logs)) == (400, [])
+        detail = resp.json()["detail"]
+        assert "surrogate" in detail
+        assert "\ud800" not in resp.text
+        assert registry.operational.event_log.count() == 0

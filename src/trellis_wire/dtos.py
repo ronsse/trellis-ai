@@ -430,6 +430,41 @@ class BatchCommandResponse(WireModel):
     results: list[CommandResponse]
 
 
+class BatchCommandBodyErrorItem(WireModel):
+    """One pydantic field error, mirroring FastAPI's own validation-error shape."""
+
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class BatchCommandBodyError(WireModel):
+    """``/commands/batch`` 422: the request body failed pydantic validation.
+
+    Same shape as every other route's default 422 (FastAPI's own
+    ``HTTPValidationError``) -- declared separately here, rather than
+    reusing that name, because ``/commands/batch`` also documents a
+    second, differently-shaped 422 cause (:class:`BatchOperationNameError`)
+    under the same status code, via ``anyOf``.
+    """
+
+    detail: list[BatchCommandBodyErrorItem]
+
+
+class BatchOperationNameError(WireModel):
+    """``/commands/batch`` 422: a command named an operation outside the
+    :class:`~trellis.mutate.Operation` enum.
+
+    ``_parse_operation`` catches ``Operation(value)``'s ``ValueError`` and
+    raises a plain-string-``detail`` ``HTTPException`` naming the bad
+    value and the valid vocabulary -- not the list-of-field-errors shape
+    pydantic body validation produces, so it needs its own model rather
+    than a ``$ref`` to ``HTTPValidationError``.
+    """
+
+    detail: str
+
+
 # -- Bulk ingest (entities + edges + aliases in one request) --
 
 

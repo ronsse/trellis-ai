@@ -29,7 +29,15 @@ Four pieces wired into the FastAPI app from :func:`create_app`:
   ``allow_nan=False``, so an error echoing ``NaN`` or ``Infinity`` (both
   of which Python's ``json`` module parses) makes that 422 raise and the
   catch-all answer ``500 internal_error``. This handler writes a
-  non-finite float as its token.
+  non-finite float as its token. A NUL byte or an unpaired UTF-16
+  surrogate (issue #869 F5) is a second way the same ``detail[].input``
+  echo breaks rendering -- pydantic already rejects the value with a
+  ``string_unicode`` error, but that error's own ``input`` carries the
+  raw surrogate forward, and ``str.encode("utf-8")`` refuses a lone
+  surrogate outright (``allow_nan`` does not apply; there is no token to
+  substitute). This handler checks for that case first and answers 400
+  without building the 422 body at all, so the unsafe value never
+  reaches a renderer.
 
 Health and version probes pass through the middleware too; the
 overhead is a ULID + a contextvar bind, both microsecond-scale.
@@ -48,6 +56,7 @@ from fastapi.responses import JSONResponse
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.ids import generate_ulid
 from trellis.errors import ConfigError, TrellisError
+from trellis.mutate.handlers import _find_unsafe_jsonb_string
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -145,10 +154,36 @@ async def request_validation_error_handler(
     reaches the renderer, not only one in the field that failed. A finite
     float is returned unchanged, so every finite case is FastAPI's own
     response, byte for byte (``tests/unit/api/test_non_finite_body.py``).
+
+    A NUL byte or an unpaired UTF-16 surrogate anywhere in ``exc.errors()``
+    (issue #869 F5) is checked first and answered as 400 before any 422
+    body is built: unlike a non-finite float, there is no finite-float-style
+    substitute token for an unparseable code point, and the value must
+    never reach a response body at all (the caller already sent it; this
+    handler does not send it back). ``_find_unsafe_jsonb_string`` is the
+    same Postgres-``jsonb``-safety walker the Apply/Revoke audit probe and
+    the classify-candidate dismiss route use, reused here rather than
+    re-derived -- the hazard (a code point that cannot round-trip through
+    a storage or wire format) is the same one, just met earlier, before
+    pydantic's own rejection reaches the renderer.
     """
     # Registered only for RequestValidationError; the check narrows the
     # type Starlette's handler signature widens.
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    unsafe = _find_unsafe_jsonb_string(errors)
+    if unsafe is not None:
+        path, _value = unsafe
+        logger.warning("api_unsafe_request_body", path=path)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": (
+                    "request body contains a NUL byte or an unpaired "
+                    "UTF-16 surrogate that cannot be represented; the "
+                    "value is not echoed"
+                )
+            },
+        )
     detail = jsonable_encoder(errors, custom_encoder={float: _json_safe_float})
     return JSONResponse(status_code=422, content={"detail": detail})
 
