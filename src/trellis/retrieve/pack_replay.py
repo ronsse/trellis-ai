@@ -62,6 +62,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.pack_observations import join_pack_feedback
+from trellis.retrieve.class_prior import ClassPriorConfig
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
@@ -555,10 +556,269 @@ def _notes(
     return notes
 
 
+class ClassPriorReplayReport(TrellisModel):
+    """What :mod:`trellis.retrieve.class_prior` would have cost or saved,
+    replayed over packs already served.
+
+    Unlike :class:`ReplayReport`, this never re-runs the token-budget walk.
+    ``PACK_ASSEMBLED.budget_trace[]`` records a tokens-and-``included``
+    triple for *every* candidate the walk saw, served or not, but only a
+    served item's ``injected_items[]`` row carries the ``document_form``
+    and ``strategy_source`` this rule matches on — a candidate the walk
+    rejected on tokens alone leaves no trace of either. So the population
+    here is servings the original pack actually served, counted per
+    ``(pack_id, item_id)``, the same convention
+    :attr:`ReplayReport.helpful_items_total` uses; see ``notes`` for what
+    that forecloses.
+    """
+
+    window_days: int
+    #: ``mode=... forms=... axes=...``, from the
+    #: :class:`~trellis.retrieve.class_prior.ClassPriorConfig` replayed.
+    applied_config: str = ""
+    attributed_packs: int = 0
+    #: Servings whose ``document_form`` and axis (``strategy_source``) both
+    #: matched ``config`` — the population every count below is drawn from,
+    #: including the ``still_served_by_other_axis`` subset that withhold
+    #: would not actually remove.
+    matched_servings: int = 0
+    #: Matched servings cited helpful whose id carries no dedup copy on an
+    #: axis outside ``config.axes`` — these would no longer be served.
+    #: Excludes ``still_served_by_other_axis``.
+    helpful_lost: int = 0
+    #: Matched servings cited unhelpful under the same exclusion — the
+    #: removals the rule is for. Excludes ``still_served_by_other_axis``.
+    unhelpful_removed: int = 0
+    #: The gross token cost of every matched serving counted in
+    #: ``helpful_lost`` or ``unhelpful_removed``, summed. Not a repriced
+    #: pack — see ``notes``. A serving in ``still_served_by_other_axis``
+    #: contributes nothing here: withhold frees none of its tokens.
+    tokens_freed: int = 0
+    #: Matched servings for which the off pack's own ``rejected_items`` has
+    #: a dedup row for a copy of the same id on an axis outside
+    #: ``config.axes`` (the shape :mod:`trellis.retrieve.withholding` calls
+    #: a non-absence). The gate is axis-scoped: withholding the
+    #: configured-axis copy lets that other copy win dedup and may still
+    #: serve the id, so none of these count as removed, as a token saving,
+    #: or as a helpful/unhelpful loss. Under budget pressure that other
+    #: copy can still miss the cut, so this count is an upper bound on
+    #: survivals, not a tally of them.
+    still_served_by_other_axis: int = 0
+
+    notes: list[str] = Field(default_factory=list)
+
+
+def _class_prior_notes(
+    *,
+    matched_servings: int,
+    mode_is_off: bool,
+    saw_document_form: bool,
+    still_served_by_other_axis: int,
+) -> list[str]:
+    """Caveats that travel with the class-prior counts."""
+    if mode_is_off:
+        return [
+            (
+                'mode is "off": the counterfactual is identical to the '
+                "baseline by construction, so every count above is zero."
+            ),
+        ]
+    notes = [
+        (
+            "Counterfactual over the SAME packs and the SAME citations. "
+            "This arm classifies and counts already-served items; it does "
+            "not re-run the token-budget walk, so tokens_freed is the "
+            "gross cost of the matched servings, not a repriced pack. It "
+            "cannot say which item the freed budget would have admitted "
+            "instead, and it cannot grade one, because that item was "
+            "never served and nobody rated it."
+        ),
+    ]
+    if matched_servings == 0:
+        if not saw_document_form:
+            notes.append(
+                "No served item in the window carries a document_form at "
+                "all, so every count above is zero because there is no "
+                "history yet for this rule to grade, not because the rule "
+                "found nothing to do."
+            )
+        else:
+            notes.append(
+                "No served item in the window matched config.forms on an "
+                "axis in config.axes, so every count above is zero because "
+                "nothing was eligible, not because the rule found nothing "
+                "to do."
+            )
+    if still_served_by_other_axis:
+        notes.append(
+            f"{still_served_by_other_axis} matched serving(s) are not "
+            "counted as removed, as freed tokens, or as a helpful/unhelpful "
+            "loss: the gate is axis-scoped, and the off pack's own "
+            "rejected_items has a dedup row for a copy of the same id on "
+            "an axis outside config.axes, which withhold may still serve. "
+            "Under budget pressure that copy can miss the cut, so this "
+            "count is an upper bound on survivals, not a tally of them. "
+            "See still_served_by_other_axis."
+        )
+    return notes
+
+
+def replay_class_prior(
+    event_log: EventLog,
+    *,
+    config: ClassPriorConfig,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+) -> ClassPriorReplayReport:
+    """Price :mod:`trellis.retrieve.class_prior` over a window already served.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED`` and
+            ``FEEDBACK_RECORDED``.
+        config: The :class:`~trellis.retrieve.class_prior.ClassPriorConfig`
+            to replay — typically
+            :func:`~trellis.retrieve.class_prior.resolve_class_prior_config`'s
+            result, so the arm matches whatever the gate would actually do.
+        days: Look-back window, matching ``trellis analyze value``.
+        limit: Per-event-type scan limit.
+
+    Returns:
+        A :class:`ClassPriorReplayReport`. See its docstring and ``notes``
+        for what this arm cannot measure.
+    """
+    mode_is_off = config.mode == "off" or not config.forms or not config.axes
+    applied_config = (
+        f"mode={config.mode} forms={sorted(config.forms)} axes={sorted(config.axes)}"
+    )
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    feedback_events, pack_payloads, _ = join_pack_feedback(
+        event_log, since=since, limit=limit
+    )
+    flat_packs = {
+        pack_id: payload
+        for pack_id, payload in pack_payloads.items()
+        if payload.get("injected_items")
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    matched_servings = 0
+    helpful_lost = 0
+    unhelpful_removed = 0
+    tokens_freed = 0
+    still_served_by_other_axis = 0
+    saw_document_form = False
+
+    if not mode_is_off:
+        for pack_id in attributed:
+            payload = flat_packs[pack_id]
+            rows = [
+                row
+                for row in (payload.get("injected_items") or [])
+                if isinstance(row, Mapping) and isinstance(row.get("item_id"), str)
+            ]
+            if not rows:
+                continue
+            helpful = helpful_by_pack.get(pack_id, set())
+            unhelpful = unhelpful_by_pack.get(pack_id, set())
+            rejected_rows = [
+                r
+                for r in (payload.get("rejected_items") or [])
+                if isinstance(r, Mapping)
+            ]
+
+            def _matched(row: Mapping[str, Any]) -> bool:
+                form = row.get("document_form")
+                axis = row.get("strategy_source")
+                return (
+                    isinstance(form, str)
+                    and form in config.forms
+                    and isinstance(axis, str)
+                    and axis in config.axes
+                )
+
+            def _served_by_other_axis(
+                item_id: str,
+                *,
+                rejected_rows: list[Mapping[str, Any]] = rejected_rows,
+            ) -> bool:
+                """``True`` when the pack's own dedup shows another axis's
+                copy of ``item_id`` losing to the configured-axis one.
+
+                Withholding the configured-axis copy removes it from
+                dedup's contest, so that losing copy — on an axis outside
+                ``config.axes`` — would win instead and the id would still
+                be served. The gate is axis-scoped by design (see
+                ``trellis.retrieve.withholding``'s ``NON_ABSENCE_REASONS``
+                treatment of the same ``dedup`` row): only a ``dedup``
+                rejection on an axis the config does not touch means the
+                id survives; any other reason, or a loser inside
+                ``config.axes``, says nothing about what withhold would do.
+
+                ``rejected_rows`` is bound as a default argument, not read
+                from the enclosing loop, so this closure cannot drift onto
+                a later pack's rows (ruff B023).
+                """
+                return any(
+                    r.get("item_id") == item_id
+                    and r.get("reason") == "dedup"
+                    and isinstance(r.get("strategy_source"), str)
+                    and r["strategy_source"] not in config.axes
+                    for r in rejected_rows
+                )
+
+            for row in rows:
+                if isinstance(row.get("document_form"), str):
+                    saw_document_form = True
+                if not _matched(row):
+                    continue
+                item_id = row["item_id"]
+                matched_servings += 1
+                if _served_by_other_axis(item_id):
+                    still_served_by_other_axis += 1
+                    continue
+                raw_tokens = row.get("estimated_tokens")
+                if isinstance(raw_tokens, int | float):
+                    tokens_freed += int(raw_tokens)
+                if item_id in helpful:
+                    helpful_lost += 1
+                elif item_id in unhelpful:
+                    unhelpful_removed += 1
+
+    report = ClassPriorReplayReport(
+        window_days=days,
+        applied_config=applied_config,
+        attributed_packs=len(attributed),
+        matched_servings=matched_servings,
+        helpful_lost=helpful_lost,
+        unhelpful_removed=unhelpful_removed,
+        tokens_freed=tokens_freed,
+        still_served_by_other_axis=still_served_by_other_axis,
+        notes=_class_prior_notes(
+            matched_servings=matched_servings,
+            mode_is_off=mode_is_off,
+            still_served_by_other_axis=still_served_by_other_axis,
+            saw_document_form=saw_document_form,
+        ),
+    )
+    logger.debug(
+        "pack_value_class_prior_replayed",
+        window_days=days,
+        applied_config=applied_config,
+        attributed_packs=report.attributed_packs,
+        matched_servings=matched_servings,
+    )
+    return report
+
+
 __all__ = [
     "EXCERPT_MAX_CHARS",
+    "ClassPriorReplayReport",
     "ReplayArm",
     "ReplayPolicy",
     "ReplayReport",
+    "replay_class_prior",
     "replay_pack_value",
 ]

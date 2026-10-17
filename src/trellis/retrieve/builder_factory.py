@@ -31,6 +31,7 @@ import structlog
 
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
+from trellis.retrieve.class_prior import resolve_class_prior_config
 from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS, DisclosureConfig
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_builder import (
@@ -262,6 +263,12 @@ def build_pack_builder(
         # advisory-serving kill switch (#settings-store PR 2/2) — see
         # ``SettingSpec(name="filter_legacy_advisories")``.
         filter_legacy_advisories=_filter_legacy_advisories_enabled(settings=settings),
+        # Default-off class prior for one document form (see
+        # trellis.retrieve.class_prior) — resolved once, with settings,
+        # same shape as the two knobs above. Every surface that goes
+        # through this factory gets the gate wired in, even while every
+        # shipped default keeps it a no-op.
+        class_prior_config=resolve_class_prior_config(settings=settings),
     )
 
 
