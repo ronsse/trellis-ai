@@ -17,6 +17,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from trellis.core.base import utc_now
 from trellis.feedback.recording import _feedback_id_in_event_log
 from trellis.stores.base.event_log import EventType
@@ -316,6 +318,27 @@ def test_has_idempotency_key_finds_legacy_raw_row(tmp_path: Path) -> None:
         store._conn.commit()
         assert store.has_idempotency_key("key\x00one") is True
         assert store.has_idempotency_key("key") is False
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("value", [float("nan"), 7])
+def test_non_str_payload_filter_value_degrades_without_raising(
+    tmp_path: Path, value: object
+) -> None:
+    """``payload_filters`` is typed ``dict[str, str]``, but a caller can
+    still hand it a non-``str`` value. Regression guard for
+    ``_scrub_match_clause``: before its ``isinstance`` guard, a float NaN
+    reached ``value.encode("utf-8")`` (``scrub_jsonb_unsafe`` leaves a
+    non-``str`` value untouched, and ``nan != nan`` skips the
+    ``scrubbed == value`` shortcut that every other non-``str`` value
+    takes) and raised ``AttributeError``, since ``float`` has no
+    ``.encode``. Both shapes must instead degrade to no match.
+    """
+    store = SQLiteEventLog(tmp_path / "events.db")
+    try:
+        store.emit(EventType.PACK_ASSEMBLED, source="pack_builder", payload={"n": "x"})
+        assert store.get_events(payload_filters={"n": value}) == []
     finally:
         store.close()
 

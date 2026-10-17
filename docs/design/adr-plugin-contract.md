@@ -62,7 +62,9 @@ until the first consumer appears.
 An `event_log` plugin implements `_append`, not `append`: `EventLog.append`
 is the concrete scrubbing template every backend shares, and overriding it
 bypasses the NUL/lone-surrogate scrub the base class guarantees before a
-byte reaches storage.
+byte reaches storage. Defining `append` in a subclass body raises `TypeError`
+at class-creation time (`EventLog.__init_subclass__`), so this is enforced
+at import, not just at review.
 
 ### Entry-point value syntax
 

@@ -16,14 +16,24 @@ population floor from a hand read, never from the scan it guards
 
 Hand read, 2026-10: ``_BUILTIN_BACKENDS["operational"]["event_log"]``
 registers exactly three backends -- sqlite, postgres, null.
+
+This AST rule only sees the backends in that hand-read set, so it is
+blind to a subclass of an already-concrete backend and to an
+out-of-tree entry-point plugin. ``EventLog.__init_subclass__``
+(``src/trellis/stores/base/event_log.py``) closes both at class-creation
+time; this file stays for the readable, specific failure it gives on the
+builtin backends.
 """
 
 from __future__ import annotations
 
 import importlib
 
+import pytest
+
 from tests.ast_rules import assert_hand_read_floor
-from trellis.stores.base.event_log import EventLog
+from trellis.stores.base.event_log import Event, EventLog
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 #: Hand-read population: sqlite, postgres, null. Bump this, with a fresh
 #: hand count, when a fourth event_log backend is registered.
@@ -116,3 +126,38 @@ def test_append_is_concrete_and_append_underscore_is_abstract() -> None:
     assert "append" not in EventLog.__abstractmethods__
     assert "_append" in EventLog.__abstractmethods__
     assert callable(EventLog.append)
+
+
+# ---------------------------------------------------------------------------
+# Runtime companion to the AST rule above: EventLog.__init_subclass__ closes
+# the two gaps the hand-read backend set above is blind to -- a subclass of
+# an already-concrete backend, and an out-of-tree plugin neither this file
+# nor the hand-read count would ever see.
+# ---------------------------------------------------------------------------
+
+
+def test_direct_subclass_overriding_append_raises() -> None:
+    with pytest.raises(TypeError, match="append"):
+
+        class _Bad(EventLog):
+            def append(self, event: Event) -> None:
+                pass
+
+
+def test_subclass_of_a_concrete_backend_overriding_append_raises() -> None:
+    """The exact shape the AST rule above cannot see: a subclass of an
+    already-registered, already-concrete backend."""
+    with pytest.raises(TypeError, match="append"):
+
+        class _Bad(SQLiteEventLog):
+            def append(self, event: Event) -> None:
+                pass
+
+
+def test_subclass_defining_only_append_underscore_is_fine() -> None:
+    class _Fine(SQLiteEventLog):
+        def _append(self, event: Event) -> None:
+            super()._append(event)
+
+    assert "append" not in _Fine.__dict__
+    assert "_append" in _Fine.__dict__
