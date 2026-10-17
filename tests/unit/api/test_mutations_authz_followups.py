@@ -31,11 +31,11 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
-from trellis.auth import SCOPE_ADMIN, SCOPE_MUTATE, generate_api_key
+from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, generate_api_key
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
-from trellis_api.routes.mutations import _resolve_requested_by
+from trellis_api.routes._principal import resolve_requested_by
 
 # ---------------------------------------------------------------------------
 
@@ -152,6 +152,65 @@ class TestScopeRefusalIsLogged:
 
 
 # ---------------------------------------------------------------------------
+# /ingest/bulk's sibling scope refusal -- same defect class, same fix
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBulkScopeRefusalIsLogged:
+    """``ingest_bulk`` logs ``bulk_ingest_scope_refused`` the same way
+
+    ``execute_batch`` logs ``commands_batch_scope_refused`` above: level,
+    route, required scope and the refused operation -- never the key or
+    principal. Pinned on the fields and level, not the event name's
+    presence alone, so a change that keeps the key name but drops a
+    field (or demotes the level) still fails this test.
+    """
+
+    def test_a_403_refusal_writes_one_warning_naming_scope_and_operation(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_INGEST])
+
+        with capture_logs() as logs:
+            resp = client.post(
+                "/api/v1/ingest/bulk",
+                json={
+                    "aliases": [
+                        {
+                            "entity_id": "ent-1",
+                            "source_system": "crm",
+                            "raw_id": "raw-1",
+                        }
+                    ],
+                },
+                headers={"X-API-Key": token},
+            )
+        assert resp.status_code == 403, resp.text
+
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning"
+            and e["event"] == "bulk_ingest_scope_refused"
+        ]
+        assert len(warnings) == 1, logs
+        warning = warnings[0]
+        assert warning["route"] == "/ingest/bulk"
+        assert warning["required_scope"] == SCOPE_ADMIN
+        assert warning["operation"] == "alias.upsert"
+
+        # Never the key or principal.
+        for entry in logs:
+            rendered = repr(entry)
+            assert token not in rendered
+            assert key_id not in rendered
+
+
+# ---------------------------------------------------------------------------
 # Item 6: requested_by is audited from the principal, not the body
 # ---------------------------------------------------------------------------
 
@@ -184,6 +243,7 @@ class TestRequestedByIsAuditedFromThePrincipal:
         (event,) = _executed_events(registry)
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by"] != "attacker-chosen-label"
+        assert event.payload["requested_by_claim"] == "attacker-chosen-label"
 
     def test_with_auth_off_the_claimed_value_is_kept_unchanged(
         self, client: TestClient, registry: StoreRegistry
@@ -207,15 +267,15 @@ class TestRequestedByIsAuditedFromThePrincipal:
 
 
 class TestResolveRequestedByUnit:
-    """Direct coverage of ``_resolve_requested_by``'s two branches.
+    """Direct coverage of ``resolve_requested_by``'s two branches.
 
     The route-level tests above prove the audited identity; this proves
-    the claim-preservation contract that never reaches the generic
-    ``MUTATION_EXECUTED`` payload (``executor._emit_event`` only reads
-    ``command.requested_by``, never ``command.metadata`` -- true for
-    every operation without a bespoke semantic event, unlike
-    ``settings.py``'s ``SETTINGS_UPDATED``) but is still the thing #6
-    requires: the claim survives as a separate, clearly-labelled field.
+    the claim-preservation contract -- the claim survives as a separate,
+    clearly-labelled field (``command.metadata["requested_by_claim"]``),
+    which ``MutationExecutor`` now also copies onto the
+    ``MUTATION_EXECUTED``/``MUTATION_REJECTED`` event payload when
+    present (see ``test_policy_wiring.py`` and
+    ``test_requested_by_claim_on_events.py``).
     """
 
     def test_with_a_principal_the_claim_is_kept_separately(self) -> None:
@@ -224,7 +284,7 @@ class TestResolveRequestedByUnit:
         ctx = AuthContext(
             key_id="abc123", name=None, scopes=[SCOPE_MUTATE], mode="required"
         )
-        requested_by, claim = _resolve_requested_by(ctx, "someone-else")
+        requested_by, claim = resolve_requested_by(ctx, "someone-else")
         assert requested_by == "api:abc123"
         assert claim == "someone-else"
 
@@ -235,6 +295,6 @@ class TestResolveRequestedByUnit:
         from trellis_api.auth import AuthContext
 
         ctx = AuthContext(key_id=None, name=None, scopes=ALL_SCOPES, mode="off")
-        requested_by, claim = _resolve_requested_by(ctx, "anon-claim")
+        requested_by, claim = resolve_requested_by(ctx, "anon-claim")
         assert requested_by == "anon-claim"
         assert claim is None

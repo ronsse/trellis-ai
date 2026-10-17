@@ -58,6 +58,7 @@ from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import _scrub_claim
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import CommandResponse, SettingUpdateRequest
 
@@ -611,15 +612,23 @@ def update_setting(
     twice. ``req.requested_by`` is still recorded, but only as a
     separate *claimed* field (``args["requested_by_claim"]``), surfaced
     on the event as ``requested_by_claim`` rather than overwriting
-    ``changed_by``.
+    ``changed_by`` -- and only when the body actually set it
+    (``"requested_by" in req.model_fields_set``), so the DTO's own
+    ``"api:settings"`` default is never recorded as though the caller
+    claimed it.
     """
     principal = ctx.key_id or ctx.name or "unknown"
+    requested_by_claim = (
+        _scrub_claim(req.requested_by)
+        if "requested_by" in req.model_fields_set
+        else None
+    )
     cmd = Command(
         operation=Operation.SETTINGS_UPDATE,
         args={
             "name": name,
             "value": req.value,
-            "requested_by_claim": req.requested_by,
+            "requested_by_claim": requested_by_claim,
         },
         target_id=name,
         target_type="setting",
