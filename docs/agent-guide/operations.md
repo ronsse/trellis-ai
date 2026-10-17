@@ -1831,18 +1831,22 @@ Callers that omit `overridden_by` keep the older two-valued behaviour
 flag), so this is additive, not a breaking change to `describe()`'s shape.
 
 **`settings_live` tells you whether an override does anything yet.** The
-registry catalogs every tunable `write_config.py` knows about plus two
+registry catalogs every tunable `write_config.py` knows about plus
 retrieval-side knobs resolved outside it (`graph_seeding`,
-`filter_legacy_advisories`); it is not a claim that each one has a
-settings-aware enforcement site, only that this one does. Every registered
-knob now resolves env > settings > default at its real enforcement site —
-each per-knob reader (`classify/ingest.py`, `extract/memory_ingest_hook.py`,
+`filter_legacy_advisories`, `class_prior_mode`); it
+is not a claim that each one has a settings-aware enforcement site, only
+that this one does. Every registered knob now resolves env > settings >
+default at its real enforcement site — each per-knob reader
+(`classify/ingest.py`, `extract/memory_ingest_hook.py`,
 `extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
 `mcp/reconcile.py`, `mcp/server.py`) delegates to
-`write_config.resolve_write_behaviour()`, and `graph_seeding` /
+`write_config.resolve_write_behaviour()`, `graph_seeding` /
 `filter_legacy_advisories` each carry their own settings-aware read in
-`builder_factory.py` / `pack_builder.py` — so a settings override reaches
-runtime the moment you set one. The lone exception is
+`builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
+resolves the same way through
+`trellis.retrieve.class_prior.resolve_class_prior_config`, wired in by
+`builder_factory.py` — so a settings override reaches runtime the moment
+you set one. The lone exception is
 `minhash_seed_max_docs`: it is read once, lazily, at an MCP process's first
 `save_memory` call and cached for that process's lifetime, so a settings
 write after that first call has no effect until the next process starts.
@@ -2488,8 +2492,8 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `intent_family` | Canonical intent bucket, read by the metrics `group_by=intent_family` axis. Never null on a `PackBuilder`-assembled pack: when the caller supplies none it is derived via `normalize_intent_family(intent=...)`, which falls back to `general_context` rather than an empty value. |
 | `injected_item_ids` | The served set — and the **fallback** source for the `reference_rate` metric, not the first one: `compute_timeseries` reads the feedback payload's `items_served` and only uses this when that is empty. `PackFeedback.from_agent_signal` deliberately leaves `items_served` empty (cited ids are what the agent *referenced*, not what the pack contained), so agent-graded packs do land here. |
 | `injected_item_hashes` | `{item_id: hash}` of each item's **excerpt**, so a later build in the same session can re-serve an item whose content changed rather than suppressing it as already-seen (#258). Additive — older events without the key fall back to id-only suppression. |
-| `injected_items[]` | Per-item detail — `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** below. This is the per-item row the learning join reads. |
-| `rejected_items[]` | `{item_id, item_type, relevance_score, reason, strategy_source}`. Known `reason` values: `dedup`, `archived`, `noise`, `structural_filter`, `meta_activity_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`, `superseded` — `archived` and `noise` are the collect-seam gates #404 started recording; `superseded` is the pairwise gate below. Rows are per **(strategy, item)**, so one id retrieved by two axes and gated on both appears twice; the `withholding` summary counts distinct ids and is the per-item number. |
+| `injected_items[]` | Per-item detail — `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `document_form` (`trellis.schemas.document_metadata.document_form_of`, omitted when absent), `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** below. This is the per-item row the learning join reads, and `trellis.retrieve.pack_replay.replay_class_prior` reads `document_form` off it to grade the class-prior gate counterfactually over already-served items — it does not re-run the budget walk, since `budget_trace[]` carries no form for non-served candidates. The gate is axis-scoped, so a matched row for which the off pack has a dedup row for a copy of the same id on an axis outside `config.axes` (see `rejected_items[]` below) is counted under `still_served_by_other_axis`, not as removed: withhold would let that other copy win the pack instead. |
+| `rejected_items[]` | `{item_id, item_type, relevance_score, reason, strategy_source}`. Known `reason` values: `dedup`, `archived`, `noise`, `structural_filter`, `meta_activity_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`, `superseded`, `class_prior` — `archived` and `noise` are the collect-seam gates #404 started recording; `superseded` is the pairwise gate below; `class_prior` is `class_prior_mode="withhold"` dropping an imported-conversation-document candidate, a class-level prior rather than a per-item judgment (`trellis.retrieve.class_prior`), off by default. Withholds conversation parent documents; their chunks carry no document form and are never touched. On a sectioned pack this gate's rejections have no single section to be blamed on, so they are not copied into any `PackSection.retrieval_report` — they land in `SectionedPack.metadata["withholding"]` instead, same as the other pool-level gates. Rows are per **(strategy, item)**, so one id retrieved by two axes and gated on both appears twice; the `withholding` summary counts distinct ids and is the per-item number. |
 | `content_floor` | `{mode, min_distinct_words, penalty, exempt_item_types, penalized_count, penalized_item_ids, excluded_count, excluded_item_ids}`. Emitted even when nothing tripped, so "floor ran, nothing thin" is distinguishable from "floor never ran". |
 | `index_mode` | `true` when the pack was assembled for the one-line-per-item index rendering (`get_context(index=True)` / `search(index=True)`, #305) instead of excerpt bodies. Always present on packs built after #305; read it with a `False` default. **Branch on it before aggregating token numbers** — see the two rows below. |
 | `retrieval_phase` | `"pre_work"`, `"mid_task"`, `"post_hoc"`, or `null` when the caller stated none. Always present on packs built after this field was added; `null` is not "unknown", it is "not stated". A `post_hoc` pack — most often a stop hook retrieving after the work is already done — is a hindsight relevance check, not a pack that could have changed the outcome; exclude it before grading retrieval against a holdout. |
