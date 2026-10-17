@@ -377,6 +377,22 @@ class TestOnlyAHazardousIdIsPermanent:
     originates changes that; only the hazard check does.
     """
 
+    def test_a_dry_run_with_a_hazardous_row_first_saves_no_cursor(
+        self, registry, watermark_path
+    ) -> None:
+        from .conftest import make_trace
+
+        bad = make_trace(0).model_copy(update={"trace_id": "bad\x00trace"})
+        registry.operational.trace_store.append(bad)
+        registry.operational.trace_store.append(make_trace(1))
+
+        report = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+
+        assert report.skipped_invalid == 1
+        assert TraceEmbedWatermark(watermark_path).cursor is None
+
     def test_a_stage_one_rejection_for_an_honest_id_pins_the_cursor(
         self, registry, watermark_path, recorder, monkeypatch
     ) -> None:

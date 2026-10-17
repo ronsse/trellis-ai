@@ -142,9 +142,9 @@ class CommandBatch(VersionedModel):
 #: by reading every handler in ``mutate/handlers.py``: the value each key
 #: names is either minted fresh (``entity.create``'s ``entity_id`` and its
 #: ``entity_type`` -- stored verbatim as the node's ``node_type`` and
-#: compared exactly against ``"precedent"`` --, ``alias.upsert``'s owner
-#: ``entity_id`` and its external ``raw_id`` -- ``resolve_alias``'s lookup
-#: key --, ``link.create``'s edge endpoints and its ``edge_kind`` -- stored
+#: compared exactly against ``"precedent"`` -- and ``entity.update``'s
+#: ``entity_type``, stored the same way, ``alias.upsert``'s owner
+#: ``entity_id``, ``link.create``'s edge endpoints and its ``edge_kind`` -- stored
 #: as ``edge_type`` and filtered on exactly by ``get_edges`` --,
 #: ``precedent.promote``'s trace-sourced ``trace_id``) or read back later
 #: by an exact-match query against a stored event's ``entity_id``/payload
@@ -163,7 +163,12 @@ class CommandBatch(VersionedModel):
 #: -- leaving it out also keeps governed redaction able to purge a row an
 #: id-minting bug stored before this check existed); or the value is free
 #: text/classification, not an identifier (``alias.upsert``'s
-#: ``source_system``, every ``reason``/``name``/``description``). This
+#: ``source_system``, every ``reason``/``name``/``description``). One
+#: lookup key is left out on purpose: ``alias.upsert``'s ``raw_id``. The
+#: name-alias backfill (``mutate/name_aliases.py``) and ``entity.create``'s
+#: own alias binding derive it from the entity's free-text name, which may
+#: hold a NUL, so refusing it would fail every backfill pass for such an
+#: entity while the create path stores the same value anyway. This
 #: mapping's size has a hand-read floor (``tests/unit/mutate/test_commands.py``)
 #: so deleting an entry fails a test.
 #:
@@ -171,9 +176,10 @@ class CommandBatch(VersionedModel):
 #: rather than as a bare top-level string -- cannot be named here, because
 #: the scan below reads ``command.args.get(key)`` directly. Those are
 #: ``NESTED_ID_ARG_PATHS``'s job: ``trace.ingest``'s ``trace.trace_id``,
-#: ``evidence.ingest``'s ``evidence.doc_id``, ``entity.create``'s
-#: ``document_ids``, ``observation.record``'s ``observation.observation_id``
-#: and ``.subject_entity_id``, ``measurement.record``'s matching pair, and
+#: ``evidence.ingest``'s ``evidence.doc_id``, ``entity.create``'s and
+#: ``entity.update``'s ``document_ids``, ``observation.record``'s
+#: ``observation.observation_id`` and ``.subject_entity_id``,
+#: ``measurement.record``'s matching pair, and
 #: ``retention.restore``'s ``item_ids``. The one nested arg left
 #: deliberately unscanned is ``retention.prune``'s ``criteria``:
 #: ``RetentionCriteria`` carries no id field at all (``noise_documents``,
@@ -181,8 +187,8 @@ class CommandBatch(VersionedModel):
 #: ``max_items``), so there is nothing in it a hazard could occupy.
 ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
     Operation.ENTITY_CREATE: frozenset({"entity_id", "entity_type"}),
-    Operation.ENTITY_UPDATE: frozenset({"entity_id"}),
-    Operation.ALIAS_UPSERT: frozenset({"entity_id", "raw_id"}),
+    Operation.ENTITY_UPDATE: frozenset({"entity_id", "entity_type"}),
+    Operation.ALIAS_UPSERT: frozenset({"entity_id"}),
     Operation.LINK_CREATE: frozenset({"source_id", "target_id", "edge_kind"}),
     Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
     Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
@@ -206,7 +212,8 @@ ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
 #: vector store's key (``EvidenceIngestHandler`` -- ``evidence`` is always
 #: a dict there, never a model); ``entity.create``'s ``document_ids`` is a
 #: list of ids stored verbatim on the new node with no existence check
-#: (``EntityCreateHandler``); ``observation.record``'s
+#: (``EntityCreateHandler``), and ``entity.update``'s replaces it verbatim
+#: on the new version (``EntityUpdateHandler``); ``observation.record``'s
 #: ``observation.observation_id`` is the node's own id and
 #: ``.subject_entity_id`` is an edge endpoint (``ObservationRecordHandler``);
 #: ``measurement.record``'s matching pair plays the same two roles
@@ -218,6 +225,7 @@ NESTED_ID_ARG_PATHS: dict[Operation, frozenset[tuple[str, str | None]]] = {
     Operation.TRACE_INGEST: frozenset({("trace", "trace_id")}),
     Operation.EVIDENCE_INGEST: frozenset({("evidence", "doc_id")}),
     Operation.ENTITY_CREATE: frozenset({("document_ids", None)}),
+    Operation.ENTITY_UPDATE: frozenset({("document_ids", None)}),
     Operation.OBSERVATION_RECORD: frozenset(
         {("observation", "observation_id"), ("observation", "subject_entity_id")}
     ),
@@ -357,7 +365,7 @@ class OperationRegistry:
         for arg, inner_key in NESTED_ID_ARG_PATHS.get(command.operation, frozenset()):
             container = command.args.get(arg)
             if inner_key is None:
-                if not isinstance(container, list):
+                if not isinstance(container, (list, tuple)):
                     continue
                 unsafe.extend(
                     f"args[{arg!r}] contains a NUL byte or lone surrogate"

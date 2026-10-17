@@ -376,8 +376,8 @@ class TestIdBearingArgNulSafety:
         ``comment``; this does."""
         assert {
             Operation.ENTITY_CREATE: frozenset({"entity_id", "entity_type"}),
-            Operation.ENTITY_UPDATE: frozenset({"entity_id"}),
-            Operation.ALIAS_UPSERT: frozenset({"entity_id", "raw_id"}),
+            Operation.ENTITY_UPDATE: frozenset({"entity_id", "entity_type"}),
+            Operation.ALIAS_UPSERT: frozenset({"entity_id"}),
             Operation.LINK_CREATE: frozenset({"source_id", "target_id", "edge_kind"}),
             Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
             Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
@@ -429,6 +429,41 @@ class TestNestedIdArgPathsNulSafety:
         assert valid is True, f"{operation}/{arg}/{inner_key}: {errors}"
         assert errors == []
 
+    @pytest.mark.parametrize("container", [list, tuple])
+    def test_a_hazard_after_an_honest_list_element_is_refused(
+        self, registry: OperationRegistry, container: type
+    ) -> None:
+        args = _base_args(registry, Operation.ENTITY_CREATE)
+        args["document_ids"] = container(["honest", "also-honest", "bad\x00value"])
+        valid, errors = registry.validate(
+            Command(operation=Operation.ENTITY_CREATE, args=args)
+        )
+
+        assert valid is False
+        assert any("'document_ids'" in e for e in errors)
+
+    def test_a_nested_id_on_a_model_is_read_by_attribute(
+        self, registry: OperationRegistry
+    ) -> None:
+        """The surfaces that pass ``trace`` as a ``Trace`` model rather than
+        a dict reach the attribute branch, not ``Mapping.get``."""
+        from trellis.schemas.trace import Trace
+
+        trace = Trace.model_validate(
+            {
+                "trace_id": "bad\x00trace",
+                "source": "agent",
+                "intent": "x",
+                "context": {},
+            }
+        )
+        valid, errors = registry.validate(
+            Command(operation=Operation.TRACE_INGEST, args={"trace": trace})
+        )
+
+        assert valid is False
+        assert any("'trace'" in e and "'trace_id'" in e for e in errors)
+
     def test_retention_prune_criteria_is_not_scanned(self) -> None:
         """``criteria`` has no id field at all (see ``NESTED_ID_ARG_PATHS``'s
         docstring), so ``retention.prune`` is deliberately absent here."""
@@ -437,14 +472,15 @@ class TestNestedIdArgPathsNulSafety:
     def test_mapping_hand_read_floor(self) -> None:
         """Same discipline as ``TestIdBearingArgNulSafety``'s floor, for the
         nested mapping."""
-        assert len(NESTED_ID_ARG_PATHS) == 6
-        assert len(_NESTED_ID_PATHS) == 8
+        assert len(NESTED_ID_ARG_PATHS) == 7
+        assert len(_NESTED_ID_PATHS) == 9
 
     def test_mapping_is_pinned_by_full_content(self) -> None:
         assert {
             Operation.TRACE_INGEST: frozenset({("trace", "trace_id")}),
             Operation.EVIDENCE_INGEST: frozenset({("evidence", "doc_id")}),
             Operation.ENTITY_CREATE: frozenset({("document_ids", None)}),
+            Operation.ENTITY_UPDATE: frozenset({("document_ids", None)}),
             Operation.OBSERVATION_RECORD: frozenset(
                 {
                     ("observation", "observation_id"),

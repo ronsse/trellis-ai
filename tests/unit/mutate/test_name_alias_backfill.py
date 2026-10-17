@@ -186,6 +186,18 @@ class TestGovernedNameAliasBackfill:
         assert winner is not None
         assert winner["entity_id"] == "successor"
 
+    def test_a_name_holding_a_nul_still_binds(self, registry: StoreRegistry) -> None:
+        """An entity name is free text and may hold a NUL; the alias key is
+        derived from it, so Stage 1 must not refuse ``raw_id`` -- that would
+        fail every backfill pass for this entity."""
+        _add(registry, "alpha", "Foo\x00Bar")
+        graph = registry.knowledge.graph_store
+
+        report = backfill_name_aliases(graph, _executor(registry), max_nodes=1)
+
+        assert report.failed == 0
+        assert report.bound == 1
+
     def test_alias_write_outage_is_failed_not_skipped(
         self, registry: StoreRegistry, monkeypatch
     ) -> None:
