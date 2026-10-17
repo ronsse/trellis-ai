@@ -14,7 +14,11 @@ from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
-from trellis.core.vector_metadata import resolve_vector_store
+from trellis.core.vector_metadata import (
+    VectorSyncOutcome,
+    resolve_vector_store,
+    sync_vector_metadata_outcome,
+)
 from trellis.errors import (
     DegradedStoreWriteError,
     NotFoundError,
@@ -746,6 +750,14 @@ class PrecedentReinstateHandler:
             raise ValidationError(msg, errors=[msg], code="reinstate_reason_too_long")
 
         if command.requested_by == AUTO_DEMOTE_REQUESTED_BY:
+            # Defence in depth: the executor's unattended-writer roster
+            # (trellis.mutate.immutable_core.UNATTENDED_WRITERS) already
+            # permits this identity only Operation.PRECEDENT_DEMOTE, so a
+            # command naming it here is refused at Stage 1, before this
+            # handler ever runs — this branch is currently unreachable
+            # through that path. Kept rather than removed in case a
+            # future roster change ever widens that identity's allowed
+            # operations.
             msg = (
                 "precedent.reinstate is human-only; the automatic demotion "
                 "policy's identity may not reinstate any precedent"
@@ -2748,31 +2760,62 @@ def _sync_vector_lifecycle(
     ``command.metadata["handler_warnings"]``, which ``MutationExecutor``
     folds into the returned ``CommandResult.warnings`` (see
     ``_handler_warnings`` in ``executor.py``).
+
+    The actual get/merge/upsert is delegated to
+    :func:`~trellis.core.vector_metadata.sync_vector_metadata_outcome` —
+    the same mirror the classify layer uses for ``content_tags`` and
+    ``auto_importance`` — rather than repeated here: two writers maintaining
+    the same "read the row, merge one key, re-upsert unchanged" sequence is
+    exactly how ``MIRRORED_METADATA_KEYS`` split into two disjoint sets
+    before (see that module's docstring). ``keys=(LIFECYCLE_KEY,)`` narrows
+    the mirror to the one key this caller owns, so a row that also carries
+    ``content_tags``/``auto_importance`` is left untouched. Resolving the
+    store itself can still raise (a misconfigured backend) outside anything
+    ``sync_vector_metadata_outcome`` catches, since that function takes an
+    already-resolved store; it is folded into the same "failed" handling
+    here rather than treated as the separate, silent ``"no_store"`` outcome
+    :func:`~trellis.core.vector_metadata.resolve_vector_store` reports for a
+    *deployment with no vector store at all* — this function has never had
+    that quiet case, and keeps not having it.
     """
+    outcome: VectorSyncOutcome
     try:
         store = registry.knowledge.vector_store
-        row = store.get(item_id)
-        if row is None:
-            return
-        metadata = dict(row.get("metadata") or {})
-        metadata[LIFECYCLE_KEY] = lifecycle
-        store.upsert(item_id, row["vector"], metadata)
     except Exception:
         # Fail soft and loud: the document-store stamp is the authoritative
-        # record and has already been written. A vector backend outage must
-        # not roll back an archival, but it does leave the semantic path
-        # stale, so it is logged rather than swallowed.
-        logger.warning(
-            log_event,
-            item_id=item_id,
-            exc_info=True,
+        # record and has already been written. A vector backend outage
+        # must not roll back an archival, but it does leave the semantic
+        # path stale, so it is logged rather than swallowed. ``exc_info``
+        # is valid here because we are still inside the handler for the
+        # exception it reports.
+        logger.warning(log_event, item_id=item_id, exc_info=True)
+        outcome = "failed"
+    else:
+        outcome = sync_vector_metadata_outcome(
+            store, item_id, {LIFECYCLE_KEY: lifecycle}, keys=(LIFECYCLE_KEY,)
         )
-        if command is not None:
-            command.metadata.setdefault("handler_warnings", []).append(
-                f"{log_event}: vector row for {item_id} was not re-stamped; "
-                "the semantic path may continue serving a stale snapshot "
-                "until the next resync"
-            )
+        if outcome == "failed":
+            # No ``exc_info`` here: unlike the branch above, there is no
+            # exception live at this point to attach -- ``outcome`` is a
+            # sentinel the callee returned after already logging the real
+            # traceback itself (``vector_metadata_sync_failed`` in
+            # ``sync_vector_metadata_outcome``). This call records the
+            # verb-specific ``log_event`` the tests and
+            # ``handler_warnings`` below key on, not a second copy of the
+            # same traceback.
+            logger.warning(log_event, item_id=item_id)
+    if outcome != "failed":
+        # "synced" (re-stamped), "unchanged" (already agreed) and "absent"
+        # (no vector row -- structural nodes, never-embedded documents) are
+        # all non-errors here, same as the missing-row branch before this
+        # was delegated.
+        return
+    if command is not None:
+        command.metadata.setdefault("handler_warnings", []).append(
+            f"{log_event}: vector row for {item_id} was not re-stamped; "
+            "the semantic path may continue serving a stale snapshot "
+            "until the next resync"
+        )
 
 
 def _prune_message(

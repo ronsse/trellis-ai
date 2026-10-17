@@ -255,16 +255,27 @@ def _reset_embedder_resolve_failure_log_cache() -> Iterator[None]:
     (same key shape) and
     :func:`trellis.retrieve.strategies._warn_embedder_resolve_failed_once`
     (the sibling cache for #838's embedder-resolve branch in the same
-    module, same key shape — O7, #843 gate) are each a ``functools.cache``
-    so a persistently broken embedder, vector store, upsert or
-    semantic-axis init warns once per process, not once per call. Without
-    this reset, two tests across *any* file that hit a failure with the
-    same cause would see the second test's warning silently swallowed by
-    the first's cache entry — the same order-dependent flake
-    ``_reset_write_provenance`` above guards against for the
-    write-provenance stamp.
+    module, same key shape — O7, #843 gate),
+    :func:`trellis.learning.candidate_auto_promote._warn_mode_refused_in_settings_once`
+    and its by-value-copied sibling
+    :func:`trellis.learning.precedent_auto_demote._warn_mode_refused_in_settings_once`
+    (each keyed on ``(setting, stored_mode)``, same once-per-cause reason:
+    ``GET /settings`` resolves both families on every request) are each a
+    ``functools.cache`` so a persistently broken embedder, vector store,
+    upsert, semantic-axis init or refused stored mode warns once per
+    process, not once per call. Without this reset, two tests across
+    *any* file that hit a failure with the same cause would see the
+    second test's warning silently swallowed by the first's cache entry
+    — the same order-dependent flake ``_reset_write_provenance`` above
+    guards against for the write-provenance stamp.
     """
     from trellis.core.vector_metadata import _warn_vector_store_unavailable_once
+    from trellis.learning.candidate_auto_promote import (
+        _warn_mode_refused_in_settings_once as _warn_promote_mode_refused_once,
+    )
+    from trellis.learning.precedent_auto_demote import (
+        _warn_mode_refused_in_settings_once as _warn_demote_mode_refused_once,
+    )
     from trellis.retrieve.embed_ingest_hook import (
         _warn_resolve_failed_once,
         _warn_upsert_failed_once,
@@ -279,12 +290,16 @@ def _reset_embedder_resolve_failure_log_cache() -> Iterator[None]:
     _warn_vector_store_unavailable_once.cache_clear()
     _warn_semantic_search_init_failed_once.cache_clear()
     _warn_embedder_resolve_failed_once.cache_clear()
+    _warn_promote_mode_refused_once.cache_clear()
+    _warn_demote_mode_refused_once.cache_clear()
     yield
     _warn_resolve_failed_once.cache_clear()
     _warn_upsert_failed_once.cache_clear()
     _warn_vector_store_unavailable_once.cache_clear()
     _warn_semantic_search_init_failed_once.cache_clear()
     _warn_embedder_resolve_failed_once.cache_clear()
+    _warn_promote_mode_refused_once.cache_clear()
+    _warn_demote_mode_refused_once.cache_clear()
 
 
 @pytest.fixture(autouse=True)

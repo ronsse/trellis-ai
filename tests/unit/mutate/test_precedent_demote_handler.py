@@ -27,7 +27,7 @@ import pytest
 
 from trellis.errors import ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
-from trellis.mutate import build_curate_executor
+from trellis.mutate import build_curate_executor, handlers
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     AUTO_DEMOTE_REQUESTED_BY,
@@ -857,3 +857,82 @@ class TestVectorSyncFailureSurfacesAsAWarning:
             "precedent_reinstate_vector_lifecycle_sync_failed" in w
             for w in result.warnings
         )
+
+
+class TestVectorSyncRoutesThroughTheSharedMirror:
+    """The demote/reinstate vector stamp must go through the same mirror
+    the classify layer uses for ``content_tags``/``auto_importance``
+    (:func:`~trellis.core.vector_metadata.sync_vector_metadata_outcome`),
+    not a second, private get/merge/upsert sequence kept in sync by hand.
+
+    A revert to that private sequence would still pass every test in
+    ``TestVectorRowSyncOnDemoteAndReinstate`` above -- the row ends up
+    stamped either way, since both implementations produce the same
+    effect -- so this spies on the shared function directly instead of
+    inferring routing from an effect two implementations share.
+    """
+
+    @staticmethod
+    def _embed(registry: StoreRegistry, node_id: str) -> None:
+        registry.knowledge.vector_store.upsert(
+            node_id,
+            [0.1, 0.2, 0.3],
+            {"excerpt": f"excerpt of {node_id}", "content_tags": {}},
+        )
+
+    @staticmethod
+    def _spy_on_the_mirror(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        calls: list[tuple[str, tuple[str, ...]]] = []
+        real = handlers.sync_vector_metadata_outcome
+
+        def _wrapped(
+            store: Any, item_id: str, document_metadata: Any, *, keys: Any
+        ) -> Any:
+            calls.append((item_id, tuple(keys)))
+            return real(store, item_id, document_metadata, keys=keys)
+
+        monkeypatch.setattr(handlers, "sync_vector_metadata_outcome", _wrapped)
+        return calls
+
+    def test_demote_calls_the_shared_vector_metadata_mirror(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        calls = self._spy_on_the_mirror(monkeypatch)
+
+        build_curate_executor(registry).execute(_demote(node_id, reason="stale"))
+
+        assert calls == [(node_id, (LIFECYCLE_KEY,))], calls
+
+    def test_reinstate_calls_the_shared_vector_metadata_mirror(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        self._embed(registry, node_id)
+        executor = build_curate_executor(registry)
+        executor.execute(_demote(node_id, reason="stale"))
+        calls = self._spy_on_the_mirror(monkeypatch)
+
+        executor.execute(_reinstate(node_id, reason="back"))
+
+        assert calls == [(node_id, (LIFECYCLE_KEY,))], calls
+
+    def test_a_missing_vector_row_still_calls_the_shared_mirror(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No embedding at all: the mirror is still the one asked, and it
+        is the mirror's own "absent" outcome -- not a pre-check in the
+        handler -- that turns a missing row into a no-op.
+        """
+        node_id = _create_node(registry)
+        calls = self._spy_on_the_mirror(monkeypatch)
+
+        result = build_curate_executor(registry).execute(
+            _demote(node_id, reason="stale")
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert calls == [(node_id, (LIFECYCLE_KEY,))], calls
