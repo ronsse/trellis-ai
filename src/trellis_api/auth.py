@@ -42,7 +42,10 @@ API credentials") — the failure category (malformed / unknown /
 revoked / mismatch) is logged server-side only, so callers cannot
 probe which key ids exist.
 
-:func:`check_bind_is_safe` is the fail-closed bind check (#189): a
+:func:`check_bind_is_safe` is the fail-closed bind check (#189), run
+from :func:`trellis_api.app.create_app` so every entry point is
+covered — the CLI commands and the bare
+``uvicorn trellis_api.app:create_app --factory`` invocation alike: a
 non-loopback listener may only start in ``required`` mode, mirroring
 the posture ``trellis.mcp.auth.resolve_http_settings`` already takes
 for the MCP http transport. ``optional`` is refused here too — unlike
@@ -153,11 +156,14 @@ def _is_loopback(host: str) -> bool:
 def check_bind_is_safe(host: str, port: int) -> None:
     """Refuse a non-loopback bind unless auth is ``required`` (#189).
 
-    Both REST entry points — ``trellis serve`` (``trellis_api.app.main``)
-    and ``trellis admin serve`` (which now delegates to the same
-    function) — call this before ``uvicorn.run``. It reads the same
-    :func:`resolve_auth_mode` request handling uses, so the check and the
-    runtime can never disagree about the effective mode.
+    Called from :func:`trellis_api.app.create_app` — the one construction
+    point every entry point funnels through, including ``trellis serve``
+    / ``trellis admin serve`` (via ``trellis_api.app.main``) and the bare
+    ``uvicorn trellis_api.app:create_app --factory`` invocation, which
+    bypasses ``main`` entirely (there it checks ``TRELLIS_API_HOST``,
+    since uvicorn's own ``--host`` flag never reaches ``create_app``). It
+    reads the same :func:`resolve_auth_mode` request handling uses, so the
+    check and the runtime can never disagree about the effective mode.
 
     ``off`` and ``optional`` are both refused on a non-loopback host:
     without a presented credential, ``optional`` grants every scope just
