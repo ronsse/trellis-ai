@@ -2,14 +2,14 @@
 
 **Why a class, not an item.** Per-item noise tagging
 (:mod:`trellis.retrieve.noise`) is a judgment about one memory; this module
-is a judgment about a whole imported document *form* — e.g. every chunk
-:mod:`trellis.ingest_corpus.conversations` writes. Measured on the live
-store (counts only, no corpus content): imported conversation documents
+is a judgment about a whole imported document *form* — e.g. every parent
+document :mod:`trellis.ingest_corpus.conversations` writes. Measured on the
+live store (counts only, no corpus content): imported conversation documents
 took about 11% of pack tokens on the keyword axis while being marked
 helpful 0 of 83 times and unhelpful on 44% of rows in that slice, and only
 1.2% of these documents have ever been marked helpful at all. Per-item
-noise tagging cannot keep up — new conversation chunks arrive faster than
-it tags them. Out-of-sample, withholding the whole class on the keyword
+noise tagging cannot keep up — new conversation parent documents arrive
+faster than it tags them. Out-of-sample, withholding the whole class on the keyword
 axis removed 29-33% of later unhelpful marks and lost 0-0.2% of helpful
 ones; item-level demotion alone removed under 1%. Other namespaces
 (captures, bare memories) are helpful 8-25% of the time, so this prior
@@ -105,6 +105,7 @@ from typing import Any, Literal
 
 import structlog
 
+from trellis.retrieve.semantic_seeds import ENTITY_SUMMARY_DOCUMENT_FORM
 from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import PackItem, RejectedItem
 
@@ -128,6 +129,10 @@ CLASS_PRIOR_MODE_ENV = "TRELLIS_CLASS_PRIOR_MODE"
 #: settings-store entry the way ``mode`` is — see
 #: ``src/trellis/core/settings_registry.py``'s module docstring and the
 #: ``class_prior_mode`` entry there.
+#: Case-insensitive, the same as the axes knob below: each name is
+#: lower-cased before matching, with a warning (not a refusal — document
+#: forms are open vocabulary) when a normalised name is outside
+#: :data:`KNOWN_FORMS`.
 CLASS_PRIOR_FORMS_ENV = "TRELLIS_CLASS_PRIOR_FORMS"
 #: Comma-separated retrieval axis names (``keyword``, ``semantic``, ``graph``).
 #: Case-insensitive: each name is lower-cased before matching, with a
@@ -148,6 +153,16 @@ DEFAULT_AXES: frozenset[str] = frozenset({"keyword"})
 #: strategy set itself stays open (see the module docstring), so this is
 #: advisory, never a closed enum :func:`apply_class_prior` enforces.
 KNOWN_AXES: frozenset[str] = frozenset({"keyword", "semantic", "graph"})
+
+#: The document forms ingest handlers in this repo are known to stamp,
+#: used only to decide whether to log a warning on a form that matches
+#: none of them — ``document_form`` is open vocabulary (see
+#: ``trellis.schemas.document_metadata``), so this is advisory, never a
+#: closed enum :func:`apply_class_prior` enforces, the same posture
+#: :data:`KNOWN_AXES` takes for strategy names.
+KNOWN_FORMS: frozenset[str] = frozenset(
+    {CONVERSATION_DOCUMENT_FORM, ENTITY_SUMMARY_DOCUMENT_FORM}
+)
 
 
 @dataclass(frozen=True)
@@ -202,7 +217,11 @@ def resolve_class_prior_config(
     mode = _resolve_mode(settings)
 
     forms_raw = os.environ.get(CLASS_PRIOR_FORMS_ENV, "").strip()
-    forms = _parse_csv(forms_raw) if forms_raw else DEFAULT_FORMS
+    if forms_raw:
+        forms = frozenset(name.lower() for name in _parse_csv(forms_raw))
+        _warn_unknown_forms(forms)
+    else:
+        forms = DEFAULT_FORMS
 
     axes_raw = os.environ.get(CLASS_PRIOR_AXES_ENV, "").strip()
     if axes_raw:
@@ -224,6 +243,16 @@ def _warn_unknown_axes(axes: frozenset[str]) -> None:
         )
 
 
+def _warn_unknown_forms(forms: frozenset[str]) -> None:
+    unknown = sorted(forms - KNOWN_FORMS)
+    if unknown:
+        logger.warning(
+            "class_prior_forms_env_unrecognised",
+            var=CLASS_PRIOR_FORMS_ENV,
+            names=unknown,
+        )
+
+
 def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
     raw = os.environ.get(CLASS_PRIOR_MODE_ENV, "").strip().lower()
     if raw:
@@ -234,15 +263,23 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
             # docstring); never resolve to withhold for it.
             logger.warning("class_prior_mode_demote_removed", var=CLASS_PRIOR_MODE_ENV)
             return "off"
+        # Name the variable, never the value it held — see the module's
+        # callers for why an unrecognised config value does not belong in
+        # a log line.
         logger.warning(
             "class_prior_mode_env_unrecognised",
             var=CLASS_PRIOR_MODE_ENV,
-            value=raw,
             effective="off",
         )
         return "off"
-    value = (settings or {}).get(CLASS_PRIOR_MODE_SETTING)
-    if isinstance(value, str):
+    raw_value = (settings or {}).get(CLASS_PRIOR_MODE_SETTING)
+    # Normalised the same way as the env var above (strip + lowercase) so
+    # a stored "WITHHOLD" or " demote " is read the same as its env
+    # counterpart. This is read-side robustness only — the governed PUT
+    # path that writes this setting still refuses a non-canonical
+    # spelling with 400; normalising here never papers over that refusal.
+    value = raw_value.strip().lower() if isinstance(raw_value, str) else ""
+    if value:
         if value in _VALID_MODES:
             return value  # type: ignore[return-value]
         if value == "demote":

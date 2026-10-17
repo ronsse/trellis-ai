@@ -332,12 +332,18 @@ def test_degenerate_policies_are_refused(kwargs: dict[str, int]) -> None:
 def _class_prior_pack_event(
     pack_id: str,
     rows: list[dict[str, Any]],
+    *,
+    rejected: list[dict[str, Any]] | None = None,
 ) -> Event:
     """A flat PACK_ASSEMBLED whose ``injected_items`` carry the extra
     ``document_form`` field :func:`replay_class_prior` reads. Each row:
     ``item_id``, ``form``, ``axis``, ``tokens``, ``score``, ``rank`` — the
     unused ``score``/``rank`` keys are dead data callers may still pass,
     kept only so existing fixtures need no trimming.
+
+    ``rejected`` mirrors the pack's own ``rejected_items[]`` (each row:
+    ``item_id``, ``reason``, ``axis``) for scenarios where a losing
+    duplicate on another axis is on record.
     """
     return Event(
         event_type=EventType.PACK_ASSEMBLED,
@@ -356,6 +362,16 @@ def _class_prior_pack_event(
                     "document_form": row["form"],
                 }
                 for row in rows
+            ],
+            "rejected_items": [
+                {
+                    "item_id": row["item_id"],
+                    "item_type": "document",
+                    "relevance_score": 0.0,
+                    "reason": row["reason"],
+                    "strategy_source": row["axis"],
+                }
+                for row in (rejected or [])
             ],
             "budget_trace": [],
         },
@@ -531,3 +547,77 @@ def test_no_document_form_in_the_window_says_no_history_yet_not_nothing_eligible
     assert report.matched_servings == 0
     assert any("no history yet" in note for note in report.notes)
     assert not any("nothing was eligible" in note for note in report.notes)
+
+
+def test_a_serving_still_served_by_another_axis_is_not_counted_as_removed() -> None:
+    """The gate is axis-scoped: withholding the configured-axis copy of a
+    matched item does not remove it from the pack when the pack's own
+    dedup record shows another, unconfigured axis's copy losing to it. A
+    matched serving in that shape must not count as removed, must not
+    free its tokens, and must not count as helpful lost or unhelpful
+    removed — whatever the feedback said — and must be counted separately.
+    """
+    config = ClassPriorConfig(mode="withhold")  # axes default: {"keyword"}
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                }
+            ],
+            rejected=[{"item_id": "c1", "reason": "dedup", "axis": "semantic"}],
+        )
+    )
+    feedback = _feedback_event("pack-0", [])
+    feedback.payload["unhelpful_item_ids"] = ["c1"]
+    log.append(feedback)
+
+    report = replay_class_prior(log, config=config)
+
+    assert report.matched_servings == 1
+    assert report.still_served_by_other_axis == 1
+    assert report.helpful_lost == 0
+    assert report.unhelpful_removed == 0
+    assert report.tokens_freed == 0
+    assert any("still_served_by_other_axis" in note for note in report.notes)
+
+
+def test_a_dedup_loss_on_a_configured_axis_does_not_suppress_removal() -> None:
+    """The exclusion is specific to a losing copy *outside* config.axes.
+    A dedup row whose strategy_source is itself inside config.axes (e.g.
+    two keyword-axis copies of the same id) says nothing about another
+    axis rescuing the item, so the serving still counts as removed.
+    """
+    config = ClassPriorConfig(mode="withhold")  # axes default: {"keyword"}
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                }
+            ],
+            rejected=[{"item_id": "c1", "reason": "dedup", "axis": "keyword"}],
+        )
+    )
+    log.append(_feedback_event("pack-0", ["c1"]))
+
+    report = replay_class_prior(log, config=config)
+
+    assert report.matched_servings == 1
+    assert report.still_served_by_other_axis == 0
+    assert report.helpful_lost == 1
+    assert report.tokens_freed == 50

@@ -578,15 +578,29 @@ class ClassPriorReplayReport(TrellisModel):
     applied_config: str = ""
     attributed_packs: int = 0
     #: Servings whose ``document_form`` and axis (``strategy_source``) both
-    #: matched ``config`` — the population every count below is drawn from.
+    #: matched ``config`` — the population every count below is drawn from,
+    #: including the ``still_served_by_other_axis`` subset that withhold
+    #: would not actually remove.
     matched_servings: int = 0
-    #: Matched servings cited helpful. These would no longer be served.
+    #: Matched servings cited helpful whose id carries no dedup copy on an
+    #: axis outside ``config.axes`` — these would no longer be served.
+    #: Excludes ``still_served_by_other_axis``.
     helpful_lost: int = 0
-    #: Matched servings cited unhelpful — the removals the rule is for.
+    #: Matched servings cited unhelpful under the same exclusion — the
+    #: removals the rule is for. Excludes ``still_served_by_other_axis``.
     unhelpful_removed: int = 0
-    #: The gross token cost of every matched serving, summed. Not a
-    #: repriced pack — see ``notes``.
+    #: The gross token cost of every matched serving counted in
+    #: ``helpful_lost`` or ``unhelpful_removed``, summed. Not a repriced
+    #: pack — see ``notes``. A serving in ``still_served_by_other_axis``
+    #: contributes nothing here: withhold frees none of its tokens.
     tokens_freed: int = 0
+    #: Matched servings the off pack's own ``rejected_items`` shows losing
+    #: a dedup to a copy of the same id on an axis outside ``config.axes``
+    #: (the shape :mod:`trellis.retrieve.withholding` calls a non-absence).
+    #: The gate is axis-scoped: withholding the configured-axis copy lets
+    #: that other copy win dedup and still serve the id, so it is neither
+    #: removed, nor a token saving, nor a helpful/unhelpful loss.
+    still_served_by_other_axis: int = 0
 
     notes: list[str] = Field(default_factory=list)
 
@@ -596,6 +610,7 @@ def _class_prior_notes(
     matched_servings: int,
     mode_is_off: bool,
     saw_document_form: bool,
+    still_served_by_other_axis: int,
 ) -> list[str]:
     """Caveats that travel with the class-prior counts."""
     if mode_is_off:
@@ -631,6 +646,15 @@ def _class_prior_notes(
                 "nothing was eligible, not because the rule found nothing "
                 "to do."
             )
+    if still_served_by_other_axis:
+        notes.append(
+            f"{still_served_by_other_axis} matched serving(s) are not "
+            "counted as removed, as freed tokens, or as a helpful/unhelpful "
+            "loss: the gate is axis-scoped, and the off pack's own "
+            "rejected_items shows the same id losing a dedup to a copy on "
+            "an axis outside config.axes, which withhold would still "
+            "serve. See still_served_by_other_axis."
+        )
     return notes
 
 
@@ -679,6 +703,7 @@ def replay_class_prior(
     helpful_lost = 0
     unhelpful_removed = 0
     tokens_freed = 0
+    still_served_by_other_axis = 0
     saw_document_form = False
 
     if not mode_is_off:
@@ -693,6 +718,11 @@ def replay_class_prior(
                 continue
             helpful = helpful_by_pack.get(pack_id, set())
             unhelpful = unhelpful_by_pack.get(pack_id, set())
+            rejected_rows = [
+                r
+                for r in (payload.get("rejected_items") or [])
+                if isinstance(r, Mapping)
+            ]
 
             def _matched(row: Mapping[str, Any]) -> bool:
                 form = row.get("document_form")
@@ -704,6 +734,36 @@ def replay_class_prior(
                     and axis in config.axes
                 )
 
+            def _served_by_other_axis(
+                item_id: str,
+                *,
+                rejected_rows: list[Mapping[str, Any]] = rejected_rows,
+            ) -> bool:
+                """``True`` when the pack's own dedup shows another axis's
+                copy of ``item_id`` losing to the configured-axis one.
+
+                Withholding the configured-axis copy removes it from
+                dedup's contest, so that losing copy — on an axis outside
+                ``config.axes`` — would win instead and the id would still
+                be served. The gate is axis-scoped by design (see
+                ``trellis.retrieve.withholding``'s ``NON_ABSENCE_REASONS``
+                treatment of the same ``dedup`` row): only a ``dedup``
+                rejection on an axis the config does not touch means the
+                id survives; any other reason, or a loser inside
+                ``config.axes``, says nothing about what withhold would do.
+
+                ``rejected_rows`` is bound as a default argument, not read
+                from the enclosing loop, so this closure cannot drift onto
+                a later pack's rows (ruff B023).
+                """
+                return any(
+                    r.get("item_id") == item_id
+                    and r.get("reason") == "dedup"
+                    and isinstance(r.get("strategy_source"), str)
+                    and r["strategy_source"] not in config.axes
+                    for r in rejected_rows
+                )
+
             for row in rows:
                 if isinstance(row.get("document_form"), str):
                     saw_document_form = True
@@ -711,6 +771,9 @@ def replay_class_prior(
                     continue
                 item_id = row["item_id"]
                 matched_servings += 1
+                if _served_by_other_axis(item_id):
+                    still_served_by_other_axis += 1
+                    continue
                 raw_tokens = row.get("estimated_tokens")
                 if isinstance(raw_tokens, int | float):
                     tokens_freed += int(raw_tokens)
@@ -727,9 +790,11 @@ def replay_class_prior(
         helpful_lost=helpful_lost,
         unhelpful_removed=unhelpful_removed,
         tokens_freed=tokens_freed,
+        still_served_by_other_axis=still_served_by_other_axis,
         notes=_class_prior_notes(
             matched_servings=matched_servings,
             mode_is_off=mode_is_off,
+            still_served_by_other_axis=still_served_by_other_axis,
             saw_document_form=saw_document_form,
         ),
     )

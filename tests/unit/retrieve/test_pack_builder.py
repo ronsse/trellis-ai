@@ -387,6 +387,63 @@ class TestClassPriorGate:
         assert [item.item_id for item in pack.items] == ["c1", "m1"]
         assert pack.retrieval_report.rejected_items == []
 
+    def test_off_path_injected_item_row_shape_is_pinned(self, tmp_path: Path) -> None:
+        """Pin the exact key set of an ``injected_items[]`` row on the off
+        path. A key silently added to ``_injected_item_rows`` (or to the
+        attribution it splices in) must show up here, not only in a
+        downstream consumer's strict parsing.
+
+        ``document_form`` is the one attribution field a bare, otherwise
+        untagged item can carry — present only when the item actually has
+        a form, absent when it does not.
+        """
+        items = [
+            _form_item("c1", 0.9, form="conversation"),
+            _form_item("m1", 0.8, form=None),
+        ]
+        strategy = _make_strategy("keyword", items)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            builder = PackBuilder(
+                strategies=[strategy],
+                content_floor=ContentFloorConfig(mode="off"),
+                event_log=event_log,
+            )
+            builder.build("q")
+            events = event_log.get_events(limit=10)
+            assert len(events) == 1
+            injected = events[0].payload["injected_items"]
+            by_id = {row["item_id"]: row for row in injected}
+
+            base_keys = {
+                "item_id",
+                "item_type",
+                "rank",
+                "selection_reason",
+                "score_breakdown",
+                "estimated_tokens",
+                "strategy_source",
+                "injected_advisory_ids",
+            }
+            assert set(by_id["c1"].keys()) == base_keys | {"document_form"}
+            assert by_id["c1"]["document_form"] == "conversation"
+            assert set(by_id["m1"].keys()) == base_keys
+        finally:
+            event_log.close()
+
+    def test_item_attribution_key_set_is_pinned(self) -> None:
+        """Pin ``_item_attribution``'s own key set directly, independent of
+        the row it is spliced into above: present only when the item
+        actually carries a document form, absent otherwise.
+        """
+        from trellis.retrieve.pack_builder import _item_attribution
+
+        with_form = _form_item("c1", 0.9, form="conversation")
+        without_form = _form_item("m1", 0.8, form=None)
+        assert set(_item_attribution(with_form).keys()) == {"document_form"}
+        assert _item_attribution(with_form)["document_form"] == "conversation"
+        assert _item_attribution(without_form) == {}
+
     def test_withhold_mode_drops_matching_form_and_records_rejection(self) -> None:
         from trellis.retrieve.class_prior import (
             CLASS_PRIOR_REJECTION_REASON,
@@ -590,6 +647,100 @@ class TestBuildSectioned:
         withholding = pack.metadata["withholding"]
         assert withholding["by_reason"].get(CLASS_PRIOR_REJECTION_REASON) == 1
         assert "c1" in withholding["withheld_item_ids"]
+
+    def test_withhold_on_one_axis_leaves_the_other_axis_free_to_serve(self) -> None:
+        """The gate is axis-scoped by design (not a bug to fix): a
+        conversation parent found by both keyword and semantic, with
+        ``axes={"keyword"}`` (the default), is rejected as ``class_prior``
+        from its keyword copy but still served via its semantic copy.
+
+        The withholding note must say so honestly: the item is NOT in
+        ``withheld_item_ids`` (it was served), and ``class_prior`` shows up
+        only under ``non_absence_reasons``, never ``by_reason`` — the same
+        shape the flat and the sectioned path must both produce.
+        """
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_REJECTION_REASON,
+            ClassPriorConfig,
+        )
+
+        def _axis_item(
+            item_id: str, score: float, *, form: str | None, axis: str
+        ) -> PackItem:
+            # ``source_strategy`` is the metadata key _promote_strategy_source
+            # reads to stamp the first-class strategy_source field, so a
+            # cross-axis assertion needs it set explicitly (_form_item does
+            # not set it, since most of this file's tests don't care which
+            # axis served an item).
+            metadata: dict[str, object] = {"source_strategy": axis}
+            if form is not None:
+                metadata["document_form"] = form
+            return PackItem(
+                item_id=item_id,
+                item_type="document",
+                excerpt="x" * 60,
+                relevance_score=score,
+                metadata=metadata,
+            )
+
+        def _strategies() -> list[SearchStrategy]:
+            return [
+                _make_strategy(
+                    "keyword",
+                    [
+                        _axis_item("conv", 0.9, form="conversation", axis="keyword"),
+                        _axis_item("mem", 0.5, form=None, axis="keyword"),
+                    ],
+                ),
+                _make_strategy(
+                    "semantic",
+                    [
+                        _axis_item("conv", 0.4, form="conversation", axis="semantic"),
+                        _axis_item("mem2", 0.3, form=None, axis="semantic"),
+                    ],
+                ),
+            ]
+
+        config = ClassPriorConfig(mode="withhold")  # axes default: {"keyword"}
+
+        flat_builder = PackBuilder(
+            strategies=_strategies(),
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        flat_pack = flat_builder.build("q")
+        served_ids = {item.item_id for item in flat_pack.items}
+        assert served_ids == {"mem", "conv", "mem2"}
+        served_conv = next(i for i in flat_pack.items if i.item_id == "conv")
+        assert served_conv.strategy_source == "semantic"
+
+        rejected = flat_pack.retrieval_report.rejected_items
+        assert len(rejected) == 1
+        assert rejected[0].item_id == "conv"
+        assert rejected[0].reason == CLASS_PRIOR_REJECTION_REASON
+        assert rejected[0].strategy_source == "keyword"
+
+        flat_withholding = flat_pack.metadata["withholding"]
+        assert flat_withholding["withheld_item_ids"] == []
+        assert flat_withholding["by_reason"] == {}
+        assert CLASS_PRIOR_REJECTION_REASON in flat_withholding["non_absence_reasons"]
+
+        sectioned_builder = PackBuilder(
+            strategies=_strategies(),
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        sectioned_pack = sectioned_builder.build_sectioned(
+            intent="q",
+            sections=[SectionRequest(name="all")],
+        )
+        sect_served_ids = {item.item_id for item in sectioned_pack.sections[0].items}
+        assert sect_served_ids == {"mem", "conv", "mem2"}
+
+        sect_withholding = sectioned_pack.metadata["withholding"]
+        assert sect_withholding["withheld_item_ids"] == []
+        assert sect_withholding["by_reason"] == {}
+        assert CLASS_PRIOR_REJECTION_REASON in sect_withholding["non_absence_reasons"]
 
     def test_withheld_successor_never_revives_its_superseded_loser(self) -> None:
         """The build_sectioned() path needs the same post-supersession
