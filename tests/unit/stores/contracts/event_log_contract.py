@@ -36,6 +36,7 @@ import pytest
 
 from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
+from trellis.core.text_safety import REPLACEMENT_CHAR
 from trellis.schemas.memory_op import (
     InputDigest,
     JudgedOpType,
@@ -562,3 +563,181 @@ class EventLogContractTests:
         # and the result is well-formed.
         assert isinstance(rows, list)
         assert store.count() == 1
+
+    # ------------------------------------------------------------------
+    # NUL byte / lone surrogate scrub — every backend, one seam
+    # ------------------------------------------------------------------
+    #
+    # A Postgres ``text``/``jsonb`` column refuses a raw NUL byte or an
+    # unpaired UTF-16 surrogate outright; SQLite accepts both silently.
+    # ``EventLog.append`` scrubs ``payload``, ``metadata``, ``entity_id``,
+    # ``entity_type`` and ``source`` before any backend ever sees the
+    # event, so every backend under this suite must show the same
+    # scrubbed result — that is what makes this a *contract* test rather
+    # than a SQLite-only one.
+
+    def test_hazard_in_payload_value_is_scrubbed(self, store: EventLog) -> None:
+        emitted = store.emit(
+            EventType.ENTITY_CREATED, "curate", payload={"name": "bad\x00name"}
+        )
+        assert emitted.payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
+        rows = store.get_events()
+        assert rows[0].payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
+
+    def test_hazard_in_metadata_value_is_scrubbed(self, store: EventLog) -> None:
+        emitted = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            metadata={"note": "bad\ud800note"},
+        )
+        assert emitted.metadata["note"] == f"bad{REPLACEMENT_CHAR}note"
+        rows = store.get_events()
+        assert rows[0].metadata["note"] == f"bad{REPLACEMENT_CHAR}note"
+
+    def test_hazard_in_entity_id_and_entity_type_is_scrubbed(
+        self, store: EventLog
+    ) -> None:
+        # NUL only, not a lone surrogate: pydantic-core's own ``str``
+        # validator already refuses an unpaired surrogate in a plain
+        # ``str`` field (confirmed empirically -- ``Event(entity_type=...)``
+        # raises ``ValidationError`` before ``append`` ever runs), so that
+        # half of the hazard pair never reaches this seam for entity_id /
+        # entity_type / source. It does reach ``payload`` and ``metadata``
+        # (``dict[str, Any]`` -- pydantic does not deep-validate ``Any``),
+        # which is why the surrogate case is covered there instead.
+        emitted = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            entity_id="ent\x00_1",
+            entity_type="doc\x00type",
+        )
+        assert emitted.entity_id == f"ent{REPLACEMENT_CHAR}_1"
+        assert emitted.entity_type == f"doc{REPLACEMENT_CHAR}type"
+        rows = store.get_events(entity_id=f"ent{REPLACEMENT_CHAR}_1")
+        assert len(rows) == 1
+        assert rows[0].entity_type == f"doc{REPLACEMENT_CHAR}type"
+
+    def test_hazard_in_source_is_scrubbed(self, store: EventLog) -> None:
+        emitted = store.emit(EventType.ENTITY_CREATED, "bad\x00source")
+        assert emitted.source == f"bad{REPLACEMENT_CHAR}source"
+        rows = store.get_events(source=f"bad{REPLACEMENT_CHAR}source")
+        assert len(rows) == 1
+
+    def test_hazard_in_nested_dict_key_is_scrubbed(self, store: EventLog) -> None:
+        """A hazard in a *key*, not just a value, nested two levels deep."""
+        emitted = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            payload={"outer": {"bad\x00key": "value", "ok": 1}},
+        )
+        assert emitted.payload == {
+            "outer": {f"bad{REPLACEMENT_CHAR}key": "value", "ok": 1}
+        }
+        rows = store.get_events()
+        assert rows[0].payload == {
+            "outer": {f"bad{REPLACEMENT_CHAR}key": "value", "ok": 1}
+        }
+
+    def test_hazard_in_list_element_is_scrubbed(self, store: EventLog) -> None:
+        emitted = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            payload={"items": ["clean", "bad\ud800item"]},
+        )
+        assert emitted.payload == {"items": ["clean", f"bad{REPLACEMENT_CHAR}item"]}
+        rows = store.get_events()
+        assert rows[0].payload == {"items": ["clean", f"bad{REPLACEMENT_CHAR}item"]}
+
+    def test_direct_append_also_scrubs(self, store: EventLog) -> None:
+        """The scrub runs for a direct ``append(Event(...))`` too, not just
+        through the ``emit()`` convenience wrapper."""
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="curate",
+            entity_id="ent_1",
+            payload={"name": "bad\x00name"},
+        )
+        store.append(event)
+        # append() scrubs in place, so the caller's own object reflects it.
+        assert event.payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
+        rows = store.get_events()
+        assert rows[0].payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
+
+    def test_clean_payload_is_stored_byte_identical(self, store: EventLog) -> None:
+        """A payload with no hazard round-trips with no observable change
+        at all — same keys, same values, same shape."""
+        clean_payload = {
+            "name": "auth-service",
+            "tags": ["billing", "core"],
+            "nested": {"tier": 1, "owner": "platform"},
+        }
+        clean_metadata = {"agent": "claude", "flags": {"dry_run": False}}
+        emitted = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            entity_id="ent_clean",
+            entity_type="service",
+            payload=dict(clean_payload),
+            metadata=dict(clean_metadata),
+        )
+        assert emitted.payload == clean_payload
+        assert emitted.entity_id == "ent_clean"
+        assert emitted.entity_type == "service"
+        rows = store.get_events(entity_id="ent_clean")
+        assert len(rows) == 1
+        got = rows[0]
+        assert got.payload == clean_payload
+        # metadata carries the write-provenance stamp too; assert the
+        # caller-supplied keys survive untouched rather than equality on
+        # the whole dict.
+        assert got.metadata["agent"] == "claude"
+        assert got.metadata["flags"] == {"dry_run": False}
+
+    def test_filter_by_the_original_unscrubbed_value_still_matches(
+        self, store: EventLog
+    ) -> None:
+        """The filter-value decision: a caller that only ever saw the raw
+        string it originally handed ``emit()`` -- never the scrubbed
+        version ``append`` actually stored -- must still find the row.
+        ``get_events`` scrubs ``entity_id``/``source`` filter values the
+        same way ``append`` scrubs the stored field, so the comparison
+        is scrubbed-against-scrubbed either way the caller spells it.
+        """
+        store.emit(
+            EventType.ENTITY_CREATED,
+            "bad\x00source",
+            entity_id="ent\x00_1",
+        )
+        # Filtering with the *raw* value the caller originally passed in.
+        by_raw_entity_id = store.get_events(entity_id="ent\x00_1")
+        assert len(by_raw_entity_id) == 1
+        by_raw_source = store.get_events(source="bad\x00source")
+        assert len(by_raw_source) == 1
+        # Filtering with the already-scrubbed value matches identically.
+        by_scrubbed_entity_id = store.get_events(entity_id=f"ent{REPLACEMENT_CHAR}_1")
+        assert len(by_scrubbed_entity_id) == 1
+
+    def test_has_idempotency_key_matches_original_unscrubbed_key(
+        self, store: EventLog
+    ) -> None:
+        """Same decision, for the idempotency lookup: ``append`` scrubs
+        ``payload["idempotency_key"]`` like any other payload value, and
+        ``has_idempotency_key`` scrubs its ``key`` argument before
+        comparing, so a caller checking with the raw key it originally
+        submitted still gets ``True``.
+
+        In the shipped system this hazard never actually reaches here --
+        ``CommandValidator.validate`` (``trellis/mutate/commands.py``)
+        refuses a hazardous ``idempotency_key`` at Stage 1, before a
+        command is ever executed or its event emitted. This test covers
+        the defense-in-depth case: calling the event log directly,
+        bypassing ``MutationExecutor`` and its Stage 1 validation.
+        """
+        store.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={"idempotency_key": "key\x00_1"},
+        )
+        assert store.has_idempotency_key("key\x00_1") is True
+        assert store.has_idempotency_key(f"key{REPLACEMENT_CHAR}_1") is True
+        assert store.has_idempotency_key("key_1") is False

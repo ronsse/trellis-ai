@@ -40,8 +40,13 @@ if TYPE_CHECKING:
 class NullEventLog(EventLog):
     """An :class:`EventLog` that persists nothing. See module docstring."""
 
-    def append(self, event: Event) -> None:
-        """Drop the event — no persistence in knowledge-plane-only mode."""
+    def _append(self, event: Event) -> None:
+        """Drop the event — no persistence in knowledge-plane-only mode.
+
+        Called by ``EventLog.append`` only, after it has scrubbed
+        ``event`` -- harmless here since nothing is stored, but every
+        backend goes through the same seam regardless.
+        """
 
     def get_events(
         self,

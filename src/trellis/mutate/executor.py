@@ -10,7 +10,7 @@ from typing import Any, Protocol
 import structlog
 
 from trellis.core.error_sanitize import summarize_exception
-from trellis.core.text_safety import replace_nul_and_lone_surrogates
+from trellis.core.text_safety import scrub_jsonb_unsafe as _scrub_jsonb_unsafe
 from trellis.errors import (
     IdempotencyError,
     PolicyViolationError,
@@ -128,29 +128,16 @@ def _audit_warnings(audit_warning: str | None) -> list[str]:
     return [] if audit_warning is None else [audit_warning]
 
 
-def _scrub_jsonb_unsafe(value: Any) -> Any:
-    """A copy of *value* with every NUL byte and lone surrogate replaced.
-
-    Postgres ``jsonb`` refuses either, so an audit event carrying one --
-    for instance the ``mutation.rejected`` event for a command refused
-    because its key held a NUL -- would itself be lost. Walks ``str``
-    leaves, ``dict`` keys and values, ``list`` and ``tuple`` at any depth;
-    other types pass through. Applied in :meth:`MutationExecutor._emit_event`
-    to the payload handed to ``emit`` only, never to ``command`` or the
-    ``CommandResult``.
-    """
-    if isinstance(value, str):
-        return replace_nul_and_lone_surrogates(value)
-    if isinstance(value, dict):
-        return {
-            _scrub_jsonb_unsafe(key): _scrub_jsonb_unsafe(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        # A list either way: the event log serialises both as a JSON array,
-        # and ``type(value)(...)`` would break on a namedtuple.
-        return [_scrub_jsonb_unsafe(item) for item in value]
-    return value
+# ``_scrub_jsonb_unsafe`` above is an import alias for
+# ``trellis.core.text_safety.scrub_jsonb_unsafe`` -- the one copy of this
+# walk. It used to be a second, independently-maintained copy defined here;
+# now ``EventLog.append`` (the base-class template every backend's write
+# path runs through) calls the same function on the fields it scrubs, so
+# an audit event carrying a NUL or lone surrogate -- for instance the
+# ``mutation.rejected`` event for a command refused because its key held
+# one -- is covered twice over: once here (advisory, payload only, kept so
+# this module's own tests and the warning below still make sense) and
+# unconditionally again at the store boundary.
 
 
 def _jsonb_safe_or_original(value: Any) -> Any:

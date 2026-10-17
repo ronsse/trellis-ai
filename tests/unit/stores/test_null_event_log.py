@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trellis.core.text_safety import REPLACEMENT_CHAR
 from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.null.event_log import NullEventLog
 from trellis.stores.registry import StoreRegistry
@@ -52,6 +53,41 @@ class TestNullEventLogNoOp:
 
     def test_close_does_not_raise(self) -> None:
         NullEventLog().close()
+
+    def test_emit_still_scrubs_even_though_nothing_persists(self) -> None:
+        """``EventLog.append``'s scrub runs before ``_append``, so it runs
+        here too even though this backend's ``_append`` drops the event on
+        the floor — the returned ``Event`` still reflects the scrubbed
+        fields, exactly as a persisting backend's would.
+
+        NUL only for ``entity_id``/``entity_type``/``source``: pydantic-core's
+        ``str`` validator already refuses a lone surrogate in those plain
+        ``str`` fields before ``append`` ever runs, so that hazard can't
+        reach this seam there -- it's exercised on ``payload`` instead,
+        where ``dict[str, Any]`` lets it through unvalidated.
+        """
+        log = NullEventLog()
+        event = log.emit(
+            EventType.ENTITY_CREATED,
+            source="bad\x00source",
+            entity_id="ent\x00_1",
+            entity_type="doc\x00type",
+            payload={"name": "bad\ud800name"},
+        )
+        assert event.source == f"bad{REPLACEMENT_CHAR}source"
+        assert event.entity_id == f"ent{REPLACEMENT_CHAR}_1"
+        assert event.entity_type == f"doc{REPLACEMENT_CHAR}type"
+        assert event.payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
+
+    def test_direct_append_also_scrubs_in_place(self) -> None:
+        log = NullEventLog()
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="test",
+            payload={"name": "bad\x00name"},
+        )
+        log.append(event)
+        assert event.payload == {"name": f"bad{REPLACEMENT_CHAR}name"}
 
 
 class TestNullBackendRegistration:

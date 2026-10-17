@@ -32,7 +32,7 @@ class _FakeEventLog(EventLog):
     def __init__(self) -> None:
         self.events: list[Event] = []
 
-    def append(self, event: Event) -> None:
+    def _append(self, event: Event) -> None:
         self.events.append(event)
 
     def get_events(

@@ -22,6 +22,8 @@ mutations.
 
 from __future__ import annotations
 
+from typing import Any
+
 _SURROGATE_RANGE_LOW = 0xD800
 _SURROGATE_RANGE_HIGH = 0xDFFF
 
@@ -47,8 +49,39 @@ def replace_nul_and_lone_surrogates(value: str) -> str:
     return "".join(REPLACEMENT_CHAR if _is_unsafe_char(ch) else ch for ch in value)
 
 
+def scrub_jsonb_unsafe(value: Any) -> Any:
+    """Recursively replace NUL bytes and lone surrogates in ``value``.
+
+    Walks ``str``, ``dict`` (keys and values) and ``list``/``tuple``
+    structures -- the shapes a JSON-serializable ``Event.payload`` or
+    ``Event.metadata`` can take -- and leaves every other type (``int``,
+    ``bool``, ``None``, a datetime already converted elsewhere)
+    untouched. A ``tuple`` comes back as a ``list``: both encode to the
+    same JSON array, and a namedtuple's extra attributes have no slot in
+    a JSON array either, so round-tripping one loses nothing a store
+    would have kept.
+
+    This is the one copy call sites share: :mod:`trellis.mutate.executor`
+    imports it under its pre-existing private name so its tests keep
+    pinning the behaviour without a second implementation to drift from,
+    and :class:`~trellis.stores.base.event_log.EventLog` calls it from
+    its ``append`` template so every backend gets it for free.
+    """
+    if isinstance(value, str):
+        return replace_nul_and_lone_surrogates(value)
+    if isinstance(value, dict):
+        return {
+            scrub_jsonb_unsafe(key): scrub_jsonb_unsafe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [scrub_jsonb_unsafe(item) for item in value]
+    return value
+
+
 __all__ = [
     "REPLACEMENT_CHAR",
     "contains_nul_or_lone_surrogate",
     "replace_nul_and_lone_surrogates",
+    "scrub_jsonb_unsafe",
 ]

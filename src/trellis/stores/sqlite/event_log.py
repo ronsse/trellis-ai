@@ -9,6 +9,7 @@ from typing import Any
 
 import structlog
 
+from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
@@ -54,8 +55,9 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
     # -- mutations -----------------------------------------------------------
 
-    def append(self, event: Event) -> None:
-        """Append event (immutable, no updates).
+    def _append(self, event: Event) -> None:
+        """Append event (immutable, no updates). Called by ``EventLog.append``
+        only, after it has scrubbed ``event`` -- see the base class.
 
         An INSERT that fails (a duplicate ``event_id``, say) has already
         taken the database's write lock, so it is rolled back rather than
@@ -91,12 +93,18 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
     # -- idempotency ---------------------------------------------------------
 
     def has_idempotency_key(self, key: str) -> bool:
-        """Efficient single-row check for an idempotency key."""
+        """Efficient single-row check for an idempotency key.
+
+        ``key`` is scrubbed before the lookup so it agrees with what
+        ``append`` would have stored for it; see the base class's
+        ``has_idempotency_key`` docstring for why this never bites in
+        practice (Stage 1 validation refuses a hazardous key outright).
+        """
         cur = self._conn.cursor()
         cur.execute(
             "SELECT 1 FROM events WHERE event_type = ? "
             "AND json_extract(payload_json, '$.idempotency_key') = ? LIMIT 1",
-            (str(EventType.MUTATION_EXECUTED), key),
+            (str(EventType.MUTATION_EXECUTED), scrub_jsonb_unsafe(key)),
         )
         return cur.fetchone() is not None
 
@@ -121,7 +129,17 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         order: EventOrder = "asc",
         payload_filters: dict[str, str] | None = None,
     ) -> list[Event]:
-        """Query events with filters."""
+        """Query events with filters.
+
+        ``entity_id``, ``source`` and each ``payload_filters`` value are
+        scrubbed the same way ``append`` scrubs the corresponding stored
+        field, so a caller filtering by the raw string it originally
+        handed ``emit()`` still matches the (possibly scrubbed) row
+        instead of silently returning nothing. ``payload_filters`` keys
+        are left alone: they are JSON field names chosen by code, not
+        caller free text, and no shipped caller names one containing
+        either hazard.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -130,10 +148,10 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             params.append(str(event_type))
         if entity_id is not None:
             clauses.append("entity_id = ?")
-            params.append(entity_id)
+            params.append(scrub_jsonb_unsafe(entity_id))
         if source is not None:
             clauses.append("source = ?")
-            params.append(source)
+            params.append(scrub_jsonb_unsafe(source))
         if since is not None:
             clauses.append("occurred_at >= ?")
             params.append(since.isoformat())
@@ -149,7 +167,7 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
                 # underlying scalar so plain string comparison matches
                 # JSON string values.
                 clauses.append("json_extract(payload_json, '$.' || ?) = ?")
-                params.extend([key, value])
+                params.extend([key, scrub_jsonb_unsafe(value)])
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
