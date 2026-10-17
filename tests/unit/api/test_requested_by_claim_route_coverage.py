@@ -372,7 +372,7 @@ class TestExtractDraftsAuditsThePrincipalNotTheClaim:
 
         Proves the extract.py fix: with no ``requested_by`` in the body,
         ``claim_was_set`` must be ``False`` (derived from
-        ``req.requested_by is not None``, not hardcoded ``True``), so the
+        a non-empty ``req.requested_by``, not hardcoded ``True``), so the
         derived ``extractor_id`` fallback is never misreported as
         something the caller claimed.
         """
@@ -381,6 +381,39 @@ class TestExtractDraftsAuditsThePrincipalNotTheClaim:
         resp = client.post(
             "/api/v1/extract/drafts",
             json={
+                "batch": {
+                    "source": "unity_catalog",
+                    "extractor_name": "test_extractor",
+                    "extractor_version": "0.1.0",
+                    "entities": [
+                        {
+                            "entity_type": "unity_catalog.table",
+                            "name": "sales.returns",
+                        },
+                    ],
+                },
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "entity.create")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
+
+    def test_extract_drafts_with_an_empty_requested_by_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """An empty ``requested_by`` falls back to the extractor id, which
+        the body never sent, so it must not be recorded as the claim.
+        """
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+
+        resp = client.post(
+            "/api/v1/extract/drafts",
+            json={
+                "requested_by": "",
                 "batch": {
                     "source": "unity_catalog",
                     "extractor_name": "test_extractor",

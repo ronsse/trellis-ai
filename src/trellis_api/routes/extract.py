@@ -82,7 +82,7 @@ def submit_drafts(
     batch = req.batch
     effective_key = idempotency_key or batch.idempotency_key
     extractor_id = f"{batch.extractor_name}@{batch.extractor_version}"
-    claim_was_set = req.requested_by is not None
+    claim_was_set = bool(req.requested_by)
     claimed_requested_by = req.requested_by or extractor_id
     requested_by, requested_by_claim = resolve_requested_by(
         ctx, claimed_requested_by, claim_was_set=claim_was_set
