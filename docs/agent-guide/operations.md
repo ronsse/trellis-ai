@@ -150,7 +150,7 @@ rendered as a visible error rather than a silent empty list.
 Start the REST API server.
 
 ```bash
-trellis admin serve [--port PORT] [--host HOST] [--format text|json]
+trellis admin serve [--port PORT] [--host HOST]
 ```
 
 | Option | Default | Description |
