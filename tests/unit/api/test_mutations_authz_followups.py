@@ -245,6 +245,37 @@ class TestRequestedByIsAuditedFromThePrincipal:
         assert event.payload["requested_by"] != "attacker-chosen-label"
         assert event.payload["requested_by_claim"] == "attacker-chosen-label"
 
+    def test_with_no_requested_by_in_the_body_no_claim_is_recorded(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The DTO's own default (``"api:mutations"``) is not a claim --
+        mirrors the defaulted-body tests in
+        ``test_requested_by_claim_route_coverage.py`` for the one route
+        that file does not cover."""
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE])
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "unclaimed"},
+                    }
+                ],
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        (event,) = _executed_events(registry)
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
+
     def test_with_auth_off_the_claimed_value_is_kept_unchanged(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
@@ -284,7 +315,9 @@ class TestResolveRequestedByUnit:
         ctx = AuthContext(
             key_id="abc123", name=None, scopes=[SCOPE_MUTATE], mode="required"
         )
-        requested_by, claim = resolve_requested_by(ctx, "someone-else")
+        requested_by, claim = resolve_requested_by(
+            ctx, "someone-else", claim_was_set=True
+        )
         assert requested_by == "api:abc123"
         assert claim == "someone-else"
 
@@ -295,6 +328,8 @@ class TestResolveRequestedByUnit:
         from trellis_api.auth import AuthContext
 
         ctx = AuthContext(key_id=None, name=None, scopes=ALL_SCOPES, mode="off")
-        requested_by, claim = resolve_requested_by(ctx, "anon-claim")
+        requested_by, claim = resolve_requested_by(
+            ctx, "anon-claim", claim_was_set=True
+        )
         assert requested_by == "anon-claim"
         assert claim is None

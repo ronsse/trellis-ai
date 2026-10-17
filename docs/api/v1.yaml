@@ -4474,11 +4474,17 @@ paths:
 
         :func:`trellis_api.routes._principal.resolve_requested_by`) rather
 
-        than trusted from the body or the client-asserted extractor id;
+        than trusted from the body or the client-asserted extractor id.
 
-        the body''s own claim rides along as each command''s
+        The body''s own claim rides along as each command''s
 
-        ``metadata["requested_by_claim"]``.'
+        ``metadata["requested_by_claim"]`` only when the body actually set
+
+        ``requested_by`` -- the derived ``extractor_id`` fallback used as
+
+        the audited label with no principal is not something the caller
+
+        claimed, and must not be recorded as though it were.'
       operationId: submit_drafts_api_v1_extract_drafts_post
       parameters:
       - in: header

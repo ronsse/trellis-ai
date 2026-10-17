@@ -1,20 +1,22 @@
 """The one place a REST route turns an authenticated principal into an
 audit-trail ``requested_by``.
 
-Lifted from ``routes/mutations.py``'s ``_resolve_requested_by`` (#889),
-which got this right for ``/commands/batch`` but left every other
-body-supplied ``requested_by`` route to trust the caller: a mutate-scoped
-key could ``POST /precedents`` with ``requested_by="auto:learning_candidate"``
-and forge the auto-promote origin that ``_was_auto_promoted`` trusts. Every
-route that lets a request body claim a ``requested_by`` must resolve it
-through :func:`resolve_requested_by` instead of passing the claim straight
-to ``Command(...)`` -- see ``tests/unit/api/test_requested_by_principal_rule.py``.
+Every route that lets a request body claim a ``requested_by`` -- promote,
+demote, reinstate, bulk ingest, extract/drafts and ``/commands/batch`` --
+resolves it through :func:`resolve_requested_by` instead of passing the
+claim straight to ``Command(...)``: with an authenticated principal (a
+real key, or the legacy shared secret) the audit trail's ``requested_by``
+is always derived from that principal, never from the body, and the
+body's own claim survives only as a separate, clearly-labelled
+``requested_by_claim``. ``tests/unit/api/test_requested_by_principal_rule.py``
+statically enforces that every such route call site resolves through this
+module rather than reintroducing a body passthrough.
 """
 
 from __future__ import annotations
 
 from trellis.core.elision import elide_text
-from trellis.mutate.handlers import _contains_nul_or_lone_surrogate
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis_api.auth import AuthContext
 
 #: ``requested_by_claim`` is attacker-controlled free text, so it is bounded
@@ -44,13 +46,13 @@ def _scrub_claim(claim: str) -> str:
     manufacture a fresh lone surrogate at the boundary.
     """
     scrubbed = "".join(
-        _REPLACEMENT_CHAR if _contains_nul_or_lone_surrogate(ch) else ch for ch in claim
+        _REPLACEMENT_CHAR if contains_nul_or_lone_surrogate(ch) else ch for ch in claim
     )
     return elide_text(scrubbed, _CLAIM_MAX_CHARS)
 
 
 def resolve_requested_by(
-    ctx: AuthContext, claimed: str, *, claim_was_set: bool = True
+    ctx: AuthContext, claimed: str, *, claim_was_set: bool
 ) -> tuple[str, str | None]:
     """The audit ``requested_by`` for this request, and the body's own claim.
 
@@ -63,14 +65,17 @@ def resolve_requested_by(
     behaviour is unchanged: *claimed* passes through verbatim and the
     second element is ``None``.
 
-    *claim_was_set* says whether the body actually supplied
-    ``requested_by`` (``"requested_by" in req.model_fields_set``) rather
-    than falling back to the request model's own default. A caller
-    passes ``False`` for a defaulted value, and the second element of
-    the return is then ``None`` even with a principal present -- a DTO
-    default such as ``"api:promote"`` is not something the caller
-    claimed, and recording it as ``requested_by_claim`` would blame the
-    body for a value it never sent.
+    *claim_was_set* is required, not defaulted -- every caller must say
+    whether the body actually supplied ``requested_by``
+    (``"requested_by" in req.model_fields_set``, or the route's own
+    equivalent for a field that falls back to something other than the
+    request model's own default) rather than silently inheriting a
+    "the caller claimed it" assumption. Pass ``False`` for a defaulted
+    value, and the second element of the return is then ``None`` even
+    with a principal present -- a DTO default such as ``"api:promote"``
+    is not something the caller claimed, and recording it as
+    ``requested_by_claim`` would blame the body for a value it never
+    sent.
 
     When a claim is recorded, it is bounded and scrubbed first (see
     :func:`_scrub_claim`) -- the claim rides into ``Command.metadata``

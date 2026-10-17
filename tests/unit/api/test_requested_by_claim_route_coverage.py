@@ -201,6 +201,26 @@ class TestDemoteAuditsThePrincipalNotTheClaim:
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by_claim"] == _HOSTILE_CLAIM
 
+    def test_demote_with_no_requested_by_in_the_body_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Mirrors promote's defaulted-body test: the DTO's own default
+        is not a claim, so ``claim_was_set`` must keep it off the event."""
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+        node_id = self._create_precedent(client, token)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "superseded by a broader pattern"},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "precedent.demote")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
+
 
 class TestReinstateAuditsThePrincipalNotTheClaim:
     def _create_demoted_precedent(self, client: TestClient, token: str) -> str:
@@ -240,6 +260,25 @@ class TestReinstateAuditsThePrincipalNotTheClaim:
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by_claim"] == _HOSTILE_CLAIM
 
+    def test_reinstate_with_no_requested_by_in_the_body_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Mirrors promote's defaulted-body test for ``/reinstate``."""
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+        node_id = self._create_demoted_precedent(client, token)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "the broader pattern was withdrawn"},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "precedent.reinstate")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
+
 
 class TestIngestBulkAuditsThePrincipalNotTheClaim:
     def test_ingest_bulk_requested_by_is_the_key_claim_is_preserved(
@@ -267,6 +306,32 @@ class TestIngestBulkAuditsThePrincipalNotTheClaim:
         event = _one_event_for_operation(events, "entity.create")
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by_claim"] == _HOSTILE_CLAIM
+
+    def test_ingest_bulk_with_no_requested_by_in_the_body_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Mirrors promote's defaulted-body test for ``/ingest/bulk``."""
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+
+        resp = client.post(
+            "/api/v1/ingest/bulk",
+            json={
+                "entities": [
+                    {
+                        "entity_type": "service",
+                        "name": "auth",
+                        "entity_id": "svc-auth-no-claim-test",
+                    },
+                ],
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "entity.create")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
 
 
 class TestExtractDraftsAuditsThePrincipalNotTheClaim:
@@ -299,3 +364,73 @@ class TestExtractDraftsAuditsThePrincipalNotTheClaim:
         event = _one_event_for_operation(events, "entity.create")
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by_claim"] == _HOSTILE_CLAIM
+
+    def test_extract_drafts_with_no_requested_by_in_the_body_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Mirrors promote's defaulted-body test for ``/extract/drafts``.
+
+        Proves the extract.py fix: with no ``requested_by`` in the body,
+        ``claim_was_set`` must be ``False`` (derived from
+        a non-empty ``req.requested_by``, not hardcoded ``True``), so the
+        derived ``extractor_id`` fallback is never misreported as
+        something the caller claimed.
+        """
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+
+        resp = client.post(
+            "/api/v1/extract/drafts",
+            json={
+                "batch": {
+                    "source": "unity_catalog",
+                    "extractor_name": "test_extractor",
+                    "extractor_version": "0.1.0",
+                    "entities": [
+                        {
+                            "entity_type": "unity_catalog.table",
+                            "name": "sales.returns",
+                        },
+                    ],
+                },
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "entity.create")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload
+
+    def test_extract_drafts_with_an_empty_requested_by_records_no_claim(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """An empty ``requested_by`` falls back to the extractor id, which
+        the body never sent, so it must not be recorded as the claim.
+        """
+        token, key_id = _mint_with_key_id(registry, [SCOPE_MUTATE, SCOPE_INGEST])
+
+        resp = client.post(
+            "/api/v1/extract/drafts",
+            json={
+                "requested_by": "",
+                "batch": {
+                    "source": "unity_catalog",
+                    "extractor_name": "test_extractor",
+                    "extractor_version": "0.1.0",
+                    "entities": [
+                        {
+                            "entity_type": "unity_catalog.table",
+                            "name": "sales.returns",
+                        },
+                    ],
+                },
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = _executed_events(registry)
+        event = _one_event_for_operation(events, "entity.create")
+        assert event.payload["requested_by"] == f"api:{key_id}"
+        assert "requested_by_claim" not in event.payload

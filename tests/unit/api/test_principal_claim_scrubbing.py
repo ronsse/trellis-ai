@@ -11,6 +11,8 @@ future route can be checked against them without standing up a full app.
 
 from __future__ import annotations
 
+import pytest
+
 from trellis_api.auth import AuthContext
 from trellis_api.routes._principal import (
     _CLAIM_MAX_CHARS,
@@ -51,15 +53,15 @@ class TestClaimWasSetGating:
         assert requested_by == "api:abc123"
         assert claim is None
 
-    def test_claim_was_set_defaults_to_true_for_backward_compatible_callers(
-        self,
-    ) -> None:
-        # /commands/batch's DTO has no server-side default for
-        # requested_by that would need gating historically, so callers
-        # that don't pass claim_was_set keep the pre-existing behaviour.
-        requested_by, claim = resolve_requested_by(_CTX_WITH_KEY, "someone-else")
-        assert requested_by == "api:abc123"
-        assert claim == "someone-else"
+    def test_claim_was_set_is_required_not_defaulted(self) -> None:
+        # claim_was_set has no default -- every caller must say, from
+        # the body's own model_fields_set (or the route's equivalent),
+        # whether the body actually supplied requested_by. A caller
+        # that omits it entirely is a bug, not a fallback to historical
+        # behaviour, so this must raise rather than silently assume
+        # "the caller claimed it".
+        with pytest.raises(TypeError):
+            resolve_requested_by(_CTX_WITH_KEY, "someone-else")  # type: ignore[call-arg]
 
     def test_gating_applies_with_a_name_only_principal_too(self) -> None:
         requested_by, claim = resolve_requested_by(
