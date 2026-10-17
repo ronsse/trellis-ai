@@ -415,6 +415,7 @@
             body.nav-collapsed .sidebar-nav a .nav-label { opacity: 1; width: auto; flex: 1 1 auto; }
             body.nav-collapsed .sidebar-nav a .nav-key { opacity: 0.45; width: auto; }
             .shortcuts-hint { display: none; }
+            .view-asof { display: none; }
         }
 
         .container {
@@ -688,21 +689,51 @@
         }
         .help-link:hover { color: var(--accent); border-color: var(--accent); }
 
-        /* Readiness pill (G14): tiny by design -- a dot in the topbar, not
-           a card. Failing component names surface only on hover. */
+        /* Readiness pill (G14): a dot plus its status word, not a card.
+           Failing component names surface only on hover (title). */
         .readiness-pill {
-            display: inline-block;
-            width: 0.5rem;
-            height: 0.5rem;
-            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
             margin-left: 0.6rem;
-            background: var(--text-dim);
+            padding: 0.15rem 0.55rem 0.15rem 0.45rem;
+            border: 1px solid var(--border);
+            border-radius: var(--r-pill);
+            font-size: var(--fs-1);
+            color: var(--text-dim);
             flex-shrink: 0;
             cursor: help;
         }
-        .readiness-pill.is-ready { background: var(--ok); }
-        .readiness-pill.is-degraded { background: var(--danger); }
-        .readiness-pill.is-unknown { background: var(--text-dim); }
+        .readiness-pill::before {
+            content: '';
+            display: block;
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            background: var(--text-dim);
+            flex-shrink: 0;
+        }
+        .readiness-pill.is-ready::before { background: var(--ok); }
+        .readiness-pill.is-degraded::before { background: var(--danger); }
+        .readiness-pill.is-unknown::before { background: var(--text-dim); }
+
+        .view-asof {
+            font-size: var(--fs-1);
+            font-family: var(--font-mono);
+            color: var(--text-dim);
+            white-space: nowrap;
+        }
+
+        .breadcrumb { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+        .breadcrumb-root {
+            font-size: var(--fs-2);
+            font-weight: 600;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            color: var(--text-dim);
+        }
+        .breadcrumb-sep { color: var(--text-faint); font-size: var(--fs-2); }
 
         /* Loading spinner */
         .spinner {
@@ -714,15 +745,43 @@
             border-radius: 50%;
             animation: spin 0.6s linear infinite;
             vertical-align: middle;
+            flex-shrink: 0;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         .loading-state {
             display: flex;
+            flex-direction: column;
             align-items: center;
             gap: 0.75rem;
             justify-content: center;
             padding: 2rem;
             color: var(--text-dim);
+        }
+        .loading-state .loading-row { display: flex; align-items: center; gap: 0.75rem; }
+        .loading-state .shimmer-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            width: 100%;
+            max-width: 22rem;
+        }
+        .shimmer-bar {
+            height: 0.6rem;
+            border-radius: var(--r-1);
+            background: linear-gradient(
+                90deg,
+                var(--surface-sunken) 25%,
+                color-mix(in srgb, var(--surface-sunken) 40%, var(--border) 60%) 37%,
+                var(--surface-sunken) 63%
+            );
+            background-size: 400% 100%;
+            animation: shimmer 1.4s ease infinite;
+        }
+        .shimmer-bar:nth-child(2) { width: 85%; }
+        .shimmer-bar:nth-child(3) { width: 65%; }
+        @keyframes shimmer {
+            0% { background-position: 100% 0; }
+            100% { background-position: 0 0; }
         }
         #error { color: var(--danger); text-align: center; padding: 1rem; display: none; }
         /* A 403 here means the stored key is fine but lacks admin scope --
@@ -1199,7 +1258,8 @@
         th {
             text-align: left;
             padding: 0.6rem 0.75rem;
-            border-bottom: 2px solid var(--border);
+            background: var(--surface-sunken);
+            border-bottom: 1px solid var(--border);
             color: var(--text-dim);
             font-weight: 600;
             font-size: var(--fs-2);
@@ -1361,8 +1421,11 @@
             padding: 3rem;
             color: var(--text-dim);
         }
-        .empty-state .icon { margin-bottom: 0.5rem; }
+        .empty-state .icon { margin-bottom: 0.5rem; color: var(--text-faint); }
         .empty-state .icon svg { display: inline-block; }
+        .empty-state .empty-title { font-weight: 600; color: var(--text); margin-bottom: 0.35rem; }
+        .empty-state .empty-body { font-size: var(--fs-4); max-width: 34rem; margin: 0 auto; }
+        .empty-state .empty-action { margin-top: 0.85rem; }
         .mono { font-family: var(--font-mono); font-size: var(--fs-3); }
         .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; display: inline-block; vertical-align: bottom; }
         /* ...but the renderers also put .truncate on the <td> itself, and a cell
@@ -1669,6 +1732,10 @@
         .tbl-btn.on { color: var(--text); background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
         .table-wrap { overflow-x: auto; overflow-y: hidden; }
+        /* The floor lives on the table, not the wrapper -- a floor on
+           .table-wrap itself would force the page body to scroll
+           sideways at 400px; this way only the table's own box does. */
+        .table-wrap table { min-width: 640px; }
 
         /* Resize grips live on the th, so th needs a positioning context. */
         table[data-ux] thead th { position: relative; }
@@ -1893,8 +1960,13 @@
             <button class="rail-btn" id="nav-toggle" onclick="toggleSidebar()" title="Toggle sidebar (\)" aria-label="Toggle sidebar">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/></svg>
             </button>
-            <span class="view-title" id="view-title">Dashboard</span>
+            <nav class="breadcrumb" aria-label="Breadcrumb">
+                <span class="breadcrumb-root">Console</span>
+                <span class="breadcrumb-sep" aria-hidden="true">/</span>
+                <span class="view-title" id="view-title">Dashboard</span>
+            </nav>
             <span class="readiness-pill is-unknown" id="readiness-pill" title="Readiness: checking&hellip;"></span>
+            <span class="view-asof" id="view-asof"></span>
             <span class="spacer"></span>
             <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Alt</kbd>+<kbd>1</kbd>-<kbd>5</kbd> More views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
             <button class="btn-icon" id="theme-toggle" title="Switch colour theme" aria-label="Switch between dark and light theme" onclick="toggleTheme()">
@@ -1925,7 +1997,10 @@
     </div>
 
     <div class="container" id="app">
-        <div id="loading" class="loading-state"><span class="spinner"></span> Connecting to API...</div>
+        <div id="loading" class="loading-state">
+            <div class="loading-row"><span class="spinner"></span> Connecting to API...</div>
+            <div class="shimmer-bars"><span class="shimmer-bar"></span><span class="shimmer-bar"></span><span class="shimmer-bar"></span></div>
+        </div>
         <div id="error"></div>
         <div id="toast-region" role="status" aria-live="polite"></div>
 
@@ -2157,7 +2232,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Time</th>
+                            <th class="num">Time</th>
                             <th>Intent</th>
                             <th>Source</th>
                             <th>Domain</th>
@@ -2207,7 +2282,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Time</th>
+                            <th class="num">Time</th>
                             <th>Doc ID</th>
                             <th>Preview</th>
                             <th>Content tags</th>
@@ -2224,8 +2299,8 @@
                     <option value="50" selected>50</option>
                     <option value="100">100</option>
                 </select></label>
-                <button type="button" class="btn btn-sm" id="mem-prev" onclick="memPage(-1)">&laquo; Prev</button>
-                <button type="button" class="btn btn-sm" id="mem-next" onclick="memPage(1)">Next &raquo;</button>
+                <button type="button" class="btn btn-sm" id="mem-prev" onclick="memPage(-1)">&laquo; Newer</button>
+                <button type="button" class="btn btn-sm" id="mem-next" onclick="memPage(1)">Older &raquo;</button>
             </div>
             <div id="memory-detail-container"></div>
         </div>
@@ -2246,7 +2321,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Time</th>
+                            <th class="num">Time</th>
                             <th>Type</th>
                             <th>Source</th>
                             <th>Entity</th>
@@ -2278,7 +2353,7 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Time</th>
+                            <th class="num">Time</th>
                             <th>Intent</th>
                             <th>Domain</th>
                             <th>Agent</th>
@@ -2377,8 +2452,8 @@
                             <th class="num">Evidence</th>
                             <th class="num">Effect</th>
                             <th>Status</th>
-                            <th>Created</th>
-                            <th>Fitness-scored</th>
+                            <th class="num">Created</th>
+                            <th class="num">Fitness-scored</th>
                         </tr>
                     </thead>
                     <tbody id="advisories-body"></tbody>
@@ -2412,7 +2487,7 @@
                             <th>Scope</th>
                             <th>Rules</th>
                             <th>Enforcement</th>
-                            <th>Created</th>
+                            <th class="num">Created</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -2501,7 +2576,7 @@
                             <th>Key</th>
                             <th>Target</th>
                             <th>Source</th>
-                            <th>Applied</th>
+                            <th class="num">Applied</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -2523,7 +2598,10 @@
                     auth mode, storage backends, LLM routing and the directories a background job
                     reads. Never shows a connection string, key or token, whatever the source.
                 </p>
-                <div id="runtime-body" class="empty-state">Loading runtime info&hellip;</div>
+                <div id="runtime-body" class="loading-state">
+                    <div class="loading-row"><span class="spinner"></span> Loading runtime info&hellip;</div>
+                    <div class="shimmer-bars"><span class="shimmer-bar"></span><span class="shimmer-bar"></span><span class="shimmer-bar"></span></div>
+                </div>
             </div>
             <div id="settings-banner"></div>
             <p class="field-hint">
@@ -2674,6 +2752,7 @@
             const res = await fetch(API + path, { headers });
             await throwIfAuthRefused(res, key);
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            markDataFetched();
             return res.json();
         }
 
@@ -2794,6 +2873,30 @@
             const d = new Date(iso);
             if (Number.isNaN(d.getTime())) return String(iso);
             return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC').replace(/Z$/, ' UTC');
+        }
+
+        // Row 5 (W2-pass5): the topbar's as-of clock, in both zones at
+        // once -- UTC (the zone every table cell is in) and local (the
+        // operator's own) -- so reading it needs no mental conversion.
+        // Driven by fetchJSON() via markDataFetched() below, so it
+        // updates on every successful request, not just a view switch.
+        // This is a live "now" stamp, not a data timestamp, so it takes
+        // an already-constructed Date rather than parsing one itself --
+        // fmtTime()/timeAgo() above remain the only two `new Date(iso)`
+        // parses of server-supplied timestamps in this file.
+        function fmtAsOf(d) {
+            const pad = (n) => String(n).padStart(2, '0');
+            const utc = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+            const local = `${pad(d.getHours())}:${pad(d.getMinutes())} local`;
+            return `${utc} · ${local}`;
+        }
+
+        function markDataFetched() {
+            const el = document.getElementById('view-asof');
+            if (!el) return;
+            const now = new Date();
+            el.textContent = fmtAsOf(now);
+            el.title = 'Last updated ' + now.toISOString();
         }
 
         // A relative-time cell: visible "3h ago" (zone-agnostic, so it needs
@@ -3025,7 +3128,41 @@
         }
 
         function loadingHtml(msg) {
-            return `<div class="loading-state"><span class="spinner"></span> ${escHtml(msg || 'Loading...')}</div>`;
+            return `<div class="loading-state">` +
+                `<div class="loading-row"><span class="spinner"></span> ${escHtml(msg || 'Loading...')}</div>` +
+                `<div class="shimmer-bars"><span class="shimmer-bar"></span><span class="shimmer-bar"></span><span class="shimmer-bar"></span></div>` +
+                `</div>`;
+        }
+
+        // Row 3 (W2-pass5): one visual shape for every "nothing to show"
+        // site -- an icon, a bold one-line title, a sentence naming the
+        // confirmed cause (and the CLI command that changes it, only when
+        // the code path this view reads actually has one), and at most
+        // one quiet action. `body` is plain text, escaped like every other
+        // interpolated value in this file; `bodyHtml` is caller-built
+        // markup for the few sites that embed a safe inline link or a
+        // dynamically-computed sentence, built the same way every other
+        // innerHTML assignment here already is (caller escapes the parts
+        // that are not literal). `bodyColor` carries a CSS var() string
+        // (e.g. from loadFailureColor()), never user data, so it is not
+        // escaped, matching every other style-attribute interpolation in
+        // this file.
+        const EMPTY_STATE_ICON =
+            '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+            'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>';
+
+        function emptyStateHtml({ icon, title, body, bodyHtml, bodyColor, actionHtml } = {}) {
+            const iconHtml = icon || EMPTY_STATE_ICON;
+            const titleHtml = title ? `<p class="empty-title">${escHtml(title)}</p>` : '';
+            const inner = bodyHtml != null ? bodyHtml : (body != null ? escHtml(body) : '');
+            const colorAttr = bodyColor ? ` style="color:${bodyColor}"` : '';
+            // A <div>, not a <p>: `bodyHtml` callers sometimes pass more
+            // than one block-level element (e.g. two paragraphs), which a
+            // <p> wrapper cannot legally contain.
+            const bodyBlock = inner ? `<div class="empty-body"${colorAttr}>${inner}</div>` : '';
+            const actionBlock = actionHtml ? `<div class="empty-action">${actionHtml}</div>` : '';
+            return `<div class="empty-state"><div class="icon">${iconHtml}</div>${titleHtml}${bodyBlock}${actionBlock}</div>`;
         }
 
         // A panel backed by an admin-scoped route renders a 403 differently
@@ -3509,12 +3646,14 @@
         }
 
         function reviewEmpty(msg) {
-            return `<div class="empty-state"><p style="color:var(--text-dim)">${escHtml(msg)}</p></div>`;
+            return emptyStateHtml({ body: msg });
         }
 
         function reviewError(err, label) {
-            return `<div class="empty-state"><p style="color:${loadFailureColor(err)}">` +
-                `${escHtml(loadFailureText(err, label))}</p></div>`;
+            return emptyStateHtml({
+                bodyHtml: escHtml(loadFailureText(err, label)),
+                bodyColor: loadFailureColor(err),
+            });
         }
 
         async function loadReview() {
@@ -3944,14 +4083,23 @@
                     html += '</tbody></table></div>';
                     items.innerHTML = html;
                 } else {
-                    items.innerHTML = '<div class="empty-state"><div class="icon">&#x2191;</div><p>No item scores yet. Assemble context packs and provide feedback to see effectiveness data.</p></div>';
+                    items.innerHTML = emptyStateHtml({
+                        title: 'No item scores yet',
+                        bodyHtml: `Effectiveness needs packs with recorded feedback. Assemble one ` +
+                            `(<code>POST /packs</code> or the <code>get_context</code> MCP tool), then grade ` +
+                            `it with <code>trellis curate feedback --pack-id &lt;id&gt;</code>.`,
+                    });
                 }
 
                 renderNoiseSection(data);
                 cancelApplyNoiseTags();
                 document.getElementById('evo-noise-apply-result').innerHTML = '';
             } catch (err) {
-                summary.innerHTML = `<div class="empty-state"><div class="icon">&#x2191;</div><p style="color:${loadFailureColor(err)}">${escHtml(loadFailureText(err, 'Effectiveness data'))}</p></div>`;
+                summary.innerHTML = emptyStateHtml({
+                    title: 'Could not load effectiveness data',
+                    body: loadFailureText(err, 'Effectiveness data'),
+                    bodyColor: loadFailureColor(err),
+                });
             }
         }
 
@@ -5040,14 +5188,18 @@
                 const traces = data.traces || [];
 
                 if (traces.length === 0) {
-                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><p>No traces found</p></div></td></tr>';
+                    body.innerHTML = `<tr><td colspan="6">${emptyStateHtml({
+                        icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>',
+                        title: 'No traces found',
+                        bodyHtml: `None match the domain filter, or no traces have been ingested yet. Record one with <code>trellis ingest trace</code>.`,
+                    })}</td></tr>`;
                     renderCursorPagerFooter('trace', tracePager, 0, data.total || 0);
                     return;
                 }
 
                 body.innerHTML = traces.map((t, i) => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}"${i === traces.length - 1 ? ` data-oldest-stamp="${escHtml(t.created_at)}"` : ''}>
-                        <td>${fmtTimeCell(t.created_at)}</td>
+                        <td class="num">${fmtTimeCell(t.created_at)}</td>
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
                         <td>${t.domain ? escHtml(t.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
@@ -5279,13 +5431,15 @@
                 }
             }
 
-            return '<div class="empty-state"><div class="icon">&#x2713;</div>' +
-                '<p>No precedents yet. A precedent is ordinarily created when a human approves a ' +
-                'learning candidate on the <a href="#" onclick="switchView(\'review\'); return false;">' +
-                'Review</a> tab; the auto-promotion loop on the ' +
-                '<a href="#" onclick="switchView(\'loops\'); return false;">Loops</a> tab can also ' +
-                'create one on its own once an operator enables its commit mode. ' +
-                `${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
+            return emptyStateHtml({
+                title: 'No precedents yet',
+                bodyHtml: 'A precedent is ordinarily created when a human approves a ' +
+                    'learning candidate on the <a href="#" onclick="switchView(\'review\'); return false;">' +
+                    'Review</a> tab; the auto-promotion loop on the ' +
+                    '<a href="#" onclick="switchView(\'loops\'); return false;">Loops</a> tab can also ' +
+                    'create one on its own once an operator enables its commit mode. ' +
+                    `${reviewLine} ${qualifyLine} ${scheduleLine}`,
+            });
         }
 
         async function loadPrecedents() {
@@ -5318,7 +5472,11 @@
                     </div>
                 `).join('')}</div>`;
             } catch (err) {
-                container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">Failed to load precedents: ${escHtml(err.message)}</p></div>`;
+                container.innerHTML = emptyStateHtml({
+                    title: 'Could not load precedents',
+                    body: 'Failed to load precedents: ' + err.message,
+                    bodyColor: 'var(--danger)',
+                });
             }
         }
 
@@ -5362,14 +5520,18 @@
                 const docs = data.documents || [];
 
                 if (docs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2 2 0 0 1 6 4h6v16H6a2 2 0 0 1-2-2z"/><path d="M20 5.5A2 2 0 0 0 18 4h-6v16h6a2 2 0 0 0 2-2z"/></svg></div><p>No documents found</p></div></td></tr>';
+                    body.innerHTML = `<tr><td colspan="5">${emptyStateHtml({
+                        icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2 2 0 0 1 6 4h6v16H6a2 2 0 0 1-2-2z"/><path d="M20 5.5A2 2 0 0 0 18 4h-6v16h6a2 2 0 0 0 2-2z"/></svg>',
+                        title: 'No documents found',
+                        bodyHtml: `None match the search, or none have been saved yet. Ingest one with <code>trellis ingest evidence</code> or <code>trellis ingest corpus</code>, or save one via the <code>save_memory</code> MCP tool.`,
+                    })}</td></tr>`;
                     document.getElementById('mem-pagination').style.display = 'none';
                     return;
                 }
 
                 body.innerHTML = docs.map(d => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
-                        <td style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
+                        <td class="num" style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
                         <td class="mono truncate" style="max-width:220px; font-size:var(--fs-2)" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
@@ -5519,7 +5681,11 @@
                 }
 
                 if (events.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19v-5"/><circle cx="12" cy="12" r="2"/><path d="M8.5 10a5 5 0 0 1 0 4M15.5 10a5 5 0 0 1 0 4M5.5 7a9 9 0 0 1 0 10M18.5 7a9 9 0 0 1 0 10"/></svg></div><p>No events match</p></div></td></tr>';
+                    body.innerHTML = `<tr><td colspan="5">${emptyStateHtml({
+                        icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19v-5"/><circle cx="12" cy="12" r="2"/><path d="M8.5 10a5 5 0 0 1 0 4M15.5 10a5 5 0 0 1 0 4M5.5 7a9 9 0 0 1 0 10M18.5 7a9 9 0 0 1 0 10"/></svg>',
+                        title: 'No events match',
+                        body: 'None match the current type/source filters, or none have been recorded yet. Events are written automatically by governed mutations; there is no command to create one directly.',
+                    })}</td></tr>`;
                     renderCursorPagerFooter('event', eventPager, 0, data.total || 0);
                     return;
                 }
@@ -5532,7 +5698,7 @@
                     const oldestAttr = i === events.length - 1 ? ` data-oldest-stamp="${escHtml(e.occurred_at)}"` : '';
                     return `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}"${oldestAttr}>
-                        <td style="white-space:nowrap">${fmtTimeCell(e.occurred_at)}</td>
+                        <td class="num" style="white-space:nowrap">${fmtTimeCell(e.occurred_at)}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
                         <td style="font-size:var(--fs-3)">${escHtml(e.source)}</td>
                         <td>${entityCell}</td>
@@ -5626,14 +5792,18 @@
                 const packs = data.packs || [];
 
                 if (packs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></div><p>No packs assembled yet</p><p style="font-size:var(--fs-3); color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    body.innerHTML = `<tr><td colspan="7">${emptyStateHtml({
+                        icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
+                        title: 'No packs assembled yet',
+                        bodyHtml: `<p>Packs appear here when agents call <code>get_context</code> or <code>POST /packs</code>.</p>`,
+                    })}</td></tr>`;
                     renderCursorPagerFooter('pack', packPager, 0, data.total || 0);
                     return;
                 }
 
                 body.innerHTML = packs.map((p, i) => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}"${i === packs.length - 1 ? ` data-oldest-stamp="${escHtml(p.created_at)}"` : ''}>
-                        <td style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
+                        <td class="num" style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td class="mono" style="font-size:var(--fs-2)">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
@@ -5919,11 +6089,13 @@
             el.classList.remove('is-ready', 'is-degraded', 'is-unknown');
             if (statusVal === 'ready') {
                 el.classList.add('is-ready');
+                el.textContent = 'Ready';
                 el.title = 'Readiness: ready (all probed backends ok)';
                 return;
             }
             if (statusVal === 'degraded' || statusVal === 'initializing') {
                 el.classList.add('is-degraded');
+                el.textContent = statusVal === 'initializing' ? 'Starting' : 'Degraded';
                 const backends = ready && ready.backends;
                 if (backends) {
                     const failing = Object.entries(backends)
@@ -5940,6 +6112,7 @@
                 return;
             }
             el.classList.add('is-unknown');
+            el.textContent = 'Unknown';
             el.title = 'Readiness: unknown (probe unreachable)';
         }
 
@@ -5994,23 +6167,20 @@
 
                 const total = stats ? (stats.traces || 0) + (stats.documents || 0) + (stats.nodes || 0) : -1;
                 if (total === 0 && ready.status === 'ready') {
+                    // Only the banner's own box look (dashed border, inset
+                    // background) is set here; the centred/muted empty-state
+                    // look itself comes from emptyStateHtml()'s own markup
+                    // below -- giving this outer element the same class too
+                    // would nest two .empty-state paddings inside one box.
                     const banner = document.createElement('div');
-                    banner.className = 'empty-state';
-                    banner.style.cssText = 'margin:1.5rem;padding:2rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius: var(--r-2);';
-                    banner.innerHTML = `
-                        <div style="margin-bottom:0.75rem"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21v-9"/><path d="M12 12C7 12 5 9 5 5c4 0 7 2 7 7z"/><path d="M12 12c5 0 7-3 7-7-4 0-7 2-7 7z"/></svg></div>
-                        <h3 style="margin-bottom:0.5rem;color:var(--text)">Welcome to Trellis</h3>
-                        <p style="color:var(--text-dim);max-width:480px;margin:0 auto 1rem">
-                            Your knowledge graph is empty. Load sample data to explore the dashboard,
-                            graph visualization, and trace inspector.
-                        </p>
-                        <code style="display:inline-block;background:var(--surface-sunken);padding:0.5rem 1rem;border-radius: var(--r-1);color:var(--accent);font-size:var(--fs-4)">
-                            trellis demo load
-                        </code>
-                        <p style="color:var(--text-dim);font-size:var(--fs-3);margin-top:0.75rem">
-                            Then refresh this page to see your data.
-                        </p>
-                    `;
+                    banner.style.cssText = 'margin:1.5rem;padding:1rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius: var(--r-2);';
+                    banner.innerHTML = emptyStateHtml({
+                        icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21v-9"/><path d="M12 12C7 12 5 9 5 5c4 0 7 2 7 7z"/><path d="M12 12c5 0 7-3 7-7-4 0-7 2-7 7z"/></svg>',
+                        title: 'Welcome to Trellis',
+                        body: 'Your knowledge graph is empty. Load sample data to explore the dashboard, graph visualization, and trace inspector.',
+                        actionHtml: '<code style="display:inline-block;background:var(--surface-sunken);padding:0.5rem 1rem;border-radius:var(--r-1);color:var(--accent);font-size:var(--fs-4)">trellis demo load</code>' +
+                            '<p style="color:var(--text-dim);font-size:var(--fs-3);margin-top:0.75rem">Then refresh this page to see your data.</p>',
+                    });
                     const dashboard = document.getElementById('view-dashboard');
                     dashboard.insertBefore(banner, dashboard.firstChild);
                 }
@@ -6097,7 +6267,10 @@
                 const data = await fetchJSON('/loops');
                 const loops = data.loops || [];
                 if (loops.length === 0) {
-                    container.innerHTML = '<div class="empty-state"><p>No loops reported</p></div>';
+                    container.innerHTML = emptyStateHtml({
+                        title: 'No loops reported',
+                        body: 'The loop catalog is fixed in the server (precedent promotion, tuner, feedback intake and the learning auto-promote/demote pair); it has no CLI command that adds to it from here.',
+                    });
                     return;
                 }
                 container.innerHTML = `<div class="status-section" style="padding:0.25rem 1.25rem">` +
@@ -6209,7 +6382,10 @@
                 const reports = (data.reports || []).slice().sort((a, b) => a.name.localeCompare(b.name));
                 if (reports.length === 0) {
                     picker.innerHTML = '';
-                    outputEl.innerHTML = '<div class="empty-state"><p>No reports available</p></div>';
+                    outputEl.innerHTML = emptyStateHtml({
+                        title: 'No reports available',
+                        body: 'The report registry is fixed in the server; this deployment has none registered, and there is no CLI command that adds one from here.',
+                    });
                     return;
                 }
                 reportDescriptions = {};
@@ -6231,7 +6407,10 @@
                 // whatever work the first report in the list does on
                 // every visit, including ones that only wanted a
                 // different report.
-                outputEl.innerHTML = '<div class="empty-state"><p>Pick a report above and click Run.</p></div>';
+                outputEl.innerHTML = emptyStateHtml({
+                    title: 'Pick a report to run',
+                    body: 'Choose one from the list above, then click Run.',
+                });
             } catch (err) {
                 picker.innerHTML = '';
                 outputEl.innerHTML = `<div style="color:${loadFailureColor(err)}; padding:1.5rem; text-align:center">` +
@@ -6430,7 +6609,7 @@
 
         function renderReportData(data) {
             if (data === null || data === undefined) {
-                return '<div class="empty-state"><p>No data returned</p></div>';
+                return emptyStateHtml({ title: 'No data returned', body: 'This report ran successfully and returned an empty result.' });
             }
             if (typeof data === 'object' && !Array.isArray(data) && data.status === 'degraded') {
                 return `<div style="color:var(--danger); padding:1rem">` +
@@ -6471,7 +6650,7 @@
                     </details>`).join('');
             }
             if (!html) {
-                html = '<div class="empty-state"><p>Insufficient data for this report</p></div>';
+                html = emptyStateHtml({ title: 'Insufficient data for this report', body: 'The report ran but had nothing it could score or summarize yet.' });
             }
             return html;
         }
@@ -6986,7 +7165,12 @@
                 renderDegradedBanner('advisories-banner', data.store_degradation);
                 const rows = data.advisories || [];
                 if (rows.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">${data.store_degradation ? 'No advisories parsed from a degraded store -- see the banner above.' : 'No advisories generated yet.'}</div></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="9">${emptyStateHtml({
+                        title: 'No advisories',
+                        bodyHtml: data.store_degradation ?
+                            'No advisories parsed from a degraded store -- see the banner above.' :
+                            'None generated yet. Run <code>trellis analyze generate-advisories</code>.',
+                    })}</td></tr>`;
                 } else {
                     const filterLegacyAdvisoriesEnabled = !!data.filter_legacy_advisories_enabled;
                     tbody.innerHTML = rows
@@ -7033,8 +7217,8 @@
                 <td class="num" title="${escHtml(evidenceTitle)}">${evidenceConf}</td>
                 <td class="num" title="${escHtml(evidenceTitle)}">${fmtNum(ev.effect_size, 2)}</td>
                 <td>${statusBadge}</td>
-                <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
-                <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
+                <td class="num">${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
+                <td class="num">${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
             </tr>`;
         }
 
@@ -7151,7 +7335,12 @@
                 renderDegradedBanner('policies-banner', data.store_degradation);
                 const rows = data.policies || [];
                 if (rows.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">${data.store_degradation ? 'No policies parsed from a degraded store -- more may exist in the unreadable rows; see the banner above.' : 'No policies declared. Trellis ships zero policies by default, which behaves exactly as if no gate existed.'}</div></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="7">${emptyStateHtml({
+                        title: 'No policies',
+                        bodyHtml: data.store_degradation ?
+                            'No policies parsed from a degraded store -- more may exist in the unreadable rows; see the banner above.' :
+                            'None declared. Trellis ships zero policies by default, which behaves exactly as if no gate existed. Add one with <code>trellis policy add</code>.',
+                    })}</td></tr>`;
                 } else {
                     tbody.innerHTML = rows.map(renderPolicyRow).join('');
                 }
@@ -7172,7 +7361,7 @@
                 <td>${escHtml(scopeText)}</td>
                 <td>${escHtml(rulesText)}</td>
                 <td>${escHtml(p.enforcement)}</td>
-                <td>${escHtml(fmtTime(p.created_at, { empty: 'not measured' }))}</td>
+                <td class="num">${escHtml(fmtTime(p.created_at, { empty: 'not measured' }))}</td>
                 <td id="policy-actions-${escHtml(p.policy_id)}"><button class="btn btn-sm btn-danger" data-action="confirmDeletePolicy" data-id="${escHtml(p.policy_id)}">Delete</button></td>
             </tr>`;
         }
@@ -7423,7 +7612,10 @@
                 rows.forEach(job => { scheduleJobsCache[job.name] = job; });
                 tbody.innerHTML = rows.length
                     ? rows.map(job => renderScheduleRow(job, degraded, data.dispatcher_seen)).join('')
-                    : `<tr><td colspan="8"><div class="empty-state">No catalog jobs.</div></td></tr>`;
+                    : `<tr><td colspan="8">${emptyStateHtml({
+                        title: 'No catalog jobs',
+                        body: 'The job catalog is fixed in the server source; it has no CLI command that adds to it from here.',
+                    })}</td></tr>`;
                 totalEl.textContent = `${data.count ?? rows.length} job(s) in the catalog`;
             } catch (err) {
                 tbody.innerHTML = `<tr><td colspan="8" style="color:${loadFailureColor(err)}">` +
@@ -7732,7 +7924,11 @@
                 all.forEach(c => { tagCandidatesCache[c.candidate_id] = c; });
                 const rows = all.filter(c => c.status === 'open');
                 if (rows.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">No open candidates. Try "Mine candidates" to scan for new keyword/alias proposals.</div></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="7">${emptyStateHtml({
+                        title: 'No open candidates',
+                        body: 'None are waiting for review. Mine for new keyword/alias proposals with the button below, or from the CLI.',
+                        actionHtml: '<button class="btn btn-sm" onclick="confirmMineTagCandidates()">Mine candidates&hellip;</button>',
+                    })}</td></tr>`;
                 } else {
                     tbody.innerHTML = rows.map(renderTagCandidateRow).join('');
                 }
@@ -7945,7 +8141,10 @@
                 effectiveRulesCache = {};
                 rows.forEach(r => { effectiveRulesCache[`${r.kind}:${r.key}`] = r; });
                 if (rows.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">No effective rules.</div></td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6">${emptyStateHtml({
+                        title: 'No effective rules',
+                        bodyHtml: 'No tag-keyword or domain-alias rule has been approved yet. Review the open candidates above, or mine new ones with <code>trellis classify tag-candidates</code>.',
+                    })}</td></tr>`;
                 } else {
                     tbody.innerHTML = rows.map(renderEffectiveRuleRow).join('');
                 }
@@ -7965,7 +8164,7 @@
                 <td><code>${escHtml(r.key)}</code></td>
                 <td>${escHtml(r.target)}</td>
                 <td>${escHtml(r.source)}</td>
-                <td>${escHtml(fmtTime(r.applied_at, { empty: '' }))}</td>
+                <td class="num">${escHtml(fmtTime(r.applied_at, { empty: '' }))}</td>
                 <td id="tagrule-actions-${escHtml(id)}">${actions}</td>
             </tr>`;
         }
@@ -8132,8 +8331,11 @@
                 populateSettingsGroupFilter(data);
                 renderSettingsTable();
             } catch (err) {
-                tbody.innerHTML = `<div class="empty-state" style="color:${loadFailureColor(err)}">` +
-                    `${escHtml(loadFailureText(err, 'Settings'))}</div>`;
+                tbody.innerHTML = emptyStateHtml({
+                    title: 'Could not load settings',
+                    body: loadFailureText(err, 'Settings'),
+                    bodyColor: loadFailureColor(err),
+                });
             }
         }
 
@@ -8240,7 +8442,10 @@
                     (r.description || '').toLowerCase().includes(filterText));
             }
             if (rows.length === 0) {
-                tbody.innerHTML = `<div class="empty-state">No settings match this filter.</div>`;
+                tbody.innerHTML = emptyStateHtml({
+                    title: 'No settings match this filter',
+                    body: 'Clear or broaden the group filter above to see the rest of the catalog.',
+                });
             } else {
                 tbody.innerHTML = rows.map(s => renderSettingRow(s, groups, degraded)).join('');
             }
