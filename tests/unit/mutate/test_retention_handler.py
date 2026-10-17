@@ -813,6 +813,21 @@ class TestRestorePrecedentHistory:
         assert refused_id in result.message
         assert never_archived_id in result.message
 
+        # The audit event is emitted unconditionally -- even though the
+        # command itself is REJECTED, an all-refused-or-skipped batch
+        # still gets a RETENTION_RESTORED row with restored=0: the
+        # refused/skipped ids are the only record of what was attempted,
+        # and nothing in this codebase branches on the restored count.
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["restored"] == 0
+        assert payload["restored_ids"] == []
+        assert payload["skipped_ids"] == [never_archived_id]
+        assert payload["refused_ids"] == [refused_id]
+
 
 class TestNodePurgedMidCommand:
     """A purge that commits between a node's read and its rewrite stands.

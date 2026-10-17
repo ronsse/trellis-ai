@@ -3693,6 +3693,14 @@
         // a proposal is resolved; never polled. A held-but-under-scoped key
         // and an absent key both hide the badge the same way a genuinely
         // empty queue would -- "unknown" must never render as "0".
+        //
+        // The call sends no explicit `limit`, so the server's default
+        // (`GET /proposals`'s `limit: int = Query(100, ...)`) caps `count`
+        // at 100 -- `count` is `len(rows)` after that cap, never a true
+        // total. A queue that is at or past the cap must not render as
+        // exactly "100": that reads as a real total when it is really
+        // "at least this many".
+        const REVIEW_BADGE_CAP = 100;
         async function refreshReviewBadge() {
             const el = document.getElementById('nav-badge-review');
             if (!el) return;
@@ -3701,7 +3709,7 @@
                 const data = await fetchJSON('/proposals');
                 const n = typeof data.count === 'number' ? data.count : (data.proposals || []).length;
                 if (n > 0) {
-                    el.textContent = String(n);
+                    el.textContent = n >= REVIEW_BADGE_CAP ? `${REVIEW_BADGE_CAP}+` : String(n);
                     el.hidden = false;
                 } else {
                     el.hidden = true;

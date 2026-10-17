@@ -1699,6 +1699,32 @@ class TestCurateAutoPromoteCandidates:
             ],
         )
         assert refused.exit_code == 5, refused.output
+        # The refusal must name both the stored mode ("commit") and the
+        # setting an operator would go edit — not a generic failure --
+        # in the JSON message (gate-879 follow-up #6).
+        refused_payload = json.loads(refused.stdout.strip())
+        assert refused_payload["setting"] == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+        assert CANDIDATE_AUTO_PROMOTE_MODE_SETTING in refused_payload["message"]
+        assert "commit" in refused_payload["message"]
+
+        # Same scenario rendered as text (the CLI's default format) must
+        # name both too -- this is the asymmetry gate-879 follow-up #6
+        # flagged: the JSON branch already carried `setting` as a
+        # separate field, but the rendered text previously had no way
+        # for a reader to learn the setting's dotted path at all.
+        refused_text = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+            ],
+        )
+        assert refused_text.exit_code == 5, refused_text.output
+        refused_text_plain = plain(refused_text.stdout)
+        assert CANDIDATE_AUTO_PROMOTE_MODE_SETTING in refused_text_plain
+        assert "commit" in refused_text_plain
 
         # With --dry-run: forced to report_only before the policy is built.
         result = runner.invoke(
@@ -1721,16 +1747,19 @@ class TestCurateAutoPromoteCandidates:
         event_log = curate_cli._get_registry().operational.event_log
         mutation_events = event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
         assert mutation_events == []
-        # Both invocations emit an event: the refused run records its own
-        # refusal (exit 5, below), and the dry-run that followed records
-        # its completed evaluation -- every exit path writes a run event.
+        # All three invocations emit an event: the two refused runs above
+        # (JSON then text format) each record their own refusal, and the
+        # dry-run that followed records its completed evaluation -- every
+        # exit path writes a run event.
         evaluated_events = event_log.get_events(
             event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
         )
-        assert len(evaluated_events) == 2
-        refused_event, ok_event = evaluated_events
+        assert len(evaluated_events) == 3
+        refused_event, refused_text_event, ok_event = evaluated_events
         assert refused_event.payload["outcome"] == "refused"
         assert refused_event.payload["configured_mode"] == "commit"
+        assert refused_text_event.payload["outcome"] == "refused"
+        assert refused_text_event.payload["configured_mode"] == "commit"
         assert ok_event.payload["outcome"] == "ok"
         assert ok_event.payload["configured_mode"] == "commit"
 
