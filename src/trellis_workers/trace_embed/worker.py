@@ -449,12 +449,15 @@ def _process_one(
     executor is a plain failure: it holds the cursor, because nothing about
     it says the next attempt cannot succeed.
     """
-    if trace_is_embedded(vector_store, trace.trace_id):
-        report.skipped_existing += 1
-        return True
-
+    # Before the vector-store lookup, not after it: a backend that binds the
+    # id as a SQL parameter (Postgres refuses a NUL in a text value) would
+    # raise on the lookup itself and fail the whole pass.
     if contains_nul_or_lone_surrogate(trace.trace_id):
         report.skipped_invalid += 1
+        return True
+
+    if trace_is_embedded(vector_store, trace.trace_id):
+        report.skipped_existing += 1
         return True
 
     content = render_trace_summary(trace, include_step_errors=include_step_errors)

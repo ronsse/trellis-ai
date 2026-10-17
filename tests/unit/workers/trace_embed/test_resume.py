@@ -318,6 +318,30 @@ class TestPermanentlyInvalidRowDoesNotPinTheWatermark:
             == []
         )
 
+    def test_a_hazardous_id_is_never_looked_up_in_the_vector_store(
+        self, registry, watermark_path, monkeypatch
+    ) -> None:
+        from .conftest import make_trace
+
+        bad = make_trace(0).model_copy(update={"trace_id": "bad\x00trace"})
+        registry.operational.trace_store.append(bad)
+        vector_store = registry.knowledge.vector_store
+        looked_up: list[str] = []
+        real_get = vector_store.get
+
+        def recording_get(item_id: str):  # type: ignore[no-untyped-def]
+            looked_up.append(item_id)
+            return real_get(item_id)
+
+        monkeypatch.setattr(vector_store, "get", recording_get)
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert report.skipped_invalid == 1
+        assert not any("\x00" in item_id for item_id in looked_up), (
+            "a backend that binds the id as a SQL parameter raises on a NUL, "
+            "so the hazard must be classified before the embedded-row lookup"
+        )
+
     def test_a_dry_run_reports_a_hazardous_row_as_skipped_invalid_not_embedded(
         self, registry, watermark_path, recorder
     ) -> None:
