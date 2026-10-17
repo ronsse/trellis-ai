@@ -70,6 +70,9 @@
             --entity-team: #a3e635; --entity-dataset: #e879f9; --entity-project: #38bdf8;
             --entity-product: #fda4af; --entity-event: #facc15; --entity-place: #34d399;
             --entity-observation: #22d3ee; --entity-measurement: #a8a29e;
+            /* Lightness of the hashed fill nodeColor() gives any other entity
+               type; light mode darkens it so every reachable hue clears 3:1. */
+            --entity-hashed-lightness: 62%;
         }
 
         @media (prefers-color-scheme: light) {
@@ -124,6 +127,7 @@
                 --entity-team: #639312; --entity-dataset: #db30f6; --entity-project: #078dc8;
                 --entity-product: #fb364e; --entity-event: #a08103; --entity-place: #20956a;
                 --entity-observation: #0d93a7; --entity-measurement: #8b837e;
+                --entity-hashed-lightness: 34%;
             }
         }
         :root[data-theme="light"] {
@@ -177,6 +181,7 @@
             --entity-team: #639312; --entity-dataset: #db30f6; --entity-project: #078dc8;
             --entity-product: #fb364e; --entity-event: #a08103; --entity-place: #20956a;
             --entity-observation: #0d93a7; --entity-measurement: #8b837e;
+            --entity-hashed-lightness: 34%;
         }
         /* IBM Plex Sans (400/500/600) and IBM Plex Mono (400/500), Latin
            subset, woff2 only -- vendored rather than linked so the console
@@ -4334,6 +4339,8 @@
         // Any other type gets a hue hashed (FNV-1a) from its stored string, so
         // it keeps its colour across loads. Hues 228-257 are skipped: that band
         // is the indigo of the page accent and the edge highlight.
+        // Lightness is a theme token (--entity-hashed-lightness), so light mode
+        // gets a shade dark enough to read on the canvas.
         function nodeColor(type) {
             if (WELL_KNOWN_ENTITY_TYPES.includes(type)) {
                 const fixed = cssVar(entityTypeCssVar(type));
@@ -4346,7 +4353,7 @@
             }
             let hue = (h >>> 0) % 330;
             if (hue >= 228) hue += 30;
-            return `hsl(${hue}, 55%, 62%)`;
+            return `hsl(${hue}, 55%, ${cssVar('--entity-hashed-lightness') || '62%'})`;
         }
 
         // Activity names are task intents, often over 100 characters. The
