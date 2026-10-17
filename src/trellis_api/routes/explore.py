@@ -199,11 +199,11 @@ def _parse_event_type(event_type: str | None) -> EventType | None:
         403: {"description": "The caller's key lacks the admin scope."},
         422: {
             "description": (
-                "An unknown `event_type` or an `order` outside "
-                "{'asc', 'desc'} (DefaultValidationError -- ``detail`` is "
-                "a list of field errors), or a hand-raised 422 naming the "
-                "bad value (StringDetailError -- ``detail`` is a plain "
-                "string; see ``_parse_event_type`` and the ``order`` check)."
+                "A query parameter fails its declared type "
+                "(DefaultValidationError -- ``detail`` is a list of field "
+                "errors), or an unknown `event_type` or an `order` outside "
+                "{'asc', 'desc'} (StringDetailError -- ``detail`` is a "
+                "plain string naming the bad value)."
             ),
             "model": DefaultValidationError | StringDetailError,
         },

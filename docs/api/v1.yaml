@@ -4432,9 +4432,9 @@ paths:
                 - $ref: '#/components/schemas/DefaultValidationError'
                 - $ref: '#/components/schemas/StringDetailError'
                 title: Response 422 List Events Api V1 Events Get
-          description: An unknown `event_type` or an `order` outside {'asc', 'desc'} (DefaultValidationError -- ``detail``
-            is a list of field errors), or a hand-raised 422 naming the bad value (StringDetailError -- ``detail`` is a plain
-            string; see ``_parse_event_type`` and the ``order`` check).
+          description: A query parameter fails its declared type (DefaultValidationError -- ``detail`` is a list of field
+            errors), or an unknown `event_type` or an `order` outside {'asc', 'desc'} (StringDetailError -- ``detail`` is
+            a plain string naming the bad value).
       security:
       - APIKeyHeader: []
       summary: List Events
