@@ -299,6 +299,21 @@
             opacity: 0.85;
         }
         body.nav-collapsed .sidebar-nav a .nav-scope-badge { display: none; }
+        /* Pending-items count on the Review nav entry (refreshReviewBadge) --
+           hidden rather than "0" both when the queue is empty and when no
+           admin-scoped key is held to ask it, since neither case is the
+           same fact as "none pending". */
+        .sidebar-nav a .nav-badge {
+            flex: none;
+            font-size: var(--fs-1);
+            font-weight: 600;
+            line-height: 1;
+            padding: 0.1rem 0.4rem;
+            border-radius: var(--r-pill);
+            background: var(--accent-tint);
+            color: var(--accent-ink);
+        }
+        body.nav-collapsed .sidebar-nav a .nav-badge { display: none; }
         .sidebar-nav a:hover { color: var(--rail-text-active); background: var(--rail-active-bg); }
         .sidebar-nav a:hover > svg { opacity: 1; }
         .sidebar-nav a.active { color: var(--rail-text-active); background: var(--rail-active-bg); }
@@ -1933,7 +1948,7 @@
         <nav class="sidebar-nav">
             <a href="#" class="active" data-view="dashboard" data-label="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Dashboard</span><span class="nav-key">1</span></a>
             <a href="#" data-view="metrics" data-label="Metrics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16.5A1.5 1.5 0 0 0 4.5 21H21"/><path d="M7 14.5l4-4.5 3 3 5.5-6.5"/></svg><span class="nav-label">Metrics</span><span class="nav-key">2</span></a>
-            <a href="#" data-view="review" data-label="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/><path d="M8.5 11.5l3 3 9-9.5"/></svg><span class="nav-label">Review</span><span class="nav-key">3</span></a>
+            <a href="#" data-view="review" data-label="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/><path d="M8.5 11.5l3 3 9-9.5"/></svg><span class="nav-label">Review</span><span class="nav-badge" id="nav-badge-review" hidden></span><span class="nav-key">3</span></a>
             <a href="#" data-view="effectiveness" data-label="Effectiveness"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Effectiveness</span><span class="nav-key">4</span></a>
             <a href="#" data-view="graph" data-label="Graph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.6" r="2.6"/><circle cx="4.6" cy="18" r="2.6"/><circle cx="19.4" cy="18" r="2.6"/><path d="M10.7 6.9L5.9 15.7M13.3 6.9l4.8 8.8M7.2 18h9.6"/></svg><span class="nav-label">Graph</span><span class="nav-key">5</span></a>
             <a href="#" data-view="traces" data-label="Traces"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h4l2.8 6.5L14 4.5l2.6 8h4.9"/></svg><span class="nav-label">Traces</span><span class="nav-key">6</span></a>
@@ -3280,6 +3295,11 @@
                 if (name === 'tagrules') loadTagRules();
                 if (name === 'settings') { loadRuntime(); loadSettings(); }
             }
+            // Unlike the one-time loads gated by viewLoaded above, the nav
+            // badge is refreshed every time Review opens, not just the
+            // first: a proposal can land between visits with no polling to
+            // have caught it.
+            if (name === 'review') refreshReviewBadge();
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
                 setTimeout(() => document.getElementById('graph-search').focus(), 100);
@@ -3665,6 +3685,32 @@
             loadReviewCode();
         }
 
+        // Pending-items count shown on the Review nav entry itself, so an
+        // operator sees there is work waiting before they ever open the
+        // tab. Reuses `/proposals` -- the same endpoint loadReviewProposals()
+        // above already calls -- rather than adding a second count route.
+        // Fetched once on load and again whenever the Review view opens or
+        // a proposal is resolved; never polled. A held-but-under-scoped key
+        // and an absent key both hide the badge the same way a genuinely
+        // empty queue would -- "unknown" must never render as "0".
+        async function refreshReviewBadge() {
+            const el = document.getElementById('nav-badge-review');
+            if (!el) return;
+            if (!getApiKey()) { el.hidden = true; return; }
+            try {
+                const data = await fetchJSON('/proposals');
+                const n = typeof data.count === 'number' ? data.count : (data.proposals || []).length;
+                if (n > 0) {
+                    el.textContent = String(n);
+                    el.hidden = false;
+                } else {
+                    el.hidden = true;
+                }
+            } catch {
+                el.hidden = true;
+            }
+        }
+
         // A proposal with `reachable === false` can never be promoted --
         // promote_proposal() and preview_promotion() both re-check the same
         // reachability before any policy gate runs, so Approve on this row
@@ -3769,6 +3815,7 @@
                 toastReview('Promote failed: ' + err.message, false);
             }
             loadReviewProposals();
+            refreshReviewBadge();
         }
 
         // Reject is terminal (TUNER_PROPOSAL_REJECTED; unlike a bootstrap
@@ -3795,6 +3842,7 @@
                 toastReview('Reject failed: ' + err.message, false);
             }
             loadReviewProposals();
+            refreshReviewBadge();
         }
 
         // A dedicated aria-live="polite" region, never #error (#error is a
@@ -8802,6 +8850,7 @@
         installHelpLinks();
 
         init();
+        refreshReviewBadge();
     </script>
 </body>
 </html>
