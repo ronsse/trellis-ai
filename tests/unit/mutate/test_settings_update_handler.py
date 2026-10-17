@@ -272,6 +272,52 @@ class TestRefusesRatherThanClamps:
         assert exc_info.value.code == "invalid_value"
         assert _store(registry).get("pack_holdout_rate") is None
 
+    def test_excerpt_max_chars_below_minimum_is_rejected(
+        self, registry: StoreRegistry
+    ) -> None:
+        """One of the seven pack-size/excerpt knobs this PR adds, proven
+        through the same governed write path as every other bounds
+        check in this class -- not merely asserted at the
+        :class:`SettingSpec` level.
+        """
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd("excerpt_max_chars", 0)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "invalid_value"
+        assert _store(registry).get("excerpt_max_chars") is None
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "get_context_max_tokens",
+            "get_context_max_items",
+            "search_max_tokens",
+            "rest_pack_max_items",
+            "rest_pack_max_tokens",
+            "disclosure_body_items",
+            "excerpt_max_chars",
+        ],
+    )
+    def test_pack_budget_knob_below_minimum_is_rejected(
+        self, registry: StoreRegistry, name: str
+    ) -> None:
+        """All seven pack-size/excerpt knobs this PR adds share
+        ``minimum=1`` -- ``0`` is refused for every one of them through
+        the same governed write path, not merely at the
+        :class:`SettingSpec` level. Companion to
+        ``test_excerpt_max_chars_below_minimum_is_rejected`` above, which
+        this parametrization also re-covers.
+        """
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd(name, 0)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "invalid_value"
+        assert _store(registry).get(name) is None
+
     def test_candidate_auto_promote_mode_commit_is_refused(
         self, registry: StoreRegistry
     ) -> None:
