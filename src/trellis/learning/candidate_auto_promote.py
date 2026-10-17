@@ -316,7 +316,11 @@ class LearningCandidateAutoPromotePolicy:
             # commit is refused until the caller says that policy is also
             # enabled. See the module docstring's "Scope: evaluation only,
             # by default".
-            msg = "commit mode is not available until auto-demotion is enabled"
+            msg = (
+                f"{CANDIDATE_AUTO_PROMOTE_MODE_SETTING}: commit mode is not "
+                "available until auto-demotion is enabled "
+                "(learning.precedent_auto_demote.enabled)"
+            )
             raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
         if self.min_helpful_count < MIN_HELPFUL_COUNT_FLOOR:
             msg = (
