@@ -938,6 +938,32 @@ def _raise_held_refusal(*refusals: ConfigError | None, dry_run: bool) -> None:
             raise refusal
 
 
+def _emit_auto_job_validation_failure(
+    output_format: str, policy_label: str, error_type: str
+) -> None:
+    """Render a resolver's value-free ``ValueError``, format-aware.
+
+    Both auto-* report-only commands catch a resolver's ``ValueError``
+    (an unrecognized mode, a non-finite env override) the same way:
+    never let ``str(exc)`` — which can embed the raw rejected value —
+    reach stderr, but a ``--format json`` caller still needs a JSON
+    payload carrying ``status`` rather than a plain-text line, so a
+    script reading stdout can tell the run failed without scraping
+    stderr. *policy_label* names the job whose own configuration
+    actually failed, so a sibling policy's bad value is never reported
+    as this one's mistake.
+
+    Never exits. The caller raises ``typer.Exit`` itself, below this
+    call and outside any format branch, so the exit code stays
+    identical in both formats (tests/unit/test_format_exit_parity_rule.py).
+    """
+    message = f"invalid {policy_label} configuration ({error_type})"
+    if output_format == "json":
+        emit_json({"status": "error", "error_type": error_type, "message": message})
+    else:
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+
+
 def _resolve_candidate_auto_promote_overrides_for_cli(
     stores_dir: Path | None,
 ) -> tuple[dict[str, bool | int | str], ConfigError | None]:
@@ -1077,6 +1103,15 @@ def auto_promote_candidates(
     this command's own output still reports the true pre-``--dry-run``
     value. Both policies still ship ``enabled=False`` by default, so
     nothing commits unattended until an operator turns both on.
+
+    This command builds a real governed ``MutationExecutor`` via
+    ``build_curate_executor`` on every run, report-only included: the
+    executor is what stays fail-closed (Stage 2's policy gate, idempotency,
+    audit emission) if ``effective_mode`` is ever wrong, not a missing
+    executor. report_only means the policy never issues a
+    ``precedent.promote`` command, not that the executor is skipped. See
+    the "trellis curate auto-promote-candidates" section in
+    docs/agent-guide/operations.md.
     """
     registry = _get_registry()
     event_log = get_event_log()
@@ -1118,9 +1153,48 @@ def auto_promote_candidates(
             registry.stores_dir
         )
         configured_mode = overrides["mode"]  # type: ignore[assignment]
+    except ValueError as exc:
+        # A resolver or policy ValueError (an invalid mode, a knob looser
+        # than its floor, a non-finite env override) can embed the raw
+        # value it rejected — never let str(exc) reach stderr. The clean,
+        # value-free message plus a validation exit code is this
+        # command's whole response; the failure event records the type.
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        _emit_auto_job_validation_failure(
+            output_format, "candidate auto-promote", type(exc).__name__
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+    except Exception as exc:
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        raise
+
+    # Resolved in its own try/except, separate from the block above and
+    # below: a bogus TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE (or a hand-edited
+    # settings.json refusal) is the *sibling* policy's own configuration
+    # problem, never this command's — each failure event and message
+    # below names precedent auto-demote, not candidate auto-promote, and
+    # a ConfigError (the refused-value case) is left to propagate so the
+    # CLI's TrellisError boundary renders and exits exactly as it does
+    # for every other ConfigError (gate-879 follow-up #6).
+    try:
         demote_overrides, demote_refusal = (
             _resolve_precedent_auto_demote_overrides_for_cli(registry.stores_dir)
         )
+    except ConfigError as exc:
+        emit_precedent_auto_demote_failure_event(event_log, error=exc)
+        raise
+    except ValueError as exc:
+        emit_precedent_auto_demote_failure_event(event_log, error=exc)
+        _emit_auto_job_validation_failure(
+            output_format, "precedent auto-demote", type(exc).__name__
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    try:
         _raise_held_refusal(refusal, demote_refusal, dry_run=dry_run)
         policy = _build_candidate_auto_promote_policy(
             overrides,
@@ -1138,20 +1212,24 @@ def auto_promote_candidates(
             configured_mode=configured_mode,
         )
     except ValueError as exc:
-        # A resolver or policy ValueError (an invalid mode, a knob looser
-        # than its floor, a non-finite env override) can embed the raw
-        # value it rejected — never let str(exc) reach stderr. The clean,
-        # value-free message plus a validation exit code is this
-        # command's whole response; the failure event records the type.
         emit_candidate_auto_promote_failure_event(
             event_log, error=exc, configured_mode=configured_mode
         )
-        console.print(
-            "[red]invalid candidate auto-promote configuration "
-            f"({escape(type(exc).__name__)})[/red]",
-            soft_wrap=True,
+        _emit_auto_job_validation_failure(
+            output_format, "candidate auto-promote", type(exc).__name__
         )
         raise typer.Exit(code=EXIT_VALIDATION) from exc
+    except ConfigError as exc:
+        # _raise_held_refusal can surface either policy's own held
+        # refusal here — attribute by which setting it names, same
+        # convention as the resolution try/except above.
+        if exc.setting == PRECEDENT_AUTO_DEMOTE_MODE_SETTING:
+            emit_precedent_auto_demote_failure_event(event_log, error=exc)
+        else:
+            emit_candidate_auto_promote_failure_event(
+                event_log, error=exc, configured_mode=configured_mode
+            )
+        raise
     except Exception as exc:
         emit_candidate_auto_promote_failure_event(
             event_log, error=exc, configured_mode=configured_mode
@@ -1275,6 +1353,15 @@ def evaluate_precedent_demotion(
     operator turns it on. Every run — including one that fails before
     evaluating a single precedent — emits at least one
     ``LEARNING_AUTO_DEMOTE_EVALUATED`` event.
+
+    This command builds a real governed ``MutationExecutor`` via
+    ``build_curate_executor`` on every run, report-only included: the
+    executor is what stays fail-closed (Stage 2's policy gate, idempotency,
+    audit emission) if ``effective_mode`` is ever wrong, not a missing
+    executor. report_only means the policy never issues a
+    ``precedent.demote`` command, not that the executor is skipped. See
+    the "trellis curate evaluate-precedent-demotion" section in
+    docs/agent-guide/operations.md.
     """
     registry = _get_registry()
     event_log = get_event_log()
@@ -1306,10 +1393,8 @@ def evaluate_precedent_demotion(
         emit_precedent_auto_demote_failure_event(
             event_log, error=exc, configured_mode=configured_mode
         )
-        console.print(
-            "[red]invalid precedent auto-demote configuration "
-            f"({escape(type(exc).__name__)})[/red]",
-            soft_wrap=True,
+        _emit_auto_job_validation_failure(
+            output_format, "precedent auto-demote", type(exc).__name__
         )
         raise typer.Exit(code=EXIT_VALIDATION) from exc
     except Exception as exc:

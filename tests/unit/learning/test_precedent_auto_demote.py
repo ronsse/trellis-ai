@@ -35,6 +35,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.errors import ConfigError
 from trellis.learning.candidate_auto_promote import (
@@ -357,10 +358,16 @@ class TestResolveOverridesPrecedence:
         settings = load_settings_values(stores_dir)
         assert settings[PRECEDENT_AUTO_DEMOTE_MODE_SETTING] == "commit"
 
-        with pytest.raises(ConfigError) as excinfo:
+        with capture_logs() as logs, pytest.raises(ConfigError) as excinfo:
             resolve_precedent_auto_demote_overrides(settings=settings, env={})
         assert excinfo.value.setting == PRECEDENT_AUTO_DEMOTE_MODE_SETTING
         assert "TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE" in str(excinfo.value)
+        warnings = [e for e in logs if e["log_level"] == "warning"]
+        assert any(
+            e["event"] == "precedent_auto_demote_mode_refused_in_settings"
+            and e["setting"] == PRECEDENT_AUTO_DEMOTE_MODE_SETTING
+            for e in warnings
+        )
 
 
 class TestSanitizeConfiguredMode:
@@ -723,6 +730,81 @@ class TestRunPrecedentAutoDemotionCommit:
                     assert state == "demoted"
                 else:
                     assert state in (None, "current")
+        finally:
+            registry.close()
+
+    def test_overlapping_run_reports_already_demoted_and_does_not_spend_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """Two real, interleaved runs through the same governed executor
+        (gate-876 follow-up #8 / #8 idempotency): the second run's loser —
+        the precedent the first run already committed — is reported
+        ``already_demoted``, not a second ``demoted`` or a redundant
+        commit, and that disposition does not consume the second run's
+        own ``max_demotions_per_run`` cap: a different, still-eligible
+        precedent in that same second run still gets demoted."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            for entity_id, offset in (("p1", 0), ("p2", 1)):
+                registry.knowledge.graph_store.upsert_node(
+                    node_id=entity_id, node_type="precedent", properties={}
+                )
+                promoted_at = _T0 + timedelta(days=offset)
+                _emit_promote(
+                    registry.operational.event_log,
+                    entity_id,
+                    at=promoted_at,
+                    requested_by=AUTO_PROMOTE_REQUESTED_BY,
+                )
+                _give_two_unhelpful_citations(
+                    registry.operational.event_log, entity_id, promoted_at=promoted_at
+                )
+            policy = PrecedentAutoDemotePolicy(
+                enabled=True, mode="commit", max_demotions_per_run=1
+            )
+
+            first_run = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=registry.operational.event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+            assert first_run.demoted_count == 1
+            assert first_run.skipped_rate_limited_count == 1
+            first_demoted_id = next(
+                o.entity_id for o in first_run.outcomes if o.disposition == "demoted"
+            )
+
+            second_run = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=registry.operational.event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+
+            second_by_id = {o.entity_id: o.disposition for o in second_run.outcomes}
+            assert second_by_id[first_demoted_id] == "already_demoted"
+            assert second_run.already_demoted_count == 1
+            # already_demoted did not spend the cap: the other, still
+            # eligible precedent is demoted in this same second run.
+            assert second_run.demoted_count == 1
+            other_id = "p1" if first_demoted_id == "p2" else "p2"
+            assert second_by_id[other_id] == "demoted"
+            assert second_run.skipped_rate_limited_count == 0
+
+            demote_events = registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                payload_filters={
+                    "operation": Operation.PRECEDENT_DEMOTE.value,
+                    "requested_by": AUTO_DEMOTE_REQUESTED_BY,
+                    "status": "success",
+                },
+            )
+            # Exactly one commit per precedent across both runs combined —
+            # the first run's winner is never re-committed by the second.
+            assert len(demote_events) == 2
+            assert {e.entity_id for e in demote_events} == {"p1", "p2"}
         finally:
             registry.close()
 
