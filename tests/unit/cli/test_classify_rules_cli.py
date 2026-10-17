@@ -211,6 +211,79 @@ class TestApplyRule:
         rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
         assert not [r for r in rules if r["key"] == "zzzkw"]
 
+    def test_lone_surrogate_in_key_exits_validation_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #869 F6: ``Command(...)`` itself raises an uncaught
+        pydantic ``ValidationError`` on a lone UTF-16 surrogate, with no
+        ``CommandResult`` for ``_execute_classify_command`` to render.
+        The pre-check in ``_reject_unsafe_cli_string`` catches it first,
+        so both formats exit :data:`EXIT_VALIDATION` with a parseable
+        refusal -- never a traceback -- and nothing is applied.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        json_result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "bad\ud800key",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert json_result.exit_code == EXIT_VALIDATION, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "rejected"
+        assert "surrogate" in payload["message"]
+        assert "\ud800" not in json_result.output
+
+        text_result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "bad\ud800key",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+            ]
+        )
+        assert text_result.exit_code == EXIT_VALIDATION, text_result.output
+        assert "\ud800" not in text_result.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if "key" in r and "bad" in str(r.get("key"))]
+
+    def test_lone_surrogate_in_by_exits_validation_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same guard, reached through ``--by`` instead of ``KEY``."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--by",
+                "bad\ud800actor",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "surrogate" in payload["message"]
+        assert "\ud800" not in result.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+
     def test_self_mapping_alias_apply_exits_validation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -887,6 +960,58 @@ class TestRevokeRule:
         )
         assert row["source"] == "overlay"
         assert row["target"] == "y-canonical"
+
+    def test_revoke_lone_surrogate_in_key_exits_validation_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same issue #869 F6 guard as ``apply-rule``, on ``revoke-rule``'s
+        own ``KEY`` argument."""
+        _init_stores(tmp_path, monkeypatch)
+        self._apply(tmp_path, monkeypatch)
+
+        json_result = _invoke(
+            ["revoke-rule", "tag_keyword", "bad\ud800key", "--format", "json"]
+        )
+        assert json_result.exit_code == EXIT_VALIDATION, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "rejected"
+        assert "surrogate" in payload["message"]
+        assert "\ud800" not in json_result.output
+
+        text_result = _invoke(["revoke-rule", "tag_keyword", "bad\ud800key"])
+        assert text_result.exit_code == EXIT_VALIDATION, text_result.output
+        assert "\ud800" not in text_result.output
+
+        # The real row survives untouched.
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert [r for r in rules if r["key"] == "zzzkw"]
+
+    def test_revoke_lone_surrogate_in_by_exits_validation_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same guard, reached through ``--by`` instead of ``KEY``."""
+        _init_stores(tmp_path, monkeypatch)
+        self._apply(tmp_path, monkeypatch)
+
+        result = _invoke(
+            [
+                "revoke-rule",
+                "tag_keyword",
+                "zzzkw",
+                "--by",
+                "bad\ud800actor",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "surrogate" in payload["message"]
+        assert "\ud800" not in result.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert [r for r in rules if r["key"] == "zzzkw"]
 
     def test_revoke_config_sourced_rule_is_refused_not_a_no_op(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

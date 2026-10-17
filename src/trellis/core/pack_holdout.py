@@ -19,8 +19,12 @@ on any Python version recomputes the same arm for a recorded pack.
 ``holdout`` (a bool) and ``holdout_rate`` (the rate in force), so a row
 from a build that predates the flag reads as served by absence.  Readers
 that aggregate over packs drop holdout packs, and the feedback that names
-them, with :func:`drop_holdout`.  Surfaces that return a row to a caller
-without the ``admin`` scope pass it through :func:`blind_holdout` first.
+them, with :func:`drop_holdout`.  :func:`blind_holdout` exists for a
+surface that would return a row to a caller without the ``admin`` scope
+to pass it through first; every current reader of this data
+(``trellis_api.routes.explore``) requires ``admin`` unconditionally, so
+no such surface exists yet and :func:`blind_holdout` has no live caller
+there today.
 
 Standard library only: aggregate readers in ``trellis.learning`` and
 ``trellis.ops`` import this, and ``trellis.retrieve`` imports them back.

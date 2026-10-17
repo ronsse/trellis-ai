@@ -19,7 +19,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
-from trellis.core.pack_holdout import blind_holdout, is_holdout
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import require_scope
@@ -162,15 +161,14 @@ def get_document(doc_id: str) -> dict[str, Any]:
     return {"status": "ok", "document": doc}
 
 
-def _event_row(event: Event, *, include_payload: bool, blind: bool) -> dict[str, Any]:
+def _event_row(event: Event, *, include_payload: bool) -> dict[str, Any]:
     """Serialize an event; strip large payloads to a summary unless asked.
 
-    A ``blind`` row loses the would-be pack before either shape is built,
-    so neither ``payload`` nor ``payload_keys`` carries it.
+    Every route that calls this already requires the ``admin`` scope
+    (``_ADMIN_ONLY``), so the would-be pack on a held-out row is never
+    blinded here -- there is no caller of this function without admin.
     """
     row = event.model_dump(mode="json")
-    if blind:
-        row["payload"] = blind_holdout(row["payload"])
     if not include_payload:
         payload = row.pop("payload", {}) or {}
         row["payload_keys"] = sorted(payload)
@@ -231,15 +229,11 @@ def list_events(
         limit=limit,
         order=order,  # type: ignore[arg-type]
     )
-    # Dependencies above already require admin, so nothing is blinded.
-    blind = False
     return {
         "status": "ok",
         "total": event_log.count(event_type=parsed_type, since=since),
         "count": len(events),
-        "events": [
-            _event_row(e, include_payload=include_payload, blind=blind) for e in events
-        ],
+        "events": [_event_row(e, include_payload=include_payload) for e in events],
         "event_types": [e.value for e in EventType],
     }
 
@@ -265,11 +259,9 @@ def get_event(event_id: str) -> dict[str, Any]:
     event = event_log.get_event(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail=f"Event not found: {event_id}")
-    # Dependencies above already require admin, so nothing is blinded.
-    blind = False
     return {
         "status": "ok",
-        "event": _event_row(event, include_payload=True, blind=blind),
+        "event": _event_row(event, include_payload=True),
     }
 
 
@@ -376,18 +368,18 @@ def get_pack(pack_id: str) -> dict[str, Any]:
     feedback_total = len(feedback_scan)
     feedback = feedback_scan[:50]
     payload = event.payload or {}
-    # Dependencies above already require admin, so nothing is blinded.
-    blind = False
     return {
         "status": "ok",
         "pack": {
             **_pack_summary(event),
-            "payload": blind_holdout(payload) if blind else payload,
+            "payload": payload,
         },
-        # True when this caller's own payload above had fields stripped
-        # (a held-out pack, read without admin) — so the UI can say *why*
-        # a field reads short rather than let it pass as "nothing there".
-        "holdout_blinded": blind and is_holdout(payload),
+        # Always False: this route requires the ``admin`` scope
+        # (``_ADMIN_ONLY``), and only a caller without it ever gets a
+        # held-out pack's fields stripped. The key stays in the response
+        # (the UI reads it) so a future non-admin reader of this route
+        # would not need a wire-shape change to carry the real answer.
+        "holdout_blinded": False,
         "feedback": [f.model_dump(mode="json") for f in feedback],
         "feedback_total": feedback_total,
         "feedback_truncated": feedback_total > len(feedback),

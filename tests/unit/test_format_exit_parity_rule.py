@@ -944,7 +944,11 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
         ],
         # Same shape as curate._execute_command above: exits on a
         # REJECTED or FAILED Command and returns on any other.
-        "classify": ["_execute_classify_command", "_require_llm_facet_classifier"],
+        "classify": [
+            "_execute_classify_command",
+            "_reject_unsafe_cli_string",
+            "_require_llm_facet_classifier",
+        ],
         # Exits on a REJECTED or FAILED command and returns on any other.
         "curate": ["_execute_command"],
         "ingest_corpus": ["_parse_tags"],

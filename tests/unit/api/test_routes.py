@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
@@ -29,6 +30,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
+from trellis_wire.dtos import BatchCommandBodyError, BatchOperationNameError
 
 
 @pytest.fixture
@@ -2080,6 +2082,79 @@ def test_batch_idempotency(client):
     data = resp.json()
     assert data["succeeded"] == 1
     assert data["duplicates"] == 1
+
+
+def test_batch_body_422_missing_field_validates_against_batch_command_body_error(
+    client,
+):
+    """A real body-validation 422 (missing ``operation``) must validate
+
+    against :class:`~trellis_wire.dtos.BatchCommandBodyError`, the model
+    ``docs/api/v1.yaml`` documents for this status code. Before #895's
+    fix, ``BatchCommandBodyErrorItem`` forbade extra fields but pydantic's
+    own error items always carry ``input`` (and sometimes ``ctx``), so
+    the documented schema rejected every real 422 body -- this is the
+    test that would have caught it.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={"commands": [{"args": {}}]},  # operation field missing
+    )
+    assert resp.status_code == 422, resp.text
+    body = BatchCommandBodyError.model_validate(resp.json())
+    (item,) = body.detail
+    assert item.type == "missing"
+    assert item.loc == ["body", "commands", 0, "operation"]
+    assert item.input == {"args": {}}
+    assert item.ctx is None
+
+
+def test_batch_body_422_malformed_json_validates_against_batch_command_body_error(
+    client,
+):
+    """A second real 422 shape, this one carrying ``ctx``.
+
+    None of ``BatchCommandRequest``'s own fields (all plain ``str``,
+    ``str | None``, ``dict[str, Any]``) produce pydantic's ``ctx`` key on
+    a type mismatch -- only error types tied to a constraint or a parse
+    failure do (``literal_error``, bounded numerics, ``json_invalid``).
+    Malformed JSON is the one a real client sends to this real route
+    that pydantic reports with a populated ``ctx``, so it is what proves
+    the field was added, not just declared.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        content=b'{"commands": [1, 2, }',
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 422, resp.text
+    body = BatchCommandBodyError.model_validate(resp.json())
+    (item,) = body.detail
+    assert item.type == "json_invalid"
+    assert item.ctx is not None
+    assert "error" in item.ctx
+
+
+def test_batch_body_422_unknown_operation_validates_against_batch_operation_name_error(
+    client,
+):
+    """The *other* 422 shape this route documents: an operation name
+
+    outside the ``Operation`` enum answers a plain-string ``detail``
+    (:class:`~trellis_wire.dtos.BatchOperationNameError`), not the
+    field-errors list :class:`~trellis_wire.dtos.BatchCommandBodyError`
+    describes. Both are declared on the route via ``anyOf`` -- this is
+    the test proving the second arm independently of the first.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={"commands": [{"operation": "nope.not.a.real.operation", "args": {}}]},
+    )
+    assert resp.status_code == 422, resp.text
+    body = BatchOperationNameError.model_validate(resp.json())
+    assert "nope.not.a.real.operation" in body.detail
+    with pytest.raises(ValidationError):
+        BatchCommandBodyError.model_validate(resp.json())
 
 
 def test_batch_evidence_ingest_allocates_document_id(client):

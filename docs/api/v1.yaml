@@ -386,6 +386,76 @@ components:
       - status
       title: BackendHealth
       type: object
+    BatchCommandBodyError:
+      additionalProperties: false
+      description: '``/commands/batch`` 422: the request body failed pydantic validation.
+
+
+        Same shape as every other route''s default 422 (FastAPI''s own
+
+        ``HTTPValidationError``) -- declared separately here, rather than
+
+        reusing that name, because ``/commands/batch`` also documents a
+
+        second, differently-shaped 422 cause (:class:`BatchOperationNameError`)
+
+        under the same status code, via ``anyOf``.'
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/BatchCommandBodyErrorItem'
+          title: Detail
+          type: array
+      required:
+      - detail
+      title: BatchCommandBodyError
+      type: object
+    BatchCommandBodyErrorItem:
+      additionalProperties: false
+      description: 'One pydantic field error, mirroring FastAPI''s own validation-error shape.
+
+
+        FastAPI''s ``ValidationError`` items always carry ``input`` (the value
+
+        that failed) and, for some error types (e.g. a wrong-type error),
+
+        ``ctx`` (extra context such as the expected type). Both are declared
+
+        here so a real 422 validates against this model -- ``extra="forbid"``
+
+        on :class:`~trellis_wire.base.WireModel` otherwise rejects every real
+
+        response, since pydantic always emits ``input`` and often emits
+
+        ``ctx``.'
+      properties:
+        ctx:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Ctx
+        input:
+          title: Input
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          title: Loc
+          type: array
+        msg:
+          title: Msg
+          type: string
+        type:
+          title: Type
+          type: string
+      required:
+      - loc
+      - msg
+      - type
+      title: BatchCommandBodyErrorItem
+      type: object
     BatchCommandItem:
       additionalProperties: false
       description: A single command within a batch request.
@@ -493,6 +563,30 @@ components:
       - duplicates
       - results
       title: BatchCommandResponse
+      type: object
+    BatchOperationNameError:
+      additionalProperties: false
+      description: '``/commands/batch`` 422: a command named an operation outside the
+
+        :class:`~trellis.mutate.Operation` enum.
+
+
+        ``_parse_operation`` catches ``Operation(value)``''s ``ValueError`` and
+
+        raises a plain-string-``detail`` ``HTTPException`` naming the bad
+
+        value and the valid vocabulary -- not the list-of-field-errors shape
+
+        pydantic body validation produces, so it needs its own model rather
+
+        than a ``$ref`` to ``HTTPValidationError``.'
+      properties:
+        detail:
+          title: Detail
+          type: string
+      required:
+      - detail
+      title: BatchOperationNameError
       type: object
     BatchStrategy:
       description: 'How a mutation batch handles per-item failures.
@@ -3808,9 +3902,11 @@ paths:
 
         derived from the authenticated principal when one is present (see
 
-        :func:`_resolve_requested_by`); the body''s own claim rides along as
+        :func:`trellis_api.routes._principal.resolve_requested_by`); the
 
-        each command''s ``metadata["requested_by_claim"]``.'
+        body''s own claim rides along as each command''s
+
+        ``metadata["requested_by_claim"]``.'
       operationId: execute_batch_api_v1_commands_batch_post
       requestBody:
         content:
@@ -3832,8 +3928,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: A pydantic body-validation failure, or a command names an operation outside the Operation enum.
+                anyOf:
+                - $ref: '#/components/schemas/BatchCommandBodyError'
+                - $ref: '#/components/schemas/BatchOperationNameError'
+                title: Response 422 Execute Batch Api V1 Commands Batch Post
+          description: A pydantic body-validation failure (BatchCommandBodyError -- ``detail`` is a list of field errors),
+            or a command names an operation outside the Operation enum (BatchOperationNameError -- ``detail`` is a plain string
+            naming the bad value; see ``_parse_operation``).
       security:
       - APIKeyHeader: []
       summary: Execute Batch
@@ -4364,7 +4465,20 @@ paths:
 
         side, so it wins.  When neither is present the submission is
 
-        still processed, but without deduplication.'
+        still processed, but without deduplication.
+
+
+        ``requested_by`` is derived from the authenticated principal when
+
+        one is present (see
+
+        :func:`trellis_api.routes._principal.resolve_requested_by`) rather
+
+        than trusted from the body or the client-asserted extractor id;
+
+        the body''s own claim rides along as each command''s
+
+        ``metadata["requested_by_claim"]``.'
       operationId: submit_drafts_api_v1_extract_drafts_post
       parameters:
       - in: header
@@ -4629,7 +4743,10 @@ paths:
         \ entities, so entities must land first).\n\nA request carrying any ``aliases`` is refused whole, with nothing\nexecuted,\
         \ unless the caller's key carries the ``admin`` scope: alias\nrebinds are ``alias.upsert``, a :data:`~trellis.mutate.DESTRUCTIVE_OPERATIONS`\n\
         member, and this route must require the same scope the equivalent\ncommand needs through ``/commands/batch`` rather\
-        \ than letting the\nrouter-level ``ingest`` scope stand in for it."
+        \ than letting the\nrouter-level ``ingest`` scope stand in for it.\n\n``requested_by`` is derived from the authenticated\
+        \ principal when one\nis present (see\n:func:`trellis_api.routes._principal.resolve_requested_by`), the same\nrule\
+        \ ``/commands/batch`` applies -- a mutate-scoped caller cannot\nstamp an arbitrary ``requested_by`` onto a bulk-ingested\
+        \ entity or\nedge. The body's own claim rides along as each command's\n``metadata[\"requested_by_claim\"]``."
       operationId: ingest_bulk_api_v1_ingest_bulk_post
       requestBody:
         content:
@@ -5468,7 +5585,22 @@ paths:
       tags:
       - retrieve
     post:
-      description: Promote a trace to a precedent.
+      description: 'Promote a trace to a precedent.
+
+
+        ``requested_by`` is derived from the authenticated principal when one
+
+        is present (see
+
+        :func:`trellis_api.routes._principal.resolve_requested_by`) rather
+
+        than trusted from the body -- a mutate-scoped key must not be able to
+
+        claim ``requested_by="auto:learning_candidate"`` and forge the
+
+        auto-promote origin ``_was_auto_promoted`` relies on. The body''s own
+
+        claim rides along as ``metadata["requested_by_claim"]``.'
       operationId: promote_api_v1_precedents_post
       requestBody:
         content:
@@ -5571,7 +5703,16 @@ paths:
 
         refused too -- see
 
-        :func:`trellis.learning.scoring.submit_learning_promotion`.'
+        :func:`trellis.learning.scoring.submit_learning_promotion`.
+
+
+        ``requested_by`` is derived from the authenticated principal when one
+
+        is present (see
+
+        :func:`trellis_api.routes._principal.resolve_requested_by`); the
+
+        body''s own claim rides along as ``metadata["requested_by_claim"]``.'
       operationId: demote_api_v1_precedents__target_id__demote_post
       parameters:
       - in: path
@@ -5631,7 +5772,16 @@ paths:
 
         ``requested_by`` equal to the automatic demotion policy''s own
 
-        identity is refused outright.'
+        identity is refused outright.
+
+
+        ``requested_by`` is derived from the authenticated principal when one
+
+        is present (see
+
+        :func:`trellis_api.routes._principal.resolve_requested_by`); the
+
+        body''s own claim rides along as ``metadata["requested_by_claim"]``.'
       operationId: reinstate_api_v1_precedents__target_id__reinstate_post
       parameters:
       - in: path
@@ -6115,7 +6265,13 @@ paths:
 
         on the event as ``requested_by_claim`` rather than overwriting
 
-        ``changed_by``.'
+        ``changed_by`` -- and only when the body actually set it
+
+        (``"requested_by" in req.model_fields_set``), so the DTO''s own
+
+        ``"api:settings"`` default is never recorded as though the caller
+
+        claimed it.'
       operationId: update_setting_api_v1_settings__name__post
       parameters:
       - in: path
@@ -6189,7 +6345,13 @@ paths:
 
         on the event as ``requested_by_claim`` rather than overwriting
 
-        ``changed_by``.'
+        ``changed_by`` -- and only when the body actually set it
+
+        (``"requested_by" in req.model_fields_set``), so the DTO''s own
+
+        ``"api:settings"`` default is never recorded as though the caller
+
+        claimed it.'
       operationId: update_setting_api_v1_settings__name__put
       parameters:
       - in: path

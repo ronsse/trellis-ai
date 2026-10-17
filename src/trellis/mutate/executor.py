@@ -870,6 +870,17 @@ class MutationExecutor:
             "requested_by": command.requested_by,
             "idempotency_key": command.idempotency_key,
         }
+        # A REST route that derives ``requested_by`` from the
+        # authenticated principal (trellis_api.routes._principal) stamps
+        # the body's own, overridden claim onto
+        # ``command.metadata["requested_by_claim"]``. Surfacing it here
+        # keeps the claim on the audit trail without letting it stand in
+        # for the audited identity. Absent (every other surface, and
+        # every pre-existing caller), the key stays out and the payload
+        # is byte-identical to before this field existed.
+        requested_by_claim = command.metadata.get("requested_by_claim")
+        if requested_by_claim is not None:
+            payload["requested_by_claim"] = requested_by_claim
         if reason is not None:
             payload["reason"] = reason
         if error_type is not None:

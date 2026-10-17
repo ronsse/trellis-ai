@@ -484,6 +484,67 @@ class TestUpdateSetting:
         assert payload["changed_by"] != "api:settings:someone-else"
         assert payload["requested_by_claim"] == "someone-else"
 
+    def test_with_no_requested_by_in_the_body_no_claim_is_recorded(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A body that never mentions ``requested_by`` records no claim.
+
+        ``SettingUpdateRequest.requested_by`` defaults to
+        ``"api:settings"`` so the handler always has *something* to
+        write when a caller claims nothing -- but that default is not a
+        claim, and recording it as ``requested_by_claim`` would make
+        every unclaimed write look like the caller wrote "api:settings"
+        into the body. Gated the same way the resolver-based routes are
+        (``"requested_by" in req.model_fields_set``).
+        """
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        resp = client.put(
+            "/api/v1/settings/pack_holdout_rate",
+            json={"value": 0.3},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.SETTINGS_UPDATED, order="asc", limit=100
+        )
+        payload = events[-1].payload
+        assert payload["changed_by"] == f"api:settings:{key_id}"
+        assert "requested_by_claim" not in payload
+
+    def test_a_nul_byte_in_the_claim_is_scrubbed_not_rejected(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A NUL in ``requested_by`` must not reach ``Command.metadata``
+        unscrubbed -- the same hazard :func:`_scrub_claim` exists to
+        close for every other claim-recording route, applied here
+        because this route builds its claim directly rather than
+        through :func:`resolve_requested_by`.
+        """
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        resp = client.put(
+            "/api/v1/settings/pack_holdout_rate",
+            json={"value": 0.3, "requested_by": "bad\x00claim"},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.SETTINGS_UPDATED, order="asc", limit=100
+        )
+        payload = events[-1].payload
+        assert payload["changed_by"] == f"api:settings:{key_id}"
+        assert "\x00" not in payload["requested_by_claim"]
+        assert payload["requested_by_claim"] == "bad�claim"
+
     def test_unknown_name_is_400(self, client: TestClient) -> None:
         resp = client.put("/api/v1/settings/not_a_real_setting", json={"value": 1})
         assert resp.status_code == 400
