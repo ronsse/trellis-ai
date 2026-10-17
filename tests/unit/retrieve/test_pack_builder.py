@@ -346,6 +346,128 @@ class TestBuildDomainScopeGraphAxis:
         assert pack.items[1].estimated_tokens == 6
 
 
+def _form_item(item_id: str, score: float, *, form: str | None, excerpt: str = "x" * 60) -> PackItem:
+    metadata = {"document_form": form} if form is not None else {}
+    return PackItem(
+        item_id=item_id,
+        item_type="document",
+        excerpt=excerpt,
+        relevance_score=score,
+        metadata=metadata,
+    )
+
+
+class TestClassPriorGate:
+    """The class-prior gate, through PackBuilder.build() end to end.
+
+    Unit coverage of the matching/mode logic itself lives in
+    tests/unit/retrieve/test_class_prior.py; this class proves the gate is
+    actually wired at the collect seam for every mode.
+    """
+
+    def test_default_construction_is_off_and_byte_identical(self) -> None:
+        """Shipped default: no class_prior_config passed in at all."""
+        items = [
+            _form_item("c1", 0.9, form="conversation"),
+            _form_item("m1", 0.8, form="capture"),
+        ]
+        strategy = _make_strategy("keyword", items)
+        builder = PackBuilder(
+            strategies=[strategy],
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+        assert [item.item_id for item in pack.items] == ["c1", "m1"]
+        assert pack.retrieval_report.rejected_items == []
+
+    def test_withhold_mode_drops_matching_form_and_records_rejection(self) -> None:
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_REJECTION_REASON,
+            ClassPriorConfig,
+        )
+        from trellis.retrieve.withholding import summarize_withheld
+
+        items = [
+            _form_item("c1", 0.9, form="conversation"),
+            _form_item("m1", 0.8, form="capture"),
+        ]
+        strategy = _make_strategy("keyword", items)
+        config = ClassPriorConfig(mode="withhold")
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+
+        served_ids = [item.item_id for item in pack.items]
+        assert served_ids == ["m1"]
+        rejected = pack.retrieval_report.rejected_items
+        assert len(rejected) == 1
+        assert rejected[0].item_id == "c1"
+        assert rejected[0].reason == CLASS_PRIOR_REJECTION_REASON
+
+        summary = summarize_withheld(rejected, served_ids)
+        by_reason = {group.reason: group.count for group in summary.groups}
+        assert by_reason.get(CLASS_PRIOR_REJECTION_REASON) == 1
+        assert "c1" in summary.withheld_item_ids
+
+    def test_demote_mode_reorders_but_drops_nothing(self) -> None:
+        from trellis.retrieve.class_prior import ClassPriorConfig
+
+        items = [
+            _form_item("c1", 0.9, form="conversation"),
+            _form_item("m1", 0.8, form="capture"),
+        ]
+        strategy = _make_strategy("keyword", items)
+        config = ClassPriorConfig(mode="demote", factor=0.5)
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+
+        assert pack.retrieval_report.rejected_items == []
+        assert len(pack.items) == 2
+        # c1 (conversation, demoted to 0.45) now ranks behind m1 (0.8).
+        assert [item.item_id for item in pack.items] == ["m1", "c1"]
+        demoted = next(item for item in pack.items if item.item_id == "c1")
+        assert demoted.relevance_score == pytest.approx(0.45)
+        assert demoted.metadata["class_prior"]["mode"] == "demote"
+
+    def test_a_document_of_another_form_is_never_touched(self) -> None:
+        from trellis.retrieve.class_prior import ClassPriorConfig
+
+        items = [_form_item("m1", 0.8, form="capture")]
+        strategy = _make_strategy("keyword", items)
+        config = ClassPriorConfig(mode="withhold")
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+        assert [item.item_id for item in pack.items] == ["m1"]
+        assert pack.retrieval_report.rejected_items == []
+
+    def test_axis_scoping_holds(self) -> None:
+        """Default axes is {keyword}; a semantic-axis conversation item is untouched."""
+        from trellis.retrieve.class_prior import ClassPriorConfig
+
+        items = [_form_item("c1", 0.9, form="conversation")]
+        strategy = _make_strategy("semantic", items)
+        config = ClassPriorConfig(mode="withhold")  # axes default: {"keyword"}
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build("q")
+        assert [item.item_id for item in pack.items] == ["c1"]
+        assert pack.retrieval_report.rejected_items == []
+
+
 class TestBuildSectioned:
     """Tests for PackBuilder.build_sectioned()."""
 
@@ -399,6 +521,46 @@ class TestBuildSectioned:
             sections=[SectionRequest(name="all", max_items=3, max_tokens=50000)],
         )
         assert len(pack.sections[0].items) <= 3
+
+    def test_class_prior_gate_applies_to_sectioned_pack(self) -> None:
+        """The collect-seam gate runs for build_sectioned() too, not just build().
+
+        A SectionRequest naming no affinities/content_types/scopes/entity_ids
+        accepts everything (see test_per_section_budget above), so this isolates
+        the gate itself rather than section matching. Pool-level gates (this
+        one included) have no single section to be blamed on, so they are not
+        copied into a ``PackSection.retrieval_report`` (that field carries only
+        the content floor's per-section-matched rejections) — they land in the
+        sectioned pack's ``metadata["withholding"]`` summary instead, same as
+        every other pool-level reason (supersession, dedup, structural, ...).
+        """
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_REJECTION_REASON,
+            ClassPriorConfig,
+        )
+
+        items = [
+            _form_item("c1", 0.9, form="conversation"),
+            _form_item("m1", 0.8, form="capture"),
+        ]
+        strategy = _make_strategy("keyword", items)
+        config = ClassPriorConfig(mode="withhold")
+        builder = PackBuilder(
+            strategies=[strategy],
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+        pack = builder.build_sectioned(
+            intent="test",
+            sections=[SectionRequest(name="all")],
+        )
+        assert len(pack.sections) == 1
+        served_ids = [item.item_id for item in pack.sections[0].items]
+        assert served_ids == ["m1"]
+
+        withholding = pack.metadata["withholding"]
+        assert withholding["by_reason"].get(CLASS_PRIOR_REJECTION_REASON) == 1
+        assert "c1" in withholding["withheld_item_ids"]
 
     def test_cross_section_dedup(self) -> None:
         """Item in multiple sections kept only in highest-scoring one."""

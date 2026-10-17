@@ -62,6 +62,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.pack_observations import join_pack_feedback
+from trellis.retrieve.class_prior import ClassPriorConfig
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
@@ -555,10 +556,217 @@ def _notes(
     return notes
 
 
+class ClassPriorReplayReport(TrellisModel):
+    """What :mod:`trellis.retrieve.class_prior` would have cost or saved,
+    replayed over packs already served.
+
+    Unlike :class:`ReplayReport`, this never re-runs the token-budget walk.
+    ``PACK_ASSEMBLED.budget_trace[]`` records a tokens-and-``included``
+    triple for *every* candidate the walk saw, served or not, but only a
+    served item's ``injected_items[]`` row carries the ``document_form``
+    and ``strategy_source`` this rule matches on — a candidate the walk
+    rejected on tokens alone leaves no trace of either. So the population
+    here is servings the original pack actually served, counted per
+    ``(pack_id, item_id)``, the same convention
+    :attr:`ReplayReport.helpful_items_total` uses; see ``notes`` for what
+    that forecloses.
+    """
+
+    window_days: int
+    #: ``mode=... forms=... axes=... factor=...``, from the
+    #: :class:`~trellis.retrieve.class_prior.ClassPriorConfig` replayed.
+    applied_config: str = ""
+    attributed_packs: int = 0
+    #: Servings whose ``document_form`` and axis (``strategy_source``) both
+    #: matched ``config`` — the population every count below is drawn from.
+    matched_servings: int = 0
+    #: ``withhold`` only: matched servings cited helpful. These would no
+    #: longer be served.
+    helpful_lost: int = 0
+    #: ``withhold`` only: matched servings cited unhelpful — the removals
+    #: the rule is for.
+    unhelpful_removed: int = 0
+    #: ``withhold`` only: the gross token cost of every matched serving,
+    #: summed. Not a repriced pack — see ``notes``.
+    tokens_freed: int = 0
+    #: ``demote`` only: servings whose position among the items their own
+    #: pack actually served would move, under ``relevance_score * factor``
+    #: for matched items against ``relevance_score`` unchanged for the rest.
+    rank_changes: int = 0
+
+    notes: list[str] = Field(default_factory=list)
+
+
+def _class_prior_notes(*, mode: str, matched_servings: int, mode_is_off: bool) -> list[str]:
+    """Caveats that travel with the class-prior counts."""
+    if mode_is_off:
+        return [
+            'mode is "off": the counterfactual is identical to the baseline '
+            "by construction, so every count above is zero.",
+        ]
+    notes = [
+        "Counterfactual over the SAME packs and the SAME citations. This "
+        "arm classifies and counts already-served items; it does not "
+        "re-run the token-budget walk, so tokens_freed is the gross cost "
+        "of the matched servings, not a repriced pack. It cannot say which "
+        "item the freed budget would have admitted instead, and it cannot "
+        "grade one, because that item was never served and nobody rated it.",
+    ]
+    if mode == "demote":
+        notes.append(
+            "rank_changes counts reordering only among items the original "
+            "pack already served. Demote can also change which items are "
+            "admitted at all, by lowering a matched item below the budget "
+            "cutoff — this arm does not model that, because the event "
+            "records no score for a candidate the budget walk rejected."
+        )
+    if matched_servings == 0:
+        notes.append(
+            "No served item in the window matched config.forms on an axis "
+            "in config.axes, so every count above is zero because nothing "
+            "was eligible, not because the rule found nothing to do."
+        )
+    return notes
+
+
+def replay_class_prior(
+    event_log: EventLog,
+    *,
+    config: ClassPriorConfig,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+) -> ClassPriorReplayReport:
+    """Price :mod:`trellis.retrieve.class_prior` over a window already served.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED`` and
+            ``FEEDBACK_RECORDED``.
+        config: The :class:`~trellis.retrieve.class_prior.ClassPriorConfig`
+            to replay — typically
+            :func:`~trellis.retrieve.class_prior.resolve_class_prior_config`'s
+            result, so the arm matches whatever the gate would actually do.
+        days: Look-back window, matching ``trellis analyze value``.
+        limit: Per-event-type scan limit.
+
+    Returns:
+        A :class:`ClassPriorReplayReport`. See its docstring and ``notes``
+        for what this arm cannot measure.
+    """
+    mode_is_off = config.mode == "off" or not config.forms or not config.axes
+    applied_config = (
+        f"mode={config.mode} forms={sorted(config.forms)} "
+        f"axes={sorted(config.axes)} factor={config.factor}"
+    )
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    feedback_events, pack_payloads, _ = join_pack_feedback(
+        event_log, since=since, limit=limit
+    )
+    flat_packs = {
+        pack_id: payload
+        for pack_id, payload in pack_payloads.items()
+        if payload.get("injected_items")
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    matched_servings = 0
+    helpful_lost = 0
+    unhelpful_removed = 0
+    tokens_freed = 0
+    rank_changes = 0
+
+    if not mode_is_off:
+        for pack_id in attributed:
+            payload = flat_packs[pack_id]
+            rows = [
+                row
+                for row in (payload.get("injected_items") or [])
+                if isinstance(row, Mapping) and isinstance(row.get("item_id"), str)
+            ]
+            if not rows:
+                continue
+            helpful = helpful_by_pack.get(pack_id, set())
+            unhelpful = unhelpful_by_pack.get(pack_id, set())
+
+            def _matched(row: Mapping[str, Any]) -> bool:
+                form = row.get("document_form")
+                axis = row.get("strategy_source")
+                return (
+                    isinstance(form, str)
+                    and form in config.forms
+                    and isinstance(axis, str)
+                    and axis in config.axes
+                )
+
+            for row in rows:
+                if not _matched(row):
+                    continue
+                item_id = row["item_id"]
+                matched_servings += 1
+                raw_tokens = row.get("estimated_tokens")
+                if isinstance(raw_tokens, int | float):
+                    tokens_freed += int(raw_tokens)
+                if item_id in helpful:
+                    helpful_lost += 1
+                elif item_id in unhelpful:
+                    unhelpful_removed += 1
+
+            if config.mode == "demote":
+                sentinel = len(rows)
+
+                def _rank(row: Mapping[str, Any]) -> int:
+                    raw_rank = row.get("rank")
+                    return raw_rank if isinstance(raw_rank, int) else sentinel
+
+                original_order = sorted(rows, key=_rank)
+
+                def _score(row: Mapping[str, Any]) -> float:
+                    raw_score = row.get("relevance_score")
+                    base = float(raw_score) if isinstance(raw_score, int | float) else 0.0
+                    return base * config.factor if _matched(row) else base
+
+                demoted_order = sorted(original_order, key=_score, reverse=True)
+                rank_changes += sum(
+                    1
+                    for original, demoted in zip(
+                        original_order, demoted_order, strict=True
+                    )
+                    if original["item_id"] != demoted["item_id"]
+                )
+
+    report = ClassPriorReplayReport(
+        window_days=days,
+        applied_config=applied_config,
+        attributed_packs=len(attributed),
+        matched_servings=matched_servings,
+        helpful_lost=helpful_lost,
+        unhelpful_removed=unhelpful_removed,
+        tokens_freed=tokens_freed,
+        rank_changes=rank_changes,
+        notes=_class_prior_notes(
+            mode=config.mode,
+            matched_servings=matched_servings,
+            mode_is_off=mode_is_off,
+        ),
+    )
+    logger.debug(
+        "pack_value_class_prior_replayed",
+        window_days=days,
+        applied_config=applied_config,
+        attributed_packs=report.attributed_packs,
+        matched_servings=matched_servings,
+    )
+    return report
+
+
 __all__ = [
     "EXCERPT_MAX_CHARS",
+    "ClassPriorReplayReport",
     "ReplayArm",
     "ReplayPolicy",
     "ReplayReport",
+    "replay_class_prior",
     "replay_pack_value",
 ]

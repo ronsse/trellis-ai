@@ -22,7 +22,8 @@ from typing import Any
 
 import pytest
 
-from trellis.retrieve.pack_replay import ReplayPolicy, replay_pack_value
+from trellis.retrieve.class_prior import OFF, ClassPriorConfig
+from trellis.retrieve.pack_replay import ReplayPolicy, replay_class_prior, replay_pack_value
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS
 from trellis.stores.base.event_log import Event, EventLog, EventType
 
@@ -317,3 +318,214 @@ def test_a_pack_without_a_budget_trace_is_excluded_and_counted() -> None:
 def test_degenerate_policies_are_refused(kwargs: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="must be >= 1"):
         ReplayPolicy(**kwargs)
+
+
+# --------------------------------------------------------------------------
+# 4. The class-prior replay arm (trellis.retrieve.class_prior)
+# --------------------------------------------------------------------------
+
+
+def _class_prior_pack_event(
+    pack_id: str,
+    rows: list[dict[str, Any]],
+) -> Event:
+    """A flat PACK_ASSEMBLED whose ``injected_items`` carry the extra
+    ``document_form`` / ``relevance_score`` fields :func:`replay_class_prior`
+    reads. Each row: ``item_id``, ``form``, ``axis``, ``tokens``, ``score``,
+    ``rank``.
+    """
+    return Event(
+        event_type=EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload={
+            "pack_id": pack_id,
+            "injected_items": [
+                {
+                    "item_id": row["item_id"],
+                    "item_type": "document",
+                    "rank": row["rank"],
+                    "estimated_tokens": row["tokens"],
+                    "relevance_score": row["score"],
+                    "strategy_source": row["axis"],
+                    "document_form": row["form"],
+                }
+                for row in rows
+            ],
+            "budget_trace": [],
+        },
+    )
+
+
+def test_off_mode_reports_all_zero_counts_and_the_off_note() -> None:
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                }
+            ],
+        )
+    )
+    log.append(_feedback_event("pack-0", ["c1"]))
+
+    report = replay_class_prior(log, config=OFF)
+
+    assert report.matched_servings == 0
+    assert report.helpful_lost == 0
+    assert report.unhelpful_removed == 0
+    assert report.tokens_freed == 0
+    assert report.rank_changes == 0
+    assert any('mode is "off"' in note for note in report.notes)
+
+
+def test_withhold_counts_helpful_lost_unhelpful_removed_and_tokens_freed() -> None:
+    config = ClassPriorConfig(mode="withhold")
+    log = _FakeEventLog()
+    # pack-0: the matching (conversation, keyword) item was cited helpful.
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                },
+                {
+                    "item_id": "m1",
+                    "form": "capture",
+                    "axis": "keyword",
+                    "tokens": 30,
+                    "score": 0.7,
+                    "rank": 2,
+                },
+            ],
+        )
+    )
+    log.append(_feedback_event("pack-0", ["c1"]))
+    # pack-1: the matching item was cited UNhelpful — the removal the rule
+    # is for. The capture-form item is never eligible, even cited helpful.
+    log.append(
+        _class_prior_pack_event(
+            "pack-1",
+            [
+                {
+                    "item_id": "c2",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 80,
+                    "score": 0.6,
+                    "rank": 1,
+                },
+                {
+                    "item_id": "m2",
+                    "form": "capture",
+                    "axis": "keyword",
+                    "tokens": 40,
+                    "score": 0.5,
+                    "rank": 2,
+                },
+            ],
+        )
+    )
+    feedback = _feedback_event("pack-1", ["m2"])
+    feedback.payload["unhelpful_item_ids"] = ["c2"]
+    log.append(feedback)
+
+    report = replay_class_prior(log, config=config)
+
+    assert report.attributed_packs == 2
+    # Only the two conversation/keyword rows match; the two capture rows
+    # never do, whatever they were cited.
+    assert report.matched_servings == 2
+    assert report.helpful_lost == 1
+    assert report.unhelpful_removed == 1
+    assert report.tokens_freed == 50 + 80
+    assert report.rank_changes == 0
+    assert any("it cannot grade one" in note for note in report.notes)
+
+
+def test_axis_scoping_excludes_a_matching_form_on_another_axis() -> None:
+    """Default axes is {keyword}; a semantic-axis conversation item never counts."""
+    config = ClassPriorConfig(mode="withhold")  # axes default: {"keyword"}
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "semantic",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                }
+            ],
+        )
+    )
+    log.append(_feedback_event("pack-0", ["c1"]))
+
+    report = replay_class_prior(log, config=config)
+
+    assert report.matched_servings == 0
+    assert report.helpful_lost == 0
+    assert report.tokens_freed == 0
+
+
+def test_demote_counts_rank_changes_among_served_items_only() -> None:
+    config = ClassPriorConfig(mode="demote", factor=0.5)
+    log = _FakeEventLog()
+    # Original order by rank: c1 (conv, 0.9), m1 (capture, 0.8), m2 (capture, 0.7).
+    # Demoted scores: c1 -> 0.45 (matched), m1 -> 0.8, m2 -> 0.7 (unchanged).
+    # New order: m1, m2, c1 — a full rotation, so every position differs.
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                {
+                    "item_id": "c1",
+                    "form": "conversation",
+                    "axis": "keyword",
+                    "tokens": 50,
+                    "score": 0.9,
+                    "rank": 1,
+                },
+                {
+                    "item_id": "m1",
+                    "form": "capture",
+                    "axis": "keyword",
+                    "tokens": 30,
+                    "score": 0.8,
+                    "rank": 2,
+                },
+                {
+                    "item_id": "m2",
+                    "form": "capture",
+                    "axis": "keyword",
+                    "tokens": 20,
+                    "score": 0.7,
+                    "rank": 3,
+                },
+            ],
+        )
+    )
+    log.append(_feedback_event("pack-0", ["m1"]))
+
+    report = replay_class_prior(log, config=config)
+
+    assert report.matched_servings == 1
+    assert report.rank_changes == 3
+    assert any("admitted at all" in note for note in report.notes)

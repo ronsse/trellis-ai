@@ -46,6 +46,11 @@ from trellis.core.pack_holdout import (
 )
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.class_prior import (
+    ClassPriorConfig,
+    apply_class_prior,
+    resolve_class_prior_config,
+)
 from trellis.retrieve.concentration import measure_parent_concentration
 from trellis.retrieve.disclosure import (
     DEFAULT_DISCLOSURE,
@@ -85,6 +90,7 @@ from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
 from trellis.retrieve.withholding import SECTION_FILTER_REASON, summarize_withheld
 from trellis.schemas.advisory import Advisory
 from trellis.schemas.classification import facet_values
+from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import (
     BudgetStep,
     Pack,
@@ -442,6 +448,16 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
       of a code-reading finding. It reveals nothing about content — three enum
       values naming a mechanism.
 
+    * ``document_form`` — :func:`~trellis.schemas.document_metadata.document_form_of`
+      on the item's metadata: the ingest-stamped provenance/format (e.g.
+      ``"conversation"``), not the ``category`` facet above. Added so
+      :func:`~trellis.retrieve.pack_replay.replay_class_prior` can tell,
+      after the fact, which served items a class-scoped serving rule
+      would have matched — the event otherwise has no form-shaped field
+      for a counterfactual to key on. Absence means the document carries
+      no form, the same omission-as-a-value convention as the rest of
+      this function.
+
     * ``node_type`` / ``node_role`` — the graph row's own type and role, as
       stamped by :class:`~trellis.retrieve.strategies.GraphSearch` and
       :class:`~trellis.retrieve.observation_strategy.ObservationSearch`
@@ -492,6 +508,7 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
         "domain_system": meta.get("source_system"),
         "signal_quality": tags.get("signal_quality"),
         "graph_selection": meta.get("graph_selection"),
+        "document_form": document_form_of(meta),
         RECENCY_CLOCK_METADATA_KEY: meta.get(RECENCY_CLOCK_METADATA_KEY),
         "node_type": meta.get("node_type"),
         "node_role": meta.get("node_role"),
@@ -624,6 +641,7 @@ class PackBuilder:
         embedder_configured: bool = False,
         embedder_resolve_failure: EmbedderResolveFailure | None = None,
         filter_legacy_advisories: bool | None = None,
+        class_prior_config: ClassPriorConfig | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -699,6 +717,28 @@ class PackBuilder:
         #: it) relies on. :func:`trellis.retrieve.builder_factory.build_pack_builder`
         #: resolves this once, with settings, and passes the bool in.
         self._filter_legacy_advisories = filter_legacy_advisories
+        #: Resolved class-level serving prior for one document form (see
+        #: :mod:`trellis.retrieve.class_prior`), or ``None`` to defer to a
+        #: live, env-and-settings-free read in :meth:`_effective_class_prior_config`
+        #: — same ``None``-means-"resolve later" shape as
+        #: ``filter_legacy_advisories`` above, for a direct
+        #: ``PackBuilder(...)`` construction with no factory in front of it.
+        #: :func:`trellis.retrieve.builder_factory.build_pack_builder` resolves
+        #: this once, with settings, and passes the :class:`ClassPriorConfig` in.
+        self._class_prior_config = class_prior_config
+
+    def _effective_class_prior_config(self) -> ClassPriorConfig:
+        """``self._class_prior_config``, or a fresh env-only resolve.
+
+        Mirrors :meth:`_select_advisories`'s
+        ``effective_filter = self._filter_legacy_advisories or
+        _filter_legacy_advisories_enabled()`` fallback. A builder
+        constructed directly (no settings available) still gets the
+        shipped-off default rather than silently skipping the gate.
+        """
+        if self._class_prior_config is not None:
+            return self._class_prior_config
+        return resolve_class_prior_config()
 
     @property
     def holdout_rate(self) -> float:
@@ -904,6 +944,7 @@ class PackBuilder:
             merged_filters = dict(merged_filters) if merged_filters else {}
             merged_filters["include_structural"] = True
 
+        class_prior_config = self._effective_class_prior_config()
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -917,7 +958,11 @@ class PackBuilder:
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                 )
+                items, class_prior_rejected = apply_class_prior(
+                    items, config=class_prior_config, strategy_name=strategy.name
+                )
                 rejected.extend(gate_rejected)
+                rejected.extend(class_prior_rejected)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1220,6 +1265,7 @@ class PackBuilder:
             merged_filters = dict(merged_filters) if merged_filters else {}
             merged_filters["include_structural"] = True
 
+        class_prior_config = self._effective_class_prior_config()
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -1233,7 +1279,11 @@ class PackBuilder:
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                 )
+                items, class_prior_rejected = apply_class_prior(
+                    items, config=class_prior_config, strategy_name=strategy.name
+                )
                 rejected.extend(gate_rejected)
+                rejected.extend(class_prior_rejected)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -2043,6 +2093,11 @@ class PackBuilder:
                 "rank": item.rank,
                 "selection_reason": item.selection_reason,
                 "score_breakdown": item.score_breakdown,
+                # Plain final score, beside score_breakdown's components —
+                # read by trellis.retrieve.pack_replay.replay_class_prior
+                # to recompute rank order under a demoted score, which no
+                # component in score_breakdown alone reconstructs.
+                "relevance_score": item.relevance_score,
                 "estimated_tokens": item.estimated_tokens,
                 "strategy_source": item.strategy_source,
                 "injected_advisory_ids": list(item.injected_advisory_ids),
@@ -2774,6 +2829,12 @@ class PackBuilder:
         collect-gate rejection and
         :func:`~trellis.retrieve.telemetry.analyze_pack_telemetry` would
         bucket all of them under ``"unknown"``.
+
+        Both call sites also run :func:`~trellis.retrieve.class_prior.apply_class_prior`
+        immediately after this, on the same per-strategy ``items`` — a
+        fourth, default-off collect-seam gate kept in its own module rather
+        than folded in here, since it is a class-level prior rather than a
+        per-item judgment like the three above.
         """
         kept, archived = partition_archived(items)
         kept, noisy = partition_by_signal_quality(kept, signal_quality_spec)

@@ -543,6 +543,82 @@ class TestFilterLegacyAdvisoriesWiring:
         assert messages == {"post-repair row"}
 
 
+class TestClassPriorWiring:
+    """``class_prior_config`` is resolved once, with settings, by the factory
+    (see the comment beside ``class_prior_config=`` in ``build_pack_builder``)
+    — proven end to end through a real keyword-axis document, same shape as
+    ``TestFilterLegacyAdvisoriesWiring`` above.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    def test_default_is_off_and_serves_the_conversation_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import CLASS_PRIOR_MODE_ENV
+
+        monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+
+    def test_a_settings_only_override_withholds_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_MODE_ENV,
+            CLASS_PRIOR_REJECTION_REASON,
+        )
+
+        monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "class_prior_mode", "withhold"
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert pack.items == []
+        rejected = pack.retrieval_report.rejected_items
+        assert any(r.reason == CLASS_PRIOR_REJECTION_REASON for r in rejected)
+
+    def test_env_beats_a_settings_override_here_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import CLASS_PRIOR_MODE_ENV
+
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "class_prior_mode", "withhold"
+        )
+        monkeypatch.setenv(CLASS_PRIOR_MODE_ENV, "off")
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+
+
 def _src_root() -> Path:
     root = Path(__file__).resolve().parents[3] / "src"
     assert root.is_dir(), f"src/ not found at {root}"

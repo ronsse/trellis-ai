@@ -90,6 +90,8 @@ class TestCatalogMembership:
             | {
                 "graph_seeding",
                 "filter_legacy_advisories",
+                "class_prior_mode",
+                "class_prior_factor",
                 "graph_max_subgraph_depth",
                 "noise_demotion_min_attributed_packs",
                 "noise_demotion_min_unhelpful_citations",
@@ -103,8 +105,8 @@ class TestCatalogMembership:
             | _PRECEDENT_AUTO_DEMOTE_NAMES
         )
 
-    def test_thirtyfour_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 34
+    def test_thirtysix_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 36
 
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the
@@ -331,8 +333,11 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     partial capture sweep fails the run) joined it there — each one
     can silently admit weaker evidence, a slower query, or a quieter
     failure when turned down, which is exactly the "caution" tier's
-    bar. None of this is an oversight, so pin both tiers rather than let
-    them silently drift.
+    bar. ``class_prior_mode`` joined for the same reason: its
+    ``"withhold"`` value removes a whole document class from every pack
+    on the configured axes before an operator notices (``risk_note`` on
+    the spec itself). None of this is an oversight, so pin both tiers
+    rather than let them silently drift.
     """
 
     def test_high_tier_is_exactly_this_set(self) -> None:
@@ -359,6 +364,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "advisory_min_sample_size",
             "advisory_min_effect_size",
             "capture_strict",
+            "class_prior_mode",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:
