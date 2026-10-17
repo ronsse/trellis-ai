@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from trellis.auth import SCOPE_ADMIN, scopes_satisfy
 from trellis.core.error_sanitize import (
     describe_validation_error,
     sanitize_error_message,
@@ -16,7 +17,11 @@ from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
     trace_already_ingested,
 )
-from trellis.mutate import build_curate_executor, build_evidence_ingest_command
+from trellis.mutate import (
+    build_curate_executor,
+    build_evidence_ingest_command,
+    requires_admin_scope,
+)
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
@@ -26,6 +31,7 @@ from trellis.mutate.commands import (
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
 from trellis_wire.dtos import (
     BulkAliasItem,
     BulkEdgeItem,
@@ -265,8 +271,24 @@ def _sanitized_item_message(status: CommandStatus, message: str) -> str:
     return sanitize_error_message(message) if _is_terminal_failure(status) else message
 
 
-@router.post("/ingest/bulk", response_model=BulkIngestResponse)
-def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
+@router.post(
+    "/ingest/bulk",
+    response_model=BulkIngestResponse,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "The request carries aliases but the caller's key lacks "
+                "the admin scope -- alias.upsert is a destructive "
+                "operation (see requires_admin_scope) and requires the "
+                "same scope here as it does through /commands/batch."
+            )
+        }
+    },
+)
+def ingest_bulk(
+    req: BulkIngestRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> BulkIngestResponse:
     """Bulk ingest entities, edges, and aliases in one request.
 
     Entities, edges, and aliases flow through the governed mutation pipeline
@@ -283,7 +305,32 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
 
     Processing order is entities → edges → aliases (downstream groups
     reference entities, so entities must land first).
+
+    A request carrying any ``aliases`` is refused whole, with nothing
+    executed, unless the caller's key carries the ``admin`` scope: alias
+    rebinds are ``alias.upsert``, a :data:`~trellis.mutate.DESTRUCTIVE_OPERATIONS`
+    member, and this route must require the same scope the equivalent
+    command needs through ``/commands/batch`` rather than letting the
+    router-level ``ingest`` scope stand in for it.
     """
+    if (
+        req.aliases
+        and requires_admin_scope(Operation.ALIAS_UPSERT)
+        and not scopes_satisfy(ctx.scopes, SCOPE_ADMIN)
+    ):
+        logger.warning(
+            "bulk_ingest_scope_refused",
+            route="/ingest/bulk",
+            required_scope=SCOPE_ADMIN,
+            operation=Operation.ALIAS_UPSERT.value,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"operation requires the admin scope: {Operation.ALIAS_UPSERT.value}"
+            ),
+        )
+
     registry = get_registry()
     executor = build_curate_executor(registry)
 
