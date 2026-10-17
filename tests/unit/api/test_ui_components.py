@@ -511,3 +511,37 @@ def test_th_scope_pattern_catches_a_deliberately_defective_subject() -> None:
 
     # <thead> itself must never be mistaken for a <th> site.
     assert re.findall(r"<th(?:\s[^<>]*)?>", "<thead>") == []
+
+
+# ---------------------------------------------------------------------------
+# Elements that start hidden carry the ".hide" class, so an inline
+# ``style.display`` read no longer reports their state.
+# ---------------------------------------------------------------------------
+
+_INLINE_DISPLAY_NONE_READ_RE = re.compile(
+    r"""\.style\.display\s*[!=]==?\s*['"]none['"]"""
+)
+
+
+def test_no_script_reads_hidden_state_from_the_inline_style() -> None:
+    """A ``.hide`` element has an empty inline display until a script sets
+    one, so ``el.style.display === 'none'`` is false for it while it is
+    hidden. A toggle written that way needs two clicks to open. Read
+    ``getComputedStyle(el).display`` instead."""
+    page = _page()
+    assert_hand_read_floor(
+        len(re.findall(r'class="[^"]*\bhide\b', page)),
+        25,
+        subject='class="... hide" site(s)',
+        hint="hand count for this pass: 31 elements start hidden via .hide.",
+    )
+    reads = _INLINE_DISPLAY_NONE_READ_RE.findall(page)
+    assert reads == [], f"inline display read(s) of hidden state: {reads}"
+
+
+def test_inline_display_read_guard_catches_a_defective_subject() -> None:
+    defective = "if (banner.style.display === 'none') showKeyBanner('');"
+    assert _INLINE_DISPLAY_NONE_READ_RE.search(defective) is not None
+    assert _INLINE_DISPLAY_NONE_READ_RE.search('el.style.display !== "none"')
+    fixed = "if (getComputedStyle(banner).display === 'none') showKeyBanner('');"
+    assert _INLINE_DISPLAY_NONE_READ_RE.search(fixed) is None

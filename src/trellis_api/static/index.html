@@ -2726,7 +2726,10 @@
 
         function toggleKeyBanner() {
             const banner = document.getElementById('key-banner');
-            if (banner.style.display === 'none') showKeyBanner('');
+            // The banner starts hidden by the .hide class, not an inline
+            // style, so read the computed value: an empty inline display
+            // does not mean the banner is showing.
+            if (getComputedStyle(banner).display === 'none') showKeyBanner('');
             else banner.style.display = 'none';
         }
 
