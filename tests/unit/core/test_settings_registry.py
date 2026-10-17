@@ -13,11 +13,20 @@ knobs for the new candidate-promotion policy — nine entries on top of the
 fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below. A parallel PR
 registered eight more catalog-only, read-side knobs (the subgraph depth
 cap, two noise-demotion thresholds, two advisory-generation thresholds,
-and three capture-health knobs), bringing the total to 31. This PR adds
-the three ``learning.precedent_auto_demote.*`` knobs for the new
+and three capture-health knobs), bringing the total to 31. A later PR
+added the three ``learning.precedent_auto_demote.*`` knobs for the
 precedent-demotion policy — commit mode's rollback for the
 candidate-promotion policy above — pinned by
-:data:`_PRECEDENT_AUTO_DEMOTE_NAMES`, bringing the total to 34.
+:data:`_PRECEDENT_AUTO_DEMOTE_NAMES`, bringing the total to 34. A
+parallel PR added one entry, ``class_prior_mode``, for the serving gate
+that can withhold a document class from a pack, bringing the total to
+35. This PR adds seven pack-size/excerpt knobs — three for the mcp
+surface (``get_context_max_tokens``, ``get_context_max_items``,
+``search_max_tokens``), two for ``POST /packs``
+(``rest_pack_max_items``, ``rest_pack_max_tokens``), and two shared by
+every surface that builds a pack (``disclosure_body_items``,
+``excerpt_max_chars``) — pinned by :data:`_PACK_BUDGET_KNOB_NAMES`,
+bringing the total to 42.
 """
 
 from __future__ import annotations
@@ -72,6 +81,21 @@ _PRECEDENT_AUTO_DEMOTE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+#: The seven pack-size/excerpt knobs registered by this PR — the mcp
+#: surface's three, REST's two, and the two shared by every surface that
+#: builds a pack through ``build_pack_builder``.
+_PACK_BUDGET_KNOB_NAMES: frozenset[str] = frozenset(
+    {
+        "get_context_max_tokens",
+        "get_context_max_items",
+        "search_max_tokens",
+        "rest_pack_max_items",
+        "rest_pack_max_tokens",
+        "disclosure_body_items",
+        "excerpt_max_chars",
+    }
+)
+
 
 class TestCatalogMembership:
     def test_every_write_behaviour_field_is_registered(self) -> None:
@@ -102,10 +126,11 @@ class TestCatalogMembership:
             }
             | _AUTO_PROMOTE_NAMES
             | _PRECEDENT_AUTO_DEMOTE_NAMES
+            | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_thirtyfive_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 35
+    def test_fortytwo_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 42
 
     def test_auto_promote_families_are_registered(self) -> None:
         """Both knob families are now registered — the opposite of the
@@ -125,6 +150,20 @@ class TestCatalogMembership:
         assert all(
             name.startswith("learning.precedent_auto_demote")
             for name in _PRECEDENT_AUTO_DEMOTE_NAMES
+        )
+
+    def test_pack_budget_knob_family_is_registered(self) -> None:
+        """The seven pack-size/excerpt knobs this PR adds, registered as
+        one contiguous block after the existing ``retrieval`` entries.
+        """
+        assert set(SETTINGS_REGISTRY) >= _PACK_BUDGET_KNOB_NAMES
+        assert all(
+            SETTINGS_REGISTRY[name].group == "retrieval"
+            for name in _PACK_BUDGET_KNOB_NAMES
+        )
+        assert all(
+            SETTINGS_REGISTRY[name].settings_live is True
+            for name in _PACK_BUDGET_KNOB_NAMES
         )
 
     @pytest.mark.parametrize(
@@ -335,7 +374,10 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     bar. ``class_prior_mode`` joined for the same reason: its
     ``"withhold"`` value removes a whole document class from every pack
     on the configured axes before an operator notices (``risk_note`` on
-    the spec itself). None of this is an oversight, so pin both tiers
+    the spec itself). The seven pack-size/excerpt knobs added by a
+    parallel PR join it too: each one trades response size/cost against
+    how much an agent sees, in either direction, which is the same
+    "caution" bar. None of this is an oversight, so pin both tiers
     rather than let them silently drift.
     """
 
@@ -364,6 +406,13 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "advisory_min_effect_size",
             "capture_strict",
             "class_prior_mode",
+            "get_context_max_tokens",
+            "get_context_max_items",
+            "search_max_tokens",
+            "rest_pack_max_items",
+            "rest_pack_max_tokens",
+            "disclosure_body_items",
+            "excerpt_max_chars",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:

@@ -20,7 +20,7 @@ import structlog
 
 from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
-from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -1139,10 +1139,12 @@ class KeywordSearch(SearchStrategy):
         *,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
         registry: ParameterRegistry | None = None,
+        excerpt_max_chars: int = EXCERPT_MAX_CHARS,
     ) -> None:
         self._store = document_store
         self._recency_half_life_days = recency_half_life_days
         self._registry = registry
+        self._excerpt_max_chars = excerpt_max_chars
 
     @property
     def name(self) -> str:
@@ -1212,7 +1214,9 @@ class KeywordSearch(SearchStrategy):
                 PackItem(
                     item_id=doc["doc_id"],
                     item_type="document",
-                    excerpt=truncate_excerpt(doc.get("content", "")),
+                    excerpt=truncate_excerpt(
+                        doc.get("content", ""), limit=self._excerpt_max_chars
+                    ),
                     relevance_score=score,
                     metadata={
                         "source_strategy": "keyword",
@@ -1238,11 +1242,13 @@ class SemanticSearch(SearchStrategy):
         *,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
         registry: ParameterRegistry | None = None,
+        excerpt_max_chars: int = EXCERPT_MAX_CHARS,
     ) -> None:
         self._store = vector_store
         self._embedding_fn = embedding_fn  # callable(str) -> list[float]
         self._recency_half_life_days = recency_half_life_days
         self._registry = registry
+        self._excerpt_max_chars = excerpt_max_chars
 
     @property
     def name(self) -> str:
@@ -1330,7 +1336,8 @@ class SemanticSearch(SearchStrategy):
                     # document is in hand; this only bounds rows from some
                     # other producer.
                     excerpt=truncate_excerpt(
-                        metadata.get("content", metadata.get("excerpt", ""))
+                        metadata.get("content", metadata.get("excerpt", "")),
+                        limit=self._excerpt_max_chars,
                     ),
                     relevance_score=score,
                     metadata={
@@ -1439,6 +1446,7 @@ class GraphSearch(SearchStrategy):
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
         registry: ParameterRegistry | None = None,
         seed_extractor: GraphSeedExtractor | None = None,
+        excerpt_max_chars: int = EXCERPT_MAX_CHARS,
     ) -> None:
         """Build the graph axis.
 
@@ -1459,12 +1467,15 @@ class GraphSearch(SearchStrategy):
                 raises falls back to the recency window — seeding is
                 additive, and a seeding miss must never cost the caller an
                 axis it would otherwise have had.
+            excerpt_max_chars: Character cap applied to each item's excerpt
+                via :func:`truncate_excerpt`.
         """
         self._store = graph_store
         self._curated_boost = curated_boost
         self._recency_half_life_days = recency_half_life_days
         self._registry = registry
         self._seed_extractor = seed_extractor
+        self._excerpt_max_chars = excerpt_max_chars
 
     @property
     def name(self) -> str:
@@ -1867,7 +1878,9 @@ class GraphSearch(SearchStrategy):
                 PackItem(
                     item_id=node["node_id"],
                     item_type="entity",
-                    excerpt=truncate_excerpt(str(excerpt)),
+                    excerpt=truncate_excerpt(
+                        str(excerpt), limit=self._excerpt_max_chars
+                    ),
                     relevance_score=score,
                     metadata={
                         "source_strategy": "graph",
@@ -2055,6 +2068,7 @@ def build_strategies(
     *,
     parameter_registry: ParameterRegistry | None = None,
     graph_seed_extractor: GraphSeedExtractor | None = None,
+    excerpt_max_chars: int = EXCERPT_MAX_CHARS,
 ) -> BuildStrategiesResult:
     """Build the standard strategy list from a registry.
 
@@ -2127,11 +2141,16 @@ def build_strategies(
         an embedder resolved *and* the vector backend initialised.
     """
     strategies: list[SearchStrategy] = [
-        KeywordSearch(registry.knowledge.document_store, registry=parameter_registry),
+        KeywordSearch(
+            registry.knowledge.document_store,
+            registry=parameter_registry,
+            excerpt_max_chars=excerpt_max_chars,
+        ),
         GraphSearch(
             registry.knowledge.graph_store,
             registry=parameter_registry,
             seed_extractor=graph_seed_extractor,
+            excerpt_max_chars=excerpt_max_chars,
         ),
     ]
 
@@ -2168,6 +2187,7 @@ def build_strategies(
                     registry.knowledge.vector_store,
                     fn,
                     registry=parameter_registry,
+                    excerpt_max_chars=excerpt_max_chars,
                 )
             )
             logger.info("semantic_search_enabled")
