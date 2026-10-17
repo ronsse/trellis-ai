@@ -19,6 +19,7 @@ from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_cont
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.auth import SCOPE_ADMIN, SCOPE_MUTATE
@@ -993,3 +994,132 @@ class TestExecuteMutationRequiresAdminForDestructiveOps:
 
         events = temp_registry.operational.event_log.get_events(limit=50)
         assert not any(e.entity_id == node_id for e in events)
+
+
+class TestExecuteMutationScopeRefusalIsLogged:
+    """A scope refusal writes exactly one ``structlog`` warning naming the
+
+    tool, the required scope and the operation -- never the caller's key
+    or principal. Mirrors the REST ``/commands/batch`` equivalent in
+    ``tests/unit/api/test_mutations_authz_followups.py``.
+    """
+
+    def test_refusal_logs_one_warning_naming_scope_and_operation(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        import logging
+
+        import structlog
+
+        node_id = TestExecuteMutationRequiresAdminForDestructiveOps._redact_target(
+            temp_registry
+        )
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+        try:
+            with (
+                _as_http(scopes=[SCOPE_MUTATE]),
+                capture_logs() as entries,
+                pytest.raises(McpError) as excinfo,
+            ):
+                execute_mutation(
+                    operation="redaction.apply",
+                    args={"target_id": node_id, "reason": "test"},
+                )
+        finally:
+            structlog.configure(**prior)
+        assert excinfo.value.error.code == POLICY_DENIED
+
+        warnings = [e for e in entries if e.get("log_level") == "warning"]
+        assert len(warnings) == 1, entries
+        entry = warnings[0]
+        assert entry["event"] == "execute_mutation_scope_refused"
+        assert entry["tool"] == "execute_mutation"
+        assert entry["required_scope"] == SCOPE_ADMIN
+        assert entry["operation"] == "redaction.apply"
+
+        # Never a key id or principal label anywhere in the captured line.
+        rendered = repr(entries)
+        assert "key-id" not in rendered
+
+
+class TestExecuteMutationRequestedByIsAuditedFromThePrincipal:
+    """``requested_by`` is derived from the authenticated principal over
+
+    HTTP, never from the caller-supplied ``actor``; with no principal
+    (stdio) ``actor`` passes through unchanged, as
+    ``test_actor_is_recorded_on_event`` above already pins.
+    """
+
+    def test_http_principal_overrides_the_claimed_actor(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        source_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "p"}
+        )
+        target_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "q"}
+        )
+
+        with _as_http(scopes=[SCOPE_MUTATE]):
+            raw = execute_mutation(
+                operation="link.create",
+                args={
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "edge_kind": "entity_related_to",
+                },
+                actor="claimed-actor",
+            )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+
+        events = temp_registry.operational.event_log.get_events(limit=50)
+        mutation_events = [
+            ev for ev in events if ev.payload and "requested_by" in ev.payload
+        ]
+        assert any(
+            ev.payload.get("requested_by") == "mcp:key-id" for ev in mutation_events
+        )
+        assert not any(
+            ev.payload.get("requested_by") == "claimed-actor" for ev in mutation_events
+        )
+
+    def test_stdio_shaped_call_keeps_the_claimed_actor(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """No principal to derive from (stdio) -- unchanged from before
+
+        ``current_principal_id`` existed.
+        """
+        graph = temp_registry.knowledge.graph_store
+        source_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "r"}
+        )
+        target_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "s"}
+        )
+
+        with _as_stdio():
+            raw = execute_mutation(
+                operation="link.create",
+                args={
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "edge_kind": "entity_related_to",
+                },
+                actor="claimed-actor",
+            )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+
+        events = temp_registry.operational.event_log.get_events(limit=50)
+        mutation_events = [
+            ev for ev in events if ev.payload and "requested_by" in ev.payload
+        ]
+        assert any(
+            ev.payload.get("requested_by") == "claimed-actor" for ev in mutation_events
+        )

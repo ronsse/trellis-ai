@@ -3289,7 +3289,7 @@ intents, served item ids and titles, attribution.
 | POST | `/links` | `{source_id, target_id, edge_kind?}` | Create edge |
 | POST | `/entities` | `{entity_type, name, properties?}` | Create entity |
 | POST | `/feedback` | `{target_id, rating, comment?, pack_id?}` | Record feedback (pass `pack_id` so it joins) |
-| POST | `/packs/{pack_id}/feedback` | `{rating, success?, notes?}` | Pack-specific feedback |
+| POST | `/packs/{pack_id}/feedback` | `{rating, success?, comment?}` | Pack-specific feedback |
 
 ### Admin
 
