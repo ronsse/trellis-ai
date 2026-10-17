@@ -659,6 +659,27 @@ def revoke_classify_rule(
 # ---------------------------------------------------------------------------
 
 
+def _reject_if_unsafe_jsonb(payload: dict[str, Any]) -> None:
+    """Raise 400 if any string in ``payload`` holds a NUL byte or an
+    unpaired UTF-16 surrogate -- the same byte Postgres's ``jsonb`` columns
+    refuse, and the same one psycopg refuses client-side in a *query*
+    parameter before any statement reaches the server. Shared so a
+    pre-lookup guard (on ``candidate_id`` alone, before any store access)
+    and the post-lookup guard (on the full audit payload) raise identical
+    text.
+    """
+    unsafe = _find_unsafe_jsonb_string(payload)
+    if unsafe is not None:
+        path, value = unsafe
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"dismiss: audit payload {path} contains a NUL byte or "
+                f"an unpaired UTF-16 surrogate: {value!r}"
+            ),
+        )
+
+
 def _find_candidate(event_log: EventLog, candidate_id: str) -> tuple[str, Event] | None:
     """Find a candidate's kind and latest surfacing event by id.
 
@@ -694,6 +715,14 @@ def dismiss_classify_candidate(
     its "open" listing unless it resurfaces with a newer emission.
     """
     registry = get_registry()
+    # Checked on ``candidate_id`` alone *before* any store access: on
+    # Postgres, ``_find_candidate`` below passes it to ``get_events`` as a
+    # query parameter, and psycopg refuses a NUL byte client-side (never
+    # reaching the server) with its own uncaught error -- answering 500,
+    # not 400, for exactly the input issue #869 F4 means to catch. SQLite
+    # has no such client-side check, which is why the old order was
+    # invisible to the default (SQLite) test run.
+    _reject_if_unsafe_jsonb({"candidate_id": candidate_id})
     found = _find_candidate(registry.operational.event_log, candidate_id)
     if found is None:
         raise HTTPException(
@@ -709,22 +738,10 @@ def dismiss_classify_candidate(
         **identity,
     }
     # No MutationExecutor on this path (a dismiss writes only this event,
-    # not a governed store), so nothing already runs
-    # ``_validate_jsonb_safe_payload``'s check for us -- the same NUL
-    # byte or unpaired UTF-16 surrogate it exists to catch would
-    # otherwise reach a Postgres ``jsonb`` column and fail the emit,
-    # answering 500 rather than 400 (issue #869 F4). Reuses the
-    # Apply/Revoke audit probe's own walker rather than re-deriving it.
-    unsafe = _find_unsafe_jsonb_string(payload)
-    if unsafe is not None:
-        path, value = unsafe
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"dismiss: audit payload {path} contains a NUL byte or "
-                f"an unpaired UTF-16 surrogate: {value!r}"
-            ),
-        )
+    # not a governed store), so nothing already runs this check for us on
+    # the full payload -- ``identity`` (``key_id``/``key_name``) is not
+    # covered by the pre-lookup guard above, only ``candidate_id`` is.
+    _reject_if_unsafe_jsonb(payload)
     registry.operational.event_log.emit(
         EventType.CLASSIFY_CANDIDATE_DISMISSED,
         source="api:classify:dismiss",

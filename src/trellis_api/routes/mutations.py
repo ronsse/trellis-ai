@@ -151,7 +151,9 @@ def execute_batch(
 
     executor = build_curate_executor(get_registry())
 
-    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
 
     # Build Command objects from the request items
     commands = [

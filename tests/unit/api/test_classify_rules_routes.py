@@ -197,6 +197,49 @@ class TestListCandidates:
         )
         assert events == []
 
+    def test_dismiss_nul_in_candidate_id_never_reaches_event_log_lookup(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On Postgres, a NUL in ``candidate_id`` never reaches a query.
+
+        ``test_dismiss_nul_in_candidate_id_is_400_not_500`` proves the 400
+        on SQLite, which has no client-side NUL check and so cannot tell
+        "refused before the query" apart from "refused after it fails".
+        psycopg does refuse a NUL parameter client-side, with its own
+        uncaught error ("PostgreSQL text fields cannot contain NUL (0x00)
+        bytes") -- so if the route still queried the event log *before*
+        checking ``candidate_id`` (the old order), this would surface as
+        an uncaught 500 on Postgres even though the route's own guard
+        exists and is reachable. This wraps ``get_events`` to raise the
+        way psycopg does on any NUL-bearing string argument, without
+        requiring the optional psycopg dependency, and asserts both the
+        400 and that the wrapped method was never called at all.
+        """
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        original_get_events = registry.operational.event_log.get_events
+        psycopg_nul_message = "PostgreSQL text fields cannot contain NUL (0x00) bytes"
+
+        def psycopg_shaped_get_events(*args: Any, **kwargs: Any) -> Any:
+            for value in (*args, *kwargs.values()):
+                if isinstance(value, str) and "\x00" in value:
+                    raise RuntimeError(psycopg_nul_message)
+            calls.append((args, kwargs))
+            return original_get_events(*args, **kwargs)
+
+        monkeypatch.setattr(
+            registry.operational.event_log, "get_events", psycopg_shaped_get_events
+        )
+
+        resp = client.post(
+            "/api/v1/classify/candidates/bad%00cand/dismiss",
+        )
+        assert resp.status_code == 400, resp.text
+        assert "NUL" in resp.json()["detail"]
+        assert calls == [], "the event log must never be queried with the bad value"
+
     def test_dismiss_spreads_identity_and_dismissed_by_prefers_key_id(
         self,
         client: TestClient,

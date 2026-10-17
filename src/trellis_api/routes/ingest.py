@@ -364,7 +364,9 @@ def ingest_bulk(
 
     registry = get_registry()
     executor = build_curate_executor(registry)
-    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
 
     response = BulkIngestResponse(
         batch_id=generate_ulid(),

@@ -66,7 +66,9 @@ def promote(
     auto-promote origin ``_was_auto_promoted`` relies on. The body's own
     claim rides along as ``metadata["requested_by_claim"]``.
     """
-    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_PROMOTE,
         args={
@@ -118,7 +120,9 @@ def demote(
     :func:`trellis_api.routes._principal.resolve_requested_by`); the
     body's own claim rides along as ``metadata["requested_by_claim"]``.
     """
-    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_DEMOTE,
         args={"target_id": target_id, "reason": req.reason},
@@ -174,7 +178,9 @@ def reinstate(
     :func:`trellis_api.routes._principal.resolve_requested_by`); the
     body's own claim rides along as ``metadata["requested_by_claim"]``.
     """
-    requested_by, requested_by_claim = resolve_requested_by(ctx, req.requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
     cmd = Command(
         operation=Operation.PRECEDENT_REINSTATE,
         args={"target_id": target_id, "reason": req.reason},

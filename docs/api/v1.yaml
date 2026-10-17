@@ -412,8 +412,31 @@ components:
       type: object
     BatchCommandBodyErrorItem:
       additionalProperties: false
-      description: One pydantic field error, mirroring FastAPI's own validation-error shape.
+      description: 'One pydantic field error, mirroring FastAPI''s own validation-error shape.
+
+
+        FastAPI''s ``ValidationError`` items always carry ``input`` (the value
+
+        that failed) and, for some error types (e.g. a wrong-type error),
+
+        ``ctx`` (extra context such as the expected type). Both are declared
+
+        here so a real 422 validates against this model -- ``extra="forbid"``
+
+        on :class:`~trellis_wire.base.WireModel` otherwise rejects every real
+
+        response, since pydantic always emits ``input`` and often emits
+
+        ``ctx``.'
       properties:
+        ctx:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Ctx
+        input:
+          title: Input
         loc:
           items:
             anyOf:
@@ -6242,7 +6265,13 @@ paths:
 
         on the event as ``requested_by_claim`` rather than overwriting
 
-        ``changed_by``.'
+        ``changed_by`` -- and only when the body actually set it
+
+        (``"requested_by" in req.model_fields_set``), so the DTO''s own
+
+        ``"api:settings"`` default is never recorded as though the caller
+
+        claimed it.'
       operationId: update_setting_api_v1_settings__name__post
       parameters:
       - in: path
@@ -6316,7 +6345,13 @@ paths:
 
         on the event as ``requested_by_claim`` rather than overwriting
 
-        ``changed_by``.'
+        ``changed_by`` -- and only when the body actually set it
+
+        (``"requested_by" in req.model_fields_set``), so the DTO''s own
+
+        ``"api:settings"`` default is never recorded as though the caller
+
+        claimed it.'
       operationId: update_setting_api_v1_settings__name__put
       parameters:
       - in: path

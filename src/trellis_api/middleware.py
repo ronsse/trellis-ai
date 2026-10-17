@@ -157,15 +157,24 @@ async def request_validation_error_handler(
 
     A NUL byte or an unpaired UTF-16 surrogate anywhere in ``exc.errors()``
     (issue #869 F5) is checked first and answered as 400 before any 422
-    body is built: unlike a non-finite float, there is no finite-float-style
-    substitute token for an unparseable code point, and the value must
-    never reach a response body at all (the caller already sent it; this
-    handler does not send it back). ``_find_unsafe_jsonb_string`` is the
-    same Postgres-``jsonb``-safety walker the Apply/Revoke audit probe and
-    the classify-candidate dismiss route use, reused here rather than
-    re-derived -- the hazard (a code point that cannot round-trip through
-    a storage or wire format) is the same one, just met earlier, before
-    pydantic's own rejection reaches the renderer.
+    body is built. The two hazards are not the same kind: a lone surrogate
+    cannot round-trip through ``str.encode("utf-8")``, so there genuinely
+    is no finite-float-style substitute token to write in its place, and
+    the value must never reach a response body at all. A NUL byte, by
+    contrast, renders in this handler's own JSON response without any
+    trouble -- ``json.dumps`` escapes it as ``\u0000`` like any other
+    control character, so a NUL alone would not force this 400. It is
+    blocked here anyway, for the same reason ``_find_unsafe_jsonb_string``
+    blocks it everywhere else it is called (the Apply/Revoke audit probe,
+    the classify-candidate dismiss route): a NUL that reaches this far is
+    unwritable to a Postgres ``jsonb`` column, and this handler cannot
+    know whether a deployment logs, forwards, or otherwise persists a
+    validation error's echoed ``input``. Blocking both hazards at the one
+    boundary every such value passes through is simpler than auditing
+    every downstream consumer for its own NUL guard, so the status for a
+    NUL-containing body is 400, not FastAPI's usual 422, as a deliberate
+    choice to fail closed here rather than a claim that the NUL itself
+    breaks rendering in this handler.
     """
     # Registered only for RequestValidationError; the check narrows the
     # type Starlette's handler signature widens.

@@ -141,20 +141,36 @@ def _resolver_bound_names(
     """Names bound, within *func*'s own body, by a tuple-unpack whose
     value is a call to ``resolve_requested_by`` (however imported,
     aliased or rebound at module scope -- *resolver_names* already
-    resolved that)."""
+    resolved that).
+
+    Flow-insensitive on purpose (matching the rest of this module), but
+    not blind to the one rebind that matters: a name this walk has
+    already credited as resolver-bound, reassigned *anywhere else* in
+    the function by a plain (non-tuple-unpack) ``Assign``, is dropped
+    from the safe set entirely. Without this, ``requested_by, claim =
+    resolve_requested_by(...)`` followed later by ``requested_by =
+    req.requested_by`` still read as safe everywhere the name is used,
+    because the walk never revisits a name once it is in the set --
+    the exact regression #895's review caught surviving as an
+    unkilled mutant.
+    """
     bound: set[str] = set()
+    reassigned: set[str] = set()
     for node in ast.walk(func):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
         if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Tuple)
+            isinstance(target, ast.Tuple)
             and isinstance(node.value, ast.Call)
             and name_of(node.value.func) in resolver_names
         ):
-            elts = node.targets[0].elts
+            elts = target.elts
             if elts and isinstance(elts[0], ast.Name):
                 bound.add(elts[0].id)
-    return bound
+        elif isinstance(target, ast.Name):
+            reassigned.add(target.id)
+    return bound - reassigned
 
 
 def _call_arg_for_param(
@@ -171,6 +187,35 @@ def _call_arg_for_param(
     return None
 
 
+def _joinedstr_mentions_a_param(
+    value: ast.JoinedStr, enclosing: ast.FunctionDef | ast.AsyncFunctionDef | None
+) -> bool:
+    """Whether an f-string's interpolated parts name an enclosing param.
+
+    An f-string template (``f"api:settings:{principal}"``) is not a
+    passthrough of a body-supplied value *by itself* -- but it is one
+    when an interpolated part names a parameter of the enclosing
+    function directly, bare (``f"{req}"``) or via attribute access
+    (``f"{req.requested_by}"``): a legitimate f-string always resolves
+    first (``principal = ctx.key_id or ...``) and interpolates the
+    resulting local, never the raw parameter. Every parameter counts,
+    not just one named "req": the resolver-threading pattern in
+    :func:`_is_safe_value` already distinguishes a genuinely resolved
+    parameter from a raw one for the bare-Name case, but a parameter can
+    never be made safe by wrapping it in an f-string, so any direct
+    mention of one here is unsafe without the deeper recursion that
+    bare-Name sites get.
+    """
+    param_names = {a.arg for a in enclosing.args.args} if enclosing else set()
+    for part in value.values:
+        if not isinstance(part, ast.FormattedValue):
+            continue
+        for node in ast.walk(part.value):
+            if isinstance(node, ast.Name) and node.id in param_names:
+                return True
+    return False
+
+
 def _is_safe_value(  # noqa: PLR0911 — each return is a distinct verdict in a flat safety check, not nested branching.
     value: ast.expr,
     *,
@@ -183,9 +228,7 @@ def _is_safe_value(  # noqa: PLR0911 — each return is a distinct verdict in a 
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return True
     if isinstance(value, ast.JoinedStr):
-        # An f-string template (``f"api:settings:{principal}"``) is not a
-        # passthrough of a body-supplied value by itself.
-        return True
+        return not _joinedstr_mentions_a_param(value, enclosing)
     if not isinstance(value, ast.Name) or enclosing is None:
         return False
     if value.id in _resolver_bound_names(enclosing, resolver_names):
@@ -371,6 +414,65 @@ class TestRuleCatchesADefectiveRoute:
             """
         )
         assert len(_unsafe_sites(tree)) == 1
+
+    def test_a_reassignment_from_a_body_attribute_after_the_resolver_is_flagged(
+        self,
+    ) -> None:
+        """A mutant that survived review: the name the resolver bound gets
+        clobbered with the raw claim right before the construction site."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+            from trellis_api.routes._principal import resolve_requested_by
+
+            def promote(req, ctx):
+                requested_by, requested_by_claim = resolve_requested_by(
+                    ctx, req.requested_by
+                )
+                requested_by = req.requested_by
+                cmd = Command(
+                    operation=Operation.PRECEDENT_PROMOTE,
+                    requested_by=requested_by,
+                )
+                return cmd
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_an_fstring_interpolating_a_body_attribute_is_flagged(self) -> None:
+        """A mutant that survived review: wrapping the raw claim in an
+        f-string does not make it a template literal."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def promote(req, ctx):
+                cmd = Command(
+                    operation=Operation.PRECEDENT_PROMOTE,
+                    requested_by=f"{req.requested_by}",
+                )
+                return cmd
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_an_fstring_interpolating_a_resolved_local_is_not_flagged(self) -> None:
+        """The real pattern in settings.py: a template built from a local
+        that was itself derived from ``ctx``, never from the raw parameter."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def update_setting(name, req, ctx):
+                principal = ctx.key_id or ctx.name or "unknown"
+                cmd = Command(
+                    operation=Operation.SETTING_UPDATE,
+                    requested_by=f"api:settings:{principal}",
+                )
+                return cmd
+            """
+        )
+        assert _unsafe_sites(tree) == []
 
     def test_a_call_with_no_requested_by_keyword_is_not_a_site(self) -> None:
         """Negative control: a Command() call that doesn't carry

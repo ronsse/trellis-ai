@@ -431,11 +431,22 @@ class BatchCommandResponse(WireModel):
 
 
 class BatchCommandBodyErrorItem(WireModel):
-    """One pydantic field error, mirroring FastAPI's own validation-error shape."""
+    """One pydantic field error, mirroring FastAPI's own validation-error shape.
+
+    FastAPI's ``ValidationError`` items always carry ``input`` (the value
+    that failed) and, for some error types (e.g. a wrong-type error),
+    ``ctx`` (extra context such as the expected type). Both are declared
+    here so a real 422 validates against this model -- ``extra="forbid"``
+    on :class:`~trellis_wire.base.WireModel` otherwise rejects every real
+    response, since pydantic always emits ``input`` and often emits
+    ``ctx``.
+    """
 
     loc: list[str | int]
     msg: str
     type: str
+    input: Any = None
+    ctx: dict[str, Any] | None = None
 
 
 class BatchCommandBodyError(WireModel):

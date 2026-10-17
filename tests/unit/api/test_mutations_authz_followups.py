@@ -243,6 +243,7 @@ class TestRequestedByIsAuditedFromThePrincipal:
         (event,) = _executed_events(registry)
         assert event.payload["requested_by"] == f"api:{key_id}"
         assert event.payload["requested_by"] != "attacker-chosen-label"
+        assert event.payload["requested_by_claim"] == "attacker-chosen-label"
 
     def test_with_auth_off_the_claimed_value_is_kept_unchanged(
         self, client: TestClient, registry: StoreRegistry
