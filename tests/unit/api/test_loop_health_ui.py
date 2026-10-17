@@ -204,8 +204,13 @@ def test_fetch_failure_renders_visible_error_in_loops_rows() -> None:
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "loops-rows" not in catch_block  # container ref already captured above
     assert "container.innerHTML" in catch_block
-    assert "err.message" in catch_block
-    assert "color:var(--danger)" in catch_block
+    # Loops is admin-only: the message and its colour go through the
+    # shared helpers so a merely-under-scoped key dims instead of reading
+    # as the same red "Failed to load" text a genuine error gets (W1D
+    # ui-pass4, see test_ui_gating.py's
+    # TestAdminScopeErrorRenderingConsistency).
+    assert "loadFailureText(err, " in catch_block
+    assert "loadFailureColor(err)" in catch_block
 
 
 # ---------------------------------------------------------------------------
