@@ -193,7 +193,11 @@ def _parse_event_type(event_type: str | None) -> EventType | None:
         ) from None
 
 
-@router.get("/events", dependencies=_ADMIN_ONLY)
+@router.get(
+    "/events",
+    dependencies=_ADMIN_ONLY,
+    responses={403: {"description": "The caller's key lacks the admin scope."}},
+)
 def list_events(
     event_type: str | None = Query(None, description="Filter by event type value"),
     entity_id: str | None = Query(None, description="Filter by subject entity"),
@@ -240,7 +244,11 @@ def list_events(
     }
 
 
-@router.get("/events/{event_id}", dependencies=_ADMIN_ONLY)
+@router.get(
+    "/events/{event_id}",
+    dependencies=_ADMIN_ONLY,
+    responses={403: {"description": "The caller's key lacks the admin scope."}},
+)
 def get_event(event_id: str) -> dict[str, Any]:
     """Fetch one event by id, reaching the whole log, not just a window.
     Requires the ``admin`` scope.
@@ -293,7 +301,11 @@ def _pack_summary(event: Event) -> dict[str, Any]:
     }
 
 
-@router.get("/packs", dependencies=_ADMIN_ONLY)
+@router.get(
+    "/packs",
+    dependencies=_ADMIN_ONLY,
+    responses={403: {"description": "The caller's key lacks the admin scope."}},
+)
 def list_packs(
     until: datetime | None = Query(  # noqa: B008 — FastAPI DI idiom
         None,
@@ -322,7 +334,11 @@ def list_packs(
     }
 
 
-@router.get("/packs/{pack_id}", dependencies=_ADMIN_ONLY)
+@router.get(
+    "/packs/{pack_id}",
+    dependencies=_ADMIN_ONLY,
+    responses={403: {"description": "The caller's key lacks the admin scope."}},
+)
 def get_pack(pack_id: str) -> dict[str, Any]:
     """Full pack telemetry: what was injected, rejected, and why.
     Requires the ``admin`` scope.

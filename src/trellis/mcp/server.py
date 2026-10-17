@@ -86,6 +86,7 @@ from trellis.mcp.auth import (
     HttpSettings,
     TrellisApiKeyVerifier,
     caller_has_scope,
+    current_principal_id,
     resolve_http_settings,
     resolve_transport,
     set_auth_enforced,
@@ -3916,8 +3917,13 @@ def execute_mutation(
     redactions, retention prune, alias rebinds, link/label removal,
     schedule/settings/classify-rule writes) only with the ``admin``
     scope — refused with ``POLICY_DENIED`` before a ``Command`` is ever
-    built. ``requested_by``/``actor`` stays a caller-chosen audit label,
-    unverified against the credential, exactly as it already was.
+    built. ``requested_by`` is derived from the authenticated principal
+    (:func:`~trellis.mcp.auth.current_principal_id`) when one is present
+    — ``mcp:<key id>`` — never from the caller-supplied ``actor``; with
+    no principal to derive from (stdio, or enforcement disabled) current
+    behaviour is unchanged and ``actor`` passes through as before. The
+    claimed ``actor`` rides along separately as
+    ``metadata["requested_by_claim"]`` whenever it is overridden.
 
     Args:
         operation: Operation name. Accepts the wire value
@@ -3961,6 +3967,12 @@ def execute_mutation(
         )
 
     if requires_admin_scope(op) and not caller_has_scope(SCOPE_ADMIN):
+        logger.warning(
+            "execute_mutation_scope_refused",
+            tool="execute_mutation",
+            required_scope=SCOPE_ADMIN,
+            operation=str(op),
+        )
         _raise_policy_denied(
             f"operation {op} is destructive and requires the admin scope",
             data={"operation": str(op)},
@@ -3973,6 +3985,11 @@ def execute_mutation(
         )
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
+    requested_by_claim: str | None = None
+    principal = current_principal_id()
+    if principal is not None:
+        requested_by_claim = requested_by
+        requested_by = f"mcp:{principal}"
 
     # Stamped before ingest, as in save_experience: a stored trace is
     # immutable. Targeted as there too: the target is what an
@@ -3981,12 +3998,18 @@ def execute_mutation(
     # precedent.demote/precedent.reinstate are also special-cased here.
     target_id, target_type, args = _resolve_execute_mutation_target(op, args)
 
+    command_metadata = (
+        {"requested_by_claim": requested_by_claim}
+        if requested_by_claim is not None
+        else {}
+    )
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
             command = build_evidence_ingest_command_from_args(
                 args,
                 requested_by=requested_by,
                 idempotency_key=idempotency_key,
+                command_metadata=command_metadata,
             )
         else:
             command = Command(
@@ -3996,6 +4019,7 @@ def execute_mutation(
                 args=dict(args),
                 idempotency_key=idempotency_key,
                 requested_by=requested_by,
+                metadata=command_metadata,
             )
     except Exception as exc:
         _raise_invalid_params(
