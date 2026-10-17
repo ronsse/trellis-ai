@@ -405,6 +405,11 @@ def resolve_candidate_auto_promote_overrides(
                 f"{CANDIDATE_AUTO_PROMOTE_MODE_SETTING}={stored_mode!r} "
                 "is not accepted."
             )
+            logger.warning(
+                "candidate_auto_promote_mode_refused_in_settings",
+                setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+                env_override=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+            )
             raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
 
     def resolve_bool(env_name: str, setting_name: str, default: bool) -> bool:
@@ -1072,17 +1077,25 @@ def _outcome_to_dict(outcome: CandidateAutoPromoteOutcome) -> dict[str, Any]:
 def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
     """Serialise a :class:`CandidateAutoPromoteReport` for ``--format json``.
 
-    ``status`` is always ``"ok"``: this report is only ever built from a
-    run that reached :func:`run_candidate_auto_promotion` and produced
-    outcomes — a run that failed before that point never reaches this
-    function, and is reported instead through
+    ``status`` is ``"degraded"`` when ``report.skipped_count`` is nonzero
+    — this run silently dropped an id-less candidate before it could
+    become an outcome, the same condition the emitted event's own
+    ``outcome: "degraded"`` names (see :func:`_emit_evaluated_event`) —
+    and ``"ok"`` otherwise. Never ``"error"``: a run that failed before
+    reaching :func:`run_candidate_auto_promotion` never builds a report
+    at all, and is reported instead through
     :func:`emit_candidate_auto_promote_failure_event`'s own
-    ``"refused"``/``"failed"`` event payload. Named here, rather than left
-    implicit, so this JSON shape and the CLI's exit code are both read off
-    the same flag (``tests/unit/test_format_exit_parity_rule.py``).
+    ``"refused"``/``"failed"`` event payload and the CLI's own
+    ``"error"``-status JSON. The CLI still exits 0 for ``"degraded"``:
+    every candidate given an outcome was evaluated correctly, so nothing
+    here is a command failure, only an incomplete input the caller
+    should notice (``docs/agent-guide/operations.md``). Named here,
+    rather than left implicit, so this JSON shape and the CLI's exit
+    code are both read off the same flag
+    (``tests/unit/test_format_exit_parity_rule.py``).
     """
     return {
-        "status": "ok",
+        "status": "degraded" if report.skipped_count else "ok",
         "enabled": report.enabled,
         "mode": report.mode,
         "configured_mode": sanitize_configured_mode(report.configured_mode),
@@ -1090,6 +1103,7 @@ def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
         "already_promoted_count": report.already_promoted_count,
         "promoted_count": report.promoted_count,
         "ineligible_count": report.ineligible_count,
+        "skipped_count": report.skipped_count,
         "event_id": report.event_id,
         "outcomes": [_outcome_to_dict(o) for o in report.outcomes],
     }

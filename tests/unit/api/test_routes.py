@@ -1786,6 +1786,13 @@ class TestReinstatePrecedentRoute:
         where the automatic policy may demote what it itself promoted,
         the automatic identity reinstating anything is refused outright.
 
+        ``auto:learning_candidate_demote`` is rostered in
+        ``UNATTENDED_WRITERS`` for exactly ``precedent.demote`` (#693-ish
+        hardening), so ``MutationExecutor``'s Stage 1 roster check now
+        refuses this before the route's handler ever runs -- the
+        handler's own human-only check is defense in depth, unreachable
+        for this identity now, and not exercised by this test.
+
         Defective subject: a route/handler that drops this check
         reinstates the node anyway -- both the status code and the
         unchanged-lifecycle assertion below catch it.
@@ -1801,7 +1808,10 @@ class TestReinstatePrecedentRoute:
             },
         )
         assert resp.status_code == 400, resp.text
-        assert "human-only" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "unattended_writer_operation_not_allowed" in detail
+        assert "auto:learning_candidate_demote" in detail
+        assert "precedent.reinstate" in detail
 
         graph = app_module._registry.knowledge.graph_store
         node = graph.get_node(node_id)

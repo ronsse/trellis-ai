@@ -96,8 +96,14 @@ def test_load_reports_tab_fetch_failure_renders_visible_error() -> None:
     )
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "outputEl.innerHTML" in catch_block
-    assert "err.message" in catch_block
-    assert "color:var(--danger)" in catch_block
+    # Reports is admin-only: loading the list goes through the shared
+    # helpers so a merely-under-scoped key dims instead of reading as the
+    # same red "Failed to load" text a genuine error gets (W1D ui-pass4,
+    # see test_ui_gating.py's TestAdminScopeErrorRenderingConsistency).
+    # Running one specific report (below) is a secondary action, not a
+    # panel load, and is unaffected -- it still renders a plain error.
+    assert "loadFailureText(err, " in catch_block
+    assert "loadFailureColor(err)" in catch_block
 
 
 def test_run_report_fetch_failure_renders_visible_error() -> None:

@@ -46,6 +46,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.errors import ConfigError
 from trellis.learning.candidate_auto_promote import (
@@ -368,9 +369,15 @@ class TestResolveModeValidation:
         settings = load_settings_values(stores_dir)
         assert settings[CANDIDATE_AUTO_PROMOTE_MODE_SETTING] == "commit"
 
-        with pytest.raises(ConfigError) as excinfo:
+        with capture_logs() as logs, pytest.raises(ConfigError) as excinfo:
             resolve_candidate_auto_promote_overrides(settings=settings, env={})
         assert excinfo.value.setting == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+        warnings = [e for e in logs if e["log_level"] == "warning"]
+        assert any(
+            e["event"] == "candidate_auto_promote_mode_refused_in_settings"
+            and e["setting"] == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+            for e in warnings
+        )
 
     def test_env_commit_mode_still_resolves_over_a_stored_one(self) -> None:
         resolved = resolve_candidate_auto_promote_overrides(
@@ -1293,10 +1300,12 @@ class TestSerializationHelpers:
             event_id="evt-1",
         )
         data = report_to_dict(report)
+        assert data["status"] == "ok"
         assert data["would_promote_count"] == 1
         assert data["promoted_count"] == 0
         assert data["already_promoted_count"] == 0
         assert data["ineligible_count"] == 0
+        assert data["skipped_count"] == 0
         assert data["event_id"] == "evt-1"
         assert data["outcomes"][0] == {
             "candidate_id": "cand-1",
@@ -1305,6 +1314,25 @@ class TestSerializationHelpers:
             "entity_id": None,
             "holdout_arm": "unknown",
         }
+
+    def test_report_to_dict_status_is_degraded_when_candidates_were_skipped(
+        self,
+    ) -> None:
+        """gate-879 follow-up #9: the CLI's own JSON output must name the
+        same ``skipped_count``-driven condition the emitted event already
+        calls ``outcome: "degraded"`` -- a reader of only the command's
+        JSON (not the event log) must be able to see it too."""
+        report = CandidateAutoPromoteReport(
+            enabled=True,
+            mode="report_only",
+            configured_mode="report_only",
+            outcomes=[],
+            event_id="evt-2",
+            skipped_count=2,
+        )
+        data = report_to_dict(report)
+        assert data["status"] == "degraded"
+        assert data["skipped_count"] == 2
 
     def test_report_to_dict_sanitizes_an_invalid_configured_mode(self) -> None:
         """A report built with a bogus ``configured_mode`` — not reachable
