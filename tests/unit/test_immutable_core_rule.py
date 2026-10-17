@@ -57,14 +57,16 @@ than left to be discovered:
   pass by going unread instead.
 
 Both scans and both seams were mutation-tested rather than assumed:
-nineteen mutants — the ``AnnAssign`` branch dropped, module-level
+twenty mutants — the ``AnnAssign`` branch dropped, module-level
 scoping widened to a full ``walk``, constant resolution of
 ``requested_by`` dropped, unreadable sites swallowed, the scan pointed at
 ``source=``, ``startswith`` loosened to a substring test, each predicate
 neutered, each roster entry corrupted, each seam's check and each seam's
-emission removed, the executor's rejection ``reason`` mislabelled, and
-the unreadable-site allow-list check (:func:`_unallowed_unreadable_sites`)
-made to accept everything — and all nineteen die, each against a named
+emission removed, the executor's rejection ``reason`` mislabelled, the
+unreadable-site allow-list check (:func:`_unallowed_unreadable_sites`)
+made to accept everything, and the count-mismatch check
+(:func:`_mismatched_allow_list_counts`) made to always report nothing —
+and all twenty die, each against a named
 test here or in
 ``tests/unit/mutate/test_immutable_core.py``. The substring mutant is
 worth noting: it survived the first sweep, because no decoy carried
@@ -77,7 +79,9 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -296,9 +300,55 @@ def _enclosing_function(
     return None
 
 
+def _enclosing_qualname(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> str:
+    """The dotted ``def``/``class`` chain enclosing *node*, or ``"<module>"``.
+
+    Walks every ``FunctionDef``/``AsyncFunctionDef``/``ClassDef`` ancestor,
+    nearest first, and joins their names outer-to-inner -- a method reads
+    ``"Class.method"``, a nested function reads ``"outer.inner"``. This is
+    not Python's own ``__qualname__`` (no ``<locals>`` marker for a nested
+    function), because nothing here needs to match the runtime value,
+    only to name a lexical scope uniquely enough that two different
+    functions never collide. A site with no enclosing def or class is
+    module-level and reads ``"<module>"``, never the empty string, so an
+    allow-list entry can name it without a blank component.
+    """
+    parts: list[str] = []
+    current: ast.AST | None = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parts.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(parts)) if parts else "<module>"
+
+
+@dataclass(frozen=True)
+class _UnreadableSite:
+    """One ``requested_by=`` site the scan could not resolve to a value.
+
+    *key* -- ``(path, qualname, expr)`` -- is what
+    :data:`_ALLOWED_UNREADABLE_SITES` is keyed on and deliberately excludes
+    *line*: an unrelated edit that shifts a line inside an already-listed
+    function must not change a site's identity. *line* is carried only for
+    human-readable messages.
+    """
+
+    path: str
+    qualname: str
+    expr: str
+    line: int
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.path, self.qualname, self.expr)
+
+    def describe(self) -> str:
+        return f"{self.path}:{self.line} ({self.qualname}): requested_by={self.expr}"
+
+
 def _requested_by_sites(
     path: Path, tree: ast.Module, repo_root: Path
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[_UnreadableSite]]:
     """``({identity: "path:line"}, [unreadable sites])`` for one module.
 
     Module-level constants are resolved, because **both** real worker
@@ -326,7 +376,12 @@ def _requested_by_sites(
     constants.update(_one_hop_imported_constants(tree, repo_root))
     parents = _parent_map(tree)
     found: dict[str, str] = {}
-    unreadable: list[str] = []
+    unreadable: list[_UnreadableSite] = []
+    # Repo-root-relative, not `path`'s absolute form: this is also the
+    # first component of an allow-list key (_ALLOWED_UNREADABLE_SITES
+    # below), and an absolute path is only ever correct on the machine
+    # that produced it.
+    rel_path = str(path.relative_to(repo_root))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -343,18 +398,20 @@ def _requested_by_sites(
             if resolved is not None:
                 found.setdefault(resolved, where)
             else:
-                # Repo-root-relative, not `where`'s absolute form: this
-                # string is also an allow-list key
-                # (_ALLOWED_UNREADABLE_SITES below), and an absolute path
-                # is only ever correct on the machine that produced it.
-                rel_where = f"{path.relative_to(repo_root)}:{node.lineno}"
-                unreadable.append(f"{rel_where}: requested_by={ast.unparse(value)}")
+                unreadable.append(
+                    _UnreadableSite(
+                        path=rel_path,
+                        qualname=_enclosing_qualname(node, parents),
+                        expr=ast.unparse(value),
+                        line=node.lineno,
+                    )
+                )
     return found, unreadable
 
 
 def unattended_writer_identities(
     root: Path, repo_root: Path | None = None
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[_UnreadableSite]]:
     """Every ``requested_by=`` identity submitted from *root*.
 
     *repo_root* anchors the one-hop import resolution in
@@ -367,7 +424,7 @@ def unattended_writer_identities(
     if repo_root is None:
         repo_root = root
     found: dict[str, str] = {}
-    unreadable: list[str] = []
+    unreadable: list[_UnreadableSite] = []
     for path, tree in iter_modules(root):
         module_found, module_unreadable = _requested_by_sites(path, tree, repo_root)
         for identity, where in module_found.items():
@@ -430,16 +487,26 @@ def auto_prefixed_identities(
 # completely unseen by either check.
 #
 # Closing that requires naming every unreadable site rather than inferring
-# which ones matter, so each entry below is one exact
-# "<path>:<line>: requested_by=<expression>" string -- the same string
-# unattended_writer_identities() itself returns -- paired with a
-# human-written reason. A site not in this dict fails
+# which ones matter, so each key below is a
+# (repo-relative path, enclosing function/method qualname, ast.unparse(value))
+# triple -- a module-level site uses the qualname "<module>" -- paired
+# with (expected count, a human-written reason). A key the live scan
+# produces that is not listed here fails
 # test_every_unreadable_site_under_src_is_allow_listed_with_a_reason below;
-# an entry with nothing left to match (the line moved, the value resolved,
-# the call was deleted) fails it too, the same both-directions shape every
-# other roster in this module uses. Keying on the exact line rather than
-# just the path is deliberate: a path-only key would keep silently covering
-# a *new* unreadable call planted anywhere in an already-listed file.
+# so does a listed key whose live count disagrees with what is recorded
+# here, in either direction -- zero means the site moved, resolved, or
+# was deleted, and a count above what is listed means a *new* identical
+# call was planted inside a function this allow-list already covers for
+# one -- the same both-directions shape every other roster in this module
+# uses. Keying on path + qualname + expression rather than the exact line
+# is deliberate the other way around from this allow-list's first
+# version: a line-keyed entry breaks on any unrelated edit that merely
+# shifts a line inside an already-listed function, which made the
+# allow-list a merge-conflict tax on the whole repo (an unrelated PR
+# touching a REST route file's `requested_by=` line was all it took).
+# Dropping the line does not widen what passes, because the count check
+# still catches a second identical call added inside an already-listed
+# function -- the one gap a path-only key would have reopened.
 
 _PASSTHROUGH_REASON = (
     "a requested_by parameter (or an already-validated request/batch "
@@ -454,182 +521,227 @@ _DYNAMIC_PREFIX_REASON = (
     "though the scan cannot resolve the value it interpolates at runtime"
 )
 
-_ALLOWED_UNREADABLE_SITES: dict[str, str] = {
+_ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
+    ("src/trellis/extract/commands.py", "_apply_confidence_gate", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/extract/commands.py", "reconcile_node_roles", "batch.requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/extract/commands.py", "result_to_batch", "requested_by"): (
+        4,
+        _PASSTHROUGH_REASON,
+    ),
     (
-        "src/trellis/extract/commands.py:111: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis/extract/memory_ingest_hook.py",
+        "run_memory_extraction",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
     (
-        "src/trellis/extract/commands.py:134: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis/extract/trace_ingest_hook.py",
+        "extract_trace_batch",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
     (
-        "src/trellis/extract/commands.py:143: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis/extract/trace_ingest_hook.py",
+        "run_trace_extraction",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis/ingest_corpus/sync.py", "_apply_record", "requested_by"): (
+        3,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/ingest_corpus/sync.py", "sync_records", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/learning/scoring.py", "submit_learning_promotion", "requested_by"): (
+        3,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_link_domains", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_link_relates_to", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/server.py", "execute_mutation", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "_stamp_document", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "_stamp_entity", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "supersede_document", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/supersession.py", "supersede_entity", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
     (
-        "src/trellis/extract/commands.py:183: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis/mutate/evidence_ingest.py",
+        "build_evidence_ingest_command",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
     (
-        "src/trellis/extract/commands.py:247: requested_by=batch.requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis/mutate/evidence_ingest.py",
+        "build_evidence_ingest_command_from_args",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis/mutate/name_aliases.py", "_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "demote", "req.requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "promote", "req.requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/curate.py", "reinstate", "req.requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/extract.py", "submit_drafts", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_alias_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_edge_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/ingest.py", "_entity_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/mutations.py", "_build_command", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/mutations.py", "execute_batch", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
     (
-        "src/trellis/extract/commands.py:82: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis_api/routes/settings.py",
+        "update_setting",
+        "f'api:settings:{principal}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
+    ("src/trellis_cli/admin_settings.py", "set_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "set_setting_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "unset_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/admin_settings.py", "unset_setting_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/classify.py", "apply_rule", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/classify.py", "revoke_rule", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "demote_precedent", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "promote", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "prune", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "redact", "requested_by"): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_cli/curate.py", "reinstate_precedent", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "restore", "requested_by"): (1, _PASSTHROUGH_REASON),
     (
-        "src/trellis/extract/memory_ingest_hook.py:176: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis_cli/demo.py",
+        "_run_extractor_on_fixture",
+        "f'cli:demo-load:{source_hint}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
     (
-        "src/trellis/extract/trace_ingest_hook.py:178: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
+        "src/trellis_cli/extract_refresh.py",
+        "_run_refresh",
+        "f'cli:extract-refresh:{source_name}'",
+    ): (1, _DYNAMIC_PREFIX_REASON),
     (
-        "src/trellis/extract/trace_ingest_hook.py:217: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/ingest_corpus/sync.py:373: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/ingest_corpus/sync.py:401: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/ingest_corpus/sync.py:526: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/ingest_corpus/sync.py:579: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/ingest_corpus/sync.py:592: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/learning/scoring.py:1011: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/learning/scoring.py:1043: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/learning/scoring.py:990: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/knowledge_links.py:197: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/knowledge_links.py:262: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    ("src/trellis/mcp/server.py:4008: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis/mcp/server.py:4015: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/supersession.py:274: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/supersession.py:299: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/supersession.py:321: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mcp/supersession.py:339: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mutate/evidence_ingest.py:107: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mutate/evidence_ingest.py:81: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis/mutate/name_aliases.py:61: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/curate.py:133: requested_by=req.requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/curate.py:55: requested_by=req.requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/curate.py:92: requested_by=req.requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/extract.py:76: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/ingest.py:205: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/ingest.py:215: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/ingest.py:232: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/mutations.py:177: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/mutations.py:89: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/mutations.py:96: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_api/routes/settings.py:558: "
-        "requested_by=f'api:settings:{principal}'"
-    ): _DYNAMIC_PREFIX_REASON,
-    (
-        "src/trellis_cli/admin_settings.py:196: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/admin_settings.py:211: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/admin_settings.py:240: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/admin_settings.py:258: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/classify.py:1138: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/classify.py:1185: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:145: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:270: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:306: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:389: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:487: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    ("src/trellis_cli/curate.py:557: requested_by=requested_by"): _PASSTHROUGH_REASON,
-    (
-        "src/trellis_cli/demo.py:1172: requested_by=f'cli:demo-load:{source_hint}'"
-    ): _DYNAMIC_PREFIX_REASON,
-    (
-        "src/trellis_cli/extract_refresh.py:308: "
-        "requested_by=f'cli:extract-refresh:{source_name}'"
-    ): _DYNAMIC_PREFIX_REASON,
-    (
-        "src/trellis_sdk/async_client.py:552: requested_by=requested_by"
-    ): _PASSTHROUGH_REASON,
-    ("src/trellis_sdk/client.py:578: requested_by=requested_by"): _PASSTHROUGH_REASON,
+        "src/trellis_sdk/async_client.py",
+        "AsyncTrellisClient.submit_drafts",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
+    ("src/trellis_sdk/client.py", "TrellisClient.submit_drafts", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
 }
 
 
 def _unallowed_unreadable_sites(
-    unreadable: Iterable[str], allowed: Mapping[str, str]
-) -> list[str]:
-    """Every entry of *unreadable* with no matching allow-list key.
+    unreadable: Iterable[_UnreadableSite],
+    allowed: Mapping[tuple[str, str, str], tuple[int, str]],
+) -> list[_UnreadableSite]:
+    """Every *unreadable* site whose key the allow-list does not carry at all.
 
-    A pure set difference, pulled out of the test body so a mutant can be
-    planted against it directly: return everything unconditionally, or
-    return nothing, and a test below must go red either way.
+    Keyed on (path, qualname, expr) -- no line number -- so an unrelated
+    edit that only shifts a line inside an already-listed function can
+    never trip this check; see
+    test_a_blank_line_above_an_already_listed_site_does_not_break_the_check.
+    A pure membership test, pulled out of the test body so a mutant can
+    be planted against it directly: return everything unconditionally,
+    or return nothing, and a test below must go red either way.
     """
-    return [site for site in unreadable if site not in allowed]
+    return [site for site in unreadable if site.key not in allowed]
 
 
-def _stale_allow_list_entries(
-    unreadable: Iterable[str], allowed: Mapping[str, str]
-) -> list[str]:
-    """Every allow-list key no site in the live *unreadable* scan matches.
+def _mismatched_allow_list_counts(
+    unreadable: Iterable[_UnreadableSite],
+    allowed: Mapping[tuple[str, str, str], tuple[int, str]],
+) -> list[tuple[tuple[str, str, str], int, int]]:
+    """``(key, expected, observed)`` for every listed key whose live count
+    disagrees with what :data:`_ALLOWED_UNREADABLE_SITES` expects.
 
-    The companion direction: a key the scan no longer produces was pinned
-    to a line that moved, resolved, or was deleted, and re-reading the
-    tree is the only honest way to retire it.
+    *observed* of 0 is a stale entry -- the site moved, resolved, or was
+    deleted. *observed* above *expected* is a second identical call
+    planted inside a function the allow-list already covers for one --
+    exactly the gap a line-keyed allow-list could not see, because a new
+    call at a new line was a brand new key there; see
+    test_a_second_identical_call_in_an_already_listed_function_fails_via_count.
+    Both directions are the same failure here: the human-recorded
+    expectation and the live tree disagree, so both are reported by one
+    count comparison rather than two separate membership tests.
     """
-    live = set(unreadable)
-    return [key for key in allowed if key not in live]
+    observed = Counter(site.key for site in unreadable)
+    return [
+        (key, expected, observed.get(key, 0))
+        for key, (expected, _reason) in allowed.items()
+        if observed.get(key, 0) != expected
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +840,7 @@ def test_every_unattended_writer_identity_is_in_the_allow_list() -> None:
         "the scan cannot read the identity these sites submit under, so it "
         "cannot certify the allow-list is complete. Bind the value to a "
         "module-level constant, or widen the resolver deliberately: "
-        + "; ".join(unreadable)
+        + "; ".join(site.describe() for site in unreadable)
     )
 
     missing = set(discovered) - set(UNATTENDED_WRITERS)
@@ -852,14 +964,20 @@ def test_every_unreadable_site_under_src_is_allow_listed_with_a_reason() -> None
         "can certify it is not one of theirs; read it and either resolve "
         "it (bind the value to a module-level constant, or widen the "
         "resolver deliberately) or add it here with a reason: "
-        + "; ".join(sorted(missing))
+        + "; ".join(sorted(site.describe() for site in missing))
     )
 
-    stale = _stale_allow_list_entries(unreadable, _ALLOWED_UNREADABLE_SITES)
-    assert not stale, (
-        "_ALLOWED_UNREADABLE_SITES still names a site the live scan no "
-        "longer finds — it moved, resolved, or was deleted; re-count "
-        "rather than leave a stale entry: " + "; ".join(sorted(stale))
+    mismatched = _mismatched_allow_list_counts(unreadable, _ALLOWED_UNREADABLE_SITES)
+    assert not mismatched, (
+        "_ALLOWED_UNREADABLE_SITES disagrees with the live scan's count for "
+        "at least one key — 0 observed means the site moved, resolved, or "
+        "was deleted; more than expected means a new identical call was "
+        "planted inside a function this allow-list already covers for one; "
+        "re-count rather than leave the entry as-is: "
+        + "; ".join(
+            f"{key} expected {expected}, observed {observed}"
+            for key, expected, observed in sorted(mismatched)
+        )
     )
 
 
@@ -990,6 +1108,20 @@ def submit(who: str) -> None:
     execute(Command(requested_by=who))                   # 5  UNREADABLE
 '''
 
+_DUPLICATED_UNREADABLE_TREE = '''
+"""A worker whose identity the scan cannot read, planted twice."""
+
+
+def submit(who: str) -> None:
+    execute(Command(requested_by=who))                   # 5  UNREADABLE #1
+    execute(Command(requested_by=who))                   # 6  UNREADABLE #2
+'''
+
+_LINE_SHIFTED_UNREADABLE_TREE = _UNREADABLE_TREE.replace(
+    "def submit(who: str) -> None:\n    execute",
+    "def submit(who: str) -> None:\n\n    execute",
+)
+
 _UNALLOWLISTED_UNREADABLE_TREE = '''
 """A worker whose identity the scan cannot read and nobody allow-listed."""
 
@@ -1111,7 +1243,10 @@ def test_the_worker_scan_reports_an_identity_it_cannot_read(tmp_path: Path) -> N
 
     assert not found
     assert len(unreadable) == 1
-    assert unreadable[0].endswith(":5: requested_by=who"), unreadable
+    site = unreadable[0]
+    assert site.line == 5, unreadable
+    assert site.expr == "who", unreadable
+    assert site.qualname == "submit", unreadable
 
 
 def test_an_unlisted_unreadable_site_fails_the_allow_list_check(
@@ -1132,7 +1267,70 @@ def test_an_unlisted_unreadable_site_fails_the_allow_list_check(
 
     missing = _unallowed_unreadable_sites(unreadable, _ALLOWED_UNREADABLE_SITES)
     assert len(missing) == 1
-    assert missing[0].endswith(":5: requested_by=who"), missing
+    assert missing[0].line == 5, missing
+    assert missing[0].expr == "who", missing
+    assert missing[0].qualname == "submit", missing
+
+
+def test_a_second_identical_call_in_an_already_listed_function_fails_via_count(
+    tmp_path: Path,
+) -> None:
+    """A duplicate inside an already-listed function is a count mismatch.
+
+    This is exactly the gap a line-keyed allow-list could not close: a
+    second identical call sits at a new line, so a line-keyed entry reads
+    it as a brand new, unlisted site rather than as a duplicate of one
+    already covered. Keying on (path, qualname, expr) instead collapses
+    both calls onto the same key, which means :func:`_unallowed_unreadable_sites`
+    has nothing new to report — proving the duplicate is caught
+    specifically by :func:`_mismatched_allow_list_counts` comparing the
+    live count (2) against the allow-list's recorded expectation (1), not
+    by the unlisted-key path.
+    """
+    root = _render(tmp_path, "duplicated_unreadable", _DUPLICATED_UNREADABLE_TREE)
+    _, unreadable = unattended_writer_identities(root)
+    assert len(unreadable) == 2
+
+    key = unreadable[0].key
+    assert unreadable[1].key == key
+    allowed = {key: (1, "test fixture: single call expected")}
+
+    assert not _unallowed_unreadable_sites(unreadable, allowed)
+
+    mismatched = _mismatched_allow_list_counts(unreadable, allowed)
+    assert mismatched == [(key, 1, 2)], mismatched
+
+
+def test_a_blank_line_above_an_already_listed_site_does_not_break_the_check(
+    tmp_path: Path,
+) -> None:
+    """An unrelated line shift inside an already-listed function must pass.
+
+    This is the merge-conflict tax the new key design exists to remove:
+    the old line-keyed allow-list broke on exactly this edit even though
+    the site's identity never changed. Parses the same source twice, once
+    with a blank line inserted above the call, and shows the computed
+    ``.key`` is identical in both renders despite ``.line`` moving from 5
+    to 6 — so an allow-list built from the unshifted render still passes
+    both check functions against the shifted one.
+    """
+    base_root = _render(tmp_path, "line_shift_base", _UNREADABLE_TREE)
+    _, base_unreadable = unattended_writer_identities(base_root)
+    assert len(base_unreadable) == 1
+    assert base_unreadable[0].line == 5
+    key = base_unreadable[0].key
+
+    shifted_root = _render(
+        tmp_path, "line_shift_shifted", _LINE_SHIFTED_UNREADABLE_TREE
+    )
+    _, shifted_unreadable = unattended_writer_identities(shifted_root)
+    assert len(shifted_unreadable) == 1
+    assert shifted_unreadable[0].line == 6
+    assert shifted_unreadable[0].key == key
+
+    allowed = {key: (1, "test fixture: line-shift tolerance")}
+    assert not _unallowed_unreadable_sites(shifted_unreadable, allowed)
+    assert not _mismatched_allow_list_counts(shifted_unreadable, allowed)
 
 
 def test_the_scan_resolves_a_keyword_default_and_a_lazy_import(
@@ -1168,7 +1366,10 @@ def test_the_scan_resolves_a_keyword_default_and_a_lazy_import(
     assert found["auto:planted-promote"].endswith("promote_planted.py:6")
     assert found["auto:planted-demote"].endswith("demote_planted.py:9")
     assert len(unreadable) == 1
-    assert unreadable[0].endswith("demote_planted.py:13: requested_by=who"), unreadable
+    assert unreadable[0].path.endswith("demote_planted.py"), unreadable
+    assert unreadable[0].line == 13, unreadable
+    assert unreadable[0].expr == "who", unreadable
+    assert unreadable[0].qualname == "run_unresolvable", unreadable
 
 
 @pytest.mark.parametrize(
