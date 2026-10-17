@@ -274,10 +274,12 @@ class TestBackfillNameAliasesCommand:
             ["admin", "backfill-name-aliases", "--format", "json"],
         )
 
-        assert result.exit_code != 5
         payload = json.loads(result.stdout)
         assert payload["status"] == "error"
         assert payload["bound"] == 0
         assert payload["failed"] == 2
-        reasons = {failure["reason"] for failure in payload["failures"]}
-        assert reasons == {"policy", "validation"}
+        reasons = [failure["reason"] for failure in payload["failures"]]
+        assert sorted(reasons) == ["policy", "validation"]
+        # The first failure in command order decides the exit code.
+        expected = {"policy": 3, "validation": 2}[reasons[0]]
+        assert result.exit_code == expected

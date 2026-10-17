@@ -24,8 +24,7 @@ if TYPE_CHECKING:
 #: mirror the same three-way split ``trellis_cli.exit_codes
 #: .refusal_exit_code`` makes from a raw ``CommandResult``; ``"protocol"``
 #: (an unexpected success message, or a verify-stage miss) has no analog
-#: there and falls to the same conservative "don't retry with the same
-#: input" code a store failure does.
+#: there and exits with the same code a store failure does.
 _EXIT_CODE_BY_FAILURE_REASON: dict[str, int] = {
     "policy": EXIT_POLICY,
     "validation": EXIT_VALIDATION,
@@ -111,12 +110,10 @@ def register(app: Typer) -> None:
         if truncated:
             exit_code = EXIT_VALIDATION
         elif report.failed:
-            # The ADR batch rule: exit by the first refused-or-failed
-            # result, not by requiring every failure to agree. A
-            # policy+validation mix (no store failure) exits EXIT_POLICY
-            # here, matching whichever command the backfill hit first,
-            # the same way trellis_cli.exit_codes.batch_outcome reads a
-            # governed batch's results.
+            # Any failure exits non-zero, with the code of the first
+            # failure in command order, not one that requires every
+            # failure to agree: a policy+validation mix exits by
+            # whichever cause the backfill hit first, never EXIT_STORE.
             exit_code = _EXIT_CODE_BY_FAILURE_REASON[report.failures[0].reason]
         if exit_code:
             raise typer.Exit(code=exit_code)
