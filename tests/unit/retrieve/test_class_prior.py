@@ -17,6 +17,7 @@ from trellis.retrieve.class_prior import (
     OFF,
     ClassPriorConfig,
     apply_class_prior,
+    class_prior_telemetry,
     resolve_class_prior_config,
 )
 from trellis.schemas.pack import PackItem
@@ -244,6 +245,31 @@ class TestResolveClassPriorConfig:
         assert lines[0]["var"] == CLASS_PRIOR_MODE_ENV
         assert "value" not in lines[0]
 
+    def test_unrecognised_stored_mode_degrades_to_off_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The settings-store sibling of
+        ``test_unrecognised_env_mode_warning_names_the_variable_not_the_
+        value`` above: an unrecognised *stored* mode (not ``demote``,
+        which has its own dedicated warning) must still degrade to
+        ``off`` rather than raise or silently resolve to something else,
+        and must still warn once, naming the setting and never the
+        value it held — matching the existing
+        ``class_prior_mode_demote_removed`` style."""
+        monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
+        with capture_logs() as logs:
+            config = resolve_class_prior_config(
+                settings={"class_prior_mode": "not-a-mode"}
+            )
+        assert config.mode == "off"
+        lines = [
+            e for e in logs if e["event"] == "class_prior_mode_settings_unrecognised"
+        ]
+        assert len(lines) == 1
+        assert lines[0]["setting"] == CLASS_PRIOR_MODE_SETTING
+        assert "value" not in lines[0]
+        assert "var" not in lines[0]
+
     def test_stored_mode_is_case_normalised(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -332,3 +358,36 @@ class TestResolveClassPriorConfig:
         assert not [
             e for e in logs if e["event"] == "class_prior_forms_env_unrecognised"
         ]
+
+
+class TestClassPriorTelemetry:
+    """The compact ``PACK_ASSEMBLED.class_prior`` payload — pinned directly
+    on the pure function; ``test_pack_holdout_seam.py`` separately pins
+    that the *key* reaches every flat and sectioned row, including off."""
+
+    def test_off_reports_mode_off_with_default_forms_and_axes(self) -> None:
+        assert class_prior_telemetry(OFF) == {
+            "mode": "off",
+            "forms": ["conversation"],
+            "axes": ["keyword"],
+        }
+
+    def test_withhold_reports_the_configured_forms_and_axes_sorted(self) -> None:
+        config = ClassPriorConfig(
+            mode="withhold",
+            forms=frozenset({"entity_summary", "conversation"}),
+            axes=frozenset({"semantic", "keyword"}),
+        )
+        assert class_prior_telemetry(config) == {
+            "mode": "withhold",
+            "forms": ["conversation", "entity_summary"],
+            "axes": ["keyword", "semantic"],
+        }
+
+    def test_forms_and_axes_are_lists_not_the_underlying_frozenset(self) -> None:
+        """``extra="forbid"`` wire DTOs and JSON serialization both need a
+        list, not a frozenset — and a sorted list, so the payload is
+        deterministic across runs with the same config."""
+        payload = class_prior_telemetry(OFF)
+        assert isinstance(payload["forms"], list)
+        assert isinstance(payload["axes"], list)

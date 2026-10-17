@@ -34,7 +34,6 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from collections.abc import Mapping
@@ -972,55 +971,23 @@ def _resolve_int_knob(
     default: int,
     settings: Mapping[str, Any] | None,
 ) -> int:
-    """Coerce and bounds-check through the registry's own ``validate_value``.
+    """Resolve one integer knob: env var, then a stored setting, then default.
 
-    Mirrors :func:`trellis.ops.capture_health._resolve_int_knob` /
-    :func:`trellis.classify.demotion_gate._resolve_int_threshold` /
-    :func:`trellis.retrieve.builder_factory._resolve_int_knob`: both the
-    env and the stored value go through the same coercion the governed
-    ``PUT /settings`` path uses, so an out-of-bounds or non-finite value
-    is rejected rather than silently honoured.
-
-    Imported lazily for the same import-cycle reason those three give:
-    ``trellis.core.settings_registry`` imports the learning tuners, which
-    import ``trellis.ops.parameter_reachability``, which imports
-    ``trellis.ops``'s ``__init__``.
+    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
+    shared implementation; see its docstring for the coercion and
+    precedence rules). ``warning_prefix="mcp_server"`` keeps this
+    caller's event names — ``mcp_server.bad_env_int`` /
+    ``mcp_server.bad_settings_int`` — exactly what they were before.
     """
-    from trellis.core.settings_registry import (  # noqa: PLC0415
-        get_setting,
-        validate_value,
-    )
+    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
 
-    spec = get_setting(setting_name)
-    raw_env = os.environ.get(env_var, "").strip()
-    if raw_env:
-        try:
-            return (
-                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "mcp_server.bad_env_int",
-                var=env_var,
-                error_type=type(exc).__name__,
-            )
-            return default
-    if settings is not None and setting_name in settings:
-        raw_setting = settings[setting_name]
-        try:
-            return (
-                int(validate_value(spec, raw_setting))
-                if spec is not None
-                else int(raw_setting)
-            )
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "mcp_server.bad_settings_int",
-                setting=setting_name,
-                error_type=type(exc).__name__,
-            )
-            return default
-    return default
+    return resolve_int_knob(
+        env_var=env_var,
+        setting_name=setting_name,
+        default=default,
+        settings=settings,
+        warning_prefix="mcp_server",
+    )
 
 
 def _resolve_get_context_max_tokens(settings: Mapping[str, Any] | None) -> int:

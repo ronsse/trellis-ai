@@ -166,6 +166,7 @@ _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
     "advisories_filtered_legacy",
     "retrieval_phase",
     "refresh",
+    "class_prior",
 }
 
 

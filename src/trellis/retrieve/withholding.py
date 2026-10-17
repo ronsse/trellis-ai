@@ -215,11 +215,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable
+    from collections.abc import Collection, Iterable, Mapping
 
     from trellis.schemas.pack import RejectedItem
 
+from trellis.retrieve.class_prior import CLASS_PRIOR_REJECTION_REASON
 from trellis_wire.withholding import (
+    ClassPriorDetail,
     WithheldGroup,
     WithholdingSummary,
     format_withholding_note,
@@ -246,6 +248,8 @@ SECTION_FILTER_REASON: str = "section_filter"
 def summarize_withheld(
     rejected: Iterable[RejectedItem],
     served_item_ids: Collection[str],
+    *,
+    class_prior_forms: Mapping[str, str] | None = None,
 ) -> WithholdingSummary:
     """Group rejections into the items actually absent from the pack.
 
@@ -260,45 +264,73 @@ def summarize_withheld(
     of ``total``, out of ``by_reason`` and out of ``withheld_item_ids``
     (which would otherwise carry a median of ten ids on every sectioned
     pack, for a count the caller is not shown).
+
+    ``class_prior_forms`` maps the id of an item rejected under
+    :data:`CLASS_PRIOR_REJECTION_REASON` to the document form that gate
+    matched it on. :class:`RejectedItem` itself carries no ``metadata``
+    field (by design — see :mod:`trellis.retrieve.class_prior`'s module
+    docstring), so the form has to be passed in by the one caller
+    (:meth:`~trellis.retrieve.pack_builder.PackBuilder._apply_class_prior_pool`)
+    that still holds the source :class:`~trellis.schemas.pack.PackItem`.
+    A missing entry degrades to ``"unknown"`` rather than raising — this
+    feeds display text, not a gate — and an entry for an id that is not,
+    after all, attributed to ``class_prior`` here (served elsewhere, or
+    first-claimed by an earlier reason) is simply never read.
     """
+    class_prior_forms = class_prior_forms or {}
     served = set(served_item_ids)
-    first_reason: dict[str, str] = {}
+    first_item: dict[str, RejectedItem] = {}
     non_absence: list[str] = []
     for item in rejected:
         if item.reason in NON_ABSENCE_REASONS or item.item_id in served:
             if item.reason not in non_absence:
                 non_absence.append(item.reason)
             continue
-        first_reason.setdefault(item.item_id, item.reason)
+        first_item.setdefault(item.item_id, item)
 
     counts: dict[str, int] = {}
     section_filtered = 0
-    for reason in first_reason.values():
+    class_prior_counts: dict[tuple[str, str], int] = {}
+    for item_id, item in first_item.items():
+        reason = item.reason
         if reason == SECTION_FILTER_REASON:
             section_filtered += 1
             continue
         counts[reason] = counts.get(reason, 0) + 1
+        if reason == CLASS_PRIOR_REJECTION_REASON:
+            form = class_prior_forms.get(item_id, "unknown")
+            axis = item.strategy_source or "unknown"
+            key = (form, axis)
+            class_prior_counts[key] = class_prior_counts.get(key, 0) + 1
 
     groups = tuple(
         WithheldGroup(reason=reason, count=count)
         for reason, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     )
+    class_prior_detail = tuple(
+        ClassPriorDetail(form=form, axis=axis, count=count)
+        for (form, axis), count in sorted(
+            class_prior_counts.items(), key=lambda kv: (-kv[1], kv[0])
+        )
+    )
     return WithholdingSummary(
         groups=groups,
         withheld_item_ids=tuple(
             item_id
-            for item_id, reason in first_reason.items()
-            if reason != SECTION_FILTER_REASON
+            for item_id, item in first_item.items()
+            if item.reason != SECTION_FILTER_REASON
         ),
         non_absence_reasons=tuple(sorted(non_absence)),
         section_filtered=section_filtered,
         served_count=len(served),
+        class_prior_detail=class_prior_detail,
     )
 
 
 __all__ = [
     "NON_ABSENCE_REASONS",
     "SECTION_FILTER_REASON",
+    "ClassPriorDetail",
     "WithheldGroup",
     "WithholdingSummary",
     "format_withholding_note",

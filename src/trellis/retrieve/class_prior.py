@@ -264,15 +264,15 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
             # Named demote mode removed entirely (see the module
             # docstring); never resolve to withhold for it.
             logger.warning("class_prior_mode_demote_removed", var=CLASS_PRIOR_MODE_ENV)
-            return "off"
-        # Name the variable, never the value it held — see the module's
-        # callers for why an unrecognised config value does not belong in
-        # a log line.
-        logger.warning(
-            "class_prior_mode_env_unrecognised",
-            var=CLASS_PRIOR_MODE_ENV,
-            effective="off",
-        )
+        else:
+            # Name the variable, never the value it held — see the
+            # module's callers for why an unrecognised config value does
+            # not belong in a log line.
+            logger.warning(
+                "class_prior_mode_env_unrecognised",
+                var=CLASS_PRIOR_MODE_ENV,
+                effective="off",
+            )
         return "off"
     raw_value = (settings or {}).get(CLASS_PRIOR_MODE_SETTING)
     # Normalised the same way as the env var above (strip + lowercase) so
@@ -281,14 +281,20 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
     # path that writes this setting still refuses a non-canonical
     # spelling with 400; normalising here never papers over that refusal.
     value = raw_value.strip().lower() if isinstance(raw_value, str) else ""
+    if value and value in _VALID_MODES:
+        return value  # type: ignore[return-value]
     if value:
-        if value in _VALID_MODES:
-            return value  # type: ignore[return-value]
         if value == "demote":
             logger.warning(
                 "class_prior_mode_demote_removed", setting=CLASS_PRIOR_MODE_SETTING
             )
-            return "off"
+        else:
+            # Name the setting, never the value it held -- same posture
+            # the env branch above takes for an unrecognised value.
+            logger.warning(
+                "class_prior_mode_settings_unrecognised",
+                setting=CLASS_PRIOR_MODE_SETTING,
+            )
     return "off"
 
 
@@ -328,6 +334,23 @@ def apply_class_prior(
     return kept, rejected
 
 
+def class_prior_telemetry(config: ClassPriorConfig) -> dict[str, Any]:
+    """The compact, additive ``PACK_ASSEMBLED.class_prior`` payload.
+
+    ``{"mode": ..., "forms": [...], "axes": [...]}`` — sorted lists so the
+    payload is deterministic regardless of the frozenset's iteration
+    order. Emitted on every flat and sectioned ``PACK_ASSEMBLED`` row,
+    including when ``mode == "off"``, so a pack event can say whether
+    this gate was on without a reader having to re-derive it from env/
+    settings state at read time (which may have since changed).
+    """
+    return {
+        "mode": config.mode,
+        "forms": sorted(config.forms),
+        "axes": sorted(config.axes),
+    }
+
+
 __all__ = [
     "CLASS_PRIOR_AXES_ENV",
     "CLASS_PRIOR_FORMS_ENV",
@@ -342,5 +365,6 @@ __all__ = [
     "ClassPriorConfig",
     "ClassPriorMode",
     "apply_class_prior",
+    "class_prior_telemetry",
     "resolve_class_prior_config",
 ]
