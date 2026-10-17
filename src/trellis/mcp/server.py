@@ -34,8 +34,10 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
@@ -929,6 +931,127 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 #: token budget; this bounds the candidate list the budget walk considers.
 _FLAT_MAX_ITEMS = 50
 
+#: Settings-registry wiring for the MCP pack-size knobs below — env wins
+#: over a stored override, which wins over the module default, same
+#: posture as ``GRAPH_SEEDING_ENV`` in
+#: :mod:`trellis.retrieve.builder_factory`. See
+#: ``trellis.core.settings_registry``'s ``get_context_max_tokens`` /
+#: ``get_context_max_items`` / ``search_max_tokens`` entries.
+#:
+#: ``get_context``'s ``sections=`` layout resolves its budget through a
+#: DIFFERENT, older mechanism (``registry.budget_config``, config.yaml's
+#: ``retrieval.budgets``, fallback 4000/30 — the same one
+#: ``get_objective_context``/``get_task_context`` use) and is deliberately
+#: NOT wired to these three settings, so the two resolution paths can
+#: never disagree about what "unset" means. See the ``sections is not
+#: None`` branch below.
+_GET_CONTEXT_MAX_TOKENS_ENV = "TRELLIS_GET_CONTEXT_MAX_TOKENS"
+_GET_CONTEXT_MAX_TOKENS_SETTING = "get_context_max_tokens"
+_GET_CONTEXT_MAX_ITEMS_ENV = "TRELLIS_GET_CONTEXT_MAX_ITEMS"
+_GET_CONTEXT_MAX_ITEMS_SETTING = "get_context_max_items"
+_SEARCH_MAX_TOKENS_ENV = "TRELLIS_SEARCH_MAX_TOKENS"
+_SEARCH_MAX_TOKENS_SETTING = "search_max_tokens"
+
+#: ``get_context``'s historical literal ``max_tokens`` default (2000),
+#: frozen here for the ``sections=`` branch alone. That branch treats
+#: ``max_tokens <= 0`` as "no override, resolve via ``budget_config``" —
+#: so before this knob existed, a caller who omitted ``max_tokens``
+#: (landing on the old hardcoded signature default) always fed the
+#: literal ``2000`` into that branch as an override. Kept as its own
+#: constant rather than reusing :data:`_GET_CONTEXT_MAX_TOKENS_SETTING`'s
+#: default so a settings override of the *new* flat-path knob can never
+#: change what the sections branch does.
+_GET_CONTEXT_SECTIONS_LEGACY_MAX_TOKENS = 2000
+
+
+def _resolve_int_knob(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Mirrors :func:`trellis.ops.capture_health._resolve_int_knob` /
+    :func:`trellis.classify.demotion_gate._resolve_int_threshold` /
+    :func:`trellis.retrieve.builder_factory._resolve_int_knob`: both the
+    env and the stored value go through the same coercion the governed
+    ``PUT /settings`` path uses, so an out-of-bounds or non-finite value
+    is rejected rather than silently honoured.
+
+    Imported lazily for the same import-cycle reason those three give:
+    ``trellis.core.settings_registry`` imports the learning tuners, which
+    import ``trellis.ops.parameter_reachability``, which imports
+    ``trellis.ops``'s ``__init__``.
+    """
+    from trellis.core.settings_registry import (  # noqa: PLC0415
+        get_setting,
+        validate_value,
+    )
+
+    spec = get_setting(setting_name)
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "mcp_server.bad_env_int",
+                var=env_var,
+                error_type=type(exc).__name__,
+            )
+            return default
+    if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
+        try:
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "mcp_server.bad_settings_int",
+                setting=setting_name,
+                error_type=type(exc).__name__,
+            )
+            return default
+    return default
+
+
+def _resolve_get_context_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``get_context``'s flat-path ``max_tokens`` default (2000)."""
+    return _resolve_int_knob(
+        env_var=_GET_CONTEXT_MAX_TOKENS_ENV,
+        setting_name=_GET_CONTEXT_MAX_TOKENS_SETTING,
+        default=2000,
+        settings=settings,
+    )
+
+
+def _resolve_get_context_max_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``get_context``'s flat-path ``max_items`` default (50)."""
+    return _resolve_int_knob(
+        env_var=_GET_CONTEXT_MAX_ITEMS_ENV,
+        setting_name=_GET_CONTEXT_MAX_ITEMS_SETTING,
+        default=_FLAT_MAX_ITEMS,
+        settings=settings,
+    )
+
+
+def _resolve_search_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``search``'s ``max_tokens`` default (2000)."""
+    return _resolve_int_knob(
+        env_var=_SEARCH_MAX_TOKENS_ENV,
+        setting_name=_SEARCH_MAX_TOKENS_SETTING,
+        default=2000,
+        settings=settings,
+    )
+
+
 #: Floor for the index-mode builder budget once the rendering overhead is
 #: reserved — roughly one index line. A budget too small to survey anything
 #: should still answer with one id, not "no context found" about a corpus
@@ -1349,7 +1472,7 @@ def _sectioned_context(
 def get_context(
     intent: str,
     domain: str | None = None,
-    max_tokens: int = 2000,
+    max_tokens: int | None = None,
     session_id: str = "",
     run_id: str = "",
     sections: list[dict[str, Any]] | None = None,
@@ -1373,7 +1496,9 @@ def get_context(
         domain: Optional domain scope (e.g., "platform", "data"). Scoped
             with default-pass semantics — a memory that carries no domain is
             never hard-excluded; only an explicit mismatch is dropped.
-        max_tokens: Maximum response size in tokens (default 2000).
+        max_tokens: Maximum response size in tokens. Leave unset to use the
+            deployment's configured default (2000 unless an operator has
+            overridden it via settings).
         session_id: Optional conversation/session identifier. When supplied,
             items already returned by recent calls in this session are
             excluded, preventing repetition across calls.
@@ -1427,10 +1552,20 @@ def get_context(
                 "sections must not be empty",
                 data={"field": "sections"},
             )
+        # Deliberately NOT routed through the new settings knob (see
+        # ``_GET_CONTEXT_SECTIONS_LEGACY_MAX_TOKENS``'s docstring) — this
+        # branch's resolution is budget_config's alone.
+        sections_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else _GET_CONTEXT_SECTIONS_LEGACY_MAX_TOKENS
+        )
         budget = registry.budget_config.resolve(
             tool="get_context",
             domain=domain or None,
-            caller_override_tokens=max_tokens if max_tokens > 0 else None,
+            caller_override_tokens=(
+                sections_max_tokens if sections_max_tokens > 0 else None
+            ),
         )
         return _sectioned_context(
             registry,
@@ -1445,11 +1580,18 @@ def get_context(
             retrieval_phase=retrieval_phase,
         )
 
+    settings = load_settings_values(registry.stores_dir)
+    resolved_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else _resolve_get_context_max_tokens(settings)
+    )
     return _flat_context(
         registry,
         intent,
         domain=domain,
-        max_tokens=max_tokens,
+        max_tokens=resolved_max_tokens,
+        max_items=_resolve_get_context_max_items(settings),
         session_id=session_id,
         run_id=run_id,
         operation="get_context",
@@ -3373,7 +3515,7 @@ def record_feedback(
 def search(
     query: str,
     limit: int = 10,
-    max_tokens: int = 2000,
+    max_tokens: int | None = None,
     index: bool = False,
     retrieval_phase: str | None = None,
 ) -> str:
@@ -3386,7 +3528,9 @@ def search(
     Args:
         query: Search query.
         limit: Maximum results (default 10).
-        max_tokens: Maximum response size in tokens (default 2000).
+        max_tokens: Maximum response size in tokens. Leave unset to use the
+            deployment's configured default (2000 unless an operator has
+            overridden it via settings).
         index: Return an id index instead of excerpt bodies (default
             False) — one compact line per item; raise ``limit`` to survey
             more. Fetch chosen bodies with ``get_items``; feedback
@@ -3405,11 +3549,17 @@ def search(
             data={"field": "query"},
         )
 
+    registry = _get_registry()
+    resolved_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else _resolve_search_max_tokens(load_settings_values(registry.stores_dir))
+    )
     return _flat_context(
-        _get_registry(),
+        registry,
         query,
         domain=None,
-        max_tokens=max_tokens,
+        max_tokens=resolved_max_tokens,
         session_id="",
         max_items=limit,
         title=f"Search: {query}",

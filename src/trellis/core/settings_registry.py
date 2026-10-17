@@ -50,7 +50,19 @@ no legacy file-based config to shadow); and the three
 (:func:`~trellis.learning.precedent_auto_demote.resolve_precedent_auto_demote_overrides`,
 same env > settings > default shape as the candidate-promotion family — this
 is commit mode's rollback policy, not a parameter of the promotion policy
-itself). Not registered: anything
+itself); and seven pack-size/excerpt knobs — ``get_context_max_tokens``,
+``get_context_max_items`` and ``search_max_tokens`` for the mcp surface,
+``rest_pack_max_items`` and ``rest_pack_max_tokens`` for ``POST /packs``
+(resolved from the request's ``model_fields_set``, never from
+:class:`~trellis_wire.dtos.PackRequest`'s own field defaults, so the REST
+DTO and its OpenAPI schema are untouched), and ``disclosure_body_items``
+(:data:`trellis.retrieve.disclosure.DEFAULT_BODY_ITEMS`) and
+``excerpt_max_chars`` (:data:`trellis.retrieve.excerpts.EXCERPT_MAX_CHARS`)
+for every surface that builds a pack through
+:func:`~trellis.retrieve.builder_factory.build_pack_builder` — each
+surface's shipped default is left exactly as it was and the five
+``max_tokens``/``max_items`` defaults are deliberately not unified across
+surfaces. Not registered: anything
 `StoreRegistry`-construction-time (backend choice, DSN, blob bucket,
 auth mode) — those are process-start parameters, never read live by any
 of the stores or readers this registry's siblings touch, so a settings
@@ -67,7 +79,8 @@ enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``demotion_gate.py``, ``advisory_generator.py``, ``capture_health.py``,
 ``session_capture/sweep.py``, ``trellis_cli.worker._build_auto_promote_policy``,
 ``trellis.learning.candidate_auto_promote``,
-``trellis.learning.precedent_auto_demote``) now resolves env > settings
+``trellis.learning.precedent_auto_demote``, ``retrieve/strategies.py``,
+``trellis_api/routes/retrieve.py``) now resolves env > settings
 > default (the two auto-promote families add a ``config.yaml`` and/or
 default-only layer beneath that — see their own entries above) via
 :func:`trellis.core.write_config.resolve_write_behaviour` or an
@@ -146,7 +159,7 @@ SettingType = Literal["bool", "int", "float", "str"]
 #: ``"learning_loops"`` holds the tuner's ``learning.auto_promote.*``, the
 #: ``learning.candidate_auto_promote.*`` and the
 #: ``learning.precedent_auto_demote.*`` entries below, out of this
-#: module's 34 entries total.
+#: module's 41 entries total.
 SettingGroup = Literal[
     "retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"
 ]
@@ -605,6 +618,208 @@ _SPECS: tuple[SettingSpec, ...] = (
         group="retrieval",
         settings_live=True,
         env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
+    ),
+    SettingSpec(
+        name="get_context_max_tokens",
+        label="get_context token budget",
+        type="int",
+        default=2000,
+        description=(
+            "Default token budget for mcp get_context's flat (non-"
+            "sectioned) layout when a caller omits max_tokens. Raising it "
+            "returns more context per call at the cost of a larger "
+            "response; lowering it returns less. A caller that passes "
+            "max_tokens explicitly always wins over this setting. Default "
+            "2000. Does not affect get_context's sections= layout, which "
+            "resolves its own budget from config.yaml's retrieval.budgets "
+            "(the same mechanism get_objective_context/get_task_context "
+            "use) — the two are deliberately separate."
+        ),
+        risk_note=(
+            "A larger budget costs more tokens on every get_context call "
+            "that doesn't specify its own; a smaller one can silently "
+            "return less than an agent would otherwise have received."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_GET_CONTEXT_MAX_TOKENS",
+        minimum=1,
+        maximum=200000,
+    ),
+    SettingSpec(
+        name="get_context_max_items",
+        label="get_context item ceiling",
+        type="int",
+        default=50,
+        description=(
+            "Ceiling on how many candidate items mcp get_context's flat "
+            "layout considers before the token budget trims the list. "
+            "get_context exposes no caller-facing max_items parameter, so "
+            "this setting is the only way to change it without an env "
+            "var. Raising it widens the candidate pool the token budget "
+            "then walks; lowering it narrows the pool before ranking. "
+            "Default 50."
+        ),
+        risk_note=(
+            "Raising this widens the candidate pool PackBuilder ranks "
+            "before budgeting, costing more compute per call; it does "
+            "not by itself grow the response, since max_tokens still "
+            "trims the rendered pack."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_GET_CONTEXT_MAX_ITEMS",
+        minimum=1,
+        maximum=5000,
+    ),
+    SettingSpec(
+        name="search_max_tokens",
+        label="search token budget",
+        type="int",
+        default=2000,
+        description=(
+            "Default token budget for the mcp search tool when a caller "
+            "omits max_tokens. Same shape as get_context_max_tokens, but "
+            "resolved independently — search and get_context currently "
+            "ship the same default (2000) by coincidence, not by "
+            "unification, so changing one does not change the other. A "
+            "caller that passes max_tokens explicitly always wins over "
+            "this setting. Default 2000."
+        ),
+        risk_note=(
+            "A larger budget costs more tokens on every search call that "
+            "doesn't specify its own; a smaller one can silently return "
+            "less than an agent would otherwise have received."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_SEARCH_MAX_TOKENS",
+        minimum=1,
+        maximum=200000,
+    ),
+    SettingSpec(
+        name="rest_pack_max_items",
+        label="REST pack item ceiling",
+        type="int",
+        default=50,
+        description=(
+            "Default max_items for POST /packs when the request body "
+            "omits the field. Resolved from the request's own "
+            "model_fields_set, not from PackRequest's field default, so "
+            "a caller that supplies max_items — even the value 50 — "
+            "always wins over this setting. Independent of "
+            "get_context_max_items: REST's shipped default (50) happens "
+            "to match get_context's today, but the two surfaces are "
+            "tuned separately by design. Default 50."
+        ),
+        risk_note=(
+            "Raising this widens the candidate pool POST /packs ranks "
+            "before budgeting, costing more compute per call, and can "
+            "return a larger response for callers that omit max_items."
+        ),
+        surfaces=("api",),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_REST_PACK_MAX_ITEMS",
+        minimum=1,
+        maximum=5000,
+    ),
+    SettingSpec(
+        name="rest_pack_max_tokens",
+        label="REST pack token budget",
+        type="int",
+        default=8000,
+        description=(
+            "Default max_tokens for POST /packs when the request body "
+            "omits the field. Resolved from the request's own "
+            "model_fields_set, not from PackRequest's field default, so "
+            "a caller that supplies max_tokens — even the value 8000 — "
+            "always wins over this setting. Independent of "
+            "get_context_max_tokens/search_max_tokens: REST's shipped "
+            "default (8000) is larger than either MCP tool's (2000), and "
+            "the three are deliberately not unified. Default 8000."
+        ),
+        risk_note=(
+            "A larger budget costs more tokens on every POST /packs call "
+            "that omits max_tokens; a smaller one can silently return "
+            "less than a caller would otherwise have received."
+        ),
+        surfaces=("api",),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_REST_PACK_MAX_TOKENS",
+        minimum=1,
+        maximum=200000,
+    ),
+    SettingSpec(
+        name="disclosure_body_items",
+        label="Full-body disclosure ceiling",
+        type="int",
+        default=12,
+        description=(
+            "How many ranked pack items get a full-body excerpt before "
+            "graduated disclosure demotes the rest to a lighter summary "
+            "form instead of dropping them. Raising it gives more items "
+            "a full body at the cost of a larger pack for the same item "
+            "count; lowering it summarizes sooner. Applies to every "
+            "surface that assembles a pack through build_pack_builder "
+            "(mcp, REST, the CLI's operator preview, the pack-quality "
+            "evaluator). Default 12."
+        ),
+        risk_note=(
+            "Raising this increases the token cost of a pack with the "
+            "same item count, since more items render in full rather "
+            "than summarized."
+        ),
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_DISCLOSURE_BODY_ITEMS",
+        minimum=1,
+        maximum=5000,
+    ),
+    SettingSpec(
+        name="excerpt_max_chars",
+        label="Excerpt character cap",
+        type="int",
+        default=500,
+        description=(
+            "Character cap applied to each retrieved item's excerpt "
+            "(keyword, semantic and graph axes) before it enters a pack. "
+            "Raising it lets each item carry more text at the cost of "
+            "fewer items fitting the same token budget; lowering it fits "
+            "more items per pack at the cost of shorter excerpts. "
+            "Applies to every surface that assembles a pack through "
+            "build_pack_builder. Default 500."
+        ),
+        risk_note=(
+            "Raising this trades item count for per-item detail within "
+            "the same token budget — a pack's max_items/max_tokens are "
+            "unchanged, but fewer items survive before the budget fills."
+        ),
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_EXCERPT_MAX_CHARS",
+        minimum=1,
+        maximum=50000,
     ),
     SettingSpec(
         name="learning.auto_promote.enabled",
