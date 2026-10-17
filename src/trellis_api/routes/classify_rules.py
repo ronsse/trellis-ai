@@ -68,6 +68,7 @@ from trellis.mutate import (
     Operation,
     build_classify_rules_executor,
 )
+from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis.mutate.handlers import _find_unsafe_jsonb_string
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
@@ -162,7 +163,7 @@ def _execute_classify_command(cmd: Command) -> Any:
     result = build_classify_rules_executor(get_registry()).execute(cmd)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         reason = result.metadata.get("rejection_reason")
-        if reason in ("degraded_store_write", "stale_store_write"):
+        if reason in STORE_REFUSAL_REASONS:
             store = _get_overrides_store(get_registry())
             degradation = store.degradation
             recovery = (

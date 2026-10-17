@@ -22,15 +22,25 @@ group. Two things it deliberately does **not** do:
   boundary that folds a ``KeyError`` into a tidy actionable envelope turns
   a bug into an operator's problem to diagnose.
 
-The one class caught beside ``TrellisError`` is
-:class:`~trellis.retrieve.pack_builder.PackAssemblyError` (#493), named
-explicitly rather than by widening the clause. It subclasses
-``RuntimeError`` for reasons internal to retrieval, but a pack build whose
-every axis failed is a *deployment condition*, not a bug, and it became
-CLI-reachable when #488 routed ``trellis retrieve pack`` through
+Two classes are caught beside ``TrellisError``, each named explicitly
+rather than by widening the clause.
+:class:`~trellis.retrieve.pack_builder.PackAssemblyError` (#493)
+subclasses ``RuntimeError`` for reasons internal to retrieval, but a pack
+build whose every axis failed is a *deployment condition*, not a bug, and
+it became CLI-reachable when #488 routed ``trellis retrieve pack`` through
 ``PackBuilder``. :func:`_render_pack_assembly_failure` carries the
-argument for translating it here instead of reparenting it. A second such
-class gets a second clause, visible in the diff; a roster dressed up as a
+argument for translating it here instead of reparenting it.
+
+Pydantic's own ``ValidationError`` is the other: every command that
+submits a mutation builds a
+:class:`~trellis.mutate.commands.Command` straight from argv, and on
+Linux an argv byte that is not valid UTF-8 decodes with
+``surrogateescape`` into a lone UTF-16 surrogate that pydantic refuses in
+a plain ``str`` field, before a ``CommandResult`` exists for any
+per-command rendering to catch (issue #869 F6).
+:func:`_render_command_validation_failure` describes the failure without
+``str(exc)``, which embeds the caller's raw value. A third such class
+gets a third clause, visible in the diff; a roster dressed up as a
 framework would not be.
 """
 
@@ -40,10 +50,12 @@ import os
 from typing import TYPE_CHECKING, Any
 
 import typer
+from pydantic import ValidationError as PydanticValidationError
 from rich.markup import escape
 from typer.core import TyperGroup
 
 from trellis.core.error_sanitize import (
+    describe_validation_error,
     sanitize_error_message,
     sanitized_error_payload,
 )
@@ -55,7 +67,7 @@ from trellis_cli.analyze import analyze_app
 from trellis_cli.classify import classify_app
 from trellis_cli.curate import curate_app
 from trellis_cli.demo import demo_app
-from trellis_cli.exit_codes import exit_code_for
+from trellis_cli.exit_codes import EXIT_VALIDATION, exit_code_for
 from trellis_cli.extract_refresh import extract_app
 from trellis_cli.ingest import ingest_app
 from trellis_cli.metrics import metrics_app
@@ -256,6 +268,51 @@ def _render_pack_assembly_failure(exc: PackAssemblyError, output_format: str) ->
     raise typer.Exit(code=exit_code_for(exc))
 
 
+def _render_command_validation_failure(
+    exc: PydanticValidationError, output_format: str
+) -> None:
+    """Render an uncaught pydantic ``ValidationError`` building a ``Command``.
+
+    Every CLI command that submits a mutation builds a
+    :class:`~trellis.mutate.commands.Command` (or another
+    :class:`~trellis.schemas.base.TrellisModel`) straight from argv. On
+    Linux, an argv byte that is not valid UTF-8 decodes with
+    ``surrogateescape`` into a lone UTF-16 surrogate, and pydantic refuses
+    one in a plain ``str`` field — raising *its own* ``ValidationError``,
+    not :class:`~trellis.errors.ValidationError`, before a
+    ``CommandResult`` exists for the command's own rendering to catch. Left
+    uncaught, that is a Typer traceback and exit ``1`` for an input the
+    shell handed the process unchanged (issue #869 F6's root cause, caught
+    per-command at the two sites it was first found; this is the seam that
+    covers the rest without one pre-check per command). The caller checks
+    ``exc.title == "Command"`` before calling this, so a pydantic
+    ``ValidationError`` from config or settings loading never reaches
+    here.
+
+    The message goes through
+    :func:`~trellis.core.error_sanitize.describe_validation_error`, never
+    ``str(exc)``: pydantic's own rendering composes
+    ``input_value=<the caller's value>`` into every line, which is exactly
+    the surrogate (or a NUL byte, the same hazard) this handler exists to
+    keep off of both a Rich renderer and a machine-readable payload.
+    :func:`~rich.markup.escape` on the text surface, and the already-clean
+    description straight into the JSON envelope, because ``escape`` guards
+    Rich's ``[tag]`` parsing, not the JSON encoder — and
+    ``describe_validation_error`` left nothing that encoder could choke on.
+    """
+    message = sanitize_error_message(describe_validation_error(exc))
+    if output_format in MACHINE_FORMATS:
+        emit_json(
+            {"status": "error", "error_type": type(exc).__name__, "message": message}
+        )
+    else:
+        console.print(
+            f"[bold red]VALIDATION_ERROR[/bold red] — {escape(message)}",
+            soft_wrap=True,
+        )
+    raise typer.Exit(code=EXIT_VALIDATION)
+
+
 class _BoundaryGroup(TyperGroup):
     """Root group that renders typed Trellis failures instead of a traceback.
 
@@ -287,6 +344,19 @@ class _BoundaryGroup(TyperGroup):
             raise  # unreachable — the helper exits on every path
         except PackAssemblyError as exc:
             _render_pack_assembly_failure(exc, _requested_format(raw_args))
+            raise  # unreachable — the helper exits on every path
+        except PydanticValidationError as exc:
+            if exc.title != "Command":
+                # Config/settings loading builds its own pydantic models
+                # (e.g. ``TrellisConfig``) and can raise this same
+                # exception type for a reason that has nothing to do with
+                # argv; ``tests/unit/cli/test_config_echo.py`` pins that
+                # case at its current traceback and exit ``1`` as a
+                # separate, unmeasured follow-up. ``exc.title`` names the
+                # model pydantic was validating, so this seam only claims
+                # the one case it was built for.
+                raise
+            _render_command_validation_failure(exc, _requested_format(raw_args))
             raise  # unreachable — the helper exits on every path
 
 
