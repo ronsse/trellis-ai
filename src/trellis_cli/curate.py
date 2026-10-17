@@ -1205,9 +1205,18 @@ def auto_promote_candidates(
         )
     except ConfigError as exc:
         emit_precedent_auto_demote_failure_event(event_log, error=exc)
+        # This command's own run also ended without outcomes, so it records
+        # its evaluated event too: otherwise loop health keeps showing the
+        # last good promote run while every run fails here.
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
         raise
     except ValueError as exc:
         emit_precedent_auto_demote_failure_event(event_log, error=exc)
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
         _emit_auto_job_validation_failure(
             output_format, "precedent auto-demote", type(exc).__name__
         )
@@ -1244,10 +1253,9 @@ def auto_promote_candidates(
         # convention as the resolution try/except above.
         if exc.setting == PRECEDENT_AUTO_DEMOTE_MODE_SETTING:
             emit_precedent_auto_demote_failure_event(event_log, error=exc)
-        else:
-            emit_candidate_auto_promote_failure_event(
-                event_log, error=exc, configured_mode=configured_mode
-            )
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
         raise
     except Exception as exc:
         emit_candidate_auto_promote_failure_event(

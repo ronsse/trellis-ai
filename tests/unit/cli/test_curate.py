@@ -1980,7 +1980,11 @@ class TestCurateAutoPromoteCandidates:
             demote_events = event_log.get_events(
                 event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
             )
-            assert promote_events == []
+            # The command's own run also ended without outcomes, so it
+            # records one promote event per run as well.
+            assert len(promote_events) == run_number
+            assert promote_events[-1].payload["outcome"] == "failed"
+            assert secret not in json.dumps(promote_events[-1].payload)
             assert len(demote_events) == run_number
             latest = demote_events[-1]
             assert latest.payload["outcome"] == "failed"
@@ -2021,7 +2025,8 @@ class TestCurateAutoPromoteCandidates:
         demote_events = event_log.get_events(
             event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
         )
-        assert promote_events == []
+        assert len(promote_events) == 1
+        assert promote_events[0].payload["outcome"] == "refused"
         assert len(demote_events) == 1
         assert demote_events[0].payload["outcome"] == "refused"
         assert demote_events[0].payload["error"]["type"] == "ConfigError"
