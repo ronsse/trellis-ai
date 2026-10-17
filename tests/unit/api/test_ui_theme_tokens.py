@@ -10,6 +10,7 @@ formula, never eyeballed.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -229,3 +230,89 @@ def test_the_two_light_blocks_override_the_same_tokens() -> None:
     # other is a drift bug, not a deliberate difference.
     text = _page()
     assert set(_media_light_tokens(text)) == set(_attr_light_tokens(text))
+
+
+# nodeColor() gives any entity type outside the fixed list a hashed hue at a
+# fixed saturation, with lightness read from --entity-hashed-lightness. The
+# hue arithmetic and saturation are read from the page itself, so a change to
+# either is swept here rather than drifting from a copy in this file.
+_HUE_MOD_RE = re.compile(r"let hue = \(h >>> 0\) % (\d+);")
+_HUE_SKIP_RE = re.compile(r"if \(hue >= (\d+)\) hue \+= (\d+);")
+_HASHED_HSL_RE = re.compile(
+    r"return `hsl\(\$\{hue\}, (\d+)%, \$\{cssVar\('--entity-hashed-lightness'\)"
+)
+
+
+def _reachable_hashed_hues(text: str) -> list[int]:
+    mod = _HUE_MOD_RE.search(text)
+    skip = _HUE_SKIP_RE.search(text)
+    assert mod is not None, "nodeColor() hue modulus not found"
+    assert skip is not None, "nodeColor() hue skip band not found"
+    start, width = int(skip.group(1)), int(skip.group(2))
+    return [h + width if h >= start else h for h in range(int(mod.group(1)))]
+
+
+def _hsl_hex(hue: int, saturation: float, lightness: float) -> str:
+    chroma = (1 - abs(2 * lightness - 1)) * saturation
+    x = chroma * (1 - abs((hue / 60) % 2 - 1))
+    m = lightness - chroma / 2
+    r, g, b = [
+        (chroma, x, 0),
+        (x, chroma, 0),
+        (0, chroma, x),
+        (0, x, chroma),
+        (x, 0, chroma),
+        (chroma, 0, x),
+    ][int(hue // 60) % 6]
+    return "#" + "".join(f"{round((c + m) * 255):02x}" for c in (r, g, b))
+
+
+def _assert_hashed_fills_clear_floor(tokens: dict[str, str], label: str) -> None:
+    text = _page()
+    sat = _HASHED_HSL_RE.search(text)
+    assert sat is not None, "nodeColor() does not read --entity-hashed-lightness"
+    lightness = float(tokens["entity-hashed-lightness"].rstrip("%")) / 100
+    hues = _reachable_hashed_hues(text)
+    # Hand-read: 330 hues reachable (0-227 and 258-359).
+    assert len(hues) == 330
+    worst = min(
+        (
+            contrast_ratio(
+                _hsl_hex(h, int(sat.group(1)) / 100, lightness),
+                tokens["surface-sunken"],
+            ),
+            h,
+        )
+        for h in hues
+    )
+    assert worst[0] >= MIN_CONTRAST_NONTEXT, (
+        f"{label}: hashed fill at hue {worst[1]} is {worst[0]:.2f}:1 on surface-sunken"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tokens_of", "label"),
+    [
+        (_root_tokens, "dark (:root)"),
+        (_media_light_tokens, "light (prefers-color-scheme)"),
+        (_attr_light_tokens, "light (data-theme toggle)"),
+    ],
+)
+def test_hashed_entity_fills_clear_contrast_floor(
+    tokens_of: Callable[[str], dict[str, str]], label: str
+) -> None:
+    _assert_hashed_fills_clear_floor(tokens_of(_page()), label)
+
+
+def test_hashed_fill_floor_catches_a_deliberately_defective_subject() -> None:
+    # The dark-mode lightness (62%) in light mode puts hue 60 near 1.4:1.
+    defective = dict(_media_light_tokens(_page()))
+    defective["entity-hashed-lightness"] = "62%"
+    with pytest.raises(AssertionError):
+        _assert_hashed_fills_clear_floor(defective, "defective")
+
+
+def test_hsl_conversion_matches_known_values() -> None:
+    assert _hsl_hex(0, 1.0, 0.5) == "#ff0000"
+    assert _hsl_hex(120, 1.0, 0.25) == "#008000"
+    assert _hsl_hex(240, 1.0, 0.5) == "#0000ff"
