@@ -63,6 +63,7 @@ from trellis.classify.factory import (
 )
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.learning import domain_normalization as dn
 from trellis.learning.domain_normalization import (
@@ -83,7 +84,6 @@ from trellis.mutate import (
     Operation,
     build_classify_rules_executor,
 )
-from trellis.mutate.handlers import _contains_nul_or_lone_surrogate
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.classify_overrides_store import (
@@ -973,13 +973,14 @@ def _reject_unsafe_cli_string(value: str, *, field: str, output_format: str) -> 
     ``_execute_classify_command``'s own, rather than a traceback and
     exit 1.
 
-    Reuses ``_contains_nul_or_lone_surrogate``, the same walker the REST
-    dismiss route (``classify_rules.py``) and the Apply/Revoke audit
-    probe (``handlers.py``) use, rather than re-deriving the check --
+    Reuses :func:`trellis.core.text_safety.contains_nul_or_lone_surrogate`,
+    the same predicate the REST dismiss route (``classify_rules.py``) and
+    the Apply/Revoke audit probe (``handlers.py``) use (the latter via
+    ``_find_unsafe_jsonb_string``), rather than re-deriving the check --
     and never echoes the raw value, for the same reason neither of
     those does.
     """
-    if not _contains_nul_or_lone_surrogate(value):
+    if not contains_nul_or_lone_surrogate(value):
         return
     message = (
         f"{field} contains a NUL byte or an unpaired UTF-16 surrogate "

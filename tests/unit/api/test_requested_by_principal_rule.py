@@ -144,19 +144,35 @@ def _resolver_bound_names(
     resolved that).
 
     Flow-insensitive on purpose (matching the rest of this module), but
-    not blind to the one rebind that matters: a name this walk has
-    already credited as resolver-bound, reassigned *anywhere else* in
-    the function by a plain (non-tuple-unpack) ``Assign``, is dropped
-    from the safe set entirely. Without this, ``requested_by, claim =
-    resolve_requested_by(...)`` followed later by ``requested_by =
-    req.requested_by`` still read as safe everywhere the name is used,
-    because the walk never revisits a name once it is in the set --
-    the exact regression #895's review caught surviving as an
-    unkilled mutant.
+    not blind to the rebinds that matter: a name this walk has already
+    credited as resolver-bound, reassigned *anywhere else* in the
+    function, is dropped from the safe set entirely, regardless of the
+    shape the rebind takes --
+
+    - a plain ``Assign`` (``requested_by = req.requested_by``);
+    - an annotated ``AnnAssign`` (``requested_by: str = req.requested_by``),
+      which carries no tuple-unpack shape at all so it can only ever be
+      a rebind, never a fresh resolver bind;
+    - a tuple-target ``Assign`` whose value is *not* a resolver call
+      (``requested_by, x = req.requested_by, 1``) -- the bind branch
+      above only credits a tuple target when the value traces to the
+      resolver, so any other tuple assignment that happens to name a
+      previously-bound element clobbers it the same as a plain Assign
+      would.
+
+    Without this, ``requested_by, claim = resolve_requested_by(...)``
+    followed later by any of these rebinds still reads as safe
+    everywhere the name is used, because the walk never revisits a name
+    once it is in the set -- the exact regression #895's review caught
+    surviving as an unkilled mutant (plain Assign), plus the two
+    sibling shapes that evade a check narrowed to only that one form.
     """
     bound: set[str] = set()
     reassigned: set[str] = set()
     for node in ast.walk(func):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            reassigned.add(node.target.id)
+            continue
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
         target = node.targets[0]
@@ -170,7 +186,59 @@ def _resolver_bound_names(
                 bound.add(elts[0].id)
         elif isinstance(target, ast.Name):
             reassigned.add(target.id)
+        elif isinstance(target, ast.Tuple):
+            # A tuple-unpack whose value is not a resolver call still
+            # clobbers any element name it targets.
+            reassigned.update(
+                elt.id for elt in target.elts if isinstance(elt, ast.Name)
+            )
     return bound - reassigned
+
+
+def _is_bare_param_passthrough(expr: ast.expr, param_names: set[str]) -> bool:
+    """Whether *expr* is a parameter, or a direct attribute access on
+    one, with no combinator in between.
+
+    This is the shape that makes a local a renamed alias of an
+    unresolved parameter rather than a value genuinely *derived* from
+    it: ``rb = req.requested_by`` matches (``rb`` is just ``req``'s
+    claim under a new name), but ``principal = ctx.key_id or ctx.name
+    or "unknown"`` does not -- a ``BoolOp`` combines several sources
+    into a resolved identity, which is exactly the legitimate pattern
+    :func:`_joinedstr_mentions_an_unsafe_name` must not false-positive
+    on.
+    """
+    if isinstance(expr, ast.Name):
+        return expr.id in param_names
+    if isinstance(expr, ast.Attribute):
+        return _is_bare_param_passthrough(expr.value, param_names)
+    return False
+
+
+def _unsafe_local_aliases(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    param_names: set[str],
+    safe_locals: set[str],
+) -> set[str]:
+    """Local names assigned, by a plain ``Assign``, a bare parameter or
+    parameter-attribute passthrough (see :func:`_is_bare_param_passthrough`)
+    -- a local copy such as ``rb = req.requested_by`` is not made safe
+    merely by moving the value into a new name before interpolating it,
+    so ``f"{rb}"`` must still read as unsafe. *safe_locals* (the
+    resolver-bound names) are never added here even when some other
+    assignment happens to also match the passthrough shape, since
+    :func:`_resolver_bound_names` already decided they are safe (or,
+    if rebound since, already dropped them)."""
+    aliases: set[str] = set()
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id in safe_locals:
+            continue
+        if _is_bare_param_passthrough(node.value, param_names):
+            aliases.add(target.id)
+    return aliases
 
 
 def _call_arg_for_param(
@@ -187,10 +255,13 @@ def _call_arg_for_param(
     return None
 
 
-def _joinedstr_mentions_a_param(
-    value: ast.JoinedStr, enclosing: ast.FunctionDef | ast.AsyncFunctionDef | None
+def _joinedstr_mentions_an_unsafe_name(
+    value: ast.JoinedStr,
+    enclosing: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    resolver_names: set[str],
 ) -> bool:
-    """Whether an f-string's interpolated parts name an enclosing param.
+    """Whether an f-string's interpolated parts name an enclosing param,
+    or a local that is itself just an unresolved copy of one.
 
     An f-string template (``f"api:settings:{principal}"``) is not a
     passthrough of a body-supplied value *by itself* -- but it is one
@@ -205,13 +276,30 @@ def _joinedstr_mentions_a_param(
     never be made safe by wrapping it in an f-string, so any direct
     mention of one here is unsafe without the deeper recursion that
     bare-Name sites get.
+
+    The same holds one hop further: ``rb = req.requested_by`` followed
+    by ``f"{rb}"`` is not a resolved local either, just a renamed copy
+    of the raw parameter -- see :func:`_unsafe_local_aliases`. A
+    genuinely resolved local (``principal = ctx.key_id or ctx.name or
+    "unknown"``) is unaffected, since its assignment is a ``BoolOp``,
+    not a bare passthrough.
     """
     param_names = {a.arg for a in enclosing.args.args} if enclosing else set()
+    safe_locals = (
+        _resolver_bound_names(enclosing, resolver_names) if enclosing else set()
+    )
+    unsafe_aliases = (
+        _unsafe_local_aliases(enclosing, param_names, safe_locals)
+        if enclosing
+        else set()
+    )
     for part in value.values:
         if not isinstance(part, ast.FormattedValue):
             continue
         for node in ast.walk(part.value):
-            if isinstance(node, ast.Name) and node.id in param_names:
+            if isinstance(node, ast.Name) and (
+                node.id in param_names or node.id in unsafe_aliases
+            ):
                 return True
     return False
 
@@ -228,7 +316,7 @@ def _is_safe_value(  # noqa: PLR0911 — each return is a distinct verdict in a 
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return True
     if isinstance(value, ast.JoinedStr):
-        return not _joinedstr_mentions_a_param(value, enclosing)
+        return not _joinedstr_mentions_an_unsafe_name(value, enclosing, resolver_names)
     if not isinstance(value, ast.Name) or enclosing is None:
         return False
     if value.id in _resolver_bound_names(enclosing, resolver_names):
@@ -473,6 +561,74 @@ class TestRuleCatchesADefectiveRoute:
             """
         )
         assert _unsafe_sites(tree) == []
+
+    def test_an_fstring_interpolating_a_local_copy_of_the_body_value_is_flagged(
+        self,
+    ) -> None:
+        """A local copy under a fresh name is not a resolved value --
+        ``rb = req.requested_by`` is just ``req.requested_by`` renamed,
+        and wrapping *that* in an f-string is the same evasion as
+        wrapping the raw attribute directly."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def promote(req, ctx):
+                rb = req.requested_by
+                cmd = Command(
+                    operation=Operation.PRECEDENT_PROMOTE,
+                    requested_by=f"{rb}",
+                )
+                return cmd
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_an_annotated_reassignment_of_the_resolved_name_is_flagged(self) -> None:
+        """The same mutant as the plain-``Assign`` reassignment test
+        above, but via ``AnnAssign`` -- a shape the bind/reassign walk
+        must not treat as a fresh, still-unbound name."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+            from trellis_api.routes._principal import resolve_requested_by
+
+            def promote(req, ctx):
+                requested_by, requested_by_claim = resolve_requested_by(
+                    ctx, req.requested_by
+                )
+                requested_by: str = req.requested_by
+                cmd = Command(
+                    operation=Operation.PRECEDENT_PROMOTE,
+                    requested_by=requested_by,
+                )
+                return cmd
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_a_tuple_reassignment_of_the_resolved_name_is_flagged(self) -> None:
+        """Same mutant again, via a tuple-target ``Assign`` whose value
+        is not a resolver call -- the bind branch must not mistake this
+        for a second, equally-trustworthy resolver bind."""
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+            from trellis_api.routes._principal import resolve_requested_by
+
+            def promote(req, ctx):
+                requested_by, requested_by_claim = resolve_requested_by(
+                    ctx, req.requested_by
+                )
+                requested_by, x = req.requested_by, 1
+                cmd = Command(
+                    operation=Operation.PRECEDENT_PROMOTE,
+                    requested_by=requested_by,
+                )
+                return cmd
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
 
     def test_a_call_with_no_requested_by_keyword_is_not_a_site(self) -> None:
         """Negative control: a Command() call that doesn't carry

@@ -13,6 +13,7 @@ import structlog
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import (
     DegradedStoreWriteError,
@@ -1153,7 +1154,8 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
     logical identifier across two different strings. A
     control character (:func:`unicodedata.category` category ``"Cc"``,
     which includes NUL and ESC) or a lone UTF-16 surrogate (category
-    ``"Cs"``, checked with :func:`_contains_nul_or_lone_surrogate` rather
+    ``"Cs"``, checked with
+    :func:`trellis.core.text_safety.contains_nul_or_lone_surrogate` rather
     than re-deriving the same surrogate-range test) can break a
     downstream consumer outright: a NUL embedded in a Postgres ``jsonb``
     audit payload fails to write at all, and a lone surrogate cannot be
@@ -1195,7 +1197,7 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
             f"{_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH}-character limit"
         )
         raise ValidationError(msg, errors=[msg], code=code)
-    if _contains_nul_or_lone_surrogate(value):
+    if contains_nul_or_lone_surrogate(value):
         msg = (
             f"classify_rule: {field} {value!r} contains a NUL byte or an "
             "unpaired UTF-16 surrogate"
@@ -1208,28 +1210,6 @@ def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> 
                 f"character ({unicodedata.category(ch)!r})"
             )
             raise ValidationError(msg, errors=[msg], code=code)
-
-
-_SURROGATE_RANGE_LOW = 0xD800
-_SURROGATE_RANGE_HIGH = 0xDFFF
-
-
-def _contains_nul_or_lone_surrogate(value: str) -> bool:
-    """True if ``value`` has a NUL byte or an unpaired UTF-16 surrogate.
-
-    Both are accepted by a Python ``str`` -- a sequence of Unicode code
-    points, not UTF-16 code units, so a surrogate code point (U+D800 to
-    U+DFFF) needs no missing partner to exist -- but neither can
-    round-trip through a Postgres ``jsonb`` column: a NUL byte raises
-    ``UntranslatableCharacter`` and a lone surrogate cannot be encoded to
-    UTF-8 at all. SQLite's text columns accept both silently, which is
-    why a payload carrying either only ever fails in a Postgres
-    deployment, never in the SQLite-backed test suite.
-    """
-    return any(
-        ch == "\x00" or _SURROGATE_RANGE_LOW <= ord(ch) <= _SURROGATE_RANGE_HIGH
-        for ch in value
-    )
 
 
 def _find_unsafe_jsonb_string(
@@ -1252,10 +1232,10 @@ def _find_unsafe_jsonb_string(
         structure is unsafe.
     """
     if isinstance(obj, str):
-        return (path, obj) if _contains_nul_or_lone_surrogate(obj) else None
+        return (path, obj) if contains_nul_or_lone_surrogate(obj) else None
     if isinstance(obj, dict):
         for key, value in obj.items():
-            if isinstance(key, str) and _contains_nul_or_lone_surrogate(key):
+            if isinstance(key, str) and contains_nul_or_lone_surrogate(key):
                 return (f"{path} key", key)
             found = _find_unsafe_jsonb_string(value, f"{path}[{key!r}]")
             if found is not None:

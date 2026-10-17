@@ -20,10 +20,11 @@ With no authenticated principal, the ``requested_by`` field on the
 audit trail takes the form ``"{extractor_name}@{extractor_version}"``
 (or the body's own claim, when given) so downstream effectiveness
 analysis can attribute drafts to a specific client release. With a
-principal, the audit trail records ``api:<key id or name>`` instead,
-and that extractor identity rides along as
-``metadata["requested_by_claim"]`` on every command in the batch --
-see :func:`trellis_api.routes._principal.resolve_requested_by`.
+principal, the audit trail records ``api:<key id or name>`` instead;
+the body's own ``requested_by`` -- never the derived extractor
+identity -- rides along as ``metadata["requested_by_claim"]`` on every
+command in the batch, and only when the body actually set it, see
+:func:`trellis_api.routes._principal.resolve_requested_by`.
 """
 
 from __future__ import annotations
@@ -71,15 +72,21 @@ def submit_drafts(
     ``requested_by`` is derived from the authenticated principal when
     one is present (see
     :func:`trellis_api.routes._principal.resolve_requested_by`) rather
-    than trusted from the body or the client-asserted extractor id;
-    the body's own claim rides along as each command's
-    ``metadata["requested_by_claim"]``.
+    than trusted from the body or the client-asserted extractor id.
+    The body's own claim rides along as each command's
+    ``metadata["requested_by_claim"]`` only when the body actually set
+    ``requested_by`` -- the derived ``extractor_id`` fallback used as
+    the audited label with no principal is not something the caller
+    claimed, and must not be recorded as though it were.
     """
     batch = req.batch
     effective_key = idempotency_key or batch.idempotency_key
     extractor_id = f"{batch.extractor_name}@{batch.extractor_version}"
+    claim_was_set = req.requested_by is not None
     claimed_requested_by = req.requested_by or extractor_id
-    requested_by, requested_by_claim = resolve_requested_by(ctx, claimed_requested_by)
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, claimed_requested_by, claim_was_set=claim_was_set
+    )
 
     executor = build_curate_executor(get_registry())
 
