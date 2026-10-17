@@ -67,6 +67,18 @@ def _edge_lock_key(source_id: str, target_id: str, edge_type: str) -> str:
     )
 
 
+def _contains_nul(value: str) -> bool:
+    """True if ``value`` holds a raw NUL byte.
+
+    PostgreSQL ``text`` columns can never store one: binding it raises
+    ``psycopg.errors.DataError`` client-side, before any SQL reaches the
+    server. A node, edge, or alias keyed on such a value can therefore
+    never exist as a row here, so every reader and the deleter below
+    answer "not found" for it instead of surfacing that driver error.
+    """
+    return "\x00" in value
+
+
 def _lock_edge_keys(
     conn: psycopg.Connection, keys: Iterable[tuple[str, str, str]]
 ) -> None:
@@ -659,6 +671,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         node_id: str,
         as_of: datetime | None = None,
     ) -> dict[str, Any] | None:
+        if _contains_nul(node_id):
+            return None
         temporal = self._temporal_filter(as_of)
         params: list[Any] = [node_id, *self._temporal_params(as_of)]
         with self._conn() as conn, conn.cursor() as cur:
@@ -698,6 +712,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         return [self._node_row_to_dict(row) for row in rows]
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
+        if _contains_nul(node_id):
+            return []
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -969,6 +985,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         source_system: str | None = None,
         as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        if _contains_nul(entity_id):
+            return []
         conditions = ["entity_id = %s"]
         params: list[Any] = [entity_id]
         if source_system:
@@ -1254,6 +1272,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         edge_type: str | None = None,
         as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        if _contains_nul(node_id):
+            return []
         conditions: list[str] = []
         params: list[Any] = []
 
@@ -1483,6 +1503,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         A lost connection is not retried: the purge may have committed, and
         a second run would report it as ``False``.
         """
+        if _contains_nul(node_id):
+            return False
+
         import psycopg  # noqa: PLC0415
 
         aborted: psycopg.Error | None = None

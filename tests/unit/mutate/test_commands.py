@@ -236,6 +236,45 @@ class TestOperationRegistry:
             assert valid is True, f"{op}: {errors}"
 
 
+class TestRedactionApplyTargetIdExemption:
+    """``redaction.apply`` exempts ``Command.target_id`` alone from the Stage 1
+    NUL scan (see ``validate()``'s docstring) so a hazardous id minted
+    elsewhere can still be targeted for removal. ``target_type`` and
+    ``idempotency_key`` carry no such exemption for this operation. A lone
+    surrogate is not exercised here: pydantic's strict string validation
+    refuses one in ``Command.target_id``/``target_type`` at construction,
+    before ``validate()`` ever runs.
+    """
+
+    @pytest.fixture
+    def registry(self) -> OperationRegistry:
+        return OperationRegistry()
+
+    def test_nul_in_target_id_is_exempted(self, registry: OperationRegistry) -> None:
+        cmd = Command(
+            operation=Operation.REDACTION_APPLY,
+            args={"target_id": "t1", "reason": "pii"},
+            target_id="bad\x00value",
+        )
+        valid, errors = registry.validate(cmd)
+        assert valid is True
+        assert errors == []
+
+    def test_nul_in_target_type_is_still_refused(
+        self, registry: OperationRegistry
+    ) -> None:
+        cmd = Command(
+            operation=Operation.REDACTION_APPLY,
+            args={"target_id": "t1", "reason": "pii"},
+            target_type="bad\x00value",
+        )
+        valid, errors = registry.validate(cmd)
+        assert valid is False
+        assert any(
+            "target_type" in e and "NUL byte or lone surrogate" in e for e in errors
+        )
+
+
 class TestFeedbackRecordRatingBound:
     """``feedback.record``'s ``rating`` must be a real number in [0.0, 1.0]."""
 
@@ -473,7 +512,7 @@ class TestNestedIdArgPathsNulSafety:
         """Same discipline as ``TestIdBearingArgNulSafety``'s floor, for the
         nested mapping."""
         assert len(NESTED_ID_ARG_PATHS) == 7
-        assert len(_NESTED_ID_PATHS) == 9
+        assert len(_NESTED_ID_PATHS) == 11
 
     def test_mapping_is_pinned_by_full_content(self) -> None:
         assert {
@@ -485,12 +524,14 @@ class TestNestedIdArgPathsNulSafety:
                 {
                     ("observation", "observation_id"),
                     ("observation", "subject_entity_id"),
+                    ("observation", "observer_agent_id"),
                 }
             ),
             Operation.MEASUREMENT_RECORD: frozenset(
                 {
                     ("measurement", "measurement_id"),
                     ("measurement", "subject_entity_id"),
+                    ("measurement", "observer_agent_id"),
                 }
             ),
             Operation.RETENTION_RESTORE: frozenset({("item_ids", None)}),

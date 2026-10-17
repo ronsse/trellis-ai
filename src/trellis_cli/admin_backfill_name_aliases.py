@@ -19,6 +19,19 @@ if TYPE_CHECKING:
     from rich.console import Console
     from typer import Typer
 
+#: Exit code for each cause a backfill failure can carry, keyed by
+#: ``BackfillFailure.reason``. ``"policy"``/``"validation"``/``"store"``
+#: mirror the same three-way split ``trellis_cli.exit_codes
+#: .refusal_exit_code`` makes from a raw ``CommandResult``; ``"protocol"``
+#: (an unexpected success message, or a verify-stage miss) has no analog
+#: there and exits with the same code a store failure does.
+_EXIT_CODE_BY_FAILURE_REASON: dict[str, int] = {
+    "policy": EXIT_POLICY,
+    "validation": EXIT_VALIDATION,
+    "store": EXIT_STORE,
+    "protocol": EXIT_STORE,
+}
+
 
 def register(app: Typer) -> None:
     """Register the name-alias backfill command."""
@@ -97,11 +110,11 @@ def register(app: Typer) -> None:
         if truncated:
             exit_code = EXIT_VALIDATION
         elif report.failed:
-            exit_code = (
-                EXIT_POLICY
-                if all(failure.reason == "policy" for failure in report.failures)
-                else EXIT_STORE
-            )
+            # Any failure exits non-zero, with the code of the first
+            # failure in command order, not one that requires every
+            # failure to agree: a policy+validation mix exits by
+            # whichever cause the backfill hit first, never EXIT_STORE.
+            exit_code = _EXIT_CODE_BY_FAILURE_REASON[report.failures[0].reason]
         if exit_code:
             raise typer.Exit(code=exit_code)
 
