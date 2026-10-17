@@ -350,6 +350,34 @@ class TestListSettings:
         assert row["parse_error"] == "stored value is not a recognized boolean"
         assert "maybe" not in row["parse_error"]
 
+    def test_an_unrecognised_stored_class_prior_mode_is_flagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """``class_prior_mode``'s own resolver
+        (:func:`trellis.retrieve.class_prior.resolve_class_prior_config`)
+        degrades an unrecognised stored value to ``off`` silently from
+        this route's point of view -- it never raises, so ``effective``
+        above never disagrees with ``spec.enum`` on its own. This is the
+        one place that disagreement still has to surface: ``class_prior_mode``
+        is the first shipped registry entry with a real ``enum``
+        (``("off", "withhold")``), which makes the row's own
+        ``parse_error`` -- not a class-prior-specific check, the generic
+        ``spec.enum is not None`` branch in ``_parse_error_reason`` --
+        the thing that reports the stored row as unusable.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("class_prior_mode", "not-a-mode")
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "class_prior_mode")
+
+        assert row["stored_value"] == "not-a-mode"
+        assert row["effective_value"] == "off"
+        assert row["parse_error"] == "stored value is not one of the allowed options"
+        assert "not-a-mode" not in row["parse_error"]
+
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """The UI's filter box reads display labels from
         ``groups``, not a hardcoded string -- so every group a real entry
@@ -1336,11 +1364,12 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
 class TestParseErrorReasonIsFixedPerType:
     """Unit-level on ``_parse_error_reason``.
 
-    No shipped :data:`SETTINGS_REGISTRY` entry sets ``enum`` today (grep
-    confirms it), so the enum branch is otherwise dead in every HTTP-level
-    test above. Exercising the private function directly with a synthetic
-    ``SettingSpec`` is the only way to pin that branch's text without
-    adding a throwaway production setting just to carry a test.
+    ``class_prior_mode`` is now a shipped :data:`SETTINGS_REGISTRY` entry
+    with a real ``enum`` (``("off", "withhold")``), exercised end to end
+    by ``TestListSettings.test_an_unrecognised_stored_class_prior_mode_is_flagged``
+    above. This class still pins the text itself against a synthetic
+    ``SettingSpec`` -- cheaper than adding a second real setting with a
+    different ``enum`` just to prove the reason string generalizes.
     """
 
     def test_int_reason_is_distinct_from_float_reason(self) -> None:

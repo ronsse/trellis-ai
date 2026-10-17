@@ -73,3 +73,36 @@ def test_both_pack_response_dtos_declare_optional_withholding() -> None:
         },
     )
     assert isinstance(response.withholding, wire_dtos.WithholdingResponse)
+    # An older event payload carries no ``class_prior_detail`` key at all —
+    # ``extra="forbid"`` on WireModel means the field must default rather
+    # than be required, or this construction would raise.
+    assert response.withholding.class_prior_detail == []
+
+
+def test_withholding_response_accepts_class_prior_detail() -> None:
+    """A payload naming which (form, axis) pair the gate withheld validates
+    into typed rows, not a bare dict — ``extra="forbid"`` means a field the
+    server emits that the DTO never declared would raise here instead."""
+    response = PackResponse(
+        pack_id="pack-1",
+        intent="deploy",
+        count=0,
+        items=[],
+        withholding={
+            "total": 2,
+            "by_reason": {"class_prior": 2},
+            "withheld_item_ids": ["c1", "c2"],
+            "non_absence_reasons": [],
+            "section_filtered": 0,
+            "served_count": 1,
+            "class_prior_detail": [
+                {"form": "conversation", "axis": "keyword", "count": 2}
+            ],
+        },
+    )
+    assert response.withholding is not None
+    [detail] = response.withholding.class_prior_detail
+    assert isinstance(detail, wire_dtos.ClassPriorWithheldDetail)
+    assert detail.form == "conversation"
+    assert detail.axis == "keyword"
+    assert detail.count == 2

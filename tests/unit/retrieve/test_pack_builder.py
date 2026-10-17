@@ -648,6 +648,15 @@ class TestBuildSectioned:
         assert withholding["by_reason"].get(CLASS_PRIOR_REJECTION_REASON) == 1
         assert "c1" in withholding["withheld_item_ids"]
 
+        # The docstring's claim, pinned directly rather than only implied by
+        # the metadata assertions above: no section's own retrieval_report
+        # carries the rejection — it has nowhere single to be attributed.
+        for section in pack.sections:
+            assert all(
+                rejected.reason != CLASS_PRIOR_REJECTION_REASON
+                for rejected in section.retrieval_report.rejected_items
+            )
+
     def test_withhold_on_one_axis_leaves_the_other_axis_free_to_serve(self) -> None:
         """The gate is axis-scoped by design (not a bug to fix): a
         conversation parent found by both keyword and semantic, with

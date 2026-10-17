@@ -19,6 +19,22 @@ class WithheldGroup:
 
 
 @dataclass(frozen=True)
+class ClassPriorDetail:
+    """One (document form, retrieval axis) pair the class-prior gate withheld.
+
+    Breaks down the ``class_prior`` row in :attr:`WithholdingSummary.groups`
+    — a reason code alone cannot say *which* imported class or axis was
+    involved, and :mod:`trellis.retrieve.class_prior` is explicitly scoped
+    to a configured subset of each. Counts only, same as every other field
+    here: never an item id or excerpt.
+    """
+
+    form: str
+    axis: str
+    count: int
+
+
+@dataclass(frozen=True)
 class WithholdingSummary:
     """What one pack build withheld, grouped by reason."""
 
@@ -27,6 +43,7 @@ class WithholdingSummary:
     non_absence_reasons: tuple[str, ...] = ()
     section_filtered: int = 0
     served_count: int = 0
+    class_prior_detail: tuple[ClassPriorDetail, ...] = ()
 
     @property
     def total(self) -> int:
@@ -39,7 +56,12 @@ class WithholdingSummary:
         return self.section_filtered > 0 and self.served_count == 0
 
     def as_telemetry(self) -> dict[str, Any]:
-        """Serialize the summary for pack metadata and events."""
+        """Serialize the summary for pack metadata and events.
+
+        ``class_prior_detail`` is always present (an empty list when the
+        gate withheld nothing), the same "ran, found nothing" posture
+        ``content_floor`` already takes elsewhere in the pack payload.
+        """
         return {
             "total": self.total,
             "by_reason": {group.reason: group.count for group in self.groups},
@@ -47,6 +69,10 @@ class WithholdingSummary:
             "non_absence_reasons": list(self.non_absence_reasons),
             "section_filtered": self.section_filtered,
             "served_count": self.served_count,
+            "class_prior_detail": [
+                {"form": d.form, "axis": d.axis, "count": d.count}
+                for d in self.class_prior_detail
+            ],
         }
 
 
@@ -75,6 +101,30 @@ def _count(payload: dict[str, Any], key: str) -> int:
     return value
 
 
+def _class_prior_detail_list(value: Any) -> tuple[ClassPriorDetail, ...]:
+    """Parse ``class_prior_detail`` rows, tolerating absence or garbage.
+
+    Mirrors ``_count``/``_str_list`` above: an unreadable row is dropped
+    rather than raised, and the whole field defaults to empty on a payload
+    from a server that never emitted it.
+    """
+    if not isinstance(value, list):
+        return ()
+    details: list[ClassPriorDetail] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        form, axis, count = row.get("form"), row.get("axis"), row.get("count")
+        if (
+            isinstance(form, str)
+            and isinstance(axis, str)
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+        ):
+            details.append(ClassPriorDetail(form=form, axis=axis, count=count))
+    return tuple(details)
+
+
 def withholding_from_payload(
     payload: dict[str, Any] | None,
 ) -> WithholdingSummary | None:
@@ -99,16 +149,37 @@ def withholding_from_payload(
         non_absence_reasons=tuple(_str_list(payload.get("non_absence_reasons"))),
         section_filtered=_count(payload, "section_filtered"),
         served_count=_count(payload, "served_count"),
+        class_prior_detail=_class_prior_detail_list(payload.get("class_prior_detail")),
     )
 
 
+def _class_prior_fragment(detail: ClassPriorDetail) -> str:
+    """``"2 conversation documents on keyword (class prior)"``."""
+    noun = "document" if detail.count == 1 else "documents"
+    return f"{detail.count} {detail.form} {noun} on {detail.axis} (class prior)"
+
+
 def format_withholding_note(summary: WithholdingSummary | None) -> str:
-    """Render counts and reasons without exposing withheld ids or content."""
+    """Render counts and reasons without exposing withheld ids or content.
+
+    The ``class_prior`` reason renders as one fragment per (form, axis)
+    pair from :attr:`WithholdingSummary.class_prior_detail` instead of a
+    bare reason code — a reader cannot tell which imported class or axis
+    was withheld from ``class_prior 2`` alone.
+    """
     if summary is None:
         return ""
     sentences: list[str] = []
     if summary.groups:
-        detail = ", ".join(f"{group.reason} {group.count}" for group in summary.groups)
+        fragments: list[str] = []
+        for group in summary.groups:
+            if group.reason == "class_prior" and summary.class_prior_detail:
+                fragments.extend(
+                    _class_prior_fragment(d) for d in summary.class_prior_detail
+                )
+            else:
+                fragments.append(f"{group.reason} {group.count}")
+        detail = ", ".join(fragments)
         singular = summary.total == 1
         noun = "item" if singular else "items"
         verb = "was" if singular else "were"
@@ -128,6 +199,7 @@ def format_withholding_note(summary: WithholdingSummary | None) -> str:
 
 
 __all__ = [
+    "ClassPriorDetail",
     "WithheldGroup",
     "WithholdingSummary",
     "format_withholding_note",

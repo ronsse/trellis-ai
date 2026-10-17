@@ -130,6 +130,19 @@ class PackRequest(WireRequestModel):
     tag_filters: dict[str, dict[str, Any]] | None = None
 
 
+class ClassPriorWithheldDetail(WireModel):
+    """One (document form, retrieval axis) pair the class-prior gate withheld.
+
+    Counts only, same posture as the rest of :class:`WithholdingResponse` —
+    ``form``/``axis`` name the class and the axis the prior was scoped to,
+    never an item id or excerpt.
+    """
+
+    form: str
+    axis: str
+    count: int
+
+
 class WithholdingResponse(WireModel):
     """Pack withholding telemetry exposed without item content."""
 
@@ -139,6 +152,12 @@ class WithholdingResponse(WireModel):
     non_absence_reasons: list[str]
     section_filtered: int
     served_count: int
+    #: Breakdown of the ``class_prior`` row in ``by_reason`` by document
+    #: form and retrieval axis, e.g. ``{"form": "conversation", "axis":
+    #: "keyword", "count": 2}``. Always present (possibly empty) on a
+    #: server new enough to emit it; absent on an older event payload,
+    #: which the ``default_factory`` here reads the same as empty.
+    class_prior_detail: list[ClassPriorWithheldDetail] = Field(default_factory=list)
 
 
 class AxisReportResponse(WireModel):

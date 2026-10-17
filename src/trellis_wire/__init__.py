@@ -39,6 +39,7 @@ from trellis_wire.dtos import (
     BulkIngestRequest,
     BulkIngestResponse,
     BulkItemResult,
+    ClassPriorWithheldDetail,
     CommandResponse,
     EntityCreateRequest,
     ErrorResponse,
@@ -90,6 +91,7 @@ __all__ = [
     "SectionedPackRequest",
     "SectionedPackResponse",
     "WithholdingResponse",
+    "ClassPriorWithheldDetail",
     "AxisReportResponse",
     # Curate
     "PromoteRequest",

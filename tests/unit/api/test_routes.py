@@ -3836,3 +3836,38 @@ class TestVectorsResetUnsupportedBackend:
 
         assert resp.status_code == 200, resp.text
         assert store.reset_calls == 1
+
+
+class TestResolveIntKnobWarningEventNames:
+    """Pins ``_resolve_int_knob``'s warning event names before any
+    refactor moves its body into a shared ``trellis.core.knobs`` helper.
+    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
+    call site had no test naming ``retrieve_route.bad_env_int`` /
+    ``retrieve_route.bad_settings_int`` at all.
+    """
+
+    def test_bad_env_value_logs_retrieve_route_bad_env_int(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(retrieve._REST_PACK_MAX_ITEMS_ENV, "not-an-int")
+
+        with capture_logs() as logs:
+            value = retrieve._resolve_rest_pack_max_items(None)
+
+        assert value == 50
+        lines = [e for e in logs if e["event"] == "retrieve_route.bad_env_int"]
+        assert len(lines) == 1
+        assert lines[0]["var"] == retrieve._REST_PACK_MAX_ITEMS_ENV
+        assert "value" not in lines[0]
+
+    def test_bad_settings_value_logs_retrieve_route_bad_settings_int(self) -> None:
+        settings = {retrieve._REST_PACK_MAX_ITEMS_SETTING: "not-an-int"}
+
+        with capture_logs() as logs:
+            value = retrieve._resolve_rest_pack_max_items(settings)
+
+        assert value == 50
+        lines = [e for e in logs if e["event"] == "retrieve_route.bad_settings_int"]
+        assert len(lines) == 1
+        assert lines[0]["setting"] == retrieve._REST_PACK_MAX_ITEMS_SETTING
+        assert "value" not in lines[0]

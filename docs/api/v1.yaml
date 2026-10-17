@@ -837,6 +837,32 @@ components:
       - status
       title: BulkItemResult
       type: object
+    ClassPriorWithheldDetail:
+      additionalProperties: false
+      description: 'One (document form, retrieval axis) pair the class-prior gate withheld.
+
+
+        Counts only, same posture as the rest of :class:`WithholdingResponse` —
+
+        ``form``/``axis`` name the class and the axis the prior was scoped to,
+
+        never an item id or excerpt.'
+      properties:
+        axis:
+          title: Axis
+          type: string
+        count:
+          title: Count
+          type: integer
+        form:
+          title: Form
+          type: string
+      required:
+      - form
+      - axis
+      - count
+      title: ClassPriorWithheldDetail
+      type: object
     ClassifyCandidate:
       additionalProperties: false
       description: 'One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
@@ -3196,6 +3222,11 @@ components:
             type: integer
           title: By Reason
           type: object
+        class_prior_detail:
+          items:
+            $ref: '#/components/schemas/ClassPriorWithheldDetail'
+          title: Class Prior Detail
+          type: array
         non_absence_reasons:
           items:
             type: string

@@ -3504,3 +3504,54 @@ class TestServerInstructions:
         """It rides in every session on every client — cap the token cost."""
         text = server_mod.mcp.instructions or ""
         assert 400 < len(text) < 2000, f"instructions are {len(text)} chars"
+
+
+class TestResolveIntKnobWarningEventNames:
+    """Pins ``_resolve_int_knob``'s warning event names before any
+    refactor moves its body into a shared ``trellis.core.knobs`` helper.
+    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
+    call site had no test naming ``mcp_server.bad_env_int`` /
+    ``mcp_server.bad_settings_int`` at all.
+    """
+
+    @pytest.fixture
+    def logs(self) -> Iterator[list[dict[str, Any]]]:
+        """See ``TestBuildLlmClientRouting.logs`` above for why both the
+        processor swap and the proxy-cache eviction are required."""
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as captured:
+                clear_cached_logger_proxies()
+                yield captured
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+    def test_bad_env_value_logs_mcp_server_bad_env_int(
+        self, monkeypatch: pytest.MonkeyPatch, logs: list[dict[str, Any]]
+    ) -> None:
+        monkeypatch.setenv(server_mod._GET_CONTEXT_MAX_TOKENS_ENV, "not-an-int")
+
+        value = server_mod._resolve_get_context_max_tokens(None)
+
+        assert value == 2000
+        lines = [e for e in logs if e["event"] == "mcp_server.bad_env_int"]
+        assert len(lines) == 1
+        assert lines[0]["var"] == server_mod._GET_CONTEXT_MAX_TOKENS_ENV
+        assert "value" not in lines[0]
+
+    def test_bad_settings_value_logs_mcp_server_bad_settings_int(
+        self, logs: list[dict[str, Any]]
+    ) -> None:
+        settings = {server_mod._GET_CONTEXT_MAX_TOKENS_SETTING: "not-an-int"}
+
+        value = server_mod._resolve_get_context_max_tokens(settings)
+
+        assert value == 2000
+        lines = [e for e in logs if e["event"] == "mcp_server.bad_settings_int"]
+        assert len(lines) == 1
+        assert lines[0]["setting"] == server_mod._GET_CONTEXT_MAX_TOKENS_SETTING
+        assert "value" not in lines[0]

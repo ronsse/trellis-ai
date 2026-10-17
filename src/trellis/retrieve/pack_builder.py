@@ -47,8 +47,10 @@ from trellis.core.pack_holdout import (
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.class_prior import (
+    CLASS_PRIOR_REJECTION_REASON,
     ClassPriorConfig,
     apply_class_prior,
+    class_prior_telemetry,
     resolve_class_prior_config,
 )
 from trellis.retrieve.concentration import measure_parent_concentration
@@ -1050,10 +1052,12 @@ class PackBuilder:
         # successor yet). Running it here means a withheld successor's loser
         # stays rejected as superseded, and the successor is rejected as
         # class_prior — neither one reaches the pack.
-        all_items, class_prior_rejected = self._apply_class_prior_pool(
-            all_items,
-            config=class_prior_config,
-            strategy_by_item_id=strategy_by_item_id,
+        all_items, class_prior_rejected, class_prior_forms = (
+            self._apply_class_prior_pool(
+                all_items,
+                config=class_prior_config,
+                strategy_by_item_id=strategy_by_item_id,
+            )
         )
         rejected.extend(class_prior_rejected)
 
@@ -1193,7 +1197,11 @@ class PackBuilder:
         # is on screen anyway (the losing copy of a dedup, or a row one
         # axis gated and another served) is not reported as withheld. See
         # :mod:`trellis.retrieve.withholding`.
-        withholding = summarize_withheld(rejected, [item.item_id for item in selected])
+        withholding = summarize_withheld(
+            rejected,
+            [item.item_id for item in selected],
+            class_prior_forms=class_prior_forms,
+        )
 
         pack = Pack(
             intent=intent,
@@ -1222,6 +1230,7 @@ class PackBuilder:
             "advisories_matched": advisories_matched,
             "advisories_explored": advisories_explored,
             "advisories_filtered_legacy": advisories_filtered_legacy,
+            "class_prior": class_prior_telemetry(class_prior_config),
         }
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
@@ -1231,7 +1240,9 @@ class PackBuilder:
         withheld_from: Pack | None = None
         if is_held_out(pack.pack_id, self._holdout_rate):
             withheld_from, pack = pack, self._withhold_flat(pack)
-            telemetry = self._withheld_flat_telemetry(index_mode=index_mode)
+            telemetry = self._withheld_flat_telemetry(
+                index_mode=index_mode, class_prior_config=class_prior_config
+            )
 
         # R1 (#844): applied to the *served* pack only, after the holdout
         # draw above — ``withheld_from`` already captured the true would-be
@@ -1374,10 +1385,12 @@ class PackBuilder:
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
 
         # 1b. Class-level serving prior, after supersession — see build().
-        all_items, class_prior_rejected = self._apply_class_prior_pool(
-            all_items,
-            config=class_prior_config,
-            strategy_by_item_id=strategy_by_item_id,
+        all_items, class_prior_rejected, class_prior_forms = (
+            self._apply_class_prior_pool(
+                all_items,
+                config=class_prior_config,
+                strategy_by_item_id=strategy_by_item_id,
+            )
         )
         rejected.extend(class_prior_rejected)
 
@@ -1582,6 +1595,7 @@ class PackBuilder:
         withholding = summarize_withheld(
             rejected,
             [item.item_id for section in pack_sections for item in section.items],
+            class_prior_forms=class_prior_forms,
         )
 
         sectioned_pack = SectionedPack(
@@ -1605,6 +1619,7 @@ class PackBuilder:
             "advisories_matched": advisories_matched,
             "advisories_explored": advisories_explored,
             "advisories_filtered_legacy": advisories_filtered_legacy,
+            "class_prior": class_prior_telemetry(class_prior_config),
         }
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
@@ -1612,7 +1627,9 @@ class PackBuilder:
         if is_held_out(sectioned_pack.pack_id, self._holdout_rate):
             withheld_from = sectioned_pack
             sectioned_pack = self._withhold_sectioned(sectioned_pack)
-            telemetry = self._withheld_sectioned_telemetry()
+            telemetry = self._withheld_sectioned_telemetry(
+                class_prior_config=class_prior_config
+            )
 
         # R1 (#844): see the matching comment in :meth:`build` — applied
         # after the holdout draw, so ``withheld_from`` keeps the true
@@ -1686,12 +1703,19 @@ class PackBuilder:
             }
         )
 
-    def _withheld_flat_telemetry(self, *, index_mode: bool) -> dict[str, Any]:
+    def _withheld_flat_telemetry(
+        self, *, index_mode: bool, class_prior_config: ClassPriorConfig
+    ) -> dict[str, Any]:
         """Telemetry blocks for the empty pack a withheld caller received.
 
         Each is what this builder computes over an empty item list, so a
         withheld row's standard keys read as a greenfield pack's; the
-        would-be pack rides the ``holdout_*`` keys instead.
+        would-be pack rides the ``holdout_*`` keys instead. ``class_prior``
+        is the one exception: it describes the gate's *configuration*, not
+        anything derived from the (empty) item list, so it is passed in
+        rather than recomputed over ``[]`` — the same config the served
+        branch would have reported, since the holdout draw happens after
+        the gate already ran.
         """
         disclosure = apply_disclosure(
             [], DISCLOSURE_OFF if index_mode else self._disclosure
@@ -1709,9 +1733,12 @@ class PackBuilder:
             "advisories_matched": 0,
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
+            "class_prior": class_prior_telemetry(class_prior_config),
         }
 
-    def _withheld_sectioned_telemetry(self) -> dict[str, Any]:
+    def _withheld_sectioned_telemetry(
+        self, *, class_prior_config: ClassPriorConfig
+    ) -> dict[str, Any]:
         """The sectioned counterpart of :meth:`_withheld_flat_telemetry`."""
         return {
             "meta_filtered_count": 0,
@@ -1723,6 +1750,7 @@ class PackBuilder:
             "advisories_matched": 0,
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
+            "class_prior": class_prior_telemetry(class_prior_config),
         }
 
     def _emit_sectioned_telemetry(
@@ -1737,6 +1765,7 @@ class PackBuilder:
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
+        class_prior: dict[str, Any],
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -1761,6 +1790,13 @@ class PackBuilder:
         mirrors the flat path's field of the same name, and so does
         ``withholding`` (#404) — emitted even when nothing was withheld, so
         a consumer can tell an empty summary from a missing one.
+
+        ``class_prior`` (:func:`trellis.retrieve.class_prior.class_prior_telemetry`)
+        is the ``{mode, forms, axes}`` configuration the class-prior gate
+        ran with for this build — a required kwarg, never defaulted, so a
+        caller cannot forget it; emitted even when ``mode == "off"``, the
+        same posture ``withholding`` takes, so a reader can tell the gate
+        was off from the gate never having run at all.
 
         ``advisories_matched`` (#392) is how many advisories matched the
         pack's scope *before* ``_ADVISORY_MAX_COUNT`` cut them, so an
@@ -1863,6 +1899,7 @@ class PackBuilder:
                 "meta_filtered_count": meta_filtered_count,
                 "retrieval_phase": retrieval_phase,
                 "refresh": refresh,
+                "class_prior": class_prior,
                 **holdout,
                 **token_budget_fields,
             },
@@ -1959,6 +1996,7 @@ class PackBuilder:
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
+        class_prior: dict[str, Any],
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -2026,6 +2064,13 @@ class PackBuilder:
         posture ``content_floor`` takes. Unlike the rendered pack note it
         carries the ids: the event log is a different access path with a
         different audience.
+
+        ``class_prior`` (:func:`trellis.retrieve.class_prior.class_prior_telemetry`)
+        is the ``{mode, forms, axes}`` configuration the class-prior gate
+        ran with for this build — a required kwarg, never defaulted, so a
+        caller cannot forget it; emitted even when ``mode == "off"``, the
+        same posture ``withholding`` takes above, so a reader can tell the
+        gate was off from the gate never having run at all.
 
         ``index_mode`` (#305) marks a pack assembled for the one-line-per-
         item index rendering. Additive — consumers ``payload.get(...)``
@@ -2169,6 +2214,7 @@ class PackBuilder:
                 "index_mode": index_mode,
                 "retrieval_phase": retrieval_phase,
                 "refresh": refresh,
+                "class_prior": class_prior,
                 **holdout,
                 **token_budget_fields,
             },
@@ -2819,7 +2865,7 @@ class PackBuilder:
         *,
         config: ClassPriorConfig,
         strategy_by_item_id: dict[int, str],
-    ) -> tuple[list[PackItem], list[RejectedItem]]:
+    ) -> tuple[list[PackItem], list[RejectedItem], dict[str, str]]:
         """Apply the class-level serving prior over the merged, de-superseded pool.
 
         Runs once per strategy represented in ``items`` rather than inside
@@ -2841,9 +2887,22 @@ class PackBuilder:
         it unchanged (same object, not a copy), matching
         :func:`~trellis.retrieve.class_prior.apply_class_prior`'s own
         off-is-a-no-op contract at the per-strategy level.
+
+        The third return value, ``class_prior_forms``, maps the id of each
+        item :func:`~trellis.retrieve.class_prior.apply_class_prior` rejected
+        to its ``document_form`` — read here, from the source
+        :class:`PackItem`, because :class:`RejectedItem` itself never
+        carries one. It feeds
+        :func:`~trellis.retrieve.withholding.summarize_withheld`'s
+        ``class_prior_forms`` so the withholding note can name the form a
+        withheld item belonged to, not just the ``class_prior`` reason
+        code. Harmless to compute even when some of these ids are later
+        excluded from ``summarize_withheld``'s own attribution (served
+        anyway, or claimed by an earlier reason) — an unused entry is
+        simply never read.
         """
         if config.mode == "off":
-            return items, []
+            return items, [], {}
         order = {id(item): idx for idx, item in enumerate(items)}
         groups: dict[str, list[PackItem]] = {}
         for item in items:
@@ -2851,14 +2910,26 @@ class PackBuilder:
             groups.setdefault(name, []).append(item)
         kept: list[PackItem] = []
         rejected: list[RejectedItem] = []
+        class_prior_forms: dict[str, str] = {}
         for name, group in groups.items():
             group_kept, group_rejected = apply_class_prior(
                 group, config=config, strategy_name=name
             )
             kept.extend(group_kept)
             rejected.extend(group_rejected)
+            if group_rejected:
+                by_id = {it.item_id: it for it in group}
+                for rejected_item in group_rejected:
+                    if rejected_item.reason != CLASS_PRIOR_REJECTION_REASON:
+                        continue
+                    source = by_id.get(rejected_item.item_id)
+                    if source is None:
+                        continue
+                    form = document_form_of(source.metadata)
+                    if form is not None:
+                        class_prior_forms[rejected_item.item_id] = form
         kept.sort(key=lambda it: order[id(it)])
-        return kept, rejected
+        return kept, rejected, class_prior_forms
 
     @staticmethod
     def _promote_strategy_source(items: list[PackItem]) -> list[PackItem]:
