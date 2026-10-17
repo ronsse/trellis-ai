@@ -31,26 +31,27 @@ caller-supplied the same way a command's own metadata is, so
 before building the batch, rather than leaving an exemption that would
 need revisiting the day something starts reading it.
 
-A site is unsafe only when its value is **shaped like a raw copy of a
-caller mapping** -- a bare ``X.metadata`` attribute access, ``dict(X.metadata)``,
-or a dict-unpack ``{**X.metadata, ...}`` -- and was not passed through the
-guard, either directly or one local-variable hop away
-(``m = item.metadata`` is still a bare passthrough one hop later; the
-guard call is checked on the keyword's value itself, and once more on the
-single local it resolves to, matching ``mutations.py``'s own
-``metadata = reject_reserved_metadata(item.metadata)`` shape). Nothing
-else is flagged: a freshly built dict literal
-(``{"requested_by_claim": claim} if claim else {}``) or a call to a
-different, server-only helper (``_audit_identity(ctx)``) is not a copy of
-caller input at all, so it is not this rule's business and the guard
-would reject the server's own legitimate stamp if applied to it (see
-``reject_reserved_metadata``'s docstring). This is narrower than
-``test_requested_by_principal_rule.py``'s "every value must prove itself
-safe" policy, deliberately: *most* ``Command.metadata=`` sites in this
-tree build a fresh dict server-side and are safe by construction, so a
-"guilty until proven safe" rule here would false-positive on the majority
-of the real population instead of on the one shape that is actually
-dangerous.
+A site is safe only when its value is the guard call itself -- directly,
+or one local-variable hop away (``m = item.metadata`` is still a bare
+passthrough one hop later; the guard call is checked on the keyword's
+value itself, and once more on the single local it resolves to, matching
+``mutations.py``'s own ``metadata = reject_reserved_metadata(item.metadata)``
+shape) -- or contains no read of a caller mapping's ``metadata`` attribute
+anywhere in its expression tree, by any shape: a bare ``X.metadata``
+attribute access, ``dict(X.metadata)``, a dict-unpack ``{**X.metadata,
+...}``, ``getattr(X, "metadata")``, a subscript (``X.metadata["key_id"]``),
+or a ``.get()`` call (``X.metadata.get("key_id")``) -- including any of
+those buried inside an otherwise-fresh dict literal
+(``{"note": item.metadata.get("key_id")}`` is unsafe: the dict is
+literal, but one of its values still reads the caller's bag). This is an
+allowlist, not a denylist of known-dangerous shapes: a freshly built dict
+literal (``{"requested_by_claim": claim} if claim else {}``) or a call to
+a different, server-only helper (``_audit_identity(ctx)``) passes only
+because neither one touches ``.metadata`` at all, not because either
+shape is named safe. The guard would reject the server's own legitimate
+stamp if applied to either (see ``reject_reserved_metadata``'s
+docstring), which is why the guard call itself is checked for structurally
+rather than by re-running it.
 
 The population floor below is hand-read against this branch, not
 computed by the scan it guards (the lesson #466 is cited for throughout
@@ -150,34 +151,46 @@ def _enclosing_function(
     return None
 
 
-def _is_metadata_passthrough_shape(expr: ast.expr) -> bool:
-    """A bare ``X.metadata``, ``dict(X.metadata)``, or ``{**X.metadata, ...}``.
-
-    The one shape that is actually dangerous: a caller's own mapping,
-    copied whole (or merged whole into a fresh dict) rather than read
-    key-by-key or rebuilt from scratch. ``X.metadata.get("foo")`` is not
-    this shape -- a single key read off a caller mapping is ordinary
-    decoration, not a copy of the whole bag a reserved key could hide in.
-    """
-    if isinstance(expr, ast.Attribute) and expr.attr == "metadata":
-        return True
-    if (
-        isinstance(expr, ast.Call)
-        and name_of(expr.func) == "dict"
-        and len(expr.args) == 1
-        and not expr.keywords
-    ):
-        return _is_metadata_passthrough_shape(expr.args[0])
-    if isinstance(expr, ast.Dict):
-        return any(
-            key is None and _is_metadata_passthrough_shape(value)
-            for key, value in zip(expr.keys, expr.values, strict=True)
-        )
-    return False
-
-
 def _is_guard_call(expr: ast.expr, guard_names: set[str]) -> bool:
     return isinstance(expr, ast.Call) and name_of(expr.func) in guard_names
+
+
+def _is_getattr_metadata_call(node: ast.AST) -> bool:
+    """``getattr(X, "metadata")`` (with or without a default arg) --
+    the one caller-metadata read that is a plain ``Call``, not an
+    ``ast.Attribute``, so it needs its own check."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "metadata"
+    )
+
+
+def _contains_metadata_attr_read(node: ast.AST, guard_names: set[str]) -> bool:
+    """Whether *node*'s expression tree reads a caller mapping's
+    ``metadata`` attribute anywhere, by any shape -- a bare attribute
+    access, ``getattr(X, "metadata")``, or either buried under a
+    subscript, a ``.get()`` call, ``dict(...)``, a dict literal/unpack,
+    or any other wrapper.
+
+    The one place a ``.metadata`` read is sanctioned is inside a call to
+    the guard itself: recursion does not descend into a nested guard
+    call's own arguments, so ``{"x": reject_reserved_metadata(m)["x"]}``
+    is not flagged for the read the guard call performs internally.
+    """
+    if _is_guard_call(node, guard_names):
+        return False
+    if isinstance(node, ast.Attribute) and node.attr == "metadata":
+        return True
+    if _is_getattr_metadata_call(node):
+        return True
+    return any(
+        _contains_metadata_attr_read(child, guard_names)
+        for child in ast.iter_child_nodes(node)
+    )
 
 
 def _local_assignment_value(
@@ -210,16 +223,13 @@ def _is_unsafe_metadata_value(
 ) -> bool:
     if _is_guard_call(value, guard_names):
         return False
-    if _is_metadata_passthrough_shape(value):
-        return True
     if isinstance(value, ast.Name) and func is not None:
         rhs = _local_assignment_value(func, value.id)
         if rhs is not None:
             if _is_guard_call(rhs, guard_names):
                 return False
-            if _is_metadata_passthrough_shape(rhs):
-                return True
-    return False
+            return _contains_metadata_attr_read(rhs, guard_names)
+    return _contains_metadata_attr_read(value, guard_names)
 
 
 def _unsafe_sites(tree: ast.Module) -> list[ast.Call]:
@@ -316,6 +326,51 @@ class TestRuleCatchesADefectiveRoute:
                 return Command(
                     operation=Operation.ENTITY_CREATE,
                     metadata={**item.metadata, "note": "x"},
+                    requested_by=requested_by,
+                )
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_a_getattr_passthrough_is_flagged(self) -> None:
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def handler(item, requested_by):
+                return Command(
+                    operation=Operation.ENTITY_CREATE,
+                    metadata=getattr(item, "metadata"),
+                    requested_by=requested_by,
+                )
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_a_get_call_buried_in_a_dict_literal_is_flagged(self) -> None:
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def handler(item, requested_by):
+                return Command(
+                    operation=Operation.ENTITY_CREATE,
+                    metadata={"key_id": item.metadata.get("key_id")},
+                    requested_by=requested_by,
+                )
+            """
+        )
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_a_subscript_read_is_flagged(self) -> None:
+        tree = _parse(
+            """
+            from trellis.mutate import Command, Operation
+
+            def handler(item, requested_by):
+                return Command(
+                    operation=Operation.ENTITY_CREATE,
+                    metadata=item.metadata["key_id"],
                     requested_by=requested_by,
                 )
             """
