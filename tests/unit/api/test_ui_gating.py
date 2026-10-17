@@ -4,8 +4,8 @@ Also covers read-only-mode gating within the mounted page itself: a
 read-scoped key used to hard-block on every admin-scoped tab with no
 warning, and ``throwIfAuthRefused`` told every 403 caller "this UI needs
 an admin-scoped key" even though most of the UI's tabs are read-scoped
-(Traces, Memories, Graph, Precedents, and Policies for viewing — see
-app.py's router scope map). The page now badges the admin-only tabs
+(Traces, Memories, Graph, Precedents, Policies and Tag rules for
+viewing — see app.py's router scope map). The page now badges the admin-only tabs
 once a 403 proves the stored key lacks admin scope, instead of claiming
 the whole UI needs one.
 """
@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api
 import trellis_api.app as app_module
+from tests.ast_rules import assert_hand_read_floor
 from trellis.errors import ConfigError
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app, resolve_ui_enabled
@@ -203,6 +204,7 @@ _ADMIN_SCOPE_VIEWS = {
     "events",
     "packs",
     "reports",
+    "schedules",
 }
 
 
@@ -263,7 +265,71 @@ class TestReadOnlyModeGating:
         )
         assert found is not None
         body = found.group(1)
-        assert "Traces, Memories, Graph, Precedents and Policies" in body
+        assert "Traces, Memories, Graph, Precedents, Policies and Tag rules" in body
 
     def test_nav_scope_badge_css_class_defined(self) -> None:
         assert ".sidebar-nav a .nav-scope-badge {" in _page()
+
+
+class TestAdminScopeErrorRenderingConsistency:
+    """Every admin-only panel's catch block dims a 403 (isAdminScopeError)
+    instead of reporting it in the same red "Failed to load" text a real
+    error gets -- loadFailureColor/loadFailureText already drew this
+    distinction for Metrics, Review, Events, Packs, Loops, Reports,
+    Advisories, Schedules and Settings. Effectiveness was the one
+    holdout: its catch block built its own fixed "Could not load
+    effectiveness data: <message>" string, coloured the same way
+    whether the key merely lacked admin scope or the API was genuinely
+    down (W1D ui-pass4)."""
+
+    def test_effectiveness_panel_dims_a_403_through_the_shared_helpers(self) -> None:
+        page = _page()
+        found = re.search(
+            r"async function loadEvolution\(\) \{(.*?)\n        \}", page, re.DOTALL
+        )
+        assert found is not None, "loadEvolution() not found in index.html"
+        body = found.group(1)
+        assert "loadFailureColor(err)" in body
+        assert "loadFailureText(err, " in body
+        # The regression this closes: a fixed string with no isAdminScopeError
+        # branch, read the same for a 403 as for a genuine failure.
+        assert "Could not load effectiveness data: ${escHtml(err.message)}" not in body
+
+    def test_shared_failure_helper_population_is_above_a_hand_read_floor(self) -> None:
+        # Vacuous-sweep guard for the test above: pins that the shared
+        # helpers still have real call sites, not just the one this pass
+        # touched. Hand count for this pass: 10 loadFailureColor(err) +
+        # 14 loadFailureText(err, ...) sites (Metrics x2 loadFailureText-only
+        # via chartEmpty, Review x4 loadFailureText-only via setCountError,
+        # plus Events/Packs/Loops/Reports/Advisories/Schedules/Settings/
+        # Effectiveness carrying both).
+        page = _page()
+        assert_hand_read_floor(
+            page.count("loadFailureColor(err)"),
+            9,
+            subject="loadFailureColor(err) call sites",
+            hint="hand count for this pass: 10.",
+        )
+        assert_hand_read_floor(
+            page.count("loadFailureText(err, "),
+            13,
+            subject="loadFailureText(err, ...) call sites",
+            hint="hand count for this pass: 14.",
+        )
+
+    def test_each_pattern_catches_a_deliberately_defective_subject(self) -> None:
+        defective = (
+            "async function loadEvolution() {\n"
+            "            } catch (err) {\n"
+            "                summary.innerHTML = `<p>Could not load effectiveness"
+            " data: ${escHtml(err.message)}</p>`;\n"
+            "            }\n"
+            "        }"
+        )
+        found = re.search(
+            r"async function loadEvolution\(\) \{(.*?)\n        \}",
+            defective,
+            re.DOTALL,
+        )
+        assert found is not None
+        assert "loadFailureColor(err)" not in found.group(1)

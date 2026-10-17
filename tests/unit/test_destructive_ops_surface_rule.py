@@ -232,3 +232,89 @@ class TestEveryDestructiveOperationNeedsAdminOverMcp:
                 # or fail for reasons unrelated to scope, so this only
                 # forbids POLICY_DENIED rather than requiring an exception.
                 assert exc.error.code != POLICY_DENIED, exc.error.message  # noqa: PT017
+
+
+# ---------------------------------------------------------------------------
+# An operation absent from *both* rosters fails closed, at both surfaces
+# ---------------------------------------------------------------------------
+#
+# ``requires_admin_scope`` is ``operation not in NON_DESTRUCTIVE_OPERATIONS``
+# -- it never consults ``DESTRUCTIVE_OPERATIONS`` at runtime (that set is a
+# documentation / completeness-test artifact only). So "unclassified" is not
+# a third state the function can observe; it is simulated here by removing
+# an otherwise-ordinary member from the allow-list, which is exactly the
+# shape a forgotten classification of a *new* ``Operation`` member would
+# take. ``Operation.LABEL_ADD`` is picked arbitrarily -- any member of
+# ``NON_DESTRUCTIVE_OPERATIONS`` would do.
+
+
+@pytest.fixture
+def unclassify_label_add(monkeypatch: pytest.MonkeyPatch) -> Operation:
+    """Remove one member from the allow-list, simulating an operation no
+
+    classification pass has ever looked at.
+    """
+    import trellis.mutate.immutable_core as immutable_core_mod
+
+    target = Operation.LABEL_ADD
+    assert target in immutable_core_mod.NON_DESTRUCTIVE_OPERATIONS
+    monkeypatch.setattr(
+        immutable_core_mod,
+        "NON_DESTRUCTIVE_OPERATIONS",
+        frozenset(immutable_core_mod.NON_DESTRUCTIVE_OPERATIONS - {target}),
+    )
+    return target
+
+
+class TestAnUnclassifiedOperationFailsClosedOverRest:
+    @pytest.fixture(autouse=True)
+    def _required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+
+    def test_refused_below_admin(
+        self,
+        rest_client: TestClient,
+        rest_registry: Any,
+        unclassify_label_add: Operation,
+    ) -> None:
+        token = _mint_rest(rest_registry, [SCOPE_MUTATE])
+        resp = rest_client.post(
+            "/api/v1/commands/batch",
+            json={"commands": [{"operation": unclassify_label_add.value, "args": {}}]},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403, resp.text
+        assert unclassify_label_add.value in resp.json()["detail"]
+
+    def test_admin_passes_the_gate(
+        self,
+        rest_client: TestClient,
+        rest_registry: Any,
+        unclassify_label_add: Operation,
+    ) -> None:
+        token = _mint_rest(rest_registry, [SCOPE_ADMIN])
+        resp = rest_client.post(
+            "/api/v1/commands/batch",
+            json={"commands": [{"operation": unclassify_label_add.value, "args": {}}]},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code != 403, resp.text
+
+
+class TestAnUnclassifiedOperationFailsClosedOverMcp:
+    def test_refused_below_admin(
+        self, mcp_registry: Any, unclassify_label_add: Operation
+    ) -> None:
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+            execute_mutation(operation=unclassify_label_add.value, args={})
+        assert excinfo.value.error.code == POLICY_DENIED
+        assert excinfo.value.error.data == {"operation": unclassify_label_add.value}
+
+    def test_admin_passes_the_gate(
+        self, mcp_registry: Any, unclassify_label_add: Operation
+    ) -> None:
+        with _as_stdio():
+            try:
+                execute_mutation(operation=unclassify_label_add.value, args={})
+            except McpError as exc:
+                assert exc.error.code != POLICY_DENIED, exc.error.message  # noqa: PT017

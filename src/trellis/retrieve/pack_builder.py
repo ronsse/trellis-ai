@@ -130,6 +130,33 @@ DEFAULT_SESSION_DEDUP_WINDOW_MINUTES = 60
 #: items last seen beyond the cap: bounded, documented staleness.
 DEFAULT_SESSION_DEDUP_EVENT_LIMIT = 200
 
+#: Allowed values for the optional ``retrieval_phase`` passed to :meth:`build`
+#: / :meth:`build_sectioned` — when in the task this pack was fetched,
+#: relative to the work it is meant to inform. ``None`` (the default) means
+#: the caller did not say. ``"post_hoc"`` is a retrieval made after the work
+#: is already done (e.g. a stop hook asking an agent to retrieve before
+#: ending), which mixes "pack that could have helped" with "hindsight
+#: relevance check" unless it is told apart from the other two.
+RETRIEVAL_PHASES: frozenset[str] = frozenset({"pre_work", "mid_task", "post_hoc"})
+
+
+def _validate_retrieval_phase(retrieval_phase: str | None) -> None:
+    """Raise ``ValueError`` for a stated-but-unrecognised ``retrieval_phase``.
+
+    ``None`` (not stated) always passes. Checked case-sensitively against
+    :data:`RETRIEVAL_PHASES` exactly — no case folding, so a near-miss
+    (``"Post_Hoc"``) is refused rather than silently landing in the wrong
+    bucket, the same posture :data:`trellis.schemas.graph.ALLOWED_EXTRACTOR_TIERS`
+    takes.
+    """
+    if retrieval_phase is not None and retrieval_phase not in RETRIEVAL_PHASES:
+        msg = (
+            f"retrieval_phase must be one of {sorted(RETRIEVAL_PHASES)} or "
+            f"None; got {retrieval_phase!r}"
+        )
+        raise ValueError(msg)
+
+
 #: Signature for an optional assembly-time pack evaluator. Consumers own the
 #: scenario-resolution logic (e.g., lookup by ``agent_id`` + ``intent``) and
 #: return a :class:`QualityReport` when the pack should be scored, or ``None``
@@ -823,6 +850,7 @@ class PackBuilder:
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
         refresh: bool = False,
         index_mode: bool = False,
+        retrieval_phase: str | None = None,
     ) -> Pack:
         """Assemble a pack by running all strategies and applying budget.
 
@@ -923,7 +951,16 @@ class PackBuilder:
         normal shape and with nothing that names the holdout, and its
         would-be items are recorded under ``holdout_items`` instead of
         ``injected_items``; :meth:`build_sectioned` does the same per pack.
+
+        ``retrieval_phase`` (default ``None``) says when in the task this
+        pack was fetched, relative to the work it is meant to inform — pass
+        ``"post_hoc"`` when retrieving after the work is done, e.g. to check
+        conclusions. Not stored on the :class:`Pack`; recorded only in the
+        ``PACK_ASSEMBLED`` payload so grading can tell a pre-work pack from
+        a hindsight relevance check. ``None`` means the caller did not say.
+        A stated-but-unrecognised value raises :class:`ValueError`.
         """
+        _validate_retrieval_phase(retrieval_phase)
         start_time = time.perf_counter()
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -1199,6 +1236,8 @@ class PackBuilder:
                 pack,
                 strategy_failures=strategy_failures,
                 index_mode=index_mode,
+                retrieval_phase=retrieval_phase,
+                refresh=refresh,
                 withheld_from=withheld_from,
                 **telemetry,
             )
@@ -1223,6 +1262,7 @@ class PackBuilder:
         include_meta: bool = False,
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
         refresh: bool = False,
+        retrieval_phase: str | None = None,
     ) -> SectionedPack:
         """Assemble a sectioned pack with independently budgeted sections.
 
@@ -1231,6 +1271,11 @@ class PackBuilder:
         ``refresh=True`` bypasses it for this call only (client-compaction
         signal). ``run_id`` / ``intent_family`` mirror :meth:`build` too.
         See :meth:`build` for the full contract.
+
+        ``retrieval_phase`` (default ``None``) mirrors :meth:`build`: pass
+        ``"post_hoc"`` when retrieving after the work is done, e.g. to check
+        conclusions. Recorded only in the ``PACK_ASSEMBLED`` payload; a
+        stated-but-unrecognised value raises :class:`ValueError`.
 
         Steps:
             1. Run all strategies once to collect a candidate pool.
@@ -1241,6 +1286,7 @@ class PackBuilder:
             5. Cross-section dedup: keep each item in its highest-scoring section.
             6. Emit telemetry and return SectionedPack.
         """
+        _validate_retrieval_phase(retrieval_phase)
         start_time = time.perf_counter()
         mapper = tier_mapper or TierMapper()
 
@@ -1561,6 +1607,8 @@ class PackBuilder:
             self._emit_sectioned_telemetry(
                 sectioned_pack,
                 strategy_failures=strategy_failures,
+                retrieval_phase=retrieval_phase,
+                refresh=refresh,
                 withheld_from=withheld_from,
                 **telemetry,
             )
@@ -1670,8 +1718,16 @@ class PackBuilder:
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
         withheld_from: SectionedPack | None = None,
+        retrieval_phase: str | None = None,
+        refresh: bool = False,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
+
+        ``retrieval_phase`` and ``refresh`` are passed as explicit kwargs,
+        outside the swappable ``telemetry`` dict, so they survive the
+        holdout branch unchanged (the same posture ``index_mode`` takes on
+        the flat path) — see ``retrieval_phase`` / ``refresh`` in
+        :meth:`_emit_telemetry` for the full rationale.
 
         ``holdout`` / ``holdout_rate`` and, on a withheld pack's row,
         ``holdout_sections`` / ``holdout_advisory_ids`` follow the flat
@@ -1785,6 +1841,8 @@ class PackBuilder:
                     sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
+                "retrieval_phase": retrieval_phase,
+                "refresh": refresh,
                 **holdout,
                 **token_budget_fields,
             },
@@ -1882,6 +1940,8 @@ class PackBuilder:
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
         withheld_from: Pack | None = None,
+        retrieval_phase: str | None = None,
+        refresh: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -1972,6 +2032,15 @@ class PackBuilder:
         the point the :class:`RetrievalReport` is constructed (strategy
         search through budget application). Health reporting had no
         latency signal before this: every build hard-coded ``0``.
+
+        ``retrieval_phase`` (default ``None``) and ``refresh`` (default
+        ``False``, always present) are passed as explicit kwargs, outside
+        the swappable ``telemetry`` dict the holdout branch replaces, so
+        they survive it unchanged — the same posture ``index_mode`` takes.
+        ``retrieval_phase`` says when in the task this pack was fetched
+        (unstated when ``None``); ``refresh`` records whether the caller
+        bypassed session dedup for this call, so an unchanged re-serve is
+        distinguishable from a dedup miss.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -2078,6 +2147,8 @@ class PackBuilder:
                 ],
                 "meta_filtered_count": meta_filtered_count,
                 "index_mode": index_mode,
+                "retrieval_phase": retrieval_phase,
+                "refresh": refresh,
                 **holdout,
                 **token_budget_fields,
             },
