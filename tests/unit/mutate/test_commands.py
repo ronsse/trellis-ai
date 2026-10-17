@@ -434,7 +434,7 @@ class TestNestedIdArgPathsNulSafety:
         self, registry: OperationRegistry, container: type
     ) -> None:
         args = _base_args(registry, Operation.ENTITY_CREATE)
-        args["document_ids"] = container(["honest", "also-honest", "bad\x00value"])
+        args["document_ids"] = container(["honest", "bad\x00value", "also-honest"])
         valid, errors = registry.validate(
             Command(operation=Operation.ENTITY_CREATE, args=args)
         )
