@@ -1546,6 +1546,14 @@ job never ran" to `trellis.ops.loop_health`.
 Both policies ship `enabled=False` by default: nothing commits
 unattended until an operator turns both on.
 
+This command builds a real governed `MutationExecutor` (via
+`build_curate_executor`) on every run, including a `report_only` or
+`--dry-run` one: the executor supplies the fail-closed behavior (Stage
+2's policy gate, idempotency, audit emission), not a conditionally
+constructed one. `report_only` means the policy never issues a
+`precedent.promote` command — the executor that would run it is built
+regardless.
+
 ```bash
 trellis curate auto-promote-candidates [--candidates <path>] [--dry-run] [--format text|json]
 ```
@@ -1633,6 +1641,11 @@ mirroring the promotion event's `outcome`/`configured_mode`/
 `policy_snapshot` shape. Both this report and the promotion report's
 JSON carry a top-level `status` key derived from the same flag that
 drives the exit code.
+
+Like `auto-promote-candidates` above, this command builds a real
+governed `MutationExecutor` on every run, `report_only` included: the
+executor is the fail-closed mechanism, not a stand-in that is skipped
+until commit mode is reached.
 
 ```bash
 trellis curate evaluate-precedent-demotion [--min-unhelpful-citations <n>] [--dry-run] [--format text|json]

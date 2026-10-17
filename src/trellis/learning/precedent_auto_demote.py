@@ -319,6 +319,11 @@ def resolve_precedent_auto_demote_overrides(
             msg = spec.refused_reason or (
                 f"{PRECEDENT_AUTO_DEMOTE_MODE_SETTING}={stored_mode!r} is not accepted."
             )
+            logger.warning(
+                "precedent_auto_demote_mode_refused_in_settings",
+                setting=PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
+                env_override=PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+            )
             raise ConfigError(msg, setting=PRECEDENT_AUTO_DEMOTE_MODE_SETTING)
 
     mode = resolve_str(
@@ -846,6 +851,15 @@ def report_to_dict(report: PrecedentAutoDemoteReport) -> dict[str, Any]:
     ``"refused"``/``"failed"`` event payload. Named here, rather than
     left implicit, so this JSON shape and the CLI's exit code are both
     read off the same flag (``tests/unit/test_format_exit_parity_rule.py``).
+
+    Unlike :func:`trellis.learning.candidate_auto_promote.report_to_dict`,
+    there is no ``"degraded"`` case here: that sibling's ``skipped_count``
+    exists because an id-less candidate never becomes an outcome at all,
+    while this gate never drops a precedent silently — a truncated scan's
+    casualties are still named, individually, as
+    ``"skipped_incomplete_evidence"`` outcomes (counted in
+    ``skipped_incomplete_evidence_count``), not folded into a run-level
+    flag. Both commands exit 0 for a completed run regardless of status.
     """
     return {
         "status": "ok",

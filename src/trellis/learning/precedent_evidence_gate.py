@@ -55,7 +55,7 @@ rather than once in a docstring nobody serving a report has read.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -268,7 +268,7 @@ def _attribute_precedent_citation_evidence(
 
     ``feedback_events``/``pack_events`` may have been joined with a
     ``since`` earlier than this precedent's own ``promoted_at`` —
-    :func:`evaluate_precedent_demotions` runs the PACK_ASSEMBLED +
+    :func:`judge_current_precedents` runs the PACK_ASSEMBLED +
     FEEDBACK_RECORDED join once, at the *earliest* ``promoted_at`` among
     the precedents it judges this run, rather than once per precedent.
     The ``occurred_at >= since`` filters below are what still scope each
@@ -334,7 +334,7 @@ def join_precedent_citation_events(
 ) -> tuple[list[Event], dict[str, Event], ScanCoverage]:
     """Run the PACK_ASSEMBLED + FEEDBACK_RECORDED join once for a whole run.
 
-    :func:`evaluate_precedent_demotions` used to call
+    :func:`judge_current_precedents` used to call
     :func:`gather_precedent_citation_evidence` once per discovered
     precedent, re-running this join from scratch for every one. It now
     calls this once instead, with ``since`` set to the *earliest*
@@ -374,7 +374,7 @@ def gather_precedent_citation_evidence(
 
     A single-entity convenience wrapper kept for direct callers (tests,
     and anything that only ever asks about one precedent at a time) —
-    :func:`evaluate_precedent_demotions` itself no longer calls this: it
+    :func:`judge_current_precedents` itself no longer calls this: it
     runs :func:`join_precedent_citation_events` once per run instead.
     This wrapper discards that join's own coverage, since a single ad
     hoc lookup has no run-level report to carry it on; a caller that
@@ -569,92 +569,6 @@ class PrecedentDemotionOutcome:
     unhelpful_count: int = 0
 
 
-@dataclass(frozen=True, slots=True)
-class PrecedentDemotionReport:
-    """Aggregate result of one :func:`evaluate_precedent_demotions` pass."""
-
-    outcomes: list[PrecedentDemotionOutcome] = field(default_factory=list)
-    event_id: str | None = None
-    min_unhelpful_citations: int = MIN_UNHELPFUL_CITATIONS
-    attribution_caveat: str = ATTRIBUTION_CAVEAT
-    #: Merged coverage of the promotion-discovery scan and the single
-    #: PACK_ASSEMBLED/FEEDBACK_RECORDED join this run made. A truncated
-    #: scan can under-count unhelpful citations or miss a precedent
-    #: entirely — see :attr:`notes`.
-    scan: ScanCoverage = field(default_factory=ScanCoverage)
-    #: Human-readable callouts a caller surface should show above the
-    #: outcomes — currently just :attr:`scan`'s own note, when truncated.
-    notes: list[str] = field(default_factory=list)
-
-    @property
-    def would_demote_count(self) -> int:
-        return sum(
-            1 for o in self.outcomes if o.disposition == DISPOSITION_WOULD_DEMOTE
-        )
-
-    @property
-    def refused_count(self) -> int:
-        return sum(1 for o in self.outcomes if o.disposition == DISPOSITION_REFUSED)
-
-    @property
-    def skipped_count(self) -> int:
-        return sum(1 for o in self.outcomes if o.disposition == DISPOSITION_SKIPPED)
-
-
-def _emit_evaluated_event(
-    event_log: EventLog,
-    *,
-    outcomes: Sequence[PrecedentDemotionOutcome],
-    min_unhelpful_citations: int,
-    scan: ScanCoverage,
-    source: str,
-) -> str | None:
-    """Emit the single ``LEARNING_AUTO_DEMOTE_EVALUATED`` event for a run.
-
-    Mirrors :func:`trellis.learning.candidate_auto_promote._emit_evaluated_event`'s
-    payload shape. ``outcome`` is always ``"ok"``: unlike the promote
-    policy's candidate-id-less rows, every current precedent this module
-    discovers gets exactly one outcome, so there is no silent-drop case
-    to report as ``"degraded"`` here.
-
-    ``scan`` is included so a reader of the raw event stream — not only
-    the CLI/report surface — can see that a scan was capped without
-    re-deriving it: a truncated discovery or join scan can under-count
-    unhelpful citations and read as "no evidence" rather than "didn't
-    look far enough".
-    """
-    payload: dict[str, Any] = {
-        "outcome": "ok",
-        "mode": "report_only",
-        "min_unhelpful_citations": min_unhelpful_citations,
-        "attribution_caveat": ATTRIBUTION_CAVEAT,
-        "scan": scan.model_dump(),
-        "dispositions": [
-            {
-                "entity_id": o.entity_id,
-                "disposition": o.disposition,
-                "reason": o.reason,
-                "promoted_at": o.promoted_at,
-            }
-            for o in outcomes
-        ],
-        "counts": {
-            "total": len(outcomes),
-            "would_demote": sum(
-                1 for o in outcomes if o.disposition == DISPOSITION_WOULD_DEMOTE
-            ),
-            "refused": sum(1 for o in outcomes if o.disposition == DISPOSITION_REFUSED),
-            "skipped": sum(1 for o in outcomes if o.disposition == DISPOSITION_SKIPPED),
-        },
-    }
-    event = event_log.emit(
-        EventType.LEARNING_AUTO_DEMOTE_EVALUATED,
-        source,
-        payload=payload,
-    )
-    return event.event_id
-
-
 def emit_precedent_demotion_failure_event(
     event_log: EventLog,
     *,
@@ -703,9 +617,9 @@ def judge_current_precedents(
 ) -> tuple[list[PrecedentDemotionOutcome], ScanCoverage]:
     """Discover and judge every current precedent — the reusable core.
 
-    Writes nothing and emits no event: this is the discovery-and-judging
-    body :func:`evaluate_precedent_demotions` has always run, pulled out
-    so a commit-capable caller
+    Writes nothing and emits no event: the discovery-and-judging body is
+    kept separate from event emission and commit decisions so a
+    commit-capable caller
     (:func:`trellis.learning.precedent_auto_demote.run_precedent_auto_demotion`)
     can reuse it without duplicating the join/skip/judge logic or its own
     event-emission shape. Discovers every precedent with a successful
@@ -844,90 +758,6 @@ def judge_current_precedents(
     return outcomes, scan
 
 
-def evaluate_precedent_demotions(
-    event_log: EventLog,
-    graph_store: GraphStore,
-    *,
-    min_unhelpful_citations: int = MIN_UNHELPFUL_CITATIONS,
-    promotion_scan_limit: int = _PROMOTION_SCAN_LIMIT,
-    join_limit: int = _JOIN_SCAN_LIMIT,
-    source: str = "precedent_evidence_gate",
-) -> PrecedentDemotionReport:
-    """Evaluate every current precedent and report what would be demoted.
-
-    Writes nothing: no demotion, no node change. See
-    :func:`judge_current_precedents` for the discovery/judging logic this
-    wraps. Exactly one :attr:`EventType.LEARNING_AUTO_DEMOTE_EVALUATED`
-    event is emitted per call, covering every discovered precedent, with
-    ``mode`` always ``"report_only"`` — mirrors
-    :func:`trellis.learning.candidate_auto_promote.run_candidate_auto_promotion`'s
-    "always emit, even for zero precedents" shape. A caller that wants a
-    real, possibly-commit-mode run should use
-    :func:`trellis.learning.precedent_auto_demote.run_precedent_auto_demotion`
-    instead — this function's own event payload never varies by mode.
-    """
-    outcomes, scan = judge_current_precedents(
-        event_log,
-        graph_store,
-        min_unhelpful_citations=min_unhelpful_citations,
-        promotion_scan_limit=promotion_scan_limit,
-        join_limit=join_limit,
-    )
-
-    notes: list[str] = []
-    if scan.truncated and scan.note:
-        notes.append(scan.note)
-
-    event_id = _emit_evaluated_event(
-        event_log,
-        outcomes=outcomes,
-        min_unhelpful_citations=min_unhelpful_citations,
-        scan=scan,
-        source=source,
-    )
-    return PrecedentDemotionReport(
-        outcomes=outcomes,
-        event_id=event_id,
-        min_unhelpful_citations=min_unhelpful_citations,
-        scan=scan,
-        notes=notes,
-    )
-
-
-def _outcome_to_dict(outcome: PrecedentDemotionOutcome) -> dict[str, Any]:
-    """Serialise a :class:`PrecedentDemotionOutcome` for ``--format json``."""
-    return {
-        "entity_id": outcome.entity_id,
-        "disposition": outcome.disposition,
-        "reason": outcome.reason,
-        "promoted_at": outcome.promoted_at,
-        "appearances": outcome.appearances,
-        "helpful_count": outcome.helpful_count,
-        "unhelpful_count": outcome.unhelpful_count,
-    }
-
-
-def report_to_dict(report: PrecedentDemotionReport) -> dict[str, Any]:
-    """Serialise a :class:`PrecedentDemotionReport` for ``--format json``.
-
-    ``scan`` is hand-assembled from :attr:`PrecedentDemotionReport.scan`
-    rather than the whole dataclass dumped wholesale, so a new field
-    reaches this surface only when named here — the same discipline
-    :mod:`trellis_cli.analyze`'s own truncated reports follow.
-    """
-    return {
-        "would_demote_count": report.would_demote_count,
-        "refused_count": report.refused_count,
-        "skipped_count": report.skipped_count,
-        "min_unhelpful_citations": report.min_unhelpful_citations,
-        "attribution_caveat": report.attribution_caveat,
-        "event_id": report.event_id,
-        "scan": report.scan.model_dump(),
-        "notes": report.notes,
-        "outcomes": [_outcome_to_dict(o) for o in report.outcomes],
-    }
-
-
 __all__ = [
     "ATTRIBUTION_CAVEAT",
     "DISPOSITION_REFUSED",
@@ -947,15 +777,12 @@ __all__ = [
     "PrecedentCitationEvidence",
     "PrecedentDemotionDecision",
     "PrecedentDemotionOutcome",
-    "PrecedentDemotionReport",
     "discover_current_precedents",
     "discover_current_precedents_with_coverage",
     "emit_precedent_demotion_failure_event",
-    "evaluate_precedent_demotions",
     "gather_precedent_citation_evidence",
     "join_precedent_citation_events",
     "judge_current_precedents",
     "judge_precedent_demotion",
     "precedent_skip_reason",
-    "report_to_dict",
 ]

@@ -2,9 +2,12 @@
 
 Covers the module's two layers: the pure gate decision
 (``judge_precedent_demotion``) and the event-log join that feeds it
-(``gather_precedent_citation_evidence``), plus the report-only run loop
-(``evaluate_precedent_demotions``) that ties discovery, the lifecycle
-skip check and the gate together without writing anything.
+(``gather_precedent_citation_evidence``), plus the discovery-and-judging
+core (``judge_current_precedents``) that ties discovery, the lifecycle
+skip check and the gate together. The only production caller is
+``precedent_auto_demote.run_precedent_auto_demotion``; its own report
+dataclass, event shape and ``report_to_dict`` are tested in
+``test_precedent_auto_demote.py``, not here.
 
 The four non-regression acceptance tests below are load-bearing for the
 rule this module exists to enforce: demotion requires evidence of
@@ -26,6 +29,7 @@ import pytest
 
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.learning.precedent_evidence_gate import (
+    ATTRIBUTION_CAVEAT,
     DISPOSITION_REFUSED,
     DISPOSITION_SKIPPED,
     DISPOSITION_WOULD_DEMOTE,
@@ -41,12 +45,11 @@ from trellis.learning.precedent_evidence_gate import (
     PrecedentCitationEvidence,
     discover_current_precedents,
     discover_current_precedents_with_coverage,
-    evaluate_precedent_demotions,
     gather_precedent_citation_evidence,
     join_precedent_citation_events,
+    judge_current_precedents,
     judge_precedent_demotion,
     precedent_skip_reason,
-    report_to_dict,
 )
 from trellis.mutate.commands import Operation
 from trellis.mutate.retention import ARCHIVED_STATE
@@ -478,7 +481,18 @@ class TestDiscoverCurrentPrecedentsWithCoverage:
         assert discover_current_precedents(event_log, limit=1) == promoted_at
 
 
-class TestEvaluatePrecedentDemotions:
+class TestJudgeCurrentPrecedents:
+    """``judge_current_precedents`` is the reusable discovery-and-judging
+    core; ``evaluate_precedent_demotions`` (the report-only wrapper these
+    tests used to call) was deleted as dead code once
+    ``run_precedent_auto_demotion`` became the only real caller of this
+    logic (#693-adjacent cleanup) -- it never reused this wrapper, so
+    these exercise the core directly instead. Wrapper-only concerns
+    (its own event shape, its own report dataclass / ``report_to_dict``)
+    moved with it and are covered by
+    ``test_precedent_auto_demote.py``'s own equivalents instead.
+    """
+
     def test_would_demote_end_to_end(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
     ) -> None:
@@ -491,10 +505,10 @@ class TestEvaluatePrecedentDemotions:
         _emit_pack_assembled(event_log, pack_id="pack-2", item_ids=["p1"], at=at2)
         _emit_feedback(event_log, pack_id="pack-2", at=at2, unhelpful=["p1"])
 
-        report = evaluate_precedent_demotions(event_log, graph_store)
+        outcomes, _scan = judge_current_precedents(event_log, graph_store)
 
-        assert report.would_demote_count == 1
-        outcome = report.outcomes[0]
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
         assert outcome.entity_id == "p1"
         assert outcome.disposition == DISPOSITION_WOULD_DEMOTE
         assert outcome.unhelpful_count == 2
@@ -504,8 +518,8 @@ class TestEvaluatePrecedentDemotions:
     ) -> None:
         """A demoted precedent needs no citation read at all -- the skip
         check keeps it out of ``to_judge`` entirely, so the shared join
-        (``join_precedent_citation_events``, which ``evaluate_precedent_demotions``
-        now calls once per run instead of once per precedent) never runs
+        (``join_precedent_citation_events``, which ``judge_current_precedents``
+        calls once per run instead of once per precedent) never runs
         when every discovered precedent is skipped."""
         graph_store.upsert_node(
             node_id="p1",
@@ -517,11 +531,11 @@ class TestEvaluatePrecedentDemotions:
         with patch(
             "trellis.learning.precedent_evidence_gate.join_precedent_citation_events"
         ) as mock_join:
-            report = evaluate_precedent_demotions(event_log, graph_store)
+            outcomes, _scan = judge_current_precedents(event_log, graph_store)
 
         mock_join.assert_not_called()
-        assert report.skipped_count == 1
-        outcome = report.outcomes[0]
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
         assert outcome.disposition == DISPOSITION_SKIPPED
         assert outcome.reason == SKIPPED_ALREADY_DEMOTED
 
@@ -535,11 +549,10 @@ class TestEvaluatePrecedentDemotions:
         refuse (``target_not_graph_backed``)."""
         _emit_promote(event_log, "p1", at=_T0)
 
-        report = evaluate_precedent_demotions(event_log, graph_store)
+        outcomes, _scan = judge_current_precedents(event_log, graph_store)
 
-        assert report.skipped_count == 1
-        assert report.would_demote_count == 0
-        outcome = report.outcomes[0]
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
         assert outcome.entity_id == "p1"
         assert outcome.disposition == DISPOSITION_SKIPPED
         assert outcome.reason == SKIPPED_NOT_GRAPH_BACKED
@@ -575,55 +588,34 @@ class TestEvaluatePrecedentDemotions:
         )
         _emit_feedback(event_log, pack_id="pack-early-2", at=early2, unhelpful=["p2"])
 
-        report = evaluate_precedent_demotions(event_log, graph_store)
+        outcomes, _scan = judge_current_precedents(event_log, graph_store)
 
-        p2_outcome = next(o for o in report.outcomes if o.entity_id == "p2")
+        p2_outcome = next(o for o in outcomes if o.entity_id == "p2")
         assert p2_outcome.disposition == DISPOSITION_REFUSED
         assert p2_outcome.reason == REFUSED_NO_EVIDENCE
         assert p2_outcome.unhelpful_count == 0
 
-    def test_truncated_discovery_scan_is_surfaced_on_report_and_event(
+    def test_truncated_discovery_scan_is_surfaced_on_the_merged_coverage(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
     ) -> None:
         """Fix 2, end to end: a truncated discovery scan can hide an
         older precedent entirely, not merely under-count one it already
-        knows about -- both the report and the emitted event must say
-        so, not just ``discover_current_precedents_with_coverage``
-        itself."""
+        knows about -- the merged coverage this function returns must say
+        so, not just ``discover_current_precedents_with_coverage`` itself
+        (a caller reading only the merged result would otherwise miss
+        it)."""
         graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
         graph_store.upsert_node(node_id="p2", node_type="precedent", properties={})
         _emit_promote(event_log, "p1", at=_T0)
         _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
 
-        report = evaluate_precedent_demotions(
+        _outcomes, scan = judge_current_precedents(
             event_log, graph_store, promotion_scan_limit=1
         )
 
-        assert report.scan.truncated is True
-        assert report.notes
-        assert "TRUNCATED" in report.notes[0]
-
-        events = event_log.get_events(
-            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
-        )
-        assert len(events) == 1
-        assert events[0].payload["scan"]["truncated"] is True
-
-    def test_report_to_dict_carries_truncation(
-        self, event_log: EventLog, graph_store: SQLiteGraphStore
-    ) -> None:
-        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
-        graph_store.upsert_node(node_id="p2", node_type="precedent", properties={})
-        _emit_promote(event_log, "p1", at=_T0)
-        _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
-
-        report = evaluate_precedent_demotions(
-            event_log, graph_store, promotion_scan_limit=1
-        )
-        data = report_to_dict(report)
-
-        assert data["scan"]["truncated"] is True
-        assert data["notes"]
+        assert scan.truncated is True
+        assert scan.note
+        assert "TRUNCATED" in scan.note
 
     def test_no_evidence_refuses_not_skips(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
@@ -631,11 +623,11 @@ class TestEvaluatePrecedentDemotions:
         graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
         _emit_promote(event_log, "p1", at=_T0)
 
-        report = evaluate_precedent_demotions(event_log, graph_store)
+        outcomes, _scan = judge_current_precedents(event_log, graph_store)
 
-        assert report.refused_count == 1
-        assert report.outcomes[0].disposition == DISPOSITION_REFUSED
-        assert report.outcomes[0].reason == REFUSED_NO_EVIDENCE
+        assert len(outcomes) == 1
+        assert outcomes[0].disposition == DISPOSITION_REFUSED
+        assert outcomes[0].reason == REFUSED_NO_EVIDENCE
 
     def test_truncated_join_skips_incomplete_evidence_full_join_contests(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
@@ -672,58 +664,39 @@ class TestEvaluatePrecedentDemotions:
                 event_log, pack_id=f"pack-unhelpful-{i}", at=at, unhelpful=["p1"]
             )
 
-        truncated_report = evaluate_precedent_demotions(
+        truncated_outcomes, truncated_scan = judge_current_precedents(
             event_log, graph_store, join_limit=2
         )
-        assert truncated_report.scan.truncated is True
-        assert len(truncated_report.outcomes) == 1
-        truncated_outcome = truncated_report.outcomes[0]
+        assert truncated_scan.truncated is True
+        assert len(truncated_outcomes) == 1
+        truncated_outcome = truncated_outcomes[0]
         assert truncated_outcome.disposition == DISPOSITION_SKIPPED
         assert truncated_outcome.reason == SKIPPED_INCOMPLETE_EVIDENCE
-        assert truncated_report.would_demote_count == 0
 
-        full_report = evaluate_precedent_demotions(event_log, graph_store)
-        assert full_report.scan.truncated is False
-        assert len(full_report.outcomes) == 1
-        full_outcome = full_report.outcomes[0]
+        full_outcomes, full_scan = judge_current_precedents(event_log, graph_store)
+        assert full_scan.truncated is False
+        assert len(full_outcomes) == 1
+        full_outcome = full_outcomes[0]
         assert full_outcome.disposition == DISPOSITION_REFUSED
         assert full_outcome.reason == REFUSED_CONTESTED
-        assert full_report.would_demote_count == 0
 
-    def test_exactly_one_event_emitted_per_run(
+    def test_empty_log_returns_no_outcomes(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
     ) -> None:
-        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
-        _emit_promote(event_log, "p1", at=_T0)
+        outcomes, scan = judge_current_precedents(event_log, graph_store)
 
-        report = evaluate_precedent_demotions(event_log, graph_store)
+        assert outcomes == []
+        assert scan.truncated is False
 
-        events = event_log.get_events(
-            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
-        )
-        assert len(events) == 1
-        assert events[0].event_id == report.event_id
-        assert events[0].payload["mode"] == "report_only"
-        assert events[0].payload["counts"]["total"] == 1
-
-    def test_empty_log_still_emits_one_event_with_zero_counts(
-        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    def test_attribution_caveat_names_the_structurally_invisible_surfaces(
+        self,
     ) -> None:
-        report = evaluate_precedent_demotions(event_log, graph_store)
-
-        assert report.outcomes == []
-        events = event_log.get_events(
-            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
-        )
-        assert len(events) == 1
-
-    def test_report_to_dict_carries_the_attribution_caveat(
-        self, event_log: EventLog, graph_store: SQLiteGraphStore
-    ) -> None:
-        report = evaluate_precedent_demotions(event_log, graph_store)
-        data = report_to_dict(report)
-        assert "get_lessons" in data["attribution_caveat"]
-        assert "sectioned" in data["attribution_caveat"]
+        """The exact two surfaces :func:`judge_current_precedents` can
+        never see evidence from (module docstring, "Attribution coverage
+        gap") -- a caveat that silently dropped either would read as a
+        tightened gate rather than the same structural blind spot."""
+        assert "get_lessons" in ATTRIBUTION_CAVEAT
+        assert "sectioned" in ATTRIBUTION_CAVEAT
 
 
 class TestPortedConstants:
