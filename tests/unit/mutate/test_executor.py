@@ -513,6 +513,118 @@ class TestMutationExecutor:
         assert payload["message"] == SUPPRESSED_MARKER
 
 
+class TestRejectionPayloadIsJsonbSafe:
+    """Issue #869: a refused NUL key or target rides along on the
+    MUTATION_REJECTED event's ``entity_id`` and ``payload`` -- the very
+    string that got the command rejected. ``json.dumps(..., ensure_ascii=
+    True)`` renders either hazard as a plain ASCII escape sequence, but
+    Postgres's ``jsonb`` column refuses that *escape* outright (and
+    psycopg refuses a raw NUL in a plain ``TEXT`` parameter such as
+    ``entity_id`` client-side), so the audit event for the refusal meant
+    to stop a bad write was itself being lost on the one backend where it
+    matters. SQLite's text columns accept both silently, which is why
+    this is reproducible without a live Postgres: it inspects the exact
+    payload the executor hands to ``emit``, not whether a particular
+    backend accepts it.
+    """
+
+    def test_target_id_and_message_hazards_are_escaped_before_emit(self) -> None:
+        # The offending value is interpolated via ``!r}``, same as every
+        # real validator in ``trellis.mutate.handlers`` -- ``repr()`` of a
+        # string already renders a NUL byte or lone surrogate as literal
+        # ASCII escape *text* (confirmed: ``repr('bad\x00key')`` contains
+        # the four characters ``\x00``, not the raw byte), so a message
+        # built this way can never itself carry the raw hazard. The hazard
+        # this test pins reaches the seam through ``target_id`` /
+        # ``entity_id``, not through the message text.
+        unsafe_target = "tag_keyword:bad\x00key"
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError(
+            f"classify_rule.apply: key {unsafe_target!r} contains a NUL byte",
+            errors=["invalid"],
+            code="invalid_key",
+        )
+        event_log = MagicMock()
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd(target_id=unsafe_target))
+
+        assert result.status == CommandStatus.REJECTED
+        event_log.emit.assert_called_once()
+        entity_id = event_log.emit.call_args.kwargs["entity_id"]
+        payload = event_log.emit.call_args.kwargs["payload"]
+
+        # The exact failure this guards against: jsonb (and a plain TEXT
+        # entity_id column) refuse the escape sequence json.dumps would
+        # otherwise produce for either hazard. Succeeding here is the
+        # SQLite-runnable proxy for "Postgres would accept this row".
+        json.dumps({"entity_id": entity_id, "payload": payload}, allow_nan=False)
+
+        assert "\x00" not in entity_id
+        assert len(entity_id) == len(unsafe_target)  # escaped, not dropped
+        assert "\x00" not in payload["message"]
+
+    def test_lone_surrogate_in_metadata_claim_is_escaped_before_emit(self) -> None:
+        """A raw lone surrogate cannot survive construction of any ``str``
+        field on a ``TrellisModel`` (``str_strip_whitespace=True`` makes
+        pydantic-core convert to a Rust string, which requires valid
+        UTF-8, which a lone surrogate is not) -- so ``target_id`` or
+        ``message`` can only ever carry one pre-escaped via ``repr()``.
+        ``Command.metadata`` is typed ``dict[str, Any]``, which bypasses
+        that per-field string validator entirely, and
+        ``requested_by_claim`` rides from there straight into the audit
+        payload (see ``_emit_event``) -- making it the realistic carrier
+        for the surrogate half of issue #869 at this seam.
+        """
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError(
+            "classify_rule.apply: refused", errors=["invalid"], code="invalid_key"
+        )
+        event_log = MagicMock()
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        claim = "bad \ud800 claim"
+        cmd = _cmd(metadata={"requested_by_claim": claim})
+
+        executor.execute(cmd)
+
+        event_log.emit.assert_called_once()
+        payload = event_log.emit.call_args.kwargs["payload"]
+        json.dumps(payload, allow_nan=False)
+
+        scrubbed_claim = payload["requested_by_claim"]
+        assert "\ud800" not in scrubbed_claim
+        assert len(scrubbed_claim) == len(claim)  # escaped, not dropped
+
+    def test_hazard_nested_in_cause_and_a_dict_key_is_escaped(self) -> None:
+        """The walk covers a nested ``cause`` dict and dict *keys*, not
+        only the top-level ``message`` -- the same shape
+        ``trellis.mutate.handlers._find_unsafe_jsonb_string`` walks for
+        the Apply/Revoke audit probe."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        exc = StoreError("backend rejected the write", store="pg")
+        exc.__cause__ = RuntimeError("bad\x00field: \ud800 value")
+        handler.handle.side_effect = exc
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        executor.execute(_cmd())
+
+        payload = event_log.emit.call_args.kwargs["payload"]
+        json.dumps(payload, allow_nan=False)
+        cause_message = payload["cause"]["message"]
+        assert "\x00" not in cause_message
+        assert "\ud800" not in cause_message
+
+
 class TestIdempotencyCacheEviction:
     """Gap 4.1 — FIFO eviction replaces silent .clear(); loud warning when
     eviction happens without an event_log backstop."""

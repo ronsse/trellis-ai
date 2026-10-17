@@ -878,14 +878,14 @@ class TestJsonbSafeAuditPayload:
         assert _store(registry).get("tag_keyword", "zzzkw") is not None
         assert _revoked_event_count(registry) == 0
 
-    def test_revoke_row_with_nul_in_source_event_id_is_refused_row_untouched(
+    def test_revoke_row_with_nul_in_source_event_id_succeeds_scrubbed(
         self, registry: StoreRegistry
     ) -> None:
         """A row carrying a NUL in ``source_event_id`` -- as Apply's own
         validator now refuses on the way in, this can only be legacy
         data from an earlier build or a hand-edited overlay file -- must
-        still be refused on Revoke rather than removed with a broken
-        audit event."""
+        not be stranded (issue #869): Revoke escapes the legacy field
+        into the audit payload rather than refusing to remove the row."""
         store = _store(registry)
         store.put(
             ClassifyOverrideRow(
@@ -901,12 +901,51 @@ class TestJsonbSafeAuditPayload:
         revoke_handler = ClassifyRuleRevokeHandler(registry)
         cmd = _revoke_cmd("tag_keyword", "legacykw")
 
-        with pytest.raises(ValidationError) as exc_info:
-            revoke_handler.handle(cmd)
+        row_id, _message = revoke_handler.handle(cmd)
 
-        assert exc_info.value.code == "unsafe_audit_payload"
-        assert _store(registry).get("tag_keyword", "legacykw") is not None
-        assert _revoked_event_count(registry) == 0
+        assert row_id == "tag_keyword:legacykw"
+        assert _store(registry).get("tag_keyword", "legacykw") is None
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=100
+        )
+        assert len(events) == 1
+        removed_source_event_id = events[0].payload["removed_source_event_id"]
+        assert "\x00" not in removed_source_event_id
+        # Escaped, not dropped -- same length as the stranded original.
+        assert len(removed_source_event_id) == len("01EVT\x00legacy")
+
+    def test_apply_over_row_with_nul_in_applied_by_succeeds_scrubbed(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The other half of being stranded (issue #869): re-applying the
+        same rule over a legacy row whose ``applied_by`` carries a NUL
+        must also succeed, with the prior value escaped rather than the
+        new Apply being refused."""
+        store = _store(registry)
+        store.put(
+            ClassifyOverrideRow(
+                kind="tag_keyword",
+                key="legacykw",
+                target="finance",
+                applied_at=datetime.now(UTC),
+                applied_by="legacy\x00writer",
+                source_event_id=_SOURCE_EVENT_ID,
+            )
+        )
+
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "legacykw", "finance")
+
+        row_id, _message = apply_handler.handle(cmd)
+
+        assert row_id == "tag_keyword:legacykw"
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=100
+        )
+        assert len(events) == 1
+        prior_applied_by = events[0].payload["prior_applied_by"]
+        assert "\x00" not in prior_applied_by
+        assert len(prior_applied_by) == len("legacy\x00writer")
 
 
 # ---------------------------------------------------------------------------

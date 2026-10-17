@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import structlog
 
 from trellis.core.error_sanitize import summarize_exception
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.errors import (
     IdempotencyError,
     PolicyViolationError,
@@ -125,6 +126,55 @@ def _audit_emit_failure_classes() -> tuple[type[BaseException], ...]:
 def _audit_warnings(audit_warning: str | None) -> list[str]:
     """The warning list contributed by one audit emit — empty when it landed."""
     return [] if audit_warning is None else [audit_warning]
+
+
+#: Stands in for a scrubbed NUL byte or unpaired UTF-16 surrogate, same
+#: choice as ``trellis_api.routes._principal._scrub_claim`` -- it is a
+#: visible character, so a scrubbed field still looks like text rather
+#: than silently losing a character.
+_SCRUB_REPLACEMENT_CHAR = "�"
+
+
+def _scrub_jsonb_unsafe(value: Any) -> Any:
+    """Escape every NUL byte / unpaired UTF-16 surrogate reachable from *value*.
+
+    A rejected command's own key or target can carry either hazard (issue
+    #869): ``_validate_classify_rule_identifier`` refuses it before any row
+    is written, but the refusal is itself an audited ``mutation.rejected``
+    event, and the string that caused the refusal rides along in
+    ``command.target_id`` and in the exception's own message. Postgres's
+    ``jsonb`` column refuses a ``\\u0000`` or lone-surrogate *escape*
+    outright, even though ``json.dumps(..., ensure_ascii=True)`` already
+    renders the hazard as plain ASCII text before the column ever sees a
+    raw code point -- so the audit event for the very refusal meant to
+    stop a bad write is itself lost, on the one backend where it matters
+    (SQLite's text columns accept both silently).
+
+    Walks ``str`` leaves, ``dict`` (keys and values), ``list`` and
+    ``tuple`` at any depth; every other type (``int``, ``bool``, ``None``,
+    an already-``CommandStatus`` enum member) is returned unchanged, since
+    neither hazard can occur outside a ``str``. Escapes rather than drops,
+    character for character, so a scrubbed field keeps its length and
+    shape instead of silently shrinking. Applied once, at the single seam
+    every emitted event already passes through
+    (:meth:`MutationExecutor._emit_event`), to the copy handed to
+    :meth:`~trellis.stores.base.event_log.EventLog.emit` -- never to
+    ``command`` itself or to the ``CommandResult`` a caller reads, so what
+    the pipeline reports is unaffected.
+    """
+    if isinstance(value, str):
+        return "".join(
+            _SCRUB_REPLACEMENT_CHAR if contains_nul_or_lone_surrogate(ch) else ch
+            for ch in value
+        )
+    if isinstance(value, dict):
+        return {
+            _scrub_jsonb_unsafe(key): _scrub_jsonb_unsafe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return type(value)(_scrub_jsonb_unsafe(item) for item in value)
+    return value
 
 
 def _handler_warnings(command: Command) -> list[str]:
@@ -899,13 +949,19 @@ class MutationExecutor:
         # makes the default posture verifiably transparent.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
+        # Scrubbed on the copy handed to ``emit`` only -- see
+        # ``_scrub_jsonb_unsafe``'s own docstring for why this must sit
+        # here rather than upstream of the branch that built ``payload``.
+        # ``_scrub_jsonb_unsafe`` returns ``None`` for a ``None`` entity_id
+        # unchanged, same as every other non-``str``/``dict``/``list``
+        # leaf.
         try:
             self._event_log.emit(
                 event_type,
                 "mutation_executor",
-                entity_id=command.target_id,
+                entity_id=_scrub_jsonb_unsafe(command.target_id),
                 entity_type=command.target_type,
-                payload=payload,
+                payload=_scrub_jsonb_unsafe(payload),
             )
         except _audit_emit_failure_classes() as exc:
             # No traceback, and no text Trellis did not write; see the
