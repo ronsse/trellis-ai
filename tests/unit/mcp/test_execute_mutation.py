@@ -379,7 +379,15 @@ class TestPrecedentReinstateIsMcpReachable:
     ) -> None:
         """Human-only, end to end through MCP: the automatic demotion
         policy's own identity may not reinstate anything it -- or anyone
-        else -- demoted."""
+        else -- demoted.
+
+        ``auto:learning_candidate_demote`` is rostered in
+        ``UNATTENDED_WRITERS`` for exactly ``precedent.demote`` (#693-ish
+        hardening), so ``MutationExecutor``'s Stage 1 roster check now
+        refuses this before ``PrecedentReinstateHandler`` ever runs --
+        its own human-only check is defense in depth, unreachable for
+        this identity now, and not exercised by this test.
+        """
         node_id = self._demoted_precedent(temp_registry)
 
         raw = execute_mutation(
@@ -390,7 +398,9 @@ class TestPrecedentReinstateIsMcpReachable:
         payload = json.loads(raw)
 
         assert payload["status"] == "rejected"
-        assert "human-only" in payload["message"]
+        assert "unattended_writer_operation_not_allowed" in payload["message"]
+        assert "auto:learning_candidate_demote" in payload["message"]
+        assert "precedent.reinstate" in payload["message"]
         graph = temp_registry.knowledge.graph_store
         node = graph.get_node(node_id)
         assert node["properties"]["lifecycle"]["state"] == "demoted"

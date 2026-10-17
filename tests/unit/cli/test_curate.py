@@ -701,7 +701,15 @@ class TestCurateReinstatePrecedent:
         """Reinstatement has no automatic path at all: the automatic
         demotion policy's own identity must be refused outright, narrowing
         or not -- unlike demotion, which the policy may perform on what it
-        itself promoted."""
+        itself promoted.
+
+        ``auto:learning_candidate_demote`` is rostered in
+        ``UNATTENDED_WRITERS`` for exactly ``precedent.demote`` (#693-ish
+        hardening), so ``MutationExecutor``'s Stage 1 roster check now
+        refuses this before ``PrecedentReinstateHandler`` ever runs --
+        its own ``reinstate_requires_human`` check is defense in depth,
+        unreachable for this identity now, and not exercised by this
+        test."""
         node_id = self._create_precedent()
         self._demote(node_id)
 
@@ -722,7 +730,9 @@ class TestCurateReinstatePrecedent:
         assert result.exit_code == EXIT_VALIDATION, result.output
         data = json.loads(result.stdout.strip())
         assert data["status"] == "rejected"
-        assert "human-only" in data["message"]
+        assert "unattended_writer_operation_not_allowed" in data["message"]
+        assert AUTO_DEMOTE_REQUESTED_BY in data["message"]
+        assert "precedent.reinstate" in data["message"]
 
         graph = curate_cli._get_registry().knowledge.graph_store
         node = graph.get_node(node_id)
@@ -1926,6 +1936,100 @@ class TestCurateAutoPromoteCandidates:
             assert latest.payload["error"]["type"] == "ValueError"
             assert latest.payload["configured_mode"] is None
             assert secret not in json.dumps(latest.payload)
+
+    def test_bogus_demote_mode_is_reported_under_its_own_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bogus ``TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE`` is the *sibling*
+        policy's own configuration error -- it must not fail this command
+        as a candidate auto-promote problem (gate-879 follow-up #6).
+        ``--format json`` must also answer with a JSON payload carrying
+        ``status``, and the exit code must match the text surface
+        (tests/unit/test_format_exit_parity_rule.py)."""
+        secret = "SEKRETdemote91c2"  # noqa: S105 - synthetic test placeholder
+        monkeypatch.setenv(PRECEDENT_AUTO_DEMOTE_MODE_ENV, secret)
+        exit_codes: set[int] = set()
+        for run_number, output_format in enumerate(("json", "text"), start=1):
+            candidates_path = self._write_candidates(tmp_path, [])
+
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "auto-promote-candidates",
+                    "--candidates",
+                    str(candidates_path),
+                    "--format",
+                    output_format,
+                ],
+            )
+            exit_codes.add(result.exit_code)
+            assert result.exit_code == EXIT_VALIDATION, result.output
+            assert secret not in result.output
+            assert "candidate auto-promote" not in result.output
+            assert "precedent auto-demote" in result.output
+            if output_format == "json":
+                data = json.loads(result.stdout.strip())
+                assert data["status"] == "error"
+                assert data["error_type"] == "ValueError"
+
+            event_log = curate_cli._get_registry().operational.event_log
+            promote_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            demote_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+            )
+            # The command's own run also ended without outcomes, so it
+            # records one promote event per run as well.
+            assert len(promote_events) == run_number
+            assert promote_events[-1].payload["outcome"] == "failed"
+            assert secret not in json.dumps(promote_events[-1].payload)
+            assert len(demote_events) == run_number
+            latest = demote_events[-1]
+            assert latest.payload["outcome"] == "failed"
+            assert latest.payload["error"]["type"] == "ValueError"
+            assert secret not in json.dumps(latest.payload)
+        assert exit_codes == {EXIT_VALIDATION}
+
+    def test_hand_edited_demote_commit_is_reported_under_its_own_name(
+        self, tmp_path: Path
+    ) -> None:
+        """A hand-edited ``settings.json`` that sets the *sibling*
+        demote policy's mode to ``commit`` is a precedent auto-demote
+        refusal, not a candidate auto-promote one -- the failure event
+        this command emits must name the policy that actually failed."""
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        SettingsStore(stores_dir / "settings.json").set(
+            PRECEDENT_AUTO_DEMOTE_MODE_SETTING, "commit"
+        )
+        candidates_path = self._write_candidates(tmp_path, [])
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 5, result.output
+
+        event_log = curate_cli._get_registry().operational.event_log
+        promote_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        demote_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+        )
+        assert len(promote_events) == 1
+        assert promote_events[0].payload["outcome"] == "refused"
+        assert len(demote_events) == 1
+        assert demote_events[0].payload["outcome"] == "refused"
+        assert demote_events[0].payload["error"]["type"] == "ConfigError"
 
 
 class TestCurateEvaluatePrecedentDemotion:
