@@ -40,6 +40,7 @@ from trellis_wire.dtos import (
     BulkIngestResponse,
     BulkItemResult,
     CommandResponse,
+    DefaultValidationError,
     EntityCreateRequest,
     ErrorResponse,
     FeedbackRequest,
@@ -56,6 +57,7 @@ from trellis_wire.dtos import (
     SectionedPackResponse,
     StatsResponse,
     StatusResponse,
+    StringDetailError,
     VersionResponse,
     WithholdingResponse,
 )
@@ -106,6 +108,9 @@ __all__ = [
     "BatchCommandBodyError",
     "BatchCommandBodyErrorItem",
     "BatchOperationNameError",
+    # Generic 422 shapes (reused across routes outside /commands/batch)
+    "DefaultValidationError",
+    "StringDetailError",
     # Bulk ingest
     "BulkEntityItem",
     "BulkEdgeItem",

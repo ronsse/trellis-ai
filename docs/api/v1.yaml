@@ -1320,6 +1320,38 @@ components:
       - rules
       title: CreatePolicyRequest
       type: object
+    DefaultValidationError:
+      additionalProperties: false
+      description: 'FastAPI''s own default 422 shape: ``detail`` is a list of field
+
+        errors (``loc`` / ``msg`` / ``type`` / ...), generated automatically
+
+        for any route with query/path/body params FastAPI itself validates.
+
+
+        Structurally identical to :class:`BatchCommandBodyError` -- that
+
+        model stays separately named and documented for ``/commands/batch``
+
+        specifically; this one is the reusable, route-agnostic declaration
+
+        for any other route whose 422 can be *either* that default shape
+
+        *or* a hand-raised plain-string-``detail`` shape
+
+        (:class:`StringDetailError`), so the two can be declared together
+
+        via a ``model`` union without re-deriving the list shape per route.'
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/BatchCommandBodyErrorItem'
+          title: Detail
+          type: array
+      required:
+      - detail
+      title: DefaultValidationError
+      type: object
     DraftAdrResponse:
       additionalProperties: false
       description: Rendered promotion-ADR markdown for a schema-evolution candidate.
@@ -2919,6 +2951,29 @@ components:
           type: integer
       title: StatsResponse
       type: object
+    StringDetailError:
+      additionalProperties: false
+      description: 'A 422 whose ``detail`` is a plain string, not FastAPI''s default
+
+        list-of-field-errors shape -- the shape of a hand-raised
+
+        ``HTTPException(422, detail="...")`` guarding an input check FastAPI''s
+
+        own query/body validation cannot express (an unknown enum-like value,
+
+        an empty list, an out-of-range computed field, ...). Reused across
+
+        every route with this pattern instead of one model per route, since
+
+        the shape itself carries no route-specific fields.'
+      properties:
+        detail:
+          title: Detail
+          type: string
+      required:
+      - detail
+      title: StringDetailError
+      type: object
     TimeseriesPointResponse:
       additionalProperties: false
       description: 'One bucket''s value for one series.
@@ -3325,8 +3380,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Patch Admin Job Api V1 Admin Jobs  Name  Patch
+          description: '``body`` fails ``AdminJobPatchRequest`` validation (DefaultValidationError -- ``detail`` is a list
+            of field errors), or the schedule-update command is REJECTED for a reason other than a degraded/stale store (StringDetailError
+            -- ``detail`` is a plain string; see ``_schedule_result_http_error``).'
       security:
       - APIKeyHeader: []
       summary: Patch Admin Job
@@ -3379,8 +3439,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                $ref: '#/components/schemas/StringDetailError'
+          description: The job-run-request command is REJECTED for a reason other than a degraded/stale store -- ``detail``
+            is a plain string (see ``_schedule_result_http_error``).
       security:
       - APIKeyHeader: []
       summary: Run Admin Job
@@ -4367,8 +4428,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 List Events Api V1 Events Get
+          description: An unknown `event_type` or an `order` outside {'asc', 'desc'} (DefaultValidationError -- ``detail``
+            is a list of field errors), or a hand-raised 422 naming the bad value (StringDetailError -- ``detail`` is a plain
+            string; see ``_parse_event_type`` and the ``order`` check).
       security:
       - APIKeyHeader: []
       summary: List Events
@@ -4445,8 +4511,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Ingest Evidence Api V1 Evidence Post
+          description: The body isn't a JSON object at all (DefaultValidationError -- ``detail`` is a list of field errors),
+            or it is one but fails the route's own schema validation (StringDetailError -- ``detail`` is a plain string naming
+            the problem).
       security:
       - APIKeyHeader: []
       summary: Ingest Evidence
@@ -5026,8 +5097,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Record Measurement Api V1 Measurements Post
+          description: The body isn't a JSON object at all (DefaultValidationError -- ``detail`` is a list of field errors),
+            or it is one but fails the schema (StringDetailError -- ``detail`` is a plain string naming the problem).
       security:
       - APIKeyHeader: []
       summary: Record Measurement
@@ -5108,8 +5183,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Metrics Timeseries Api V1 Metrics Timeseries Get
+          description: '``days`` isn''t a valid int (DefaultValidationError -- ``detail`` is a list of field errors), or ``bucket``
+            / ``metric`` / ``group_by`` fails its own value check (StringDetailError -- ``detail`` is a plain string naming
+            the problem).'
       security:
       - APIKeyHeader: []
       summary: Metrics Timeseries
@@ -5203,8 +5283,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Record Observation Api V1 Observations Post
+          description: The body isn't a JSON object at all (DefaultValidationError -- ``detail`` is a list of field errors),
+            or it is one but fails the schema (StringDetailError -- ``detail`` is a plain string naming the problem).
       security:
       - APIKeyHeader: []
       summary: Record Observation
@@ -5319,8 +5403,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Assemble Sectioned Pack Api V1 Packs Sectioned Post
+          description: '``req`` itself fails pydantic validation (DefaultValidationError -- ``detail`` is a list of field
+            errors), or ``sections`` is empty or one entry fails ``SectionRequest`` validation (StringDetailError -- ``detail``
+            is a plain string).'
       security:
       - APIKeyHeader: []
       summary: Assemble Sectioned Pack
@@ -6507,8 +6596,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Ingest Trace Api V1 Traces Post
+          description: The body isn't a JSON object at all (DefaultValidationError -- ``detail`` is a list of field errors),
+            or it is one but fails the route's own schema validation (StringDetailError -- ``detail`` is a plain string naming
+            the problem).
       security:
       - APIKeyHeader: []
       summary: Ingest Trace
@@ -6609,8 +6703,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
-          description: Validation Error
+                anyOf:
+                - $ref: '#/components/schemas/DefaultValidationError'
+                - $ref: '#/components/schemas/StringDetailError'
+                title: Response 422 Upsert Vectors Api V1 Vectors Post
+          description: The body isn't a JSON object at all (DefaultValidationError -- ``detail`` is a list of field errors),
+            or it is one but fails the route's own schema validation (StringDetailError -- ``detail`` is a plain string naming
+            the problem).
       security:
       - APIKeyHeader: []
       summary: Upsert Vectors

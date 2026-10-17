@@ -37,10 +37,26 @@ from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
 from trellis_api.app import get_registry
 from trellis_api.auth import require_scope
+from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+#: Both POST routes below take an untyped ``dict[str, Any]`` body and
+#: hand-raise a plain-string-``detail`` 422 when ``Observation`` /
+#: ``Measurement.model_validate`` fails -- not FastAPI's own default
+#: list-of-field-errors shape, though that shape is still possible first
+#: (e.g. a JSON body that isn't an object at all).
+_BODY_422 = {
+    "description": (
+        "The body isn't a JSON object at all (DefaultValidationError -- "
+        "``detail`` is a list of field errors), or it is one but fails "
+        "the schema (StringDetailError -- ``detail`` is a plain string "
+        "naming the problem)."
+    ),
+    "model": DefaultValidationError | StringDetailError,
+}
 
 
 def _projected_node(node: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +82,7 @@ def _projected_node(node: dict[str, Any]) -> dict[str, Any]:
     # Router-level dependency is ``read``; writes additionally require
     # ``mutate`` (see the router→scope map in trellis_api.app).
     dependencies=[Depends(require_scope(SCOPE_MUTATE))],
+    responses={422: _BODY_422},
 )
 def record_observation(body: dict[str, Any]) -> dict[str, Any]:
     """Record an :class:`Observation` through the governed pipeline.
@@ -134,6 +151,7 @@ def list_observations(
     "/measurements",
     status_code=201,
     dependencies=[Depends(require_scope(SCOPE_MUTATE))],
+    responses={422: _BODY_422},
 )
 def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
     """Record a :class:`Measurement` through the governed pipeline."""
