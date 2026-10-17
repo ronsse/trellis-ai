@@ -701,7 +701,15 @@ class TestCurateReinstatePrecedent:
         """Reinstatement has no automatic path at all: the automatic
         demotion policy's own identity must be refused outright, narrowing
         or not -- unlike demotion, which the policy may perform on what it
-        itself promoted."""
+        itself promoted.
+
+        ``auto:learning_candidate_demote`` is rostered in
+        ``UNATTENDED_WRITERS`` for exactly ``precedent.demote`` (#693-ish
+        hardening), so ``MutationExecutor``'s Stage 1 roster check now
+        refuses this before ``PrecedentReinstateHandler`` ever runs --
+        its own ``reinstate_requires_human`` check is defense in depth,
+        unreachable for this identity now, and not exercised by this
+        test."""
         node_id = self._create_precedent()
         self._demote(node_id)
 
@@ -722,7 +730,9 @@ class TestCurateReinstatePrecedent:
         assert result.exit_code == EXIT_VALIDATION, result.output
         data = json.loads(result.stdout.strip())
         assert data["status"] == "rejected"
-        assert "human-only" in data["message"]
+        assert "unattended_writer_operation_not_allowed" in data["message"]
+        assert AUTO_DEMOTE_REQUESTED_BY in data["message"]
+        assert "precedent.reinstate" in data["message"]
 
         graph = curate_cli._get_registry().knowledge.graph_store
         node = graph.get_node(node_id)

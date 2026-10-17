@@ -161,9 +161,7 @@ def _module_file(repo_root: Path, dotted: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _one_hop_imported_constants(
-    tree: ast.Module, repo_root: Path
-) -> dict[str, str]:
+def _one_hop_imported_constants(tree: ast.Module, repo_root: Path) -> dict[str, str]:
     """``{local name: value}`` for every ``from <module> import <name>``
     whose target has a matching module-level string constant.
 
@@ -236,11 +234,13 @@ def _function_local_names(
     local: dict[str, str] = {}
     args = func.args
     positional = list(args.posonlyargs) + list(args.args)
-    for arg, default in zip(reversed(positional), reversed(args.defaults)):
+    for arg, default in zip(
+        reversed(positional), reversed(args.defaults), strict=False
+    ):
         resolved = _resolve_simple(default, constants)
         if resolved is not None:
             local[arg.arg] = resolved
-    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
         resolved = _resolve_simple(default, constants)
         if resolved is not None:
             local[arg.arg] = resolved
@@ -352,7 +352,9 @@ def unattended_writer_identities(
     return found, unreadable
 
 
-def worker_prefixed_identities(root: Path, repo_root: Path | None = None) -> dict[str, str]:
+def worker_prefixed_identities(
+    root: Path, repo_root: Path | None = None
+) -> dict[str, str]:
     """Every ``requested_by=`` identity under *root* spelled ``worker:*``.
 
     The companion sweep to :func:`unattended_writer_identities`, over all
@@ -371,7 +373,9 @@ def worker_prefixed_identities(root: Path, repo_root: Path | None = None) -> dic
     return {k: v for k, v in found.items() if k.startswith("worker:")}
 
 
-def auto_prefixed_identities(root: Path, repo_root: Path | None = None) -> dict[str, str]:
+def auto_prefixed_identities(
+    root: Path, repo_root: Path | None = None
+) -> dict[str, str]:
     """Every ``requested_by=`` identity under *root* spelled ``auto:*``.
 
     ``auto:`` identities have no single home package the way
@@ -843,9 +847,7 @@ def test_the_scan_resolves_a_keyword_default_and_a_lazy_import(
     assert found["auto:planted-promote"].endswith("promote_planted.py:6")
     assert found["auto:planted-demote"].endswith("demote_planted.py:9")
     assert len(unreadable) == 1
-    assert unreadable[0].endswith("demote_planted.py:13: requested_by=who"), (
-        unreadable
-    )
+    assert unreadable[0].endswith("demote_planted.py:13: requested_by=who"), unreadable
 
 
 @pytest.mark.parametrize(

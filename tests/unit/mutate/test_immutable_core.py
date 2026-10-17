@@ -217,7 +217,9 @@ class TestAutoLearningLoopIdentities:
         assert unattended_writer_refusal(command) is not None
 
     def test_the_demoter_is_restricted_to_exactly_precedent_demote(self) -> None:
-        assert UNATTENDED_WRITERS[_AUTO_DEMOTE] == frozenset({Operation.PRECEDENT_DEMOTE})
+        assert UNATTENDED_WRITERS[_AUTO_DEMOTE] == frozenset(
+            {Operation.PRECEDENT_DEMOTE}
+        )
 
     def test_the_promoter_holds_exactly_the_operations_its_write_path_issues(
         self,

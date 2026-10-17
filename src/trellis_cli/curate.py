@@ -23,6 +23,7 @@ from trellis.learning import (
 from trellis.learning.candidate_auto_promote import (
     CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
     CandidateAutoPromoteMode,
+    CandidateAutoPromoteReport,
     LearningCandidateAutoPromotePolicy,
     emit_candidate_auto_promote_failure_event,
     report_to_dict,
@@ -1044,6 +1045,52 @@ def _raise_bad_candidates_param(msg: str) -> NoReturn:
     raise typer.BadParameter(msg, param_hint="'--candidates'")
 
 
+def _load_candidates_file(
+    candidates_path: Path | None, stores_dir: Path | None
+) -> tuple[Path, list[Any]]:
+    """Resolve ``--candidates``'s default path, then read and parse its JSON.
+
+    Split out of ``auto_promote_candidates`` to keep that command's
+    branch/statement count under the linter's ceiling
+    (``PLR0912``/``PLR0915``) — a mechanical extraction, not a behaviour
+    change: every raise here is still inside the caller's own ``try``
+    block (unchanged call site), caught by the same ``except Exception``
+    that emits a failure event before re-raising.
+    """
+    if candidates_path is None:
+        resolved_dir = resolve_learning_artifacts_dir(stores_dir)
+        if resolved_dir is None:
+            msg = (
+                "no learning-artifacts directory: the store registry "
+                f"has no stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} "
+                "is unset; pass --candidates"
+            )
+            _raise_bad_candidates_param(msg)
+        candidates_path = resolved_dir / LEARNING_CANDIDATES_FILENAME
+
+    try:
+        raw_text = candidates_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"cannot read candidates file {candidates_path}: {exc}"
+        raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        msg = f"candidates file {candidates_path} is not valid JSON: {exc}"
+        raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
+    if not isinstance(payload, dict):
+        msg = (
+            f"candidates file {candidates_path} must contain a JSON "
+            'object with a top-level "candidates" array, got '
+            f"{type(payload).__name__}"
+        )
+        _raise_bad_candidates_param(msg)
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+    return candidates_path, candidates
+
+
 @curate_app.command("auto-promote-candidates")
 def auto_promote_candidates(
     candidates_path: Path | None = typer.Option(  # noqa: B008 - typer option default
@@ -1117,37 +1164,9 @@ def auto_promote_candidates(
     event_log = get_event_log()
     configured_mode: CandidateAutoPromoteMode | None = None
     try:
-        if candidates_path is None:
-            resolved_dir = resolve_learning_artifacts_dir(registry.stores_dir)
-            if resolved_dir is None:
-                msg = (
-                    "no learning-artifacts directory: the store registry "
-                    f"has no stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} "
-                    "is unset; pass --candidates"
-                )
-                _raise_bad_candidates_param(msg)
-            candidates_path = resolved_dir / LEARNING_CANDIDATES_FILENAME
-
-        try:
-            raw_text = candidates_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            msg = f"cannot read candidates file {candidates_path}: {exc}"
-            raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
-        try:
-            payload = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            msg = f"candidates file {candidates_path} is not valid JSON: {exc}"
-            raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
-        if not isinstance(payload, dict):
-            msg = (
-                f"candidates file {candidates_path} must contain a JSON "
-                'object with a top-level "candidates" array, got '
-                f"{type(payload).__name__}"
-            )
-            _raise_bad_candidates_param(msg)
-        candidates = payload.get("candidates", [])
-        if not isinstance(candidates, list):
-            candidates = []
+        candidates_path, candidates = _load_candidates_file(
+            candidates_path, registry.stores_dir
+        )
 
         overrides, refusal = _resolve_candidate_auto_promote_overrides_for_cli(
             registry.stores_dir
@@ -1239,7 +1258,16 @@ def auto_promote_candidates(
     if output_format == "json":
         emit_json(report_to_dict(report))
         return
+    _print_auto_promote_report(report)
 
+
+def _print_auto_promote_report(report: CandidateAutoPromoteReport) -> None:
+    """Render ``auto_promote_candidates``'s text-format output.
+
+    Split out to keep that command's statement count under the linter's
+    ceiling (``PLR0915``); a mechanical extraction, not a behaviour
+    change.
+    """
     console.print(
         f"[bold]Auto-Promote Candidates[/bold] — mode={report.mode} "
         f"(configured={sanitize_configured_mode(report.configured_mode)})"
