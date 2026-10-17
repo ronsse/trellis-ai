@@ -195,9 +195,10 @@ def _build_candidate_auto_promote_row(
         }
         # ``outcome`` is the one vocabulary key every
         # LEARNING_AUTO_PROMOTE_EVALUATED payload carries uniformly,
-        # whether the run completed an evaluation ("ok"/"degraded",
-        # emitted by ``_emit_evaluated_event``) or never reached one
-        # ("refused"/"failed", emitted by
+        # whether the run completed an evaluation ("ok"/"degraded"/
+        # "failed", emitted by ``_emit_evaluated_event`` --
+        # see ``candidate_auto_promote._run_status``) or never reached
+        # one ("refused"/"failed", emitted by
         # ``emit_candidate_auto_promote_failure_event``). A refused or
         # failed run must not read as "ok" just because it produced an
         # event at all. Fall back to the pre-``outcome`` skipped-based
@@ -288,10 +289,13 @@ def _build_precedent_auto_demote_row(
             # report_only because enabled resolved false.
             "configured_mode": latest.payload.get("configured_mode"),
         }
-        # LEARNING_AUTO_DEMOTE_EVALUATED's ``outcome`` is always "ok" for
-        # a completed evaluation (unlike the promote event, this gate has
-        # no "degraded" case) and "refused"/"failed" for a run that never
-        # reached one — see emit_precedent_auto_demote_failure_event.
+        # LEARNING_AUTO_DEMOTE_EVALUATED's ``outcome`` is "ok" | "degraded"
+        # | "failed" for a completed evaluation (see
+        # precedent_auto_demote._run_status) and "refused"/"failed" for a
+        # run that never reached one — see
+        # emit_precedent_auto_demote_failure_event. The fallback below is
+        # for an event emitted before ``outcome`` existed; every current
+        # build always writes it.
         outcome = latest.payload.get("outcome")
         last_status = outcome if outcome is not None else "ok"
 

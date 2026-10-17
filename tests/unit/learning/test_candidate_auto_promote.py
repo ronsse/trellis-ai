@@ -386,6 +386,24 @@ class TestResolveModeValidation:
         )
         assert resolved["mode"] == "commit"
 
+    def test_refusal_warning_fires_once_per_cause_not_once_per_call(self) -> None:
+        """A stored refused ``mode`` is a standing misconfiguration, not a
+        per-call event: ``GET /settings`` calls this resolver on every
+        request, so logging on every call would turn one bad
+        ``settings.json`` entry into one warning per poll forever."""
+        settings = {CANDIDATE_AUTO_PROMOTE_MODE_SETTING: "commit"}
+        with capture_logs() as logs:
+            for _ in range(3):
+                with pytest.raises(ConfigError):
+                    resolve_candidate_auto_promote_overrides(settings=settings, env={})
+        refusal_warnings = [
+            e
+            for e in logs
+            if e["log_level"] == "warning"
+            and e["event"] == "candidate_auto_promote_mode_refused_in_settings"
+        ]
+        assert len(refusal_warnings) == 1
+
 
 class TestSanitizeConfiguredMode:
     """``sanitize_configured_mode`` is the single point every event
@@ -977,6 +995,86 @@ class TestRunCandidateAutoPromotionCommit:
             node = registry.knowledge.graph_store.get_node(entity_id)
             assert node is not None
             assert node["properties"]["lifecycle"]["state"] == "archived"
+        finally:
+            registry.close()
+
+    def test_status_is_failed_when_every_attempted_submission_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """``status``/``outcome`` is ``"failed"`` only once a write was
+        actually attempted and none of the attempts succeeded --
+        ``"ineligible:submission_refused_archived"`` is the only outcome
+        in this run, and nothing was ever promoted."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True)
+            entity_id = precedent_entity_id_for_candidate("cand-archived")
+            registry.knowledge.graph_store.upsert_node(
+                entity_id,
+                "precedent",
+                {
+                    "name": "Pre-existing archived precedent",
+                    "lifecycle": {"state": "archived"},
+                },
+            )
+
+            report = run_candidate_auto_promotion(
+                candidates=[_candidate("cand-archived")],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            assert report.promoted_count == 0
+            assert report.submission_failed_count == 1
+            payload = report_to_dict(report)
+            assert payload["status"] == "failed"
+
+            evaluated = registry.operational.event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert evaluated[-1].payload["outcome"] == "failed"
+        finally:
+            registry.close()
+
+    def test_status_is_degraded_when_some_attempted_submissions_fail(
+        self, tmp_path: Path
+    ) -> None:
+        """A mixed run -- one candidate promotes, one's submission is
+        refused -- reports ``"degraded"``, not ``"failed"``."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True)
+            entity_id = precedent_entity_id_for_candidate("cand-archived")
+            registry.knowledge.graph_store.upsert_node(
+                entity_id,
+                "precedent",
+                {
+                    "name": "Pre-existing archived precedent",
+                    "lifecycle": {"state": "archived"},
+                },
+            )
+
+            report = run_candidate_auto_promotion(
+                candidates=[_candidate("cand-ok"), _candidate("cand-archived")],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            assert report.promoted_count == 1
+            assert report.submission_failed_count == 1
+            payload = report_to_dict(report)
+            assert payload["status"] == "degraded"
+
+            evaluated = registry.operational.event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert evaluated[-1].payload["outcome"] == "degraded"
         finally:
             registry.close()
 

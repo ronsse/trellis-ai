@@ -93,6 +93,7 @@ a measured agreement rate.
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -134,6 +135,14 @@ logger = structlog.get_logger(__name__)
 AUTO_PROMOTE_REQUESTED_BY = "auto:learning_candidate"
 
 CandidateAutoPromoteMode = Literal["report_only", "commit"]
+
+#: Run-level status vocabulary shared by the emitted event's ``outcome``
+#: and ``report_to_dict``'s ``status`` (see :func:`_run_status`). Named
+#: the same three values as
+#: :data:`trellis.learning.precedent_auto_demote.RunStatus` — kept as a
+#: separate alias rather than imported, matching this module's existing
+#: by-value-copy relationship to its sibling.
+RunStatus = Literal["ok", "degraded", "failed"]
 
 
 def sanitize_configured_mode(value: object) -> str | None:
@@ -353,6 +362,34 @@ class LearningCandidateAutoPromotePolicy:
         return self.mode
 
 
+@functools.cache
+def _warn_mode_refused_in_settings_once(setting: str, stored_mode: str) -> None:
+    """Emit ``candidate_auto_promote_mode_refused_in_settings`` once per cause.
+
+    ``resolve_candidate_auto_promote_overrides`` resolves this family on
+    every call, including ``GET /settings`` (``trellis_api/routes/
+    settings.py``), which calls it once per request rather than once per
+    job run. A stored refused ``mode`` is a standing misconfiguration,
+    not a per-request event, so logging a warning on every poll turned
+    one bad `settings.json` entry into one warning per request forever.
+    ``functools.cache`` makes a repeat call with the same ``(setting,
+    stored_mode)`` a no-op: the body runs once per distinct cause per
+    process, the same dedup :func:`trellis.core.vector_metadata.
+    _warn_vector_store_unavailable_once` already applies to a different
+    standing cause.
+
+    ``_warn_mode_refused_in_settings_once.cache_clear()`` is test-facing
+    only, to isolate cases within one process — a production process
+    does not reset it mid-flight.
+    """
+    logger.warning(
+        "candidate_auto_promote_mode_refused_in_settings",
+        setting=setting,
+        stored_mode=stored_mode,
+        env_override=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+    )
+
+
 def resolve_candidate_auto_promote_overrides(
     *,
     settings: Mapping[str, bool | int | float | str] | None = None,
@@ -405,10 +442,8 @@ def resolve_candidate_auto_promote_overrides(
                 f"{CANDIDATE_AUTO_PROMOTE_MODE_SETTING}={stored_mode!r} "
                 "is not accepted."
             )
-            logger.warning(
-                "candidate_auto_promote_mode_refused_in_settings",
-                setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
-                env_override=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+            _warn_mode_refused_in_settings_once(
+                CANDIDATE_AUTO_PROMOTE_MODE_SETTING, stored_mode
             )
             raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
 
@@ -603,6 +638,44 @@ class CandidateAutoPromoteReport:
     def ineligible_count(self) -> int:
         return sum(1 for o in self.outcomes if o.disposition.startswith("ineligible:"))
 
+    @property
+    def submission_failed_count(self) -> int:
+        """Candidates where a write was actually attempted and did not
+        succeed -- the ``ineligible:submission_*`` dispositions
+        :func:`run_candidate_auto_promotion` reports when
+        ``submission.get("status") != "promoted"``. A strict subset of
+        :attr:`ineligible_count`: that count also includes dispositions
+        such as ``ineligible:run_cap_reached``, which were never
+        attempted at all, so it cannot stand in for this one in
+        :func:`_run_status`."""
+        return sum(
+            1
+            for o in self.outcomes
+            if o.disposition.startswith("ineligible:submission_")
+        )
+
+
+def _run_status(*, succeeded: int, attempt_failed: int, skipped: int) -> RunStatus:
+    """Classify one run's outcome for the emitted event and ``--format json``.
+
+    ``succeeded`` and ``attempt_failed`` both count candidates for which a
+    governed write was actually attempted (:attr:`CandidateAutoPromoteReport.
+    promoted_count` and :attr:`CandidateAutoPromoteReport.submission_failed_count`
+    respectively) -- a candidate that was never attempted (``would_promote``,
+    ``already_promoted``, ``ineligible:run_cap_reached``, ...) affects neither.
+    ``"failed"`` requires at least one attempt: a run with nothing to attempt
+    is never reported as having failed every attempt. ``skipped`` keeps this
+    module's pre-existing signal -- an id-less candidate dropped before it
+    could become an outcome at all -- folded into the same ``"degraded"``
+    bucket as a mixed attempt, never into ``"ok"``.
+    """
+    attempted = succeeded + attempt_failed
+    if attempted and not succeeded:
+        return "failed"
+    if skipped or attempt_failed:
+        return "degraded"
+    return "ok"
+
 
 def _emit_evaluated_event(
     event_log: EventLog,
@@ -626,13 +699,19 @@ def _emit_evaluated_event(
     promoted = sum(1 for o in outcomes if o.disposition == "promoted")
     already_promoted = sum(1 for o in outcomes if o.disposition == "already_promoted")
     ineligible = sum(1 for o in outcomes if o.disposition.startswith("ineligible:"))
+    submission_failed = sum(
+        1 for o in outcomes if o.disposition.startswith("ineligible:submission_")
+    )
     payload: dict[str, Any] = {
         # Top-level and not just derivable from ``counts.skipped`` so
         # ``loop_health.py``'s ``_build_candidate_auto_promote_row`` can
         # read a run's outcome the same way for a completed evaluation
         # (this event) and for a run that never got this far at all
         # (see ``_emit_failed_event`` below, same event type, same key).
-        "outcome": "degraded" if skipped else "ok",
+        # See ``_run_status`` for the ok | degraded | failed vocabulary.
+        "outcome": _run_status(
+            succeeded=promoted, attempt_failed=submission_failed, skipped=skipped
+        ),
         "mode": effective_mode,
         "configured_mode": sanitize_configured_mode(configured_mode),
         "dispositions": [
@@ -1077,25 +1156,34 @@ def _outcome_to_dict(outcome: CandidateAutoPromoteOutcome) -> dict[str, Any]:
 def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
     """Serialise a :class:`CandidateAutoPromoteReport` for ``--format json``.
 
-    ``status`` is ``"degraded"`` when ``report.skipped_count`` is nonzero
-    — this run silently dropped an id-less candidate before it could
-    become an outcome, the same condition the emitted event's own
-    ``outcome: "degraded"`` names (see :func:`_emit_evaluated_event`) —
-    and ``"ok"`` otherwise. Never ``"error"``: a run that failed before
+    ``status`` is one of ``"ok"`` | ``"degraded"`` | ``"failed"``, via
+    :func:`_run_status` (same vocabulary and same function the emitted
+    event's own ``outcome`` uses, see :func:`_emit_evaluated_event`):
+    ``"failed"`` when at least one candidate's promotion was actually
+    attempted (:attr:`CandidateAutoPromoteReport.promoted_count` +
+    :attr:`CandidateAutoPromoteReport.submission_failed_count`) and none
+    of those attempts succeeded; ``"degraded"`` when some attempts
+    succeeded and some failed, or ``report.skipped_count`` is nonzero
+    (an id-less candidate dropped before it could become an outcome at
+    all); ``"ok"`` otherwise. Never ``"error"``: a run that failed before
     reaching :func:`run_candidate_auto_promotion` never builds a report
     at all, and is reported instead through
     :func:`emit_candidate_auto_promote_failure_event`'s own
     ``"refused"``/``"failed"`` event payload and the CLI's own
-    ``"error"``-status JSON. The CLI still exits 0 for ``"degraded"``:
-    every candidate given an outcome was evaluated correctly, so nothing
-    here is a command failure, only an incomplete input the caller
-    should notice (``docs/agent-guide/operations.md``). Named here,
-    rather than left implicit, so this JSON shape and the CLI's exit
-    code are both read off the same flag
+    ``"error"``-status JSON. The CLI still exits 0 for ``"degraded"``
+    and ``"failed"`` alike: every candidate given an outcome was
+    evaluated correctly, so nothing here is a command failure, only
+    something the caller should notice (``docs/agent-guide/operations.md``).
+    Named here, rather than left implicit, so this JSON shape and the
+    CLI's exit code are both read off the same flag
     (``tests/unit/test_format_exit_parity_rule.py``).
     """
     return {
-        "status": "degraded" if report.skipped_count else "ok",
+        "status": _run_status(
+            succeeded=report.promoted_count,
+            attempt_failed=report.submission_failed_count,
+            skipped=report.skipped_count,
+        ),
         "enabled": report.enabled,
         "mode": report.mode,
         "configured_mode": sanitize_configured_mode(report.configured_mode),
