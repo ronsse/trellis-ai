@@ -16,11 +16,12 @@ stamp rather than treated as opaque decoration --
   (e.g. ``SCHEDULE_UPDATED``, ``JOB_RUN_REQUESTED``) to attribute *who*
   changed a schedule or classify rule.
 * ``write_provenance`` -- the per-process build/commit stamp
-  (:data:`trellis.core.write_provenance.WRITE_PROVENANCE_KEY`). A value
-  already present when :func:`trellis.core.write_provenance.stamp_metadata`
-  runs is kept rather than overwritten -- deliberately, so an internal
-  replay/backfill tool can restate history -- which is exactly why an
-  external caller must never be the one who sets it first.
+  (:data:`trellis.core.write_provenance.WRITE_PROVENANCE_KEY`).
+  :func:`trellis.core.write_provenance.stamp_metadata` keeps a value
+  already present on *event* metadata rather than overwriting it. No
+  emit passes ``Command.metadata`` through today, so nothing reads this
+  key off a command yet; it stays reserved so that a future pass-through
+  cannot let a caller choose which build an event claims.
 * ``handler_warnings`` -- read by
   :func:`trellis.mutate.executor._handler_warnings` and surfaced verbatim
   on ``CommandResult.warnings``; a caller-planted list would appear in the
@@ -68,7 +69,7 @@ class ReservedMetadataKeyError(ValueError):
     A plain :class:`ValueError`, not a :class:`trellis.errors.TrellisError`
     -- the boundaries that call :func:`reject_reserved_metadata` catch
     this locally and answer their own transport-shaped error (a 400 for
-    REST, ``INVALID_PARAMS`` for MCP), the same pattern
+    REST ``/commands/batch``), the same pattern
     ``trellis_api.routes.mutations._parse_operation`` already uses for a
     bad operation string, rather than falling through to the generic
     ``TrellisError`` handler's 500.
