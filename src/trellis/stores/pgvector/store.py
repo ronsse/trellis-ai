@@ -304,6 +304,12 @@ class PgVectorStore(PostgresStoreBase, VectorStore):
         }
 
     def delete(self, item_id: str) -> bool:
+        # A PostgreSQL ``text`` column can never hold a raw NUL byte: binding
+        # one raises ``psycopg.errors.DataError`` client-side before any SQL
+        # reaches the server. No row keyed on such a value can exist here,
+        # so "nothing to delete" is the exact answer, not a driver error.
+        if "\x00" in item_id:
+            return False
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM vectors WHERE item_id = %s",

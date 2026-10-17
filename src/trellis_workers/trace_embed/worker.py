@@ -131,7 +131,17 @@ class TraceEmbedReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "partial" if self.failed or self.skipped_invalid else "ok",
+            # ``skipped_empty`` joins ``failed``/``skipped_invalid`` here
+            # because the CLI already exits non-zero for it alone
+            # (src/trellis_cli/worker.py) -- a pass that left a trace
+            # unreachable reporting "ok" next to that exit code is the
+            # exact disagreement between payload and process result this
+            # worker exists to remove.
+            "status": (
+                "partial"
+                if self.failed or self.skipped_invalid or self.skipped_empty
+                else "ok"
+            ),
             "scanned": self.scanned,
             "embedded": self.embedded,
             "skipped_existing": self.skipped_existing,

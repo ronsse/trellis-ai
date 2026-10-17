@@ -2686,6 +2686,15 @@ class RedactionApplyHandler:
             # REDACTION_APPLIED carrying counts this command did not purge.
             raise NotFoundError(entity_type="entity", entity_id=target_id)
 
+        # ``target_id`` can carry the exact hazard this handler exists to
+        # purge: ``redaction.apply`` is deliberately absent from
+        # ID_BEARING_ARG_KEYS (see OperationRegistry.validate in
+        # mutate/commands.py), so a raw NUL byte or lone surrogate reaches
+        # here unscrubbed, and REDACTION_APPLIED is "the only record that
+        # survives the purge" (class docstring above). ``EventLog.append``
+        # scrubs ``entity_id`` and ``payload`` on every ``emit()`` call
+        # before any backend sees them, so this record lands on Postgres
+        # the same as any other -- no local scrub needed here.
         payload: dict[str, Any] = {
             "target_id": target_id,
             "target_kind": "entity",

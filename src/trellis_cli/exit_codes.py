@@ -40,7 +40,12 @@ from trellis.errors import (
     StoreError,
     ValidationError,
 )
-from trellis.mutate.commands import CommandResult, CommandStatus
+from trellis.mutate.commands import (
+    POLICY_REFUSAL_REASONS,
+    STORE_REFUSAL_REASONS,
+    CommandResult,
+    CommandStatus,
+)
 
 EXIT_OK = 0
 EXIT_INTERNAL = 1
@@ -121,9 +126,9 @@ def refusal_exit_code(result: CommandResult) -> int:
     if result.status != CommandStatus.REJECTED:
         return EXIT_STORE
     reason = result.metadata.get("rejection_reason")
-    if reason == "policy_violation":
+    if reason in POLICY_REFUSAL_REASONS:
         return EXIT_POLICY
-    if reason in ("degraded_store_write", "stale_store_write"):
+    if reason in STORE_REFUSAL_REASONS:
         return EXIT_STORE
     return EXIT_VALIDATION
 

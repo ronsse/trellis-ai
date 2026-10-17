@@ -228,3 +228,58 @@ class TestBackfillNameAliasesCommand:
         assert payload["status"] == "error"
         assert payload["failed"] == 1
         assert payload["failures"][0]["reason"] == "policy"
+
+    def test_validate_rejection_uses_validation_exit(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A NUL-bearing node id is refused at Stage 1 validate, not Stage 2
+        policy, so the exit code must be EXIT_VALIDATION (2), not the
+        EXIT_POLICY (3) a policy denial gets."""
+        _seed(tmp_path, monkeypatch, [("alpha\x00bad", "Alpha")])
+
+        result = runner.invoke(
+            app,
+            ["admin", "backfill-name-aliases", "--format", "json"],
+        )
+
+        assert result.exit_code == 2
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["failed"] == 1
+        assert payload["failures"][0]["reason"] == "validation"
+
+    def test_policy_and_validation_mix_does_not_exit_store(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A batch with one policy refusal and one Stage-1 validation refusal,
+        and zero store failures, must not exit EXIT_STORE (5): the old
+        uniform-reasons-set check fell through to EXIT_STORE as soon as the
+        failures disagreed, which this mix is built to trigger."""
+        stores_dir = _seed(
+            tmp_path,
+            monkeypatch,
+            [("alpha", "Alpha"), ("beta\x00bad", "Beta")],
+        )
+        PolicyStore(stores_dir / "policies.json").add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="alias.upsert", action="deny")],
+            )
+        )
+        _reset_registry()
+
+        result = runner.invoke(
+            app,
+            ["admin", "backfill-name-aliases", "--format", "json"],
+        )
+
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["bound"] == 0
+        assert payload["failed"] == 2
+        reasons = [failure["reason"] for failure in payload["failures"]]
+        assert sorted(reasons) == ["policy", "validation"]
+        # The first failure in command order decides the exit code.
+        expected = {"policy": 3, "validation": 2}[reasons[0]]
+        assert result.exit_code == expected

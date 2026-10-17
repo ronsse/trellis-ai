@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.mutate.commands import (
+    POLICY_REFUSAL_REASONS,
+    STORE_REFUSAL_REASONS,
     BatchStrategy,
     Command,
     CommandBatch,
@@ -141,11 +143,20 @@ def _classify_result(
         return BackfillFailure(stage="bind", reason="protocol", entity_id=entity_id)
     if result.status is CommandStatus.DUPLICATE:
         return _verify_duplicate(graph_store, command)
-    return BackfillFailure(
-        stage="bind",
-        reason="policy" if result.status is CommandStatus.REJECTED else "store",
-        entity_id=entity_id,
-    )
+    if result.status is CommandStatus.REJECTED:
+        # Classify with the same shared sets trellis_cli.exit_codes
+        # .refusal_exit_code reads for the identical purpose, so a reason
+        # added to the pipeline is categorized for both callers in one
+        # place rather than reimplemented here.
+        rejection_reason = result.metadata.get("rejection_reason")
+        if rejection_reason in POLICY_REFUSAL_REASONS:
+            reason: FailureReason = "policy"
+        elif rejection_reason in STORE_REFUSAL_REASONS:
+            reason = "store"
+        else:
+            reason = "validation"
+        return BackfillFailure(stage="bind", reason=reason, entity_id=entity_id)
+    return BackfillFailure(stage="bind", reason="store", entity_id=entity_id)
 
 
 def backfill_name_aliases(
