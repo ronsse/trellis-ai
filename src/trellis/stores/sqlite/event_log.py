@@ -16,7 +16,7 @@ from trellis.stores.sqlite.base import SQLiteStoreBase
 logger = structlog.get_logger(__name__)
 
 
-def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
+def _scrub_match_clause(column_sql: str, value: Any) -> tuple[str, list[Any]]:
     """Build a SQL fragment that matches ``column_sql`` against ``value``,
     scrubbed-aware.
 
@@ -39,9 +39,18 @@ def _scrub_match_clause(column_sql: str, value: str) -> tuple[str, list[Any]]:
     Postgres never needs this: a Postgres ``text``/``jsonb`` column can
     never have stored a raw NUL or lone surrogate in the first place
     (the write raises), so its filters stay a plain scrubbed equality.
+
+    ``payload_filters`` is typed ``dict[str, str]``, but a caller can
+    still hand this a non-``str`` value (an ``int``, or a ``float`` NaN,
+    whose ``!=``-to-itself skips the ``scrubbed == value`` shortcut
+    below). ``scrub_jsonb_unsafe`` only ever touches ``str``/``dict``/
+    ``list``/``tuple``, so a non-``str`` value is never a hazard and
+    never needs the raw/scrubbed ``IN`` clause; the ``isinstance`` check
+    routes it straight to the plain-equality return before the
+    ``.encode`` call below, which only ``str`` supports.
     """
     scrubbed = scrub_jsonb_unsafe(value)
-    if scrubbed == value:
+    if not isinstance(value, str) or scrubbed == value:
         return f"{column_sql} = ?", [value]
     try:
         value.encode("utf-8")
