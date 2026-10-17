@@ -16,12 +16,14 @@ from trellis.errors import PolicyViolationError, StoreError, ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate import executor as executor_module
 from trellis.mutate.commands import (
+    ID_BEARING_ARG_KEYS,
     BatchStrategy,
     Command,
     CommandBatch,
     CommandResult,
     CommandStatus,
     Operation,
+    OperationRegistry,
 )
 from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER, MutationExecutor
 from trellis.schemas.enums import TraceSource
@@ -513,6 +515,44 @@ class TestMutationExecutor:
 
         payload = event_log.emit.call_args.kwargs["payload"]
         assert payload["message"] == SUPPRESSED_MARKER
+
+
+class TestIdBearingArgRejectionNeverReachesHandler:
+    """A NUL/lone-surrogate hazard in an id-bearing ``args`` value (e.g.
+    ``entity.create``'s ``entity_id``, carried in ``args`` rather than
+    ``Command.target_id`` -- see ``ID_BEARING_ARG_KEYS``'s docstring in
+    ``mutate/commands.py``) is caught at Stage 1 ``validate``, the same
+    stage ``test_validate_rejection_emits_event`` above pins for missing
+    args, so the handler that would otherwise store it is never reached."""
+
+    @staticmethod
+    def _base_args(operation: Operation) -> dict[str, object]:
+        registry = OperationRegistry()
+        args: dict[str, object] = dict.fromkeys(
+            registry.get_required_args(operation), "test_value"
+        )
+        if operation is Operation.FEEDBACK_RECORD:
+            args["rating"] = 0.5
+        for key in ID_BEARING_ARG_KEYS.get(operation, frozenset()):
+            args.setdefault(key, "test_value")
+        return args
+
+    @pytest.mark.parametrize(
+        ("operation", "key"),
+        sorted((op, key) for op, keys in ID_BEARING_ARG_KEYS.items() for key in keys),
+    )
+    def test_handler_not_called_on_hazard(self, operation: Operation, key: str) -> None:
+        args = self._base_args(operation)
+        args[key] = "bad\x00value"
+        handler = _handler()
+        event_log = MagicMock()
+        executor = MutationExecutor(event_log=event_log, handlers={operation: handler})
+
+        result = executor.execute(Command(operation=operation, args=args))
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "validate"
+        handler.handle.assert_not_called()
 
 
 class TestRejectionPayloadIsJsonbSafe:

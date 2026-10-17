@@ -135,6 +135,50 @@ class CommandBatch(VersionedModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+#: Operation-specific ``args`` keys whose value is stored as a primary key
+#: or an audited ``entity_id`` -- never scanned generically, because
+#: free-text args (names, descriptions, reasons, comments) must stay
+#: accepted. Found by reading every handler in ``mutate/handlers.py``: the
+#: value each key names is either minted fresh (``entity.create``'s
+#: ``entity_id``, ``alias.upsert``'s owner ``entity_id``, ``link.create``'s
+#: edge endpoints, ``precedent.promote``'s trace-sourced ``trace_id``) or
+#: read back later by an exact-match query against a stored event's
+#: ``entity_id``/payload field (``precedent.demote``/``reinstate``,
+#: ``label.add``/``remove``, and ``feedback.record``'s ``target_id`` and
+#: its join key ``pack_id`` -- see ``_was_auto_promoted``,
+#: ``_is_promoted_precedent_event`` in handlers.py and
+#: ``join_pack_feedback`` in ``learning/pack_observations.py``).
+#:
+#: A key is deliberately absent when: the handler already refuses a NUL
+#: itself (``classify_rule.apply``/``revoke``'s ``key``/``target``/
+#: ``source_event_id``, via ``_validate_classify_rule_identifier``); the
+#: value only ever looks up a node that must already exist, and a failed
+#: lookup refuses cleanly either way (``redaction.apply``'s ``target_id``
+#: -- leaving it out also keeps governed redaction able to purge a row an
+#: id-minting bug stored before this check existed); or the value is free
+#: text/classification, not an identifier (``label.add``/``remove``'s
+#: ``label``, ``alias.upsert``'s ``raw_id``/``source_system``, every
+#: ``reason``/``name``/``description``). ``entity.create``'s optional
+#: ``document_ids`` and every ``trace``/``evidence``/``observation``/
+#: ``measurement``/``criteria``/``item_ids`` arg carry their id(s) nested
+#: in a dict or list, never a bare string, so they are out of scope by
+#: construction, not by omission. This mapping's size has a hand-read
+#: floor (``tests/unit/mutate/test_commands.py``) so deleting an entry
+#: fails a test.
+ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
+    Operation.ENTITY_CREATE: frozenset({"entity_id"}),
+    Operation.ENTITY_UPDATE: frozenset({"entity_id"}),
+    Operation.ALIAS_UPSERT: frozenset({"entity_id"}),
+    Operation.LINK_CREATE: frozenset({"source_id", "target_id"}),
+    Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
+    Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
+    Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
+    Operation.LABEL_ADD: frozenset({"target_id"}),
+    Operation.LABEL_REMOVE: frozenset({"target_id"}),
+    Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),
+}
+
+
 class OperationRegistry:
     """Registry of valid operations and their argument schemas."""
 
@@ -244,6 +288,17 @@ class OperationRegistry:
             if (value := getattr(command, field))
             and contains_nul_or_lone_surrogate(value)
         ]
+        # Same discipline, extended to the id-bearing args a handler reads
+        # directly rather than through Command's own typed fields -- see
+        # ID_BEARING_ARG_KEYS's docstring for which keys and why. Only a
+        # str value is checked; a missing or non-string value is left to
+        # the schema/handler validation that already covers it.
+        unsafe.extend(
+            f"args[{key!r}] contains a NUL byte or lone surrogate"
+            for key in ID_BEARING_ARG_KEYS.get(command.operation, frozenset())
+            if isinstance(value := command.args.get(key), str)
+            and contains_nul_or_lone_surrogate(value)
+        )
         if unsafe:
             return False, unsafe
         # The one value checked here: a feedback rating is a 0.0-1.0 score,

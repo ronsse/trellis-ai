@@ -3978,11 +3978,15 @@ paths:
 
         ``write_provenance``, ``handler_warnings`` --
 
-        :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). A batch
+        :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). The batch''s
 
-        containing one is refused whole with 400, naming the key, before any
+        own ``metadata`` (``CommandBatch.metadata``, distinct from any one
 
-        command executes.'
+        command''s) carries the same restriction, even though nothing reads it
+
+        yet. Either one naming a reserved key refuses the whole batch with
+
+        400, naming the key, before any command executes.'
       operationId: execute_batch_api_v1_commands_batch_post
       requestBody:
         content:
@@ -3998,8 +4002,9 @@ paths:
                 $ref: '#/components/schemas/BatchCommandResponse'
           description: Successful Response
         '400':
-          description: A command's own ``metadata`` named a key reserved for server-side audit stamping (``requested_by_claim``,
-            ``key_id``, ``key_name``, ``write_provenance``, ``handler_warnings``); ``detail`` names the key.
+          description: A command's own ``metadata``, or the batch's own ``metadata``, named a key reserved for server-side
+            audit stamping (``requested_by_claim``, ``key_id``, ``key_name``, ``write_provenance``, ``handler_warnings``);
+            ``detail`` names the key.
         '403':
           description: The batch names an operation outside NON_DESTRUCTIVE_OPERATIONS and the caller's key lacks the admin
             scope.

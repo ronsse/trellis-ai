@@ -107,9 +107,10 @@ def _build_command(
     responses={
         400: {
             "description": (
-                "A command's own ``metadata`` named a key reserved for "
-                "server-side audit stamping (``requested_by_claim``, "
-                "``key_id``, ``key_name``, ``write_provenance``, "
+                "A command's own ``metadata``, or the batch's own "
+                "``metadata``, named a key reserved for server-side audit "
+                "stamping (``requested_by_claim``, ``key_id``, "
+                "``key_name``, ``write_provenance``, "
                 "``handler_warnings``); ``detail`` names the key."
             )
         },
@@ -158,9 +159,11 @@ def execute_batch(
     one exception: it may not name a key reserved for server-side audit
     stamping (``requested_by_claim``, ``key_id``, ``key_name``,
     ``write_provenance``, ``handler_warnings`` --
-    :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). A batch
-    containing one is refused whole with 400, naming the key, before any
-    command executes.
+    :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). The batch's
+    own ``metadata`` (``CommandBatch.metadata``, distinct from any one
+    command's) carries the same restriction, even though nothing reads it
+    yet. Either one naming a reserved key refuses the whole batch with
+    400, naming the key, before any command executes.
     """
     operations = [_parse_operation(item.operation) for item in req.commands]
 
@@ -194,20 +197,22 @@ def execute_batch(
             _build_command(item, operation, requested_by, requested_by_claim)
             for item, operation in zip(req.commands, operations, strict=True)
         ]
+        # The batch's own metadata, not any one command's. Nothing reads
+        # CommandBatch.metadata today, but it is caller-supplied the same
+        # way each command's own metadata is, so it gets the same guard
+        # rather than an exemption that would need revisiting the day a
+        # handler starts reading it.
+        batch_metadata = reject_reserved_metadata(req.metadata)
     except ReservedMetadataKeyError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"metadata key {exc.key!r} is reserved for server-side "
-                "audit stamping and may not be set by the caller"
-            ),
-        ) from None
+        # str(exc) is ReservedMetadataKeyError's own message -- built from
+        # RESERVED_COMMAND_METADATA_KEYS, not a second copy of this prose.
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
     batch = CommandBatch(
         commands=commands,
         strategy=BatchStrategy(req.strategy),
         requested_by=requested_by,
-        metadata=req.metadata,
+        metadata=batch_metadata,
     )
 
     results = executor.execute_batch(batch)

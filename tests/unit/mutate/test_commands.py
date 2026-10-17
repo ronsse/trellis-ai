@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from trellis.mutate.commands import (
+    ID_BEARING_ARG_KEYS,
     BatchStrategy,
     Command,
     CommandBatch,
@@ -13,6 +14,26 @@ from trellis.mutate.commands import (
     Operation,
     OperationRegistry,
 )
+
+#: Every (operation, arg key) pair ID_BEARING_ARG_KEYS declares, flattened
+#: for parametrization. Sorted so a parametrize id is stable across runs.
+_ID_BEARING_PAIRS = sorted(
+    (op, key) for op, keys in ID_BEARING_ARG_KEYS.items() for key in keys
+)
+
+
+def _base_args(registry: OperationRegistry, operation: Operation) -> dict[str, object]:
+    """A minimal args dict that satisfies *operation*'s required schema,
+    plus every optional id-bearing key it declares (so a test can target
+    an optional key like ``feedback.record``'s ``pack_id`` the same way
+    as a required one)."""
+    required = registry.get_required_args(operation)
+    args: dict[str, object] = dict.fromkeys(required, "test_value")
+    if operation is Operation.FEEDBACK_RECORD:
+        args["rating"] = 0.5
+    for key in ID_BEARING_ARG_KEYS.get(operation, frozenset()):
+        args.setdefault(key, "test_value")
+    return args
 
 
 class TestOperation:
@@ -244,3 +265,81 @@ class TestFeedbackRecordRatingBound:
         )
         valid, _errors = registry.validate(cmd)
         assert valid is True
+
+
+class TestIdBearingArgNulSafety:
+    """A NUL byte or lone surrogate minted into an id-bearing ``args`` value
+    (``entity.create``'s ``entity_id`` and siblings — see
+    ``ID_BEARING_ARG_KEYS``'s docstring) is refused at Stage 1, the same
+    posture ``Command.target_id``/``idempotency_key``/``target_type``
+    already have. Refusing rather than scrubbing matters here specifically:
+    a scrubbed id would no longer match the raw key a later lookup sends.
+    """
+
+    @pytest.fixture
+    def registry(self) -> OperationRegistry:
+        return OperationRegistry()
+
+    @pytest.mark.parametrize(("operation", "key"), _ID_BEARING_PAIRS)
+    @pytest.mark.parametrize("hazard", ["\x00", "\ud800"], ids=["nul", "surrogate"])
+    def test_rejects_hazard_in_id_bearing_arg(
+        self,
+        registry: OperationRegistry,
+        operation: Operation,
+        key: str,
+        hazard: str,
+    ) -> None:
+        args = _base_args(registry, operation)
+        args[key] = f"bad{hazard}value"
+        cmd = Command(operation=operation, args=args)
+
+        valid, errors = registry.validate(cmd)
+
+        assert valid is False
+        assert any(repr(key) in e and "NUL byte or lone surrogate" in e for e in errors)
+
+    @pytest.mark.parametrize(("operation", "key"), _ID_BEARING_PAIRS)
+    def test_honest_value_in_id_bearing_arg_passes(
+        self, registry: OperationRegistry, operation: Operation, key: str
+    ) -> None:
+        args = _base_args(registry, operation)
+        cmd = Command(operation=operation, args=args)
+
+        valid, errors = registry.validate(cmd)
+
+        assert valid is True, f"{operation}/{key}: {errors}"
+        assert errors == []
+
+    @pytest.mark.parametrize(
+        ("operation", "free_text_key"),
+        [
+            (Operation.ENTITY_CREATE, "name"),
+            (Operation.PRECEDENT_DEMOTE, "reason"),
+            (Operation.LABEL_ADD, "label"),
+        ],
+    )
+    def test_hazard_in_free_text_arg_still_accepted(
+        self,
+        registry: OperationRegistry,
+        operation: Operation,
+        free_text_key: str,
+    ) -> None:
+        """Content, not an identifier: ``args`` is not scanned wholesale —
+        only the keys ``ID_BEARING_ARG_KEYS`` names for that operation."""
+        args = _base_args(registry, operation)
+        args[free_text_key] = "bad\x00 name with a NUL"
+
+        valid, errors = registry.validate(Command(operation=operation, args=args))
+
+        assert valid is True
+        assert errors == []
+
+    def test_mapping_hand_read_floor(self) -> None:
+        """Pinned to the exact count found by reading every handler in
+        ``mutate/handlers.py`` (see ``ID_BEARING_ARG_KEYS``'s docstring for
+        which operation/key pairs and why, and which were deliberately left
+        out). Deleting an entry drops one of these counts and fails here —
+        a silent shrink is the one failure mode this test exists to catch.
+        """
+        assert len(ID_BEARING_ARG_KEYS) == 10
+        assert len(_ID_BEARING_PAIRS) == 12

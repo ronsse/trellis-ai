@@ -246,6 +246,73 @@ class TestStateIsTheAuthority:
         assert _embedded_trace_ids(registry, traces) == {t.trace_id for t in traces}
 
 
+class TestPermanentlyInvalidRowDoesNotPinTheWatermark:
+    """A hazardous trace id (a NUL byte or lone surrogate, as SQLite can
+    already hold one — see ``trellis.mutate.commands``) rejects identically
+    on every retry. Unlike the renderer failure above, holding the cursor
+    behind it would never recover: it would re-reject the same row, and only
+    that row, forever. The fix is to advance past it like an already-embedded
+    trace, counted separately so the gap stays visible.
+    """
+
+    def test_a_permanently_rejected_row_is_skipped_and_the_cursor_advances(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        from trellis.stores.base.event_log import EventType
+
+        from .conftest import make_trace
+
+        good_a = make_trace(0)
+        # Seeded directly against the store, bypassing the governed write
+        # path — this is the shape SQLite already accepts and Postgres
+        # would refuse at write time (see commands.py), so it is only
+        # reachable as a pre-existing row, never as a new write.
+        bad = make_trace(1).model_copy(update={"trace_id": "bad\x00trace"})
+        good_b = make_trace(2)
+        for trace in (good_a, bad, good_b):
+            registry.operational.trace_store.append(trace)
+
+        first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert first.scanned == 3
+        assert first.embedded == 2
+        assert first.skipped_invalid == 1
+        assert first.failed == 0
+        assert first.to_dict()["status"] == "ok", (
+            "a permanent rejection is not a failure the pass should flag red"
+        )
+
+        # The cursor is past ALL three, including the invalid row — not
+        # pinned behind it.
+        saved = TraceEmbedWatermark(watermark_path).cursor
+        assert saved == TraceCursor(
+            created_at=good_b.created_at, trace_id=good_b.trace_id
+        )
+        assert _embedded_trace_ids(registry, [good_a, good_b]) == {
+            good_a.trace_id,
+            good_b.trace_id,
+        }
+
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, limit=50
+        )
+        assert len(rejected) == 1
+        assert rejected[0].payload.get("reason") == "validate"
+
+        # A second pass finds nothing left behind the cursor: no re-read,
+        # and no new rejection event for the same row.
+        second = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert second.scanned == 0
+        assert second.skipped_invalid == 0
+        assert (
+            len(
+                registry.operational.event_log.get_events(
+                    event_type=EventType.MUTATION_REJECTED, limit=50
+                )
+            )
+            == 1
+        )
+
+
 class TestCollectionHasNoGaps:
     @pytest.mark.parametrize("page_size", [1, 2, 3, 7, 200])
     def test_paging_reaches_every_trace(

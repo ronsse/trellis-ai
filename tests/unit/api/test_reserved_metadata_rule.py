@@ -18,14 +18,18 @@ server-derived ``requested_by_claim``; this rule is what keeps a *new*
 site (or a regression in this one) from reopening the hole.
 
 **What the rule polices.** Every call in ``src/trellis_api/routes/`` or
-``src/trellis/mcp/`` to ``Command`` carrying a ``metadata=`` keyword, or
-to ``build_evidence_ingest_command``/``build_evidence_ingest_command_from_args``
-carrying a ``command_metadata=`` keyword -- ``CommandBatch``'s own
-``metadata=`` is deliberately excluded (``MutationExecutor.execute_batch``
-never reads it; see the module docstring's "out of scope" note), and so is
-``build_evidence_ingest_command``'s own ``metadata=`` keyword, which sets
-the *document's* content metadata, a caller-owned field with no relation
-to audit identity.
+``src/trellis/mcp/`` to ``Command`` or ``CommandBatch`` carrying a
+``metadata=`` keyword, or to
+``build_evidence_ingest_command``/``build_evidence_ingest_command_from_args``
+carrying a ``command_metadata=`` keyword. ``build_evidence_ingest_command``'s
+own ``metadata=`` keyword is the one exclusion: it sets the *document's*
+content metadata, a caller-owned field with no relation to audit identity.
+``CommandBatch.metadata`` is read by no handler today
+(``MutationExecutor.execute_batch`` never reads it) -- but it is
+caller-supplied the same way a command's own metadata is, so
+``trellis_api.routes.mutations.execute_batch`` guards it the same way
+before building the batch, rather than leaving an exemption that would
+need revisiting the day something starts reading it.
 
 A site is unsafe only when its value is **shaped like a raw copy of a
 caller mapping** -- a bare ``X.metadata`` attribute access, ``dict(X.metadata)``,
@@ -73,7 +77,7 @@ _GUARD_NAME = "reject_reserved_metadata"
 
 #: Hand-read 2026-10-17 against this branch: every call under
 #: ``src/trellis_api/routes/*.py`` or ``src/trellis/mcp/*.py`` to
-#: ``Command`` carrying ``metadata=``, or to
+#: ``Command`` or ``CommandBatch`` carrying ``metadata=``, or to
 #: ``build_evidence_ingest_command``/``build_evidence_ingest_command_from_args``
 #: carrying ``command_metadata=`` --
 #:   admin.py: schedule-update, job-run-request
@@ -83,17 +87,19 @@ _GUARD_NAME = "reject_reserved_metadata"
 #:              (Command(metadata={...} if claim else {}))                  (3)
 #:   ingest.py: ingest_trace x3 (Command(metadata=_claim_metadata(claim)))   (3)
 #:   mutations.py: _build_command's build_evidence_ingest_command_from_args
-#:                 call, _build_command's Command(...) fallback             (2)
+#:                 call, _build_command's Command(...) fallback,
+#:                 execute_batch's CommandBatch(...) call                   (3)
 #:   mcp/server.py: execute_mutation's build_evidence_ingest_command_from_args
 #:                  call, execute_mutation's Command(...) fallback          (2)
-#: Total: 2 + 2 + 3 + 3 + 2 + 2 = 14
-_HAND_READ_FLOOR = 14
+#: Total: 2 + 2 + 3 + 3 + 3 + 2 = 15
+_HAND_READ_FLOOR = 15
 
-#: ``Command``'s own keyword. ``CommandBatch`` and
-#: ``build_evidence_ingest_command``'s ``metadata=`` are not in this map
-#: at all -- see the module docstring for why each is out of scope.
+#: ``Command``'s and ``CommandBatch``'s own keyword.
+#: ``build_evidence_ingest_command``'s ``metadata=`` is not in this map at
+#: all -- see the module docstring for why it is out of scope.
 _SUBJECT_KEYWORDS: dict[str, str] = {
     "Command": "metadata",
+    "CommandBatch": "metadata",
     "build_evidence_ingest_command": "command_metadata",
     "build_evidence_ingest_command_from_args": "command_metadata",
 }
@@ -413,10 +419,11 @@ class TestRuleCatchesADefectiveRoute:
         )
         assert _unsafe_sites(tree) == []
 
-    def test_command_batch_metadata_is_out_of_scope(self) -> None:
-        """``CommandBatch.metadata`` is never read by the executor (see
-        the module docstring); a caller passthrough there is not this
-        rule's population at all, so it must not even be counted."""
+    def test_command_batch_metadata_passthrough_is_flagged(self) -> None:
+        """``CommandBatch.metadata`` is read by no handler today, but it is
+        caller-supplied the same way a command's own metadata is, so an
+        unguarded passthrough is flagged the same way (see
+        ``trellis_api.routes.mutations.execute_batch``)."""
         tree = _parse(
             """
             from trellis.mutate import CommandBatch
@@ -430,7 +437,24 @@ class TestRuleCatchesADefectiveRoute:
                 )
             """
         )
-        assert _reserved_metadata_calls(tree) == []
+        assert len(_unsafe_sites(tree)) == 1
+
+    def test_command_batch_metadata_through_the_guard_is_not_flagged(self) -> None:
+        tree = _parse(
+            """
+            from trellis.mutate import CommandBatch, reject_reserved_metadata
+
+            def handler(req, requested_by):
+                batch_metadata = reject_reserved_metadata(req.metadata)
+                return CommandBatch(
+                    commands=[],
+                    strategy="sequential",
+                    requested_by=requested_by,
+                    metadata=batch_metadata,
+                )
+            """
+        )
+        assert _unsafe_sites(tree) == []
 
     def test_evidence_document_metadata_keyword_is_out_of_scope(self) -> None:
         """``build_evidence_ingest_command``'s ``metadata=`` sets the

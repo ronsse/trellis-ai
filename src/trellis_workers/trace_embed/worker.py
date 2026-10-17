@@ -109,6 +109,13 @@ class TraceEmbedReport:
     embedded: int = 0
     skipped_existing: int = 0
     skipped_empty: int = 0
+    #: Rows Stage 1 permanently refuses (e.g. a NUL byte or lone surrogate in
+    #: a stored trace id) rather than a transient failure. Counted separately
+    #: from ``failed`` because the pass advances past these -- see
+    #: ``_process_one``: a validation rejection cannot ever become a success
+    #: on retry, so holding the watermark behind it forever would re-reject
+    #: the same row every pass without ever making progress.
+    skipped_invalid: int = 0
     failed: int = 0
     stopped_early: bool = False
     #: More traces remained after ``max_scan`` cut this pass. Reported, not
@@ -127,6 +134,7 @@ class TraceEmbedReport:
             "embedded": self.embedded,
             "skipped_existing": self.skipped_existing,
             "skipped_empty": self.skipped_empty,
+            "skipped_invalid": self.skipped_invalid,
             "failed": self.failed,
             "stopped_early": self.stopped_early,
             "more_remaining": self.more_remaining,
@@ -394,11 +402,21 @@ def run_trace_embed_pass(
         watermark.cursor.created_at.isoformat() if watermark.cursor else None
     )
 
+    _log_skipped_invalid(report)
+
     logger.info(
         "trace_embed_pass_completed",
         **{k: v for k, v in report.to_dict().items() if k != "failures"},
     )
     return report
+
+
+def _log_skipped_invalid(report: TraceEmbedReport) -> None:
+    """One warning naming the count -- never a trace id, which is exactly
+    the hazardous value ``skipped_invalid`` exists to keep out of a log
+    line. Split out so the branch stays off ``run_trace_embed_pass``."""
+    if report.skipped_invalid:
+        logger.warning("trace_embed_skipped_invalid", count=report.skipped_invalid)
 
 
 def _process_one(
@@ -414,6 +432,14 @@ def _process_one(
 
     A dry run returns ``False`` for anything it *would* have written: nothing
     was confirmed, so the cursor must not move past it.
+
+    A Stage-1 ``validate`` rejection is the one exception to "failure stops
+    the cursor": it is permanent -- the same hazard (e.g. a NUL byte or lone
+    surrogate already stored in this trace's id) rejects it identically on
+    every retry, so refusing to advance would pin the watermark on this row
+    forever and re-emit a rejection event every pass. Counted under
+    ``skipped_invalid`` and returns ``True`` so the cursor moves past it, the
+    same way an already-embedded trace does.
     """
     if trace_is_embedded(vector_store, trace.trace_id):
         report.skipped_existing += 1
@@ -443,6 +469,17 @@ def _process_one(
             created_at=trace.created_at.isoformat(),
         )
     )
+    if (
+        result.status is CommandStatus.REJECTED
+        and result.metadata.get("rejection_reason") == "validate"
+    ):
+        # Permanent, not transient -- see the docstring above. No per-trace
+        # log line and no trace id in ``failures``: the id is exactly the
+        # hazardous value this rejection exists to keep out of a rendered
+        # report, so the pass-level count below is the only signal.
+        report.skipped_invalid += 1
+        return True
+
     if result.status is not CommandStatus.SUCCESS:
         report.failed += 1
         report.failures.append(
@@ -474,6 +511,7 @@ def summarize(
         total.embedded += r.embedded
         total.skipped_existing += r.skipped_existing
         total.skipped_empty += r.skipped_empty
+        total.skipped_invalid += r.skipped_invalid
         total.failed += r.failed
         total.failures.extend(r.failures)
     return total.to_dict()
