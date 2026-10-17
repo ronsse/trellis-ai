@@ -588,6 +588,20 @@ class TestUpdateSetting:
         resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 5.0})
         assert resp.status_code == 400
 
+    def test_class_prior_mode_demote_is_refused_with_400(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """The dropped ``demote`` mode is not a value this governed route
+        will accept, even though the resolver would quietly degrade it to
+        ``off`` if it ever reached a stored value (``test_class_prior.py``
+        covers that path). The write itself is refused outright, and
+        nothing is persisted.
+        """
+        resp = client.put("/api/v1/settings/class_prior_mode", json={"value": "demote"})
+        assert resp.status_code == 400
+        assert "demote" in resp.json()["detail"]
+        assert _store(registry).get("class_prior_mode") is None
+
     def test_missing_value_field_is_422(self, client: TestClient) -> None:
         resp = client.put("/api/v1/settings/pack_holdout_rate", json={})
         assert resp.status_code == 422

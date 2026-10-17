@@ -173,8 +173,13 @@ class TestCommitModeConstructionRefused:
         with pytest.raises(
             ConfigError,
             match="commit mode is not available until auto-demotion is enabled",
-        ):
+        ) as excinfo:
             LearningCandidateAutoPromotePolicy(mode="commit")
+        # The refusal must name the setting an operator would go edit,
+        # not just the mode -- both the structured ``.setting`` attribute
+        # (gate-879 follow-up #6) and the message text itself.
+        assert excinfo.value.setting == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+        assert CANDIDATE_AUTO_PROMOTE_MODE_SETTING in str(excinfo.value)
 
     def test_mode_commit_raises_even_when_disabled(self) -> None:
         with pytest.raises(ConfigError):

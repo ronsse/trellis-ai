@@ -112,6 +112,21 @@ def test_a_fetch_failure_hides_the_badge_not_an_error_glyph() -> None:
     assert "'!'" not in catch_block
 
 
+def test_badge_renders_100_plus_at_the_proposals_default_limit() -> None:
+    # `/proposals` is called with no explicit `limit`, so the server's
+    # `Query(100, ...)` default caps `count` at 100 -- that cap is a
+    # floor on the real total, not the total itself, so it must never
+    # render as a bare "100".
+    page = _page()
+    body = _function_body(
+        page,
+        "async function refreshReviewBadge() {",
+        "function reachabilityHtml(p) {",
+    )
+    assert "REVIEW_BADGE_CAP" in page
+    assert "n >= REVIEW_BADGE_CAP ? `${REVIEW_BADGE_CAP}+`" in body
+
+
 def test_badge_reuses_the_proposals_endpoint_already_called_by_the_tab() -> None:
     page = _page()
     body = _function_body(
@@ -189,3 +204,4 @@ def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     )
     assert "if (n > 0) {" not in defective
     assert "if (!getApiKey())" not in defective
+    assert "REVIEW_BADGE_CAP" not in defective

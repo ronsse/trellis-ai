@@ -362,6 +362,11 @@ class TestResolveOverridesPrecedence:
             resolve_precedent_auto_demote_overrides(settings=settings, env={})
         assert excinfo.value.setting == PRECEDENT_AUTO_DEMOTE_MODE_SETTING
         assert "TRELLIS_PRECEDENT_AUTO_DEMOTE_MODE" in str(excinfo.value)
+        # The message itself must name the setting's dotted path, not
+        # just the structured ``.setting`` attribute -- a human reading
+        # text-format CLI output has no other way to learn it
+        # (gate-879 follow-up #6).
+        assert PRECEDENT_AUTO_DEMOTE_MODE_SETTING in str(excinfo.value)
         warnings = [e for e in logs if e["log_level"] == "warning"]
         assert any(
             e["event"] == "precedent_auto_demote_mode_refused_in_settings"

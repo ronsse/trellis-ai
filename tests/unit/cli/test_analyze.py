@@ -387,6 +387,67 @@ class TestReplay:
         result = runner.invoke(app, ["analyze", "replay", "--body-items", "0"])
         assert result.exit_code == 2
 
+    @staticmethod
+    def _seed_class_prior(registry: StoreRegistry) -> None:
+        """One pack whose sole item matches the shipped default config
+        (conversation form, keyword axis) and was cited unhelpful."""
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="cpack_0",
+            entity_type="pack",
+            payload={
+                "pack_id": "cpack_0",
+                "injected_items": [
+                    {
+                        "item_id": "cpack_0_c1",
+                        "item_type": "document",
+                        "rank": 1,
+                        "estimated_tokens": 40,
+                        "relevance_score": 0.9,
+                        "strategy_source": "keyword",
+                        "document_form": "conversation",
+                    }
+                ],
+                "budget_trace": [],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id="cpack_0",
+            payload={
+                "pack_id": "cpack_0",
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": ["cpack_0_c1"],
+                "rating": 0.0,
+                "success": False,
+            },
+        )
+
+    def test_class_prior_flag_with_no_events_reports_zero(self) -> None:
+        result = runner.invoke(
+            app, ["analyze", "replay", "--class-prior", "--format", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["attributed_packs"] == 0
+        assert data["matched_servings"] == 0
+        # Shipped default is "off", so the arm reports the off note even
+        # though nothing was served — the config, not the data, is why.
+        assert any('mode is "off"' in note for note in data["notes"])
+
+    def test_class_prior_flag_text_output_names_the_config(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_class_prior(temp_stores)
+        result = runner.invoke(app, ["analyze", "replay", "--class-prior"])
+        assert result.exit_code == 0
+        rendered = plain(result.stdout)
+        assert "Class-Prior Replay" in rendered
+        assert "mode=off" in rendered
+
 
 class TestValue:
     """``trellis analyze value`` — serving precision, with its coverage."""

@@ -30,8 +30,12 @@ fields; ``graph_seeding``
 (:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
 ``filter_legacy_advisories``
 (:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
-catalog entries outside ``WriteBehaviourConfig``; eight more read-side
-knobs, also outside ``WriteBehaviourConfig``: the knowledge-graph
+catalog entries outside ``WriteBehaviourConfig``; ``class_prior_mode``
+(:mod:`trellis.retrieve.class_prior`) the same way — the gate's other two
+fields, ``forms``/``axes``, stay env-only since this module has no
+list-typed field, so they are deliberately not catalog entries; eight more
+read-side knobs, also outside ``WriteBehaviourConfig``:
+the knowledge-graph
 subgraph depth cap, the two noise-demotion evidence thresholds, the two
 advisory-generation thresholds, and the three capture-health knobs (the
 warning threshold, its trailing window, and whether a partial
@@ -76,8 +80,9 @@ write-config`` / ``GET /api/version`` report about it. Every real
 enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
 ``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
-``demotion_gate.py``, ``advisory_generator.py``, ``capture_health.py``,
-``session_capture/sweep.py``, ``trellis_cli.worker._build_auto_promote_policy``,
+``class_prior.py``, ``demotion_gate.py``, ``advisory_generator.py``,
+``capture_health.py``, ``session_capture/sweep.py``,
+``trellis_cli.worker._build_auto_promote_policy``,
 ``trellis.learning.candidate_auto_promote``,
 ``trellis.learning.precedent_auto_demote``, ``retrieve/strategies.py``,
 ``trellis_api/routes/retrieve.py``) now resolves env > settings
@@ -159,7 +164,7 @@ SettingType = Literal["bool", "int", "float", "str"]
 #: ``"learning_loops"`` holds the tuner's ``learning.auto_promote.*``, the
 #: ``learning.candidate_auto_promote.*`` and the
 #: ``learning.precedent_auto_demote.*`` entries below, out of this
-#: module's 41 entries total.
+#: module's 42 entries total.
 SettingGroup = Literal[
     "retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"
 ]
@@ -620,6 +625,50 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
     ),
     SettingSpec(
+        name="class_prior_mode",
+        label="Conversation document prior",
+        type="str",
+        default="off",
+        description=(
+            "Applies a class-level prior to imported conversation "
+            "documents on the retrieval axes TRELLIS_CLASS_PRIOR_AXES "
+            "names (keyword only, by default) — a judgment about the "
+            "whole document form, not a per-item one. 'off' (the "
+            "default) serves this class exactly like everything else. "
+            "'withhold' removes a matching document from the configured "
+            "axes only, recorded under a rejection reason distinct from "
+            "noise/archived/superseded; if an unconfigured axis also "
+            "surfaces the same document, that axis may still serve it, "
+            "and the pack's withholding note says so. Withholds "
+            "conversation parent documents; their chunks carry "
+            "no document form and are never touched. Measured on the "
+            "live store: this class took about 11% of pack tokens on "
+            "the keyword axis while being marked helpful 0 of 83 times "
+            "and unhelpful on 44% of rows there, and only 1.2% of these "
+            "documents have ever been marked helpful at all — but other "
+            "namespaces are helpful 8-25% of the time, so this must stay "
+            "scoped to one document form rather than widened "
+            "store-wide."
+        ),
+        # Which document forms and axes this reaches is set by
+        # TRELLIS_CLASS_PRIOR_FORMS / TRELLIS_CLASS_PRIOR_AXES — env-only,
+        # since SettingSpec has no list-typed field (see the module
+        # docstring's "Scope" section) — defaulting to the imported
+        # conversation form on the keyword axis only. See
+        # trellis.retrieve.class_prior for the gate itself.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'withhold' removes matching items from every pack on the "
+            "configured axes before an operator sees them."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_CLASS_PRIOR_MODE",
+        enum=("off", "withhold"),
+    ),
+    SettingSpec(
         name="get_context_max_tokens",
         label="get_context token budget",
         type="int",
@@ -954,7 +1003,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("report_only", "commit"),
         refused_values=("commit",),
         refused_reason=(
-            "commit mode cannot be set through Settings; only the "
+            'learning.candidate_auto_promote.mode="commit" cannot be set '
+            "through Settings; only the "
             f"{CANDIDATE_AUTO_PROMOTE_MODE_ENV} environment variable can, "
             "and construction still refuses it unless auto-demotion "
             "(learning.precedent_auto_demote.enabled) is also on"
@@ -1124,7 +1174,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("report_only", "commit"),
         refused_values=("commit",),
         refused_reason=(
-            "commit mode cannot be set through Settings; only the "
+            'learning.precedent_auto_demote.mode="commit" cannot be set '
+            "through Settings; only the "
             f"{PRECEDENT_AUTO_DEMOTE_MODE_ENV} environment variable can"
         ),
     ),

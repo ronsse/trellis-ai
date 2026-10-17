@@ -548,6 +548,160 @@ class TestFilterLegacyAdvisoriesWiring:
         assert messages == {"post-repair row"}
 
 
+class TestClassPriorWiring:
+    """``class_prior_config`` is resolved once, with settings, by the factory
+    (see the comment beside ``class_prior_config=`` in ``build_pack_builder``)
+    — proven end to end through a real keyword-axis document, same shape as
+    ``TestFilterLegacyAdvisoriesWiring`` above.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    def test_default_is_off_and_serves_the_conversation_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import CLASS_PRIOR_MODE_ENV
+
+        monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+
+    def test_a_settings_only_override_withholds_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_MODE_ENV,
+            CLASS_PRIOR_REJECTION_REASON,
+        )
+
+        monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "class_prior_mode", "withhold"
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert pack.items == []
+        rejected = pack.retrieval_report.rejected_items
+        assert any(r.reason == CLASS_PRIOR_REJECTION_REASON for r in rejected)
+
+    def test_env_beats_a_settings_override_here_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.class_prior import CLASS_PRIOR_MODE_ENV
+
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"document_form": "conversation"},
+        )
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "class_prior_mode", "withhold"
+        )
+        monkeypatch.setenv(CLASS_PRIOR_MODE_ENV, "off")
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+
+    def test_the_real_importer_chunks_a_conversation_without_touching_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exercises the real conversation reader + chunker, not a
+        hand-built item: only the parent a sync run writes carries
+        ``document_form``, so it alone may be withheld, and every chunk
+        the same run writes must come through untouched."""
+        import json
+        import random
+
+        from trellis.ingest_corpus.conversations import (
+            conversation_doc_id,
+            sync_conversations,
+        )
+        from trellis.ingest_corpus.models import chunk_doc_id
+        from trellis.retrieve.class_prior import (
+            CLASS_PRIOR_MODE_ENV,
+            CLASS_PRIOR_REJECTION_REASON,
+        )
+
+        monkeypatch.setenv(CLASS_PRIOR_MODE_ENV, "withhold")
+        registry = self._registry(tmp_path)
+
+        # Long enough, across several turns, to push the rendered
+        # transcript past the chunking threshold and yield 2+ chunks.
+        # Each turn opens with the query phrase (once) and is padded with
+        # deterministic-but-random filler so no two chunks look like
+        # near-duplicates to the pack's own semantic-dedup gate — a flat
+        # repeated phrase would trip that gate and confound this test with
+        # a second, unrelated rejection reason.
+        rng = random.Random(1234)  # noqa: S311 - test RNG, not crypto
+        vocabulary = [f"item{i}" for i in range(500)]
+
+        def _turn() -> str:
+            filler = " ".join(rng.choice(vocabulary) for _ in range(700))
+            return f"a canary rollout runbook detail. {filler}"
+
+        export_path = tmp_path / "conversations.json"
+        export_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "uuid": "conv-1",
+                        "name": "Canary rollout notes",
+                        "chat_messages": [
+                            {"sender": "human", "text": _turn()},
+                            {"sender": "assistant", "text": _turn()},
+                            {"sender": "human", "text": _turn()},
+                        ],
+                    }
+                ]
+            )
+        )
+
+        report = sync_conversations(registry, export_path, requested_by="test")
+        (outcome,) = report.files
+        assert outcome.chunk_count >= 2  # the real chunker actually split it
+        parent_id = conversation_doc_id("claude-ai", "conv-1")
+        assert outcome.doc_id == parent_id
+
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout runbook detail"
+        )
+
+        rejected_reasons = {
+            rejected.item_id: rejected.reason
+            for rejected in pack.retrieval_report.rejected_items
+        }
+        chunk_ids = {
+            chunk_doc_id(parent_id, index) for index in range(outcome.chunk_count)
+        }
+        seen_ids = {item.item_id for item in pack.items} | set(rejected_reasons)
+        # The chunks were actually candidates, so "never rejected" below
+        # isn't vacuously true because the search never found them.
+        assert chunk_ids & seen_ids
+        assert rejected_reasons.get(parent_id) == CLASS_PRIOR_REJECTION_REASON
+        assert not (chunk_ids & rejected_reasons.keys())
+
+
 class TestDisclosureBodyItemsWiring:
     """``disclosure_body_items`` -- env > settings > :data:`DEFAULT_BODY_ITEMS`,
     resolved once per build and handed to :class:`DisclosureConfig`. Same

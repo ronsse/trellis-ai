@@ -41,15 +41,33 @@ from trellis_wire.dtos import (
     BulkIngestRequest,
     BulkIngestResponse,
     BulkItemResult,
+    DefaultValidationError,
     IngestResponse,
+    StringDetailError,
 )
+
+#: Every hand-raised 422 in this module carries a plain-string ``detail``
+#: (describing the bad trace/evidence/vectors body), not FastAPI's own
+#: default list-of-field-errors shape -- but each route's body param is
+#: typed ``dict[str, Any]``, so FastAPI's own validation can still fail
+#: with that default shape first (e.g. a JSON body that isn't an object
+#: at all). Declared once and reused on every route below.
+_BODY_422 = {
+    "description": (
+        "The body isn't a JSON object at all (DefaultValidationError -- "
+        "``detail`` is a list of field errors), or it is one but fails "
+        "the route's own schema validation (StringDetailError -- "
+        "``detail`` is a plain string naming the problem)."
+    ),
+    "model": DefaultValidationError | StringDetailError,
+}
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
 
-@router.post("/traces", response_model=IngestResponse)
+@router.post("/traces", response_model=IngestResponse, responses={422: _BODY_422})
 def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     """Ingest a trace through the governed mutation pipeline."""
     try:
@@ -101,7 +119,7 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     )
 
 
-@router.post("/evidence", response_model=IngestResponse)
+@router.post("/evidence", response_model=IngestResponse, responses={422: _BODY_422})
 def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
     """Ingest evidence."""
     try:
@@ -147,7 +165,7 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
 # ── Vector batch upsert ─────────────────────────────────────────────────
 
 
-@router.post("/vectors")
+@router.post("/vectors", responses={422: _BODY_422})
 def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
     """Batch upsert vectors into the vector store.
 

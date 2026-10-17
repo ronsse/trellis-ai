@@ -102,6 +102,7 @@ from trellis_wire.dtos import (
     BackendHealth,
     CodeProposalListResponse,
     CodeProposalSummary,
+    DefaultValidationError,
     DraftAdrResponse,
     HealthResponse,
     LearningCandidateListResponse,
@@ -118,6 +119,7 @@ from trellis_wire.dtos import (
     SchemaEvolutionCandidate,
     SchemaEvolutionListResponse,
     StatsResponse,
+    StringDetailError,
     TimeseriesPointResponse,
     TimeseriesSeriesResponse,
     TunerProposalListResponse,
@@ -472,7 +474,22 @@ def apply_noise_tags(
 # -- Improvement-metrics dashboard (WP11) --
 
 
-@router.get("/metrics/timeseries", response_model=MetricsTimeseriesResponse)
+@router.get(
+    "/metrics/timeseries",
+    response_model=MetricsTimeseriesResponse,
+    responses={
+        422: {
+            "description": (
+                "``days`` isn't a valid int (DefaultValidationError -- "
+                "``detail`` is a list of field errors), or ``bucket`` / "
+                "``metric`` / ``group_by`` fails its own value check "
+                "(StringDetailError -- ``detail`` is a plain string naming "
+                "the problem)."
+            ),
+            "model": DefaultValidationError | StringDetailError,
+        }
+    },
+)
 def metrics_timeseries(
     metric: str = Query(..., description="One of the five improvement metrics"),
     days: int = Query(30, description="Look-back window in days"),
@@ -2045,7 +2062,23 @@ def list_admin_jobs() -> AdminJobListResponse:
     )
 
 
-@router.patch("/admin/jobs/{name}", response_model=AdminJobPatchResponse)
+@router.patch(
+    "/admin/jobs/{name}",
+    response_model=AdminJobPatchResponse,
+    responses={
+        422: {
+            "description": (
+                "``body`` fails ``AdminJobPatchRequest`` validation "
+                "(DefaultValidationError -- ``detail`` is a list of field "
+                "errors), or the schedule-update command is REJECTED for a "
+                "reason other than a degraded/stale store "
+                "(StringDetailError -- ``detail`` is a plain string; see "
+                "``_schedule_result_http_error``)."
+            ),
+            "model": DefaultValidationError | StringDetailError,
+        }
+    },
+)
 def patch_admin_job(
     name: str,
     body: AdminJobPatchRequest,
@@ -2122,7 +2155,20 @@ def patch_admin_job(
     )
 
 
-@router.post("/admin/jobs/{name}/run", response_model=AdminJobRunResponse)
+@router.post(
+    "/admin/jobs/{name}/run",
+    response_model=AdminJobRunResponse,
+    responses={
+        422: {
+            "description": (
+                "The job-run-request command is REJECTED for a reason "
+                "other than a degraded/stale store -- ``detail`` is a "
+                "plain string (see ``_schedule_result_http_error``)."
+            ),
+            "model": StringDetailError,
+        }
+    },
+)
 def run_admin_job(
     name: str,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom

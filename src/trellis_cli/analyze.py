@@ -890,6 +890,17 @@ def replay(
             "this arm is diagnostic, not a prediction."
         ),
     ),
+    class_prior: bool = typer.Option(
+        False,
+        "--class-prior",
+        help=(
+            "Replay trellis.retrieve.class_prior instead of a width policy: "
+            "reports matched servings, helpful lost, unhelpful removed, and "
+            "tokens freed. Resolves mode/forms/axes the same way PackBuilder "
+            "does, so this replays whatever the gate is actually configured "
+            "to do."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
         False,
@@ -913,13 +924,45 @@ def replay(
     id), and how many an item ceiling removed outright (not fetchable).
     A policy can always raise the fraction by serving less.
 
+    ``--class-prior`` replays a different kind of change — a class-scoped
+    serving rule, not a width lever — and reports different numbers; see
+    ``trellis.retrieve.pack_replay.replay_class_prior``. It cannot be
+    combined with the width options above.
+
     Examples::
 
         trellis analyze replay --body-items 12
         trellis analyze replay --excerpt-max-chars 300
         trellis analyze replay --excerpt-max-chars 300 --no-refill
         trellis analyze replay --max-items 12
+        trellis analyze replay --class-prior
     """
+    if class_prior:
+        from trellis.retrieve.class_prior import (  # noqa: PLC0415
+            resolve_class_prior_config,
+        )
+        from trellis.retrieve.pack_replay import replay_class_prior  # noqa: PLC0415
+
+        event_log = get_event_log()
+        settings_values = load_settings_values(_get_registry().stores_dir)
+        prior_config = resolve_class_prior_config(settings=settings_values)
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.analyze.replay-class-prior",
+            disabled=no_meta_trace,
+        ) as _meta_record:
+            prior_report = replay_class_prior(event_log, config=prior_config, days=days)
+            if _meta_record.enabled and prior_report.attributed_packs > 0:
+                _meta_record.produced_finding(
+                    f"pack-replay-class-prior-report-d{days}",
+                    finding_type="ClassPriorReplayReport",
+                )
+        if output_format == "json":
+            print(json.dumps(prior_report.model_dump()))
+            return
+        _render_class_prior_replay(prior_report)
+        return
+
     from trellis.retrieve.pack_replay import (  # noqa: PLC0415
         ReplayPolicy,
         replay_pack_value,
@@ -1007,6 +1050,25 @@ def _render_replay(report: Any) -> None:
         f"    items admitted that nobody graded:                  "
         f"{report.admitted_ungraded_items}"
     )
+
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{note}[/dim]")
+
+
+def _render_class_prior_replay(report: Any) -> None:
+    """Render a ClassPriorReplayReport."""
+    console.print(
+        f"[bold]Class-Prior Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(f"  config: [cyan]{escape(report.applied_config)}[/cyan]")
+    console.print()
+    console.print(f"  matched servings:   {report.matched_servings}")
+    console.print(f"  helpful lost:       {report.helpful_lost}")
+    console.print(f"  unhelpful removed:  {report.unhelpful_removed}")
+    console.print(f"  tokens freed:       {report.tokens_freed:,}")
 
     if report.notes:
         console.print()
