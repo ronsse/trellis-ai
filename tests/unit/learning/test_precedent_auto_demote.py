@@ -369,6 +369,24 @@ class TestResolveOverridesPrecedence:
             for e in warnings
         )
 
+    def test_refusal_warning_fires_once_per_cause_not_once_per_call(self) -> None:
+        """A stored refused ``mode`` is a standing misconfiguration, not a
+        per-call event: ``GET /settings`` calls this resolver on every
+        request, so logging on every call would turn one bad
+        ``settings.json`` entry into one warning per poll forever."""
+        settings = {PRECEDENT_AUTO_DEMOTE_MODE_SETTING: "commit"}
+        with capture_logs() as logs:
+            for _ in range(3):
+                with pytest.raises(ConfigError):
+                    resolve_precedent_auto_demote_overrides(settings=settings, env={})
+        refusal_warnings = [
+            e
+            for e in logs
+            if e["log_level"] == "warning"
+            and e["event"] == "precedent_auto_demote_mode_refused_in_settings"
+        ]
+        assert len(refusal_warnings) == 1
+
 
 class TestSanitizeConfiguredMode:
     def test_none_passes_through(self) -> None:
@@ -1079,6 +1097,177 @@ class TestRunPrecedentAutoDemotionCommit:
         assert submitted.idempotency_key == _demote_idempotency_key(
             "p1", _T0.isoformat()
         )
+
+    def test_status_is_failed_when_every_attempted_demote_is_refused(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """``status``/``outcome`` is ``"failed"`` only once a write was
+        actually attempted and none of the attempts succeeded -- the
+        handler rejects the only ``would_demote`` precedent this run
+        has, so ``demoted_count`` stays 0 while ``refused_count`` is 1."""
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0, requested_by=AUTO_PROMOTE_REQUESTED_BY)
+        _give_two_unhelpful_citations(event_log, "p1", promoted_at=_T0)
+
+        mock_executor = MagicMock()
+        mock_executor.execute.return_value = CommandResult(
+            command_id="rejected",
+            status=CommandStatus.REJECTED,
+            operation=Operation.PRECEDENT_DEMOTE,
+            target_id="p1",
+            message="refused",
+            metadata={"rejection_reason": "target_not_auto_promoted"},
+        )
+        policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
+
+        report = run_precedent_auto_demotion(
+            policy=policy,
+            event_log=event_log,
+            graph_store=graph_store,
+            executor=mock_executor,
+        )
+
+        assert report.demoted_count == 0
+        assert report.refused_count == 1
+        outcome = report.outcomes[0]
+        assert outcome.disposition == "refused:target_not_auto_promoted"
+
+        payload = report_to_dict(report)
+        assert payload["status"] == "failed"
+        evaluated = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+        )
+        assert evaluated[-1].payload["outcome"] == "failed"
+
+    def test_status_is_degraded_when_some_attempted_demotes_are_refused(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """A mixed run -- one precedent demotes, the other's write is
+        refused -- reports ``"degraded"``, not ``"failed"``."""
+        for i, entity_id in enumerate(("p1", "p2")):
+            graph_store.upsert_node(
+                node_id=entity_id, node_type="precedent", properties={}
+            )
+            promoted_at = _T0 + timedelta(days=i)
+            _emit_promote(
+                event_log,
+                entity_id,
+                at=promoted_at,
+                requested_by=AUTO_PROMOTE_REQUESTED_BY,
+            )
+            _give_two_unhelpful_citations(event_log, entity_id, promoted_at=promoted_at)
+
+        mock_executor = MagicMock()
+        mock_executor.execute.side_effect = [
+            CommandResult(
+                command_id="ok",
+                status=CommandStatus.SUCCESS,
+                operation=Operation.PRECEDENT_DEMOTE,
+                target_id="p1",
+                created_id="p1",
+                message="demoted",
+            ),
+            CommandResult(
+                command_id="rejected",
+                status=CommandStatus.REJECTED,
+                operation=Operation.PRECEDENT_DEMOTE,
+                target_id="p2",
+                message="refused",
+                metadata={"rejection_reason": "target_not_auto_promoted"},
+            ),
+        ]
+        policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
+
+        report = run_precedent_auto_demotion(
+            policy=policy,
+            event_log=event_log,
+            graph_store=graph_store,
+            executor=mock_executor,
+        )
+
+        assert report.demoted_count == 1
+        assert report.refused_count == 1
+        payload = report_to_dict(report)
+        assert payload["status"] == "degraded"
+        evaluated = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+        )
+        assert evaluated[-1].payload["outcome"] == "degraded"
+
+    def test_replaying_the_submitted_command_against_the_real_executor_is_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """The test above proves this module reports a mocked ``DUPLICATE``
+        correctly; it never submits the same idempotency key to a real
+        ``MutationExecutor`` twice, so it cannot prove the executor's own
+        idempotency-check stage is what produces that status. A second
+        sequential run of this module does not reach that stage either --
+        by the time it re-scans, ``p1`` already reads ``demoted`` and the
+        evidence gate filters it out before a command is ever built.
+
+        So this captures the exact ``Command`` the first, real run submits
+        (same target, same properties, same ``idempotency_key``) and
+        replays that same object against the same executor a second time,
+        with nothing re-scanned in between. The executor's own stage 3 is
+        what must answer ``DUPLICATE`` here, and the graph/event state
+        after the replay must show one demotion, not two.
+        """
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            registry.knowledge.graph_store.upsert_node(
+                node_id="p1", node_type="precedent", properties={}
+            )
+            _emit_promote(
+                registry.operational.event_log,
+                "p1",
+                at=_T0,
+                requested_by=AUTO_PROMOTE_REQUESTED_BY,
+            )
+            _give_two_unhelpful_citations(
+                registry.operational.event_log, "p1", promoted_at=_T0
+            )
+            policy = PrecedentAutoDemotePolicy(enabled=True, mode="commit")
+
+            submitted: list[Command] = []
+            real_execute = executor.execute
+
+            def _capturing_execute(command: Command) -> CommandResult:
+                submitted.append(command)
+                return real_execute(command)
+
+            executor.execute = _capturing_execute  # type: ignore[method-assign]
+
+            first_report = run_precedent_auto_demotion(
+                policy=policy,
+                event_log=registry.operational.event_log,
+                graph_store=registry.knowledge.graph_store,
+                executor=executor,
+            )
+
+            assert first_report.demoted_count == 1
+            assert len(submitted) == 1
+            replayed_command = submitted[0]
+
+            second_result = real_execute(replayed_command)
+
+            assert second_result.status == CommandStatus.DUPLICATE
+
+            demote_events = registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                payload_filters={
+                    "operation": Operation.PRECEDENT_DEMOTE.value,
+                    "requested_by": AUTO_DEMOTE_REQUESTED_BY,
+                    "status": "success",
+                },
+            )
+            assert len(demote_events) == 1
+
+            node = registry.knowledge.graph_store.get_node("p1")
+            assert node is not None
+            assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        finally:
+            registry.close()
 
 
 class TestEmitFailureEvent:
