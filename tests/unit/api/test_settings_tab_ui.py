@@ -215,3 +215,81 @@ def test_env_only_rows_get_a_dedicated_pin_note_not_the_generic_one() -> None:
     # first one's guard does not fire.
     assert "s.overridden_by !== 'env'" in body
     assert "Pinned by <code>${escHtml(s.env_var)}</code>" in body
+
+
+# ---------------------------------------------------------------------------
+# 6. A pinned row with a stored value underneath it gets a "Clear stored
+#    value" action, not just a disabled "Edit" button (W1D ui-pass4)
+# ---------------------------------------------------------------------------
+
+
+def test_pinned_row_with_a_stored_value_gets_a_clear_stored_value_action() -> None:
+    """Before this pass, an ``isPinned`` row (env-only knob, or a
+    settings-store knob currently overridden by env) always rendered a
+    disabled "Edit" button and nothing else. A stray stored value
+    underneath the env var -- set before the var was exported, or left
+    behind after an unset/re-set cycle -- had no way to be cleared, and
+    would silently take over the moment the env var went away.
+
+    The fix reuses the existing reset mechanism verbatim: a reset already
+    *is* a clear (``PUT .../settings/{name}`` with ``value: null``, the
+    same write ``beginResetSetting``/``confirmResetSetting`` send for the
+    writable row's "Reset to default" button), so no new API route and no
+    new JS action was needed.
+    """
+    page = _page()
+    body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert "hasStoredValue" in body
+    assert "s.stored_value !== null && s.stored_value !== undefined" in body
+    assert (
+        'data-action="beginResetSetting" data-id="${escHtml(s.name)}">'
+        "Clear stored value</button>" in body
+    )
+    # Explains the env var wins either way, regardless of the clear.
+    assert "environment variable wins either way" in body
+    # The write's confirm/cancel/error UI (showSettingKeyPrompt,
+    # cancelSettingWrite, runSettingWrite) all target this cell by id --
+    # without it here, a click would silently do nothing visible.
+    assert "setting-error-${escHtml(s.name)}" in body
+
+
+def test_pinned_row_without_a_stored_value_still_renders_disabled_edit() -> None:
+    """Nothing to clear means the old disabled placeholder is still
+    correct -- this guards the branch's ``else`` half, not just the
+    ``hasStoredValue`` half added above."""
+    page = _page()
+    body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert '<button type="button" class="btn btn-sm" disabled>Edit</button>' in body
+
+
+def test_clear_stored_value_reuses_the_existing_reset_action_not_a_new_one() -> None:
+    """No new JS function and no new ID_ACTIONS entry: the pinned row's
+    "Clear stored value" button dispatches the identical data-action name
+    the writable row's "Reset to default" button already uses -- a reset
+    IS a clear (``value: null``), there is no separate verb to add."""
+    page = _page()
+    assert "beginClearStoredValue" not in page
+    assert page.count('data-action="beginResetSetting"') == 2
+
+
+def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
+    """Proves the substring checks above would actually fail on a
+    regression, not just pass on anything."""
+    defective = (
+        "actHtml = hasStoredValue\n"
+        '    ? \'<button type="button" class="btn btn-sm" disabled>Edit</button>\'\n'
+        '    : \'<button type="button" class="btn btn-sm" disabled>Edit</button>\';'
+    )
+    assert (
+        'data-action="beginResetSetting" data-id="${escHtml(s.name)}">'
+        "Clear stored value</button>" not in defective
+    )
+    assert "environment variable wins either way" not in defective

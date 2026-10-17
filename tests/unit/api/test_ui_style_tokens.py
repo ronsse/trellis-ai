@@ -28,21 +28,23 @@ Two literal exceptions are real, not escaped by this test:
   sweep by construction: the sweep only reads the text after the last of
   the three blocks closes.
 
-The Fonts pass adds the same shape of guard for ``font-size``, scoped
-deliberately narrower than the radius/shadow sweeps above: it reads only
-the ``<style>...</style>`` block (after the token-definition blocks), not
-the rest of the file. Every ``font-size: <number>rem`` literal inside
-that block was hand-converted to a ``--fs-1`` through ``--fs-7`` token
-read for this pass; the admin script below ``</style>`` still carries
-about 96 ``style="font-size:...rem"`` template-literal attributes across
-roughly a dozen renderers, and converting those is deferred rather than
-attempted here -- there is no headless browser on this host to confirm
-each renderer still lays out correctly, and most of those sites were
-untouched by the tokens/components passes too. Scoping the sweep to the
-``<style>`` block (rather than policing inline attributes with a
-per-site allowance list the way the circle-radius exception does) is the
-chosen way to leave that population ungoverned without the guard lying
-about having checked it.
+The Fonts pass added the same shape of guard for ``font-size``, scoped
+deliberately narrower than the radius/shadow sweeps above: it read only
+the ``<style>...</style>`` block (after the token-definition blocks),
+not the rest of the file, because the admin script below ``</style>``
+still carried about 96 ``style="font-size:...rem"`` template-literal
+attributes across roughly a dozen renderers that pass left unconverted.
+
+The buttons/inline-sizes pass closes that gap: every one of those 96
+inline literals was hand-converted to its nearest ``--fs-1`` through
+``--fs-7`` step (within about 1px, the one ``0.85em`` nested inside an
+already-tokenized ``0.8rem`` parent judged against that parent's new
+pixel value), and the sweep below now reads the whole page, not just
+the ``<style>`` block -- there is still no headless browser on this
+host, so which renderer a given inline attribute belongs to, and
+whether its layout still reads right, remains unverified by anything
+in this file; only that the literal number is gone and the token read
+is syntactically present.
 """
 
 from __future__ import annotations
@@ -150,6 +152,20 @@ def test_no_literal_font_size_in_style_block_remains() -> None:
     )
 
 
+def test_no_literal_font_size_anywhere_in_page_remains() -> None:
+    # Whole-page version of the check above -- the buttons/inline-sizes
+    # pass converted the ~96 inline style="font-size:...rem" template
+    # literals the Fonts pass had deliberately left ungoverned (see the
+    # module docstring), so the sweep no longer needs to stop at
+    # </style>. Inline SVG markup carries no font-size at all in this
+    # file (hand-checked), so there is nothing to carve out for it.
+    hits = _LITERAL_FONT_SIZE_RE.findall(_page())
+    assert hits == [], (
+        f"literal font-size: <N>rem/px/em found in the page ({hits}) -- "
+        f"use var(--fs-1) through var(--fs-7) instead"
+    )
+
+
 def test_font_size_token_population_is_above_a_hand_read_floor() -> None:
     # Hand count for this pass: 101 (97 literals the Fonts pass converted,
     # plus the one explicit --fs-7 card-value rewrite and three --fs-4/5/6
@@ -160,8 +176,24 @@ def test_font_size_token_population_is_above_a_hand_read_floor() -> None:
     assert_hand_read_floor(
         n_var_font_size,
         90,
-        subject="font-size: var(--fs-*) site(s)",
+        subject="font-size: var(--fs-*) site(s) in the <style> block",
         hint="hand count for this pass: 101.",
+    )
+
+
+def test_inline_font_size_token_population_is_above_a_hand_read_floor() -> None:
+    # Whole-page population, so it also counts the <style> block's 101 --
+    # the floor sits below the hand count of 197 (101 in <style> plus the
+    # 96 inline style= attributes this pass converted) for the usual
+    # reason: a legitimately added site must not turn this suite red.
+    n_var_font_size = len(_FONT_SIZE_TOKEN_RE.findall(_page()))
+    assert_hand_read_floor(
+        n_var_font_size,
+        180,
+        subject="font-size: var(--fs-*) site(s) in the whole page",
+        hint="hand count for this pass: 197 (101 in the <style> block "
+        "plus 96 inline style= attributes converted by the "
+        "buttons/inline-sizes pass).",
     )
 
 
@@ -173,4 +205,9 @@ def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     assert _BOX_SHADOW_RGBA_RE.findall(toast_rule) != []
     assert _LITERAL_FONT_SIZE_RE.findall(".card h3 { font-size: 0.75rem; }") == [
         "font-size: 0.75rem"
+    ]
+    # The inline-attribute case this pass added coverage for -- a
+    # template-literal style= string, not a <style> block rule.
+    assert _LITERAL_FONT_SIZE_RE.findall('<span style="font-size:0.8rem">x</span>') == [
+        "font-size:0.8rem"
     ]
