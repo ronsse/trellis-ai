@@ -681,7 +681,7 @@ class PrecedentDemoteHandler:
         # Keep the semantic path from continuing to serve the
         # pre-demotion snapshot: a vector row's metadata is an embed-time
         # copy, not a read of the graph store (#338-style gap).
-        _sync_vector_lifecycle(
+        vector_sync_outcome = _sync_vector_lifecycle(
             self._registry,
             target_id,
             lifecycle,
@@ -689,17 +689,24 @@ class PrecedentDemoteHandler:
             log_event="precedent_demote_vector_lifecycle_sync_failed",
         )
 
+        event_payload: dict[str, Any] = {
+            "target_id": target_id,
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+        }
+        if vector_sync_outcome == "failed":
+            # Same fact ``command.metadata["handler_warnings"]`` already
+            # carries into ``CommandResult.warnings`` -- a consumer of the
+            # event log (rather than the synchronous CommandResult) needs
+            # its own way to see the semantic path went stale.
+            event_payload["vector_sync_failed"] = True
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_DEMOTED,
             source="mutation_executor",
             entity_id=target_id,
             entity_type="precedent",
-            payload={
-                "target_id": target_id,
-                "reason": reason,
-                "command_id": command.command_id,
-                "requested_by": command.requested_by,
-            },
+            payload=event_payload,
         )
         return target_id, f"Precedent demoted: {target_id}"
 
@@ -809,7 +816,7 @@ class PrecedentReinstateHandler:
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
-        _sync_vector_lifecycle(
+        vector_sync_outcome = _sync_vector_lifecycle(
             self._registry,
             target_id,
             lifecycle,
@@ -817,17 +824,20 @@ class PrecedentReinstateHandler:
             log_event="precedent_reinstate_vector_lifecycle_sync_failed",
         )
 
+        event_payload: dict[str, Any] = {
+            "target_id": target_id,
+            "reason": reason,
+            "command_id": command.command_id,
+            "requested_by": command.requested_by,
+        }
+        if vector_sync_outcome == "failed":
+            event_payload["vector_sync_failed"] = True
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_REINSTATED,
             source="mutation_executor",
             entity_id=target_id,
             entity_type="precedent",
-            payload={
-                "target_id": target_id,
-                "reason": reason,
-                "command_id": command.command_id,
-                "requested_by": command.requested_by,
-            },
+            payload=event_payload,
         )
         return target_id, f"Precedent reinstated: {target_id}"
 
@@ -2752,7 +2762,7 @@ def _sync_vector_lifecycle(
     *,
     command: Command | None = None,
     log_event: str = "retention_vector_lifecycle_sync_failed",
-) -> None:
+) -> VectorSyncOutcome:
     """Stamp a lifecycle record onto a vector row that has no document write.
 
     Four call sites share this: ``RetentionPruneHandler._resync_archived``
@@ -2796,7 +2806,13 @@ def _sync_vector_lifecycle(
     ``command`` is given the same condition is also appended to
     ``command.metadata["handler_warnings"]``, which ``MutationExecutor``
     folds into the returned ``CommandResult.warnings`` (see
-    ``_handler_warnings`` in ``executor.py``).
+    ``_handler_warnings`` in ``executor.py``). The :data:`VectorSyncOutcome`
+    is also returned so a caller that emits its own domain event (
+    :class:`PrecedentDemoteHandler`, :class:`PrecedentReinstateHandler`) can
+    fold a ``"failed"`` outcome into that event's payload too — the
+    ``CommandResult`` warning and the event are two independent readers of
+    the same fact, and a JSON caller may see either one without replaying
+    the log.
 
     The actual get/merge/upsert is delegated to
     :func:`~trellis.core.vector_metadata.sync_vector_metadata_outcome` —
@@ -2846,13 +2862,14 @@ def _sync_vector_lifecycle(
         # (no vector row -- structural nodes, never-embedded documents) are
         # all non-errors here, same as the missing-row branch before this
         # was delegated.
-        return
+        return outcome
     if command is not None:
         command.metadata.setdefault("handler_warnings", []).append(
             f"{log_event}: vector row for {item_id} was not re-stamped; "
             "the semantic path may continue serving a stale snapshot "
             "until the next resync"
         )
+    return outcome
 
 
 def _prune_message(

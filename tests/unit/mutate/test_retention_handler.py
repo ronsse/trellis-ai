@@ -601,6 +601,69 @@ class TestRestore:
         assert node is not None
         assert node["properties"][LIFECYCLE_KEY]["state"] == CURRENT_STATE
 
+    def test_deprecated_concept_archived_by_a_real_prune_restores_to_current(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The full round trip rather than a node minted straight into
+        ``archived``: a concept that genuinely held
+        ``"deprecated"`` before ``retention.prune`` archived it comes back
+        ``"current"`` on restore, not ``"deprecated"`` -- ``_restore``'s
+        ``else`` branch (:func:`~trellis.mutate.handlers._restore`, the
+        non-precedent half) sets ``current`` unconditionally and never
+        consults ``_pre_archival_lifecycle`` for anything but a precedent,
+        per that function's own docstring: "every other node type has no
+        'demoted' concept to launder". The node's SCD-2 history is genuine
+        here -- v1 ``"deprecated"``, v2 ``"archived"`` -- so this is not the
+        degenerate single-version shape
+        ``test_archived_non_precedent_node_restores_to_current`` covers.
+
+        Defective subject: route the non-precedent branch through
+        ``_pre_archival_lifecycle`` too (over-generalising the precedent
+        fix) and this node comes back ``"deprecated"`` instead.
+        """
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={
+                "name": "Deprecated widget",
+                LIFECYCLE_KEY: {"state": "deprecated"},
+            },
+        )
+        assert len(graph.get_node_history(node_id)) == 1
+
+        executor = build_curate_executor(registry)
+        prune_result = executor.execute(
+            _prune(
+                {"lifecycle_states": ["deprecated"], "older_than_days": 0},
+                dry_run=False,
+            )
+        )
+        assert prune_result.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        # Genuine two-version history: the pre-archival state really was
+        # "deprecated", unlike the minted-archived test above.
+        # get_node_history() returns newest first, so index 0 is the
+        # archived version and index 1 is the pre-archival "deprecated" one.
+        history = graph.get_node_history(node_id)
+        assert len(history) == 2
+        assert history[0]["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        assert history[1]["properties"][LIFECYCLE_KEY]["state"] == "deprecated"
+
+        restore_result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": [node_id], "reason": "re-evaluated, still in use"},
+            )
+        )
+
+        assert restore_result.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == CURRENT_STATE
+
 
 class TestRestorePrecedentHistory:
     """Prune-then-restore is not a second, unaudited way to undo a demotion.
@@ -610,8 +673,10 @@ class TestRestorePrecedentHistory:
     ``RetentionRestoreHandler`` reads the pre-archival state from the
     node's SCD-2 history via ``_pre_archival_lifecycle`` rather than
     assuming ``"current"``. When that history cannot answer the question
-    (fewer than two versions on record), restore refuses rather than
-    guesses.
+    (every version on record reads as archived -- walking back finds no
+    non-archived version, whether because there is only one version at
+    all or because several consecutive ones carry "archived" forward),
+    restore refuses rather than guesses.
     """
 
     def _node(self, registry: StoreRegistry, properties: dict[str, Any]) -> str:
