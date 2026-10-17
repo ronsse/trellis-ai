@@ -98,7 +98,8 @@ def test_enum_schema_renders_a_select_with_options() -> None:
     body = _function_body(_page(), "reportParamFieldHtml")
     assert "Array.isArray(inner.enum)" in body
     select_branch = _between(body, "Array.isArray(inner.enum)) {", "\n            }")
-    assert '<select class="report-param-input" data-kind="enum"' in select_branch
+    # pass 6: the inline font-size style on this control became .fs-3
+    assert '<select class="report-param-input fs-3" data-kind="enum"' in select_branch
     assert "opt === val ? 'selected' : ''" in select_branch
     assert "escHtml(opt)" in select_branch
 
@@ -235,4 +236,5 @@ def test_fetch_report_json_falls_back_to_a_typed_error_message() -> None:
 def test_report_param_error_container_exists_in_markup() -> None:
     page = _page()
     assert 'id="report-param-error"' in page
-    assert "color:var(--danger)" in _between(page, '<p id="report-param-error"', "</p>")
+    # pass 6: color:var(--danger) became the shared .text-danger class
+    assert "text-danger" in _between(page, '<p id="report-param-error"', "</p>")

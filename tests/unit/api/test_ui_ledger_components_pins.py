@@ -115,29 +115,47 @@ _HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 class TestGraphAndWordmarkStayTokenOnly:
     """``buildCyStyle()`` (the cytoscape style map) and the sidebar wordmark
     SVG must read every colour from a CSS custom property, never a literal
-    hex -- that is what lets a theme toggle repaint them. The categorical
-    per-entity-type palette (``WELL_KNOWN_TYPE_COLORS`` / ``nodeColor()``)
-    is explicitly exempt by the page's own comment: it distinguishes entity
-    types from each other, not light mode from dark, so it keeps its own
-    hexes on purpose and is scoped out of this sweep deliberately."""
+    hex -- that is what lets a theme toggle repaint them. Pass 6 moved the
+    categorical per-entity-type palette (``nodeColor()``, née
+    ``WELL_KNOWN_TYPE_COLORS``) onto the same footing: its 16 fixed colours
+    now live as ``--entity-<kebab-type>`` tokens in the theme blocks, read
+    live via ``cssVar()``, rather than as hex literals baked into a JS
+    ``Map`` -- so this class's reach now covers ``nodeColor()`` too, not
+    just ``buildCyStyle()``."""
 
-    def test_well_known_type_colors_floor_proves_the_regex_finds_real_hex(
+    def test_entity_type_tokens_floor_proves_the_regex_finds_real_hex(
         self,
     ) -> None:
         # Sanity floor: if this ever drops to zero, _HEX_COLOR_RE itself
         # broke, and the "no hex" assertions below would be vacuous rather
-        # than meaningful.
+        # than meaningful. The dark (bare :root) block is one of three
+        # theme blocks carrying these tokens; any one of them hand-counts
+        # to the same 16.
         page = _page()
-        match = re.search(
-            r"const WELL_KNOWN_TYPE_COLORS = new Map\(\[(.*?)\]\);", page, re.DOTALL
+        root_block = re.search(r":root \{(.*?)\n        \}", page, re.DOTALL)
+        assert root_block is not None, "bare :root block not found"
+        entity_hex = re.findall(
+            r"--entity-[a-z0-9-]+:\s*(#[0-9a-fA-F]{6});", root_block.group(1)
         )
-        assert match is not None, "WELL_KNOWN_TYPE_COLORS not found"
         assert_hand_read_floor(
-            len(_HEX_COLOR_RE.findall(match.group(1))),
+            len(entity_hex),
             16,
-            subject="WELL_KNOWN_TYPE_COLORS categorical hex entries",
+            subject="--entity-* categorical hex tokens in the dark :root block",
             hint="hand count: 16 named entity types, one hex apiece.",
         )
+
+    def test_node_color_reads_every_fixed_colour_from_a_token(self) -> None:
+        # Pass 6: nodeColor()'s well-known branch resolves a CSS var, not a
+        # Map lookup -- only the hash-fallback branch (uncategorised types)
+        # computes an hsl() string, which is not a hex literal.
+        body = _function_body(_page(), "nodeColor")
+        hits = _HEX_COLOR_RE.findall(body)
+        assert hits == [], (
+            f"nodeColor() has literal hex colour(s) {hits} -- read via "
+            f"cssVar(entityTypeCssVar(type)) instead so a theme toggle can "
+            f"repaint it"
+        )
+        assert "cssVar(" in body
 
     def test_build_cy_style_reads_every_colour_from_a_token(self) -> None:
         body = _function_body(_page(), "buildCyStyle")

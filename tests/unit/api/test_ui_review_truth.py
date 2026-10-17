@@ -401,7 +401,7 @@ def test_noise_section_heading_no_longer_calls_candidates_noise() -> None:
     page = _page()
     section = _between(
         page,
-        '<div class="status-section" id="evo-noise-section" style="display:none">',
+        '<div class="status-section hide" id="evo-noise-section">',
         '<div id="evo-noise"></div>',
     )
     assert "<h2>Noise Candidates</h2>" not in section
@@ -442,7 +442,7 @@ def test_evolution_section_states_demotion_requires_evidence_of_unhelpfulness() 
     page = _page()
     section = _between(
         page,
-        '<div class="status-section" id="evo-noise-section" style="display:none">',
+        '<div class="status-section hide" id="evo-noise-section">',
         '<div id="evo-noise"></div>',
     )
     assert "evidence of unhelpfulness" in section

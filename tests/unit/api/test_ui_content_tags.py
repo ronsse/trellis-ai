@@ -67,5 +67,6 @@ def test_memories_column_header_uses_the_adr_term() -> None:
     """adr-terminology.md: ContentTags, not a bare 'Tags' column header
     that invites confusion with an open free-text tag field."""
     page = INDEX_HTML.read_text(encoding="utf-8")
-    assert "<th>Content tags</th>" in page
+    # pass 6: every column-header <th> gained scope="col"
+    assert '<th scope="col">Content tags</th>' in page
     assert "<th>Tags</th>" not in page
