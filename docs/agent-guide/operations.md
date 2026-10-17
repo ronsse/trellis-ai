@@ -1819,6 +1819,37 @@ write after that first call has no effect until the next process starts.
 `SettingSpec.settings_live` is `False` only for that one knob, which
 instead carries `restart_required=True`.
 
+### Pack-size and excerpt knobs
+
+Seven `group="retrieval"` tunables, all `settings_live=True`, cover the
+pack-size and excerpt defaults each surface previously hardcoded. Every one
+resolves `env > settings > default` at its real enforcement site, and an
+explicit caller argument (where a surface accepts one) always wins over
+both:
+
+| Setting | Env var | Default | What it bounds |
+|---|---|---|---|
+| `get_context_max_tokens` | `TRELLIS_GET_CONTEXT_MAX_TOKENS` | 2000 | mcp `get_context`'s flat-layout token budget when the caller omits `max_tokens`. Does **not** affect `get_context`'s `sections=` layout, which keeps resolving its budget from `config.yaml`'s `retrieval.budgets` via `registry.budget_config` — the two are deliberately decoupled. |
+| `get_context_max_items` | `TRELLIS_GET_CONTEXT_MAX_ITEMS` | 50 | mcp `get_context`'s flat-layout candidate-item ceiling. `get_context` exposes no caller-facing `max_items`, so this setting is the only way to change it without an env var. |
+| `search_max_tokens` | `TRELLIS_SEARCH_MAX_TOKENS` | 2000 | mcp `search`'s token budget when the caller omits `max_tokens`. Resolved independently of `get_context_max_tokens` — the shared 2000 default is coincidence, not unification. `search`'s item ceiling is always the caller's `limit` argument; there is no settings knob for it. |
+| `rest_pack_max_items` | `TRELLIS_REST_PACK_MAX_ITEMS` | 50 | `POST /api/v1/packs`'s `max_items` when the request body omits the field. Resolved from the request's own `model_fields_set`, not from `PackRequest`'s field default, so `PackRequest`'s OpenAPI schema is untouched and a caller that supplies `max_items` — even the value 50 — always wins. |
+| `rest_pack_max_tokens` | `TRELLIS_REST_PACK_MAX_TOKENS` | 8000 | `POST /api/v1/packs`'s `max_tokens` when the request body omits the field. Same `model_fields_set` resolution as `rest_pack_max_items`. |
+| `disclosure_body_items` | `TRELLIS_DISCLOSURE_BODY_ITEMS` | 12 | How many ranked pack items get a full-body excerpt before graduated disclosure demotes the rest to a summary instead of dropping them. Applies to every surface that assembles a pack through `build_pack_builder` (mcp, REST, CLI). |
+| `excerpt_max_chars` | `TRELLIS_EXCERPT_MAX_CHARS` | 500 | Character cap on each retrieved item's excerpt (keyword, semantic and graph axes) before it enters a pack. Applies to every surface through `build_pack_builder`. |
+
+**The three `max_tokens` defaults (2000 / 2000 / 8000) and the two
+`max_items` defaults (50 / 50) are deliberately not unified across
+surfaces** — each was tuned for its own caller independently, and this PR
+only made the existing values operator-tunable; it did not reconcile them.
+
+`get_context_max_tokens`/`get_context_max_items`/`search_max_tokens` are
+read via a private per-module int resolver in `mcp/server.py`;
+`rest_pack_max_items`/`rest_pack_max_tokens` via one in
+`trellis_api/routes/retrieve.py`; `disclosure_body_items`/
+`excerpt_max_chars` via one in `retrieve/builder_factory.py` — each mirrors
+`capture_health._resolve_int_knob`'s coerce-and-bounds-check-through-
+`validate_value` shape rather than sharing code across modules.
+
 ### Failure posture: degrades, never raises
 
 Unlike `policies.json` below, a damaged `settings.json` **does not fail a

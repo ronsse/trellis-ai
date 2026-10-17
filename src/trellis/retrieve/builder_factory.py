@@ -24,12 +24,15 @@ exactly as the old ``None`` did.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
+from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS, DisclosureConfig
+from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_builder import (
     PackBuilder,
     SemanticDedupConfig,
@@ -95,6 +98,94 @@ GRAPH_SEEDING_SETTING = "graph_seeding"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
 
+#: Settings-registry wiring for the two pack-shaping int knobs below — env
+#: wins over a stored override, which wins over the module default. See
+#: ``trellis.core.settings_registry``'s ``disclosure_body_items`` /
+#: ``excerpt_max_chars`` entries. Read-side, so (like ``GRAPH_SEEDING_ENV``
+#: above) they stay out of :mod:`trellis.core.write_config`.
+BODY_ITEMS_ENV = "TRELLIS_DISCLOSURE_BODY_ITEMS"
+BODY_ITEMS_SETTING = "disclosure_body_items"
+EXCERPT_MAX_CHARS_ENV = "TRELLIS_EXCERPT_MAX_CHARS"
+EXCERPT_MAX_CHARS_SETTING = "excerpt_max_chars"
+
+
+def _resolve_int_knob(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Mirrors :func:`trellis.ops.capture_health._resolve_int_knob` /
+    :func:`trellis.classify.demotion_gate._resolve_int_threshold` exactly:
+    both the env and the stored value go through the same coercion the
+    governed ``PUT /settings`` path uses, so a non-finite or out-of-bounds
+    value is rejected rather than silently honoured or crashing downstream.
+
+    Imported lazily: ``trellis.core.settings_registry`` imports the
+    learning tuners, which import ``trellis.ops.parameter_reachability``,
+    which imports ``trellis.ops``'s ``__init__`` — and this module already
+    imports ``from trellis.ops import ParameterRegistry`` at module scope,
+    so a module-level import here would close that cycle.
+    """
+    from trellis.core.settings_registry import (  # noqa: PLC0415
+        get_setting,
+        validate_value,
+    )
+
+    spec = get_setting(setting_name)
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "builder_factory.bad_env_int",
+                var=env_var,
+                error_type=type(exc).__name__,
+            )
+            return default
+    if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
+        try:
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "builder_factory.bad_settings_int",
+                setting=setting_name,
+                error_type=type(exc).__name__,
+            )
+            return default
+    return default
+
+
+def _resolve_body_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the disclosure body-item cap: env > settings > default."""
+    return _resolve_int_knob(
+        env_var=BODY_ITEMS_ENV,
+        setting_name=BODY_ITEMS_SETTING,
+        default=DEFAULT_BODY_ITEMS,
+        settings=settings,
+    )
+
+
+def _resolve_excerpt_max_chars(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the per-item excerpt character cap: env > settings > default."""
+    return _resolve_int_knob(
+        env_var=EXCERPT_MAX_CHARS_ENV,
+        setting_name=EXCERPT_MAX_CHARS_SETTING,
+        default=EXCERPT_MAX_CHARS,
+        settings=settings,
+    )
+
 
 class AxisReport(TypedDict):
     """What :func:`describe_axes` returns. Serialised verbatim into JSON.
@@ -136,6 +227,7 @@ def build_pack_builder(
         registry,
         parameter_registry=param_registry,
         graph_seed_extractor=_build_seed_extractor(registry, settings=settings),
+        excerpt_max_chars=_resolve_excerpt_max_chars(settings),
     )
     return PackBuilder(
         strategies=strategies_result.strategies,
@@ -144,6 +236,10 @@ def build_pack_builder(
         event_log=registry.operational.event_log,
         advisory_store=load_advisory_store(registry.stores_dir, surface=surface),
         reranker=build_reranker("rrf", parameter_registry=param_registry),
+        # Same env > settings > default resolution as the knobs above, for
+        # the disclosure body-item cap (DEFAULT_BODY_ITEMS) — see
+        # ``SettingSpec(name="disclosure_body_items")``.
+        disclosure=DisclosureConfig(body_items=_resolve_body_items(settings)),
         # F14 (#259): collapse near-duplicate pack items — the same fact
         # stored via save_memory AND via corpus ingestion surfaced both
         # copies in one pack. MinHash/LSH over item excerpts,

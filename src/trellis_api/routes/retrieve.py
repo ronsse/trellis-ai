@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +20,7 @@ from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
+from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     AxisReportResponse,
@@ -40,6 +43,100 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
     docstring over a hand-copied argument list; it is now the same call.
     """
     return build_pack_builder(registry, surface="api.retrieve")
+
+
+#: Settings-registry wiring for ``POST /packs``'s budget defaults — env
+#: wins over a stored override, which wins over :class:`PackRequest`'s own
+#: field default. See ``trellis.core.settings_registry``'s
+#: ``rest_pack_max_items`` / ``rest_pack_max_tokens`` entries.
+#:
+#: Deliberately does NOT touch ``PackRequest.max_items`` /
+#: ``.max_tokens`` — those Pydantic field defaults (50 / 8000) stay
+#: exactly as they are, so the committed OpenAPI schema (``default: 50`` /
+#: ``default: 8000``, plain ``integer``, no ``anyOf``/nullable) does not
+#: change. Whether a caller supplied the field at all is read from
+#: ``req.model_fields_set`` (Pydantic v2) instead: a field *present* in
+#: the request body always wins, matching the explicit-caller-wins rule
+#: every other knob in this PR follows; a field *absent* resolves through
+#: this knob rather than silently taking the DTO's literal default. The
+#: SDK (``trellis_sdk.client``/``async_client``) always sends both keys
+#: explicitly on every call, so it is unaffected either way (and is out
+#: of scope for this change).
+_REST_PACK_MAX_ITEMS_ENV = "TRELLIS_REST_PACK_MAX_ITEMS"
+_REST_PACK_MAX_ITEMS_SETTING = "rest_pack_max_items"
+_REST_PACK_MAX_TOKENS_ENV = "TRELLIS_REST_PACK_MAX_TOKENS"
+_REST_PACK_MAX_TOKENS_SETTING = "rest_pack_max_tokens"
+
+
+def _resolve_int_knob(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Mirrors :func:`trellis.retrieve.builder_factory._resolve_int_knob` /
+    :func:`trellis.ops.capture_health._resolve_int_knob` /
+    :func:`trellis.classify.demotion_gate._resolve_int_threshold`.
+    Imported lazily for the same import-cycle reason those three give.
+    """
+    from trellis.core.settings_registry import (  # noqa: PLC0415
+        get_setting,
+        validate_value,
+    )
+
+    spec = get_setting(setting_name)
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "retrieve_route.bad_env_int",
+                var=env_var,
+                error_type=type(exc).__name__,
+            )
+            return default
+    if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
+        try:
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "retrieve_route.bad_settings_int",
+                setting=setting_name,
+                error_type=type(exc).__name__,
+            )
+            return default
+    return default
+
+
+def _resolve_rest_pack_max_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``POST /packs``'s ``max_items`` default (50) when omitted."""
+    return _resolve_int_knob(
+        env_var=_REST_PACK_MAX_ITEMS_ENV,
+        setting_name=_REST_PACK_MAX_ITEMS_SETTING,
+        default=50,
+        settings=settings,
+    )
+
+
+def _resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``POST /packs``'s ``max_tokens`` default (8000) when omitted."""
+    return _resolve_int_knob(
+        env_var=_REST_PACK_MAX_TOKENS_ENV,
+        setting_name=_REST_PACK_MAX_TOKENS_SETTING,
+        default=8000,
+        settings=settings,
+    )
 
 
 # Chunk rows are excluded from this route by default (#396) — the sibling
@@ -118,7 +215,19 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     registry = get_registry()
     builder = _build_pack_builder(registry)
 
-    budget = PackBudget(max_items=req.max_items, max_tokens=req.max_tokens)
+    settings = load_settings_values(registry.stores_dir)
+    fields_set = req.model_fields_set
+    max_items = (
+        req.max_items
+        if "max_items" in fields_set
+        else _resolve_rest_pack_max_items(settings)
+    )
+    max_tokens = (
+        req.max_tokens
+        if "max_tokens" in fields_set
+        else _resolve_rest_pack_max_tokens(settings)
+    )
+    budget = PackBudget(max_items=max_items, max_tokens=max_tokens)
     # Pass domain as a filter so strategies can use it for scoping
     filters: dict[str, Any] | None = None
     if req.domain:
