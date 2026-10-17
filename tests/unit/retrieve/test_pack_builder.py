@@ -347,7 +347,13 @@ class TestBuildDomainScopeGraphAxis:
         assert pack.items[1].estimated_tokens == 6
 
 
-def _form_item(item_id: str, score: float, *, form: str | None, excerpt: str = "x" * 60) -> PackItem:
+def _form_item(
+    item_id: str,
+    score: float,
+    *,
+    form: str | None,
+    excerpt: str = "x" * 60,
+) -> PackItem:
     metadata = {"document_form": form} if form is not None else {}
     return PackItem(
         item_id=item_id,

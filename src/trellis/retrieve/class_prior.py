@@ -83,7 +83,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 import structlog
 
@@ -126,8 +126,12 @@ DEFAULT_FORMS: frozenset[str] = frozenset({CONVERSATION_DOCUMENT_FORM})
 DEFAULT_AXES: frozenset[str] = frozenset({"keyword"})
 
 
-def _valid_factor(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and 0.0 < value < 1.0
+def _valid_factor(value: object) -> TypeGuard[float]:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and 0.0 < value < 1.0
+    )
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,11 @@ from typing import Any
 import pytest
 
 from trellis.retrieve.class_prior import OFF, ClassPriorConfig
-from trellis.retrieve.pack_replay import ReplayPolicy, replay_class_prior, replay_pack_value
+from trellis.retrieve.pack_replay import (
+    ReplayPolicy,
+    replay_class_prior,
+    replay_pack_value,
+)
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS
 from trellis.stores.base.event_log import Event, EventLog, EventType
 

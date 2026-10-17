@@ -107,7 +107,9 @@ class TestApplyClassPriorDemote:
     def test_demote_rescales_score_and_stamps_metadata_without_dropping(self) -> None:
         config = ClassPriorConfig(mode="demote", factor=0.5)
         conv = _item("c1", form="conversation", score=0.8)
-        kept, rejected = apply_class_prior([conv], config=config, strategy_name="keyword")
+        kept, rejected = apply_class_prior(
+            [conv], config=config, strategy_name="keyword"
+        )
         assert rejected == []
         assert len(kept) == 1
         demoted = kept[0]
@@ -126,7 +128,9 @@ class TestApplyClassPriorDemote:
     def test_demote_never_touches_another_form(self) -> None:
         config = ClassPriorConfig(mode="demote", factor=0.5)
         other = _item("m1", form="capture", score=0.8)
-        kept, rejected = apply_class_prior([other], config=config, strategy_name="keyword")
+        kept, rejected = apply_class_prior(
+            [other], config=config, strategy_name="keyword"
+        )
         assert rejected == []
         assert kept == [other]
         assert kept[0] is other
@@ -139,7 +143,9 @@ class TestResolveClassPriorConfig:
         config = resolve_class_prior_config(settings=None)
         assert config == OFF
 
-    def test_settings_value_used_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_settings_value_used_when_env_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv(CLASS_PRIOR_MODE_ENV, raising=False)
         monkeypatch.delenv(CLASS_PRIOR_FACTOR_ENV, raising=False)
         config = resolve_class_prior_config(

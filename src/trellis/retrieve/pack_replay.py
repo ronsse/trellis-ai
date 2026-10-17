@@ -597,20 +597,27 @@ class ClassPriorReplayReport(TrellisModel):
     notes: list[str] = Field(default_factory=list)
 
 
-def _class_prior_notes(*, mode: str, matched_servings: int, mode_is_off: bool) -> list[str]:
+def _class_prior_notes(
+    *, mode: str, matched_servings: int, mode_is_off: bool
+) -> list[str]:
     """Caveats that travel with the class-prior counts."""
     if mode_is_off:
         return [
-            'mode is "off": the counterfactual is identical to the baseline '
-            "by construction, so every count above is zero.",
+            (
+                'mode is "off": the counterfactual is identical to the '
+                "baseline by construction, so every count above is zero."
+            ),
         ]
     notes = [
-        "Counterfactual over the SAME packs and the SAME citations. This "
-        "arm classifies and counts already-served items; it does not "
-        "re-run the token-budget walk, so tokens_freed is the gross cost "
-        "of the matched servings, not a repriced pack. It cannot say which "
-        "item the freed budget would have admitted instead, and it cannot "
-        "grade one, because that item was never served and nobody rated it.",
+        (
+            "Counterfactual over the SAME packs and the SAME citations. "
+            "This arm classifies and counts already-served items; it does "
+            "not re-run the token-budget walk, so tokens_freed is the "
+            "gross cost of the matched servings, not a repriced pack. It "
+            "cannot say which item the freed budget would have admitted "
+            "instead, and it cannot grade one, because that item was "
+            "never served and nobody rated it."
+        ),
     ]
     if mode == "demote":
         notes.append(
@@ -714,9 +721,9 @@ def replay_class_prior(
                     unhelpful_removed += 1
 
             if config.mode == "demote":
-                sentinel = len(rows)
+                row_count = len(rows)
 
-                def _rank(row: Mapping[str, Any]) -> int:
+                def _rank(row: Mapping[str, Any], *, sentinel: int = row_count) -> int:
                     raw_rank = row.get("rank")
                     return raw_rank if isinstance(raw_rank, int) else sentinel
 
@@ -724,7 +731,9 @@ def replay_class_prior(
 
                 def _score(row: Mapping[str, Any]) -> float:
                     raw_score = row.get("relevance_score")
-                    base = float(raw_score) if isinstance(raw_score, int | float) else 0.0
+                    base = (
+                        float(raw_score) if isinstance(raw_score, int | float) else 0.0
+                    )
                     return base * config.factor if _matched(row) else base
 
                 demoted_order = sorted(original_order, key=_score, reverse=True)

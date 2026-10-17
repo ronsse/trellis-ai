@@ -68,8 +68,9 @@ write-config`` / ``GET /api/version`` report about it. Every real
 enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
 ``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
-``class_prior.py``, ``demotion_gate.py``, ``advisory_generator.py``, ``capture_health.py``,
-``session_capture/sweep.py``, ``trellis_cli.worker._build_auto_promote_policy``,
+``class_prior.py``, ``demotion_gate.py``, ``advisory_generator.py``,
+``capture_health.py``, ``session_capture/sweep.py``,
+``trellis_cli.worker._build_auto_promote_policy``,
 ``trellis.learning.candidate_auto_promote``,
 ``trellis.learning.precedent_auto_demote``) now resolves env > settings
 > default (the two auto-promote families add a ``config.yaml`` and/or
@@ -668,8 +669,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
         # No maximum_exclusive field exists on SettingSpec, so a stored
         # 1.0 passes _check_bounds here even though the gate's own
-        # ClassPriorConfig requires factor < 1.0 strictly; the resolver
-        # (trellis.retrieve.class_prior.resolve_class_prior_config)
+        # ClassPriorConfig requires factor < 1.0 strictly; the resolver in
+        # trellis.retrieve.class_prior, resolve_class_prior_config,
         # re-checks the open interval and degrades to the default with a
         # logged warning rather than accepting 1.0 as a no-op multiplier.
         surfaces=("mcp", "api", "cli"),
