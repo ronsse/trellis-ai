@@ -57,6 +57,7 @@ from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.ids import generate_ulid
 from trellis.errors import ConfigError, TrellisError
 from trellis.mutate.handlers import _find_unsafe_jsonb_string
+from trellis_wire.feedback_hints import rating_out_of_range_hint
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -126,6 +127,37 @@ async def unhandled_exception_handler(
     )
 
 
+#: pydantic v2's ``type`` for a ``Field(ge=...)`` / ``Field(le=...)`` miss.
+_RANGE_ERROR_TYPES = frozenset({"greater_than_equal", "less_than_equal"})
+
+
+def _with_rating_hint(error: dict[str, Any]) -> dict[str, Any]:
+    """Append a unit-mismatch guess to a ``rating`` range error's ``msg``.
+
+    Only a ``rating`` field's own ``ge``/``le`` miss qualifies — this is
+    not a new check, the ``Field(ge=0.0, le=1.0)`` constraint already
+    rejected the value; this only makes its message name the likely fix.
+    ``input`` is a bool for a ``True``/``False`` rating (bool subclasses
+    int in Python) and never numeric otherwise once this type matched, so
+    the bool guard keeps ``rating_out_of_range_hint`` from being asked
+    about a value it was not written for.
+    """
+    loc = error.get("loc") or ()
+    value = error.get("input")
+    if (
+        error.get("type") not in _RANGE_ERROR_TYPES
+        or not loc
+        or loc[-1] != "rating"
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+    ):
+        return error
+    hint = rating_out_of_range_hint(float(value))
+    if hint is None:
+        return error
+    return {**error, "msg": f"{error['msg']}; rating is 0.0-1.0; {hint}"}
+
+
 def _json_safe_float(value: float) -> float | str:
     """A non-finite float as the token the caller sent; any other unchanged.
 
@@ -152,8 +184,14 @@ async def request_validation_error_handler(
     its token. A missing-field error echoes the whole body as its
     ``input``, so a non-finite number anywhere in a body missing a field
     reaches the renderer, not only one in the field that failed. A finite
-    float is returned unchanged, so every finite case is FastAPI's own
-    response, byte for byte (``tests/unit/api/test_non_finite_body.py``).
+    float is returned unchanged, so every finite case *with no rating
+    unit-mismatch guess* is FastAPI's own response, byte for byte
+    (``tests/unit/api/test_non_finite_body.py``).
+
+    A ``rating`` field rejected for being out of ``[0.0, 1.0]`` gains a
+    unit-mismatch guess appended to its own ``msg`` (:func:`_with_rating_hint`)
+    when the value looks like a ``/10`` or ``/100`` score; every other
+    error, and a ``rating`` miss with no such guess, is unchanged.
 
     A NUL byte or an unpaired UTF-16 surrogate anywhere in ``exc.errors()``
     (issue #869 F5) is checked first and answered as 400 before any 422
@@ -179,6 +217,7 @@ async def request_validation_error_handler(
     # Registered only for RequestValidationError; the check narrows the
     # type Starlette's handler signature widens.
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    errors = [_with_rating_hint(error) for error in errors]
     unsafe = _find_unsafe_jsonb_string(errors)
     if unsafe is not None:
         path, _value = unsafe

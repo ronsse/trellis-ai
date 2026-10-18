@@ -166,6 +166,7 @@ from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import load_settings_values
+from trellis_wire.feedback_hints import rating_out_of_range_hint
 
 logger = structlog.get_logger(__name__)
 
@@ -3394,8 +3395,12 @@ def record_feedback(
                 }
             ],
         )
+        unit_hint = rating_out_of_range_hint(rating)
+        message = "rating must be between 0.0 and 1.0"
+        if unit_hint is not None:
+            message = f"{message}; {unit_hint}"
         _raise_invalid_params(
-            "rating must be between 0.0 and 1.0",
+            message,
             data={"field": "rating", "value": rating},
         )
 

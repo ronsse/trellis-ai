@@ -160,6 +160,24 @@ class TestGradedRating:
             assert "rating must be between 0.0 and 1.0" in excinfo.value.error.message
             assert excinfo.value.error.data == {"field": "rating", "value": bad}
 
+    @pytest.mark.parametrize(("bad", "expected"), [(7, 0.7), (85, 0.85)])
+    def test_rating_out_of_range_names_the_unit_mismatch(
+        self, bad: int, expected: float
+    ) -> None:
+        """A ``/10`` or ``/100`` score gets a converted guess, same error code."""
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_1", rating=bad)
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert f"did you mean {expected}?" in excinfo.value.error.message
+        assert excinfo.value.error.data == {"field": "rating", "value": bad}
+
+    def test_rating_far_out_of_range_gets_no_guess(self) -> None:
+        """A rating with no plausible unit stays a plain range error."""
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_1", rating=-1)
+        assert excinfo.value.error.code == INVALID_PARAMS
+        assert excinfo.value.error.message == "rating must be between 0.0 and 1.0"
+
 
 class TestBooleanFallback:
     """The pre-existing boolean surface keeps its exact semantics."""
