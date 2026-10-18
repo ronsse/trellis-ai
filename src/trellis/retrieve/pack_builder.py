@@ -1270,7 +1270,9 @@ class PackBuilder:
         if is_held_out(pack.pack_id, self._holdout_rate):
             withheld_from, pack = pack, self._withhold_flat(pack)
             telemetry = self._withheld_flat_telemetry(
-                index_mode=index_mode, class_prior_config=class_prior_config
+                index_mode=index_mode,
+                class_prior_config=class_prior_config,
+                parent_verdict_degraded=parent_verdict_cache.degraded,
             )
 
         # R1 (#844): applied to the *served* pack only, after the holdout
@@ -1669,7 +1671,8 @@ class PackBuilder:
             withheld_from = sectioned_pack
             sectioned_pack = self._withhold_sectioned(sectioned_pack)
             telemetry = self._withheld_sectioned_telemetry(
-                class_prior_config=class_prior_config
+                class_prior_config=class_prior_config,
+                parent_verdict_degraded=parent_verdict_cache.degraded,
             )
 
         # R1 (#844): see the matching comment in :meth:`build` — applied
@@ -1745,18 +1748,22 @@ class PackBuilder:
         )
 
     def _withheld_flat_telemetry(
-        self, *, index_mode: bool, class_prior_config: ClassPriorConfig
+        self,
+        *,
+        index_mode: bool,
+        class_prior_config: ClassPriorConfig,
+        parent_verdict_degraded: bool,
     ) -> dict[str, Any]:
         """Telemetry blocks for the empty pack a withheld caller received.
 
         Each is what this builder computes over an empty item list, so a
         withheld row's standard keys read as a greenfield pack's; the
         would-be pack rides the ``holdout_*`` keys instead. ``class_prior``
-        is the one exception: it describes the gate's *configuration*, not
-        anything derived from the (empty) item list, so it is passed in
-        rather than recomputed over ``[]`` — the same config the served
-        branch would have reported, since the holdout draw happens after
-        the gate already ran.
+        and ``parent_verdict_degraded`` are the exceptions: both describe
+        the gate run's *configuration* or outcome, not anything derived
+        from the (empty) item list, so both are passed in rather than
+        recomputed over ``[]`` — the gate already ran before the holdout
+        draw, so the served branch would have reported the same values.
         """
         disclosure = apply_disclosure(
             [], DISCLOSURE_OFF if index_mode else self._disclosure
@@ -1775,11 +1782,14 @@ class PackBuilder:
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
-            "parent_verdict_degraded": False,
+            "parent_verdict_degraded": parent_verdict_degraded,
         }
 
     def _withheld_sectioned_telemetry(
-        self, *, class_prior_config: ClassPriorConfig
+        self,
+        *,
+        class_prior_config: ClassPriorConfig,
+        parent_verdict_degraded: bool,
     ) -> dict[str, Any]:
         """The sectioned counterpart of :meth:`_withheld_flat_telemetry`."""
         return {
@@ -1793,7 +1803,7 @@ class PackBuilder:
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
-            "parent_verdict_degraded": False,
+            "parent_verdict_degraded": parent_verdict_degraded,
         }
 
     def _emit_sectioned_telemetry(

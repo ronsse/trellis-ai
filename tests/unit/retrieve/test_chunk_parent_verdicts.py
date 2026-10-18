@@ -21,7 +21,7 @@ from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON
 from trellis.retrieve.noise import NOISE_REJECTION_REASON
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import KeywordSearch
-from trellis.schemas.pack import PackBudget
+from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
@@ -141,8 +141,20 @@ def _build(builder: PackBuilder, **kwargs: Any) -> Any:
     )
 
 
+def _build_sectioned(builder: PackBuilder, **kwargs: Any) -> Any:
+    return builder.build_sectioned(
+        intent=INTENT,
+        sections=[SectionRequest(name="s", max_items=25, max_tokens=100_000)],
+        **kwargs,
+    )
+
+
 def _served_ids(pack: Any) -> set[str]:
     return {item.item_id for item in pack.items}
+
+
+def _sectioned_served_ids(pack: Any) -> set[str]:
+    return {item.item_id for section in pack.sections for item in section.items}
 
 
 def _rejection_reasons(pack: Any) -> dict[str, str]:
@@ -273,3 +285,163 @@ class TestParentFetchDegradation:
         ]
         assert len(assembled) == 1
         assert assembled[0].payload["parent_verdict_degraded"] is True
+
+
+class TestHeldOutTelemetryReportsTheGateRun:
+    """A held-out row must report the gate run, not a hardcoded default.
+
+    ``_withheld_flat_telemetry``/``_withheld_sectioned_telemetry`` used to
+    hardcode ``parent_verdict_degraded=False`` regardless of what actually
+    happened. The gate runs once per strategy pass, before the holdout
+    draw (:func:`trellis.core.pack_holdout.is_held_out`), so a store that
+    failed must still be visible on the withheld row. ``holdout_rate=1.0``
+    withholds every pack deterministically.
+    """
+
+    def test_flat_holdout_reports_degradation(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_chunk(doc_store, "any-parent", 0)
+        event_log = _FakeEventLog()
+        builder = PackBuilder(
+            strategies=[KeywordSearch(doc_store)],
+            document_store=_RaisingDocumentStore(doc_store),
+            event_log=event_log,
+            holdout_rate=1.0,
+        )
+
+        pack = _build(builder)
+
+        assert pack.items == []
+        assembled = [
+            e for e in event_log.events if e.event_type == EventType.PACK_ASSEMBLED
+        ]
+        assert len(assembled) == 1
+        payload = assembled[0].payload
+        assert payload["holdout"] is True
+        assert payload["parent_verdict_degraded"] is True
+
+    def test_sectioned_holdout_reports_degradation(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_chunk(doc_store, "any-parent", 0)
+        event_log = _FakeEventLog()
+        builder = PackBuilder(
+            strategies=[KeywordSearch(doc_store)],
+            document_store=_RaisingDocumentStore(doc_store),
+            event_log=event_log,
+            holdout_rate=1.0,
+        )
+
+        pack = _build_sectioned(builder)
+
+        assert _sectioned_served_ids(pack) == set()
+        assembled = [
+            e for e in event_log.events if e.event_type == EventType.PACK_ASSEMBLED
+        ]
+        assert len(assembled) == 1
+        payload = assembled[0].payload
+        assert payload["holdout"] is True
+        assert payload["parent_verdict_degraded"] is True
+
+
+class TestParentContributesOnlyNoiseVerdict:
+    """The parent lends a chunk only its noise-ness, never the caller's spec.
+
+    ``partition_by_parent_signal_quality`` used to apply the caller's
+    whole ``spec`` to the parent's metadata. Under a curation spec that
+    allowlists noise (``{"in": ["noise"]}``), a parent tagged ``standard``
+    fails that allowlist too — withholding a noise-tagged chunk the caller
+    explicitly asked to see, via a parent that was never noise at all. The
+    default-spec scenario (standard chunk, noise parent, withheld) is
+    already covered by ``TestParentVerdictsWithholdChunks
+    .test_chunk_withheld_when_parent_is_noise`` above — both the old and
+    fixed logic agree there, so it does not discriminate this bug.
+    """
+
+    def test_noise_chunk_with_standard_parent_served_under_noise_allowlist(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_parent(doc_store, "parent-standard-2", signal_quality="standard")
+        chunk_id = _put_chunk(doc_store, "parent-standard-2", 0, signal_quality="noise")
+        builder = PackBuilder(
+            strategies=[KeywordSearch(doc_store)], document_store=doc_store
+        )
+
+        pack = _build(builder, tag_filters={"signal_quality": {"in": ["noise"]}})
+
+        assert chunk_id in _served_ids(pack)
+
+    def test_standard_chunk_with_noise_parent_withheld_under_noise_allowlist(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """The item's own check already excludes a standard-tagged chunk
+        under an allowlist that only admits noise, independent of what the
+        parent-level fix does with this noise-tagged parent. Only the
+        outcome (withheld) is asserted, not which gate produced it.
+        """
+        _put_parent(doc_store, "parent-noise-4", signal_quality="noise")
+        chunk_id = _put_chunk(doc_store, "parent-noise-4", 0, signal_quality="standard")
+        builder = PackBuilder(
+            strategies=[KeywordSearch(doc_store)], document_store=doc_store
+        )
+
+        pack = _build(builder, tag_filters={"signal_quality": {"in": ["noise"]}})
+
+        assert chunk_id not in _served_ids(pack)
+
+
+class TestParentResolvedOnlyForRealChunkId:
+    """A non-chunk item never inherits a parent verdict.
+
+    ``resolve_parent_id`` trusts ``metadata['parent_doc_id']``
+    unconditionally when present, so a non-chunk whose metadata happens to
+    carry that key (caller-set, not written by the chunker) would
+    otherwise fetch and apply another document's verdict to itself.
+    """
+
+    def test_non_chunk_with_parent_doc_id_is_served_and_get_not_called(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_parent(doc_store, "noise-document", signal_quality="noise")
+        doc_store.put(
+            "solo-document-2",
+            INTENT,
+            {
+                "content_tags": {"signal_quality": "standard"},
+                "parent_doc_id": "noise-document",
+            },
+        )
+        spy = _CountingDocumentStore(doc_store)
+        builder = PackBuilder(strategies=[KeywordSearch(doc_store)], document_store=spy)
+
+        pack = _build(builder)
+
+        assert "solo-document-2" in _served_ids(pack)
+        assert spy.get_calls == []
+
+
+class TestBuildSectionedAppliesParentVerdicts:
+    """``build_sectioned`` must share the parent-verdict gate with ``build``.
+
+    A ``ParentVerdictCache(None)`` (no document store wired in) would pass
+    the whole suite silently, since ``resolve`` always returns ``None``
+    for a cache with no store — this pins the sectioned path's
+    ``document_store=`` wiring behaviourally.
+    """
+
+    def test_sectioned_chunk_withheld_when_parent_is_noise(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_parent(doc_store, "parent-noise-sectioned", signal_quality="noise")
+        chunk_id = _put_chunk(doc_store, "parent-noise-sectioned", 0)
+        builder = PackBuilder(
+            strategies=[KeywordSearch(doc_store)], document_store=doc_store
+        )
+
+        pack = _build_sectioned(builder)
+
+        assert chunk_id not in _sectioned_served_ids(pack)
+        assert (
+            pack.metadata["withholding"]["by_reason"].get(NOISE_REJECTION_REASON) == 1
+        )

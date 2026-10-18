@@ -27,10 +27,10 @@ and the chunk is served. A store error while fetching a parent must not
 fail the pack either — the error is caught whole (not filtered by
 exception type, the same posture
 :func:`trellis.core.write_provenance.resolve_stamp_staleness` takes for an
-advisory step on the write path), logged once at warning level, and the
-cache is marked :attr:`ParentVerdictCache.degraded` so the caller can
-record the condition instead of serving silently-unfiltered chunks with no
-trace anywhere.
+advisory step on the write path), logged at warning level once per failed
+parent, and the cache is marked :attr:`ParentVerdictCache.degraded` so the
+caller can record the condition instead of serving silently-unfiltered
+chunks with no trace anywhere.
 
 **One fetch per distinct parent per pack.** :class:`ParentVerdictCache` is
 constructed once per :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`
@@ -38,9 +38,10 @@ constructed once per :meth:`~trellis.retrieve.pack_builder.PackBuilder.build`
 and threaded through every strategy's pass over the collect-seam gates, so
 three chunks sharing a parent cost one
 :meth:`~trellis.stores.base.document.DocumentStore.get` regardless of how
-many strategies or how many gates consult it. A non-chunk item (where
-:func:`~trellis.retrieve.concentration.resolve_parent_id` returns the
-item's own id) never reaches the store at all.
+many strategies or how many gates consult it. A non-chunk item — its own
+id fails :func:`~trellis.ingest_corpus.models.is_chunk_doc_id`, or (should
+that check somehow pass) :func:`~trellis.retrieve.concentration.resolve_parent_id`
+still returns the item's own id — never reaches the store at all.
 """
 
 from __future__ import annotations
@@ -51,7 +52,11 @@ import structlog
 
 from trellis.retrieve.concentration import resolve_parent_id
 from trellis.retrieve.lifecycle import is_archived
-from trellis.retrieve.noise import passes_signal_quality
+from trellis.retrieve.noise import (
+    NOISE_SIGNAL_QUALITY,
+    _facet_value,
+    passes_signal_quality,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -66,11 +71,14 @@ class ParentVerdictCache:
     """Per-pack memoized lookup of a chunk's parent document metadata.
 
     Not a general document cache: :meth:`resolve` only ever returns
-    something non-``None`` for an item whose
+    something non-``None`` for an item whose own id is a real chunk id
+    (:func:`~trellis.ingest_corpus.models.is_chunk_doc_id`) *and* whose
     :func:`~trellis.retrieve.concentration.resolve_parent_id` differs from
-    its own ``item_id`` — i.e. a chunk. A non-chunk item is its own parent,
-    and its own metadata already went through the gate directly, so
-    looking it up again here would be redundant, not merely wasteful.
+    its own ``item_id``. A non-chunk item is its own parent, and its own
+    metadata already went through the gate directly, so looking it up
+    again here would be redundant, not merely wasteful — and a non-chunk
+    item cannot borrow a verdict via a caller-set ``parent_doc_id`` either,
+    since the id check runs first.
     """
 
     def __init__(self, document_store: DocumentStore | None) -> None:
@@ -79,10 +87,11 @@ class ParentVerdictCache:
         #: not as a store error, so it never sets :attr:`degraded`.
         self._document_store = document_store
         self._cache: dict[str, dict[str, Any] | None] = {}
-        #: Set once a parent fetch raises. Sticky for the cache's whole
-        #: lifetime (one pack build): a store that failed once for this
-        #: build is not worth retrying for every subsequent chunk, and the
-        #: caller reports this once, not per occurrence.
+        #: Set once any parent fetch raises; sticky for the cache's whole
+        #: lifetime (one pack build). Only the failed parent is cached as a
+        #: miss: every other distinct parent is still fetched, so one
+        #: unreadable row cannot switch the check off for the whole pack.
+        #: The caller reports the condition once per build, not per chunk.
         self.degraded = False
 
     def resolve(self, item: PackItem) -> dict[str, Any] | None:
@@ -96,6 +105,20 @@ class ParentVerdictCache:
         why malformed data reads as absent rather than excluding).
         """
         if self._document_store is None:
+            return None
+        # Deferred like the matching import in
+        # ``trellis.retrieve.concentration.resolve_parent_id``:
+        # ``trellis.ingest_corpus.__init__`` pulls ``sync``, which imports
+        # back into ``trellis.retrieve`` (the embed hook), so a module-level
+        # import here would make the two packages mutually importing.
+        from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+        if not is_chunk_doc_id(item.item_id):
+            # Only a real chunk id may inherit a parent verdict. Without
+            # this, a non-chunk item whose metadata happens to carry a
+            # caller-set ``parent_doc_id`` (``resolve_parent_id`` trusts
+            # that key unconditionally) would have this cache fetch and
+            # apply another document's verdict to it.
             return None
         parent_id = resolve_parent_id(item)
         if parent_id == item.item_id:
@@ -146,19 +169,25 @@ def partition_by_parent_signal_quality(
 ) -> tuple[list[PackItem], list[PackItem]]:
     """Split ``items`` into ``(kept, withheld)`` on the *parent's* ``signal_quality``.
 
-    Applies the caller's own ``spec`` — the same one
-    :func:`~trellis.retrieve.noise.partition_by_signal_quality` applied to
-    the item's own metadata — to the parent's, so a caller-supplied spec
-    that admits noise (e.g. curation tooling) admits a noisy parent's
-    chunks too, rather than this gate silently overriding it.
+    The parent contributes only a noise verdict, never the caller's whole
+    ``spec``: a chunk is withheld through its parent only when the
+    parent's own ``signal_quality`` is literally ``"noise"`` *and* that
+    value fails ``spec`` — the same ``spec``
+    :func:`~trellis.retrieve.noise.partition_by_signal_quality` applies to
+    the item's own metadata. Applying the whole ``spec`` to the parent,
+    rather than just its noise-ness, misreads a caller-supplied allowlist
+    such as curation's ``{"in": ["noise"]}``: a parent tagged ``standard``
+    fails that allowlist too, which would withhold a noise-tagged chunk
+    the caller explicitly asked to see, via a parent that was never noise
+    at all.
     """
     kept: list[PackItem] = []
     withheld: list[PackItem] = []
     for item in items:
         parent_metadata = cache.resolve(item)
-        if parent_metadata is not None and not passes_signal_quality(
-            parent_metadata, spec
-        ):
+        if _facet_value(
+            parent_metadata
+        ) == NOISE_SIGNAL_QUALITY and not passes_signal_quality(parent_metadata, spec):
             withheld.append(item)
         else:
             kept.append(item)

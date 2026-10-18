@@ -23,6 +23,7 @@ from tests.ast_rules import (
     calls_to_any,
     construction_names,
 )
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.builder_factory import (
     BODY_ITEMS_ENV,
     EXCERPT_MAX_CHARS_ENV,
@@ -218,6 +219,31 @@ class TestBuildPackBuilder:
         # No embedder configured in this registry, so no semantic axis —
         # which is exactly what ``describe_axes`` is for.
         assert builder.strategy_names == ["keyword", "graph"]
+
+    def test_document_store_reaches_the_parent_verdict_gate(
+        self, tmp_path: Path
+    ) -> None:
+        """The registry's document store, not merely a reference to it,
+        reaches the parent-verdict gate (:mod:`trellis.retrieve.parent_verdicts`):
+        a factory that dropped ``document_store=`` would serve this chunk of
+        a noise-tagged parent instead of withholding it.
+        """
+        registry = self._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "parent-noise",
+            "unrelated filler for parent-noise",
+            {"content_tags": {"signal_quality": "noise"}},
+        )
+        chunk_id = chunk_doc_id("parent-noise", 0)
+        registry.knowledge.document_store.put(
+            chunk_id,
+            "canary rollout chunk 0 of parent-noise",
+            {"parent_doc_id": "parent-noise"},
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+
+        assert chunk_id not in {item.item_id for item in pack.items}
 
     def test_the_pack_carries_a_pack_id_and_an_event(self, tmp_path: Path) -> None:
         registry = self._registry(tmp_path)
