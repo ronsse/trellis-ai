@@ -80,6 +80,11 @@ from trellis.retrieve.noise import (
     partition_by_signal_quality,
     resolve_signal_quality_spec,
 )
+from trellis.retrieve.parent_verdicts import (
+    ParentVerdictCache,
+    partition_by_parent_archived,
+    partition_by_parent_signal_quality,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
@@ -106,6 +111,7 @@ from trellis.schemas.pack import (
 )
 from trellis.schemas.well_known import ACTIVITY
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
@@ -671,6 +677,7 @@ class PackBuilder:
         embedder_resolve_failure: EmbedderResolveFailure | None = None,
         filter_legacy_advisories: bool | None = None,
         class_prior_config: ClassPriorConfig | None = None,
+        document_store: DocumentStore | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -755,6 +762,14 @@ class PackBuilder:
         #: :func:`trellis.retrieve.builder_factory.build_pack_builder` resolves
         #: this once, with settings, and passes the :class:`ClassPriorConfig` in.
         self._class_prior_config = class_prior_config
+        #: Resolves a chunk's parent document at the collect seam so an
+        #: archived or noise verdict recorded against the parent reaches
+        #: its chunks (see :mod:`trellis.retrieve.parent_verdicts`).
+        #: ``None`` for a direct ``PackBuilder(...)`` construction with no
+        #: store wired in — every parent lookup then misses, which is the
+        #: same "no verdict, serve the chunk" outcome a store that simply
+        #: lacks the row produces.
+        self._document_store = document_store
 
     def _effective_class_prior_config(self) -> ClassPriorConfig:
         """``self._class_prior_config``, or a fresh env-only resolve.
@@ -985,6 +1000,11 @@ class PackBuilder:
 
         class_prior_config = self._effective_class_prior_config()
         strategy_by_item_id: dict[int, str] = {}
+        # One cache for the whole build: shared across every strategy's
+        # pass over the collect gates below, so a parent shared by chunks
+        # from two axes (or by several chunks on one axis) costs one
+        # DocumentStore.get() for the whole pack, not one per strategy.
+        parent_verdict_cache = ParentVerdictCache(self._document_store)
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -997,6 +1017,7 @@ class PackBuilder:
                     ),
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
+                    parent_verdict_cache=parent_verdict_cache,
                 )
                 rejected.extend(gate_rejected)
                 for item in items:
@@ -1022,6 +1043,13 @@ class PackBuilder:
                     )
                 )
                 continue
+
+        if parent_verdict_cache.degraded:
+            logger.warning(
+                "parent_verdict_fetch_degraded",
+                intent=intent,
+                pack_kind="pack",
+            )
 
         # Loud-by-default failure surfaces (C2 Phase 4).
         # 1. Single configured strategy that failed: required-strategy
@@ -1231,6 +1259,7 @@ class PackBuilder:
             "advisories_explored": advisories_explored,
             "advisories_filtered_legacy": advisories_filtered_legacy,
             "class_prior": class_prior_telemetry(class_prior_config),
+            "parent_verdict_degraded": parent_verdict_cache.degraded,
         }
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
@@ -1337,6 +1366,9 @@ class PackBuilder:
 
         class_prior_config = self._effective_class_prior_config()
         strategy_by_item_id: dict[int, str] = {}
+        # One cache for the whole build — see the matching note in
+        # :meth:`build`.
+        parent_verdict_cache = ParentVerdictCache(self._document_store)
         for strategy in self._strategies:
             try:
                 items, gate_rejected = self._apply_collect_gates(
@@ -1349,6 +1381,7 @@ class PackBuilder:
                     ),
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
+                    parent_verdict_cache=parent_verdict_cache,
                 )
                 rejected.extend(gate_rejected)
                 for item in items:
@@ -1371,6 +1404,13 @@ class PackBuilder:
                     )
                 )
                 continue
+
+        if parent_verdict_cache.degraded:
+            logger.warning(
+                "parent_verdict_fetch_degraded",
+                intent=intent,
+                pack_kind="sectioned_pack",
+            )
 
         # Loud-by-default failure surfaces (C2 Phase 4) — see build().
         _raise_if_blocking_strategy_failures(
@@ -1620,6 +1660,7 @@ class PackBuilder:
             "advisories_explored": advisories_explored,
             "advisories_filtered_legacy": advisories_filtered_legacy,
             "class_prior": class_prior_telemetry(class_prior_config),
+            "parent_verdict_degraded": parent_verdict_cache.degraded,
         }
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
@@ -1734,6 +1775,7 @@ class PackBuilder:
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
+            "parent_verdict_degraded": False,
         }
 
     def _withheld_sectioned_telemetry(
@@ -1751,6 +1793,7 @@ class PackBuilder:
             "advisories_explored": [],
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
+            "parent_verdict_degraded": False,
         }
 
     def _emit_sectioned_telemetry(
@@ -1769,6 +1812,7 @@ class PackBuilder:
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
+        parent_verdict_degraded: bool = False,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
 
@@ -1900,6 +1944,7 @@ class PackBuilder:
                 "retrieval_phase": retrieval_phase,
                 "refresh": refresh,
                 "class_prior": class_prior,
+                "parent_verdict_degraded": parent_verdict_degraded,
                 **holdout,
                 **token_budget_fields,
             },
@@ -2000,6 +2045,7 @@ class PackBuilder:
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
+        parent_verdict_degraded: bool = False,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -2106,6 +2152,13 @@ class PackBuilder:
         (unstated when ``None``); ``refresh`` records whether the caller
         bypassed session dedup for this call, so an unchanged re-serve is
         distinguishable from a dedup miss.
+
+        ``parent_verdict_degraded`` (default ``False``) is ``True`` when a
+        chunk's parent lookup at the collect seam
+        (:class:`trellis.retrieve.parent_verdicts.ParentVerdictCache`)
+        raised during this build — the chunk is still served, this is only
+        the visible record that the parent-scoped archived/noise check
+        could not run for at least one parent.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -2215,6 +2268,7 @@ class PackBuilder:
                 "retrieval_phase": retrieval_phase,
                 "refresh": refresh,
                 "class_prior": class_prior,
+                "parent_verdict_degraded": parent_verdict_degraded,
                 **holdout,
                 **token_budget_fields,
             },
@@ -3010,6 +3064,7 @@ class PackBuilder:
         *,
         signal_quality_spec: dict[str, Any],
         strategy_name: str,
+        parent_verdict_cache: ParentVerdictCache,
     ) -> tuple[list[PackItem], list[RejectedItem]]:
         """The three collect-seam gates, with what they removed handed back.
 
@@ -3025,7 +3080,13 @@ class PackBuilder:
         call nesting it replaces, then noise, then demoted — because
         :func:`~trellis.retrieve.withholding.summarize_withheld` attributes
         an item to the *first* gate that rejected it, and demoted joins
-        alongside (not ahead of or scrambled with) the other two.
+        alongside (not ahead of or scrambled with) the other two. The
+        parent-scoped checks (:mod:`trellis.retrieve.parent_verdicts`) run
+        immediately after each item-scoped check, over that check's
+        survivors, so a chunk is withheld under ``archived`` if *either*
+        its own or its parent's stamp says so, before ``noise`` ever sees
+        it — the item's own verdict still applies, this only adds a second
+        way to fail the same two gates.
 
         ``strategy_source`` is stamped from the running strategy rather
         than read off the item: ``_promote_strategy_source`` has not run
@@ -3044,7 +3105,15 @@ class PackBuilder:
         un-supersede its own loser.
         """
         kept, archived = partition_archived(items)
+        kept, archived_via_parent = partition_by_parent_archived(
+            kept, parent_verdict_cache
+        )
+        archived = archived + archived_via_parent
         kept, noisy = partition_by_signal_quality(kept, signal_quality_spec)
+        kept, noisy_via_parent = partition_by_parent_signal_quality(
+            kept, signal_quality_spec, parent_verdict_cache
+        )
+        noisy = noisy + noisy_via_parent
         kept, demoted = partition_demoted(kept)
         rejected = cls._reject(
             archived, ARCHIVED_REJECTION_REASON, strategy_source=strategy_name

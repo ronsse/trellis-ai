@@ -247,10 +247,13 @@ def _fake_registry(stores_dir: Path) -> Any:
         # ``knowledge`` is here because #375 made ``build_pack_builder``
         # read ``registry.knowledge.graph_store`` in its own body, to bind
         # the graph axis's seed extractor — outside the ``build_strategies``
-        # seam stubbed above. The store is ``None`` because these tests are
-        # about advisory-file resolution and never run a search: the
-        # extractor is constructed and never consulted.
-        knowledge = type("_Kn", (), {"graph_store": None})()
+        # seam stubbed above. ``document_store`` is here for the same
+        # reason: ``build_pack_builder`` also wires it into ``PackBuilder``
+        # so a chunk's parent verdict can be resolved at the collect seam
+        # (``trellis.retrieve.parent_verdicts``). Both stores are ``None``
+        # because these tests are about advisory-file resolution and never
+        # run a search: neither is ever consulted.
+        knowledge = type("_Kn", (), {"graph_store": None, "document_store": None})()
 
     registry = _Registry()
     registry.stores_dir = stores_dir  # type: ignore[assignment]
