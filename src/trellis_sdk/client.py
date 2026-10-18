@@ -29,6 +29,7 @@ from trellis_sdk._http import (
     describe_body_parse_error,
     pack_attribution,
     raise_for_status,
+    rating_validation_hint,
     wrap_transport_error,
 )
 from trellis_sdk.exceptions import TrellisProtocolError
@@ -465,15 +466,22 @@ class TrellisClient:
             reached the log — ``False`` means only the JSONL audit row
             landed and a reconcile is owed (the emission soft-failed).
         """
-        body = PackFeedbackRequest(
-            success=success,
-            helpful_item_ids=helpful_item_ids or [],
-            unhelpful_item_ids=unhelpful_item_ids or [],
-            followed_advisory_ids=followed_advisory_ids or [],
-            target_id=target_id,
-            rating=rating,
-            comment=comment,
-        )
+        try:
+            body = PackFeedbackRequest(
+                success=success,
+                helpful_item_ids=helpful_item_ids or [],
+                unhelpful_item_ids=unhelpful_item_ids or [],
+                followed_advisory_ids=followed_advisory_ids or [],
+                target_id=target_id,
+                rating=rating,
+                comment=comment,
+            )
+        except ValueError as exc:
+            hint = rating_validation_hint(exc)
+            if hint is None:
+                raise
+            msg = f"rating must be between 0.0 and 1.0; {hint}"
+            raise ValueError(msg) from exc
         path = f"/api/v1/packs/{pack_id}/feedback"
         resp = self._request("POST", path, json=body.model_dump(mode="json"))
         try:

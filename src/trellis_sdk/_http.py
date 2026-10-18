@@ -31,6 +31,7 @@ from trellis_sdk.exceptions import (
     TrellisTransportError,
     TrellisVersionMismatchError,
 )
+from trellis_wire.feedback_hints import rating_out_of_range_hint
 
 if TYPE_CHECKING:
     import httpx
@@ -109,6 +110,41 @@ def describe_body_parse_error(exc: Exception) -> str:
         for err in raw_errors
     ]
     return "; ".join(pairs) if pairs else type(exc).__name__
+
+
+def rating_validation_hint(exc: Exception) -> str | None:
+    """A unit-mismatch guess for a ``rating`` range miss in *exc*, or ``None``.
+
+    *exc* is the ``pydantic.ValidationError`` a wire request DTO (e.g.
+    ``PackFeedbackRequest``) raises on construction, from a value the
+    caller itself supplied — unlike :func:`describe_body_parse_error`,
+    which guards a *server response* that may not be the server's own
+    content, there is nothing here to protect against echoing, so this
+    reads ``input`` directly. Returns ``None`` for any other validation
+    failure (multi-field, a non-``rating`` field, no numeric guess), and
+    the caller should re-raise *exc* unchanged in that case.
+    """
+    errors_method = getattr(exc, "errors", None)
+    if not callable(errors_method):
+        return None
+    try:
+        raw_errors = errors_method()
+    except TypeError:
+        return None
+    for err in raw_errors:
+        loc = err.get("loc") or ()
+        value = err.get("input")
+        if (
+            err.get("type") in {"greater_than_equal", "less_than_equal"}
+            and loc
+            and loc[-1] == "rating"
+            and not isinstance(value, bool)
+            and isinstance(value, (int, float))
+        ):
+            hint = rating_out_of_range_hint(float(value))
+            if hint is not None:
+                return hint
+    return None
 
 
 def raise_for_status(resp: httpx.Response, *, request_path: str) -> None:

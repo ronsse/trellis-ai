@@ -2097,3 +2097,98 @@ class TestAnalyzeHealthFailedStrategySection:
         dumped = result.stdout
         assert "synthetic/secret/path.db" not in dumped
         assert "RuntimeError" not in dumped
+
+
+class TestAnalyzeHealthWriteSurfaceTable:
+    """Per-surface accept/reject table: operation breakdown + bypass note."""
+
+    def _emit_executed(
+        self, registry: StoreRegistry, *, requested_by: str, operation: str
+    ) -> None:
+        registry.operational.event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            source="mutation_executor",
+            payload={"requested_by": requested_by, "operation": operation},
+        )
+
+    def test_multi_operation_surface_gets_a_breakdown_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_executed(
+            temp_stores, requested_by="mcp:save_experience", operation="trace.ingest"
+        )
+        for _ in range(2):
+            self._emit_executed(
+                temp_stores,
+                requested_by="mcp:save_experience",
+                operation="entity.create",
+            )
+        # A single-operation surface must NOT get a breakdown line -- only
+        # a fan-out across more than one operation is worth naming.
+        self._emit_executed(
+            temp_stores, requested_by="worker:dbt", operation="trace.ingest"
+        )
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "entity.create=2" in out
+        assert "trace.ingest=1" in out
+        assert "mcp:save_experience by operation" in out
+        assert "worker:dbt by operation" not in out
+
+    def test_json_carries_accepted_by_operation(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_executed(
+            temp_stores, requested_by="mcp:save_experience", operation="trace.ingest"
+        )
+        for _ in range(2):
+            self._emit_executed(
+                temp_stores,
+                requested_by="mcp:save_experience",
+                operation="entity.create",
+            )
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        stats = payload["write"]["by_tool"]["mcp:save_experience"]
+        assert stats["accepted_by_operation"] == {
+            "trace.ingest": 1,
+            "entity.create": 2,
+        }
+
+    def test_executor_bypass_surface_gets_a_pointer_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # record_feedback's writes never reach MutationExecutor, so a
+        # boundary rejection is what puts it in ``by_tool`` for this test.
+        temp_stores.operational.event_log.emit(
+            EventType.WRITE_REJECTED,
+            source="test",
+            payload={"tool": "record_feedback", "rejections": []},
+        )
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "mcp:record_feedback" in out
+        assert "bypass the executor" in out
+        assert "Serve line below" in out
+
+    def test_a_non_bypass_surface_gets_no_pointer_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_executed(
+            temp_stores, requested_by="worker:dbt", operation="trace.ingest"
+        )
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "bypass the executor" not in out

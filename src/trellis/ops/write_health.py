@@ -58,7 +58,7 @@ from trellis.ops.capture_coverage import (
     summarize_capture_coverage,
 )
 from trellis.schemas.enums import TraceSource
-from trellis.schemas.trace import Outcome, Trace
+from trellis.schemas.trace import Outcome, Trace, TraceStep
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -437,6 +437,33 @@ def _freeform_clause(target: _LocTarget) -> str:
     return ""
 
 
+#: Keys agents write on a step for free-form narration, none of which
+#: ``TraceStep`` declares. Hand-kept rather than derived — like the two
+#: hints below — because each is a specific, recurring confusion about
+#: *where* narration goes, which the generic "put free-form values in
+#: steps[].args or steps[].result" hint states too vaguely to fix on the
+#: first retry.
+_NARRATION_KEYS = frozenset(
+    {
+        "detail",
+        "output",
+        "observation",
+        "action",
+        "description",
+        "summary",
+        "outcome",
+        "content",
+        "text",
+    }
+)
+
+_NARRATION_HINT = (
+    "{loc} is not accepted on a step: what happened goes in steps[].result "
+    'as {{"summary": "..."}}, a failure goes in steps[].error, and inputs '
+    "go in steps[].args"
+)
+
+
 def _extra_forbidden_hint(target: _LocTarget) -> str:
     if target.model is Outcome and (target.field or "").startswith("artifact"):
         # Hand-written on purpose: the generated form would list Outcome's
@@ -447,6 +474,12 @@ def _extra_forbidden_hint(target: _LocTarget) -> str:
             '"artifacts_produced": [{"artifact_id": ..., '
             '"artifact_type": ...}] — not inside outcome'
         )
+    if target.model is TraceStep and target.field == "index":
+        return (
+            f"{target.path} is not accepted: steps are ordered by position, so drop it"
+        )
+    if target.model is TraceStep and target.field in _NARRATION_KEYS:
+        return _NARRATION_HINT.format(loc=target.path)
     return (
         f"{target.path} is not accepted: {target.model.__name__} accepts only "
         f"[{_fields(target.model)}]{_freeform_clause(target)}"
@@ -460,10 +493,16 @@ def _type_hint(target: _LocTarget) -> str:
         # The loc stops on a list element; ``_describe`` already names the
         # element model, so do not name the owner twice.
         return f"{target.path} entries must be {_describe(target.annotation)}"
-    return (
+    hint = (
         f"{target.path} must be {_describe(target.annotation)} "
         f"({target.model.__name__}.{target.field})"
     )
+    if target.model is TraceStep and target.field == "result":
+        # Hand-written on purpose: "a JSON object, not a string or other
+        # scalar" names the shape but not a fix — the worked example is
+        # what turns it into one on the first retry.
+        hint += ', e.g. {"summary": "<text>"}'
+    return hint
 
 
 def _enum_hint(target: _LocTarget) -> str:
@@ -525,10 +564,11 @@ def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
     rejected inside ``TraceStep``. A walk covers every model reachable
     from ``Trace``, including ones added later, for free.
 
-    Two hand-written hints are kept deliberately, because each encodes a
+    Three hand-written hints are kept deliberately, because each encodes a
     specific recurring confusion a generated hint would state worse: the
-    ``artifacts``-under-``outcome`` relocation, and the ``source`` enum
-    listing. Everything else is derived.
+    ``artifacts``-under-``outcome`` relocation, the ``source`` enum
+    listing, and the narration-family relocation for a step's free-form
+    keys. Everything else is derived.
     """
     hints: list[str] = []
     for row in rows:
@@ -582,10 +622,32 @@ def record_write_rejection(
     return details
 
 
+#: Write surfaces whose writes never reach ``MutationExecutor``, so
+#: ``ToolWriteStats.accepted`` is structurally ``0`` for them rather than a
+#: reflection of zero activity. Hand-kept, like ``_NARRATION_KEYS`` above:
+#: a surface is added here only once its bypass is confirmed, not guessed
+#: from an observed zero. ``mcp:record_feedback`` is the only member today
+#: (see :class:`ServeAttributionReport` for where its signal is reported
+#: instead).
+_EXECUTOR_BYPASS_SURFACES = frozenset({"mcp:record_feedback"})
+
+
 class ToolWriteStats(TrellisModel):
-    """Accept/reject counts for one write surface (``mcp:<tool>``)."""
+    """Accept/reject counts for one write surface (``mcp:<tool>``).
+
+    ``accepted`` counts executed *commands*, not calls: a tool whose one
+    call fans out to several operations (``save_experience`` ingests a
+    trace and creates every extracted entity and edge as its own command)
+    inflates ``accepted`` by exactly that fan-out. ``accepted_by_operation``
+    breaks the same total down by ``Operation`` name, so a reader can
+    answer "how many traces" instead of only "how many writes" — empty
+    for a tool whose writes never reached the executor (e.g.
+    ``mcp:record_feedback``, which bypasses it; see
+    :class:`ServeAttributionReport` for that signal).
+    """
 
     accepted: int = 0
+    accepted_by_operation: dict[str, int] = Field(default_factory=dict)
     boundary_rejected: int = 0
     executor_rejected: int = 0
 
@@ -794,6 +856,9 @@ def summarize_write_health(
     plus extraction entities/edges), all carrying the same
     ``requested_by``. Read it as write volume on behalf of the tool; the
     rejection counts, by contrast, are one per rejected call.
+    ``ToolWriteStats.accepted_by_operation`` keys that same total by the
+    ``operation`` name ``MUTATION_EXECUTED`` already carries, so a reader
+    can recover the per-kind count the flat total hides.
     """
     since = datetime.now(tz=UTC) - timedelta(days=days)
     by_tool: dict[str, ToolWriteStats] = {}
@@ -805,7 +870,12 @@ def summarize_write_health(
         event_log, event_type=EventType.MUTATION_EXECUTED, since=since, limit=limit
     )
     for event in accepted_scan.events:
-        stats(str(event.payload.get("requested_by") or "")).accepted += 1
+        tool_stats = stats(str(event.payload.get("requested_by") or ""))
+        tool_stats.accepted += 1
+        operation = str(event.payload.get("operation") or "(unknown)")
+        tool_stats.accepted_by_operation[operation] = (
+            tool_stats.accepted_by_operation.get(operation, 0) + 1
+        )
 
     executor_reasons: dict[str, int] = {}
     rejected_scan = scan_events(

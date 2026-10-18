@@ -181,6 +181,43 @@ class TestRatingRange:
         assert registry.operational.event_log.count() > 0
 
 
+class TestRatingUnitMismatchHint:
+    """A ``/10`` or ``/100`` rating's 422 names the likely fix.
+
+    Both feedback routes validate ``rating`` with the same
+    ``Field(ge=0.0, le=1.0)``, so both go through
+    :func:`trellis_api.middleware._with_rating_hint`.
+    """
+
+    @pytest.mark.parametrize("path", [FEEDBACK, PACK_FEEDBACK])
+    @pytest.mark.parametrize(("rating", "guess"), [("7", "0.7"), ("85", "0.85")])
+    def test_hint_is_appended_to_the_range_error(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        path: str,
+        rating: str,
+        guess: str,
+    ) -> None:
+        body = f'{{"target_id": "tg-synthetic-1", "rating": {rating}}}'
+        resp = _post(client, path, body)
+        assert resp.status_code == 422, resp.text
+        [error] = resp.json()["detail"]
+        assert error["loc"] == ["body", "rating"]
+        assert f"did you mean {guess}?" in error["msg"]
+        _assert_nothing_recorded(registry)
+
+    def test_a_rating_with_no_plausible_unit_gets_no_guess(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        body = '{"target_id": "tg-synthetic-1", "rating": -1.0}'
+        resp = _post(client, FEEDBACK, body)
+        assert resp.status_code == 422, resp.text
+        [error] = resp.json()["detail"]
+        assert "did you mean" not in error["msg"]
+        _assert_nothing_recorded(registry)
+
+
 class TestFiniteErrorsMatchFastApisDefault:
     """For a finite body, the response is FastAPI's own, byte for byte.
 
@@ -201,7 +238,10 @@ class TestFiniteErrorsMatchFastApisDefault:
         ("path", "body"),
         [
             pytest.param(FEEDBACK, '{"rating": 0.5}', id="missing-field"),
-            pytest.param(PACK_FEEDBACK, '{"rating": 1.1}', id="out-of-range-finite"),
+            # 150.0 is outside both unit-mismatch buckets our handler
+            # checks (see TestRatingUnitMismatchHint above), so it stays a
+            # plain out-of-range miss with no added guess -- byte-identical.
+            pytest.param(PACK_FEEDBACK, '{"rating": 150.0}', id="out-of-range-finite"),
         ],
     )
     def test_byte_identical(

@@ -21,6 +21,7 @@ from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.ops.write_health import (
     _REPEAT_COLLISION_WARN,
     RejectionKind,
+    ToolWriteStats,
     classify_rejection,
     hints_for_trace_rejections,
     normalize_loc,
@@ -198,6 +199,57 @@ class TestHints:
         ]
         (hint,) = hints_for_trace_rejections(rows)
         assert "steps[].action" in hint
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "detail",
+            "output",
+            "observation",
+            "action",
+            "description",
+            "summary",
+            "outcome",
+            "content",
+            "text",
+        ],
+    )
+    def test_narration_key_hint_names_the_relocation(self, key: str) -> None:
+        """Every narration-family key gets the specific relocation hint.
+
+        The generic hint ("put free-form values in steps[].args or
+        steps[].result") states the shape but not which of the two, and
+        not that a failure has its own home -- this is too vague to fix
+        on the first retry.
+        """
+        rows = [{"kind": "extra_forbidden", "loc": f"steps.0.{key}", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "steps[].result" in hint
+        assert "steps[].error" in hint
+        assert "steps[].args" in hint
+
+    def test_index_key_hint_says_to_drop_it(self) -> None:
+        rows = [{"kind": "extra_forbidden", "loc": "steps.0.index", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "steps[].index" in hint
+        assert "ordered by position" in hint
+
+    def test_unrelated_unknown_key_keeps_the_generic_hint(self) -> None:
+        """A step key outside the narration family is not relocated by guess.
+
+        ``step_id`` is a real production shape (#472's corpus) that is not
+        narration and not ``index`` -- it must keep naming ``TraceStep`` and
+        its fields rather than being swept into either special case.
+        """
+        rows = [{"kind": "extra_forbidden", "loc": "steps.0.step_id", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "TraceStep accepts only" in hint
+        assert "steps[].error" not in hint
+
+    def test_string_result_hint_contains_a_worked_example(self) -> None:
+        rows = [{"kind": "type", "loc": "steps.0.result", "msg": ""}]
+        (hint,) = hints_for_trace_rejections(rows)
+        assert '{"summary"' in hint
 
 
 class TestResolveTraceLoc:
@@ -387,6 +439,70 @@ class TestSummarizeWriteHealth:
         assert report.status == "warn"
         assert any("collision" in reason for reason in report.reasons)
         assert any("rejection rate" in reason for reason in report.reasons)
+
+    def test_accepted_by_operation_breaks_down_the_fan_out(
+        self, tmp_path: Path
+    ) -> None:
+        """One ``save_experience`` call fans out to several commands.
+
+        ``accepted`` alone cannot answer "how many traces were saved" --
+        ``accepted_by_operation`` keys the same total by ``Operation`` name
+        so a reader can.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={
+                "requested_by": "mcp:save_experience",
+                "operation": "trace.ingest",
+            },
+        )
+        for _ in range(2):
+            event_log.emit(
+                EventType.MUTATION_EXECUTED,
+                "mutation_executor",
+                payload={
+                    "requested_by": "mcp:save_experience",
+                    "operation": "entity.create",
+                },
+            )
+        report = summarize_write_health(event_log, days=1)
+        stats = report.by_tool["mcp:save_experience"]
+        assert stats.accepted == 3
+        assert stats.accepted_by_operation == {"trace.ingest": 1, "entity.create": 2}
+
+    def test_accepted_by_operation_buckets_a_missing_operation(
+        self, tmp_path: Path
+    ) -> None:
+        """A tool whose event carries no ``operation`` still gets one bucket."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={"requested_by": "mcp:save_memory"},
+        )
+        report = summarize_write_health(event_log, days=1)
+        stats = report.by_tool["mcp:save_memory"]
+        assert stats.accepted == 1
+        assert stats.accepted_by_operation == {"(unknown)": 1}
+
+    def test_tool_write_stats_round_trips_through_json(self) -> None:
+        """``accepted_by_operation`` survives a dump/validate cycle untouched.
+
+        ``extra="forbid"`` means a field pydantic cannot round-trip raises
+        on ``model_validate``, not just a silent drop -- this is the check
+        that would catch that.
+        """
+        stats = ToolWriteStats(
+            accepted=3,
+            boundary_rejected=1,
+            executor_rejected=0,
+            accepted_by_operation={"trace.ingest": 1, "entity.create": 2},
+        )
+        dumped = json.loads(json.dumps(stats.model_dump(mode="json")))
+        restored = ToolWriteStats.model_validate(dumped)
+        assert restored == stats
 
     def test_one_mistake_across_steps_is_one_collision(self, tmp_path: Path) -> None:
         """Indices are collapsed, so the operator sees the true count.

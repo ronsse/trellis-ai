@@ -99,6 +99,7 @@ if TYPE_CHECKING:
         HoldoutHorizon,
         HoldoutReport,
     )
+    from trellis.ops.write_health import ToolWriteStats
 
 logger = structlog.get_logger(__name__)
 
@@ -649,6 +650,51 @@ def _print_capture_coverage(capture: CaptureCoverageReport) -> None:
         console.print(f"    [dim]{note}[/dim]")
 
 
+def _print_tool_table(
+    by_tool: dict[str, ToolWriteStats], bypass_surfaces: frozenset[str]
+) -> None:
+    """Render the per-surface accept/reject table in ``analyze health``.
+
+    Two notes ride under the table rather than in it, because neither fits
+    a flat accept/boundary/executor column: a surface with more than one
+    ``Operation`` folded into ``accepted`` gets its breakdown named, and a
+    surface in *bypass_surfaces* (writes never reach the executor) gets a
+    pointer to where its real count is reported instead, so ``accepted=0``
+    there is not misread as zero activity.
+    """
+    tool_table = Table(show_header=True, header_style="bold")
+    tool_table.add_column("surface")
+    tool_table.add_column("accepted", justify="right")
+    tool_table.add_column("boundary rej", justify="right")
+    tool_table.add_column("executor rej", justify="right")
+    for surface, stats in sorted(by_tool.items()):
+        tool_table.add_row(
+            surface,
+            str(stats.accepted),
+            str(stats.boundary_rejected),
+            str(stats.executor_rejected),
+        )
+    console.print(tool_table)
+    for surface, stats in sorted(by_tool.items()):
+        if len(stats.accepted_by_operation) > 1:
+            breakdown = ", ".join(
+                f"{op}={count}"
+                for op, count in sorted(
+                    stats.accepted_by_operation.items(), key=lambda item: -item[1]
+                )
+            )
+            console.print(f"    {escape(surface)} by operation: {breakdown}")
+        if surface in bypass_surfaces:
+            # This surface's writes bypass MutationExecutor, so accepted=0
+            # above is structural, not a report of zero activity. Its real
+            # count is the Serve line's feedback events, not this table.
+            console.print(
+                f"    [dim]{escape(surface)}: writes bypass the executor, "
+                "so accepted=0 here by construction — see feedback "
+                "events in the Serve line below[/dim]"
+            )
+
+
 @analyze_app.command("health")
 def health(
     days: int = typer.Option(7, help="Days of history to analyze"),
@@ -674,7 +720,10 @@ def health(
     is `warn` with named reasons when any deterministic threshold trips —
     the surface the grooming loop watches.
     """
-    from trellis.ops.write_health import summarize_backend_health  # noqa: PLC0415
+    from trellis.ops.write_health import (  # noqa: PLC0415
+        _EXECUTOR_BYPASS_SURFACES,
+        summarize_backend_health,
+    )
 
     event_log = get_event_log()
     with wrap_cli_meta_analysis(
@@ -712,19 +761,7 @@ def health(
         f"({write.rejection_rate:.0%} of {write.attempts} attempts)"
     )
     if write.by_tool:
-        tool_table = Table(show_header=True, header_style="bold")
-        tool_table.add_column("surface")
-        tool_table.add_column("accepted", justify="right")
-        tool_table.add_column("boundary rej", justify="right")
-        tool_table.add_column("executor rej", justify="right")
-        for surface, stats in sorted(write.by_tool.items()):
-            tool_table.add_row(
-                surface,
-                str(stats.accepted),
-                str(stats.boundary_rejected),
-                str(stats.executor_rejected),
-            )
-        console.print(tool_table)
+        _print_tool_table(write.by_tool, _EXECUTOR_BYPASS_SURFACES)
     if write.boundary_kinds:
         console.print("  Boundary rejection taxonomy:")
         for label, count in sorted(
