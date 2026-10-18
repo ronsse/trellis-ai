@@ -18,10 +18,14 @@ import pytest
 
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON
-from trellis.retrieve.noise import NOISE_REJECTION_REASON
+from trellis.retrieve.noise import DEFAULT_SIGNAL_QUALITY_SPEC, NOISE_REJECTION_REASON
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.parent_verdicts import (
+    ParentVerdictCache,
+    partition_by_parent_signal_quality,
+)
 from trellis.retrieve.strategies import KeywordSearch
-from trellis.schemas.pack import PackBudget, SectionRequest
+from trellis.schemas.pack import PackBudget, PackItem, SectionRequest
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
@@ -425,7 +429,7 @@ class TestBuildSectionedAppliesParentVerdicts:
     """``build_sectioned`` must share the parent-verdict gate with ``build``.
 
     A ``ParentVerdictCache(None)`` (no document store wired in) would pass
-    the whole suite silently, since ``resolve`` always returns ``None``
+    every other test silently, since ``resolve`` always returns ``None``
     for a cache with no store — this pins the sectioned path's
     ``document_store=`` wiring behaviourally.
     """
@@ -445,3 +449,45 @@ class TestBuildSectionedAppliesParentVerdicts:
         assert (
             pack.metadata["withholding"]["by_reason"].get(NOISE_REJECTION_REASON) == 1
         )
+
+
+class _OneBadRowDocumentStore(_CountingDocumentStore):
+    """``get`` raises for one id only: the one-unreadable-row failure."""
+
+    def __init__(self, inner: SQLiteDocumentStore, bad_id: str) -> None:
+        super().__init__(inner)
+        self._bad_id = bad_id
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        if doc_id == self._bad_id:
+            self.get_calls.append(doc_id)
+            msg = "row unreadable"
+            raise RuntimeError(msg)
+        return super().get(doc_id)
+
+
+class TestOneFailedParentLeavesTheRestChecked:
+    """A failed fetch caches a miss for that parent only, not for the pack."""
+
+    def test_noise_parent_after_a_failed_one_still_withholds(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_parent(doc_store, "parent-noise-5", signal_quality="noise")
+        bad, noisy = (
+            PackItem(
+                item_id=_put_chunk(doc_store, parent, 0),
+                item_type="document",
+                metadata={"parent_doc_id": parent},
+            )
+            for parent in ("parent-bad", "parent-noise-5")
+        )
+        store = _OneBadRowDocumentStore(doc_store, "parent-bad")
+        cache = ParentVerdictCache(store)
+
+        _, withheld = partition_by_parent_signal_quality(
+            [bad, noisy], DEFAULT_SIGNAL_QUALITY_SPEC, cache
+        )
+
+        assert cache.degraded is True
+        assert store.get_calls == ["parent-bad", "parent-noise-5"]
+        assert [item.item_id for item in withheld] == [noisy.item_id]
