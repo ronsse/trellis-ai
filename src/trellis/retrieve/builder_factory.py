@@ -237,6 +237,11 @@ def build_pack_builder(
         # through this factory gets the gate wired in, even while every
         # shipped default keeps it a no-op.
         class_prior_config=resolve_class_prior_config(settings=settings),
+        # Lets the collect seam resolve a chunk's parent so an
+        # archived/noise verdict recorded against the parent reaches its
+        # chunks (trellis.retrieve.parent_verdicts). Every surface that
+        # goes through this factory gets the lookup wired in.
+        document_store=registry.knowledge.document_store,
     )
 
 

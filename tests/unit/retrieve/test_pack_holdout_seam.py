@@ -158,15 +158,18 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: / ``refresh`` (when in the task this pack was fetched, and whether the
 #: caller bypassed session dedup — both passed as explicit kwargs outside
 #: the swappable holdout telemetry dict, like ``index_mode``, so they ride
-#: every row including a withheld one). ``_BASE_*_KEYS`` stays an honest
-#: historical snapshot of 58be23d4 rather than being backfilled, so a
-#: *later* addition extends this set, not the base one.
+#: every row including a withheld one), and ``parent_verdict_degraded``
+#: (whether a chunk's parent lookup at the collect seam raised during this
+#: build — see ``trellis.retrieve.parent_verdicts``). ``_BASE_*_KEYS`` stays
+#: an honest historical snapshot of 58be23d4 rather than being backfilled,
+#: so a *later* addition extends this set, not the base one.
 _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
     "duration_ms",
     "advisories_filtered_legacy",
     "retrieval_phase",
     "refresh",
     "class_prior",
+    "parent_verdict_degraded",
 }
 
 
