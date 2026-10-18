@@ -609,6 +609,53 @@ class TestRejectionPayloadIsJsonbSafe:
         assert len(entity_id) == len(unsafe_target)  # escaped, not dropped
         assert "\x00" not in payload["message"]
 
+    def test_rejected_event_round_trips_through_a_real_event_log_scrubbed(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue #869 ("rejected-event loss on Postgres"): the two tests
+        above inspect what the executor *hands to* ``event_log.emit`` with
+        a ``MagicMock``, which proves the executor's own escaping but not
+        that the row surviving a real backend's write-then-read path still
+        carries the escaped (not dropped) hazard. ``EventLog.append``
+        scrubs unconditionally now (#906/#907) regardless of what a caller
+        hands it, so this closes the loop with a real :class:`SQLiteEventLog`
+        -- the documented SQLite-runnable proxy for "Postgres would accept
+        and return this row" used throughout this module -- rather than by
+        re-reasoning about ``append``'s docstring.
+        """
+        unsafe_target = "tag_keyword:bad\x00key"
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError(
+            f"classify_rule.apply: key {unsafe_target!r} contains a NUL byte",
+            errors=["invalid"],
+            code="invalid_key",
+        )
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd(target_id=unsafe_target))
+
+        assert result.status == CommandStatus.REJECTED
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert len(rejected) == 1
+        stored = rejected[0]
+
+        # Read back from the store, not from the call the executor made --
+        # the row genuinely persisted and was retrieved, the write a real
+        # ``jsonb``/``TEXT`` column would have refused unscrubbed.
+        json.dumps(
+            {"entity_id": stored.entity_id, "payload": stored.payload},
+            allow_nan=False,
+        )
+        assert stored.entity_id is not None
+        assert "\x00" not in stored.entity_id
+        # Escaped, not dropped: same length as the stranded original.
+        assert len(stored.entity_id) == len(unsafe_target)
+        assert "\x00" not in stored.payload["message"]
+
     def test_lone_surrogate_in_metadata_claim_is_escaped_before_emit(self) -> None:
         """A raw lone surrogate cannot survive construction of any ``str``
         field on a ``TrellisModel`` (``str_strip_whitespace=True`` makes
