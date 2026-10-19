@@ -15,7 +15,8 @@ own the actual SQL/Cypher. This module's only job is:
 1. Pull the five fields out of an ``upsert_edge``-style ``properties``
    kwarg or a per-row ``spec`` dict in a bulk call.
 2. Validate ``confidence`` range and ``extractor_tier`` allowlist with
-   the *same* error messages the schema raises.
+   the *same* error messages the schema raises, and hand back the tier
+   in its one stored spelling (:func:`normalize_edge_provenance`).
 3. Surface a single tuple of field names so backend row-to-dict helpers
    can iterate without typoing one of them.
 """
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trellis.schemas.graph import ALLOWED_EXTRACTOR_TIERS
+from trellis.schemas.graph import canonical_extractor_tier
 
 #: Canonical ordering for the five provenance columns. Used by every
 #: backend's INSERT row builder and row-to-dict helper. Tuple (not list)
@@ -45,15 +46,22 @@ EDGE_TOP_LEVEL_COLUMNS: frozenset[str] = frozenset(
 )
 
 
-def validate_edge_provenance(
+def normalize_edge_provenance(
     *,
     source_trace_id: str | None = None,
     agent_id: str | None = None,
     confidence: float | None = None,
     evidence_ref: str | None = None,
     extractor_tier: str | None = None,
-) -> None:
-    """Raise ``ValueError`` if any provenance field violates its contract.
+) -> dict[str, Any]:
+    """Validate the five provenance fields and return them in stored form.
+
+    The only normalisation is ``extractor_tier``, mapped to its stored
+    spelling by :func:`~trellis.schemas.graph.canonical_extractor_tier`
+    (the lower-case ``ExtractorTier`` values the extractors stamp become
+    their upper-case members). A store persists the returned value, never
+    the argument, so the typed column holds one spelling whichever writer
+    produced the edge.
 
     Mirrors the validation in :class:`trellis.schemas.graph.Edge` so
     callers that drive the store directly (bypassing the Pydantic model)
@@ -66,11 +74,17 @@ def validate_edge_provenance(
         agent_id: opaque str (no validation beyond type).
         confidence: float in [0.0, 1.0] when set.
         evidence_ref: opaque str (no validation beyond type).
-        extractor_tier: one of :data:`ALLOWED_EXTRACTOR_TIERS` when set.
+        extractor_tier: one of ``ALLOWED_EXTRACTOR_TIERS`` (see
+            :mod:`trellis.schemas.graph`), or its lower-case
+            ``ExtractorTier`` spelling, when set.
+
+    Returns:
+        A dict with all five keys (``None`` where unset), ``extractor_tier``
+        canonical.
 
     Raises:
         ValueError: ``confidence`` outside [0, 1] or ``extractor_tier``
-            not in the allowlist.
+            not a recognised spelling of an allowlisted tier.
         TypeError: if any provided field has the wrong runtime type.
     """
     if source_trace_id is not None and not isinstance(source_trace_id, str):
@@ -103,12 +117,37 @@ def validate_edge_provenance(
                 f"got {type(extractor_tier).__name__}"
             )
             raise TypeError(msg)
-        if extractor_tier not in ALLOWED_EXTRACTOR_TIERS:
-            msg = (
-                f"extractor_tier must be one of "
-                f"{sorted(ALLOWED_EXTRACTOR_TIERS)}, got {extractor_tier!r}"
-            )
-            raise ValueError(msg)
+        extractor_tier = canonical_extractor_tier(extractor_tier)
+    return {
+        "source_trace_id": source_trace_id,
+        "agent_id": agent_id,
+        "confidence": confidence,
+        "evidence_ref": evidence_ref,
+        "extractor_tier": extractor_tier,
+    }
+
+
+def validate_edge_provenance(
+    *,
+    source_trace_id: str | None = None,
+    agent_id: str | None = None,
+    confidence: float | None = None,
+    evidence_ref: str | None = None,
+    extractor_tier: str | None = None,
+) -> None:
+    """Raise ``ValueError`` / ``TypeError`` if any provenance field is invalid.
+
+    The check-only form of :func:`normalize_edge_provenance`, for a caller
+    that does not persist the values. One that does must use the
+    normalised result, or a lower-case tier reaches the typed column.
+    """
+    normalize_edge_provenance(
+        source_trace_id=source_trace_id,
+        agent_id=agent_id,
+        confidence=confidence,
+        evidence_ref=evidence_ref,
+        extractor_tier=extractor_tier,
+    )
 
 
 def extract_edge_provenance(

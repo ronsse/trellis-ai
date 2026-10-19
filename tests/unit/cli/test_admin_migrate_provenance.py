@@ -19,7 +19,13 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
+from trellis.extract.base import ExtractorTier
+from trellis.extract.commands import result_to_batch
+from trellis.extract.trace import TraceExtractor
+from trellis.mutate import build_curate_executor
+from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli import admin_migrate_provenance as migrate_provenance_module
@@ -595,3 +601,173 @@ class TestMigrateProvenanceCLI:
         # about is observable in the raw output.
         assert "edges_scanned" in result.output
         assert "dry_run" in result.output
+
+
+# ---------------------------------------------------------------------------
+# The spelling a writer stamps must be one the migration accepts.
+#
+# Trace extraction stamps ``ExtractorTier.DETERMINISTIC.value`` (lower-case)
+# into an edge's ``properties``; the stored allowlist is upper-case. Until the
+# two were reconciled every trace-extracted edge was "malformed", so the
+# migration could never complete on a deployment with trace extraction on.
+# No test ran a real extractor's edge through the migration, which is why
+# the split went unnoticed: every case above seeds the canonical spelling by
+# hand.
+# ---------------------------------------------------------------------------
+
+_TRACE_DATA: dict[str, Any] = {
+    "source": "agent",
+    "intent": "fix the broken import",
+    "steps": [
+        {"step_type": "tool_call", "name": "Bash", "args": {}, "result": {}},
+        {"step_type": "tool_call", "name": "Read", "args": {}, "result": {}},
+    ],
+    "context": {"agent_id": "code-orchestrator", "domain": "backend"},
+}
+
+
+def _every_edge(store: Any) -> list[dict[str, Any]]:
+    """Each current edge once, via the public store API."""
+    seen: dict[str, dict[str, Any]] = {}
+    for node in store.query(limit=10_000):
+        for edge in store.get_edges(str(node["node_id"]), direction="outgoing"):
+            seen[str(edge["edge_id"])] = edge
+    return list(seen.values())
+
+
+@pytest.fixture
+def registry(tmp_path: Path) -> StoreRegistry:
+    stores_dir = tmp_path / "stores"
+    stores_dir.mkdir()
+    return StoreRegistry(stores_dir=stores_dir)
+
+
+class TestTraceExtractedEdgesMigrate:
+    async def test_a_real_trace_extraction_migrates_clean(
+        self,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        trace = Trace.model_validate(_TRACE_DATA)
+        extracted = await TraceExtractor().extract(trace, source_hint="trace")
+        build_curate_executor(registry).execute_batch(
+            result_to_batch(extracted, requested_by="test")
+        )
+        store = registry.knowledge.graph_store
+
+        # Guard against a vacuous pass: the live writer left edges whose
+        # tier sits in ``properties`` in the ExtractorTier spelling, with the
+        # typed column unset -- exactly the backlog the migration must lift.
+        before = _every_edge(store)
+        assert before
+        for edge in before:
+            assert edge["properties"]["extractor_tier"] == (
+                ExtractorTier.DETERMINISTIC.value
+            )
+            assert edge["extractor_tier"] is None
+
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        for dry_run in (True, False):
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=dry_run,
+                    batch_size=10,
+                    output_format="json",
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == 0
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["status"] == "ok"
+            assert payload["edges_scanned"] == len(before)
+            assert payload["edges_malformed"] == 0
+            assert payload["edges_migrated"] == len(before)
+
+        after = _every_edge(store)
+        assert len(after) == len(before)
+        for edge in after:
+            assert edge["extractor_tier"] == "DETERMINISTIC"
+            assert edge["source_trace_id"] == trace.trace_id
+            assert edge["agent_id"] == "code-orchestrator"
+            assert "extractor_tier" not in edge["properties"]
+
+    @pytest.mark.parametrize("tier", list(ExtractorTier), ids=lambda t: t.value)
+    def test_every_extractor_tier_value_migrates(
+        self, tmp_path: Path, tier: ExtractorTier
+    ) -> None:
+        # Only trace extraction stamps a tier on an edge today; the other two
+        # members would arrive in the same spelling if an extractor did.
+        store = _make_store(tmp_path)
+        try:
+            _seed_legacy_edge(store, "depends_on", {"extractor_tier": tier.value})
+
+            report = run_migrate_provenance(store, dry_run=False, batch_size=10)
+
+            assert (report.edges_migrated, report.edges_malformed) == (1, 0)
+            edge = store.get_edges("a", direction="outgoing")[0]
+            assert edge["extractor_tier"] == tier.name
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("spelling", ["Llm", "deterministic ", "heuristic"])
+    def test_a_near_miss_spelling_is_still_malformed(
+        self, tmp_path: Path, spelling: str
+    ) -> None:
+        store = _make_store(tmp_path)
+        try:
+            _seed_legacy_edge(store, "depends_on", {"extractor_tier": spelling})
+
+            with pytest.raises(MigrationDriftError) as exc:
+                run_migrate_provenance(store, dry_run=False, batch_size=10)
+
+            assert exc.value.malformed_count == 1
+            edge = store.get_edges("a", direction="outgoing")[0]
+            assert edge["extractor_tier"] is None
+            assert edge["properties"]["extractor_tier"] == spelling
+        finally:
+            store.close()
+
+
+class _RecordingStore:
+    """Wraps a real :class:`SQLiteGraphStore`, recording each ``upsert_edge``."""
+
+    def __init__(self, inner: SQLiteGraphStore) -> None:
+        self._inner = inner
+        self.upserts: list[dict[str, Any]] = []
+
+    def query(self, **kwargs: Any) -> Any:
+        return self._inner.query(**kwargs)
+
+    def get_edges(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_edges(*args, **kwargs)
+
+    def upsert_edge(
+        self, source_id: str, target_id: str, edge_type: str, **kwargs: Any
+    ) -> str:
+        self.upserts.append(kwargs)
+        return self._inner.upsert_edge(source_id, target_id, edge_type, **kwargs)
+
+
+class TestMigrationHandsTheStoreTheStoredSpelling:
+    def test_the_lift_does_not_rely_on_the_store_to_canonicalise(
+        self, tmp_path: Path
+    ) -> None:
+        """A third-party graph store need not canonicalise a tier itself.
+
+        The built-in stores do, so a SQLite round trip cannot tell whether
+        the migration normalised or the store did. Reading what the store
+        was *handed* can.
+        """
+        inner = _make_store(tmp_path)
+        try:
+            _seed_legacy_edge(inner, "depends_on", {"extractor_tier": "deterministic"})
+            store = _RecordingStore(inner)
+
+            run_migrate_provenance(store, dry_run=False, batch_size=10)  # type: ignore[arg-type]
+
+            (upsert,) = store.upserts
+            assert upsert["extractor_tier"] == "DETERMINISTIC"
+        finally:
+            inner.close()

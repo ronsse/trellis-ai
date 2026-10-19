@@ -21,6 +21,7 @@ import pytest
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     extract_edge_provenance,
+    normalize_edge_provenance,
     validate_edge_provenance,
 )
 from trellis.stores.sqlite.graph import SQLiteGraphStore
@@ -75,12 +76,38 @@ class TestValidateEdgeProvenance:
         with pytest.raises(ValueError, match="extractor_tier must be one of"):
             validate_edge_provenance(extractor_tier="MAGIC")
 
-    def test_extractor_tier_case_sensitive(self) -> None:
-        # The validator is intentionally case-sensitive — retrieval
-        # queries compare strings, and lowercasing 'llm' would silently
-        # diverge from canonical normalization elsewhere.
+    @pytest.mark.parametrize("tier", ["deterministic", "hybrid", "llm"])
+    def test_extractor_tier_accepts_the_enum_spelling(self, tier: str) -> None:
+        # Trace extraction stamps the lower-case ``ExtractorTier`` value.
+        validate_edge_provenance(extractor_tier=tier)
+
+    @pytest.mark.parametrize("tier", ["Llm", "llm ", "heuristic", ""])
+    def test_extractor_tier_is_not_case_folded(self, tier: str) -> None:
+        # A closed three-value map, not ``.upper()``: any near-miss is
+        # still malformed.
         with pytest.raises(ValueError, match="extractor_tier must be one of"):
-            validate_edge_provenance(extractor_tier="deterministic")
+            validate_edge_provenance(extractor_tier=tier)
+
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [("deterministic", "DETERMINISTIC"), ("hybrid", "HYBRID"), ("llm", "LLM")],
+    )
+    def test_normalize_returns_the_stored_spelling(
+        self, spelling: str, stored: str
+    ) -> None:
+        normalised = normalize_edge_provenance(
+            source_trace_id="t", confidence=0.5, extractor_tier=spelling
+        )
+        assert normalised == {
+            "source_trace_id": "t",
+            "agent_id": None,
+            "confidence": 0.5,
+            "evidence_ref": None,
+            "extractor_tier": stored,
+        }
+
+    def test_normalize_leaves_an_absent_tier_absent(self) -> None:
+        assert normalize_edge_provenance()["extractor_tier"] is None
 
     def test_extractor_tier_non_string_rejected(self) -> None:
         with pytest.raises(TypeError, match="extractor_tier must be"):
@@ -168,6 +195,45 @@ class TestSQLiteProvenanceRoundTrip:
         assert edge["confidence"] == pytest.approx(0.83)
         assert edge["evidence_ref"] == "doc-9"
         assert edge["extractor_tier"] == "HYBRID"
+
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [("deterministic", "DETERMINISTIC"), ("hybrid", "HYBRID"), ("llm", "LLM")],
+    )
+    def test_upsert_edge_persists_the_stored_spelling(
+        self, graph_store: SQLiteGraphStore, spelling: str, stored: str
+    ) -> None:
+        _seed_endpoints(graph_store)
+        graph_store.upsert_edge("a", "b", "depends_on", extractor_tier=spelling)
+        edge = graph_store.get_edges("a", direction="outgoing")[0]
+        assert edge["extractor_tier"] == stored
+
+    def test_bulk_persists_the_stored_spelling(
+        self, graph_store: SQLiteGraphStore
+    ) -> None:
+        _seed_endpoints(graph_store)
+        graph_store.upsert_node("c", "service", {})
+        graph_store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "links_to",
+                    "extractor_tier": "deterministic",
+                },
+                {
+                    "source_id": "a",
+                    "target_id": "c",
+                    "edge_type": "links_to",
+                    "extractor_tier": "LLM",
+                },
+            ]
+        )
+        by_target = {
+            e["target_id"]: e["extractor_tier"]
+            for e in graph_store.get_edges("a", direction="outgoing")
+        }
+        assert by_target == {"b": "DETERMINISTIC", "c": "LLM"}
 
     def test_upsert_edge_without_provenance_reads_back_none(
         self, graph_store: SQLiteGraphStore

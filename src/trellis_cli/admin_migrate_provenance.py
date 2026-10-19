@@ -14,9 +14,13 @@ Behaviour (mirrors ``plan-provenance-columns.md`` §4 + plan brief):
   candidate.  If any typed column is already populated the row is
   skipped — the migration is *additive*, not authoritative.
 * **Validation.** Lifted values pass through
-  :func:`validate_edge_provenance` before re-write.  Malformed legacy
-  values (``confidence="high"``, ``extractor_tier="hybrid"`` in
-  lowercase, …) emit an ``EXTRACTION_FAILED`` event with
+  :func:`normalize_edge_provenance` before re-write, which also maps the
+  lower-case ``ExtractorTier`` spelling that trace extraction stamps
+  (``"deterministic"``) to the stored one (``"DETERMINISTIC"``).  The
+  migration hands the store the normalised value rather than relying on
+  the store to do it, because a third-party graph store need not.
+  Malformed legacy values (``confidence="high"``, ``extractor_tier="Llm"``
+  or ``"heuristic"``, …) emit an ``EXTRACTION_FAILED`` event with
   ``failure_kind="parse_error"`` and skip the edge — they do not
   silently drop the row.
 * **Drift threshold.** When more than 1% of scanned edges fail
@@ -84,7 +88,7 @@ from trellis.extract.telemetry import emit_extraction_failure
 from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     extract_edge_provenance,
-    validate_edge_provenance,
+    normalize_edge_provenance,
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
 from trellis_cli.output import build_console, emit_json
@@ -199,7 +203,7 @@ def _migrate_one_edge(
     # write path.  emit-then-skip mirrors the dispatcher's "loud on
     # bad data" contract.
     try:
-        validate_edge_provenance(**legacy)
+        legacy = normalize_edge_provenance(**legacy)
     except (TypeError, ValueError) as exc:
         report.edges_malformed += 1
         emit_extraction_failure(

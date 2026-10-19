@@ -18,9 +18,48 @@ from trellis.schemas._type_warnings import warn_if_near_miss_edge_kind
 #: string) but the schema layer constrains it to this set so retrieval
 #: queries can filter on the tier without normalisation gymnastics.
 #:
+#: This is the *stored* spelling. Writers do not all stamp it: trace
+#: extraction stamps the lower-case ``ExtractorTier`` value into an edge's
+#: ``properties``, and the legacy-lift migration moves it into the typed
+#: column, so every boundary that takes a tier passes it through
+#: :func:`canonical_extractor_tier` first.
+#:
 #: Kept here rather than importing from ``trellis.extract`` to avoid a
-#: layering cycle (``schemas`` must not depend on ``extract``).
+#: layering cycle (``schemas`` must not depend on ``extract``);
+#: ``tests/unit/schemas/test_graph.py`` pins the two against each other.
 ALLOWED_EXTRACTOR_TIERS: frozenset[str] = frozenset({"DETERMINISTIC", "HYBRID", "LLM"})
+
+#: The one other spelling a writer produces: the lower-case
+#: ``ExtractorTier`` values. A closed map, not a case fold.
+_EXTRACTOR_TIER_SPELLINGS: dict[str, str] = {
+    **{tier: tier for tier in ALLOWED_EXTRACTOR_TIERS},
+    "deterministic": "DETERMINISTIC",
+    "hybrid": "HYBRID",
+    "llm": "LLM",
+}
+
+
+def canonical_extractor_tier(value: str) -> str:
+    """Return the stored (upper-case) spelling of an extractor tier.
+
+    Accepts exactly the six spellings in use: the canonical members of
+    :data:`ALLOWED_EXTRACTOR_TIERS` and the lower-case
+    ``ExtractorTier`` values the extractors stamp. The map is closed and
+    lossless. It is deliberately not ``str.upper()``: a mixed-case
+    ``"Llm"``, a padded ``"llm "`` or an unknown ``"heuristic"`` is still
+    malformed, because folding case would let any near-miss through.
+
+    Raises:
+        ValueError: *value* is not one of the six accepted spellings.
+    """
+    canonical = _EXTRACTOR_TIER_SPELLINGS.get(value)
+    if canonical is None:
+        msg = (
+            f"extractor_tier must be one of "
+            f"{sorted(ALLOWED_EXTRACTOR_TIERS)}, got {value!r}"
+        )
+        raise ValueError(msg)
+    return canonical
 
 
 class Edge(TimestampedModel, VersionedModel):
@@ -52,7 +91,9 @@ class Edge(TimestampedModel, VersionedModel):
     * ``evidence_ref`` — opaque pointer back to the evidence that
       justifies the edge (e.g. a document or chunk ID). Free-form.
     * ``extractor_tier`` — which routing tier produced the edge; one of
-      :data:`ALLOWED_EXTRACTOR_TIERS`. Validated case-sensitively.
+      :data:`ALLOWED_EXTRACTOR_TIERS`. Stored in that spelling; the
+      lower-case ``ExtractorTier`` values are accepted and canonicalised
+      (:func:`canonical_extractor_tier`).
     """
 
     edge_id: str = Field(default_factory=generate_ulid)
@@ -87,24 +128,20 @@ class Edge(TimestampedModel, VersionedModel):
     @field_validator("extractor_tier", mode="after")
     @classmethod
     def _validate_extractor_tier(cls, value: str | None) -> str | None:
-        """Reject ``extractor_tier`` values outside the allowlist.
+        """Canonicalise ``extractor_tier`` and reject anything unrecognised.
 
         ``None`` is allowed (the column is optional and historical edges
-        read back as NULL). Concrete values must match one of
-        :data:`ALLOWED_EXTRACTOR_TIERS` exactly — no case folding, no
+        read back as NULL). A concrete value must be one of
+        :data:`ALLOWED_EXTRACTOR_TIERS` or a lower-case ``ExtractorTier``
+        value, which is stored in the canonical spelling
+        (:func:`canonical_extractor_tier`) — no general case folding, no
         whitespace stripping (the base model already strips whitespace
         on string fields). Validating loudly here keeps downstream
         filter queries deterministic.
         """
         if value is None:
             return None
-        if value not in ALLOWED_EXTRACTOR_TIERS:
-            msg = (
-                f"extractor_tier must be one of "
-                f"{sorted(ALLOWED_EXTRACTOR_TIERS)}, got {value!r}"
-            )
-            raise ValueError(msg)
-        return value
+        return canonical_extractor_tier(value)
 
 
 class CompactionReport(TrellisModel):
