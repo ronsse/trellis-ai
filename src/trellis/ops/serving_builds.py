@@ -17,12 +17,18 @@ distinct ``(version, commit)`` pair, ``None`` parts included, is its own
 group, and :func:`build_label` names it as unidentified instead of
 folding it into a known build.
 
-**``mixed_builds`` is window-relative.**  Every group is a group because a
-pack landed inside the window, so the flag reads "more than one build
-assembled a pack in this window".  After a redeploy it holds until the old
-build's last pack ages out of the window; ``--days 1`` asks whether
-anything is *still* serving from it.  ``packs_from_other_builds`` counts
-the packs outside the group seen most recently.
+**``mixed_builds`` means two builds served concurrently, not that a build
+changed.**  Let L be the group with the latest ``last_seen``.  The flag is
+set when some other group has a pack at or after L's ``first_seen``: an
+older build was still assembling packs once the newer one had started.  A
+clean redeploy, where the old build's last pack precedes the new build's
+first, is not a mix however many days of both sit in the window, so a
+redeploy does not warn for the rest of the window.  A genuine overlap does
+stay flagged until its packs age out of the window.  An unidentified group
+(no stamp, null commit) follows the same rule as any other.
+``packs_from_other_builds`` counts only those concurrent packs, the other
+groups' packs at or after L's ``first_seen``, so it is zero exactly when the
+flag is clear.  A tie at that instant counts as concurrent.
 
 **The commit is only as good as the stamp.**  ``commit`` is frozen at
 install time, so an editable install off a moved working tree reports a
@@ -79,11 +85,13 @@ class ServingBuildsReport(TrellisModel):
     #: Newest ``last_seen`` first; ties fall to pack count, then label.
     groups: list[BuildGroup] = Field(default_factory=list)
     packs: int = 0
-    #: More than one group assembled a pack in the window.
+    #: Another group assembled a pack at or after the first pack of the
+    #: group seen most recently, so two builds served concurrently.
     mixed_builds: bool = False
-    #: Label of the group seen most recently, or ``None`` with no packs.
+    #: Label of the group seen most recently (L), or ``None`` with no packs.
     latest_build: str | None = None
-    #: Packs from every group but the latest. Zero unless ``mixed_builds``.
+    #: The other groups' packs at or after L's ``first_seen``. Zero exactly
+    #: when ``mixed_builds`` is clear; not the packs outside L.
     packs_from_other_builds: int = 0
 
 
@@ -117,18 +125,12 @@ def summarize_serving_builds(pack_events: Iterable[Event]) -> ServingBuildsRepor
     served arm, the rows ``ServeAttributionReport.packs`` counts, so the
     groups sum to that number.
     """
-    counts: dict[tuple[str | None, str | None], int] = {}
-    first: dict[tuple[str | None, str | None], datetime] = {}
-    last: dict[tuple[str | None, str | None], datetime] = {}
+    seen: dict[tuple[str | None, str | None], list[datetime]] = {}
     stale: set[tuple[str | None, str | None]] = set()
     for event in pack_events:
         version, commit, stamp_stale = _stamp_fields(event)
         key = (version, commit)
-        counts[key] = counts.get(key, 0) + 1
-        if key not in first or event.occurred_at < first[key]:
-            first[key] = event.occurred_at
-        if key not in last or event.occurred_at > last[key]:
-            last[key] = event.occurred_at
+        seen.setdefault(key, []).append(event.occurred_at)
         if stamp_stale:
             stale.add(key)
 
@@ -137,22 +139,31 @@ def summarize_serving_builds(pack_events: Iterable[Event]) -> ServingBuildsRepor
             version=key[0],
             commit=key[1],
             label=build_label(*key),
-            packs=counts[key],
-            first_seen=first[key],
-            last_seen=last[key],
+            packs=len(times),
+            first_seen=min(times),
+            last_seen=max(times),
             stamp_stale=key in stale,
         )
-        for key in counts
+        for key, times in seen.items()
     ]
     groups.sort(key=lambda g: (g.last_seen, g.packs, g.label), reverse=True)
     total = sum(g.packs for g in groups)
-    latest = groups[0] if groups else None
+    if not groups:
+        return ServingBuildsReport()
+    latest = groups[0]
+    concurrent = sum(
+        1
+        for key, times in seen.items()
+        if build_label(*key) != latest.label
+        for when in times
+        if when >= latest.first_seen
+    )
     return ServingBuildsReport(
         groups=groups,
         packs=total,
-        mixed_builds=len(groups) > 1,
-        latest_build=latest.label if latest else None,
-        packs_from_other_builds=total - latest.packs if latest else 0,
+        mixed_builds=concurrent > 0,
+        latest_build=latest.label,
+        packs_from_other_builds=concurrent,
     )
 
 
@@ -160,12 +171,13 @@ def mixed_builds_reason(report: ServingBuildsReport, *, days: int) -> str | None
     """The warning line for a mixed window, or ``None`` when it was one build."""
     if not report.mixed_builds:
         return None
+    began = report.groups[0].first_seen
     return (
-        f"mixed builds: {len(report.groups)} builds assembled packs in the last "
-        f"{days} day(s), and {report.packs_from_other_builds} of {report.packs} "
-        f"pack(s) came from builds other than the latest seen "
-        f"({report.latest_build}) — a long-lived client may still be serving "
-        "from an old build"
+        f"mixed builds: {report.packs_from_other_builds} of {report.packs} "
+        f"pack(s) in the last {days} day(s) came from builds other than the "
+        f"latest seen ({report.latest_build}) after it began at "
+        f"{began:%Y-%m-%d %H:%M} UTC — a long-lived client may still be "
+        "serving from an old build"
     )
 
 

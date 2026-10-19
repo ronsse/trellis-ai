@@ -2139,9 +2139,13 @@ class TestAnalyzeHealthServingBuilds:
     def test_json_carries_the_full_section_for_a_mix(
         self, temp_stores: StoreRegistry
     ) -> None:
-        self._pack(temp_stores, self._OLD, n=3)
-        self._pack(temp_stores, self._NEW, n=2)
+        # Emitted in this order, so the old build and the unstamped group both
+        # assemble a pack after the new build's first one.
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
         self._pack(temp_stores, None)
+        self._pack(temp_stores, self._NEW)
 
         result = runner.invoke(app, ["analyze", "health", "--format", "json"])
 
@@ -2149,36 +2153,54 @@ class TestAnalyzeHealthServingBuilds:
         payload = json.loads(result.stdout)
         builds = payload["serve"]["serving_builds"]
         assert builds["mixed_builds"] is True
-        assert builds["packs"] == 6
+        assert builds["packs"] == 5
         assert {g["label"]: g["packs"] for g in builds["groups"]} == {
-            "0.9.1.dev100+gaaaaaaa @ aaaaaaa": 3,
+            "0.9.1.dev100+gaaaaaaa @ aaaaaaa": 2,
             "0.9.1.dev200+gbbbbbbb @ bbbbbbb": 2,
             "no provenance": 1,
         }
-        # All three were emitted within one second, so which is "latest" is
-        # decided by the tie-break; the counts must add up either way.
-        assert builds["packs_from_other_builds"] == 6 - max(
-            g["packs"] for g in builds["groups"] if g["label"] == builds["latest_build"]
-        )
+        assert builds["latest_build"] == "0.9.1.dev200+gbbbbbbb @ bbbbbbb"
+        assert builds["packs_from_other_builds"] == 2
         assert payload["status"] == "warn"
         assert any(reason.startswith("mixed builds") for reason in payload["reasons"])
 
     def test_text_prints_a_table_and_the_warning(
         self, temp_stores: StoreRegistry
     ) -> None:
-        self._pack(temp_stores, self._OLD, n=3)
-        self._pack(temp_stores, self._NEW, n=2)
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
 
         result = runner.invoke(app, ["analyze", "health"])
 
         assert result.exit_code == 0, result.output
         out = " ".join(plain(result.stdout).split())
-        assert "Serving builds (UTC): 5 pack(s) from 2 builds" in out
+        assert "Serving builds (UTC): 4 pack(s) from 2 builds" in out
         # A label may fold at its " @ " in a narrow table, so each token is
         # asserted whole rather than the joined label.
         for token in ("0.9.1.dev100+gaaaaaaa", "aaaaaaa", "0.9.1.dev200+gbbbbbbb"):
             assert token in out
-        assert "warn mixed builds: 2 builds assembled packs" in out
+        assert "warn mixed builds: 1 of 4 pack(s)" in out
+
+    def test_a_clean_redeploy_prints_both_builds_and_no_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # The old build stops before the new one starts: a redeploy, not a mix.
+        self._pack(temp_stores, self._OLD, n=3)
+        self._pack(temp_stores, self._NEW, n=2)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code == 0
+        out = " ".join(plain(text.stdout).split())
+        assert "Serving builds (UTC): 5 pack(s) from 2 builds" in out
+        assert "mixed builds" not in out
+        builds = json.loads(as_json.stdout)["serve"]["serving_builds"]
+        assert builds["mixed_builds"] is False
+        assert builds["packs_from_other_builds"] == 0
+        assert len(builds["groups"]) == 2
 
     def test_one_build_prints_the_table_and_no_warning(
         self, temp_stores: StoreRegistry
@@ -2210,11 +2232,13 @@ class TestAnalyzeHealthServingBuilds:
     ) -> None:
         self._pack(temp_stores, self._OLD)
         self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
 
         text = runner.invoke(app, ["analyze", "health"])
         as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
 
         assert text.exit_code == as_json.exit_code == 0
+        assert json.loads(as_json.stdout)["status"] == "warn"
 
     def test_markup_shaped_build_names_survive_rich(
         self, temp_stores: StoreRegistry

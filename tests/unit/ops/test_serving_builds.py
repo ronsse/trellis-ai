@@ -91,7 +91,11 @@ class TestSingleBuild:
 
 
 class TestTwoBuilds:
-    def test_counts_first_and_last_seen_flag_and_warning(self, tmp_path: Path) -> None:
+    def test_a_clean_redeploy_lists_both_builds_and_does_not_flag(
+        self, tmp_path: Path
+    ) -> None:
+        # The old build's last pack precedes the new build's first: one build
+        # replaced the other, so nothing is serving from the old one.
         event_log = SQLiteEventLog(tmp_path / "events.db")
         for hours_ago in (20, 10, 6):
             _pack(event_log, OLD, hours_ago=hours_ago)
@@ -101,9 +105,9 @@ class TestTwoBuilds:
         report = summarize_backend_health(event_log, days=1)
 
         builds = report.serve.serving_builds
-        assert builds.mixed_builds is True
+        assert builds.mixed_builds is False
+        assert builds.packs_from_other_builds == 0
         assert builds.packs == 5
-        assert builds.packs_from_other_builds == 3
         # Newest last_seen first, and the latest is the new build.
         new, old = builds.groups
         assert (new.commit, new.packs) == (NEW["commit"], 2)
@@ -112,12 +116,33 @@ class TestTwoBuilds:
         assert new.last_seen - new.first_seen == timedelta(hours=3)
         assert new.first_seen > old.last_seen
         assert builds.latest_build == new.label
+        assert not any("mixed builds" in reason for reason in report.reasons)
+        assert report.status == "ok"
 
+    def test_a_stale_session_serving_after_the_new_build_started_is_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        # The old build keeps assembling packs after the new build's first.
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        for hours_ago in (20, 10, 3, 2):
+            _pack(event_log, OLD, hours_ago=hours_ago)
+        for hours_ago in (4, 1):
+            _pack(event_log, NEW, hours_ago=hours_ago)
+
+        report = summarize_backend_health(event_log, days=1)
+
+        builds = report.serve.serving_builds
+        assert builds.mixed_builds is True
+        assert builds.packs == 6
+        # Only the old build's packs at or after the new build's first count:
+        # the two before it are history, not concurrency.
+        assert builds.packs_from_other_builds == 2
+        assert builds.latest_build == f"{NEW['version']} @ {NEW['commit']}"
         assert report.status == "warn"
         (reason,) = [r for r in report.reasons if "mixed builds" in r]
-        assert "2 builds" in reason
-        assert "3 of 5 pack(s)" in reason
+        assert "2 of 6 pack(s)" in reason
         assert NEW["commit"] in reason
+        assert "after it began" in reason
 
     def test_the_latest_build_is_the_one_seen_last_not_the_busiest(
         self, tmp_path: Path
@@ -130,7 +155,28 @@ class TestTwoBuilds:
         builds = summarize_serve_attribution(event_log, days=1).serving_builds
 
         assert builds.latest_build == f"{NEW['version']} @ {NEW['commit']}"
-        assert builds.packs_from_other_builds == 5
+        assert builds.mixed_builds is False
+        assert builds.packs_from_other_builds == 0
+
+    def test_a_pack_at_the_instant_the_latest_build_began_counts_as_concurrent(
+        self,
+    ) -> None:
+        began = _now() - timedelta(hours=2)
+
+        def row(stamp: dict[str, str], when: datetime) -> Event:
+            return Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=when,
+                metadata={WRITE_PROVENANCE_KEY: stamp},
+            )
+
+        builds = summarize_serving_builds(
+            [row(OLD, began), row(NEW, began), row(NEW, began + timedelta(hours=1))]
+        )
+
+        assert builds.mixed_builds is True
+        assert builds.packs_from_other_builds == 1
 
     def test_a_pack_outside_the_window_does_not_make_a_second_group(
         self, tmp_path: Path
@@ -146,22 +192,26 @@ class TestTwoBuilds:
 
     def test_same_commit_under_two_versions_is_two_builds(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
-        _pack(event_log, {"version": "1.0", "commit": "abc"}, hours_ago=2)
-        _pack(event_log, {"version": "1.1", "commit": "abc"}, hours_ago=1)
+        _pack(event_log, {"version": "1.0", "commit": "abc"}, hours_ago=3)
+        _pack(event_log, {"version": "1.1", "commit": "abc"}, hours_ago=2)
+        _pack(event_log, {"version": "1.0", "commit": "abc"}, hours_ago=1)
 
         builds = summarize_serve_attribution(event_log, days=1).serving_builds
 
+        assert sorted(g.version for g in builds.groups if g.version) == ["1.0", "1.1"]
         assert builds.mixed_builds is True
+        assert builds.packs_from_other_builds == 1
 
 
 class TestUnidentifiedBuilds:
-    def test_a_provenance_less_event_is_its_own_counted_group(
+    def test_an_interleaved_provenance_less_group_is_counted_and_flagged(
         self, tmp_path: Path
     ) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
-        _pack(event_log, NEW, hours_ago=3)
+        _pack(event_log, NEW, hours_ago=4)
+        _pack(event_log, None, hours_ago=3)
         _pack(event_log, NEW, hours_ago=2)
-        _pack(event_log, None, hours_ago=1)
+        _pack(event_log, NEW, hours_ago=1)
 
         report = summarize_backend_health(event_log, days=1)
 
@@ -173,10 +223,31 @@ class TestUnidentifiedBuilds:
         }
         unstamped = by_label[NO_PROVENANCE_LABEL]
         assert (unstamped.version, unstamped.commit, unstamped.packs) == (None, None, 1)
-        assert builds.packs == 3
+        assert builds.packs == 4
         assert builds.mixed_builds is True
-        assert builds.packs_from_other_builds == 2
+        assert builds.packs_from_other_builds == 1
         assert any("mixed builds" in reason for reason in report.reasons)
+
+    def test_a_provenance_less_group_that_ended_first_is_listed_not_flagged(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _pack(event_log, None, hours_ago=4)
+        _pack(event_log, None, hours_ago=3)
+        _pack(event_log, NEW, hours_ago=2)
+        _pack(event_log, NEW, hours_ago=1)
+
+        report = summarize_backend_health(event_log, days=1)
+
+        builds = report.serve.serving_builds
+        # Never dropped, and never read as a second build serving at once.
+        assert {g.label: g.packs for g in builds.groups} == {
+            NO_PROVENANCE_LABEL: 2,
+            f"{NEW['version']} @ {NEW['commit']}": 2,
+        }
+        assert builds.mixed_builds is False
+        assert builds.packs_from_other_builds == 0
+        assert not any("mixed builds" in reason for reason in report.reasons)
 
     def test_only_unstamped_packs_are_one_group_not_a_mix(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -192,16 +263,19 @@ class TestUnidentifiedBuilds:
         self, tmp_path: Path
     ) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
+        fallback_stamp = {"version": "fallback-version", "commit": None}
+        _pack(event_log, fallback_stamp, hours_ago=3)
         _pack(event_log, NEW, hours_ago=2)
-        _pack(event_log, {"version": "fallback-version", "commit": None}, hours_ago=1)
+        _pack(event_log, fallback_stamp, hours_ago=1)
 
         builds = summarize_serve_attribution(event_log, days=1).serving_builds
 
         assert builds.mixed_builds is True
+        assert builds.packs_from_other_builds == 1
         fallback = next(g for g in builds.groups if g.version == "fallback-version")
         assert fallback.commit is None
         assert fallback.label == "fallback-version @ commit unknown"
-        assert fallback.packs == 1
+        assert fallback.packs == 2
 
     def test_a_malformed_stamp_reads_as_no_provenance_and_never_raises(
         self, tmp_path: Path
@@ -261,7 +335,9 @@ class TestHoldout:
 class TestSerialisation:
     def test_the_section_round_trips_through_json(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
-        _pack(event_log, OLD, hours_ago=2)
+        _pack(event_log, OLD, hours_ago=3)
+        _pack(event_log, NEW, hours_ago=2)
+        _pack(event_log, OLD, hours_ago=1.5)
         _pack(event_log, NEW, hours_ago=1)
 
         report = summarize_backend_health(event_log, days=1)
