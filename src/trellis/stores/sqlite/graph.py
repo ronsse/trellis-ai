@@ -20,7 +20,7 @@ from trellis.stores.base.edge_provenance import (
     EDGE_PROVENANCE_FIELDS,
     EDGE_TOP_LEVEL_COLUMNS,
     extract_edge_provenance,
-    validate_edge_provenance,
+    normalize_edge_provenance,
 )
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
@@ -924,13 +924,13 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # Validate provenance up-front so the SQL never sees an
         # out-of-range confidence or unknown extractor_tier. Mirrors
         # the schema-layer validation in :class:`trellis.schemas.graph.Edge`.
-        validate_edge_provenance(
+        extractor_tier = normalize_edge_provenance(
             source_trace_id=source_trace_id,
             agent_id=agent_id,
             confidence=confidence,
             evidence_ref=evidence_ref,
             extractor_tier=extractor_tier,
-        )
+        )["extractor_tier"]
 
         now = utc_now()
         now_iso = now.isoformat()
@@ -1113,9 +1113,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     edge_id = generate_ulid()
                     created_at = now_iso
                 edge_ids.append(edge_id)
-                prov = extract_edge_provenance(spec)
                 try:
-                    validate_edge_provenance(**prov)
+                    prov = normalize_edge_provenance(**extract_edge_provenance(spec))
                 except (ValueError, TypeError) as exc:
                     msg = f"upsert_edges_bulk[{i}]: {exc}"
                     raise type(exc)(msg) from exc

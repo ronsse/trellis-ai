@@ -66,7 +66,7 @@ _GENERIC_ENGINE_ERROR_CODE = "Neo.DatabaseError.General.UnknownError"
 #: ``confidence`` carries a server-enforced ``MIN/MAX`` range matching
 #: the Python-boundary validator. ``extractor_tier`` is left untyped
 #: beyond STRING — ArcadeDB has no enum constraint, so the allowlist is
-#: enforced by :func:`trellis.stores.base.edge_provenance.validate_edge_provenance`.
+#: enforced by :func:`trellis.stores.base.edge_provenance.normalize_edge_provenance`.
 #:
 #: ``CREATE PROPERTY ... IF NOT EXISTS`` is idempotent — re-runs are
 #: cheap no-ops against an already-migrated database. The trailing
@@ -86,7 +86,7 @@ _ARCADEDB_EDGE_PROVENANCE_SCHEMA: tuple[str, ...] = (
     "CREATE PROPERTY EDGE.evidence_ref IF NOT EXISTS STRING",
     # ArcadeDB has no enum constraint — the allowlist
     # ({DETERMINISTIC, HYBRID, LLM}) is enforced at the Python
-    # boundary in ``validate_edge_provenance``. Declaring the property
+    # boundary in ``normalize_edge_provenance``. Declaring the property
     # as STRING still pulls it into ArcadeDB's schema so queries can
     # filter on it without JSON-extracting the properties bag.
     "CREATE PROPERTY EDGE.extractor_tier IF NOT EXISTS STRING",

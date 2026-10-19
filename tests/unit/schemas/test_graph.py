@@ -5,8 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from trellis.extract.base import ExtractorTier
 from trellis.schemas.enums import EdgeKind
-from trellis.schemas.graph import Edge
+from trellis.schemas.graph import (
+    ALLOWED_EXTRACTOR_TIERS,
+    Edge,
+    canonical_extractor_tier,
+)
 
 
 class TestEdgeKindIsOpenString:
@@ -98,11 +103,74 @@ class TestEdgeProvenanceFields:
                 extractor_tier="BOGUS",
             )
 
-    def test_extractor_tier_case_sensitive(self) -> None:
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [
+            ("deterministic", "DETERMINISTIC"),
+            ("hybrid", "HYBRID"),
+            ("llm", "LLM"),
+            ("DETERMINISTIC", "DETERMINISTIC"),
+            ("HYBRID", "HYBRID"),
+            ("LLM", "LLM"),
+        ],
+    )
+    def test_extractor_tier_is_stored_canonical(
+        self, spelling: str, stored: str
+    ) -> None:
+        edge = Edge(
+            source_id="a",
+            target_id="b",
+            edge_kind="depends_on",
+            extractor_tier=spelling,
+        )
+        assert edge.extractor_tier == stored
+
+    @pytest.mark.parametrize("spelling", ["Llm", "Deterministic", "heuristic", ""])
+    def test_extractor_tier_is_not_case_folded(self, spelling: str) -> None:
         with pytest.raises(ValidationError, match="extractor_tier must be one of"):
             Edge(
                 source_id="a",
                 target_id="b",
                 edge_kind="depends_on",
-                extractor_tier="deterministic",
+                extractor_tier=spelling,
             )
+
+
+class TestCanonicalExtractorTier:
+    """The closed map from every spelling a writer uses to the stored one."""
+
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [
+            ("deterministic", "DETERMINISTIC"),
+            ("hybrid", "HYBRID"),
+            ("llm", "LLM"),
+            ("DETERMINISTIC", "DETERMINISTIC"),
+            ("HYBRID", "HYBRID"),
+            ("LLM", "LLM"),
+        ],
+    )
+    def test_accepted_spellings(self, spelling: str, stored: str) -> None:
+        assert canonical_extractor_tier(spelling) == stored
+
+    @pytest.mark.parametrize(
+        "spelling",
+        ["Llm", "lLM", "Deterministic", "llm ", " LLM", "heuristic", "", "None"],
+    )
+    def test_everything_else_is_rejected(self, spelling: str) -> None:
+        with pytest.raises(ValueError, match="extractor_tier must be one of"):
+            canonical_extractor_tier(spelling)
+
+    def test_extractor_tier_enum_maps_onto_the_allowlist(self) -> None:
+        """The writers' enum and the stored allowlist cannot drift apart.
+
+        Trace extraction stamps ``ExtractorTier.<X>.value`` and the store
+        validates against ``ALLOWED_EXTRACTOR_TIERS``; ``schemas`` may not
+        import ``extract``, so this is the only place the two meet. A member
+        added to the enum without a stored spelling fails here, not in a
+        deployed migration.
+        """
+        stored = {canonical_extractor_tier(tier.value) for tier in ExtractorTier}
+        assert stored == ALLOWED_EXTRACTOR_TIERS
+        for tier in ExtractorTier:
+            assert canonical_extractor_tier(tier.value) == tier.name

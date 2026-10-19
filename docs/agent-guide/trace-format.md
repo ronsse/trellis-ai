@@ -276,7 +276,7 @@ Only structured fields are mined — free-text prose (`intent`, `step.args`/`ste
 
 Edges are de-duplicated on `(source_id, kind, target_id)` *after* kind canonicalization, so a relationship a trace restates across N steps — 40 `tool_call` steps naming the same tool — yields one edge, not 40. Count expected edges from distinct relationships, not from steps.
 
-Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier` (`"deterministic"`), and `extraction_confidence` (the extractor's per-draft confidence — always `1.0` on this path, since every mined value is a structured field read). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
+Every emitted node and edge stamps property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier` (`"deterministic"`; `trellis admin migrate-provenance` lifts it into the typed column as `"DETERMINISTIC"`), and `extraction_confidence` (the extractor's per-draft confidence — always `1.0` on this path, since every mined value is a structured field read). Edges are emitted with `allow_dangling=True` because trace graphs are inherently cross-batch (e.g. a parent trace's Activity or shared evidence is extracted by a different run).
 
 ### Verifiable fields (deterministic evidence)
 
