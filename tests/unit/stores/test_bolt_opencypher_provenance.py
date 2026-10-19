@@ -138,6 +138,21 @@ class TestBoltUpsertEdgeShape:
         assert base_props["evidence_ref"] == "doc-1"
         assert base_props["extractor_tier"] == "HYBRID"
 
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [("deterministic", "DETERMINISTIC"), ("hybrid", "HYBRID"), ("llm", "LLM")],
+    )
+    def test_lowercase_tier_is_persisted_canonical(
+        self, spelling: str, stored: str
+    ) -> None:
+        # Trace extraction writes the lower-case ``ExtractorTier`` value
+        # (#915); the Cypher payload must carry the canonical spelling.
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        store.upsert_edge("a", "b", "depends_on", extractor_tier=spelling)
+        base_props = captured[-1]["params"]["base_props"]
+        assert base_props["extractor_tier"] == stored
+
     def test_none_provenance_keys_still_present_as_none(self) -> None:
         store = _make_store_with_mocked_driver()
         captured = _capture_write_calls(store)
@@ -222,6 +237,30 @@ class TestBoltUpsertEdgesBulkShape:
         row1_props = rows[1]["props"]
         for field in EDGE_PROVENANCE_FIELDS:
             assert row1_props[field] is None
+
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [("deterministic", "DETERMINISTIC"), ("hybrid", "HYBRID"), ("llm", "LLM")],
+    )
+    def test_bulk_lowercase_tier_is_persisted_canonical(
+        self, spelling: str, stored: str
+    ) -> None:
+        # The bulk path builds its own per-row payload, so it needs its
+        # own pin: a single-row fix does not cover it (#915).
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store, known_endpoint_ids={"a", "b"})
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "links_to",
+                    "extractor_tier": spelling,
+                }
+            ]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        assert write_call["params"]["rows"][0]["props"]["extractor_tier"] == stored
 
     def test_bulk_bad_row_raises_with_row_index(self) -> None:
         store = _make_store_with_mocked_driver()

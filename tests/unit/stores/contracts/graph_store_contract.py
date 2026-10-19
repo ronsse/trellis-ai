@@ -2352,6 +2352,43 @@ class GraphStoreContractTests:
         assert edge["evidence_ref"] == "doc-42"
         assert edge["extractor_tier"] == "DETERMINISTIC"
 
+    @pytest.mark.parametrize(
+        ("spelling", "stored"),
+        [
+            ("deterministic", "DETERMINISTIC"),
+            ("hybrid", "HYBRID"),
+            ("llm", "LLM"),
+        ],
+    )
+    def test_edge_provenance_tier_stored_canonical(
+        self, store: GraphStore, spelling: str, stored: str
+    ) -> None:
+        """A lower-case tier (what trace extraction writes) is stored canonical.
+
+        Covers both write paths: ``upsert_edge`` (edge to ``b``) and
+        ``upsert_edges_bulk`` (edge to ``c``). Each backend persists the
+        value itself, so a backend that stored the raw spelling would
+        leave the row failing ``migrate-provenance`` (#915).
+        """
+        for node_id in ("a", "b", "c"):
+            store.upsert_node(node_id, "service", {})
+        store.upsert_edge("a", "b", "depends_on", extractor_tier=spelling)
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "c",
+                    "edge_type": "depends_on",
+                    "extractor_tier": spelling,
+                }
+            ]
+        )
+        tiers = {
+            e["target_id"]: e["extractor_tier"]
+            for e in store.get_edges("a", direction="outgoing")
+        }
+        assert tiers == {"b": stored, "c": stored}
+
     def test_edge_provenance_null_when_omitted(self, store: GraphStore) -> None:
         """Edges written without provenance read back with NULL columns."""
         store.upsert_node("a", "service", {})
