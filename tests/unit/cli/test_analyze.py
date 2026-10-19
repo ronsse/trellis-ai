@@ -2142,6 +2142,7 @@ class TestAnalyzeHealthServingBuilds:
         # Emitted in this order, so the old build and the unstamped group both
         # assemble a pack after the new build's first one.
         self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, None)
         self._pack(temp_stores, self._NEW)
         self._pack(temp_stores, self._OLD)
         self._pack(temp_stores, None)
@@ -2153,11 +2154,11 @@ class TestAnalyzeHealthServingBuilds:
         payload = json.loads(result.stdout)
         builds = payload["serve"]["serving_builds"]
         assert builds["mixed_builds"] is True
-        assert builds["packs"] == 5
+        assert builds["packs"] == 6
         assert {g["label"]: g["packs"] for g in builds["groups"]} == {
             "0.9.1.dev100+gaaaaaaa @ aaaaaaa": 2,
             "0.9.1.dev200+gbbbbbbb @ bbbbbbb": 2,
-            "no provenance": 1,
+            "no provenance": 2,
         }
         assert builds["latest_build"] == "0.9.1.dev200+gbbbbbbb @ bbbbbbb"
         assert builds["packs_from_other_builds"] == 2

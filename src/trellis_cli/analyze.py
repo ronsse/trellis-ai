@@ -759,8 +759,9 @@ def health(
     memory, distinguishing "never deployed", "stopped" and "running but
     capturing nothing" instead of collapsing them into a low rate. The
     serving-builds table groups the window's packs by the build that
-    assembled them, and a window with more than one build warns, because a
-    long-lived client can keep serving from an old build after a redeploy.
+    assembled them, and warns when an older build was still serving after
+    the newest build began, because a long-lived client can keep
+    serving from an old build after a redeploy.
     Status is `warn` with named reasons when any deterministic threshold
     trips — the surface the grooming loop watches.
     """

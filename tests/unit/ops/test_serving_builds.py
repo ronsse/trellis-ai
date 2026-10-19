@@ -8,7 +8,7 @@ construction: only a seeded stamp can stand in for a second process.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from trellis.core.write_provenance import WRITE_PROVENANCE_KEY
 from trellis.ops.serving_builds import (
     NO_PROVENANCE_LABEL,
     build_label,
+    mixed_builds_reason,
     summarize_serving_builds,
 )
 from trellis.ops.write_health import (
@@ -144,7 +145,7 @@ class TestTwoBuilds:
         assert NEW["commit"] in reason
         assert "after it began" in reason
 
-    def test_the_latest_build_is_the_one_seen_last_not_the_busiest(
+    def test_the_newest_build_is_the_one_that_started_last_not_the_busiest(
         self, tmp_path: Path
     ) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -157,6 +158,33 @@ class TestTwoBuilds:
         assert builds.latest_build == f"{NEW['version']} @ {NEW['commit']}"
         assert builds.mixed_builds is False
         assert builds.packs_from_other_builds == 0
+
+    def test_the_newest_build_is_the_latest_first_pack_not_the_last_pack(
+        self, tmp_path: Path
+    ) -> None:
+        # The old build serves before and after the new one started, and its
+        # pack is the last in the window. Picking the build by last pack would
+        # call the old build the newest, and the warning would name it.
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _pack(event_log, OLD, hours_ago=5)
+        _pack(event_log, NEW, hours_ago=3)
+        _pack(event_log, NEW, hours_ago=2)
+        _pack(event_log, OLD, hours_ago=1)
+
+        report = summarize_backend_health(event_log, days=1)
+
+        builds = report.serve.serving_builds
+        old = next(g for g in builds.groups if g.commit == OLD["commit"])
+        new = next(g for g in builds.groups if g.commit == NEW["commit"])
+        assert old.last_seen > new.last_seen
+        assert builds.latest_build == new.label
+        assert builds.groups[0].commit == NEW["commit"]
+        assert builds.mixed_builds is True
+        # Only the old build's pack at or after the new build's first counts.
+        assert builds.packs_from_other_builds == 1
+        (reason,) = [r for r in report.reasons if "mixed builds" in r]
+        assert f"newest build ({new.label})" in reason
+        assert "1 of 4 pack(s)" in reason
 
     def test_a_pack_at_the_instant_the_latest_build_began_counts_as_concurrent(
         self,
@@ -225,7 +253,10 @@ class TestUnidentifiedBuilds:
         assert (unstamped.version, unstamped.commit, unstamped.packs) == (None, None, 1)
         assert builds.packs == 4
         assert builds.mixed_builds is True
-        assert builds.packs_from_other_builds == 1
+        # The unstamped group started last, so it is the newest build, and the
+        # stamped build's two later packs are the concurrent ones.
+        assert builds.latest_build == NO_PROVENANCE_LABEL
+        assert builds.packs_from_other_builds == 2
         assert any("mixed builds" in reason for reason in report.reasons)
 
     def test_a_provenance_less_group_that_ended_first_is_listed_not_flagged(
@@ -290,6 +321,36 @@ class TestUnidentifiedBuilds:
 
         assert [(g.label, g.packs) for g in builds.groups] == [(NO_PROVENANCE_LABEL, 4)]
 
+    def test_two_keys_that_share_a_label_are_two_builds_not_one(self) -> None:
+        # (None, "x") and ("unknown version", "x") both print as
+        # "unknown version @ x"; they are different builds all the same.
+        assert build_label(None, "x") == build_label("unknown version", "x")
+        base = _now() - timedelta(hours=3)
+
+        def row(version: str | None, when: datetime) -> Event:
+            return Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=when,
+                metadata={WRITE_PROVENANCE_KEY: {"version": version, "commit": "x"}},
+            )
+
+        builds = summarize_serving_builds(
+            [
+                row(None, base),
+                row("unknown version", base + timedelta(hours=1)),
+                row(None, base + timedelta(hours=2)),
+            ]
+        )
+
+        assert len(builds.groups) == 2
+        assert {(g.version, g.packs) for g in builds.groups} == {
+            (None, 2),
+            ("unknown version", 1),
+        }
+        assert builds.mixed_builds is True
+        assert builds.packs_from_other_builds == 1
+
     def test_label_names_whichever_half_is_unknown(self) -> None:
         assert build_label(None, None) == NO_PROVENANCE_LABEL
         assert build_label("1.0", None) == "1.0 @ commit unknown"
@@ -330,6 +391,44 @@ class TestHoldout:
         assert serve.serving_builds.packs == serve.packs
         assert [g.commit for g in serve.serving_builds.groups] == [NEW["commit"]]
         assert serve.serving_builds.mixed_builds is False
+
+
+class TestTimestamps:
+    def test_naive_and_aware_rows_in_one_window_are_compared_as_utc(self) -> None:
+        # SQLite hands back naive timestamps and Postgres aware ones, so a
+        # window can mix them; a zone other than UTC must also land on UTC.
+        base = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+        plus_five = timezone(timedelta(hours=5))
+
+        def row(stamp: dict[str, str], when: datetime) -> Event:
+            return Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=when,
+                metadata={WRITE_PROVENANCE_KEY: stamp},
+            )
+
+        builds = summarize_serving_builds(
+            [
+                row(OLD, base),
+                row(NEW, (base + timedelta(hours=1)).replace(tzinfo=None)),
+                row(OLD, (base + timedelta(hours=2)).astimezone(plus_five)),
+                row(NEW, base + timedelta(hours=3)),
+            ]
+        )
+
+        assert builds.mixed_builds is True
+        assert builds.packs_from_other_builds == 1
+        new, old = builds.groups
+        assert new.commit == NEW["commit"]
+        assert new.first_seen == base + timedelta(hours=1)
+        assert old.last_seen == base + timedelta(hours=2)
+        for group in builds.groups:
+            assert group.first_seen.utcoffset() == timedelta(0)
+            assert group.last_seen.utcoffset() == timedelta(0)
+        reason = mixed_builds_reason(builds, days=1)
+        assert reason is not None
+        assert "2026-03-01 13:00 UTC" in reason
 
 
 class TestSerialisation:
