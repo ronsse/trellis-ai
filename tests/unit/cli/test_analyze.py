@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from typer.testing import CliRunner
@@ -21,7 +22,7 @@ from trellis.schemas.advisory import (
     AdvisoryEvidence,
 )
 from trellis.stores.advisory_store import AdvisoryStore
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import analyze
 from trellis_cli.exit_codes import EXIT_STORE
@@ -2097,6 +2098,173 @@ class TestAnalyzeHealthFailedStrategySection:
         dumped = result.stdout
         assert "synthetic/secret/path.db" not in dumped
         assert "RuntimeError" not in dumped
+
+
+class TestAnalyzeHealthServingBuilds:
+    """``analyze health`` names the builds that served packs, and warns on a mix."""
+
+    _OLD: ClassVar[dict[str, str]] = {
+        "version": "0.9.1.dev100+gaaaaaaa",
+        "commit": "aaaaaaa",
+    }
+    _NEW: ClassVar[dict[str, str]] = {
+        "version": "0.9.1.dev200+gbbbbbbb",
+        "commit": "bbbbbbb",
+    }
+
+    def _pack(
+        self, registry: StoreRegistry, stamp: dict[str, object] | None, *, n: int = 1
+    ) -> None:
+        event_log = registry.operational.event_log
+        for _ in range(n):
+            if stamp is None:
+                # ``emit`` stamps the writing process, so an unstamped row
+                # (an old build, a replayed row) has to be appended whole.
+                event_log.append(
+                    Event(
+                        event_type=EventType.PACK_ASSEMBLED,
+                        source="test",
+                        entity_type="pack",
+                    )
+                )
+                continue
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_type="pack",
+                payload={},
+                metadata={"write_provenance": stamp},
+            )
+
+    def test_json_carries_the_full_section_for_a_mix(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # Emitted in this order, so the old build and the unstamped group both
+        # assemble a pack after the new build's first one.
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, None)
+        self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, None)
+        self._pack(temp_stores, self._NEW)
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        builds = payload["serve"]["serving_builds"]
+        assert builds["mixed_builds"] is True
+        assert builds["packs"] == 6
+        assert {g["label"]: g["packs"] for g in builds["groups"]} == {
+            "0.9.1.dev100+gaaaaaaa @ aaaaaaa": 2,
+            "0.9.1.dev200+gbbbbbbb @ bbbbbbb": 2,
+            "no provenance": 2,
+        }
+        assert builds["latest_build"] == "0.9.1.dev200+gbbbbbbb @ bbbbbbb"
+        assert builds["packs_from_other_builds"] == 2
+        assert payload["status"] == "warn"
+        assert any(reason.startswith("mixed builds") for reason in payload["reasons"])
+
+    def test_text_prints_a_table_and_the_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "Serving builds (UTC): 4 pack(s) from 2 builds" in out
+        # A label may fold at its " @ " in a narrow table, so each token is
+        # asserted whole rather than the joined label.
+        for token in ("0.9.1.dev100+gaaaaaaa", "aaaaaaa", "0.9.1.dev200+gbbbbbbb"):
+            assert token in out
+        assert "warn mixed builds: 1 of 4 pack(s)" in out
+
+    def test_a_clean_redeploy_prints_both_builds_and_no_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # The old build stops before the new one starts: a redeploy, not a mix.
+        self._pack(temp_stores, self._OLD, n=3)
+        self._pack(temp_stores, self._NEW, n=2)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code == 0
+        out = " ".join(plain(text.stdout).split())
+        assert "Serving builds (UTC): 5 pack(s) from 2 builds" in out
+        assert "mixed builds" not in out
+        builds = json.loads(as_json.stdout)["serve"]["serving_builds"]
+        assert builds["mixed_builds"] is False
+        assert builds["packs_from_other_builds"] == 0
+        assert len(builds["groups"]) == 2
+
+    def test_one_build_prints_the_table_and_no_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._pack(temp_stores, self._NEW, n=2)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == 0, text.output
+        out = " ".join(plain(text.stdout).split())
+        assert "Serving builds (UTC): 2 pack(s) from 1 build" in out
+        assert "0.9.1.dev200+gbbbbbbb" in out
+        assert "mixed builds" not in out
+        builds = json.loads(as_json.stdout)["serve"]["serving_builds"]
+        assert builds["mixed_builds"] is False
+        assert builds["packs_from_other_builds"] == 0
+
+    def test_a_window_with_no_packs_prints_no_table(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "Serving builds" not in plain(result.stdout)
+
+    def test_a_mix_is_a_warning_and_the_exit_code_ignores_the_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._pack(temp_stores, self._OLD)
+        self._pack(temp_stores, self._NEW)
+        self._pack(temp_stores, self._OLD)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code == 0
+        assert json.loads(as_json.stdout)["status"] == "warn"
+
+    def test_markup_shaped_build_names_survive_rich(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # A version is operator-copyable; Rich must neither delete the
+        # bracketed text nor read it as a style tag.
+        self._pack(temp_stores, {"version": "[bold]1.0[/x]", "commit": "[red]abc"})
+        self._pack(temp_stores, self._NEW)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "[bold]1.0[/x] @ [red]abc" in out
+
+    def test_a_stale_stamp_is_marked_in_the_table(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._pack(temp_stores, {**self._OLD, "stamp_stale": True})
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "stale stamp, the commit is what the install metadata said" in out
 
 
 class TestAnalyzeHealthWriteSurfaceTable:

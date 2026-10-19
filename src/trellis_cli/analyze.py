@@ -46,6 +46,7 @@ from trellis.learning import (
 )
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
+from trellis.ops.serving_builds import ServingBuildsReport
 from trellis.retrieve.advisory_generator import (
     AdvisoryGenerator,
     resolve_advisory_thresholds,
@@ -695,6 +696,46 @@ def _print_tool_table(
             )
 
 
+def _print_serving_builds(builds: ServingBuildsReport) -> None:
+    """Render which builds assembled the window's packs, one row per build.
+
+    Printed whenever the window has packs, a single build included: the
+    table is how an operator reads *which* build is serving, and a mix is
+    only visible against it. The warning for a mix rides in ``reasons``.
+    Every label is a version or a commit, so each goes through ``escape``.
+    Times print without a zone to keep the table inside 80 columns, where a
+    narrower build column would fold a version mid-token; the heading
+    carries the zone. A stale stamp is a note under the table, as in
+    :func:`_print_tool_table`, rather than a suffix that would widen a cell.
+    """
+    if not builds.groups:
+        return
+    plural = "build" if len(builds.groups) == 1 else "builds"
+    console.print(
+        f"  Serving builds (UTC): {builds.packs} pack(s) from "
+        f"{len(builds.groups)} {plural}"
+    )
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("build")
+    table.add_column("packs", justify="right")
+    table.add_column("first seen")
+    table.add_column("last seen")
+    for group in builds.groups:
+        table.add_row(
+            escape(group.label),
+            str(group.packs),
+            f"{group.first_seen:%Y-%m-%d %H:%M}",
+            f"{group.last_seen:%Y-%m-%d %H:%M}",
+        )
+    console.print(table)
+    for group in builds.groups:
+        if group.stamp_stale:
+            console.print(
+                f"    [dim]{escape(group.label)}: stale stamp, the commit is what "
+                "the install metadata said and the working tree had moved on[/dim]"
+            )
+
+
 @analyze_app.command("health")
 def health(
     days: int = typer.Option(7, help="Days of history to analyze"),
@@ -716,9 +757,13 @@ def health(
     availability assumption untargeted feedback rests on (#365). The
     capture section reports what fraction of eligible sessions produced a
     memory, distinguishing "never deployed", "stopped" and "running but
-    capturing nothing" instead of collapsing them into a low rate. Status
-    is `warn` with named reasons when any deterministic threshold trips —
-    the surface the grooming loop watches.
+    capturing nothing" instead of collapsing them into a low rate. The
+    serving-builds table groups the window's packs by the build that
+    assembled them, and warns when an older build was still serving after
+    the newest build began, because a long-lived client can keep
+    serving from an old build after a redeploy.
+    Status is `warn` with named reasons when any deterministic threshold
+    trips — the surface the grooming loop watches.
     """
     from trellis.ops.write_health import (  # noqa: PLC0415
         _EXECUTOR_BYPASS_SURFACES,
@@ -817,6 +862,7 @@ def health(
             f"    [yellow]assumption[/yellow] {serve.retrieval_availability_note}"
         )
 
+    _print_serving_builds(serve.serving_builds)
     _print_capture_coverage(report.capture)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
