@@ -57,6 +57,11 @@ from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
 )
+from trellis.ops.serving_builds import (
+    ServingBuildsReport,
+    mixed_builds_reason,
+    summarize_serving_builds,
+)
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceStep
 from trellis.stores.base.event_log import (
@@ -812,6 +817,11 @@ class ServeAttributionReport(TrellisModel):
     failed_strategies: FailedStrategyReport = Field(
         default_factory=FailedStrategyReport
     )
+    #: Which builds assembled the window's served packs, grouped by the
+    #: ``write_provenance`` stamp. Counted over the same rows as ``packs``
+    #: (the holdout dropped), so the groups sum to it. See
+    #: :mod:`trellis.ops.serving_builds`.
+    serving_builds: ServingBuildsReport = Field(default_factory=ServingBuildsReport)
 
 
 class BackendHealthReport(TrellisModel):
@@ -1084,6 +1094,7 @@ def summarize_serve_attribution(
             by_strategy=failures_by_strategy,
             latest_at=latest_failure_at,
         ),
+        serving_builds=summarize_serving_builds(pack_events),
     )
 
 
@@ -1127,6 +1138,9 @@ def summarize_backend_health(
             f"{serve.failed_strategies.packs} pack(s) in window hit a failed "
             f"retrieval strategy ({by_strategy}), latest {latest_str}"
         )
+    mixed = mixed_builds_reason(serve.serving_builds, days=days)
+    if mixed:
+        reasons.append(mixed)
     if serve.feedback_events > 0 and serve.feedback_attributed == 0:
         # Same trigger condition as before — ``status`` is read by the
         # nightly roadmap driver and must not shift under a wording

@@ -15,6 +15,7 @@ from trellis.ops.capture_health import (
 )
 from trellis.ops.recording import record_outcome
 from trellis.ops.registry import ParameterRegistry
+from trellis.ops.serving_builds import ServingBuildsReport, summarize_serving_builds
 from trellis.ops.write_health import (
     BackendHealthReport,
     ServeAttributionReport,
@@ -32,6 +33,7 @@ __all__ = [
     "CaptureHealthWarning",
     "ParameterRegistry",
     "ServeAttributionReport",
+    "ServingBuildsReport",
     "WriteHealthReport",
     "check_capture_health",
     "classify_rejection",
@@ -42,5 +44,6 @@ __all__ = [
     "resolve_capture_thresholds",
     "summarize_backend_health",
     "summarize_serve_attribution",
+    "summarize_serving_builds",
     "summarize_write_health",
 ]
