@@ -772,8 +772,9 @@ class TestWorkerCurate:
     @pytest.mark.parametrize(
         ("meta_args", "graph_after"),
         [
-            # Each stage that runs records its Activity, as every other
-            # meta-traced dry run does. No stage records a finding.
+            # Each stage that runs records its Activity: a curate dry run
+            # passes ``dry_run=False`` to the wrapper on purpose (#663).
+            # No stage records a finding.
             ([], {"edges": 2, "Agent": 1, "Activity": 2}),
             # The documented way to a dry run that writes nothing at all.
             (["--no-meta-trace"], {"edges": 0}),
