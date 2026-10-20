@@ -907,6 +907,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin migrate-graph` carries an edge's five typed provenance
+  columns.** `source_trace_id`, `agent_id`, `confidence`, `evidence_ref` and
+  `extractor_tier` are columns, not `properties` keys, and the migrator
+  copied only `properties`: a backend copy reported every edge written and
+  left all five NULL on the destination, with no error. That loss is silent
+  once `migrate-provenance` has lifted the values out of `properties`. The
+  migrator now passes the columns the source row holds through the
+  destination's own `upsert_edge`, which validates and normalises them. An
+  edge with no provenance copies as before, and one whose provenance is
+  still inside `properties` copies unchanged (lifting it stays
+  `migrate-provenance`'s job). A destination backend whose `upsert_edge`
+  cannot take the keywords now fails the step loudly for an edge that
+  carries provenance instead of dropping it. Not carried, by design:
+  `edge_id`, `alias_id`, `created_at` and `valid_from` are minted by the
+  destination, and history is current-versions only.
+
 - **A destructive mutation now requires the `admin` scope at both generic
   mutation surfaces, not just `mutate`.** `POST /api/v1/commands/batch` and
   the MCP tool `execute_mutation` previously accepted any `Operation` —

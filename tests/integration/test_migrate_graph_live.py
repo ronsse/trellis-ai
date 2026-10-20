@@ -114,6 +114,51 @@ def test_sqlite_to_neo4j_round_trip(
     assert resolved["entity_id"] == a
 
 
+def test_edge_provenance_survives_sqlite_to_neo4j(
+    sqlite_source: SQLiteGraphStore, neo4j_dest: Any
+) -> None:
+    # The five typed provenance columns are not ``properties`` keys, so a
+    # copy that passes only ``properties`` reports every edge written and
+    # leaves NULLs behind. Covers the Bolt write path's own handling of
+    # the kwargs, which the SQLite-to-SQLite unit tests cannot reach.
+    a = sqlite_source.upsert_node("agent-alice", node_type="Person", properties={})
+    b = sqlite_source.upsert_node("proj-trellis", node_type="Project", properties={})
+    c = sqlite_source.upsert_node("concept-graph", node_type="Concept", properties={})
+    sqlite_source.upsert_edge(
+        a,
+        b,
+        "memberOf",
+        properties={"since": "2026-04"},
+        source_trace_id="trace-1",
+        agent_id="agent-1",
+        confidence=0.85,
+        evidence_ref="doc-1",
+        extractor_tier="DETERMINISTIC",
+    )
+    sqlite_source.upsert_edge(a, c, "uses", properties={})
+
+    report = GraphMigrator(sqlite_source, neo4j_dest).run()
+
+    assert report.errors == []
+    assert report.edges_written == 2
+    arrived = {e["target_id"]: e for e in neo4j_dest.get_edges(a, direction="outgoing")}
+    assert arrived[b]["source_trace_id"] == "trace-1"
+    assert arrived[b]["agent_id"] == "agent-1"
+    assert float(arrived[b]["confidence"]) == pytest.approx(0.85)
+    assert arrived[b]["evidence_ref"] == "doc-1"
+    assert arrived[b]["extractor_tier"] == "DETERMINISTIC"
+    assert arrived[b]["properties"] == {"since": "2026-04"}
+    # An edge with no provenance still copies, with NULLs.
+    for name in (
+        "source_trace_id",
+        "agent_id",
+        "confidence",
+        "evidence_ref",
+        "extractor_tier",
+    ):
+        assert arrived[c][name] is None
+
+
 def test_idempotent_on_retry_against_neo4j(
     sqlite_source: SQLiteGraphStore, neo4j_dest: Any
 ) -> None:
