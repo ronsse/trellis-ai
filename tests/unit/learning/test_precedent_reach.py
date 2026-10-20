@@ -278,11 +278,26 @@ class _DocStore:
         return self._doc
 
 
-def _payloads(store: Any) -> dict[str, Any]:
+class _MapStore:
+    """A read side keyed by doc id, for a chunk whose parent is looked up."""
+
+    def __init__(self, docs: dict[str, dict[str, Any]]) -> None:
+        self._docs = docs
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        return self._docs.get(doc_id)
+
+
+_NOISE_META = {"content_tags": {"signal_quality": "noise"}}
+_ARCHIVED_META = {"lifecycle": {"state": "archived"}}
+_CHUNK_ID = "doc:x#chunk-1"
+
+
+def _payloads(store: Any, item_id: str = "doc:x") -> dict[str, Any]:
     candidate = {
         "candidate_id": "fam:abc",
         "intent_family": "fam",
-        "item_id": "doc:x",
+        "item_id": item_id,
         "metrics": {"success_rate": 1.0, "retry_rate": None},
     }
     props = build_learning_promotion_payloads(
@@ -311,6 +326,55 @@ class TestExcerptDegradation:
         assert "Source excerpt" not in props["description"]
         assert "Source item 'doc:x' showed success_rate=1.0" in props["description"]
 
+    @pytest.mark.parametrize(
+        ("store", "item_id"),
+        [
+            (_DocStore({"content": "noisy body", "metadata": _NOISE_META}), "doc:x"),
+            (
+                _DocStore({"content": "archived body", "metadata": _ARCHIVED_META}),
+                "doc:x",
+            ),
+            (
+                _MapStore(
+                    {
+                        _CHUNK_ID: {
+                            "doc_id": _CHUNK_ID,
+                            "content": "chunk body",
+                            "metadata": {"parent_doc_id": "doc:x"},
+                        },
+                        "doc:x": {"content": "parent", "metadata": _ARCHIVED_META},
+                    }
+                ),
+                _CHUNK_ID,
+            ),
+        ],
+        ids=["noise", "archived", "chunk-of-archived-parent"],
+    )
+    def test_a_source_packs_withhold_is_never_copied(
+        self, store: Any, item_id: str
+    ) -> None:
+        # The graph axis never re-checks a precedent's source, so a copied
+        # body would reach packs the collect gates keep it out of.
+        props = _payloads(store, item_id)
+        assert props["source_excerpt_status"] == "source_withheld"
+        assert "Source excerpt" not in props["description"]
+        assert "body" not in props["description"]
+
+    def test_a_chunk_of_a_servable_parent_is_copied(self) -> None:
+        store = _MapStore(
+            {
+                _CHUNK_ID: {
+                    "doc_id": _CHUNK_ID,
+                    "content": "chunk body",
+                    "metadata": {"parent_doc_id": "doc:x"},
+                },
+                "doc:x": {"content": "parent", "metadata": {}},
+            }
+        )
+        props = _payloads(store, _CHUNK_ID)
+        assert props["source_excerpt_status"] == SOURCE_EXCERPT_INCLUDED
+        assert "chunk body" in props["description"]
+
     def test_excerpt_is_bounded_single_line_and_drops_frontmatter(self) -> None:
         body = "---\ntitle: secret-title\n---\n" + "\n".join(
             f"line {i} of a long source document." for i in range(200)
@@ -326,3 +390,6 @@ class TestExcerptDegradation:
         assert "\n" not in description
         assert "secret-title" not in description
         assert excerpt.startswith("line 0 of a long source document.")
+        # Cut on a clean break with the dropped-size note, not a hard slice.
+        assert excerpt.endswith("chars]")
+        assert excerpt.rsplit("\u2026", 1)[0].endswith("document.")

@@ -805,6 +805,29 @@ def precedent_entity_id_for_candidate(candidate_id: str) -> str:
     return f"precedent://learning/{_slugify(candidate_id)}"
 
 
+def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bool:
+    """Whether the noise/archived collect gates withhold this doc or its parent."""
+    from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+    from trellis.retrieve.lifecycle import is_archived  # noqa: PLC0415
+    from trellis.retrieve.noise import NOISE_SIGNAL_QUALITY  # noqa: PLC0415
+
+    def _gated(meta: Any) -> bool:
+        if not isinstance(meta, dict):
+            return False
+        tags = meta.get("content_tags")
+        sq = tags.get("signal_quality") if isinstance(tags, dict) else None
+        return sq == NOISE_SIGNAL_QUALITY or is_archived(meta)
+
+    meta = document.get("metadata")
+    if _gated(meta):
+        return True
+    parent_id = meta.get("parent_doc_id") if isinstance(meta, dict) else None
+    if parent_id and is_chunk_doc_id(str(document.get("doc_id") or "")):
+        parent = document_store.get(str(parent_id))  # raises -> lookup_failed
+        return bool(parent) and _gated(parent.get("metadata"))
+    return False
+
+
 def _resolve_source_excerpt(
     item_id: str, document_store: DocumentStore | None
 ) -> tuple[str | None, str]:
@@ -823,14 +846,17 @@ def _resolve_source_excerpt(
         return None, "no_source_item"
     try:
         document = document_store.get(item_id)
+        withheld = _withheld_from_packs(document, document_store) if document else False
     except Exception as exc:  # advisory step; never fail the promotion
         logger.warning(
             "precedent_source_excerpt_lookup_failed",
             error_type=type(exc).__name__,
         )
         return None, "lookup_failed"
-    if not document:
-        return None, "document_not_found"
+    if not document or withheld:
+        # The graph axis never re-checks a precedent's source, so copying a
+        # noise/archived body here would launder it into every pack.
+        return None, "source_withheld" if withheld else "document_not_found"
     body = _FALLBACK_NAME_FRONTMATTER_RE.sub(
         "", str(document.get("content") or ""), count=1
     )
