@@ -1,8 +1,8 @@
 """Tests for ``scripts/check_live_floor.py``.
 
-The script is the only thing between a Neo4j vector contract that stopped
-running and a green live-infra job, so a checker that cannot fail is the
-defect it exists to catch, one level up. Each row below is a junit report the
+The script is the only thing between a cloud graph or vector contract that
+stopped running and a green live-infra job, so a checker that cannot fail is
+the defect it exists to catch, one level up. Each row below is a junit report the
 script has to judge. The failing rows are the shapes a contract that stopped
 running really leaves behind -- every case skipped, the module skipped at
 collection, the cases missing altogether -- and each sits beside a row that
@@ -10,7 +10,9 @@ must pass, so a check that went blind in either direction fails here.
 
 The two floored modules differ in floor, allowance and junit shape (bare
 module functions against a test class), so no row passes by reading the
-wrong module's counts.
+wrong module's counts. The last tests run against the real ``FLOORS`` rows: a
+report in which one floored contract skipped every case must fail, for each
+row, and a report at every row's floor must pass.
 
 The ``scripts/`` directory has no ``__init__.py``, so the module is loaded
 via ``importlib.util`` -- same pattern as ``test_check_tool_pins``.
@@ -28,7 +30,17 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_live_floor.py"
-CONTRACT = "tests/unit/stores/contracts/test_neo4j_vector_contract.py"
+#: The contracts live-infra must never stop running. Pinned by name so that
+#: deleting a ``FLOORS`` row fails here; a new row needs no edit.
+NEO4J_VECTOR = "tests/unit/stores/contracts/test_neo4j_vector_contract.py"
+CONTRACTS = (
+    NEO4J_VECTOR,
+    "tests/unit/stores/contracts/test_pgvector_contract.py",
+    "tests/unit/stores/contracts/test_arcadedb_vector_contract.py",
+    "tests/unit/stores/contracts/test_postgres_graph_contract.py",
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py",
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py",
+)
 
 MODULE_A = "tests/unit/stores/test_a.py"
 MODULE_B = "tests/integration/test_b.py"
@@ -210,11 +222,87 @@ def test_main_refuses_anything_but_one_report(
     assert floor.main(argv) == 2
 
 
-def test_the_contract_is_floored(floor: ModuleType) -> None:
-    fewest, _ = floor.FLOORS[CONTRACT]
+@pytest.mark.parametrize("contract", CONTRACTS)
+def test_the_contract_is_floored(floor: ModuleType, contract: str) -> None:
+    assert contract in floor.FLOORS
+    fewest, _ = floor.FLOORS[contract]
 
-    assert (REPO_ROOT / CONTRACT).is_file()
+    assert (REPO_ROOT / contract).is_file()
     # A floor of zero passes a contract that ran nothing, which is the whole
-    # defect. The exact numbers are hand-read off a green run (the comment on
+    # defect. The exact numbers are hand-read off a green run (the comments on
     # FLOORS) and are not pinned here, where they would only be restated.
     assert fewest >= 1
+
+
+@pytest.mark.parametrize("contract", [c for c in CONTRACTS if c != NEO4J_VECTOR])
+def test_a_contract_with_no_capability_gate_may_skip_nothing(
+    floor: ModuleType, contract: str
+) -> None:
+    """Only the Neo4j vector contract gates cases by name (``SEARCH``).
+
+    A wider allowance on any other row lets that many cases skip unseen, so
+    it stays zero until a case is gated in the same diff that raises it.
+    """
+    _, most = floor.FLOORS[contract]
+
+    assert most == 0
+
+
+def _dotted(path: str) -> str:
+    return path.removesuffix(".py").replace("/", ".")
+
+
+def _real_cases(
+    floors: dict[str, tuple[int, int]],
+    *,
+    all_skipped: str | None = None,
+    collection_skipped: str | None = None,
+) -> list[str]:
+    """A report with every floored contract exactly at its floor.
+
+    ``all_skipped`` names one contract whose every case skipped instead, the
+    shape an unset env toggle leaves; ``collection_skipped`` one replaced by
+    a single case skipped at collection, as an import guard leaves it.
+    """
+    cases: list[str] = []
+    for path, (fewest, most) in floors.items():
+        owner = _dotted(path) + ".TestContract"
+        if path == all_skipped:
+            cases += _cases(owner, skipped=fewest + most)
+        elif path == collection_skipped:
+            cases.append(_collection_skip(_dotted(path)))
+        else:
+            cases += _cases(owner, passed=fewest, skipped=most)
+    return cases
+
+
+def test_real_floors_pass_a_report_at_their_floors(floor: ModuleType) -> None:
+    assert floor.check(_root(_real_cases(floor.FLOORS)), floor.FLOORS) == []
+
+
+@pytest.mark.parametrize("contract", CONTRACTS)
+def test_real_floors_fail_a_contract_that_skipped_every_case(
+    floor: ModuleType, contract: str
+) -> None:
+    fewest, most = floor.FLOORS[contract]
+    root = _root(_real_cases(floor.FLOORS, all_skipped=contract))
+
+    # Only the skipped contract is named, so a row cannot pass by reading a
+    # sibling's counts, and a zero-skip allowance cannot hide the skips.
+    assert floor.check(root, floor.FLOORS) == [
+        f"{contract}: 0 passed, below its floor of {fewest}",
+        f"{contract}: {fewest + most} skipped, over its allowance of {most}",
+    ]
+
+
+@pytest.mark.parametrize("contract", CONTRACTS)
+def test_real_floors_fail_a_contract_skipped_at_collection(
+    floor: ModuleType, contract: str
+) -> None:
+    fewest, most = floor.FLOORS[contract]
+    root = _root(_real_cases(floor.FLOORS, collection_skipped=contract))
+
+    expected = [f"{contract}: 0 passed, below its floor of {fewest}"]
+    if most < 1:  # the one skip is within a wider allowance
+        expected.append(f"{contract}: 1 skipped, over its allowance of {most}")
+    assert floor.check(root, floor.FLOORS) == expected

@@ -1,15 +1,19 @@
-"""Fail live-infra when the Neo4j vector contract ran less than it should.
+"""Fail live-infra when a floored live contract ran less than it should.
 
 live-infra writes a junit report on every run (``PYTEST_ADDOPTS`` on its test
 step) and, until this script, read it only when the job had already failed. A
 skip is not a failure, so a contract that skipped every case -- a skip mark, a
-mistyped env var, a dropped ``neo4j`` extra, a roster widened to every case --
-left the job green while the contract stopped running.
+mistyped env var, a dropped ``neo4j`` or ``psycopg`` extra, a roster widened
+to every case -- left the job green while the contract stopped running.
 
 This reads that report and fails when a floored module passes fewer cases than
 its floor, or skips more than its allowance. Both bounds leave room to
 improve: a new case that passes, or a backend that stops needing a skip, never
 turns the job red.
+
+The floored modules are the cloud graph and vector store contracts. Every case
+of one skips when its backend's env toggle is unset, so an unset toggle is the
+failure this reads for.
 
 Run from the repository root::
 
@@ -24,13 +28,23 @@ from pathlib import PurePosixPath
 
 #: Test module -> (fewest cases that must pass, most that may skip).
 #:
-#: Hand-read off live-infra run 37484813426 at d873f570 (2026-10-06), from
-#: that run's own per-test lines, never from this script: 25 passed, 19
-#: skipped. The 19 are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12``
-#: cannot run. A change that removes passing contract cases, or gates more of
-#: them behind the ``SEARCH`` capability, edits this row in the same diff.
+#: Each row is hand-read off a green live-infra run's own per-test lines,
+#: never from this script, and its comment names the run. A change that
+#: removes passing contract cases, or gates more of them behind a capability,
+#: edits that row in the same diff. A floor is a minimum: adding a case never
+#: turns the job red.
 FLOORS: dict[str, tuple[int, int]] = {
+    # Run 37484813426 at d873f570 (2026-10-06): 25 passed, 19 skipped. The 19
+    # are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12`` cannot run. Still
+    # 25 and 19 on run 39334674588.
     "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 19),
+    # Run 39334674588 at e16e24a7 (2026-10-19): every row below passed all of
+    # its cases and skipped none.
+    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (151, 0),
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (151, 0),
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (151, 0),
+    "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
+    "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
 }
 
 
