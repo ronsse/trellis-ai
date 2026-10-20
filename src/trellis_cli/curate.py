@@ -776,9 +776,14 @@ def promote_learning(
     """
     candidates_payload = json.loads(candidates.read_text(encoding="utf-8"))
     decisions_payload = json.loads(decisions.read_text(encoding="utf-8"))
+    # Opened before the plan, not after it: the planner reads (never writes)
+    # the document store so a precedent carries an excerpt of its source,
+    # and ``--dry-run`` must show the payload a real run would submit.
+    registry = _get_registry()
     plan = prepare_learning_promotions(
         candidates_payload=candidates_payload,
         decisions_payload=decisions_payload,
+        document_store=registry.knowledge.document_store,
     )
 
     ready = [r for r in plan["results"] if r["status"] == "ready"]
@@ -827,7 +832,6 @@ def promote_learning(
         )
         return
 
-    registry = _get_registry()
     executor = build_curate_executor(registry)
 
     submission_results: list[dict[str, Any]] = []
@@ -1241,6 +1245,7 @@ def auto_promote_candidates(
             event_log=event_log,
             executor=build_curate_executor(registry),
             graph_store=registry.knowledge.graph_store,
+            document_store=registry.knowledge.document_store,
             force_report_only=dry_run,
             configured_mode=configured_mode,
         )

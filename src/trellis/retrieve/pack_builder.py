@@ -88,6 +88,8 @@ from trellis.retrieve.parent_verdicts import (
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
+    GRAPH_SEED_IDS_KEY,
+    GRAPH_STRATEGY_NAME,
     RECENCY_CLOCK_METADATA_KEY,
     EmbedderResolveFailure,
     SearchStrategy,
@@ -406,6 +408,26 @@ def _strip_dedup_frontmatter(text: str) -> str:
     relevance-order winner rule keeps the best copy.
     """
     return _DEDUP_FRONTMATTER_RE.sub("", text, count=1)
+
+
+def _note_graph_seeds(items: Iterable[PackItem], into: dict[str, None]) -> None:
+    """Add the seeds a graph-axis result set was expanded from to ``into``.
+
+    ``into`` is an insertion-ordered set (a ``dict`` of ``None``), so the
+    payload lists seeds in the order the axis resolved them. The caller
+    passes only items the *graph strategy* returned: the key is stamped by
+    :class:`~trellis.retrieve.strategies.GraphSearch`, and a keyword or
+    semantic item whose stored metadata happens to carry the same name must
+    not be read as a seed. Anything but a list of non-empty strings is
+    ignored rather than trusted.
+    """
+    for item in items:
+        seeds = (item.metadata or {}).get(GRAPH_SEED_IDS_KEY)
+        if not isinstance(seeds, list):
+            continue
+        for seed in seeds:
+            if isinstance(seed, str) and seed:
+                into[seed] = None
 
 
 def _item_attribution(item: PackItem) -> dict[str, Any]:
@@ -1000,6 +1022,9 @@ class PackBuilder:
 
         class_prior_config = self._effective_class_prior_config()
         strategy_by_item_id: dict[int, str] = {}
+        # Seeds the graph axis expanded from this build (``[]`` when it ran
+        # the recency window), for ``PACK_ASSEMBLED.seed_entity_ids``.
+        graph_seed_ids: dict[str, None] = {}
         # One cache for the whole build: shared across every strategy's
         # pass over the collect gates below, so a parent shared by chunks
         # from two axes (or by several chunks on one axis) costs one
@@ -1022,6 +1047,8 @@ class PackBuilder:
                 rejected.extend(gate_rejected)
                 for item in items:
                     strategy_by_item_id[id(item)] = strategy.name
+                if strategy.name == GRAPH_STRATEGY_NAME:
+                    _note_graph_seeds(items, graph_seed_ids)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1290,6 +1317,7 @@ class PackBuilder:
             self._emit_telemetry(
                 pack,
                 strategy_failures=strategy_failures,
+                seed_entity_ids=list(graph_seed_ids),
                 index_mode=index_mode,
                 retrieval_phase=retrieval_phase,
                 refresh=refresh,
@@ -2042,6 +2070,7 @@ class PackBuilder:
         pack: Pack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        seed_entity_ids: list[str] | None = None,
         meta_filtered_count: int = 0,
         content_floor: dict[str, Any] | None = None,
         disclosure: dict[str, Any] | None = None,
@@ -2169,6 +2198,17 @@ class PackBuilder:
         raised during this build — the chunk is still served, this is only
         the visible record that the parent-scoped archived/noise check
         could not run for at least one parent.
+
+        ``seed_entity_ids`` is the graph axis's resolved seed set for this
+        build, read off the graph items that passed the collect gates and
+        recorded whether or not one of them survived the budget into the
+        pack: the learning loop attaches a promoted precedent to *the
+        entities the pack was seeded from*, and an item served from another
+        axis (a document) is exactly the case where no graph item need have
+        made the cut. ``[]`` — always present — means the axis ran the recency window
+        or no graph strategy ran; no seed is ever invented. Only the flat
+        payload carries it: the sectioned payload has no per-item rows for
+        the learning join to read, so a seed there would be inert.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -2221,6 +2261,7 @@ class PackBuilder:
                     for item in pack.items
                 },
                 "injected_items": self._injected_item_rows(pack.items),
+                "seed_entity_ids": list(seed_entity_ids or []),
                 "strategies_used": report.strategies_used,
                 "candidates_found": report.candidates_found,
                 "duration_ms": report.duration_ms,

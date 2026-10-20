@@ -111,6 +111,7 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.mutate import MutationExecutor, Operation
+from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import GraphStore
 
@@ -855,6 +856,7 @@ def run_candidate_auto_promotion(
     event_log: EventLog,
     executor: MutationExecutor | None = None,
     graph_store: GraphStore | None = None,
+    document_store: DocumentStore | None = None,
     requested_by: str = AUTO_PROMOTE_REQUESTED_BY,
     source: str = "candidate_auto_promote",
     force_report_only: bool = False,
@@ -911,6 +913,11 @@ def run_candidate_auto_promotion(
     this configured to" on its own. Omitted (or ``None``), this falls
     back to ``policy.mode``, unchanged from before this parameter
     existed.
+
+    ``document_store`` is read-only here: a committed promotion embeds a
+    bounded excerpt of its source document (see
+    :func:`~trellis.learning.scoring.build_learning_promotion_payloads`),
+    and with ``None`` it simply carries none.
 
     Raises:
         ValueError: If the effective mode is ``"commit"`` but no
@@ -1001,6 +1008,7 @@ def run_candidate_auto_promotion(
             candidate=candidate,
             promotion_name=promotion_name,
             rationale=rationale,
+            document_store=document_store,
         )
         submission = submit_learning_promotion(
             executor,

@@ -18,6 +18,7 @@ import pytest
 
 from trellis.retrieve.pack_builder import _item_attribution
 from trellis.retrieve.strategies import (
+    GRAPH_SEED_IDS_KEY,
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
     GraphSearch,
@@ -323,3 +324,66 @@ def test_selection_stamp_is_always_present(seeds: list[str]) -> None:
     items = GraphSearch(store).search("q", filters=filters)
     assert items
     assert all("graph_selection" in i.metadata for i in items)
+
+
+class _SeedResolvingStore(_RecordingGraphStore):
+    """A subgraph that returns the seeds that exist, plus a neighbour."""
+
+    def __init__(self, existing: set[str]) -> None:
+        super().__init__()
+        self._existing = existing
+
+    def get_subgraph(
+        self,
+        seed_ids: list[str],
+        depth: int = 2,
+        edge_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.subgraph_calls.append(
+            {"seed_ids": list(seed_ids), "depth": depth, "edge_types": edge_types}
+        )
+        ids = [s for s in seed_ids if s in self._existing] + ["neighbour"]
+        return {
+            "nodes": [
+                {"node_id": i, "node_type": "concept", "properties": {"name": i}}
+                for i in ids
+            ],
+            "edges": [],
+        }
+
+
+class TestSeedRecord:
+    """The seeds an expansion actually started from ride on its items."""
+
+    def test_seeded_items_carry_only_the_seeds_that_resolved(self) -> None:
+        store = _SeedResolvingStore({"a", "b"})
+        items = GraphSearch(store).search(
+            "anything", filters={"seed_ids": ["a", "ghost", "b", "a"]}
+        )
+        assert items
+        assert all(i.metadata[GRAPH_SEED_IDS_KEY] == ["a", "b"] for i in items)
+
+    def test_a_seeded_search_that_resolves_nothing_records_nothing(self) -> None:
+        store = _SeedResolvingStore(set())
+        items = GraphSearch(store).search("anything", filters={"seed_ids": ["ghost"]})
+        assert items
+        assert all(GRAPH_SEED_IDS_KEY not in i.metadata for i in items)
+
+    def test_the_recency_window_has_no_seeds_to_record(self) -> None:
+        items = GraphSearch(_RecordingGraphStore()).search("anything")
+        assert items
+        assert all(GRAPH_SEED_IDS_KEY not in i.metadata for i in items)
+
+    def test_a_stored_property_cannot_forge_a_seed(self) -> None:
+        store = _RecordingGraphStore(
+            [
+                {
+                    "node_id": "liar",
+                    "node_type": "concept",
+                    "properties": {"name": "n", GRAPH_SEED_IDS_KEY: ["forged"]},
+                }
+            ]
+        )
+        items = GraphSearch(store).search("anything")
+        assert [i.item_id for i in items] == ["liar"]
+        assert GRAPH_SEED_IDS_KEY not in items[0].metadata

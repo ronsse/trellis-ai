@@ -1019,6 +1019,41 @@ class TestCuratePromoteLearning:
         assert result_entry["node_id"]
         assert result_entry["edges"] == []
 
+    def test_promotion_embeds_an_excerpt_of_the_source_document(
+        self, tmp_path: Path
+    ) -> None:
+        candidates_path, decisions_path = _write_review_pair(tmp_path)
+        seed = curate_cli._get_registry()
+        try:
+            seed.knowledge.document_store.put(
+                "lc:doc:helpful", "Check the retry budget before escalating.", {}
+            )
+        finally:
+            seed.close()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote-learning",
+                "--candidates",
+                str(candidates_path),
+                "--decisions",
+                str(decisions_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        node_id = json.loads(result.stdout.strip())["results"][0]["node_id"]
+        reader = curate_cli._get_registry()
+        try:
+            node = reader.knowledge.graph_store.get_node(node_id)
+        finally:
+            reader.close()
+        assert node is not None
+        assert "Check the retry budget" in node["properties"]["description"]
+        assert node["properties"]["source_excerpt_status"] == "included"
+
     def test_no_approvals_is_a_no_op(self, tmp_path: Path) -> None:
         candidates_path, decisions_path = _write_review_pair(tmp_path, approved=False)
         result = runner.invoke(
@@ -1737,6 +1772,33 @@ class TestCurateAutoPromoteCandidates:
         path = tmp_path / "candidates.json"
         path.write_text(json.dumps({"candidates": candidates}))
         return path
+
+    def test_the_run_is_given_the_document_store_for_source_excerpts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = curate_cli.run_candidate_auto_promotion
+        seen: dict[str, object] = {}
+
+        def spy(**kwargs: object) -> object:
+            seen.update(kwargs)
+            return real(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(curate_cli, "run_candidate_auto_promotion", spy)
+        candidates_path = self._write_candidates(tmp_path, [_auto_promote_candidate()])
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert seen["document_store"] is not None
 
     def test_dry_run_overrides_a_stored_commit_mode(self, tmp_path: Path) -> None:
         """Without --dry-run a stored mode=commit refuses the whole run

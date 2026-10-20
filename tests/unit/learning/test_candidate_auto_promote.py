@@ -1084,6 +1084,40 @@ class TestRunCandidateAutoPromotionCommit:
             registry.close()
 
 
+class TestCommitEmbedsSourceExcerpt:
+    """The commit branch hands its document store to the payload builder."""
+
+    def test_promoted_precedent_carries_an_excerpt_of_its_source(
+        self, tmp_path: Path
+    ) -> None:
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            registry.knowledge.document_store.put(
+                "doc:source", "Restart the worker before replaying the queue.", {}
+            )
+            policy = LearningCandidateAutoPromotePolicy(
+                enabled=True, mode="commit", demotion_enabled=True
+            )
+            candidate = {**_candidate("cand-excerpt"), "item_id": "doc:source"}
+
+            report = run_candidate_auto_promotion(
+                candidates=[candidate],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=build_curate_executor(registry),
+                graph_store=registry.knowledge.graph_store,
+                document_store=registry.knowledge.document_store,
+            )
+
+            assert report.promoted_count == 1
+            node = registry.knowledge.graph_store.get_node(report.outcomes[0].entity_id)
+            assert node is not None
+            assert "Restart the worker" in node["properties"]["description"]
+            assert node["properties"]["source_excerpt_status"] == "included"
+        finally:
+            registry.close()
+
+
 class TestAlreadyPromotedExclusion:
     """B2: a candidate that already has any successful ``precedent.promote``
     — human or automatic — is excluded from ``would_promote`` and reported

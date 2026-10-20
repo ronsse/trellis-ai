@@ -1459,13 +1459,14 @@ def promote_learning_candidates(
     decisions_payload = {
         "decisions": [d.model_dump() for d in req.decisions],
     }
+    registry = get_registry()
     plan = prepare_learning_promotions(
         candidates_payload=candidates_payload,
         decisions_payload=decisions_payload,
+        document_store=registry.knowledge.document_store,
     )
     ready = [r for r in plan["results"] if r["status"] == "ready"]
 
-    registry = get_registry()
     executor = build_curate_executor(registry)
     rows: list[LearningPromotionResultRow] = []
     promoted_count = 0

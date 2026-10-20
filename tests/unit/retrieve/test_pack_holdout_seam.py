@@ -172,6 +172,12 @@ _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
     "parent_verdict_degraded",
 }
 
+#: Keys only the flat payload gained since the snapshot: ``seed_entity_ids``
+#: (the graph seeds a pack expanded from, which the learning loop reads back
+#: from ``injected_items`` rows — a sectioned payload has none, so it records
+#: no seeds either).
+_FLAT_KEYS_ADDED_SINCE_BASE = _KEYS_ADDED_SINCE_BASE | {"seed_entity_ids"}
+
 
 def _items() -> list[PackItem]:
     return [
@@ -422,7 +428,7 @@ class TestFlatAtRateZero:
             "rotate keys", budget=_BUDGET
         )
         row = _payload(event_log, pack.pack_id)
-        assert set(row) - _BASE_FLAT_KEYS == _KEYS_ADDED_SINCE_BASE
+        assert set(row) - _BASE_FLAT_KEYS == _FLAT_KEYS_ADDED_SINCE_BASE
         assert set(row) >= _BASE_FLAT_KEYS
         assert row["holdout"] is False
         assert row["holdout_rate"] == 0.0
