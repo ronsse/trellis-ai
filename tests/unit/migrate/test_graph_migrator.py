@@ -264,11 +264,12 @@ class TestEdgeProvenanceCarried:
 
 
 class _NoProvenanceKwargsStore(SQLiteGraphStore):
-    """A destination whose ``upsert_edge`` is the abstract signature, no more.
+    """A destination whose ``upsert_edge`` predates the provenance keywords.
 
-    ``GraphStore.upsert_edge`` does not declare the provenance keywords;
-    every shipped backend adds them. A plugin that follows the abstract
-    signature literally has to keep working for edges that carry none.
+    ``GraphStore.upsert_edge`` declares them now, but a plugin written
+    against the earlier signature still loads. It has to keep working for
+    edges that carry none, since the migrator passes only the keywords an
+    edge actually holds.
     """
 
     def upsert_edge(  # type: ignore[override]
@@ -315,6 +316,105 @@ class TestDestinationWithoutProvenanceKwargs:
 
         assert excinfo.value.step == "upsert_edge"
         assert isinstance(excinfo.value.original, TypeError)
+
+
+class _AliasConfidenceSource(SQLiteGraphStore):
+    """A source whose alias rows report ``match_confidence`` as a given value.
+
+    ``_MISSING`` drops the key, anything else (``None`` included) is
+    returned as is, to reach the migrator's "no value" branch that a real
+    SQLite row (``NOT NULL DEFAULT 1.0``) never takes.
+    """
+
+    _MISSING = object()
+
+    def __init__(self, *args: Any, reported: object, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._reported = reported
+
+    def get_aliases(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        rows = super().get_aliases(*args, **kwargs)
+        for row in rows:
+            if self._reported is self._MISSING:
+                row.pop("match_confidence", None)
+            else:
+                row["match_confidence"] = self._reported
+        return rows
+
+
+class TestAliasMatchConfidenceCarried:
+    """An alias copies with the confidence it was stored with.
+
+    ``0.0`` is a stored value (a match recorded as no better than a
+    guess), not a missing one, so it must not be read back as ``1.0``.
+    """
+
+    @pytest.mark.parametrize("stored", [0.0, 0.4, 1.0])
+    def test_stored_confidence_arrives(
+        self,
+        source_store: SQLiteGraphStore,
+        dest_store: SQLiteGraphStore,
+        stored: float,
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        source_store.upsert_alias(
+            a, source_system="github", raw_id="alice42", match_confidence=stored
+        )
+
+        report = GraphMigrator(source_store, dest_store).run()
+
+        assert report.aliases_written == 1
+        arrived = dest_store.resolve_alias("github", "alice42")
+        assert arrived is not None
+        assert arrived["match_confidence"] == stored
+
+    @pytest.mark.parametrize(
+        "reported", [None, _AliasConfidenceSource._MISSING], ids=["none", "absent"]
+    )
+    def test_no_reported_confidence_defaults_to_one(
+        self, tmp_path: Path, dest_store: SQLiteGraphStore, reported: object
+    ) -> None:
+        source = _AliasConfidenceSource(
+            db_path=tmp_path / "alias-source.db", reported=reported
+        )
+        a = source.upsert_node("a", node_type="Svc", properties={})
+        source.upsert_alias(
+            a, source_system="github", raw_id="alice42", match_confidence=0.3
+        )
+
+        report = GraphMigrator(source, dest_store).run()
+
+        assert report.aliases_written == 1
+        arrived = dest_store.resolve_alias("github", "alice42")
+        assert arrived is not None
+        assert arrived["match_confidence"] == 1.0
+
+
+class TestRerunDoesNotBackfillProvenance:
+    """An edge already on the destination is skipped, provenance included.
+
+    A re-run is idempotent by ``(source, target, type)``, so an edge an
+    older build copied without its provenance columns keeps them NULL.
+    This pins the documented behaviour; it is not an endorsement of it.
+    """
+
+    def test_existing_destination_edge_keeps_null_provenance(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", source_trace_id="trace-1")
+        # The destination already holds the edge, as an older build left it.
+        dest_store.upsert_node("a", node_type="Svc", properties={})
+        dest_store.upsert_node("b", node_type="Svc", properties={})
+        dest_store.upsert_edge(a, b, "uses")
+
+        report = GraphMigrator(source_store, dest_store).run()
+
+        assert report.edges_written == 0
+        assert report.edges_skipped == 1
+        arrived = _only_outgoing(dest_store, a)
+        assert _provenance_of(arrived) == dict.fromkeys(_PROVENANCE_FIELDS)
 
 
 class TestEdgeCases:
