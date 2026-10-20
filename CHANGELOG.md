@@ -907,6 +907,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`--dry-run` on `admin migrate-graph` and `analyze advisory-effectiveness`
+  no longer writes a meta-trace Activity.** `wrap_cli_meta_analysis` writes
+  an Agent node, an Activity node and an edge to the CLI's default graph the
+  moment it is entered, so a dry run that promised to write nothing still grew
+  the live graph. The wrapper takes a keyword-only `dry_run` and yields the
+  same no-op record as `disabled`, logging `cli_meta_trace.skipped_for_dry_run`;
+  `migrate-graph`, `migrate-provenance` and `advisory-effectiveness` pass it.
+  A real run records exactly what it did before. `worker curate --dry-run` is
+  unchanged on purpose: each stage that runs still records its Activity, as
+  its help text says (`--no-meta-trace` skips it). A new rule test fails any
+  function with a `dry_run` parameter that calls the wrapper without stating
+  the flag.
+
 - **`trellis admin migrate-graph` carries an edge's five typed provenance
   columns.** `source_trace_id`, `agent_id`, `confidence`, `evidence_ref` and
   `extractor_tier` are columns, not `properties` keys, and the migrator
