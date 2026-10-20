@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,6 +14,8 @@ from trellis.schemas.graph import (
     Edge,
     canonical_extractor_tier,
 )
+from trellis.stores.base.edge_provenance import normalize_edge_provenance
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 class TestEdgeKindIsOpenString:
@@ -174,3 +178,109 @@ class TestCanonicalExtractorTier:
         assert stored == ALLOWED_EXTRACTOR_TIERS
         for tier in ExtractorTier:
             assert canonical_extractor_tier(tier.value) == tier.name
+
+
+#: Every spelling the two boundaries are held to. The six accepted ones, then
+#: the near misses, each padded and mixed-case variant of an accepted one
+#: included: the model strips whitespace on string fields by default, so it is
+#: the padded ones that tell a validator that checks the raw value from one
+#: that checks it after the strip.
+_BOUNDARY_SPELLINGS = [
+    "deterministic",
+    "hybrid",
+    "llm",
+    "DETERMINISTIC",
+    "HYBRID",
+    "LLM",
+    "llm ",
+    " llm",
+    "LLM ",
+    " LLM",
+    "\tHYBRID\n",
+    "deterministic\n",
+    "Llm",
+    "heuristic",
+    "",
+    " ",
+]
+
+
+class TestEdgeAndStoreBoundaryAgree:
+    """One spelling, one verdict, whichever boundary a writer goes through.
+
+    ``Edge`` validates after the base model's whitespace strip and the store
+    boundary does not, so ``"llm "`` used to be an ``Edge`` tier and a store
+    rejection at once. :class:`Edge` is the schema, ``normalize_edge_provenance``
+    is what every backend runs before a write; they are meant to be one rule.
+    """
+
+    @pytest.mark.parametrize("spelling", _BOUNDARY_SPELLINGS)
+    def test_the_same_verdict_and_the_same_stored_value(self, spelling: str) -> None:
+        try:
+            stored = normalize_edge_provenance(extractor_tier=spelling)[
+                "extractor_tier"
+            ]
+        except ValueError:
+            with pytest.raises(ValidationError, match="extractor_tier must be one of"):
+                Edge(
+                    source_id="a",
+                    target_id="b",
+                    edge_kind="depends_on",
+                    extractor_tier=spelling,
+                )
+        else:
+            edge = Edge(
+                source_id="a",
+                target_id="b",
+                edge_kind="depends_on",
+                extractor_tier=spelling,
+            )
+            assert edge.extractor_tier == stored
+
+    @pytest.mark.parametrize("spelling", ["llm ", " LLM", "\tHYBRID\n"])
+    def test_a_padded_tier_is_rejected_by_the_model_and_the_store_alike(
+        self, spelling: str, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValidationError, match="extractor_tier must be one of"):
+            Edge(
+                source_id="a",
+                target_id="b",
+                edge_kind="depends_on",
+                extractor_tier=spelling,
+            )
+        with pytest.raises(ValueError, match="extractor_tier must be one of"):
+            normalize_edge_provenance(extractor_tier=spelling)
+
+        store = SQLiteGraphStore(tmp_path / "graph.db")
+        try:
+            store.upsert_node("a", "service", {})
+            store.upsert_node("b", "service", {})
+            with pytest.raises(ValueError, match="extractor_tier must be one of"):
+                store.upsert_edge("a", "b", "depends_on", extractor_tier=spelling)
+            assert store.get_edges("a", direction="outgoing") == []
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("value", [5, b"llm", b"heuristic", bytearray(b"LLM")])
+    def test_a_non_string_tier_is_rejected_as_the_store_rejects_it(
+        self, value: object
+    ) -> None:
+        # pydantic's lax mode decodes bytes to str, so a pass-through would
+        # store b"heuristic" unvalidated.
+        with pytest.raises(ValidationError, match="must be str or None"):
+            Edge(
+                source_id="a",
+                target_id="b",
+                edge_kind="depends_on",
+                extractor_tier=value,  # type: ignore[arg-type]
+            )
+        with pytest.raises(TypeError, match="must be str or None"):
+            normalize_edge_provenance(extractor_tier=value)  # type: ignore[arg-type]
+
+    def test_an_unset_tier_is_still_none(self) -> None:
+        edge = Edge(source_id="a", target_id="b", edge_kind="depends_on")
+        assert edge.extractor_tier is None
+        explicit = Edge(
+            source_id="a", target_id="b", edge_kind="depends_on", extractor_tier=None
+        )
+        assert explicit.extractor_tier is None

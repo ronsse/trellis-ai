@@ -125,9 +125,9 @@ class Edge(TimestampedModel, VersionedModel):
         warn_if_near_miss_edge_kind(value)
         return value
 
-    @field_validator("extractor_tier", mode="after")
+    @field_validator("extractor_tier", mode="before")
     @classmethod
-    def _validate_extractor_tier(cls, value: str | None) -> str | None:
+    def _validate_extractor_tier(cls, value: Any) -> Any:
         """Canonicalise ``extractor_tier`` and reject anything unrecognised.
 
         ``None`` is allowed (the column is optional and historical edges
@@ -135,12 +135,24 @@ class Edge(TimestampedModel, VersionedModel):
         :data:`ALLOWED_EXTRACTOR_TIERS` or a lower-case ``ExtractorTier``
         value, which is stored in the canonical spelling
         (:func:`canonical_extractor_tier`) — no general case folding, no
-        whitespace stripping (the base model already strips whitespace
-        on string fields). Validating loudly here keeps downstream
-        filter queries deterministic.
+        whitespace stripping. A ``before`` validator, because the base
+        model's ``str_strip_whitespace`` runs ahead of an ``after`` one and
+        would turn ``"llm "`` into ``"llm"`` before it was checked, so
+        this model would accept a spelling the store boundary
+        (:func:`~trellis.stores.base.edge_provenance.normalize_edge_provenance`)
+        rejects. A non-string is rejected too, as the store rejects it:
+        passed through, pydantic's lax mode would decode ``b"llm"`` after
+        this check ran.
+        Validating loudly here keeps downstream filter queries
+        deterministic.
         """
         if value is None:
             return None
+        if not isinstance(value, str):
+            # ValueError, not TypeError: a validator's TypeError escapes pydantic
+            # unwrapped instead of becoming a ValidationError.
+            msg = f"extractor_tier must be str or None, got {type(value).__name__}"
+            raise ValueError(msg)  # noqa: TRY004
         return canonical_extractor_tier(value)
 
 
