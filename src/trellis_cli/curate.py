@@ -46,6 +46,11 @@ from trellis.learning.precedent_auto_demote import (
     sanitize_configured_mode as sanitize_precedent_auto_demote_mode,
 )
 from trellis.learning.precedent_evidence_gate import MIN_UNHELPFUL_CITATIONS
+from trellis.learning.review_ready import (
+    approval_refusal,
+    build_review_rows,
+    make_promoted_probe,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -53,7 +58,12 @@ from trellis.mutate import (
     build_curate_executor,
 )
 from trellis.stores.settings_store import load_settings_values
-from trellis_cli.exit_codes import EXIT_VALIDATION, refusal_exit_code
+from trellis_cli.exit_codes import (
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log, get_graph_store
 
@@ -902,6 +912,263 @@ def promote_learning(
             escape(edge_summary),
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# review-ready — review and approve the promotion-ready learning candidates
+# ---------------------------------------------------------------------------
+
+#: Requester stamped on every promotion this command submits.
+REVIEW_READY_REQUESTED_BY = "cli:review-ready"
+
+
+def _landed(outcome: dict[str, Any]) -> bool:
+    """Whether a submitted promotion wrote everything it promised.
+
+    ``submit_learning_promotion`` answers ``promoted`` once the entity is
+    written, whatever became of the edges and of the ``PRECEDENT_PROMOTE``
+    event that makes the precedent visible to ``get_lessons``. A reviewer's
+    approval is only honoured when all of them landed.
+    """
+    ok = CommandStatus.SUCCESS.value
+    return (
+        outcome.get("status") == "promoted"
+        and outcome.get("precedent_event_status") == ok
+        and all(e.get("status") == ok for e in outcome.get("edges") or [])
+    )
+
+
+def _review_ready_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
+    """``(exit_code, status)`` for an approval run, from one reading of the outcomes.
+
+    The exit code and the payload's ``status`` are derived together, before
+    either format renders, so neither can depend on ``--format``
+    (``tests/unit/test_format_exit_parity_rule.py``). A refusal is the
+    operator's to fix (``EXIT_VALIDATION``); a write that did not land is the
+    deployment's (``EXIT_STORE``).
+    """
+    failed = [o for o in outcomes if not _landed(o)]
+    if not failed:
+        return EXIT_OK, "ok"
+    if any(not str(o.get("status", "")).startswith("refused") for o in failed):
+        return EXIT_STORE, "failed"
+    return EXIT_VALIDATION, "refused"
+
+
+def _approve_candidates(
+    registry: Any,
+    rows: list[dict[str, Any]],
+    candidates: list[Any],
+    approve: list[str],
+    *,
+    rationale: str,
+    force_contradicted: bool,
+) -> list[dict[str, Any]]:
+    """Promote each named candidate through the governed path; one outcome per id."""
+    rows_by_id = {row["candidate_id"]: row for row in rows}
+    by_id = {str(c.get("candidate_id")): c for c in candidates if isinstance(c, dict)}
+    executor = build_curate_executor(registry)
+    outcomes: list[dict[str, Any]] = []
+    for candidate_id in dict.fromkeys(approve):
+        refusal = approval_refusal(
+            candidate_id,
+            rows_by_id.get(candidate_id),
+            force_contradicted=force_contradicted,
+        )
+        if refusal is not None:
+            outcomes.append(refusal)
+            continue
+        # Exactly what ``promote-learning`` does with an approved decision.
+        plan = prepare_learning_promotions(
+            candidates_payload={"candidates": [by_id[candidate_id]]},
+            decisions_payload={
+                "decisions": [
+                    {
+                        "candidate_id": candidate_id,
+                        "approved": True,
+                        "promotion_name": "",
+                        "rationale": rationale,
+                    }
+                ]
+            },
+            document_store=registry.knowledge.document_store,
+        )
+        entry = plan["results"][0]
+        outcome = submit_learning_promotion(
+            executor,
+            entry["entity_payload"],
+            entry["edge_payloads"],
+            requested_by=REVIEW_READY_REQUESTED_BY,
+            graph_store=registry.knowledge.graph_store,
+        )
+        outcome = {
+            "candidate_id": candidate_id,
+            "entity_id": entry["entity_id"],
+            **outcome,
+        }
+        if outcome["status"] == "promoted" and not _landed(outcome):
+            outcome["status"] = "promoted_incomplete"
+        outcomes.append(outcome)
+    return outcomes
+
+
+def _print_review_rows(rows: list[dict[str, Any]], *, ready_count: int) -> None:
+    """Render the listing: one block per candidate, evidence beside the excerpt."""
+    if not rows:
+        console.print("[yellow]No promotion-ready candidates.[/yellow]")
+        return
+    console.print(
+        f"[bold]Promotion-ready candidates[/bold] — "
+        f"showing {len(rows)} of {ready_count}"
+    )
+    for number, row in enumerate(rows, start=1):
+        sessions = row["distinct_helpful_sessions"]
+        sessionless = row["sessionless_helpful_count"]
+        console.print(
+            f"\n{number}. [cyan]{escape(row['candidate_id'])}[/cyan]  "
+            f"{escape(str(row['intent_family']))}",
+            soft_wrap=True,
+            highlight=False,
+        )
+        console.print(
+            f"   source {escape(row['item_id'])}  "
+            f"helpful {row['helpful_count']}, unhelpful {row['unhelpful_count']}, "
+            f"sessions {'n/a' if sessions is None else sessions}, "
+            f"sessionless {'n/a' if sessionless is None else sessionless}, "
+            f"targets {row['target_entity_count']}",
+            soft_wrap=True,
+            highlight=False,
+        )
+        excerpt = row["source_excerpt"]
+        console.print(
+            f"   excerpt: {escape(excerpt)}"
+            if excerpt is not None
+            else f"   excerpt: none ({escape(row['source_excerpt_status'])})",
+            soft_wrap=True,
+            highlight=False,
+        )
+        if row["cross_family_noise"]:
+            families = ", ".join(row["noise_intent_families"])
+            console.print(
+                f"   [red]contradicted[/red]: also an investigate_noise candidate "
+                f"under {escape(families)}",
+                soft_wrap=True,
+                highlight=False,
+            )
+        if row["already_promoted"]:
+            console.print("   [yellow]already promoted[/yellow]")
+    console.print(
+        "\n[dim]Approve with: trellis curate review-ready --approve <candidate id> "
+        "--rationale TEXT[/dim]"
+    )
+
+
+def _print_approval_outcomes(outcomes: list[dict[str, Any]]) -> None:
+    """Render one line per approved id."""
+    for outcome in outcomes:
+        style = "green" if _landed(outcome) else "red"
+        status = escape(str(outcome["status"]))
+        message = outcome.get("message")
+        tail = f" — {escape(str(message))}" if message else ""
+        console.print(
+            f"[{style}]{status}[/{style}] {escape(outcome['candidate_id'])}{tail}",
+            soft_wrap=True,
+            highlight=False,
+        )
+
+
+@curate_app.command("review-ready")
+def review_ready(
+    candidates_path: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
+        "--candidates",
+        help=(
+            "Path to intent_learning_candidates.json. Defaults to the "
+            "learning-artifacts directory the Review queue reads."
+        ),
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        min=1,
+        help="List at most N candidates. Does not limit --approve.",
+    ),
+    approve: list[str] | None = typer.Option(  # noqa: B008 - typer option default
+        None,
+        "--approve",
+        help="Candidate id to promote; repeat the flag for several.",
+    ),
+    rationale: str = typer.Option(
+        "", "--rationale", help="Why these are approved; stored on each precedent."
+    ),
+    force_contradicted: bool = typer.Option(
+        False,
+        "--force-contradicted",
+        help=(
+            "Allow approving a candidate whose item is an investigate_noise "
+            "candidate under another intent family."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Review the promotion-ready learning candidates and approve the ones you name.
+
+    Without ``--approve`` this only reads: it lists the candidates the
+    promotion-ready digest counts, each with a source excerpt, its citation
+    counts and two flags, a cross-family noise contradiction and an existing
+    precedent. With ``--approve ID`` it promotes each named candidate through
+    the governed path, as ``promote-learning`` would, and refuses an id that
+    is not ready, is already promoted, or is contradicted (unless
+    ``--force-contradicted``). It exits non-zero when any named id did not
+    land, in either format.
+    """
+    registry = _get_registry()
+    candidates_path, candidates = _load_candidates_file(
+        candidates_path, registry.stores_dir
+    )
+    rows = build_review_rows(
+        candidates,
+        document_store=registry.knowledge.document_store,
+        is_promoted=make_promoted_probe(
+            registry.operational.event_log, registry.knowledge.graph_store
+        ),
+    )
+    payload: dict[str, Any] = {
+        "candidates_path": str(candidates_path),
+        "ready_count": len(rows),
+    }
+    exit_code = EXIT_OK
+    outcomes: list[dict[str, Any]] = []
+    if approve:
+        outcomes = _approve_candidates(
+            registry,
+            rows,
+            candidates,
+            approve,
+            rationale=rationale,
+            force_contradicted=force_contradicted,
+        )
+        exit_code, status = _review_ready_verdict(outcomes)
+        payload["approved_count"] = len(outcomes)
+        payload["promoted_count"] = sum(1 for o in outcomes if _landed(o))
+        payload["results"] = outcomes
+    else:
+        status = "ok"
+        payload["shown_count"] = min(limit, len(rows))
+        payload["candidates"] = rows[:limit]
+    payload = {"status": status, **payload}
+
+    if output_format == "json":
+        emit_json(payload)
+    elif approve:
+        _print_approval_outcomes(outcomes)
+    else:
+        _print_review_rows(rows[:limit], ready_count=len(rows))
+
+    # Below the format branch, so both formats exit alike
+    # (tests/unit/test_format_exit_parity_rule.py).
+    if exit_code != EXIT_OK:
+        raise typer.Exit(code=exit_code)
 
 
 # ---------------------------------------------------------------------------
