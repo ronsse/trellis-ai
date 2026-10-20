@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -91,6 +92,77 @@ class TestWrapCliMetaAnalysisHelper:
         graph = temp_stores.knowledge.graph_store
         activities = graph.query(node_type=wk.ACTIVITY, limit=10)
         assert activities == []
+
+    def test_dry_run_yields_noop_record_and_writes_nothing(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """``dry_run=True`` skips the recorder as ``disabled=True`` does.
+
+        Entering the recorder writes an Agent node, an Activity node and an
+        edge, so a dry run that reached it would write.
+        """
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.test.dry-run",
+            dry_run=True,
+        ) as record:
+            assert record.enabled is False
+            assert record.activity_id is None
+            record.consumed_event("evt-1")
+            record.produced_finding("finding-1", finding_type="Test")
+
+        graph = temp_stores.knowledge.graph_store
+        assert graph.query(limit=10) == []
+        assert graph.count_edges() == 0
+
+    def test_dry_run_does_not_resolve_the_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail() -> None:
+            msg = "a dry run must not reach the registry"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("trellis_cli._meta_wiring._get_registry", _fail)
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.test.dry-run",
+            dry_run=True,
+        ) as record:
+            assert record.enabled is False
+
+    def test_dry_run_logs_its_own_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        log = MagicMock()
+        monkeypatch.setattr("trellis_cli._meta_wiring.logger", log)
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze", analyzer_name="cli.test.dry-run", dry_run=True
+        ):
+            pass
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze", analyzer_name="cli.test.flag", disabled=True
+        ):
+            pass
+
+        events = [call.args[0] for call in log.debug.call_args_list]
+        assert events == [
+            "cli_meta_trace.skipped_for_dry_run",
+            "cli_meta_trace.disabled_by_flag",
+        ]
+
+    def test_dry_run_false_records_as_before(self, temp_stores: StoreRegistry) -> None:
+        """The explicit default, which ``worker curate`` passes on purpose."""
+        with wrap_cli_meta_analysis(
+            agent_suffix="analyze",
+            analyzer_name="cli.test.dry-run-false",
+            dry_run=False,
+        ) as record:
+            assert record.enabled is True
+
+        activities = temp_stores.knowledge.graph_store.query(
+            node_type=wk.ACTIVITY,
+            properties={"analyzer_name": "cli.test.dry-run-false"},
+            limit=10,
+        )
+        assert len(activities) == 1
 
     def test_enabled_records_activity_in_graph(
         self, temp_stores: StoreRegistry

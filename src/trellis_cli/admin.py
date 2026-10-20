@@ -1806,7 +1806,12 @@ def migrate_graph(
         help="YAML file with a single 'graph:' block describing the destination store.",
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Walk and count, don't write to the destination."
+        False,
+        "--dry-run",
+        help=(
+            "Walk and count, don't write to the destination. Records no "
+            "meta-Activity either."
+        ),
     ),
     max_nodes: int = typer.Option(
         100_000,
@@ -1880,6 +1885,7 @@ def migrate_graph(
         agent_suffix="admin",
         analyzer_name="cli.admin.migrate-graph",
         disabled=no_meta_trace,
+        dry_run=dry_run,
     ) as _meta_record:
         try:
             migrator = GraphMigrator(src_store, dst_store, max_nodes=max_nodes)

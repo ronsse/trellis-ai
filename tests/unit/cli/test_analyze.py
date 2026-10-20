@@ -727,6 +727,38 @@ class TestAdvisoryEffectiveness:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness", "--dry-run"])
         assert result.exit_code == 0
 
+    def test_dry_run_adds_no_graph_node_or_edge(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """``--dry-run`` scores without adjusting, and records no meta-trace.
+
+        Entering the meta-trace recorder writes an Agent node, an Activity
+        node and an edge to the graph, so "without adjusting confidence" was
+        true of the advisory store and false of the graph.
+        """
+        graph = temp_stores.knowledge.graph_store
+        nodes_before = {n["node_id"] for n in graph.query(limit=10_000)}
+        edges_before = graph.count_edges()
+
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness", "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert {n["node_id"] for n in graph.query(limit=10_000)} == nodes_before
+        assert graph.count_edges() == edges_before
+
+    def test_an_applied_run_still_records_its_activity(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
+
+        assert result.exit_code == 0, result.output
+        activities = temp_stores.knowledge.graph_store.query(
+            node_type="Activity",
+            properties={"analyzer_name": "cli.analyze.advisory-effectiveness"},
+            limit=10,
+        )
+        assert len(activities) == 1
+
     def test_with_options(self) -> None:
         result = runner.invoke(
             app,

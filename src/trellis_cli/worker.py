@@ -635,8 +635,9 @@ def run_curation_cycle(
       fitness loop mutate the advisory store).
     * learning stage — observations are still built and scored, but no
       artifacts are written to disk.
-    * meta-trace — each stage that runs still records its meta-Activity,
-      as every other meta-traced dry run does, but no finding: the
+    * meta-trace — each stage that runs still records its meta-Activity
+      (the one dry run that does: the stages pass ``dry_run=False`` to
+      ``wrap_cli_meta_analysis`` on purpose, #663), but no finding: the
       noise-tag and learning findings name writes (the tags, the review
       files) that a dry run does not make.
 
@@ -797,6 +798,9 @@ def _curate_stage_noise_tags(
         agent_suffix="worker",
         analyzer_name="cli.worker.curate.noise-tags",
         disabled=no_meta_trace,
+        # Deliberately not ``dry_run``: a curate dry run records each stage's
+        # Activity (and no finding), as the ``--dry-run`` help and #663 say.
+        dry_run=False,
     ) as record:
         if dry_run:
             report = analyze_effectiveness(
@@ -974,6 +978,10 @@ def _curate_stage_advisories(
             agent_suffix="worker",
             analyzer_name="cli.worker.curate.advisories",
             disabled=no_meta_trace,
+            # Never entered on a dry run (the early return above), so this is
+            # the safe spelling: a stage that writes records nothing if a
+            # dry run ever reaches it.
+            dry_run=dry_run,
         ) as record:
             min_sample_size, min_effect_size = resolve_advisory_thresholds(settings)
             gen = AdvisoryGenerator(
@@ -1082,6 +1090,8 @@ def _curate_stage_learning(
         agent_suffix="worker",
         analyzer_name="cli.worker.curate.learning",
         disabled=no_meta_trace,
+        # Deliberately not ``dry_run``; see the noise-tags stage.
+        dry_run=False,
     ) as record:
         observations = build_learning_observations_from_event_log(event_log, days=days)
         report = analyze_learning_observations(

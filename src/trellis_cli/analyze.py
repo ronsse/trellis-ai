@@ -2170,7 +2170,9 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
         0.3, "--blend-weight", help="Weight of observed fitness in confidence update"
     ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Analyze without adjusting confidence"
+        False,
+        "--dry-run",
+        help="Analyze without adjusting confidence; records no meta-Activity",
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
@@ -2210,6 +2212,7 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
             agent_suffix="analyze",
             analyzer_name="cli.analyze.advisory-effectiveness",
             disabled=no_meta_trace,
+            dry_run=dry_run,
         ) as _meta_record:
             if dry_run:
                 report = analyze_advisory_effectiveness(
@@ -2229,7 +2232,7 @@ def advisory_effectiveness(  # noqa: PLR0912 - CLI rendering branches per report
                 )
             if _meta_record.enabled and report.advisory_scores:
                 _meta_record.produced_finding(
-                    f"advisory-fitness-d{days}{'-dryrun' if dry_run else ''}",
+                    f"advisory-fitness-d{days}",
                     finding_type="AdvisoryFitnessReport",
                 )
     except StoreWriteRefusedError as exc:

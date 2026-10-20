@@ -6,7 +6,7 @@ caller needs to repeat:
 * fetch the cached :class:`~trellis.stores.registry.StoreRegistry` (the
   recorder needs the knowledge plane to write the Activity node);
 * short-circuit to a no-op record when the operator passed
-  ``--no-meta-trace``;
+  ``--no-meta-trace``, and (separately) when the command is a dry run;
 * prefix the synthetic ``agent_id`` with
   :data:`trellis.meta.agents.META_AGENT_PREFIX` so the PackBuilder
   default filter (Item 6 Phase 2) recognises it as Trellis-internal.
@@ -29,9 +29,18 @@ analyzer invocation::
                 finding_type="EffectivenessReport",
             )
 
-Note: ``record.enabled`` is ``False`` when either the env var
-``TRELLIS_META_TRACES=off`` is set or the operator passed
-``--no-meta-trace``. The recorder's own methods are silent no-ops in
+A command that takes ``--dry-run`` passes ``dry_run=dry_run``: entering
+the recorder writes an Agent node, an Activity node and an edge to the
+live graph before the command has done anything, so a dry run that did
+not pass it would write. ``dry_run`` is separate from ``disabled`` so
+the rule in ``tests/unit/test_dry_run_meta_trace_rule.py`` can ask every
+such command to say which it means. A command that deliberately records
+on a dry run passes ``dry_run=False`` and says why beside it.
+
+Note: ``record.enabled`` is ``False`` when the env var
+``TRELLIS_META_TRACES=off`` is set, the operator passed
+``--no-meta-trace``, or the command is a dry run that passed
+``dry_run=dry_run``. The recorder's own methods are silent no-ops in
 that state — the ``if record.enabled`` guard above is only relevant for
 ``finding_id``s the analyzer wouldn't otherwise compute. See
 :func:`trellis.meta.record_meta_analysis` for the underlying primitive.
@@ -82,7 +91,7 @@ def cli_meta_agent_id(suffix: str | None = None) -> str:
 
 
 class _NoopMetaRecord:
-    """No-op stand-in returned when ``--no-meta-trace`` is set.
+    """No-op stand-in returned when ``--no-meta-trace`` or a dry run skips the recorder.
 
     Mirrors :class:`trellis.meta.MetaAnalysisRecord`'s public surface
     so call sites don't need ``if record.enabled`` guards around every
@@ -112,6 +121,7 @@ def wrap_cli_meta_analysis(
     agent_suffix: str,
     analyzer_name: str,
     disabled: bool = False,
+    dry_run: bool = False,
     merge_window_seconds: int = DEFAULT_MERGE_WINDOW_SECONDS,
 ) -> Iterator[MetaAnalysisRecord | _NoopMetaRecord]:
     """Wrap a CLI analyzer invocation in a meta-trace context manager.
@@ -128,13 +138,19 @@ def wrap_cli_meta_analysis(
             ``--no-meta-trace``), skips the recorder entirely and
             yields a no-op record. The wrapped command's primary
             output is unaffected.
+        dry_run: When ``True`` (the command's own ``--dry-run``), does
+            the same as ``disabled``, because a dry run writes nothing
+            and entering the recorder writes to the graph. Kept apart
+            from ``disabled`` so a command's dry-run decision is a
+            visible keyword at the call site (and a ``debug`` event of
+            its own), not folded into the operator's flag.
         merge_window_seconds: Forwarded to
             :func:`trellis.meta.record_meta_analysis`. Override only
             in tests that need a tight window.
 
     Yields:
         Either a real :class:`MetaAnalysisRecord` or a no-op stand-in
-        when ``disabled=True``. Both expose the same minimal surface
+        when ``disabled=True`` or ``dry_run=True``. Both expose the same minimal surface
         (``consumed_event`` / ``consumed_observation`` /
         ``produced_finding`` / ``activity_id`` / ``enabled``).
     """
@@ -142,6 +158,14 @@ def wrap_cli_meta_analysis(
     if disabled:
         logger.debug(
             "cli_meta_trace.disabled_by_flag",
+            agent_id=agent_id,
+            analyzer_name=analyzer_name,
+        )
+        yield _NoopMetaRecord(analyzer_name=analyzer_name, agent_id=agent_id)
+        return
+    if dry_run:
+        logger.debug(
+            "cli_meta_trace.skipped_for_dry_run",
             agent_id=agent_id,
             analyzer_name=analyzer_name,
         )

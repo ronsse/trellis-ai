@@ -377,13 +377,14 @@ def migrate_provenance_command(
     except Exception:
         event_log = None
 
-    # ``disabled=... or dry_run``: entering the recorder writes an Agent
-    # node, an Activity node and an edge to the live graph, before the
-    # migration has done anything, so a dry run would otherwise write.
+    # ``dry_run=dry_run``: entering the recorder writes an Agent node, an
+    # Activity node and an edge to the live graph, before the migration has
+    # done anything, so a dry run would otherwise write.
     meta_cm = wrap_cli_meta_analysis(
         agent_suffix="admin",
         analyzer_name="cli.admin.migrate-provenance",
-        disabled=no_meta_trace or dry_run,
+        disabled=no_meta_trace,
+        dry_run=dry_run,
     )
     try:
         with meta_cm as _meta_record:

@@ -25,9 +25,11 @@ from tests.unreadable_paths import (
     unreadable,
 )
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
+from trellis.schemas import well_known as wk
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.stores import _get_registry
 
 #: What a real read-only SQLite file raises on a write.
 _READONLY_DB = "attempt to write a readonly database"
@@ -124,6 +126,64 @@ def test_migrate_graph_dry_run(tmp_path: Path, runner: CliRunner) -> None:
     # Dry-run wrote nothing.
     assert dst.get_node("n1") is None
     dst.close()
+
+
+class TestMigrateGraphMetaTrace:
+    """``--dry-run`` writes no meta-trace to the graph the CLI is configured for.
+
+    The recorder is entered by the command body and writes an Agent node, an
+    Activity node and an edge to the *default* registry's graph, which is not
+    either store being migrated. ``test_migrate_graph_dry_run`` reads only the
+    destination, so it could not see that write.
+    """
+
+    def _argv(self, tmp_path: Path, *extra: str) -> list[str]:
+        src_config, src_db = _write_sqlite_config(tmp_path, "src")
+        dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+        src = SQLiteGraphStore(db_path=src_db)
+        src.upsert_node("n1", node_type="X", properties={})
+        src.close()
+        return [
+            "migrate-graph",
+            "--from-config",
+            str(src_config),
+            "--to-config",
+            str(dst_config),
+            *extra,
+        ]
+
+    def _default_graph(self, runner: CliRunner):
+        assert runner.invoke(admin_app, ["init"]).exit_code == 0
+        return _get_registry().knowledge.graph_store
+
+    def test_a_dry_run_adds_no_graph_node_or_edge(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        graph = self._default_graph(runner)
+        nodes_before = {n["node_id"] for n in graph.query(limit=10_000)}
+        edges_before = graph.count_edges()
+
+        result = runner.invoke(admin_app, self._argv(tmp_path, "--dry-run"))
+
+        assert result.exit_code == 0, result.output
+        assert "DRY RUN" in result.output
+        assert {n["node_id"] for n in graph.query(limit=10_000)} == nodes_before
+        assert graph.count_edges() == edges_before
+
+    def test_the_applied_form_still_records_its_activity(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        graph = self._default_graph(runner)
+
+        result = runner.invoke(admin_app, self._argv(tmp_path))
+
+        assert result.exit_code == 0, result.output
+        activities = graph.query(
+            node_type=wk.ACTIVITY,
+            properties={"analyzer_name": "cli.admin.migrate-graph"},
+            limit=10,
+        )
+        assert len(activities) == 1
 
 
 def test_migrate_graph_json_output(tmp_path: Path, runner: CliRunner) -> None:
