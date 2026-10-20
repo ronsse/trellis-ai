@@ -423,6 +423,11 @@ class GraphStore(ABC):
         - ``target_id`` (``str``, required).
         - ``edge_type`` (``str``, required).
         - ``properties`` (``dict | None``, optional).
+        - ``source_trace_id``, ``agent_id``, ``confidence``,
+          ``evidence_ref`` and ``extractor_tier`` (all optional): the
+          provenance keywords :meth:`upsert_edge` takes, given as
+          top-level keys of the entry and validated the same way, the
+          whole batch before any write.
 
         Same SCD-2 semantics as :meth:`upsert_edge`: an existing
         current edge between ``(source_id, target_id, edge_type)`` is
@@ -596,8 +601,22 @@ class GraphStore(ABC):
         properties: dict[str, Any] | None = None,
         *,
         commit: bool = True,
+        source_trace_id: str | None = None,
+        agent_id: str | None = None,
+        confidence: float | None = None,
+        evidence_ref: str | None = None,
+        extractor_tier: str | None = None,
     ) -> str:
         """Insert or update an edge.
+
+        The five provenance keywords (``source_trace_id``, ``agent_id``,
+        ``confidence``, ``evidence_ref``, ``extractor_tier``) are typed
+        edge columns, not ``properties`` keys, and ``None`` leaves a column
+        unset. A backend validates them before writing, through
+        :func:`~trellis.stores.base.edge_provenance.normalize_edge_provenance`:
+        ``confidence`` must lie in ``[0.0, 1.0]`` and ``extractor_tier`` must
+        be an allowlisted tier, else :class:`ValueError`; a value of the wrong
+        type raises :class:`TypeError`.
 
         Returns:
             The edge ID.

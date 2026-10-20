@@ -921,7 +921,23 @@ All notable changes to Trellis will be documented in this file.
   cannot take the keywords now fails the step loudly for an edge that
   carries provenance instead of dropping it. Not carried, by design:
   `edge_id`, `alias_id`, `created_at` and `valid_from` are minted by the
-  destination, and history is current-versions only.
+  destination, and history is current-versions only. An edge already on
+  the destination is skipped whole, so a re-run does not backfill
+  provenance onto an edge an earlier copy wrote without it.
+
+- **`migrate-graph` copies an alias's `match_confidence` of `0.0`, and
+  `GraphStore.upsert_edge` declares its provenance keywords.** The alias
+  copy read the stored confidence with `or 1.0`, so a stored `0.0` arrived
+  as `1.0`; only a missing value now falls back to `1.0`. The abstract
+  `GraphStore.upsert_edge` and the `upsert_edges_bulk` docstring omitted
+  the five provenance keywords (`source_trace_id`, `agent_id`,
+  `confidence`, `evidence_ref`, `extractor_tier`) that the SQLite, Postgres
+  and Bolt-family backends all accept; the abstract signature now lists them as
+  keyword-only, default `None`. No backend's behaviour changes. A
+  third-party `GraphStore` plugin whose `upsert_edge` still lacks them now
+  fails a type check against the ABC (the contract change `adr-plugin-contract`
+  routes through plugin CI); the migrator still copies provenance-free edges
+  through such a plugin, since it passes only the keywords an edge holds.
 
 - **A destructive mutation now requires the `admin` scope at both generic
   mutation surfaces, not just `mutate`.** `POST /api/v1/commands/batch` and
