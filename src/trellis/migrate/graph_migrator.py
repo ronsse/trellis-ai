@@ -9,9 +9,13 @@ What a copy carries: each node's id, type, properties, role,
 ``generation_spec`` and ``document_ids``; each edge's endpoints, type,
 properties and the five typed provenance columns (``source_trace_id``,
 ``agent_id``, ``confidence``, ``evidence_ref``, ``extractor_tier``); and
-each alias's names and primary flag. Row identity and clocks are the
-destination's: ``edge_id``, ``alias_id``, ``created_at`` and
-``valid_from`` are minted when the row is written.
+each alias's names, match confidence and primary flag. Row identity and
+clocks are the destination's: ``edge_id``, ``alias_id``, ``created_at``
+and ``valid_from`` are minted when the row is written.
+
+An edge already on the destination, by ``(source_id, target_id, edge_type)``,
+is skipped whole: a re-run does not backfill provenance onto an edge an
+earlier copy wrote without it.
 
 Failure semantics (loud-by-default, C2 Phase 4):
 
@@ -429,13 +433,20 @@ class GraphMigrator:
                     report.aliases_written += 1
                     continue
 
+                # Only a missing confidence falls back to 1.0: a stored 0.0
+                # is a value, and ``or`` would read it as absent.
+                stored_confidence = alias.get("match_confidence")
                 try:
                     self._dest.upsert_alias(
                         entity_id,
                         source_system,
                         raw_id,
                         raw_name=alias.get("raw_name"),  # type: ignore[arg-type]
-                        match_confidence=float(alias.get("match_confidence") or 1.0),  # type: ignore[arg-type]
+                        match_confidence=(
+                            1.0
+                            if stored_confidence is None
+                            else float(stored_confidence)
+                        ),
                         is_primary=bool(alias.get("is_primary", False)),
                     )
                     report.aliases_written += 1

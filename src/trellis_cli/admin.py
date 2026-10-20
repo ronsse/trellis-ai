@@ -1841,7 +1841,9 @@ def migrate_graph(
     POC scope: current versions only, in-memory snapshot up to
     ``--max-nodes``. Idempotent on retry — a destination that already
     has a row with the same ``node_id`` (or alias source/raw_id) is
-    skipped, not overwritten.
+    skipped, not overwritten. An edge already on the destination is
+    skipped too, so a re-run does not backfill provenance onto an edge
+    an earlier copy wrote without it.
 
     Both ``--from-config`` and ``--to-config`` accept a YAML file with
     a single ``graph:`` block matching the shape used in
