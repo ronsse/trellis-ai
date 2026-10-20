@@ -9,6 +9,7 @@ the env vars.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ from trellis.migrate import (
     GraphMigrator,
     MigrationCapacityExceededError,
     MigrationReport,
+    MigrationStepError,
 )
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 
@@ -116,6 +118,203 @@ class TestRoundTripBasicGraph:
         # But destination is empty.
         assert dest_store.get_node(a) is None
         assert dest_store.resolve_alias("github", "alice42") is None
+
+
+_PROVENANCE_FIELDS = (
+    "source_trace_id",
+    "agent_id",
+    "confidence",
+    "evidence_ref",
+    "extractor_tier",
+)
+
+
+def _provenance_of(edge: dict[str, object]) -> dict[str, object]:
+    """The five typed provenance columns of an edge row, as read back."""
+    return {name: edge[name] for name in _PROVENANCE_FIELDS}
+
+
+def _only_outgoing(store: SQLiteGraphStore, node_id: str) -> dict[str, object]:
+    edges = store.get_edges(node_id, direction="outgoing")
+    assert len(edges) == 1
+    return edges[0]
+
+
+class TestEdgeProvenanceCarried:
+    """The five typed provenance columns survive a backend copy.
+
+    They are columns, not ``properties`` keys, so a migrator that copies
+    only ``properties`` drops them without any error: the copy reports
+    every edge written and the destination holds NULLs.
+    """
+
+    def test_all_five_fields_arrive(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(
+            a,
+            b,
+            "depends_on",
+            properties={"note": "kept"},
+            source_trace_id="trace-1",
+            agent_id="agent-1",
+            confidence=0.85,
+            evidence_ref="doc-1",
+            extractor_tier="DETERMINISTIC",
+        )
+
+        report = GraphMigrator(source_store, dest_store).run()
+
+        assert report.edges_written == 1
+        arrived = _only_outgoing(dest_store, a)
+        assert _provenance_of(arrived) == {
+            "source_trace_id": "trace-1",
+            "agent_id": "agent-1",
+            "confidence": 0.85,
+            "evidence_ref": "doc-1",
+            "extractor_tier": "DETERMINISTIC",
+        }
+        assert arrived["properties"] == {"note": "kept"}
+
+    def test_edge_without_provenance_copies_with_nulls(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "depends_on", properties={"note": "kept"})
+
+        report = GraphMigrator(source_store, dest_store).run()
+
+        assert report.edges_written == 1
+        assert report.errors == []
+        arrived = _only_outgoing(dest_store, a)
+        assert _provenance_of(arrived) == dict.fromkeys(_PROVENANCE_FIELDS)
+        assert arrived["properties"] == {"note": "kept"}
+
+    def test_legacy_provenance_in_properties_copies_unchanged(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        # An edge whose provenance has not been lifted yet still carries
+        # it as ``properties`` keys. The migrator is not the lift
+        # (``trellis admin migrate-provenance`` is): the keys stay in
+        # ``properties`` and the typed columns stay NULL.
+        legacy = {
+            "source_trace_id": "trace-legacy",
+            "agent_id": "agent-legacy",
+            "confidence": 0.5,
+            "evidence_ref": "doc-legacy",
+            "extractor_tier": "HYBRID",
+        }
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "depends_on", properties=dict(legacy))
+
+        GraphMigrator(source_store, dest_store).run()
+
+        arrived = _only_outgoing(dest_store, a)
+        assert arrived["properties"] == legacy
+        assert _provenance_of(arrived) == dict.fromkeys(_PROVENANCE_FIELDS)
+
+    def test_each_edge_keeps_its_own_provenance(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        c = source_store.upsert_node("c", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", source_trace_id="trace-ab")
+        source_store.upsert_edge(a, c, "uses")
+
+        GraphMigrator(source_store, dest_store).run()
+
+        arrived = {
+            e["target_id"]: _provenance_of(e)
+            for e in dest_store.get_edges(a, direction="outgoing")
+        }
+        assert arrived[b]["source_trace_id"] == "trace-ab"
+        assert arrived[c] == dict.fromkeys(_PROVENANCE_FIELDS)
+
+    def test_zero_confidence_is_not_read_as_unset(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        # ``0.0`` is a real confidence. A truthiness test would turn it
+        # into NULL, which reads as "no claim was made".
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", confidence=0.0)
+
+        GraphMigrator(source_store, dest_store).run()
+
+        arrived = _only_outgoing(dest_store, a)
+        assert arrived["confidence"] == 0.0
+        assert arrived["confidence"] is not None
+
+    def test_dry_run_writes_no_edge(
+        self, source_store: SQLiteGraphStore, dest_store: SQLiteGraphStore
+    ) -> None:
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", source_trace_id="trace-1")
+
+        report = GraphMigrator(source_store, dest_store).run(dry_run=True)
+
+        assert report.edges_written == 1
+        assert dest_store.get_edges(a, direction="outgoing") == []
+
+
+class _NoProvenanceKwargsStore(SQLiteGraphStore):
+    """A destination whose ``upsert_edge`` is the abstract signature, no more.
+
+    ``GraphStore.upsert_edge`` does not declare the provenance keywords;
+    every shipped backend adds them. A plugin that follows the abstract
+    signature literally has to keep working for edges that carry none.
+    """
+
+    def upsert_edge(  # type: ignore[override]
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: str,
+        properties: dict[str, Any] | None = None,
+        *,
+        commit: bool = True,
+    ) -> str:
+        return super().upsert_edge(
+            source_id, target_id, edge_type, properties, commit=commit
+        )
+
+
+class TestDestinationWithoutProvenanceKwargs:
+    def test_edge_with_no_provenance_still_copies(
+        self, source_store: SQLiteGraphStore, tmp_path: Path
+    ) -> None:
+        dest = _NoProvenanceKwargsStore(db_path=tmp_path / "plain.db")
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", properties={"note": "kept"})
+
+        report = GraphMigrator(source_store, dest).run()
+
+        assert report.edges_written == 1
+        assert report.errors == []
+        assert _only_outgoing(dest, a)["properties"] == {"note": "kept"}
+
+    def test_edge_with_provenance_fails_loudly_not_silently(
+        self, source_store: SQLiteGraphStore, tmp_path: Path
+    ) -> None:
+        # Dropping the columns to make the write succeed is the defect
+        # this suite exists to prevent; refusing is the honest outcome.
+        dest = _NoProvenanceKwargsStore(db_path=tmp_path / "plain.db")
+        a = source_store.upsert_node("a", node_type="Svc", properties={})
+        b = source_store.upsert_node("b", node_type="Svc", properties={})
+        source_store.upsert_edge(a, b, "uses", source_trace_id="trace-1")
+
+        with pytest.raises(MigrationStepError) as excinfo:
+            GraphMigrator(source_store, dest).run()
+
+        assert excinfo.value.step == "upsert_edge"
+        assert isinstance(excinfo.value.original, TypeError)
 
 
 class TestEdgeCases:

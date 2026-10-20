@@ -5,6 +5,14 @@ Postgres ↔ Neo4j all work without backend-specific branches. POC scope
 is current-versions-only — see :mod:`trellis.migrate` for the full
 contract.
 
+What a copy carries: each node's id, type, properties, role,
+``generation_spec`` and ``document_ids``; each edge's endpoints, type,
+properties and the five typed provenance columns (``source_trace_id``,
+``agent_id``, ``confidence``, ``evidence_ref``, ``extractor_tier``); and
+each alias's names and primary flag. Row identity and clocks are the
+destination's: ``edge_id``, ``alias_id``, ``created_at`` and
+``valid_from`` are minted when the row is written.
+
 Failure semantics (loud-by-default, C2 Phase 4):
 
 * The default behavior on **any** step failure (read, get_node,
@@ -30,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.mutate.commands import BatchStrategy
+from trellis.stores.base.edge_provenance import extract_edge_provenance
 
 if TYPE_CHECKING:
     from trellis.stores.base.graph import GraphStore
@@ -519,12 +528,26 @@ class GraphMigrator:
                     report.edges_written += 1
                     continue
 
+                # The five typed provenance columns are not ``properties``
+                # keys, so they are carried by name. Only the ones the
+                # source row holds are passed: an edge with no provenance
+                # is written exactly as before, and the destination's own
+                # ``upsert_edge`` validates and normalises the rest. An
+                # edge still carrying its provenance inside ``properties``
+                # copies unchanged; lifting it is ``migrate-provenance``'s
+                # job, not the migrator's.
+                provenance = {
+                    name: value
+                    for name, value in extract_edge_provenance(edge).items()
+                    if value is not None
+                }
                 try:
                     self._dest.upsert_edge(
                         source_id,
                         target_id,
                         edge_type,
                         properties=dict(edge.get("properties") or {}),  # type: ignore[arg-type]
+                        **provenance,
                     )
                     report.edges_written += 1
                 except Exception as exc:
