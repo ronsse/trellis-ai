@@ -430,6 +430,51 @@ def _note_graph_seeds(items: Iterable[PackItem], into: dict[str, None]) -> None:
                 into[seed] = None
 
 
+def _strip_graph_seeds(items: Iterable[PackItem]) -> list[PackItem]:
+    """Return graph-axis ``items`` without their per-item seed stamp.
+
+    :class:`~trellis.retrieve.strategies.GraphSearch` stamps the whole seed
+    list on every item it returns so :func:`_note_graph_seeds` can read it
+    back. Once read, the list belongs to the pack
+    (``PACK_ASSEMBLED.seed_entity_ids``), not to each item: left on, every
+    REST/SDK response repeated it once per graph item.
+
+    Items are **copied**, never edited in place: a strategy is free to hand
+    back objects it still holds (a stub, a cache), and the stamp must stay
+    on those. An item without the key is passed through unchanged. Call this
+    only on items the graph strategy returned, as :func:`_note_graph_seeds`
+    does: the same key on a document is that document's own property.
+    """
+    out: list[PackItem] = []
+    for item in items:
+        metadata = item.metadata
+        if metadata and GRAPH_SEED_IDS_KEY in metadata:
+            out.append(
+                item.model_copy(
+                    update={
+                        "metadata": {
+                            k: v for k, v in metadata.items() if k != GRAPH_SEED_IDS_KEY
+                        }
+                    }
+                )
+            )
+        else:
+            out.append(item)
+    return out
+
+
+def _lift_graph_seeds(items: list[PackItem], into: dict[str, None]) -> list[PackItem]:
+    """Record ``items``' seeds into ``into``, then return them unstamped.
+
+    The order is the contract: the seeds are read *before* the key is
+    removed, and both happen before dedup and the budget cut so that a pack
+    whose graph items are all cut there still records the seeds it expanded
+    from.
+    """
+    _note_graph_seeds(items, into)
+    return _strip_graph_seeds(items)
+
+
 def _item_attribution(item: PackItem) -> dict[str, Any]:
     """Per-item attribution stamped onto ``PACK_ASSEMBLED.injected_items``.
 
@@ -1045,10 +1090,14 @@ class PackBuilder:
                     parent_verdict_cache=parent_verdict_cache,
                 )
                 rejected.extend(gate_rejected)
+                # Lift the seeds into the pack-level record and drop the
+                # per-item stamp before anything else holds the items;
+                # ``strategy_by_item_id`` is keyed on ``id()``, so it must
+                # see the copies.
+                if strategy.name == GRAPH_STRATEGY_NAME:
+                    items = _lift_graph_seeds(items, graph_seed_ids)
                 for item in items:
                     strategy_by_item_id[id(item)] = strategy.name
-                if strategy.name == GRAPH_STRATEGY_NAME:
-                    _note_graph_seeds(items, graph_seed_ids)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1414,6 +1463,10 @@ class PackBuilder:
                     parent_verdict_cache=parent_verdict_cache,
                 )
                 rejected.extend(gate_rejected)
+                # The sectioned payload records no seeds (see
+                # :meth:`_emit_telemetry`), so the stamp is only dropped.
+                if strategy.name == GRAPH_STRATEGY_NAME:
+                    items = _strip_graph_seeds(items)
                 for item in items:
                     strategy_by_item_id[id(item)] = strategy.name
                 candidates_found += len(items)

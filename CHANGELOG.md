@@ -907,6 +907,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A pack records its graph seeds once, not once per graph item.** A seeded
+  `GraphSearch` stamps the whole seed list on every item it returns, and the
+  stamp stayed there: `POST /api/v1/packs`, `POST /api/v1/packs/sectioned` and
+  the SDK repeated it on each graph item. `PackBuilder` now reads the seeds
+  into `PACK_ASSEMBLED.seed_entity_ids` (same values and order as before, `[]`
+  when unseeded, flat packs only) and then serves each graph item without
+  `metadata["graph_seed_ids"]`, on the flat and the sectioned path alike. The
+  items a strategy returned are copied, not edited. Seeds are still read
+  before dedup and the budget cut, so a pack whose graph items were all cut
+  there records them, as it did; a document's own metadata of the same name is
+  left alone.
+
 - **`--dry-run` on `admin migrate-graph` and `analyze advisory-effectiveness`
   no longer writes a meta-trace Activity.** `wrap_cli_meta_analysis` writes
   an Agent node, an Activity node and an edge to the CLI's default graph the
