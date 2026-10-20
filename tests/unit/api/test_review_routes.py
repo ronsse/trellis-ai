@@ -551,6 +551,32 @@ class TestLearningCandidates:
         # And a review-decision audit row.
         assert _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
 
+    def test_promotion_embeds_an_excerpt_of_the_source_document(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        registry.knowledge.document_store.put(
+            "item-1", "Profile the orders table before joining it.", {}
+        )
+        cand = _learning_candidate()
+        _write_learning_candidates(tmp_path, monkeypatch, [cand])
+        resp = client.post(
+            "/api/v1/learning/promotions",
+            json={
+                "decisions": [
+                    {
+                        "candidate_id": cand["candidate_id"],
+                        "approved": True,
+                        "rationale": "looks solid",
+                    }
+                ]
+            },
+        )
+        assert resp.status_code == 200
+        node_id = resp.json()["results"][0]["node_id"]
+        props = registry.knowledge.graph_store.get_node(node_id)["properties"]
+        assert "Profile the orders table" in props["description"]
+        assert props["source_excerpt_status"] == "included"
+
     @pytest.mark.parametrize(
         ("make_dir", "code"),
         [

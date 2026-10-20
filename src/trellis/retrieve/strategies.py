@@ -207,6 +207,19 @@ GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
 #: the caller's query.
 GRAPH_SELECTION_SEEDED = "seeded"
 
+#: ``PackItem.metadata`` key under which a *seeded* graph search records the
+#: seeds it expanded from, restricted to the ones that resolved to a node in
+#: the subgraph it got back. Absent on the recency branch, which has no seeds
+#: and must not be credited with any. ``PackBuilder`` reads it back (from the
+#: graph axis only) into ``PACK_ASSEMBLED.seed_entity_ids``, which is where
+#: the learning loop gets the entities a promoted precedent should attach to.
+GRAPH_SEED_IDS_KEY = "graph_seed_ids"
+
+#: ``SearchStrategy.name`` of the graph axis, for a reader (``PackBuilder``)
+#: that must act only on what that axis produced, never on a same-named
+#: metadata key a document happens to carry.
+GRAPH_STRATEGY_NAME = "graph"
+
 #: Filter keys that are **retrieval controls addressed to the graph axis**,
 #: not metadata predicates about a stored row.
 #:
@@ -1479,7 +1492,7 @@ class GraphSearch(SearchStrategy):
 
     @property
     def name(self) -> str:
-        return "graph"
+        return GRAPH_STRATEGY_NAME
 
     def _query_nodes(
         self,
@@ -1702,9 +1715,16 @@ class GraphSearch(SearchStrategy):
         # Extract domain for scoring (keep in filters for graph query too)
         request_domain = filters.get("domain")
 
+        resolved_seeds: list[str] = []
         if seed_ids:
             selection = GRAPH_SELECTION_SEEDED
             nodes = self._expand_seeds(seed_ids, filters=filters)
+            # Before the structural / unconfirmed / domain filters below: a
+            # seed is "resolved" when the store returned its node, however
+            # the later filters treat that node. A caller-named seed that
+            # matches nothing is dropped here rather than recorded.
+            returned_ids = {n.get("node_id") for n in nodes}
+            resolved_seeds = [s for s in dict.fromkeys(seed_ids) if s in returned_ids]
         else:
             selection = GRAPH_SELECTION_RECENCY_WINDOW
             nodes = self._recency_window_nodes(filters=filters, limit=limit)
@@ -1887,7 +1907,13 @@ class GraphSearch(SearchStrategy):
                         **{
                             k: v
                             for k, v in props.items()
-                            if k not in ("name", "description", "comment")
+                            if k
+                            not in (
+                                "name",
+                                "description",
+                                "comment",
+                                GRAPH_SEED_IDS_KEY,
+                            )
                         },
                         # All four sit after the property spread,
                         # deliberately: ``properties`` is an open bag, so a
@@ -1908,6 +1934,15 @@ class GraphSearch(SearchStrategy):
                         "node_type_canonical": canonical_type,
                         "node_role": node_role_val,
                         "graph_selection": selection,
+                        # Only a seeded search that resolved a seed carries
+                        # it. The key is also withheld from the property
+                        # spread above, so a stored property cannot forge a
+                        # seed the search never expanded.
+                        **(
+                            {GRAPH_SEED_IDS_KEY: list(resolved_seeds)}
+                            if resolved_seeds
+                            else {}
+                        ),
                     },
                 )
             )

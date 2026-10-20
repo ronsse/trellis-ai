@@ -89,6 +89,18 @@ _FALLBACK_NAME_FRONTMATTER_RE = re.compile(
 _FALLBACK_NAME_HEADING_RE = re.compile(r"\A#{1,6}[ \t]+")
 _FALLBACK_NAME_MAX_CHARS = 96
 
+#: Cap on the source excerpt a promoted precedent embeds in its description.
+#: A precedent whose description is only a generated statistics sentence
+#: carries no content for the agent that retrieves it; this is the bounded
+#: slice of the source document that does. It is a ceiling, not a target:
+#: :func:`~trellis.retrieve.excerpts.truncate_excerpt` cuts on a clean break
+#: at or below it and marks the elision.
+PRECEDENT_SOURCE_EXCERPT_MAX_CHARS = 600
+
+#: ``properties["source_excerpt_status"]`` on a promoted precedent: the
+#: excerpt is in the description.
+SOURCE_EXCERPT_INCLUDED = "included"
+
 # --- Promotion-ready digest (#845) ------------------------------------------
 #
 # A ``promote_guidance`` candidate is "promotion-ready" for the digest only
@@ -717,6 +729,7 @@ def prepare_learning_promotions(
     *,
     candidates_payload: Mapping[str, Any],
     decisions_payload: Mapping[str, Any],
+    document_store: DocumentStore | None = None,
 ) -> dict[str, Any]:
     candidate_lookup = {
         str(candidate.get("candidate_id", "")).strip(): candidate
@@ -758,6 +771,7 @@ def prepare_learning_promotions(
             candidate=candidate,
             promotion_name=str(decision.get("promotion_name", "")).strip(),
             rationale=str(decision.get("rationale", "")).strip(),
+            document_store=document_store,
         )
         results.append(
             {
@@ -791,11 +805,81 @@ def precedent_entity_id_for_candidate(candidate_id: str) -> str:
     return f"precedent://learning/{_slugify(candidate_id)}"
 
 
+def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bool:
+    """Whether the noise/archived collect gates withhold this doc or its parent."""
+    from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+    from trellis.retrieve.lifecycle import is_archived  # noqa: PLC0415
+    from trellis.retrieve.noise import NOISE_SIGNAL_QUALITY  # noqa: PLC0415
+
+    def _gated(meta: Any) -> bool:
+        if not isinstance(meta, dict):
+            return False
+        tags = meta.get("content_tags")
+        sq = tags.get("signal_quality") if isinstance(tags, dict) else None
+        return sq == NOISE_SIGNAL_QUALITY or is_archived(meta)
+
+    meta = document.get("metadata")
+    if _gated(meta):
+        return True
+    parent_id = meta.get("parent_doc_id") if isinstance(meta, dict) else None
+    if parent_id and is_chunk_doc_id(str(document.get("doc_id") or "")):
+        parent = document_store.get(str(parent_id))  # raises -> lookup_failed
+        return bool(parent) and _gated(parent.get("metadata"))
+    return False
+
+
+def _resolve_source_excerpt(
+    item_id: str, document_store: DocumentStore | None
+) -> tuple[str | None, str]:
+    """Bounded excerpt of the source item's content, and why it is absent if so.
+
+    Returns ``(excerpt, SOURCE_EXCERPT_INCLUDED)`` or ``(None, reason)``;
+    the reason is recorded on the precedent so a node that carries no
+    content says why. A promotion never fails on this: a missing store, a
+    missing or empty document and a store that raises all degrade to "no
+    excerpt". Only documents are read — a candidate whose item is a trace,
+    an entity or another precedent resolves to ``document_not_found``.
+    """
+    if document_store is None:
+        return None, "no_document_store"
+    if not item_id:
+        return None, "no_source_item"
+    try:
+        document = document_store.get(item_id)
+        withheld = _withheld_from_packs(document, document_store) if document else False
+    except Exception as exc:  # advisory step; never fail the promotion
+        logger.warning(
+            "precedent_source_excerpt_lookup_failed",
+            error_type=type(exc).__name__,
+        )
+        return None, "lookup_failed"
+    if not document or withheld:
+        # The graph axis never re-checks a precedent's source, so copying a
+        # noise/archived body here would launder it into every pack.
+        return None, "source_withheld" if withheld else "document_not_found"
+    body = _FALLBACK_NAME_FRONTMATTER_RE.sub(
+        "", str(document.get("content") or ""), count=1
+    )
+    # One line: the description is read as a sentence run, and a markdown
+    # body's newlines would otherwise survive into it.
+    body = " ".join(body.split())
+    if not body:
+        return None, "document_empty"
+    # Deferred for the same circular-import reason as ``_derive_readable_name``.
+    from trellis.retrieve.excerpts import truncate_excerpt  # noqa: PLC0415
+
+    return (
+        truncate_excerpt(body, limit=PRECEDENT_SOURCE_EXCERPT_MAX_CHARS),
+        SOURCE_EXCERPT_INCLUDED,
+    )
+
+
 def build_learning_promotion_payloads(
     *,
     candidate: Mapping[str, Any],
     promotion_name: str,
     rationale: str,
+    document_store: DocumentStore | None = None,
 ) -> dict[str, Any]:
     candidate_id = str(candidate.get("candidate_id", "")).strip()
     entity_id = precedent_entity_id_for_candidate(candidate_id)
@@ -813,13 +897,22 @@ def build_learning_promotion_payloads(
         if str(domain).strip()
     ]
     primary_domain = str(candidate.get("primary_domain") or "").strip()
+    # Read side only, and at command-build time: the write still goes
+    # through ``submit_learning_promotion`` and the executor.
+    source_excerpt, source_excerpt_status = _resolve_source_excerpt(
+        str(candidate.get("item_id") or "").strip(), document_store
+    )
     entity_payload = {
         "entity_type": "precedent",
         "entity_id": entity_id,
         "name": entity_name,
         "properties": {
             **dict(candidate.get("precedent_properties", {})),
-            "description": _build_precedent_description(candidate, rationale=rationale),
+            "description": _build_precedent_description(
+                candidate, rationale=rationale, source_excerpt=source_excerpt
+            ),
+            # ``included``, or why the description carries no source content.
+            "source_excerpt_status": source_excerpt_status,
             "approved_rationale": rationale or None,
             "approved_at": _utc_now(),
             "supporting_run_ids": list(candidate.get("supporting_run_ids", [])),
@@ -1155,6 +1248,7 @@ def _build_precedent_description(
     candidate: Mapping[str, Any],
     *,
     rationale: str,
+    source_excerpt: str | None = None,
 ) -> str:
     metrics = candidate.get("metrics", {})
     if not isinstance(metrics, Mapping):
@@ -1173,10 +1267,14 @@ def _build_precedent_description(
         if rr is not None
         else f"success_rate={sr} (retry_rate not measured)"
     )
-    parts = [
-        f"Reviewed learning for intent family '{family}'.",
-        f"Source item '{item}' showed {measured}.",
-    ]
+    parts = [f"Reviewed learning for intent family '{family}'."]
+    # Content first: a flat pack serves a graph node's description cut to the
+    # excerpt cap, so whatever follows the first ~500 characters is not what
+    # the retrieving agent reads. The statistics are for the reviewer and
+    # survive in the stored description either way.
+    if source_excerpt:
+        parts.append(f"Source excerpt: {source_excerpt}")
+    parts.append(f"Source item '{item}' showed {measured}.")
     # Citation evidence, stated rather than implied. ``success_rate`` is a
     # pack-level outcome that says nothing about whether a grader ever
     # found *this item* useful, and on the live corpus most promote
