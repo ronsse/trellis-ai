@@ -22,7 +22,15 @@ Behaviour (mirrors ``plan-provenance-columns.md`` §4 + plan brief):
   Malformed legacy values (``confidence="high"``, ``extractor_tier="Llm"``
   or ``"heuristic"``, …) emit an ``EXTRACTION_FAILED`` event with
   ``failure_kind="parse_error"`` and skip the edge — they do not
-  silently drop the row.
+  silently drop the row. A dry run counts and logs them but emits
+  nothing (see **Dry run** below).
+* **Dry run.** ``--dry-run`` writes nothing: no edge rewrite, no
+  ``EXTRACTION_FAILED`` event for a malformed row, and no meta-trace
+  Activity (it is run as if ``--no-meta-trace`` were passed). The report
+  and the warning log are the only output. ``EXTRACTION_FAILED`` events
+  are immutable and are read by the proposal generator's clustering, so a
+  dry run that wrote them would leave a permanent mark on telemetry it was
+  only meant to preview.
 * **Drift threshold.** When more than 1% of scanned edges fail
   validation, :class:`MigrationDriftError` is raised after the scan
   completes.  Operators want a loud signal that the legacy corpus
@@ -201,24 +209,28 @@ def _migrate_one_edge(
     # Validate legacy values up-front — surface malformed values as a
     # parse_error event rather than swallowing them on the way to the
     # write path.  emit-then-skip mirrors the dispatcher's "loud on
-    # bad data" contract.
+    # bad data" contract.  A dry run counts and logs the row but emits
+    # nothing: the event is immutable, so one written here could never be
+    # taken back, and a dry run over a large corpus wrote one per row.
     try:
         legacy = normalize_edge_provenance(**legacy)
     except (TypeError, ValueError) as exc:
         report.edges_malformed += 1
-        emit_extraction_failure(
-            event_log=event_log,
-            extractor_id="trellis.admin.migrate_provenance",
-            extractor_tier="deterministic",
-            failure_kind="parse_error",
-            source_hint=edge.get("edge_type"),
-            error_class=type(exc).__name__,
-            error_excerpt=str(exc),
-        )
+        if not dry_run:
+            emit_extraction_failure(
+                event_log=event_log,
+                extractor_id="trellis.admin.migrate_provenance",
+                extractor_tier="deterministic",
+                failure_kind="parse_error",
+                source_hint=edge.get("edge_type"),
+                error_class=type(exc).__name__,
+                error_excerpt=str(exc),
+            )
         logger.warning(
             "migrate_provenance_malformed_legacy",
             edge_id=edge.get("edge_id"),
             error=str(exc),
+            dry_run=dry_run,
         )
         return
 
@@ -359,15 +371,19 @@ def migrate_provenance_command(
     try:
         event_log: EventLog | None = get_event_log()
     # GRACEFUL-DEGRADATION: event_log is optional for the migration
-    # CLI — emits a MIGRATION_RECORDED event when available, otherwise
-    # the run still completes and the report is rendered to stdout.
+    # CLI — it carries the EXTRACTION_FAILED event for each malformed row
+    # of an applied run, otherwise the run still completes and the report
+    # is rendered to stdout.
     except Exception:
         event_log = None
 
+    # ``disabled=... or dry_run``: entering the recorder writes an Agent
+    # node, an Activity node and an edge to the live graph, before the
+    # migration has done anything, so a dry run would otherwise write.
     meta_cm = wrap_cli_meta_analysis(
         agent_suffix="admin",
         analyzer_name="cli.admin.migrate-provenance",
-        disabled=no_meta_trace,
+        disabled=no_meta_trace or dry_run,
     )
     try:
         with meta_cm as _meta_record:
@@ -451,7 +467,11 @@ def register(admin_app: typer.Typer) -> None:
         dry_run: bool = typer.Option(
             False,
             "--dry-run",
-            help="Report what would be migrated without writing.",
+            help=(
+                "Report what would be migrated without writing anything: no "
+                "edge rewrite, no EXTRACTION_FAILED event for a malformed "
+                "row, no meta-trace Activity."
+            ),
         ),
         batch_size: int = typer.Option(
             1000,
@@ -476,6 +496,8 @@ def register(admin_app: typer.Typer) -> None:
         Fail-loud on malformed legacy data: emits an
         ``EXTRACTION_FAILED`` event per offending row and raises a
         :class:`MigrationDriftError` when >1% of scanned edges fail.
+        ``--dry-run`` counts the malformed rows and logs a warning for
+        each, but writes nothing: no event, no edge, no meta-trace.
         """
         migrate_provenance_command(
             dry_run,

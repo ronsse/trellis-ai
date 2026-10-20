@@ -38,6 +38,7 @@ from trellis_cli.admin_migrate_provenance import (
     run_migrate_provenance,
 )
 from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.stores import _get_registry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -728,6 +729,152 @@ class TestTraceExtractedEdgesMigrate:
             assert edge["properties"]["extractor_tier"] == spelling
         finally:
             store.close()
+
+
+# ---------------------------------------------------------------------------
+# A dry run writes nothing.
+#
+# ``emit_extraction_failure`` used to be called before the ``dry_run`` check,
+# so a dry run wrote one immutable ``EXTRACTION_FAILED`` event per malformed
+# edge, and entering the meta-trace recorder wrote an Agent node, an Activity
+# node and an edge before the migration had looked at anything. The
+# existing dry-run tests read the typed columns back and so could not see
+# either: they asserted the one write they knew about.
+# ---------------------------------------------------------------------------
+
+
+def _seed_malformed_and_good(
+    store: SQLiteGraphStore, *, malformed: int, good: int
+) -> None:
+    for i in range(malformed):
+        _seed_legacy_edge(store, f"bad_{i}", {"confidence": "high"})
+    for i in range(good):
+        store.upsert_node(f"n{i}", "service", {})
+        store.upsert_edge("a", f"n{i}", f"good_{i}", properties={"confidence": 0.5})
+
+
+def _failure_events(event_log: Any) -> list[Any]:
+    return event_log.get_events(event_type=EventType.EXTRACTION_FAILED, limit=1000)
+
+
+class TestDryRunWritesNothing:
+    @pytest.fixture(autouse=True)
+    def _unsampled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The sampler would collapse a cluster's later rows into aggregate
+        # events; one-per-row is what the apply-mode assertion counts.
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+
+    def test_a_dry_run_over_malformed_rows_emits_no_event(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            # 3 malformed against 400 good: 0.7%, below the 1% drift gate.
+            _seed_malformed_and_good(store, malformed=3, good=400)
+
+            report = run_migrate_provenance(
+                store, dry_run=True, batch_size=50, event_log=event_log
+            )
+
+            # The count is still reported, so the dry run is not blind...
+            assert report.edges_malformed == 3
+            assert report.dry_run is True
+            # ...and nothing was written to the event log, of any type.
+            assert event_log.get_events(limit=1000) == []
+        finally:
+            event_log.close()
+            store.close()
+
+    def test_a_dry_run_that_trips_the_drift_gate_still_emits_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        store = _make_store(tmp_path)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            _seed_malformed_and_good(store, malformed=5, good=45)
+
+            with pytest.raises(MigrationDriftError) as exc:
+                run_migrate_provenance(
+                    store, dry_run=True, batch_size=10, event_log=event_log
+                )
+
+            assert exc.value.malformed_count == 5
+            assert event_log.get_events(limit=1000) == []
+        finally:
+            event_log.close()
+            store.close()
+
+    def test_an_applied_run_still_emits_one_event_per_malformed_row(
+        self, tmp_path: Path
+    ) -> None:
+        store = _make_store(tmp_path)
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            _seed_malformed_and_good(store, malformed=3, good=400)
+
+            report = run_migrate_provenance(
+                store, dry_run=False, batch_size=50, event_log=event_log
+            )
+
+            assert report.edges_malformed == 3
+            events = _failure_events(event_log)
+            assert len(events) == 3
+            assert {(e.payload or {}).get("failure_kind") for e in events} == {
+                "parse_error"
+            }
+            assert {(e.payload or {}).get("source_hint") for e in events} == {
+                "bad_0",
+                "bad_1",
+                "bad_2",
+            }
+        finally:
+            event_log.close()
+            store.close()
+
+    def test_the_cli_dry_run_writes_no_event_and_no_graph_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end, with the meta-trace recorder left on.
+
+        The programmatic tests above cannot see the recorder: it is entered by
+        the command body, not by ``run_migrate_provenance``.
+        """
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        assert runner.invoke(admin_app, ["init"]).exit_code == 0
+        registry = _get_registry()
+        graph = registry.knowledge.graph_store
+        graph.upsert_node("a", "service", {})
+        graph.upsert_node("b", "service", {})
+        for i in range(3):
+            graph.upsert_edge("a", "b", f"bad_{i}", properties={"confidence": "high"})
+        for i in range(400):
+            graph.upsert_edge("a", "b", f"good_{i}", properties={"confidence": 0.5})
+        nodes_before = {n["node_id"] for n in graph.query(limit=10_000)}
+
+        result = runner.invoke(
+            admin_app, ["migrate-provenance", "--dry-run", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert registry.operational.event_log.get_events(limit=1000) == []
+        assert {n["node_id"] for n in graph.query(limit=10_000)} == nodes_before
+
+        # The same command applied does write, so the zero above is the
+        # ``--dry-run`` and not a fixture that cannot emit.
+        applied = runner.invoke(
+            admin_app, ["migrate-provenance", "--format", "json", "--no-meta-trace"]
+        )
+        assert applied.exit_code == 0, applied.output
+        assert len(_failure_events(registry.operational.event_log)) == 3
+
+    def test_the_help_text_says_a_dry_run_writes_nothing(self) -> None:
+        result = runner.invoke(admin_app, ["migrate-provenance", "--help"])
+        assert result.exit_code == 0
+        # Rich boxes each option's help; drop the rule so a wrapped phrase
+        # reads as one.
+        text = " ".join(plain(result.output).replace("│", " ").split())
+        assert "without writing anything" in text
+        assert "no EXTRACTION_FAILED event" in text
 
 
 class _RecordingStore:
