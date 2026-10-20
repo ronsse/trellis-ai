@@ -1504,6 +1504,62 @@ Also reachable via `POST /precedents/{target_id}/reinstate` (`{"reason":
 `execute_mutation` (`operation="precedent.reinstate"`,
 `args={"target_id", "reason"}`).
 
+### `trellis curate review-ready`
+
+Review the promotion-ready learning candidates and approve the ones you
+name, in one command. It is the human path beside `promote-learning`: no
+decisions file, and the candidate's own content on screen.
+
+```bash
+trellis curate review-ready [--candidates PATH] [--limit N] \
+  [--approve ID ...] [--rationale TEXT] [--force-contradicted] \
+  [--format text|json]
+```
+
+**Without `--approve` it only reads.** It lists the candidates the
+promotion-ready digest counts (`is_promotion_ready`, the one predicate the
+digest and this command share), up to `--limit` (default 20; `ready_count`
+is always the full count). `--candidates` defaults to the
+learning-artifacts directory the Review queue reads. Each row carries:
+
+- `candidate_id`, `intent_family`, the source `item_id`, and a
+  `source_excerpt` of at most 300 characters, resolved as a promotion
+  resolves it. `source_excerpt_status` is `included` or the reason there is
+  none, including `source_withheld` for a noise or archived source;
+- `helpful_count`, `unhelpful_count`, `distinct_helpful_sessions` and
+  `sessionless_helpful_count` (`null` when an older artifact never wrote the
+  field), and `target_entity_count`;
+- `cross_family_noise`, with `noise_intent_families`: the same `item_id` is
+  an `investigate_noise` candidate under another intent family;
+- `already_promoted`: a successful `precedent.promote` event or a
+  `precedent` node already exists for the candidate.
+
+Candidates the digest would rank first can still sort last: clean
+candidates come first, then contradicted ones, then already-promoted ones,
+each group in digest order.
+
+**With `--approve ID`** (repeat the flag for several) each id is promoted
+through `prepare_learning_promotions` and `submit_learning_promotion` with
+`requested_by="cli:review-ready"`, exactly as `promote-learning` would,
+with `--rationale` stored as `approved_rationale` on each precedent. An id
+is refused, and nothing is written for it, when it is:
+
+| Outcome | Meaning |
+|---|---|
+| `refused_not_ready` | not in the ready set: unknown id, not `promote_guidance`, no helpful citation, or an unhelpful one |
+| `refused_already_promoted` | a precedent already exists for it |
+| `refused_contradicted` | cross-family noise; `--force-contradicted` lifts this refusal and no other |
+
+`submit_learning_promotion`'s own refusals (`refused_demoted` and the
+other lifecycle states) come back unchanged, and `promoted_incomplete`
+means the entity was written but an edge or the `PRECEDENT_PROMOTE` event
+was not. Every id gets its own entry in `results`.
+
+The exit code does not depend on `--format`, and the payload's `status`
+comes from the same reading: `0` / `ok` when every named id landed, `2` /
+`refused` when any was refused and none failed, `5` / `failed` when a write
+did not land. Listing always exits `0`.
+
 ### `trellis curate auto-promote-candidates`
 
 Evaluate learning candidates for automatic promotion to a precedent —

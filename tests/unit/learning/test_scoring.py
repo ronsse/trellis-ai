@@ -24,8 +24,10 @@ from trellis.learning.scoring import (
     LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT,
     analyze_learning_observations,
     build_learning_promotion_payloads,
+    is_promotion_ready,
     normalize_intent_family,
     prepare_learning_promotions,
+    promotion_ready_sort_key,
     write_learning_review_artifacts,
 )
 from trellis.ops import ParameterRegistry
@@ -1536,3 +1538,75 @@ class TestNoiseEvidenceScreen:
             "sessionless_citations": 0,
         }
         assert candidate["evidence_verdict"] == "insufficient_unhelpful_citations"
+
+
+class TestIsPromotionReady:
+    """The one readiness predicate the digest and ``curate review-ready`` share."""
+
+    @staticmethod
+    def _candidate(**evidence: int) -> dict:
+        return _make_promotable_candidate(citation_evidence=dict(evidence))
+
+    def test_boundaries(self) -> None:
+        floor = LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT
+        assert is_promotion_ready(
+            self._candidate(helpful_count=floor, unhelpful_count=0)
+        )
+        assert not is_promotion_ready(
+            self._candidate(helpful_count=floor - 1, unhelpful_count=0)
+        )
+        assert not is_promotion_ready(
+            self._candidate(helpful_count=floor + 5, unhelpful_count=1)
+        )
+
+    def test_only_the_narrow_recommendation_type_qualifies(self) -> None:
+        evidence = {"helpful_count": 3, "unhelpful_count": 0}
+        for rec in ("promote_precedent", "investigate_noise"):
+            candidate = _make_promotable_candidate(
+                recommendation_type=rec, citation_evidence=evidence
+            )
+            assert not is_promotion_ready(candidate)
+
+    def test_unreadable_evidence_is_not_ready(self) -> None:
+        candidate = _make_promotable_candidate()
+        candidate["citation_evidence"] = "n/a"
+        assert not is_promotion_ready(candidate)
+        del candidate["citation_evidence"]
+        assert not is_promotion_ready(candidate)
+
+    def test_digest_selects_and_orders_through_the_shared_helpers(
+        self, tmp_path: Path
+    ) -> None:
+        candidates = [
+            _make_promotable_candidate(
+                candidate_id=f"asset_generation:{i}",
+                times_served=served,
+                success_rate=rate,
+                citation_evidence={"helpful_count": helpful, "unhelpful_count": unhelp},
+            )
+            for i, (helpful, unhelp, rate, served) in enumerate(
+                [
+                    (1, 0, 0.5, 9),
+                    (3, 0, 0.5, 2),
+                    (3, 0, 0.9, 2),
+                    (3, 0, 0.9, 7),
+                    (4, 1, 1.0, 9),
+                ]
+            )
+        ]
+        report = _report_with_candidates(*candidates)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        expected = sorted(
+            (c for c in candidates if is_promotion_ready(c)),
+            key=promotion_ready_sort_key,
+        )
+        assert [r["candidate_id"] for r in report["promotion_ready"]["top"]] == [
+            c["candidate_id"] for c in expected
+        ]
+        # helpful desc, then success_rate desc, then times_served desc.
+        assert [c["candidate_id"].split(":")[1] for c in expected] == [
+            "3",
+            "2",
+            "1",
+            "0",
+        ]

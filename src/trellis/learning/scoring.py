@@ -284,6 +284,51 @@ def _accumulate_item(
         )
 
 
+def _promotion_ready_counts(candidate: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(helpful, unhelpful)`` citation counts, or ``None`` if unreadable."""
+    citations = candidate.get("citation_evidence")
+    if not isinstance(citations, Mapping):
+        return None
+    return (
+        int(citations.get("helpful_count", 0) or 0),
+        int(citations.get("unhelpful_count", 0) or 0),
+    )
+
+
+def is_promotion_ready(candidate: Mapping[str, Any]) -> bool:
+    """Whether a candidate is "promotion-ready" — the one predicate (#845).
+
+    ``recommendation_type == "promote_guidance"`` (the narrower literal, not
+    :data:`PROMOTE_RECOMMENDATIONS`, which also admits ``"promote_precedent"``),
+    at least :data:`LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` helpful
+    citations and zero unhelpful ones. The digest and
+    ``trellis curate review-ready`` both select through this function, so
+    the count a digest announces is the set a reviewer is shown.
+    """
+    if candidate.get("recommendation_type") != "promote_guidance":
+        return False
+    counts = _promotion_ready_counts(candidate)
+    if counts is None:
+        return False
+    helpful_count, unhelpful_count = counts
+    return (
+        helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT
+        and unhelpful_count == 0
+    )
+
+
+def promotion_ready_sort_key(candidate: Mapping[str, Any]) -> tuple[int, float, int]:
+    """Digest order as a sort key: helpful desc, success_rate desc, served desc."""
+    counts = _promotion_ready_counts(candidate)
+    metrics = candidate.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return (
+        -(counts[0] if counts else 0),
+        -float(metrics.get("success_rate", 0.0) or 0.0),
+        -int(metrics.get("times_served", 0) or 0),
+    )
+
+
 def _build_promotion_ready_digest(
     candidates: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -291,47 +336,28 @@ def _build_promotion_ready_digest(
 
     Surfacing only (#845): this counts and ranks waiting candidates so a
     reviewer knows to look — it never promotes anything itself. Eligibility
-    is ``recommendation_type == "promote_guidance"`` (the narrower literal,
-    not :data:`PROMOTE_RECOMMENDATIONS`, which also admits
-    ``"promote_precedent"``) plus the one named threshold,
-    :data:`LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT`, and zero unhelpful
-    citations. ``top`` is capped at :data:`_PROMOTION_READY_DIGEST_TOP_N`,
-    ordered by ``helpful_count`` desc, then ``success_rate`` desc, then
-    ``times_served`` desc.
+    is :func:`is_promotion_ready`. ``top`` is capped at
+    :data:`_PROMOTION_READY_DIGEST_TOP_N`, ordered by
+    :func:`promotion_ready_sort_key`.
     """
+    ready = sorted(
+        (candidate for candidate in candidates if is_promotion_ready(candidate)),
+        key=promotion_ready_sort_key,
+    )
     eligible: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if candidate.get("recommendation_type") != "promote_guidance":
-            continue
-        citations = candidate.get("citation_evidence")
-        if not isinstance(citations, Mapping):
-            continue
-        helpful_count = int(citations.get("helpful_count", 0) or 0)
-        unhelpful_count = int(citations.get("unhelpful_count", 0) or 0)
-        if (
-            helpful_count < LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT
-            or unhelpful_count != 0
-        ):
-            continue
+    for candidate in ready:
+        counts = _promotion_ready_counts(candidate)
         metrics = candidate.get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
         eligible.append(
             {
                 "candidate_id": candidate.get("candidate_id"),
                 "precedent_name": candidate.get("precedent_name"),
-                "helpful_count": helpful_count,
+                "helpful_count": counts[0] if counts else 0,
                 "times_served": int(metrics.get("times_served", 0) or 0),
                 "success_rate": float(metrics.get("success_rate", 0.0) or 0.0),
             }
         )
-
-    eligible.sort(
-        key=lambda row: (
-            -row["helpful_count"],
-            -row["success_rate"],
-            -row["times_served"],
-        )
-    )
     return {
         "count": len(eligible),
         "top": eligible[:_PROMOTION_READY_DIGEST_TOP_N],
@@ -828,7 +854,7 @@ def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bo
     return False
 
 
-def _resolve_source_excerpt(
+def resolve_source_excerpt(
     item_id: str, document_store: DocumentStore | None
 ) -> tuple[str | None, str]:
     """Bounded excerpt of the source item's content, and why it is absent if so.
@@ -899,7 +925,7 @@ def build_learning_promotion_payloads(
     primary_domain = str(candidate.get("primary_domain") or "").strip()
     # Read side only, and at command-build time: the write still goes
     # through ``submit_learning_promotion`` and the executor.
-    source_excerpt, source_excerpt_status = _resolve_source_excerpt(
+    source_excerpt, source_excerpt_status = resolve_source_excerpt(
         str(candidate.get("item_id") or "").strip(), document_store
     )
     entity_payload = {
@@ -1320,9 +1346,12 @@ __all__ = [
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
+    "is_promotion_ready",
     "normalize_intent_family",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
+    "promotion_ready_sort_key",
+    "resolve_source_excerpt",
     "submit_learning_promotion",
     "write_learning_review_artifacts",
 ]
