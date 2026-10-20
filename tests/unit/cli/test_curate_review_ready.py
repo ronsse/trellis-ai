@@ -129,6 +129,16 @@ def _promote_events() -> list[Any]:
         registry.close()
 
 
+def _store_counts() -> tuple[int, int, int]:
+    registry = curate_cli._get_registry()
+    try:
+        graph = registry.knowledge.graph_store
+        events = registry.operational.event_log.get_events(limit=100_000)
+        return len(events), graph.count_nodes(), graph.count_edges()
+    finally:
+        registry.close()
+
+
 def _node(entity_id: str) -> dict[str, Any] | None:
     registry = curate_cli._get_registry()
     try:
@@ -257,8 +267,11 @@ class TestListing:
         self, tmp_path: Path
     ) -> None:
         path = _ready_set(tmp_path)
+        before = _store_counts()
         code, data, _ = _review(path, "--limit", "1")
         assert code == EXIT_OK
+        assert _review(path, "--limit", "1", fmt="text")[0] == EXIT_OK
+        assert _store_counts() == before
         assert data is not None
         assert data["ready_count"] == 4
         assert data["shown_count"] == 1

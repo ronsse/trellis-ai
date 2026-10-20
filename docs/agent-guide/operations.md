@@ -1550,10 +1550,13 @@ is refused, and nothing is written for it, when it is:
 | `refused_already_promoted` | a precedent already exists for it |
 | `refused_contradicted` | cross-family noise; `--force-contradicted` lifts this refusal and no other |
 
-`submit_learning_promotion`'s own refusals (`refused_demoted` and the
-other lifecycle states) come back unchanged, and `promoted_incomplete`
-means the entity was written but an edge or the `PRECEDENT_PROMOTE` event
-was not. Every id gets its own entry in `results`.
+A precedent in any lifecycle state (demoted, archived, superseded) answers
+`refused_already_promoted`; bring one back with `trellis curate
+reinstate-precedent` or the `retention.restore` operation.
+`promoted_incomplete` means the entity was written but an edge or the
+`PRECEDENT_PROMOTE` event was not; a re-run here then answers
+`refused_already_promoted`, so retry it with `trellis curate
+promote-learning`. Every id gets its own entry in `results`.
 
 The exit code does not depend on `--format`, and the payload's `status`
 comes from the same reading: `0` / `ok` when every named id landed, `2` /
