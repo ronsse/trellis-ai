@@ -140,13 +140,20 @@ class Edge(TimestampedModel, VersionedModel):
         would turn ``"llm "`` into ``"llm"`` before it was checked, so
         this model would accept a spelling the store boundary
         (:func:`~trellis.stores.base.edge_provenance.normalize_edge_provenance`)
-        rejects. A non-string is left for pydantic's own type error.
+        rejects. A non-string is rejected too, as the store rejects it:
+        passed through, pydantic's lax mode would decode ``b"llm"`` after
+        this check ran.
         Validating loudly here keeps downstream filter queries
         deterministic.
         """
-        if isinstance(value, str):
-            return canonical_extractor_tier(value)
-        return value
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            # ValueError, not TypeError: a validator's TypeError escapes pydantic
+            # unwrapped instead of becoming a ValidationError.
+            msg = f"extractor_tier must be str or None, got {type(value).__name__}"
+            raise ValueError(msg)  # noqa: TRY004
+        return canonical_extractor_tier(value)
 
 
 class CompactionReport(TrellisModel):

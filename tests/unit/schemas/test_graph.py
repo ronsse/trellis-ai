@@ -261,14 +261,21 @@ class TestEdgeAndStoreBoundaryAgree:
         finally:
             store.close()
 
-    def test_a_non_string_tier_is_a_type_error_not_a_crash(self) -> None:
-        with pytest.raises(ValidationError, match="valid string"):
+    @pytest.mark.parametrize("value", [5, b"llm", b"heuristic", bytearray(b"LLM")])
+    def test_a_non_string_tier_is_rejected_as_the_store_rejects_it(
+        self, value: object
+    ) -> None:
+        # pydantic's lax mode decodes bytes to str, so a pass-through would
+        # store b"heuristic" unvalidated.
+        with pytest.raises(ValidationError, match="must be str or None"):
             Edge(
                 source_id="a",
                 target_id="b",
                 edge_kind="depends_on",
-                extractor_tier=5,  # type: ignore[arg-type]
+                extractor_tier=value,  # type: ignore[arg-type]
             )
+        with pytest.raises(TypeError, match="must be str or None"):
+            normalize_edge_provenance(extractor_tier=value)  # type: ignore[arg-type]
 
     def test_an_unset_tier_is_still_none(self) -> None:
         edge = Edge(source_id="a", target_id="b", edge_kind="depends_on")
