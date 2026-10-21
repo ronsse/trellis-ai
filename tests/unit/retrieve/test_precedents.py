@@ -393,3 +393,115 @@ class TestMinedCandidatesAreNotPromoted:
         [event] = event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED)
         assert is_miner_candidate_event(event)
         assert list_precedents(event_log) == []
+
+
+# ---------------------------------------------------------------------------
+# The listing fails closed on a title copied from a redacted source
+# ---------------------------------------------------------------------------
+
+SOURCE_TITLE = "Learning: fam :: FIRST LINE OF THE SOURCE"
+NEUTRAL_TITLE = "Learning: fam :: prec-t"
+
+
+def _promote_event(log: SQLiteEventLog, **payload: object) -> None:
+    log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="prec-t",
+        payload={"title": SOURCE_TITLE, "description": "d", **payload},
+    )
+
+
+def _node(graph: SQLiteGraphStore, **props: object) -> None:
+    graph.upsert_node("prec-t", "precedent", {"intent_family": "fam", **props})
+
+
+class TestServedTitle:
+    def test_a_missing_node_serves_the_neutral_name_for_a_marked_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        # No node, so no intent family to name: the precedent id alone.
+        assert row["title"] == "prec-t"
+        assert row["payload"]["title"] == "prec-t"
+        assert "FIRST LINE" not in repr(row)
+
+    @pytest.mark.parametrize("marker", ["item_title", "item_id", "reviewer", None])
+    def test_a_missing_node_keeps_a_title_not_marked_source_text(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        marker: str | None,
+    ) -> None:
+        # None is a title promoted before names were marked: it cannot be told
+        # from an ordinary title, so it is served as promoted.
+        _promote_event(event_log, **({"name_source": marker} if marker else {}))
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == SOURCE_TITLE
+
+    def test_a_node_that_does_not_vouch_for_its_excerpt_serves_the_neutral_name(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+        _node(graph_store, source_excerpt_status="no_content")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == NEUTRAL_TITLE
+
+    def test_an_included_node_serves_the_promoted_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+        _node(graph_store, source_excerpt_status="included", name_source="source_text")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == SOURCE_TITLE
+
+    def test_a_node_a_scrub_renamed_serves_its_own_name(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        # The promotion event predates the marker, so only the node says so.
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            name="Learning: fam :: renamed",
+            name_source="neutral",
+            source_excerpt_status="no_content",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == "Learning: fam :: renamed"
+
+    @pytest.mark.parametrize(
+        ("marker", "title"),
+        [
+            (None, NEUTRAL_TITLE),  # scrubbed before names were marked
+            ("source_text", NEUTRAL_TITLE),
+            ("item_title", SOURCE_TITLE),  # a scrub kept a name with no source text
+        ],
+    )
+    def test_a_node_scrubbed_before_names_were_renamed(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        marker: str | None,
+        title: str,
+    ) -> None:
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            source_excerpt_status="source_redacted",
+            **({"name_source": marker} if marker else {}),
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == title

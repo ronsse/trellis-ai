@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+from datetime import datetime
 from typing import Any
 
 _VALID_STATUSES = {"success", "failure", "partial", "unknown"}
@@ -56,7 +56,7 @@ class TracePayloadBuilder:
         name: str,
         args: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
-        started_at: str | datetime.datetime | None = None,
+        started_at: str | datetime | None = None,
     ) -> TracePayloadBuilder:
         """Append a single step to the trace.
 
@@ -79,7 +79,7 @@ class TracePayloadBuilder:
         if started_at is not None:
             step["started_at"] = (
                 started_at.isoformat()
-                if isinstance(started_at, datetime.datetime)
+                if isinstance(started_at, datetime)
                 else str(started_at)
             )
         self._steps.append(step)
@@ -157,8 +157,8 @@ class TracePayloadBuilder:
         agent_id: str,
         domain: str = "",
         workflow_id: str = "",
-        started_at: str | datetime.datetime | None = None,
-        ended_at: str | datetime.datetime | None = None,
+        started_at: str | datetime | None = None,
+        ended_at: str | datetime | None = None,
     ) -> TracePayloadBuilder:
         """Set the execution context for this trace.
 
@@ -173,14 +173,10 @@ class TracePayloadBuilder:
             ``self`` for chaining.
         """
 
-        def _coerce_dt(value: str | datetime.datetime | None) -> str | None:
+        def _coerce_dt(value: str | datetime | None) -> str | None:
             if value is None:
                 return None
-            return (
-                value.isoformat()
-                if isinstance(value, datetime.datetime)
-                else str(value)
-            )
+            return value.isoformat() if isinstance(value, datetime) else str(value)
 
         self._context = {
             "agent_id": str(agent_id).strip(),

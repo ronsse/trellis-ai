@@ -131,8 +131,7 @@ class EventType(StrEnum):
     #: target is a document (or chunk) that promoted precedents copied an
     #: excerpt from, ``scrubbed_precedent_ids`` / ``scrubbed_precedent_count``
     #: name the precedents scrubbed (ids and count only); both keys are
-    #: absent when none were. ``precedent_scan_capped`` (``True``, absent
-    #: otherwise) marks a precedent lookup that hit its read cap.
+    #: absent when none were.
     REDACTION_APPLIED = "redaction.applied"
 
     #: Emitted by :class:`~trellis.mutate.handlers.RetentionPruneHandler`
