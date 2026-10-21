@@ -1066,7 +1066,6 @@ class PackBuilder:
             merged_filters["include_structural"] = True
 
         class_prior_config = self._effective_class_prior_config()
-        strategy_by_item_id: dict[int, str] = {}
         # Seeds the graph axis expanded from this build (``[]`` when it ran
         # the recency window), for ``PACK_ASSEMBLED.seed_entity_ids``.
         graph_seed_ids: dict[str, None] = {}
@@ -1091,13 +1090,12 @@ class PackBuilder:
                 )
                 rejected.extend(gate_rejected)
                 # Lift the seeds into the pack-level record and drop the
-                # per-item stamp before anything else holds the items;
-                # ``strategy_by_item_id`` is keyed on ``id()``, so it must
-                # see the copies.
+                # per-item stamp before anything else holds the items.
                 if strategy.name == GRAPH_STRATEGY_NAME:
                     items = _lift_graph_seeds(items, graph_seed_ids)
-                for item in items:
-                    strategy_by_item_id[id(item)] = strategy.name
+                items = self._stamp_collecting_strategy(
+                    items, strategy.name, config=class_prior_config
+                )
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1157,11 +1155,7 @@ class PackBuilder:
         # stays rejected as superseded, and the successor is rejected as
         # class_prior — neither one reaches the pack.
         all_items, class_prior_rejected, class_prior_forms = (
-            self._apply_class_prior_pool(
-                all_items,
-                config=class_prior_config,
-                strategy_by_item_id=strategy_by_item_id,
-            )
+            self._apply_class_prior_pool(all_items, config=class_prior_config)
         )
         rejected.extend(class_prior_rejected)
 
@@ -1444,7 +1438,6 @@ class PackBuilder:
             merged_filters["include_structural"] = True
 
         class_prior_config = self._effective_class_prior_config()
-        strategy_by_item_id: dict[int, str] = {}
         # One cache for the whole build — see the matching note in
         # :meth:`build`.
         parent_verdict_cache = ParentVerdictCache(self._document_store)
@@ -1467,8 +1460,9 @@ class PackBuilder:
                 # :meth:`_emit_telemetry`), so the stamp is only dropped.
                 if strategy.name == GRAPH_STRATEGY_NAME:
                     items = _strip_graph_seeds(items)
-                for item in items:
-                    strategy_by_item_id[id(item)] = strategy.name
+                items = self._stamp_collecting_strategy(
+                    items, strategy.name, config=class_prior_config
+                )
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1509,11 +1503,7 @@ class PackBuilder:
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected, class_prior_forms = (
-            self._apply_class_prior_pool(
-                all_items,
-                config=class_prior_config,
-                strategy_by_item_id=strategy_by_item_id,
-            )
+            self._apply_class_prior_pool(all_items, config=class_prior_config)
         )
         rejected.extend(class_prior_rejected)
 
@@ -3022,7 +3012,6 @@ class PackBuilder:
         items: list[PackItem],
         *,
         config: ClassPriorConfig,
-        strategy_by_item_id: dict[int, str],
     ) -> tuple[list[PackItem], list[RejectedItem], dict[str, str]]:
         """Apply the class-level serving prior over the merged, de-superseded pool.
 
@@ -3033,13 +3022,19 @@ class PackBuilder:
         loser (the loser looked kept, from the loop's point of view, since
         nothing had rejected the successor yet).
 
-        ``strategy_by_item_id`` maps ``id(item)`` to the strategy that
-        collected it, recorded during the collection loop rather than read
-        off ``item.strategy_source``: the sectioned path never promotes
-        that field from metadata, and a directly-constructed
-        :class:`PackItem` (as most tests build) carries no
-        ``metadata["source_strategy"]`` either. The identity-keyed lookup
-        works regardless of either.
+        Each item is grouped by its own ``strategy_source``, which
+        :meth:`_stamp_collecting_strategy` set in the collection loop
+        (``config.mode != "off"`` is what makes it run). The strategy rides
+        on the item, so it survives every ``model_copy`` between collection
+        and here, and two copies of one ``item_id`` collected by different
+        strategies are each judged under their own strategy's rule. It is
+        deliberately not a side map keyed on ``id(item)``: a key outlives
+        its object, so a map built before ``_promote_strategy_source``
+        swapped the items for copies could answer for whichever object
+        later reused the freed address. An item that arrives with no
+        ``strategy_source`` (one that never passed through the collection
+        loop) groups under ``""``, which is on no axis and so is never
+        withheld.
 
         ``items`` itself is never mutated; ``config.mode == "off"`` returns
         it unchanged (same object, not a copy), matching
@@ -3061,11 +3056,13 @@ class PackBuilder:
         """
         if config.mode == "off":
             return items, [], {}
+        # ``order`` is the one ``id()`` key left, and is safe: it lives only
+        # inside this call, ``items`` keeps every keyed object alive for all
+        # of it, and ``apply_class_prior`` returns the objects it was given.
         order = {id(item): idx for idx, item in enumerate(items)}
         groups: dict[str, list[PackItem]] = {}
         for item in items:
-            name = strategy_by_item_id.get(id(item), item.strategy_source or "")
-            groups.setdefault(name, []).append(item)
+            groups.setdefault(item.strategy_source or "", []).append(item)
         kept: list[PackItem] = []
         rejected: list[RejectedItem] = []
         class_prior_forms: dict[str, str] = {}
@@ -3090,22 +3087,64 @@ class PackBuilder:
         return kept, rejected, class_prior_forms
 
     @staticmethod
-    def _promote_strategy_source(items: list[PackItem]) -> list[PackItem]:
-        """Promote metadata source_strategy to the first-class field."""
+    def _promote_strategy_source(
+        items: list[PackItem], *, collected_by: str | None = None
+    ) -> list[PackItem]:
+        """Promote metadata source_strategy to the first-class field.
+
+        ``collected_by`` names the strategy that collected ``items``. When
+        given, an item that still has no source after the promotion is
+        stamped with it; left ``None`` this is exactly the promotion alone.
+        """
         result: list[PackItem] = []
         for item in items:
-            if item.strategy_source is None and "source_strategy" in (
-                item.metadata or {}
+            metadata = item.metadata or {}
+            if item.strategy_source is None and (
+                "source_strategy" in metadata or collected_by is not None
             ):
+                declared = metadata.get("source_strategy")
                 promoted = item.model_copy(
                     update={
-                        "strategy_source": item.metadata["source_strategy"],
+                        "strategy_source": (
+                            declared if declared is not None else collected_by
+                        ),
                     }
                 )
                 result.append(promoted)
             else:
                 result.append(item)
         return result
+
+    @classmethod
+    def _stamp_collecting_strategy(
+        cls,
+        items: list[PackItem],
+        strategy_name: str,
+        *,
+        config: ClassPriorConfig,
+    ) -> list[PackItem]:
+        """Record on each collected item which strategy collected it.
+
+        The class prior judges an item under the strategy that collected it
+        (:meth:`_apply_class_prior_pool`), and the collection loop is the
+        only place that is known: later the pool is a merged list. The
+        answer is written onto the item's own ``strategy_source``, which
+        every ``model_copy`` carries along, rather than into a side table
+        keyed on ``id(item)``. An item's own declaration wins
+        (``strategy_source``, else ``metadata["source_strategy"]``, exactly
+        what :meth:`_promote_strategy_source` would have promoted later), so
+        what a built-in strategy already stamps is unchanged and the
+        sectioned path, which never promotes before the prior, groups too.
+
+        Stamps only when the prior is on. ``mode == "off"`` returns
+        ``items`` unchanged, the same objects, so the shipped default pack is
+        byte-identical and pays for no copies. The copy is by
+        ``model_copy``: a strategy may hand the same objects back on every
+        call, so they are never mutated in place.
+        """
+        if config.mode == "off":
+            return items
+        return cls._promote_strategy_source(items, collected_by=strategy_name)
 
     @staticmethod
     def _partition(

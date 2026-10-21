@@ -53,10 +53,13 @@ the other collect-seam gates, this one runs *after*
 after ``_apply_collect_gates``: applying it per strategy, before the pool
 is merged and supersession resolved, let a withheld successor un-supersede
 its own loser (the loser looked kept, since nothing had rejected the
-successor yet). ``strategy_name`` is still passed explicitly rather than
-read off the promoted ``strategy_source`` field, because the sectioned
-path never runs that promotion and a directly-constructed ``PackItem``
-(most tests) carries no ``metadata["source_strategy"]`` either.
+successor yet). The strategy a pooled item is judged under is read off
+the item's own ``strategy_source``, stamped in the collection loop
+(``PackBuilder._stamp_collecting_strategy``) because the sectioned path
+never runs the metadata promotion and a directly-constructed ``PackItem``
+(most tests) carries no ``metadata["source_strategy"]`` either. It is not
+a side table keyed on ``id(item)``: that outlives the object it names, and
+the pool is rebuilt from copies between collection and this gate.
 
 **Parents only, by design.** The gate matches ``metadata["document_form"]``,
 which :mod:`trellis.ingest_corpus.conversations` stamps only on the parent
