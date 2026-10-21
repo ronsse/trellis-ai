@@ -116,13 +116,20 @@ def _promote(
     return result.exit_code, data, plain(result.stdout)
 
 
-def _store_counts() -> tuple[int, int, int]:
-    """``(events, nodes, edges)``: a write of any kind moves one of them."""
+def _store_counts() -> tuple[int, ...]:
+    """Row counts of every store a promotion or its meta-trace could write."""
     registry = curate_cli._get_registry()
     try:
         graph = registry.knowledge.graph_store
         events = registry.operational.event_log.get_events(limit=100_000)
-        return len(events), graph.count_nodes(), graph.count_edges()
+        return (
+            len(events),
+            graph.count_nodes(),
+            graph.count_edges(),
+            registry.knowledge.document_store.count(),
+            registry.knowledge.vector_store.count(),
+            registry.operational.trace_store.count(),
+        )
     finally:
         registry.close()
 
