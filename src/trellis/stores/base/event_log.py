@@ -54,6 +54,19 @@ class EventType(StrEnum):
     PRECEDENT_PROMOTED = "precedent.promoted"
     PRECEDENT_DEMOTED = "precedent.demoted"
     PRECEDENT_REINSTATED = "precedent.reinstated"
+    #: Emitted by :class:`~trellis_workers.learning.miner.PrecedentMiner` for
+    #: a precedent it mined from traces. A mined *candidate*, not a promoted
+    #: precedent: it is ungoverned (written straight to the event log, past
+    #: ``MutationExecutor``), carries no human approval, and is never served
+    #: by ``list_precedents`` / ``get_lessons`` / ``GET /precedents``, which
+    #: read :attr:`PRECEDENT_PROMOTED` only. Before this type existed the
+    #: miner emitted :attr:`PRECEDENT_PROMOTED` with
+    #: ``source="precedent_miner"``; those historical rows are still in
+    #: existing logs, and :func:`~trellis.retrieve.precedents.is_miner_candidate_event`
+    #: tells readers to skip them. Payload: ``{action, title, confidence}``
+    #: for an LLM-mined candidate, ``{action, trace_id, outcome_status}`` for
+    #: a deterministic one; ``entity_id`` is the candidate's precedent id.
+    PRECEDENT_CANDIDATE_MINED = "precedent.candidate_mined"
 
     # Policy
     POLICY_CREATED = "policy.created"

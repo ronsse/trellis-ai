@@ -49,6 +49,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.candidate_auto_promote import compute_agreement_metric
+from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -461,7 +462,13 @@ def summarize_loop_health(
     )
 
     precedent_scan = _scan(event_log, EventType.PRECEDENT_PROMOTED, limit=limit)
-    precedent_events = precedent_scan.events
+    # A row the precedent miner wrote is a candidate, not a promotion:
+    # counting it would make this row report promotions (and a last run)
+    # that no human or policy ever approved. Only historical rows can
+    # match, since the miner now emits its own event type.
+    precedent_events = [
+        e for e in precedent_scan.events if not is_miner_candidate_event(e)
+    ]
     precedent_latest = precedent_events[-1] if precedent_events else None
     # A promotion event is immutable and never retracted, so a precedent
     # demoted after promoting still counts toward `promoted_last_Nd` --

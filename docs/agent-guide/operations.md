@@ -3319,7 +3319,7 @@ trellis worker mine-precedents [--domain D] [--min-traces N] \
 | `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
-Candidates are **surfaced** (the miner emits `PRECEDENT_PROMOTED` events as it intends) but **not auto-promoted** into the graph — review before acting. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+Candidates are **surfaced** as `PRECEDENT_CANDIDATE_MINED` events (one per candidate) but **not promoted**: `get_lessons`, `trellis retrieve precedents` and `GET /precedents` read `PRECEDENT_PROMOTED` only and never serve a mined candidate, and nothing routes one into the Review queue yet. Older versions emitted candidates as `PRECEDENT_PROMOTED` with `source="precedent_miner"`; readers skip those rows. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
 
 ### `trellis worker capture-sessions`
 

@@ -2001,9 +2001,10 @@ def mine_precedents_cmd(
     """Mine precedent candidates from failure / partial traces.
 
     Wraps :meth:`PrecedentMiner.generate_precedent_candidates`. Candidates
-    are surfaced (and persisted as the miner intends — it emits
-    ``PRECEDENT_PROMOTED`` events for each). They are **not** auto-promoted
-    into the graph; review them before acting.
+    are surfaced (and persisted as ``PRECEDENT_CANDIDATE_MINED`` events,
+    one per candidate). They are **not** promoted: ``get_lessons`` and
+    ``GET /precedents`` do not serve them, and nothing routes them into the
+    Review queue yet.
 
     Requires an LLM extra. Without a configured client this command exits
     loudly (the miner would otherwise return an empty list silently).

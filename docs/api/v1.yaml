@@ -5801,7 +5801,13 @@ paths:
 
         -- otherwise this endpoint would offer a domain filter option backed
 
-        entirely by precedents the listing it feeds never actually shows.'
+        entirely by precedents the listing it feeds never actually shows. A row
+
+        the precedent miner wrote
+
+        (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
+
+        candidate, not a promotion, and is skipped for the same reason.'
       operationId: list_precedent_domains_api_v1_precedents_domains_get
       responses:
         '200':
