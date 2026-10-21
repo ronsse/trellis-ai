@@ -1234,12 +1234,13 @@ class KeywordSearch(SearchStrategy):
                     ),
                     relevance_score=score,
                     metadata={
-                        "source_strategy": "keyword",
                         **metadata,
-                        # Stamped after the splat, for the #433 reason:
-                        # which clock this search read is a fact about the
-                        # search, and document metadata is an open bag that
-                        # must not get a vote on it.
+                        # Both stamped after the splat, for the #433 reason:
+                        # which clock this search read, and which strategy
+                        # collected the item, are facts about the search, and
+                        # document metadata is an open bag that must not get
+                        # a vote on either (#943).
+                        "source_strategy": "keyword",
                         RECENCY_CLOCK_METADATA_KEY: recency.clock,
                     },
                 )
@@ -1356,12 +1357,12 @@ class SemanticSearch(SearchStrategy):
                     ),
                     relevance_score=score,
                     metadata={
-                        "source_strategy": "semantic",
                         **metadata,
                         # After the splat, same reason as the keyword axis —
                         # and it matters more here: a vector row's metadata is
                         # an embed-time *snapshot* of the document's bag
                         # (#338), so anything the document carried is in it.
+                        "source_strategy": "semantic",
                         RECENCY_CLOCK_METADATA_KEY: recency.clock,
                     },
                 )
@@ -1905,7 +1906,6 @@ class GraphSearch(SearchStrategy):
                     ),
                     relevance_score=score,
                     metadata={
-                        "source_strategy": "graph",
                         **{
                             k: v
                             for k, v in props.items()
@@ -1917,11 +1917,16 @@ class GraphSearch(SearchStrategy):
                                 GRAPH_SEED_IDS_KEY,
                             )
                         },
-                        # All four sit after the property spread,
+                        # All five sit after the property spread,
                         # deliberately: ``properties`` is an open bag, so a
                         # node is free to carry a key of any of these names,
                         # and each is a fact about the *row* or about *this*
                         # search that a stored property must not get a vote on.
+                        #
+                        # ``source_strategy`` names the collecting strategy
+                        # and so picks the class-prior axis that judges the
+                        # item and the ``strategy_source`` it is attributed to
+                        # (#943).
                         #
                         # ``node_role`` is the load-bearing one — PackBuilder
                         # reads it back as a *decision*, dropping items whose
@@ -1932,6 +1937,7 @@ class GraphSearch(SearchStrategy):
                         # meta-Activity filter the same way, and since #375
                         # gate 4 both also land in
                         # ``PACK_ASSEMBLED.injected_items[]``.
+                        "source_strategy": "graph",
                         "node_type": node_type_val,
                         "node_type_canonical": canonical_type,
                         "node_role": node_role_val,

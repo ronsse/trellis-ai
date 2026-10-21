@@ -907,6 +907,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Stored metadata can no longer relabel the strategy that collected an item.**
+  The keyword, semantic and graph strategies built item metadata as
+  `{"source_strategy": <name>, **stored}`, so a stored `source_strategy` key
+  overrode the collecting strategy, and with it the class-prior axis that
+  judges the item and `strategy_source` in `PACK_ASSEMBLED.injected_items[]`
+  (telemetry, RRF and feedback attribution). The stamp now follows the splat,
+  as `recency_clock` does. No writer stores the key, so served packs are
+  unchanged; the key now sits after the stored keys in the item's metadata
+  rather than before them. The observation strategy does not splat stored
+  properties and was not exposed. (#943)
+
 - **A mined precedent candidate no longer reads as a promoted precedent
   ([#925](https://github.com/ronsse/trellis-ai/issues/925)).** `PrecedentMiner`
   wrote each candidate it mined as `PRECEDENT_PROMOTED`, so `get_lessons`,
