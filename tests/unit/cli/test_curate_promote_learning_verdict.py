@@ -564,6 +564,7 @@ class TestMalformedLifecycleReadsAsCurrent:
 
         assert preview_code == EXIT_OK
         assert [r["status"] for r in preview["results"]] == ["ready"]
+        assert preview["would_exit_code"] == code
         assert code == EXIT_OK, data
         assert data["status"] == "ok"
         assert data["promoted_count"] == 1
