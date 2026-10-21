@@ -41,8 +41,46 @@ def is_withheld_precedent(graph_store: GraphStore | None, entity_id: str) -> boo
     node = graph_store.get_node(entity_id)
     if node is None:
         return False
+    return _node_is_withheld(node)
+
+
+def _node_is_withheld(node: dict[str, Any]) -> bool:
     lifecycle = node.get("properties", {}).get(LIFECYCLE_KEY) or {}
     return lifecycle.get("state") in WITHHELD_PRECEDENT_STATES
+
+
+def _served_description(
+    node: dict[str, Any] | None, payload: dict[str, Any]
+) -> str | None:
+    """The description to serve in place of the promoted one, if any.
+
+    ``PRECEDENT_PROMOTED`` is immutable, so its payload still holds the
+    description as promoted, excerpt included. A node ``redaction.apply``
+    scrubbed serves its own text. Any other node that does not vouch for
+    the excerpt (``source_excerpt_status`` other than ``included``), and a
+    missing node, serve the promoted text with the excerpt cut out: a scrub
+    that purged the node and failed to re-create it must not hand the
+    excerpt back through this listing. ``None`` means serve it unchanged.
+    """
+    # Deferred: ``trellis.learning`` imports the retrieve package.
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        SOURCE_EXCERPT_INCLUDED,
+        SOURCE_EXCERPT_REDACTED,
+        strip_source_excerpt,
+    )
+
+    props = (node or {}).get("properties") or {}
+    status = props.get("source_excerpt_status")
+    if node is not None and status == SOURCE_EXCERPT_REDACTED:
+        description = props.get("description")
+        return description if isinstance(description, str) else ""
+    if node is not None and status == SOURCE_EXCERPT_INCLUDED:
+        return None
+    promoted = payload.get("description")
+    if not isinstance(promoted, str):
+        return None
+    stripped = strip_source_excerpt(promoted, str(payload.get("source_item_id") or ""))
+    return None if stripped == promoted else stripped
 
 
 def list_precedents(
@@ -113,11 +151,12 @@ def list_precedents(
         )
         results = []
         for e in events:
-            if e.entity_id is not None and is_withheld_precedent(
-                graph_store, e.entity_id
-            ):
+            node = graph_store.get_node(e.entity_id) if e.entity_id else None
+            if node is not None and _node_is_withheld(node):
                 continue
-            results.append(_serialize(e))
+            results.append(
+                _serialize(e, description=_served_description(node, e.payload))
+            )
             if len(results) >= limit:
                 break
         exhausted = len(events) < fetch_limit
@@ -127,13 +166,16 @@ def list_precedents(
     return results
 
 
-def _serialize(e: Event) -> dict[str, Any]:
+def _serialize(e: Event, *, description: str | None = None) -> dict[str, Any]:
+    payload = e.payload
+    if description is not None:
+        payload = {**payload, "description": description}
     return {
         "event_id": e.event_id,
         "entity_id": e.entity_id,
         "title": e.payload.get("title", ""),
-        "description": e.payload.get("description", ""),
+        "description": payload.get("description", ""),
         "domain": e.payload.get("domain"),
         "occurred_at": e.occurred_at.isoformat(),
-        "payload": e.payload,
+        "payload": payload,
     }
