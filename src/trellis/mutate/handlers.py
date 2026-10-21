@@ -2600,6 +2600,7 @@ def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str
     )
     matched: list[dict[str, Any]] = []
     offset = 0
+    first_total: int | None = None
     while True:
         rows, total = graph.search_nodes(
             node_type="precedent",
@@ -2608,6 +2609,17 @@ def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str
             limit=_PRECEDENT_PAGE_SIZE,
             offset=offset,
         )
+        # Offset paging skips a row when an earlier one disappears between
+        # pages, so a set that changed size mid-scan refuses rather than
+        # risk leaving an excerpt behind. Nothing has been purged yet.
+        if first_total is None:
+            first_total = total
+        elif total != first_total:
+            msg = (
+                "precedent set changed during the redaction scan "
+                f"({first_total} -> {total} nodes); re-run the redaction"
+            )
+            raise StoreError(msg, store="graph")
         for row in rows:
             source = (row.get("properties") or {}).get("source_item_id")
             if not isinstance(source, str) or not source:

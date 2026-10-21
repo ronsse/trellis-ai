@@ -549,6 +549,35 @@ class TestPrecedentScan:
             event_type=EventType.REDACTION_APPLIED
         )
 
+    def test_a_set_that_changes_size_mid_scan_refuses_before_any_purge(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Offset paging skips a row when an earlier one vanishes between
+        # pages, so a changed total must refuse, not finish a partial scan.
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        for name in ("b1", "b2", "b3"):
+            _promote(registry, f"doc-{name}")
+        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+
+        def shrinking(**kwargs: Any) -> Any:
+            rows, total = real(**kwargs)
+            return rows, total - 1 if kwargs["offset"] else total
+
+        monkeypatch.setattr(graph, "search_nodes", shrinking)
+        before = _everything_stored(registry, precedent_id)
+
+        with pytest.raises(StoreError, match="changed during the redaction scan"):
+            _redact(registry, "doc-a")
+
+        assert graph.get_node("doc-a") is not None
+        assert _everything_stored(registry, precedent_id) == before
+        assert not registry.operational.event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED
+        )
+
 
 class TestFailureOrder:
     def test_failed_scrub_leaves_the_target_in_place(

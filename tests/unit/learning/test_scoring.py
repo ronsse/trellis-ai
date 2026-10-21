@@ -1656,7 +1656,9 @@ class TestPrecedentNameSource:
         )
         assert payloads["entity_payload"]["properties"]["name_source"] == "source_text"
 
-    def test_a_name_the_reviewer_changed_is_theirs(self) -> None:
+    def test_an_edited_source_derived_name_stays_source_text(self) -> None:
+        # The review template pre-fills the derived name, so an edit is a
+        # touch-up of source text and must stay scrubbable.
         candidate = _make_promotable_candidate()
         candidate["precedent_name_source"] = "source_text"
         kept = build_learning_promotion_payloads(
@@ -1668,6 +1670,14 @@ class TestPrecedentNameSource:
             candidate=candidate, promotion_name="Reviewer wording", rationale=""
         )
         assert kept["entity_payload"]["properties"]["name_source"] == "source_text"
+        assert edited["entity_payload"]["properties"]["name_source"] == "source_text"
+
+    def test_a_name_the_reviewer_changed_from_a_title_is_theirs(self) -> None:
+        candidate = _make_promotable_candidate()
+        candidate["precedent_name_source"] = "item_title"
+        edited = build_learning_promotion_payloads(
+            candidate=candidate, promotion_name="Reviewer wording", rationale=""
+        )
         assert edited["entity_payload"]["properties"]["name_source"] == "reviewer"
 
     def test_a_candidate_with_no_marker_records_none(self) -> None:

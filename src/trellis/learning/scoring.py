@@ -1017,14 +1017,19 @@ def _promotion_name_source(
 ) -> str | None:
     """How the promoted name was derived, or ``None`` when it cannot be told.
 
-    A name the reviewer changed is theirs. Otherwise the candidate's own
+    A name derived from source text stays ``source_text`` even when the
+    reviewer edited it: the review template pre-fills the derived name, so an
+    edit is usually a touch-up of that text, not a replacement for it. Any
+    other name the reviewer changed is theirs. Otherwise the candidate's own
     ``precedent_name_source`` stands; a candidate artifact written before it
     existed has none, and the promotion records none rather than guess.
     """
+    marker = candidate.get("precedent_name_source")
+    if marker == NAME_SOURCE_SOURCE_TEXT:
+        return NAME_SOURCE_SOURCE_TEXT
     candidate_name = str(candidate.get("precedent_name", "")).strip()
     if promotion_name and promotion_name != candidate_name:
         return NAME_SOURCE_REVIEWER
-    marker = candidate.get("precedent_name_source")
     return marker if isinstance(marker, str) and marker else None
 
 

@@ -1316,7 +1316,7 @@ Scope boundaries, stated plainly:
   text, not the immutable promotion event's. Promotion records how the name
   was derived as `name_source` (`source_text`, `item_title`, `item_id`,
   `reviewer`) on the node and in the `PRECEDENT_PROMOTED` payload; a title, a
-  bare id and a name a reviewer changed hold no source text and are kept. A
+  bare id and a reviewer's rewrite of either hold no source text and are kept. A
   name with no marker (promoted before it existed) fails closed: the scrub
   renames it unless it is already a bare-id name, so a title-derived name may
   be renamed too. The ids ride the payload as `scrubbed_precedent_ids`
@@ -1334,8 +1334,8 @@ Scope boundaries, stated plainly:
   because a re-run no longer matches the scrubbed precedent. A promotion title
   with no marker cannot be told from an ordinary title, so the listing serves
   it as promoted for a node that is missing or never scrubbed; only a node a
-  scrub touched serves its own name. A name a reviewer typed is never
-  scrubbed, so keep source text out of it.
+  scrub touched serves its own name. A reviewer's edit of a source-derived
+  name keeps `source_text`, so the scrub still renames it.
 - **Observation/Measurement nodes about the subject are not cascaded** — they
   are independent governed nodes and property-based queries
   (`query_observations`, `GET /measurements`) keep serving them after the
