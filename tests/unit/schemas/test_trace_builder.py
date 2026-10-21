@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -80,7 +80,7 @@ def test_add_step_started_at_string_passthrough():
 
 
 def test_add_step_started_at_datetime_converted():
-    dt = datetime.datetime(2024, 6, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    dt = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
     payload = (
         TracePayloadBuilder(source="workflow", intent="x")
         .add_step(step_type="event", name="e", started_at=dt)
@@ -197,7 +197,7 @@ def test_set_context_appears_in_payload():
 
 
 def test_set_context_datetime_converted():
-    dt = datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC)
+    dt = datetime(2024, 1, 1, tzinfo=UTC)
     payload = (
         TracePayloadBuilder(source="workflow", intent="x")
         .set_context(agent_id="a", started_at=dt)

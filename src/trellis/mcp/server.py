@@ -2834,7 +2834,7 @@ def get_lessons(
         limit: Maximum lessons to return (default 10).
         max_tokens: Maximum response size in tokens (default 2000).
     """
-    from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415, I001
+    from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
 
     registry = _get_registry()
     lessons = _list_prec(
