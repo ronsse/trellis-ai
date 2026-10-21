@@ -536,7 +536,7 @@ def precedent_skip_reason(graph_store: GraphStore, entity_id: str) -> str | None
     if not isinstance(record, dict):
         return None
     state = record.get("state")
-    if not isinstance(state, str) or state == CURRENT_STATE:
+    if not isinstance(state, str) or state in ("", CURRENT_STATE):
         return None
     if state == "demoted":
         return SKIPPED_ALREADY_DEMOTED
