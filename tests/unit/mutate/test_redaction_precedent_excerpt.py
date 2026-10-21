@@ -20,6 +20,7 @@ import pytest
 from trellis.errors import StoreError
 from trellis.learning.scoring import (
     SOURCE_EXCERPT_REDACTED,
+    _apply_readable_name_fallback,
     build_learning_promotion_payloads,
     submit_learning_promotion,
 )
@@ -31,6 +32,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 COPIED_TEXT = "ZEBRA-QUOKKA confidential sentence copied from the source"
+NAME_TEXT = "NARWHAL-OKAPI first line of the source"
 EXPECTED_KEYS = {
     "target_id",
     "target_kind",
@@ -61,6 +63,8 @@ def _candidate(item_id: str, *, secret: str = COPIED_TEXT) -> dict[str, Any]:
         "recommendation_type": "promote_guidance",
         "item_id": item_id,
         "precedent_name": f"Learning :: {item_id}",
+        # A title the item carried: holds no text from the source body.
+        "precedent_name_source": "item_title",
         "precedent_properties": {
             "intent_family": "asset_generation",
             "source_item_id": item_id,
@@ -76,13 +80,32 @@ def _candidate(item_id: str, *, secret: str = COPIED_TEXT) -> dict[str, Any]:
     }
 
 
-def _promote(registry: StoreRegistry, item_id: str, *, body: str = COPIED_TEXT) -> str:
-    """Store ``item_id`` as a document and promote a precedent from it."""
+def _promote(
+    registry: StoreRegistry,
+    item_id: str,
+    *,
+    body: str = COPIED_TEXT,
+    source_named: bool = False,
+) -> str:
+    """Store ``item_id`` as a document and promote a precedent from it.
+
+    ``source_named`` promotes a title-less candidate, so its name is the
+    first line of ``body``, derived by the real readable-name fallback.
+    """
     knowledge = registry.knowledge
     if knowledge.document_store.get(item_id) is None:
         knowledge.document_store.put(item_id, body, {})
+    candidate = _candidate(item_id)
+    if source_named:
+        candidate.update(
+            title=None,
+            precedent_name=f"Learning: asset_generation :: {item_id}",
+            precedent_name_source="item_id",
+        )
+        _apply_readable_name_fallback(candidate, knowledge.document_store)
+        assert NAME_TEXT in candidate["precedent_name"]
     payloads = build_learning_promotion_payloads(
-        candidate=_candidate(item_id),
+        candidate=candidate,
         promotion_name="",
         rationale="reviewed and approved",
         document_store=knowledge.document_store,
@@ -355,23 +378,205 @@ class TestNothingToScrub:
         assert graph.get_node("doc-a") is None
 
 
-class TestScanCap:
-    def test_a_capped_precedent_scan_is_reported(
+class TestPrecedentNames:
+    """A name derived from the source's first line is source text too."""
+
+    BODY = f"{NAME_TEXT}\n\n{COPIED_TEXT}"
+
+    def test_a_name_taken_from_the_source_is_renamed(
+        self, registry: StoreRegistry
+    ) -> None:
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", body=self.BODY, source_named=True)
+        graph = registry.knowledge.graph_store
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert NAME_TEXT in node["properties"]["name"]
+        assert node["properties"]["name_source"] == "source_text"
+        (promoted,) = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED
+        )
+        assert promoted.payload["name_source"] == "source_text"
+        assert NAME_TEXT in promoted.payload["title"]
+
+        _two_versions(registry, precedent_id)
+        _redact(registry, "doc-a")
+
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"]["name"] == (
+            f"Learning: asset_generation :: {precedent_id}"
+        )
+        assert node["properties"]["name_source"] == "neutral"
+        everything = _everything_stored(registry, precedent_id)
+        assert NAME_TEXT not in everything
+        assert COPIED_TEXT not in everything
+
+    def test_a_name_alone_is_scrubbed_when_no_excerpt_was_copied(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-n")
+        payloads = build_learning_promotion_payloads(
+            candidate={
+                **_candidate("doc-n"),
+                "precedent_name": f"Learning: asset_generation :: {NAME_TEXT}",
+                "precedent_name_source": "source_text",
+            },
+            promotion_name="",
+            rationale="",
+        )
+        props = payloads["entity_payload"]["properties"]
+        assert props["source_excerpt_status"] == "no_document_store"
+        graph.upsert_node(
+            "prec-n", "precedent", {**props, "name": payloads["entity_payload"]["name"]}
+        )
+
+        payload = _redact(registry, "doc-n")
+
+        assert payload["scrubbed_precedent_ids"] == ["prec-n"]
+        node = graph.get_node("prec-n")
+        assert node is not None
+        assert NAME_TEXT not in repr(node)
+        assert node["properties"]["name_source"] == "neutral"
+        assert node["properties"]["source_excerpt_status"] == "no_document_store"
+
+    def test_a_title_name_survives(self, registry: StoreRegistry) -> None:
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        _redact(registry, "doc-a")
+        node = registry.knowledge.graph_store.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"]["name"] == "Learning :: doc-a"
+        assert node["properties"]["name_source"] == "item_title"
+
+    def test_an_unmarked_name_fails_closed_unless_it_is_a_bare_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        # Promoted before names were marked: nothing says where it came from.
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-u")
+        base = {
+            "intent_family": "asset_generation",
+            "source_item_id": "doc-u",
+            "source_excerpt_status": "no_content",
+        }
+        graph.upsert_node(
+            "prec-text", "precedent", {**base, "name": f"Learning: x :: {NAME_TEXT}"}
+        )
+        bare = "Learning: asset_generation :: doc-u"
+        graph.upsert_node("prec-bare", "precedent", {**base, "name": bare})
+
+        payload = _redact(registry, "doc-u")
+
+        assert payload["scrubbed_precedent_ids"] == ["prec-text"]
+        assert NAME_TEXT not in _everything_stored(registry, "prec-text")
+        node = graph.get_node("prec-bare")
+        assert node is not None
+        assert node["properties"]["name"] == bare
+
+    def test_listing_serves_the_neutral_title(self, registry: StoreRegistry) -> None:
+        # PRECEDENT_PROMOTED is immutable and holds the title as promoted.
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", body=self.BODY, source_named=True)
+        graph = registry.knowledge.graph_store
+        log = registry.operational.event_log
+        (row,) = list_precedents(log, graph_store=graph)
+        assert NAME_TEXT in row["title"]
+
+        _redact(registry, "doc-a")
+
+        (row,) = list_precedents(log, graph_store=graph)
+        assert row["title"] == f"Learning: asset_generation :: {precedent_id}"
+        assert NAME_TEXT not in repr(row)
+
+
+class TestPrecedentScan:
+    """The precedent lookup reads every precedent, or the redaction fails."""
+
+    def test_a_precedent_beyond_the_first_page_is_scrubbed(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Precedents are read in node-id order; "z" sorts after every other.
+        for name in ("a1", "a2", "a3", "a4"):
+            _promote(registry, f"doc-{name}")
+        _node(registry, "doc-z")
+        last = _promote(registry, "doc-z")
+        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        graph = registry.knowledge.graph_store
+        pages: list[int] = []
+        real = graph.search_nodes
+
+        def counting(**kwargs: Any) -> Any:
+            pages.append(kwargs["offset"])
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", counting)
+
+        payload = _redact(registry, "doc-z")
+
+        assert pages == [0, 2, 4]
+        assert payload["scrubbed_precedent_ids"] == [last]
+        assert COPIED_TEXT not in _everything_stored(registry, last)
+        assert "precedent_scan_capped" not in payload
+
+    def test_a_scan_that_fails_part_way_refuses_before_any_purge(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _node(registry, "doc-a")
-        _promote(registry, "doc-a")
-        _promote(registry, "doc-other")
-        monkeypatch.setattr(handlers, "_PRECEDENT_SCAN_LIMIT", 2)
+        precedent_id = _promote(registry, "doc-a")
+        for name in ("b1", "b2", "b3"):
+            _promote(registry, f"doc-{name}")
+        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
 
-        payload = _redact(registry, "doc-a")
+        def fail_on_second_page(**kwargs: Any) -> Any:
+            if kwargs["offset"]:
+                msg = "page read failed"
+                raise StoreError(msg, store="graph")
+            return real(**kwargs)
 
-        assert payload["precedent_scan_capped"] is True
+        monkeypatch.setattr(graph, "search_nodes", fail_on_second_page)
+        before = _everything_stored(registry, precedent_id)
 
-    def test_an_uncapped_scan_adds_no_key(self, registry: StoreRegistry) -> None:
+        with pytest.raises(StoreError, match="page read failed"):
+            _redact(registry, "doc-a")
+
+        assert graph.get_node("doc-a") is not None
+        assert _everything_stored(registry, precedent_id) == before
+        assert not registry.operational.event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED
+        )
+
+    def test_a_set_that_changes_size_mid_scan_refuses_before_any_purge(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Offset paging skips a row when an earlier one vanishes between
+        # pages, so a changed total must refuse, not finish a partial scan.
         _node(registry, "doc-a")
-        _promote(registry, "doc-a")
-        assert "precedent_scan_capped" not in _redact(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        for name in ("b1", "b2", "b3"):
+            _promote(registry, f"doc-{name}")
+        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+
+        def shrinking(**kwargs: Any) -> Any:
+            rows, total = real(**kwargs)
+            return rows, total - 1 if kwargs["offset"] else total
+
+        monkeypatch.setattr(graph, "search_nodes", shrinking)
+        before = _everything_stored(registry, precedent_id)
+
+        with pytest.raises(StoreError, match="changed during the redaction scan"):
+            _redact(registry, "doc-a")
+
+        assert graph.get_node("doc-a") is not None
+        assert _everything_stored(registry, precedent_id) == before
+        assert not registry.operational.event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED
+        )
 
 
 class TestFailureOrder:
