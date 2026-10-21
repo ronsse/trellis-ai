@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from tests.mined_precedents import emit_historical_miner_row
 from trellis.ops.loop_health import summarize_loop_health
 from trellis.schemas.parameters import ParameterProposal, ParameterScope
 from trellis.stores.base.event_log import Event, EventType
@@ -180,6 +181,47 @@ class TestPrecedentPromotionWindows:
         # the badge must never claim "ok" (a determination this event
         # never actually made), only the neutral "ran".
         assert row.last_status == "ran"
+
+    def test_a_mined_candidate_is_not_counted_as_a_promotion(
+        self, tmp_path: Path
+    ) -> None:
+        """The miner once emitted its candidates as ``PRECEDENT_PROMOTED``.
+        Counting such a row would report promotions (and a last run) that
+        no human or policy approved.
+
+        Only a miner row: the row reports nothing, as it does for an empty
+        log. A miner row beside a governed promotion: it counts one.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        now = datetime.now(UTC)
+        emit_historical_miner_row(event_log, entity_id="mined-1")
+        emit_historical_miner_row(event_log, entity_id="mined-2", shape="extracted")
+
+        row = _row(
+            summarize_loop_health(event_log, tuner_state, now=now),
+            "precedent_promotion",
+        )
+        assert row.counters is None
+        assert row.last_status is None
+        assert row.last_run_at is None
+
+        event_log.append(
+            Event(
+                event_type=EventType.PRECEDENT_PROMOTED,
+                source="mutation_executor",
+                entity_id="trace-1",
+                occurred_at=now - timedelta(days=1),
+                payload={"title": "Approved lesson"},
+            )
+        )
+
+        row = _row(
+            summarize_loop_health(event_log, tuner_state, now=now),
+            "precedent_promotion",
+        )
+        assert row.counters is not None
+        assert row.counters["promoted_last_7d"] == 1
+        assert row.counters["promoted_last_30d"] == 1
 
     def test_a_demoted_precedent_is_reported_separately_not_subtracted(
         self, tmp_path: Path

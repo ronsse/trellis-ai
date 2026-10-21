@@ -27,6 +27,33 @@ _MAX_PRECEDENT_SCAN = DEFAULT_SCAN_LIMIT
 #: drift on which states "excluded" means.
 WITHHELD_PRECEDENT_STATES = frozenset({"demoted", "archived"})
 
+#: ``Event.source`` the precedent miner stamps on everything it emits. A
+#: governed ``precedent.promote`` stamps ``"mutation_executor"``, so this
+#: value alone marks an ungoverned, mined row.
+MINER_EVENT_SOURCE = "precedent_miner"
+
+#: ``payload.action`` the miner stamped on an LLM-mined candidate, back when
+#: it emitted that candidate as ``PRECEDENT_PROMOTED``.
+MINED_CANDIDATE_ACTION = "precedent_candidate_generated"
+
+
+def is_miner_candidate_event(event: Event) -> bool:
+    """Whether ``event`` was written by the precedent miner, not a promotion.
+
+    The miner now emits :attr:`EventType.PRECEDENT_CANDIDATE_MINED`, but
+    event rows are immutable and earlier versions of it wrote its
+    candidates as ``PRECEDENT_PROMOTED``. Every reader that means "a
+    promoted precedent" skips such a row through this one predicate, so
+    the two spellings of "mined, not promoted" cannot drift between
+    surfaces. Matches the miner's source or its candidate action, never a
+    source *other than* the promote handler's: a ``PRECEDENT_PROMOTED``
+    row from any other emitter is still a promotion.
+    """
+    return (
+        event.source == MINER_EVENT_SOURCE
+        or event.payload.get("action") == MINED_CANDIDATE_ACTION
+    )
+
 
 def is_withheld_precedent(graph_store: GraphStore | None, entity_id: str) -> bool:
     """Whether ``entity_id``'s current graph node is demoted or archived.
@@ -115,30 +142,27 @@ def list_precedents(
     ``"demoted"`` or ``"archived"``; retention archives a demoted
     precedent, and the pack collect seam withholds both states).
 
-    The lifecycle filter is applied **before** the ``limit`` cap, not
-    after: a naive "fetch ``limit``, then filter" shape can return fewer
-    than ``limit`` rows even when ``limit``-or-more servable rows exist
-    just past the window, because every demoted/archived row inside the
-    window consumes a slot without serving anything. Instead, when
-    ``graph_store`` is given, this widens the underlying fetch (4x per
-    retry) until either ``limit`` servable rows are found, the store is
-    exhausted (a fetch returns fewer events than it asked for), or
-    :data:`_MAX_PRECEDENT_SCAN` is reached -- the same bounded-retry
-    shape :func:`~trellis.stores.base.event_log.scan_events` uses for an
+    A row the precedent miner wrote
+    (:func:`is_miner_candidate_event`) is skipped whatever the
+    ``graph_store``: the miner once emitted its ungoverned, unapproved
+    candidates as ``PRECEDENT_PROMOTED``, and a candidate is not a
+    promoted precedent.
+
+    The lifecycle and miner filters are applied **before** the ``limit``
+    cap, not after: a naive "fetch ``limit``, then filter" shape can
+    return fewer than ``limit`` rows even when ``limit``-or-more servable
+    rows exist just past the window, because every demoted, archived or
+    mined row inside the window consumes a slot without serving anything.
+    Instead this widens the underlying fetch (4x per retry) until either
+    ``limit`` servable rows are found, the store is exhausted (a fetch
+    returns fewer events than it asked for), or :data:`_MAX_PRECEDENT_SCAN`
+    is reached -- the same bounded-retry shape
+    :func:`~trellis.stores.base.event_log.scan_events` uses for an
     unrelated reason (truncation reporting). Omitted, a caller with no
-    graph store handy gets the pre-demotion, event-log-only behaviour
-    with no retry, since there is nothing to filter.
+    graph store handy gets no lifecycle filter, since there is nothing to
+    check against, but still the miner filter.
     """
     payload_filters = {"domain": domain} if domain else None
-
-    if graph_store is None:
-        events = event_log.get_events(
-            event_type=EventType.PRECEDENT_PROMOTED,
-            limit=limit,
-            order="desc",
-            payload_filters=payload_filters,
-        )
-        return [_serialize(e) for e in events]
 
     fetch_limit = max(limit, 1)
     results: list[dict[str, Any]] = []
@@ -151,14 +175,19 @@ def list_precedents(
         )
         results = []
         for e in events:
+            if len(results) >= limit:
+                break
+            if is_miner_candidate_event(e):
+                continue
+            if graph_store is None:
+                results.append(_serialize(e))
+                continue
             node = graph_store.get_node(e.entity_id) if e.entity_id else None
             if node is not None and _node_is_withheld(node):
                 continue
             results.append(
                 _serialize(e, description=_served_description(node, e.payload))
             )
-            if len(results) >= limit:
-                break
         exhausted = len(events) < fetch_limit
         if len(results) >= limit or exhausted or fetch_limit >= _MAX_PRECEDENT_SCAN:
             break

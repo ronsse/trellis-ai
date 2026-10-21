@@ -17,6 +17,7 @@ from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
 from tests.duplicate_trace import graph_state, synthetic_trace
+from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
 from trellis.retrieve.pack_builder import PackBuilder
@@ -1422,6 +1423,50 @@ def test_precedents_refuses_an_excessive_limit(client):
 def test_precedents_accepts_the_upper_bound(client):
     resp = client.get("/api/v1/precedents", params={"limit": 500})
     assert resp.status_code == 200
+
+
+def test_precedents_does_not_serve_a_mined_candidate(client):
+    """The miner once emitted candidates as ``PRECEDENT_PROMOTED``; the
+    listing skips those rows and still serves a governed promotion."""
+    registry = app_module._registry
+    emit_historical_miner_row(
+        registry.operational.event_log, entity_id="mined-1", title="Mined guess"
+    )
+    promote_through_executor(registry, trace_id="trace-1", title="Approved lesson")
+
+    resp = client.get("/api/v1/precedents")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [p["title"] for p in data["precedents"]] == ["Approved lesson"]
+    assert data["count"] == 1
+
+
+def test_list_precedent_domains_does_not_count_a_mined_candidate(client):
+    """The domain filter must not offer, or count, a precedent that
+    ``GET /precedents`` skips."""
+    registry = app_module._registry
+    event_log = registry.operational.event_log
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="precedent_miner",
+        entity_id="mined-1",
+        payload={
+            "action": "precedent_candidate_generated",
+            "title": "Mined guess",
+            "domain": "platform",
+        },
+    )
+    promote_through_executor(
+        registry, trace_id="trace-1", title="Approved lesson", domain="data"
+    )
+
+    resp = client.get("/api/v1/precedents/domains")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1
+    assert data["domains"] == [{"domain": "data", "count": 1}]
 
 
 def test_list_precedent_domains_counts_every_promoted_precedent(client):

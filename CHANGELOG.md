@@ -907,6 +907,20 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A mined precedent candidate no longer reads as a promoted precedent
+  ([#925](https://github.com/ronsse/trellis-ai/issues/925)).** `PrecedentMiner`
+  wrote each candidate it mined as `PRECEDENT_PROMOTED`, so `get_lessons`,
+  `GET /precedents` and `trellis retrieve precedents` would have served an
+  ungoverned, unapproved row as a promoted lesson. It now emits a new
+  `PRECEDENT_CANDIDATE_MINED` event (`precedent.candidate_mined`) on both its
+  paths. The readers that mean "a promoted precedent" — `list_precedents`,
+  `GET /precedents/domains`, the demote handler's "is this a real precedent"
+  check and the loop-health promotion count — also skip the rows an earlier
+  miner already wrote, through `is_miner_candidate_event` (`source ==
+  "precedent_miner"` or `action == "precedent_candidate_generated"`). The
+  governed `precedent.promote` event is unchanged. Candidates still bypass
+  `MutationExecutor` and nothing routes them into the Review queue yet.
+
 - **A pack records its graph seeds once, not once per graph item.** A seeded
   `GraphSearch` stamps the whole seed list on every item it returns, and the
   stamp stayed there: `POST /api/v1/packs`, `POST /api/v1/packs/sectioned` and

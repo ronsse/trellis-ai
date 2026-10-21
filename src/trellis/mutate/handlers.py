@@ -44,6 +44,7 @@ from trellis.mutate.retention import (
     RetentionCriteria,
     resolve_candidates,
 )
+from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -453,23 +454,28 @@ def _was_auto_promoted(event_log: EventLog, entity_id: str) -> bool:
 
 
 def _is_promoted_precedent_event(event_log: EventLog, entity_id: str) -> bool:
-    """Whether ``entity_id`` has a ``PRECEDENT_PROMOTED`` event, any source.
+    """Whether ``entity_id`` has a promotion event, whichever handler path wrote it.
 
     ``PrecedentPromoteHandler`` emits this event for two unlike sources
-    (its own docstring): a trace- or miner-sourced precedent, whose
-    ``entity_id`` names a trace and never gets a graph entity, and a
-    learning-candidate promotion, whose ``entity_id`` is a graph entity
+    (its own docstring): a trace-sourced precedent, whose ``entity_id``
+    names a trace and never gets a graph entity, and a learning-candidate
+    promotion, whose ``entity_id`` is a graph entity
     ``submit_learning_promotion`` minted first. This answers "is this id
     a real precedent, just not a graph-backed one" so
     :class:`PrecedentDemoteHandler` can name that gap specifically
     instead of reporting the same "Node not found" a garbage id gets.
+
+    A row the precedent miner wrote (:func:`is_miner_candidate_event`) is
+    not a promotion: it is an ungoverned candidate, so an id that has only
+    that row reads as "not found", the same as an id with no event at all.
+    The scan reads every ``PRECEDENT_PROMOTED`` row for the id rather than
+    the newest one, so a miner row cannot shadow a real promotion.
     """
     events = event_log.get_events(
         event_type=EventType.PRECEDENT_PROMOTED,
         entity_id=entity_id,
-        limit=1,
     )
-    return bool(events)
+    return any(not is_miner_candidate_event(e) for e in events)
 
 
 def _current_lifecycle_state(node: dict[str, Any]) -> str:

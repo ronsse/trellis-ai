@@ -14,9 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from trellis.retrieve.precedents import list_precedents
+from tests.mined_precedents import (
+    MinerShape,
+    emit_historical_miner_row,
+    promote_through_executor,
+)
+from trellis.retrieve.precedents import (
+    MINED_CANDIDATE_ACTION,
+    MINER_EVENT_SOURCE,
+    is_miner_candidate_event,
+    list_precedents,
+)
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 
@@ -291,3 +302,94 @@ class TestGraphStoreExcludesDemoted:
 
         result = list_precedents(event_log)
         assert [row["entity_id"] for row in result] == ["prec-1"]
+
+
+class TestMinedCandidatesAreNotPromoted:
+    """A candidate the precedent miner wrote is not a promoted precedent.
+
+    The miner once emitted its ungoverned, unapproved candidates as
+    ``PRECEDENT_PROMOTED``; the event log is immutable, so those rows
+    outlive the fix and ``list_precedents`` (hence ``get_lessons``,
+    ``GET /precedents`` and ``trellis retrieve precedents``) has to skip them.
+    """
+
+    @pytest.fixture
+    def registry(self, tmp_path: Path) -> StoreRegistry:
+        return StoreRegistry(stores_dir=tmp_path / "stores")
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    @pytest.mark.parametrize("shape", ["generated", "extracted"])
+    def test_a_historical_miner_row_is_not_listed(
+        self, registry: StoreRegistry, with_graph: bool, shape: MinerShape
+    ) -> None:
+        log = registry.operational.event_log
+        emit_historical_miner_row(log, entity_id="mined-1", shape=shape)
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        assert list_precedents(log, graph_store=graph) == []
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    def test_a_governed_promotion_is_still_listed(
+        self, registry: StoreRegistry, with_graph: bool
+    ) -> None:
+        log = registry.operational.event_log
+        emit_historical_miner_row(log, entity_id="mined-1")
+        promote_through_executor(registry, trace_id="trace-1", title="Real lesson")
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        listed = list_precedents(log, graph_store=graph)
+
+        assert [row["title"] for row in listed] == ["Real lesson"]
+
+    @pytest.mark.parametrize("source", ["test", "cli", "trellis.learning"])
+    def test_a_promotion_from_any_other_emitter_is_still_listed(
+        self, event_log: SQLiteEventLog, source: str
+    ) -> None:
+        """The exclusion names the miner; it is not "anything but the
+        promote handler". A ``PRECEDENT_PROMOTED`` row from some other
+        emitter is still a promotion."""
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source=source,
+            entity_id="prec-1",
+            payload={"title": "From elsewhere"},
+        )
+
+        assert [r["title"] for r in list_precedents(event_log)] == ["From elsewhere"]
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    def test_miner_rows_do_not_use_up_the_limit(
+        self, registry: StoreRegistry, with_graph: bool
+    ) -> None:
+        """Newer miner rows sit ahead of the one real promotion in the
+        newest-first window; a fetch of ``limit`` rows then a filter would
+        return nothing."""
+        log = registry.operational.event_log
+        promote_through_executor(registry, trace_id="trace-1", title="Real lesson")
+        for i in range(6):
+            emit_historical_miner_row(log, entity_id=f"mined-{i}")
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        listed = list_precedents(log, limit=1, graph_store=graph)
+
+        assert [row["title"] for row in listed] == ["Real lesson"]
+
+    def test_the_predicate_matches_the_literals_old_rows_carry(self) -> None:
+        """Old rows are immutable, so the predicate's constants can never
+        change without orphaning them."""
+        assert MINER_EVENT_SOURCE == "precedent_miner"
+        assert MINED_CANDIDATE_ACTION == "precedent_candidate_generated"
+
+    def test_the_predicate_reads_the_action_as_well_as_the_source(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="some-fork",
+            entity_id="prec-1",
+            payload={"action": MINED_CANDIDATE_ACTION, "title": "Candidate"},
+        )
+
+        [event] = event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED)
+        assert is_miner_candidate_event(event)
+        assert list_precedents(event_log) == []

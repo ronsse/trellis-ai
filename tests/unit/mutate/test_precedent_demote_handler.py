@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from tests.mined_precedents import emit_historical_miner_row
 from trellis.errors import ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.mutate import build_curate_executor, handlers
@@ -469,6 +470,36 @@ class TestPrecedentDemoteHandler:
 
         assert exc_info.value.code == "target_not_found"
         assert "Node not found" in str(exc_info.value)
+
+    def test_a_mined_candidate_id_reads_as_not_found(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A row the precedent miner wrote is an ungoverned candidate, not
+        a promoted precedent, so its id gets the generic refusal an
+        unknown id gets rather than the "real precedent, no graph node"
+        one."""
+        emit_historical_miner_row(registry.operational.event_log, entity_id="mined-1")
+
+        with pytest.raises(ValidationError) as exc_info:
+            PrecedentDemoteHandler(registry).handle(_demote("mined-1"))
+
+        assert exc_info.value.code == "target_not_found"
+
+    def test_a_miner_row_does_not_hide_a_real_promotion_of_the_same_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The miner row is written first, so it is the oldest row for the
+        id; a check that read only the first row would miss the promotion
+        behind it."""
+        emit_historical_miner_row(
+            registry.operational.event_log, entity_id="trace-abc-123"
+        )
+        _promote_trace(registry, "trace-abc-123")
+
+        with pytest.raises(ValidationError) as exc_info:
+            PrecedentDemoteHandler(registry).handle(_demote("trace-abc-123"))
+
+        assert exc_info.value.code == "target_not_graph_backed"
 
 
 class TestPrecedentReinstateHandler:

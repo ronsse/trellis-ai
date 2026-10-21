@@ -204,7 +204,12 @@ class TestConfidenceMapping:
 
 
 class TestExtractEventEmission:
-    """Verify event log receives PRECEDENT_PROMOTED on extraction."""
+    """Verify event log receives PRECEDENT_CANDIDATE_MINED on extraction.
+
+    A mined candidate is ungoverned and unapproved, so the miner never
+    emits ``PRECEDENT_PROMOTED``: the readers behind ``get_lessons`` and
+    ``GET /precedents`` would serve it as a promoted lesson.
+    """
 
     def test_emits_event(
         self,
@@ -219,11 +224,13 @@ class TestExtractEventEmission:
 
         assert precedent is not None
 
+        assert event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED) == []
         events = event_log.get_events(
-            event_type=EventType.PRECEDENT_PROMOTED,
+            event_type=EventType.PRECEDENT_CANDIDATE_MINED,
         )
         assert len(events) == 1
         evt = events[0]
+        assert evt.source == "precedent_miner"
         assert evt.entity_id == precedent.precedent_id
         assert evt.entity_type == "precedent"
         assert evt.payload["trace_id"] == trace.trace_id
@@ -377,10 +384,12 @@ class TestGenerateCandidatesHappy:
         result = await miner.generate_precedent_candidates()
 
         assert len(result) == 1
+        assert event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED) == []
         events = event_log.get_events(
-            event_type=EventType.PRECEDENT_PROMOTED,
+            event_type=EventType.PRECEDENT_CANDIDATE_MINED,
         )
         assert len(events) == 1
+        assert events[0].source == "precedent_miner"
         assert events[0].payload["action"] == "precedent_candidate_generated"
         assert events[0].payload["title"] == "Timeout pattern"
 
@@ -395,7 +404,7 @@ class TestGenerateCandidatesNonFiniteConfidence:
 
     ``json.loads`` accepts the non-standard ``NaN`` token, and ``float()``
     accepts the string ``"nan"`` too — both reached ``Precedent.confidence``
-    unclamped before this test, then failed the ``PRECEDENT_PROMOTED`` emit
+    unclamped before this test, then failed the candidate event emit
     (``allow_nan=False``) after an earlier candidate in the same reply had
     already been emitted. ``coerce_finite_float`` catches both at the
     source instead.
@@ -437,7 +446,7 @@ class TestGenerateCandidatesNonFiniteConfidence:
         assert len(result) == 1
         assert result[0].confidence == 0.5
 
-        events = event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED)
+        events = event_log.get_events(event_type=EventType.PRECEDENT_CANDIDATE_MINED)
         assert len(events) == 1
         assert events[0].payload["confidence"] == 0.5
 
