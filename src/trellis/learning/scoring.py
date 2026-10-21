@@ -101,6 +101,24 @@ PRECEDENT_SOURCE_EXCERPT_MAX_CHARS = 600
 #: excerpt is in the description.
 SOURCE_EXCERPT_INCLUDED = "included"
 
+#: ``properties["source_excerpt_status"]`` once a redaction of the source
+#: document scrubbed the excerpt from the precedent (``redaction.apply``,
+#: :func:`strip_source_excerpt`). Distinct from every reason a promotion
+#: records, which all mean "never copied"; this one means "copied, then
+#: removed".
+SOURCE_EXCERPT_REDACTED = "source_redacted"
+
+#: The two description fragments that bracket the excerpt. Shared by
+#: :func:`_build_precedent_description` (which writes them) and
+#: :func:`strip_source_excerpt` (which finds them), so the writer and the
+#: scrubber cannot drift apart.
+_SOURCE_EXCERPT_PREFIX = "Source excerpt: "
+
+
+def _source_item_marker(item_id: object) -> str:
+    return f"Source item '{item_id}' showed "
+
+
 # --- Promotion-ready digest (#845) ------------------------------------------
 #
 # A ``promote_guidance`` candidate is "promotion-ready" for the digest only
@@ -900,6 +918,36 @@ def resolve_source_excerpt(
     )
 
 
+def strip_source_excerpt(description: str, source_item_id: str) -> str:
+    """``description`` minus the excerpt :func:`resolve_source_excerpt` put in it.
+
+    The excerpt sits between ``Source excerpt: `` and the statistics
+    sentence that opens ``Source item '<id>' showed``. An excerpt is
+    arbitrary document text, so the *last* such sentence marks the end:
+    one the document happened to quote can only make the cut wider, never
+    leave a tail of the excerpt behind. If the opening is found but the
+    closing is not (a hand-edited description), everything from the
+    opening on goes, for the same reason. A description with no opening
+    carries no excerpt and comes back unchanged.
+    """
+    start = description.find(_SOURCE_EXCERPT_PREFIX)
+    if start == -1:
+        return description
+    tail = " " + _source_item_marker(source_item_id)
+    end = description.rfind(tail, start + len(_SOURCE_EXCERPT_PREFIX))
+    if end == -1:
+        return description[:start].rstrip()
+    return description[:start] + description[end + 1 :]
+
+
+def carries_source_excerpt(properties: Mapping[str, Any]) -> bool:
+    """Whether a precedent's properties hold, or promise, a copied source excerpt."""
+    if properties.get("source_excerpt_status") == SOURCE_EXCERPT_INCLUDED:
+        return True
+    description = properties.get("description")
+    return isinstance(description, str) and _SOURCE_EXCERPT_PREFIX in description
+
+
 def build_learning_promotion_payloads(
     *,
     candidate: Mapping[str, Any],
@@ -1299,8 +1347,8 @@ def _build_precedent_description(
     # the retrieving agent reads. The statistics are for the reviewer and
     # survive in the stored description either way.
     if source_excerpt:
-        parts.append(f"Source excerpt: {source_excerpt}")
-    parts.append(f"Source item '{item}' showed {measured}.")
+        parts.append(f"{_SOURCE_EXCERPT_PREFIX}{source_excerpt}")
+    parts.append(f"{_source_item_marker(item)}{measured}.")
     # Citation evidence, stated rather than implied. ``success_rate`` is a
     # pack-level outcome that says nothing about whether a grader ever
     # found *this item* useful, and on the live corpus most promote
@@ -1344,14 +1392,17 @@ __all__ = [
     "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
+    "SOURCE_EXCERPT_REDACTED",
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
+    "carries_source_excerpt",
     "is_promotion_ready",
     "normalize_intent_family",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
     "promotion_ready_sort_key",
     "resolve_source_excerpt",
+    "strip_source_excerpt",
     "submit_learning_promotion",
     "write_learning_review_artifacts",
 ]

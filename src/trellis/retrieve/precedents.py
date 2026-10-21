@@ -41,8 +41,29 @@ def is_withheld_precedent(graph_store: GraphStore | None, entity_id: str) -> boo
     node = graph_store.get_node(entity_id)
     if node is None:
         return False
+    return _node_is_withheld(node)
+
+
+def _node_is_withheld(node: dict[str, Any]) -> bool:
     lifecycle = node.get("properties", {}).get(LIFECYCLE_KEY) or {}
     return lifecycle.get("state") in WITHHELD_PRECEDENT_STATES
+
+
+def _redacted_description(node: dict[str, Any] | None) -> str | None:
+    """The node's description when a redaction scrubbed its source excerpt.
+
+    ``PRECEDENT_PROMOTED`` is immutable, so its payload still holds the
+    description as promoted, excerpt included. ``redaction.apply`` scrubs the
+    graph node instead; for such a node the listing serves the node's text.
+    """
+    # Deferred: ``trellis.learning`` imports the retrieve package.
+    from trellis.learning.scoring import SOURCE_EXCERPT_REDACTED  # noqa: PLC0415
+
+    props = (node or {}).get("properties") or {}
+    if props.get("source_excerpt_status") != SOURCE_EXCERPT_REDACTED:
+        return None
+    description = props.get("description")
+    return description if isinstance(description, str) else ""
 
 
 def list_precedents(
@@ -113,11 +134,10 @@ def list_precedents(
         )
         results = []
         for e in events:
-            if e.entity_id is not None and is_withheld_precedent(
-                graph_store, e.entity_id
-            ):
+            node = graph_store.get_node(e.entity_id) if e.entity_id else None
+            if node is not None and _node_is_withheld(node):
                 continue
-            results.append(_serialize(e))
+            results.append(_serialize(e, description=_redacted_description(node)))
             if len(results) >= limit:
                 break
         exhausted = len(events) < fetch_limit
@@ -127,13 +147,16 @@ def list_precedents(
     return results
 
 
-def _serialize(e: Event) -> dict[str, Any]:
+def _serialize(e: Event, *, description: str | None = None) -> dict[str, Any]:
+    payload = e.payload
+    if description is not None:
+        payload = {**payload, "description": description}
     return {
         "event_id": e.event_id,
         "entity_id": e.entity_id,
         "title": e.payload.get("title", ""),
-        "description": e.payload.get("description", ""),
+        "description": payload.get("description", ""),
         "domain": e.payload.get("domain"),
         "occurred_at": e.occurred_at.isoformat(),
-        "payload": e.payload,
+        "payload": payload,
     }

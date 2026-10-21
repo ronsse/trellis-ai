@@ -114,7 +114,12 @@ class EventType(StrEnum):
     #: ``linked_observation_ids`` / ``linked_measurement_ids`` point at the
     #: surviving Observation/Measurement nodes about the subject (not
     #: cascaded — redact individually). ``command_id`` joins this semantic
-    #: event to the executor's ``MUTATION_EXECUTED`` audit event.
+    #: event to the executor's ``MUTATION_EXECUTED`` audit event. When the
+    #: target is a document (or chunk) that promoted precedents copied an
+    #: excerpt from, ``scrubbed_precedent_ids`` / ``scrubbed_precedent_count``
+    #: name the precedents scrubbed (ids and count only); both keys are
+    #: absent when none were. ``precedent_scan_capped`` (``True``, absent
+    #: otherwise) marks a precedent lookup that hit its read cap.
     REDACTION_APPLIED = "redaction.applied"
 
     #: Emitted by :class:`~trellis.mutate.handlers.RetentionPruneHandler`

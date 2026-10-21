@@ -2560,6 +2560,132 @@ MAX_REDACTION_REASON_CHARS = 2000
 _LINKED_SIGNAL_LIMIT = 100
 
 
+#: Cap on the precedent nodes one redaction reads when it looks for the
+#: ones that copied a source document. The graph API has no index on
+#: ``source_item_id`` and its property filter is equality only, which cannot
+#: express "a chunk of this document"; so the lookup is one bounded read of
+#: the precedent-typed nodes, filtered here. Precedents are human-approved
+#: promotions, so the population is small; a read that fills the cap is
+#: reported on the audit event instead of being taken for complete.
+_PRECEDENT_SCAN_LIMIT = 5000
+
+
+def _precedents_sourced_from(
+    graph: GraphStore, target_id: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Current precedent nodes whose excerpt was copied from ``target_id``.
+
+    A precedent's ``source_item_id`` names a document or one of its
+    ``<parent>#chunk-N`` fragments. A parent target matches itself and its
+    chunks (the chunk id must start with ``<target>#chunk-``, so a sibling
+    document sharing a prefix does not match); a chunk target matches only
+    that chunk. Returns the rows and whether the scan hit its cap.
+    """
+    # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
+    from trellis.ingest_corpus.models import (  # noqa: PLC0415
+        CHUNK_ID_SEPARATOR,
+        is_chunk_doc_id,
+    )
+
+    chunk_prefix = (
+        None if is_chunk_doc_id(target_id) else f"{target_id}{CHUNK_ID_SEPARATOR}"
+    )
+    rows = graph.query(node_type="precedent", limit=_PRECEDENT_SCAN_LIMIT)
+    matched = []
+    for row in rows:
+        source = (row.get("properties") or {}).get("source_item_id")
+        if not isinstance(source, str) or not source:
+            continue
+        if source == target_id or (chunk_prefix and source.startswith(chunk_prefix)):
+            matched.append(row)
+    return matched, len(rows) >= _PRECEDENT_SCAN_LIMIT
+
+
+def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bool:
+    """Remove a precedent's copied source excerpt from every version it has.
+
+    Matches how ``redaction.apply`` treats its own target: a purge, not an
+    SCD-2 close. A new version would leave the excerpt readable through
+    ``get_node_history`` and ``as_of``, and the graph API cannot rewrite a
+    closed version, so the node is purged and re-created from its current
+    version with the excerpt removed and ``source_excerpt_status`` set to
+    :data:`~trellis.learning.scoring.SOURCE_EXCERPT_REDACTED`. Everything
+    else on the current version survives: properties, role, document links,
+    live edges (provenance included) and aliases. What does not survive is
+    the precedent's own earlier versions (which is the point) and the ids
+    and timestamps of its edge rows.
+
+    Returns ``False`` when no version carries an excerpt (nothing to scrub,
+    and the history is left alone). The vector row is deleted first: it was
+    embedded from the description. If the re-create fails after the purge,
+    the precedent is gone, never half-redacted, and the error names its id.
+    """
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        SOURCE_EXCERPT_REDACTED,
+        carries_source_excerpt,
+        strip_source_excerpt,
+    )
+
+    graph = registry.knowledge.graph_store
+    precedent_id = row["node_id"]
+    versions = graph.get_node_history(precedent_id) or [row]
+    if not any(carries_source_excerpt(v.get("properties") or {}) for v in versions):
+        return False
+
+    properties = dict(row.get("properties") or {})
+    description = properties.get("description")
+    if isinstance(description, str):
+        properties["description"] = strip_source_excerpt(
+            description, str(properties.get("source_item_id") or "")
+        )
+    properties["source_excerpt_status"] = SOURCE_EXCERPT_REDACTED
+
+    edges = {e["edge_id"]: e for e in graph.get_edges(precedent_id, direction="both")}
+    aliases = graph.get_aliases(precedent_id)
+
+    registry.knowledge.vector_store.delete(precedent_id)
+    if not graph.delete_node(precedent_id):
+        return False  # a concurrent purge already removed it
+    try:
+        graph.upsert_node(
+            precedent_id,
+            row["node_type"],
+            properties,
+            node_role=row.get("node_role") or "semantic",
+            generation_spec=row.get("generation_spec"),
+            document_ids=row.get("document_ids") or None,
+        )
+        for edge in edges.values():
+            graph.upsert_edge(
+                edge["source_id"],
+                edge["target_id"],
+                edge["edge_type"],
+                edge.get("properties"),
+                source_trace_id=edge.get("source_trace_id"),
+                agent_id=edge.get("agent_id"),
+                confidence=edge.get("confidence"),
+                evidence_ref=edge.get("evidence_ref"),
+                extractor_tier=edge.get("extractor_tier"),
+            )
+        for alias in aliases:
+            graph.upsert_alias(
+                precedent_id,
+                alias["source_system"],
+                alias["raw_id"],
+                raw_name=alias.get("raw_name"),
+                match_confidence=alias.get("match_confidence", 1.0),
+                is_primary=bool(alias.get("is_primary", False)),
+            )
+    except Exception as exc:
+        msg = (
+            f"precedent {precedent_id} was purged to scrub its source excerpt "
+            f"but could not be re-created ({type(exc).__name__}); the excerpt "
+            "is gone, the precedent must be re-promoted"
+        )
+        raise StoreError(msg, store="graph") from exc
+    return True
+
+
 class RedactionApplyHandler:
     """Hard-purge a graph entity, emitting ``REDACTION_APPLIED``.
 
@@ -2595,6 +2721,21 @@ class RedactionApplyHandler:
     that already happened. Scope is the Knowledge Plane: prior
     Operational-Plane events (e.g. the original ``ENTITY_CREATED`` payload)
     and traces are immutable by design and are not rewritten.
+
+    **Precedents that copied the target's text are scrubbed (#927).** A
+    promoted precedent's description opens with up to 600 chars of its
+    source document (``source_item_id``). When the target is that document
+    or a ``<document>#chunk-N`` fragment of it, the excerpt is removed from
+    the precedent (every version, see :func:`_scrub_precedent_excerpt`),
+    ``source_excerpt_status`` becomes ``source_redacted`` and the rest of
+    the precedent stays. The ids ride the payload as
+    ``scrubbed_precedent_ids``. Only a *graph node* can be a target, so
+    this runs for a document that has one (memory extraction mints a
+    node whose id is the document id); a document with no node is refused
+    like any other missing target. The ``PRECEDENT_PROMOTED`` event keeps
+    its copy of the description by design — the log is immutable — so
+    ``list_precedents`` serves the node's description for a scrubbed
+    precedent instead.
 
     **Scope: graph entities only; linked records become pointers.**
     Documents linked from any purged version are *not* cascaded — a
@@ -2685,6 +2826,21 @@ class RedactionApplyHandler:
             )
         ]
 
+        # Precedents that copied this document's text into their
+        # description are scrubbed *before* the target is purged: a failure
+        # here leaves the target in place, so the redaction can simply be
+        # re-run (a scrubbed precedent no longer matches), where the other
+        # order would strand a scrub that has nothing left to be triggered
+        # by. No precedent sourced from the target is a no-op.
+        precedent_rows, precedent_scan_capped = _precedents_sourced_from(
+            graph, target_id
+        )
+        scrubbed_precedent_ids = sorted(
+            row["node_id"]
+            for row in precedent_rows
+            if _scrub_precedent_excerpt(self._registry, row)
+        )
+
         # Vector entry first: if the vector backend raises, the command
         # fails with the graph untouched — nothing irreversible has
         # happened yet.
@@ -2724,6 +2880,21 @@ class RedactionApplyHandler:
             f"({node_versions} version(s), {edges} edge(s), "
             f"{aliases} alias(es), vector_deleted={vector_deleted})"
         )
+        # Keys only when there is something to say, so a redaction that
+        # reaches no precedent emits the payload it always did.
+        if scrubbed_precedent_ids:
+            payload["scrubbed_precedent_ids"] = scrubbed_precedent_ids
+            payload["scrubbed_precedent_count"] = len(scrubbed_precedent_ids)
+            message += (
+                f"; source excerpt scrubbed from {len(scrubbed_precedent_ids)} "
+                "precedent(s)"
+            )
+        if precedent_scan_capped:
+            payload["precedent_scan_capped"] = True
+            message += (
+                f"; precedent scan hit its {_PRECEDENT_SCAN_LIMIT}-node cap, "
+                "so later precedents may still carry an excerpt"
+            )
         try:
             event_log.emit(
                 EventType.REDACTION_APPLIED,

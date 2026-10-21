@@ -1304,6 +1304,17 @@ Scope boundaries, stated plainly:
 - **Linked documents are not cascaded** — the union of the purged node's
   document links across all versions rides the audit payload for a follow-up
   document-level redaction.
+- **Precedents that copied the target's text are scrubbed.** A promoted
+  precedent's description opens with an excerpt of its source document
+  (`source_item_id`). When the target is that document or one of its
+  `<document>#chunk-N` chunks (a chunk target matches only that chunk), the
+  excerpt is removed from every version of the precedent, its
+  `source_excerpt_status` becomes `source_redacted`, and the rest of the
+  precedent stays; `get_lessons` serves the node's text, not the immutable
+  promotion event's. The ids ride the payload as `scrubbed_precedent_ids`
+  (absent when none). Only a graph node can be a target, so this reaches a
+  document that has one; a document with none is refused like any missing
+  target.
 - **Observation/Measurement nodes about the subject are not cascaded** — they
   are independent governed nodes and property-based queries
   (`query_observations`, `GET /measurements`) keep serving them after the
