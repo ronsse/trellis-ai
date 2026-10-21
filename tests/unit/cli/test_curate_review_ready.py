@@ -129,12 +129,20 @@ def _promote_events() -> list[Any]:
         registry.close()
 
 
-def _store_counts() -> tuple[int, int, int]:
+def _store_counts() -> tuple[int, ...]:
+    """Row counts of every store a promotion or its meta-trace could write."""
     registry = curate_cli._get_registry()
     try:
         graph = registry.knowledge.graph_store
         events = registry.operational.event_log.get_events(limit=100_000)
-        return len(events), graph.count_nodes(), graph.count_edges()
+        return (
+            len(events),
+            graph.count_nodes(),
+            graph.count_edges(),
+            registry.knowledge.document_store.count(),
+            registry.knowledge.vector_store.count(),
+            registry.operational.trace_store.count(),
+        )
     finally:
         registry.close()
 
@@ -578,3 +586,98 @@ class TestFormatParity:
         if fmt == "json":
             assert data is not None
             assert data["status"] == expected_status
+        else:
+            # The human surface states the verdict; it does not only exit.
+            assert f"Verdict: {expected_status} (exit {expected_exit})" in plain(out)
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_listing_exits_zero_and_prints_no_verdict(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        # Nothing was promoted, so there is no outcome to give a verdict on.
+        code, data, out = _review(_ready_set(tmp_path), fmt=fmt)
+        assert code == EXIT_OK, out
+        if data is not None:
+            assert data["status"] == "ok"
+        else:
+            assert "Verdict:" not in plain(out)
+
+
+#: scenario -> (submit override or None, id to approve). Each is approved
+#: through ``review-ready --approve`` and through a ``promote-learning``
+#: decisions file; the two must reach the same verdict.
+_SHARED_VERDICT_SCENARIOS: dict[str, tuple[dict[str, Any] | None, str]] = {
+    "landed": (
+        {
+            "status": "promoted",
+            "node_id": "n",
+            "edges": [],
+            "precedent_event_status": "success",
+        },
+        "fam_a:g",
+    ),
+    "failed": ({"status": "entity_failed", "message": "boom"}, "fam_a:g"),
+    "refused_state": ({"status": "refused_demoted", "message": "d"}, "fam_a:g"),
+    "event_not_recorded": (
+        {
+            "status": "promoted",
+            "node_id": "n",
+            "edges": [],
+            "precedent_event_status": "rejected",
+        },
+        "fam_a:g",
+    ),
+    "unknown_id": (None, "fam_a:nope"),
+}
+
+
+class TestSameVerdictAsPromoteLearning:
+    @pytest.mark.parametrize("scenario", sorted(_SHARED_VERDICT_SCENARIOS))
+    def test_review_approve_prints_the_verdict_promote_learning_prints(
+        self,
+        scenario: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        override, approved_id = _SHARED_VERDICT_SCENARIOS[scenario]
+        if override is not None:
+            monkeypatch.setattr(
+                curate_cli, "submit_learning_promotion", _fake_submit(override)
+            )
+        path = _ready_set(tmp_path)
+        decisions = tmp_path / "decisions.json"
+        decisions.write_text(
+            json.dumps(
+                {"decisions": [{"candidate_id": approved_id, "approved": True}]}
+            ),
+            encoding="utf-8",
+        )
+
+        review_code, _, review_out = _review(path, "--approve", approved_id, fmt="text")
+        promote = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote-learning",
+                "--candidates",
+                str(path),
+                "--decisions",
+                str(decisions),
+                "--format",
+                "text",
+            ],
+        )
+
+        assert review_code == promote.exit_code
+        review_verdict = [
+            line
+            for line in plain(review_out).splitlines()
+            if line.startswith("Verdict:")
+        ]
+        promote_verdict = [
+            line
+            for line in plain(promote.stdout).splitlines()
+            if line.startswith("Verdict:")
+        ]
+        assert len(review_verdict) == 1
+        assert review_verdict == promote_verdict

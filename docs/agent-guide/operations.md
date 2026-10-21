@@ -1563,8 +1563,9 @@ in `results`:
 
 The exit code and the payload's top-level `status` come from one reading of
 those entries, taken before either format renders, so neither depends on
-`--format`; the text form ends with a `Verdict:` line naming the same status
-and code. `review-ready --approve` reads its outcomes the same way.
+`--format`; the text form ends with a `Verdict: <status> (exit N)` line naming
+the same status and code. `review-ready --approve` reads its outcomes the same
+way and prints the same line.
 
 | Exit | `status` | When |
 |---|---|---|
@@ -1572,9 +1573,27 @@ and code. `review-ready --approve` reads its outcomes the same way.
 | `2` | `refused` | at least one row was refused and no write failed |
 | `5` | `failed` | at least one write did not land, whether or not another row was refused |
 
-`--dry-run` submits nothing, so it has no outcome to read: it exits `0` and
-reports `ok`, with each row's planned status in `results`. `promoted_count`
-counts the rows that fully landed.
+`promoted_count` counts the rows that fully landed. `approved_count` counts
+the rows marked `approved: true`, including a row with a blank
+`candidate_id`; such a row names nothing to promote, so it is skipped without
+a result and without effect on the verdict. `named_count` counts the approved
+rows that do name a candidate, which is exactly the rows `results` answers,
+and the text form says how many approved rows were skipped for want of an id.
+
+`--dry-run` submits nothing, so it has no outcome to read: it **always exits
+`0`** and reports `ok`, whatever it previews. It adds a preview of the verdict
+a real run would reach, named so it cannot be read as one:
+
+| Field | Meaning |
+|---|---|
+| `would_verdict`, `would_exit_code` | the `status` and exit code a real run would give if every ready write landed (text form: a `Would-be verdict:` line, never `Verdict:`) |
+| `results[].would_status` | the status a real run would give that row: `promoted`, or its refusal |
+
+The preview reads, and never writes. It sees a refusal the planner decides
+(`missing_candidate`, `skipped_non_promotable`) and one an existing
+precedent's lifecycle state decides (`refused_demoted`, `refused_archived`,
+`refused_not_current`). It cannot see a policy-gate refusal or a write that
+fails, so a preview of `ok` can still become `refused` or `failed`.
 
 ### `trellis curate review-ready`
 
@@ -1633,7 +1652,10 @@ promote-learning`. Every id gets its own entry in `results`.
 The exit code does not depend on `--format`, and the payload's `status`
 comes from the same reading: `0` / `ok` when every named id landed, `2` /
 `refused` when any was refused and none failed, `5` / `failed` when a write
-did not land. Listing always exits `0`.
+did not land. With `--approve` the text form ends with the same
+`Verdict: <status> (exit N)` line `promote-learning` prints. Listing (no
+`--approve`) always exits `0` and prints no verdict: nothing was promoted, so
+there is no outcome to judge.
 
 ### `trellis curate auto-promote-candidates`
 
