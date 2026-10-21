@@ -1314,7 +1314,12 @@ Scope boundaries, stated plainly:
   promotion event's. The ids ride the payload as `scrubbed_precedent_ids`
   (absent when none). Only a graph node can be a target, so this reaches a
   document that has one; a document with none is refused like any missing
-  target.
+  target. A scrub purges and re-creates the precedent: if the re-create
+  fails the command fails with the target intact and the precedent gone,
+  and `get_lessons` serves the promotion event's text with the excerpt cut
+  out rather than the copy; if a link fails to come back, the error and the
+  `redaction.precedent_links_not_restored` log line name each edge and
+  alias, because a re-run no longer matches the scrubbed precedent.
 - **Observation/Measurement nodes about the subject are not cascaded** — they
   are independent governed nodes and property-based queries
   (`query_observations`, `GET /measurements`) keep serving them after the

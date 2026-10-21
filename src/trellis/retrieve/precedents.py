@@ -49,21 +49,38 @@ def _node_is_withheld(node: dict[str, Any]) -> bool:
     return lifecycle.get("state") in WITHHELD_PRECEDENT_STATES
 
 
-def _redacted_description(node: dict[str, Any] | None) -> str | None:
-    """The node's description when a redaction scrubbed its source excerpt.
+def _served_description(
+    node: dict[str, Any] | None, payload: dict[str, Any]
+) -> str | None:
+    """The description to serve in place of the promoted one, if any.
 
     ``PRECEDENT_PROMOTED`` is immutable, so its payload still holds the
-    description as promoted, excerpt included. ``redaction.apply`` scrubs the
-    graph node instead; for such a node the listing serves the node's text.
+    description as promoted, excerpt included. A node ``redaction.apply``
+    scrubbed serves its own text. Any other node that does not vouch for
+    the excerpt (``source_excerpt_status`` other than ``included``), and a
+    missing node, serve the promoted text with the excerpt cut out: a scrub
+    that purged the node and failed to re-create it must not hand the
+    excerpt back through this listing. ``None`` means serve it unchanged.
     """
     # Deferred: ``trellis.learning`` imports the retrieve package.
-    from trellis.learning.scoring import SOURCE_EXCERPT_REDACTED  # noqa: PLC0415
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        SOURCE_EXCERPT_INCLUDED,
+        SOURCE_EXCERPT_REDACTED,
+        strip_source_excerpt,
+    )
 
     props = (node or {}).get("properties") or {}
-    if props.get("source_excerpt_status") != SOURCE_EXCERPT_REDACTED:
+    status = props.get("source_excerpt_status")
+    if node is not None and status == SOURCE_EXCERPT_REDACTED:
+        description = props.get("description")
+        return description if isinstance(description, str) else ""
+    if node is not None and status == SOURCE_EXCERPT_INCLUDED:
         return None
-    description = props.get("description")
-    return description if isinstance(description, str) else ""
+    promoted = payload.get("description")
+    if not isinstance(promoted, str):
+        return None
+    stripped = strip_source_excerpt(promoted, str(payload.get("source_item_id") or ""))
+    return None if stripped == promoted else stripped
 
 
 def list_precedents(
@@ -137,7 +154,9 @@ def list_precedents(
             node = graph_store.get_node(e.entity_id) if e.entity_id else None
             if node is not None and _node_is_withheld(node):
                 continue
-            results.append(_serialize(e, description=_redacted_description(node)))
+            results.append(
+                _serialize(e, description=_served_description(node, e.payload))
+            )
             if len(results) >= limit:
                 break
         exhausted = len(events) < fetch_limit

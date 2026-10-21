@@ -2655,7 +2655,32 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
             generation_spec=row.get("generation_spec"),
             document_ids=row.get("document_ids") or None,
         )
-        for edge in edges.values():
+    except Exception as exc:
+        # The listing withholds the promoted excerpt for a precedent with no
+        # node (see ``trellis.retrieve.precedents``), so the copy in
+        # ``PRECEDENT_PROMOTED`` stays unserved; what is lost is the node and
+        # its links, which the log names so they can be rebuilt.
+        logger.warning(
+            "redaction.precedent_recreate_failed",
+            precedent_id=precedent_id,
+            edge_ids=sorted(edges),
+            alias_count=len(aliases),
+        )
+        msg = (
+            f"precedent {precedent_id} was purged to scrub its source excerpt "
+            f"but could not be re-created ({type(exc).__name__}); its node, "
+            f"{len(edges)} edge(s) and {len(aliases)} alias(es) are gone and it "
+            "must be re-promoted"
+        )
+        raise StoreError(msg, store="graph") from exc
+
+    # Each link is restored on its own, so one failure does not strand the
+    # rest. A re-run cannot finish the job (no version carries an excerpt
+    # any more, so the precedent no longer matches), which is why every
+    # unrestored link is named rather than summarised.
+    unrestored_edges: list[str] = []
+    for edge in edges.values():
+        try:
             graph.upsert_edge(
                 edge["source_id"],
                 edge["target_id"],
@@ -2667,7 +2692,13 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
                 evidence_ref=edge.get("evidence_ref"),
                 extractor_tier=edge.get("extractor_tier"),
             )
-        for alias in aliases:
+        except Exception:
+            unrestored_edges.append(
+                f"{edge['source_id']} -{edge['edge_type']}-> {edge['target_id']}"
+            )
+    unrestored_aliases: list[str] = []
+    for alias in aliases:
+        try:
             graph.upsert_alias(
                 precedent_id,
                 alias["source_system"],
@@ -2676,14 +2707,52 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
                 match_confidence=alias.get("match_confidence", 1.0),
                 is_primary=bool(alias.get("is_primary", False)),
             )
-    except Exception as exc:
-        msg = (
-            f"precedent {precedent_id} was purged to scrub its source excerpt "
-            f"but could not be re-created ({type(exc).__name__}); the excerpt "
-            "is gone, the precedent must be re-promoted"
+        except Exception:
+            unrestored_aliases.append(f"{alias['source_system']}:{alias['raw_id']}")
+    if unrestored_edges or unrestored_aliases:
+        logger.warning(
+            "redaction.precedent_links_not_restored",
+            precedent_id=precedent_id,
+            edges=unrestored_edges,
+            aliases=unrestored_aliases,
         )
-        raise StoreError(msg, store="graph") from exc
+        msg = (
+            f"precedent {precedent_id} was scrubbed and re-created, but "
+            f"{len(unrestored_edges)} edge(s) and {len(unrestored_aliases)} "
+            "alias(es) could not be restored: "
+            f"{'; '.join(unrestored_edges + unrestored_aliases)}"
+        )
+        raise StoreError(msg, store="graph")
     return True
+
+
+def _scrub_precedents(
+    registry: StoreRegistry, command: Command, rows: list[dict[str, Any]]
+) -> list[str]:
+    """Scrub each precedent in ``rows``; the sorted ids of those scrubbed."""
+    scrubbed: list[str] = []
+    try:
+        for row in rows:
+            did_scrub = _scrub_precedent_excerpt(registry, row)
+            if did_scrub:
+                scrubbed.append(row["node_id"])
+    except Exception:
+        # A scrub purges history irreversibly and REDACTION_APPLIED is never
+        # emitted on this path, so the earlier scrubs are recorded here or
+        # nowhere.
+        _log_scrubbed_before_failure(command, scrubbed)
+        raise
+    return sorted(scrubbed)
+
+
+def _log_scrubbed_before_failure(command: Command, scrubbed: list[str]) -> None:
+    """Record precedents a failed redaction had already scrubbed."""
+    if scrubbed:
+        logger.warning(
+            "redaction.precedents_scrubbed_before_failure",
+            command_id=command.command_id,
+            scrubbed_precedent_ids=sorted(scrubbed),
+        )
 
 
 class RedactionApplyHandler:
@@ -2835,10 +2904,8 @@ class RedactionApplyHandler:
         precedent_rows, precedent_scan_capped = _precedents_sourced_from(
             graph, target_id
         )
-        scrubbed_precedent_ids = sorted(
-            row["node_id"]
-            for row in precedent_rows
-            if _scrub_precedent_excerpt(self._registry, row)
+        scrubbed_precedent_ids = _scrub_precedents(
+            self._registry, command, precedent_rows
         )
 
         # Vector entry first: if the vector backend raises, the command
@@ -2850,6 +2917,7 @@ class RedactionApplyHandler:
             # Lost a race: another writer purged the node between our read
             # and the delete. Fail rather than emit a second
             # REDACTION_APPLIED carrying counts this command did not purge.
+            _log_scrubbed_before_failure(command, scrubbed_precedent_ids)
             raise NotFoundError(entity_type="entity", entity_id=target_id)
 
         # ``target_id`` can carry the exact hazard this handler exists to

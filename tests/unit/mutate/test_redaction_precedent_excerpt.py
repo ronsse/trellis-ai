@@ -403,5 +403,83 @@ class TestFailureOrder:
         assert not registry.operational.event_log.get_events(
             event_type=EventType.REDACTION_APPLIED
         )
-        # The excerpt is gone: fail closed, never half-redacted.
+        # The node is gone, and the listing does not fall back to the
+        # excerpt the immutable PRECEDENT_PROMOTED event still holds.
         assert graph.get_node(precedent_id) is None
+        log = registry.operational.event_log
+        (row,) = list_precedents(log, graph_store=graph)
+        assert row["entity_id"] == precedent_id
+        assert COPIED_TEXT not in repr(row)
+        assert "Reviewed learning for intent family" in row["description"]
+
+        # A re-run purges the target and still serves no excerpt.
+        monkeypatch.setattr(graph, "upsert_node", real)
+        _redact(registry, "doc-a")
+        assert graph.get_node("doc-a") is None
+        (row,) = list_precedents(log, graph_store=graph)
+        assert COPIED_TEXT not in repr(row)
+
+    def test_failed_edge_restore_names_every_unrestored_link(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        _node(registry, "entity://shared")
+        precedent_id = _promote(registry, "doc-a")
+        graph.upsert_edge("entity://shared", precedent_id, "cites", {})
+        before = graph.get_edges(precedent_id, direction="both")
+        assert before
+        real = graph.upsert_edge
+
+        def flaky(source_id: Any, target_id: Any, *args: Any, **kwargs: Any) -> str:
+            if precedent_id in (source_id, target_id):
+                msg = "backend down"
+                raise RuntimeError(msg)
+            return real(source_id, target_id, *args, **kwargs)
+
+        monkeypatch.setattr(graph, "upsert_edge", flaky)
+
+        with pytest.raises(StoreError, match="could not be restored") as raised:
+            _redact(registry, "doc-a")
+
+        for edge in before:
+            assert f"-{edge['edge_type']}->" in str(raised.value)
+        assert "entity://shared -cites->" in str(raised.value)
+        assert "could not be re-created" not in str(raised.value)
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"]["source_excerpt_status"] == SOURCE_EXCERPT_REDACTED
+        assert graph.get_node("doc-a") is not None
+
+
+class TestHistoryOnlyExcerpt:
+    def test_an_excerpt_left_only_in_history_is_still_purged(
+        self, registry: StoreRegistry
+    ) -> None:
+        # A later version that no longer carries the excerpt does not make
+        # the precedent clean: get_node_history and as_of still read it.
+        from trellis.learning.scoring import strip_source_excerpt
+
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        props = dict(node["properties"])
+        props["description"] = strip_source_excerpt(props["description"], "doc-a")
+        props["source_excerpt_status"] = "document_not_found"
+        graph.upsert_node(
+            precedent_id,
+            node["node_type"],
+            props,
+            document_ids=node.get("document_ids") or None,
+        )
+        current = graph.get_node(precedent_id)
+        assert current is not None
+        assert COPIED_TEXT not in repr(current)
+        assert COPIED_TEXT in _everything_stored(registry, precedent_id)
+
+        payload = _redact(registry, "doc-a")
+
+        assert payload["scrubbed_precedent_ids"] == [precedent_id]
+        assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
