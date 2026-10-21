@@ -1,11 +1,11 @@
 """The serving boundary — which stored metadata keys may reach a pack.
 
 Search strategies build a :class:`~trellis.schemas.pack.PackItem` by splatting
-the store's metadata mapping wholesale (``metadata={"source_strategy": ...,
-**metadata}``). That is the right default — a strategy cannot know which keys a
-consumer will find useful, and an allowlist would silently drop every key added
-later. But it means *any* key written onto a document is served, and some keys
-exist precisely because they must not be.
+the store's metadata mapping wholesale (``metadata={**metadata,
+"source_strategy": ...}``). That is the right default — a strategy cannot know
+which keys a consumer will find useful, and an allowlist would silently drop
+every key added later. But it means *any* key written onto a document is
+served, and some keys exist precisely because they must not be.
 
 Today that is exactly one key. Shadow tags (#321) record what an LLM said about
 a document so a deterministic vocabulary can later be mined from the evidence;
