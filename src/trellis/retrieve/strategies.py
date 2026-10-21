@@ -212,7 +212,9 @@ GRAPH_SELECTION_SEEDED = "seeded"
 #: the subgraph it got back. Absent on the recency branch, which has no seeds
 #: and must not be credited with any. ``PackBuilder`` reads it back (from the
 #: graph axis only) into ``PACK_ASSEMBLED.seed_entity_ids``, which is where
-#: the learning loop gets the entities a promoted precedent should attach to.
+#: the learning loop gets the entities a promoted precedent should attach to,
+#: and then removes it, so a *served* item never carries it: the pack records
+#: the seeds once, not once per graph item.
 GRAPH_SEED_IDS_KEY = "graph_seed_ids"
 
 #: ``SearchStrategy.name`` of the graph axis, for a reader (``PackBuilder``)
