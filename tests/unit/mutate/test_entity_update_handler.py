@@ -920,6 +920,86 @@ class TestEntityCreateOverExistingPrecedentRefusal:
             == "entity_create_over_existing_precedent"
         )
 
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"state": ""},
+            {"state": None},
+            {"state": 5},
+            {},
+            "demoted",
+            ["demoted"],
+        ],
+        ids=[
+            "empty_state",
+            "null_state",
+            "non_str_state",
+            "no_state_key",
+            "non_dict_record",
+            "list_record",
+        ],
+    )
+    def test_create_over_malformed_lifecycle_record_reads_as_current(
+        self, registry: StoreRegistry, record: Any
+    ) -> None:
+        """A malformed record is no more informative than an absent one, so
+        re-creating over it must not be refused. ``""`` is the case the
+        guard once read as a real, non-current state.
+
+        Defective subject: return ``state`` unconditionally from
+        ``_current_lifecycle_state`` and the ``""`` row raises
+        ``entity_create_over_existing_precedent``.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={"name": "Pooling pattern", LIFECYCLE_KEY: record},
+        )
+
+        EntityCreateHandler(registry).handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": node_id,
+                    "entity_type": "precedent",
+                    "name": "Pooling pattern",
+                },
+            )
+        )
+
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert LIFECYCLE_KEY not in node["properties"]
+
+    @pytest.mark.parametrize("state", ["demoted", "archived", "superseded"])
+    def test_create_over_a_real_non_current_state_is_still_refused(
+        self, registry: StoreRegistry, state: str
+    ) -> None:
+        """The empty-state fix must not fail open on a state that means
+        something: every real non-current state keeps its refusal."""
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={"name": "Pooling pattern", LIFECYCLE_KEY: {"state": state}},
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            EntityCreateHandler(registry).handle(
+                Command(
+                    operation=Operation.ENTITY_CREATE,
+                    args={
+                        "entity_id": node_id,
+                        "entity_type": "precedent",
+                        "name": "Pooling pattern",
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "entity_create_over_existing_precedent"
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == state
+
     def test_create_over_existing_non_precedent_is_still_an_upsert(
         self, registry: StoreRegistry
     ) -> None:
@@ -1064,3 +1144,41 @@ class TestEntityCreateOverExistingPrecedentRefusal:
         # version was opened -- still the single version ``_create_node``
         # wrote.
         assert len(registry.knowledge.graph_store.get_node_history(node_id)) == 1
+
+
+class TestLifecycleStateReadersAgree:
+    """The handler's reader and the scorer's reader answer the same question
+    (is this precedent current?) for the promote preview and the real write,
+    so they must give one answer for every shape of record, malformed or not.
+    """
+
+    @pytest.mark.parametrize(
+        "properties",
+        [
+            {},
+            {LIFECYCLE_KEY: None},
+            {LIFECYCLE_KEY: "demoted"},
+            {LIFECYCLE_KEY: {}},
+            {LIFECYCLE_KEY: {"state": ""}},
+            {LIFECYCLE_KEY: {"state": None}},
+            {LIFECYCLE_KEY: {"state": 5}},
+            {LIFECYCLE_KEY: {"state": "current"}},
+            {LIFECYCLE_KEY: {"state": "demoted"}},
+            {LIFECYCLE_KEY: {"state": "archived"}},
+            {LIFECYCLE_KEY: {"state": "superseded"}},
+        ],
+    )
+    def test_both_readers_give_one_answer(self, properties: dict[str, Any]) -> None:
+        from trellis.learning.scoring import _precedent_lifecycle_state
+        from trellis.mutate.handlers import _current_lifecycle_state
+
+        node = {"node_type": "precedent", "properties": properties}
+
+        assert _current_lifecycle_state(node) == _precedent_lifecycle_state(node)
+
+    def test_an_empty_state_reads_as_current(self) -> None:
+        from trellis.mutate.handlers import _current_lifecycle_state
+
+        node = {"properties": {LIFECYCLE_KEY: {"state": ""}}}
+
+        assert _current_lifecycle_state(node) == "current"

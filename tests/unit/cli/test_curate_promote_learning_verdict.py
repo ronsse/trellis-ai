@@ -60,17 +60,22 @@ def _candidate(
     }
 
 
-def _demote(candidate_id: str) -> None:
-    """Seed a demoted precedent, so re-approving the candidate is refused."""
+def _seed_precedent(candidate_id: str, lifecycle: Any) -> None:
+    """Seed the candidate's precedent node carrying ``lifecycle`` as written."""
     registry = curate_cli._get_registry()
     try:
         registry.knowledge.graph_store.upsert_node(
             precedent_entity_id_for_candidate(candidate_id),
             "precedent",
-            {"lifecycle": {"state": "demoted"}},
+            {"lifecycle": lifecycle},
         )
     finally:
         registry.close()
+
+
+def _demote(candidate_id: str) -> None:
+    """Seed a demoted precedent, so re-approving the candidate is refused."""
+    _seed_precedent(candidate_id, {"state": "demoted"})
 
 
 def _promote(
@@ -321,6 +326,69 @@ class TestVerdictFollowsOutcomes:
             ],
         )
         assert result.exit_code == EXIT_OK, result.output
+
+
+class TestMalformedLifecycleReadsAsCurrent:
+    """An empty lifecycle state re-approves, in the preview and in the write.
+
+    The scorer read ``{"state": ""}`` as current and let the write proceed;
+    the handler's own reader returned ``""`` and refused it, so the real run
+    exited ``5`` after a preview of ``ok``. Both readers now agree.
+    """
+
+    @staticmethod
+    def _invoke(tmp_path: Path, *, dry_run: bool) -> tuple[int, dict[str, Any]]:
+        candidates_path = tmp_path / "candidates.json"
+        decisions_path = tmp_path / "decisions.json"
+        candidates_path.write_text(json.dumps({"candidates": [_OK]}), encoding="utf-8")
+        decisions_path.write_text(
+            json.dumps({"decisions": [{"candidate_id": "ok", "approved": True}]}),
+            encoding="utf-8",
+        )
+        args = [
+            "curate",
+            "promote-learning",
+            "--candidates",
+            str(candidates_path),
+            "--decisions",
+            str(decisions_path),
+            "--format",
+            "json",
+        ]
+        result = runner.invoke(app, [*args, "--dry-run"] if dry_run else args)
+        return result.exit_code, json.loads(result.stdout.strip())
+
+    @pytest.mark.parametrize(
+        "lifecycle",
+        [{"state": ""}, {"state": None}, {"state": 5}, {}, "demoted"],
+        ids=["empty", "null", "non_str", "no_state_key", "non_dict"],
+    )
+    def test_a_malformed_record_re_approves(
+        self, lifecycle: Any, tmp_path: Path
+    ) -> None:
+        _seed_precedent("ok", lifecycle)
+
+        preview_code, preview = self._invoke(tmp_path, dry_run=True)
+        code, data = self._invoke(tmp_path, dry_run=False)
+
+        assert preview_code == EXIT_OK
+        assert [r["status"] for r in preview["results"]] == ["ready"]
+        assert code == EXIT_OK, data
+        assert data["status"] == "ok"
+        assert data["promoted_count"] == 1
+        assert [r["status"] for r in data["results"]] == ["promoted"]
+
+    def test_a_demoted_record_is_still_refused(self, tmp_path: Path) -> None:
+        # The control: only a malformed record reads as current. A real state
+        # keeps its refusal, so the fix cannot have failed open.
+        _seed_precedent("ok", {"state": "demoted"})
+
+        code, data = self._invoke(tmp_path, dry_run=False)
+
+        assert code == EXIT_VALIDATION, data
+        assert data["status"] == "refused"
+        assert data["promoted_count"] == 0
+        assert [r["status"] for r in data["results"]] == ["refused_demoted"]
 
 
 class TestPromotionVerdict:

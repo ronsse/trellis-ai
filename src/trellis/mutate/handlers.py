@@ -481,13 +481,13 @@ def _current_lifecycle_state(node: dict[str, Any]) -> str:
     informative than an absent one — both read as current, matching
     ``retrieve.lifecycle``'s own fail-open convention for this key: a
     bad or missing lifecycle record is never by itself a reason to
-    refuse.
+    refuse. An empty ``state`` is malformed, not a state of its own.
     """
     record = node["properties"].get(LIFECYCLE_KEY)
     if not isinstance(record, dict):
         return CURRENT_STATE
     state = record.get("state")
-    return state if isinstance(state, str) else CURRENT_STATE
+    return state if isinstance(state, str) and state else CURRENT_STATE
 
 
 def precedent_already_demoted_message(target_id: str) -> str:

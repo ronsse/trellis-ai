@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -384,6 +385,24 @@ class TestPrecedentSkipReason:
     ) -> None:
         node_id = graph_store.upsert_node(
             node_id="p1", node_type="precedent", properties={}
+        )
+        assert precedent_skip_reason(graph_store, node_id) is None
+
+    @pytest.mark.parametrize(
+        "record",
+        [{"state": ""}, {"state": None}, {"state": 5}, {}, "demoted"],
+        ids=["empty", "null", "non_str", "no_state_key", "non_dict"],
+    )
+    def test_malformed_lifecycle_record_is_judged(
+        self, graph_store: SQLiteGraphStore, record: Any
+    ) -> None:
+        """A malformed record fails open to "judge it", the way an absent one
+        does -- ``""`` included, which is a ``str`` and once fell through to
+        ``SKIPPED_NOT_CURRENT``."""
+        node_id = graph_store.upsert_node(
+            node_id="p1",
+            node_type="precedent",
+            properties={LIFECYCLE_KEY: record},
         )
         assert precedent_skip_reason(graph_store, node_id) is None
 
