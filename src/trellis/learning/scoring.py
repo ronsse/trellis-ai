@@ -108,6 +108,28 @@ SOURCE_EXCERPT_INCLUDED = "included"
 #: removed".
 SOURCE_EXCERPT_REDACTED = "source_redacted"
 
+#: How a promoted precedent's name was derived, recorded as
+#: ``properties["name_source"]`` on its node and ``name_source`` on its
+#: ``PRECEDENT_PROMOTED`` payload. Only :data:`NAME_SOURCE_SOURCE_TEXT`
+#: holds text copied from the source document (its first non-empty line, the
+#: readable-name fallback above); a redaction of that source must replace it.
+NAME_SOURCE_SOURCE_TEXT = "source_text"
+#: The name is the source item's own ``title`` metadata.
+NAME_SOURCE_ITEM_TITLE = "item_title"
+#: The name is the bare source item id (the fallback with nothing readable).
+NAME_SOURCE_ITEM_ID = "item_id"
+#: A reviewer supplied a name that differs from the candidate's.
+NAME_SOURCE_REVIEWER = "reviewer"
+#: ``redaction.apply`` replaced a source-derived name with
+#: :func:`neutral_precedent_name`. Set on the node only.
+NAME_SOURCE_NEUTRAL = "neutral"
+
+#: Markers that name no source text: a scrub keeps the name, and the
+#: precedent listing serves the promoted title.
+NAME_SOURCES_WITHOUT_SOURCE_TEXT = frozenset(
+    {NAME_SOURCE_ITEM_TITLE, NAME_SOURCE_ITEM_ID, NAME_SOURCE_REVIEWER}
+)
+
 #: The two description fragments that bracket the excerpt. Shared by
 #: :func:`_build_precedent_description` (which writes them) and
 #: :func:`strip_source_excerpt` (which finds them), so the writer and the
@@ -516,6 +538,13 @@ def analyze_learning_observations(
             },
             "evidence_refs": sorted(set(metrics["evidence_refs"]))[:10],
             "precedent_name": f"Learning: {intent_family} :: {title[:96]}".strip(),
+            # How the name above was derived; ``_apply_readable_name_fallback``
+            # overwrites it when it swaps in the source's first line.
+            "precedent_name_source": (
+                NAME_SOURCE_ITEM_TITLE
+                if str(metrics.get("title") or "").strip()
+                else NAME_SOURCE_ITEM_ID
+            ),
             "precedent_properties": {
                 "category": _candidate_category(recommendation_type),
                 "intent_family": intent_family,
@@ -675,6 +704,7 @@ def _apply_readable_name_fallback(
     candidate["precedent_name"] = (
         f"Learning: {intent_family} :: {fallback_name}".strip()
     )
+    candidate["precedent_name_source"] = NAME_SOURCE_SOURCE_TEXT
 
 
 def _apply_readable_names(
@@ -948,6 +978,56 @@ def carries_source_excerpt(properties: Mapping[str, Any]) -> bool:
     return isinstance(description, str) and _SOURCE_EXCERPT_PREFIX in description
 
 
+def neutral_precedent_name(entity_id: str, intent_family: object = None) -> str:
+    """A precedent name that holds no source text.
+
+    The existing bare-id shape, ``Learning: <intent family> :: <id>``, with
+    the precedent's own id: the family is the pack's normalised intent, never
+    the source document. With no family it is the id alone, the last resort
+    :func:`build_learning_promotion_payloads` already falls back to.
+    """
+    family = str(intent_family or "").strip()
+    return f"Learning: {family} :: {entity_id}" if family else entity_id or "precedent"
+
+
+def name_may_hold_source_text(properties: Mapping[str, Any], entity_id: str) -> bool:
+    """Whether a precedent node's ``name`` may hold text from its source.
+
+    A marked name answers for itself. An unmarked one (promoted before names
+    were marked) cannot be told from a title the item carried without the
+    pack data that chose it, so it fails closed: it may hold source text
+    unless it is already a bare-id name. A redaction renames such a name;
+    :func:`~trellis.retrieve.precedents.list_precedents` does not guess at an
+    unmarked promotion title, because that would rename every precedent
+    promoted before the marker.
+    """
+    marker = properties.get("name_source")
+    if marker is not None:
+        return bool(marker == NAME_SOURCE_SOURCE_TEXT)
+    name = properties.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    family = str(properties.get("intent_family") or "").strip()
+    bare_item_id = f"Learning: {family} :: {properties.get('source_item_id') or ''}"
+    return name not in {entity_id, bare_item_id}
+
+
+def _promotion_name_source(
+    candidate: Mapping[str, Any], promotion_name: str
+) -> str | None:
+    """How the promoted name was derived, or ``None`` when it cannot be told.
+
+    A name the reviewer changed is theirs. Otherwise the candidate's own
+    ``precedent_name_source`` stands; a candidate artifact written before it
+    existed has none, and the promotion records none rather than guess.
+    """
+    candidate_name = str(candidate.get("precedent_name", "")).strip()
+    if promotion_name and promotion_name != candidate_name:
+        return NAME_SOURCE_REVIEWER
+    marker = candidate.get("precedent_name_source")
+    return marker if isinstance(marker, str) and marker else None
+
+
 def build_learning_promotion_payloads(
     *,
     candidate: Mapping[str, Any],
@@ -971,6 +1051,7 @@ def build_learning_promotion_payloads(
         if str(domain).strip()
     ]
     primary_domain = str(candidate.get("primary_domain") or "").strip()
+    name_source = _promotion_name_source(candidate, promotion_name)
     # Read side only, and at command-build time: the write still goes
     # through ``submit_learning_promotion`` and the executor.
     source_excerpt, source_excerpt_status = resolve_source_excerpt(
@@ -982,6 +1063,7 @@ def build_learning_promotion_payloads(
         "name": entity_name,
         "properties": {
             **dict(candidate.get("precedent_properties", {})),
+            **({"name_source": name_source} if name_source else {}),
             "description": _build_precedent_description(
                 candidate, rationale=rationale, source_excerpt=source_excerpt
             ),
@@ -1215,6 +1297,7 @@ def submit_learning_promotion(
             "domain": primary_domain or None,
             "entity_type": "precedent",
             "source_item_id": entity_props.get("source_item_id"),
+            "name_source": entity_props.get("name_source"),
         },
         target_id=entity_payload["entity_id"],
         target_type="entity",
@@ -1390,6 +1473,9 @@ __all__ = [
     "LEARNING_PROMOTE_SUCCESS_KEY",
     "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
+    "NAME_SOURCES_WITHOUT_SOURCE_TEXT",
+    "NAME_SOURCE_NEUTRAL",
+    "NAME_SOURCE_SOURCE_TEXT",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "SOURCE_EXCERPT_REDACTED",
@@ -1397,6 +1483,8 @@ __all__ = [
     "build_learning_promotion_payloads",
     "carries_source_excerpt",
     "is_promotion_ready",
+    "name_may_hold_source_text",
+    "neutral_precedent_name",
     "normalize_intent_family",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
