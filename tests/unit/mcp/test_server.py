@@ -19,6 +19,7 @@ from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
 from tests.duplicate_trace import graph_state, synthetic_trace
+from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
 from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
@@ -2254,6 +2255,24 @@ class TestGetLessons:
 
         assert "Live lesson" in result
         assert "Demoted lesson" not in result
+
+    def test_a_mined_candidate_is_not_served_as_a_lesson(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The miner once emitted its candidates as ``PRECEDENT_PROMOTED``;
+        those immutable rows must not reach ``get_lessons``, while a governed
+        promotion still does.
+        """
+        event_log = temp_registry.operational.event_log
+        emit_historical_miner_row(event_log, entity_id="mined-1", title="Mined guess")
+        promote_through_executor(
+            temp_registry, trace_id="trace-1", title="Approved lesson"
+        )
+
+        result = get_lessons()
+
+        assert "Approved lesson" in result
+        assert "Mined guess" not in result
 
     def test_a_reinstated_precedent_is_served_again(
         self, temp_registry: StoreRegistry

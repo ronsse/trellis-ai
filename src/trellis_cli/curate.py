@@ -51,6 +51,7 @@ from trellis.learning.review_ready import (
     build_review_rows,
     make_promoted_probe,
 )
+from trellis.learning.scoring import preview_learning_promotion_refusal
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -788,6 +789,12 @@ def promote_learning(
     outcomes, in either format: ``0`` / ``ok`` when every approved row
     landed (or none was approved), ``2`` / ``refused`` when any was refused
     and no write failed, ``5`` / ``failed`` when a write did not land.
+
+    ``--dry-run`` writes nothing and always exits ``0``, reporting ``ok``.
+    It adds ``would_verdict`` and ``would_exit_code``: the verdict a real run
+    would reach if every ready write landed. It sees a refusal the planner or
+    an existing precedent's lifecycle state decides, and cannot see a policy
+    refusal or a failed write.
     """
     candidates_payload = json.loads(candidates.read_text(encoding="utf-8"))
     decisions_payload = json.loads(decisions.read_text(encoding="utf-8"))
@@ -804,6 +811,14 @@ def promote_learning(
     ready = [r for r in plan["results"] if r["status"] == "ready"]
 
     if dry_run:
+        # Read-only, and never an exit code: the preview is named
+        # ``would_*`` so it cannot be read as an outcome, and this command
+        # returns ``0`` whatever it previews.
+        previews = [
+            _preview_promotion(entry, registry.knowledge.graph_store)
+            for entry in plan["results"]
+        ]
+        would_exit, would_status = _would_promotion_verdict(previews)
         if output_format == "json":
             print(
                 json.dumps(
@@ -811,8 +826,16 @@ def promote_learning(
                         "status": "ok",
                         "dry_run": True,
                         "approved_count": plan["approved_count"],
+                        "named_count": plan["named_count"],
                         "ready_count": len(ready),
-                        "results": plan["results"],
+                        "would_verdict": would_status,
+                        "would_exit_code": would_exit,
+                        "results": [
+                            {**entry, "would_status": would}
+                            for entry, would in zip(
+                                plan["results"], previews, strict=True
+                            )
+                        ],
                     }
                 )
             )
@@ -821,8 +844,16 @@ def promote_learning(
             f"[bold]Dry run[/bold] — {plan['approved_count']} approved, "
             f"{len(ready)} ready to promote"
         )
-        for entry in plan["results"]:
-            console.print(f"  - {escape(entry['candidate_id'])}: {entry['status']}")
+        _print_unnamed_note(plan)
+        for entry, would in zip(plan["results"], previews, strict=True):
+            note = "" if would == entry["status"] else f" (would be {escape(would)})"
+            console.print(
+                f"  - {escape(entry['candidate_id'])}: {entry['status']}{note}"
+            )
+        console.print(
+            f"Would-be verdict: {would_status} (a real run would exit "
+            f"{would_exit}; this dry run exits {EXIT_OK})"
+        )
         return
 
     if not plan["results"]:
@@ -834,12 +865,18 @@ def promote_learning(
                         "status": "ok",
                         "dry_run": False,
                         "approved_count": plan["approved_count"],
+                        "named_count": plan["named_count"],
                         "ready_count": 0,
                         "promoted_count": 0,
                         "results": [],
                     }
                 )
             )
+            return
+        if plan["approved_count"]:
+            # Approved rows exist and none names a candidate; "no approved
+            # promotions" would contradict the note.
+            _print_unnamed_note(plan)
             return
         console.print(
             "[yellow]No approved promotions found.[/yellow] Edit the "
@@ -888,6 +925,7 @@ def promote_learning(
                     "status": status,
                     "dry_run": False,
                     "approved_count": plan["approved_count"],
+                    "named_count": plan["named_count"],
                     "ready_count": len(ready),
                     "promoted_count": promoted_count,
                     "results": submission_results,
@@ -899,6 +937,7 @@ def promote_learning(
             f"[bold]Promote Learning[/bold] — {promoted_count}/"
             f"{plan['approved_count']} approved candidates promoted"
         )
+        _print_unnamed_note(plan)
         table = Table(title="Promotion Results")
         table.add_column("Candidate ID", style="cyan", max_width=24)
         table.add_column("Status", style="bold")
@@ -1007,6 +1046,46 @@ def _print_verdict(status: str, exit_code: int) -> None:
     """State the run's verdict on the human surface, beside the exit code."""
     style = "green" if exit_code == EXIT_OK else "red"
     console.print(f"Verdict: [{style}]{status}[/{style}] (exit {exit_code})")
+
+
+def _print_unnamed_note(plan: dict[str, Any]) -> None:
+    """Say so when approved rows named no candidate and so were never run.
+
+    ``approved_count`` is what the operator marked; ``named_count`` is what
+    the planner could act on. The difference is a row with a blank
+    ``candidate_id``, which has no outcome and so no effect on the verdict.
+    """
+    unnamed = plan["approved_count"] - plan["named_count"]
+    if unnamed:
+        console.print(
+            f"[yellow]{unnamed} approved row(s) name no candidate_id and "
+            "were skipped.[/yellow]"
+        )
+
+
+def _preview_promotion(entry: dict[str, Any], graph_store: Any) -> str:
+    """The status a real run would give a planned row, if its writes landed.
+
+    Read-only. A row the planner could not ready keeps its own status; a
+    ready row is ``promoted`` unless an existing precedent's lifecycle state
+    would refuse it, the one refusal that is known before any write.
+    """
+    if entry["status"] != "ready":
+        return str(entry["status"])
+    refusal = preview_learning_promotion_refusal(
+        entry["entity_payload"]["entity_id"], graph_store=graph_store
+    )
+    return "promoted" if refusal is None else str(refusal["status"])
+
+
+def _would_promotion_verdict(previews: list[str]) -> tuple[int, str]:
+    """``(exit_code, status)`` a real run would reach, for ``--dry-run``'s preview.
+
+    The same :func:`_promotion_verdict` a real run takes, over the rows the
+    preview does not expect to land, so the two cannot drift. The caller
+    reports it as ``would_*`` and never exits with it.
+    """
+    return _promotion_verdict([{"status": p} for p in previews if p != "promoted"])
 
 
 def _approve_candidates(
@@ -1175,7 +1254,9 @@ def review_ready(
     the governed path, as ``promote-learning`` would, and refuses an id that
     is not ready, is already promoted, or is contradicted (unless
     ``--force-contradicted``). It exits non-zero when any named id did not
-    land, in either format.
+    land, in either format, and its text form ends with the same
+    ``Verdict: <status> (exit N)`` line ``promote-learning`` prints. The
+    listing prints no verdict and exits ``0``.
     """
     registry = _get_registry()
     candidates_path, candidates = _load_candidates_file(
@@ -1217,6 +1298,9 @@ def review_ready(
         emit_json(payload)
     elif approve:
         _print_approval_outcomes(outcomes)
+        # The listing prints no verdict and exits 0; a promotion run states
+        # the one ``promote-learning`` states, beside the same exit code.
+        _print_verdict(status, exit_code)
     else:
         _print_review_rows(rows[:limit], ready_count=len(rows))
 

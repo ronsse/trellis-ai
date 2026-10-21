@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.precedents import is_withheld_precedent
+from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -542,7 +542,10 @@ def list_precedent_domains() -> dict[str, Any]:
     (:func:`trellis.retrieve.precedents.is_withheld_precedent`) is excluded
     from the counts, the same lifecycle filter ``GET /precedents`` applies
     -- otherwise this endpoint would offer a domain filter option backed
-    entirely by precedents the listing it feeds never actually shows.
+    entirely by precedents the listing it feeds never actually shows. A row
+    the precedent miner wrote
+    (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
+    candidate, not a promotion, and is skipped for the same reason.
     """
     registry = get_registry()
     event_log = registry.operational.event_log
@@ -550,6 +553,8 @@ def list_precedent_domains() -> dict[str, Any]:
     scan = scan_events(event_log, event_type=EventType.PRECEDENT_PROMOTED)
     counts: dict[str, int] = {}
     for event in scan.events:
+        if is_miner_candidate_event(event):
+            continue
         if event.entity_id is not None and is_withheld_precedent(
             graph_store, event.entity_id
         ):

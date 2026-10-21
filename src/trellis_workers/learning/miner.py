@@ -20,6 +20,7 @@ from trellis.llm.json_response import (
     coerce_finite_float,
     parse_json_response,
 )
+from trellis.retrieve.precedents import MINED_CANDIDATE_ACTION, MINER_EVENT_SOURCE
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent import Precedent
 from trellis.schemas.trace import Trace
@@ -46,6 +47,12 @@ class PrecedentMiner:
 
     Analyzes traces — especially failure/partial outcomes — to identify
     patterns and generate precedent candidates using LLM analysis.
+
+    Every event it emits is :attr:`EventType.PRECEDENT_CANDIDATE_MINED`,
+    never :attr:`EventType.PRECEDENT_PROMOTED`: a mined candidate is
+    ungoverned (it goes straight to the event log, past ``MutationExecutor``)
+    and has had no human approval, so it must not be served as a promoted
+    precedent. Promotion is a separate, governed ``precedent.promote``.
     """
 
     def __init__(
@@ -92,8 +99,8 @@ class PrecedentMiner:
 
         if self._event_log is not None:
             self._event_log.emit(
-                EventType.PRECEDENT_PROMOTED,
-                source="precedent_miner",
+                EventType.PRECEDENT_CANDIDATE_MINED,
+                source=MINER_EVENT_SOURCE,
                 entity_id=precedent.precedent_id,
                 entity_type="precedent",
                 payload={
@@ -302,12 +309,12 @@ class PrecedentMiner:
 
             if self._event_log is not None:
                 self._event_log.emit(
-                    EventType.PRECEDENT_PROMOTED,
-                    source="precedent_miner",
+                    EventType.PRECEDENT_CANDIDATE_MINED,
+                    source=MINER_EVENT_SOURCE,
                     entity_id=precedent.precedent_id,
                     entity_type="precedent",
                     payload={
-                        "action": "precedent_candidate_generated",
+                        "action": MINED_CANDIDATE_ACTION,
                         "title": precedent.title,
                         "confidence": precedent.confidence,
                     },

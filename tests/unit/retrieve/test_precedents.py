@@ -14,9 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from trellis.retrieve.precedents import list_precedents
+from tests.mined_precedents import (
+    MinerShape,
+    emit_historical_miner_row,
+    promote_through_executor,
+)
+from trellis.retrieve.precedents import (
+    MINED_CANDIDATE_ACTION,
+    MINER_EVENT_SOURCE,
+    is_miner_candidate_event,
+    list_precedents,
+)
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 
@@ -291,3 +302,206 @@ class TestGraphStoreExcludesDemoted:
 
         result = list_precedents(event_log)
         assert [row["entity_id"] for row in result] == ["prec-1"]
+
+
+class TestMinedCandidatesAreNotPromoted:
+    """A candidate the precedent miner wrote is not a promoted precedent.
+
+    The miner once emitted its ungoverned, unapproved candidates as
+    ``PRECEDENT_PROMOTED``; the event log is immutable, so those rows
+    outlive the fix and ``list_precedents`` (hence ``get_lessons``,
+    ``GET /precedents`` and ``trellis retrieve precedents``) has to skip them.
+    """
+
+    @pytest.fixture
+    def registry(self, tmp_path: Path) -> StoreRegistry:
+        return StoreRegistry(stores_dir=tmp_path / "stores")
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    @pytest.mark.parametrize("shape", ["generated", "extracted"])
+    def test_a_historical_miner_row_is_not_listed(
+        self, registry: StoreRegistry, with_graph: bool, shape: MinerShape
+    ) -> None:
+        log = registry.operational.event_log
+        emit_historical_miner_row(log, entity_id="mined-1", shape=shape)
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        assert list_precedents(log, graph_store=graph) == []
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    def test_a_governed_promotion_is_still_listed(
+        self, registry: StoreRegistry, with_graph: bool
+    ) -> None:
+        log = registry.operational.event_log
+        emit_historical_miner_row(log, entity_id="mined-1")
+        promote_through_executor(registry, trace_id="trace-1", title="Real lesson")
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        listed = list_precedents(log, graph_store=graph)
+
+        assert [row["title"] for row in listed] == ["Real lesson"]
+
+    @pytest.mark.parametrize("source", ["test", "cli", "trellis.learning"])
+    def test_a_promotion_from_any_other_emitter_is_still_listed(
+        self, event_log: SQLiteEventLog, source: str
+    ) -> None:
+        """The exclusion names the miner; it is not "anything but the
+        promote handler". A ``PRECEDENT_PROMOTED`` row from some other
+        emitter is still a promotion."""
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source=source,
+            entity_id="prec-1",
+            payload={"title": "From elsewhere"},
+        )
+
+        assert [r["title"] for r in list_precedents(event_log)] == ["From elsewhere"]
+
+    @pytest.mark.parametrize("with_graph", [False, True])
+    def test_miner_rows_do_not_use_up_the_limit(
+        self, registry: StoreRegistry, with_graph: bool
+    ) -> None:
+        """Newer miner rows sit ahead of the one real promotion in the
+        newest-first window; a fetch of ``limit`` rows then a filter would
+        return nothing."""
+        log = registry.operational.event_log
+        promote_through_executor(registry, trace_id="trace-1", title="Real lesson")
+        for i in range(6):
+            emit_historical_miner_row(log, entity_id=f"mined-{i}")
+
+        graph = registry.knowledge.graph_store if with_graph else None
+        listed = list_precedents(log, limit=1, graph_store=graph)
+
+        assert [row["title"] for row in listed] == ["Real lesson"]
+
+    def test_the_predicate_matches_the_literals_old_rows_carry(self) -> None:
+        """Old rows are immutable, so the predicate's constants can never
+        change without orphaning them."""
+        assert MINER_EVENT_SOURCE == "precedent_miner"
+        assert MINED_CANDIDATE_ACTION == "precedent_candidate_generated"
+
+    def test_the_predicate_reads_the_action_as_well_as_the_source(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="some-fork",
+            entity_id="prec-1",
+            payload={"action": MINED_CANDIDATE_ACTION, "title": "Candidate"},
+        )
+
+        [event] = event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED)
+        assert is_miner_candidate_event(event)
+        assert list_precedents(event_log) == []
+
+
+# ---------------------------------------------------------------------------
+# The listing fails closed on a title copied from a redacted source
+# ---------------------------------------------------------------------------
+
+SOURCE_TITLE = "Learning: fam :: FIRST LINE OF THE SOURCE"
+NEUTRAL_TITLE = "Learning: fam :: prec-t"
+
+
+def _promote_event(log: SQLiteEventLog, **payload: object) -> None:
+    log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="prec-t",
+        payload={"title": SOURCE_TITLE, "description": "d", **payload},
+    )
+
+
+def _node(graph: SQLiteGraphStore, **props: object) -> None:
+    graph.upsert_node("prec-t", "precedent", {"intent_family": "fam", **props})
+
+
+class TestServedTitle:
+    def test_a_missing_node_serves_the_neutral_name_for_a_marked_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        # No node, so no intent family to name: the precedent id alone.
+        assert row["title"] == "prec-t"
+        assert row["payload"]["title"] == "prec-t"
+        assert "FIRST LINE" not in repr(row)
+
+    @pytest.mark.parametrize("marker", ["item_title", "item_id", "reviewer", None])
+    def test_a_missing_node_keeps_a_title_not_marked_source_text(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        marker: str | None,
+    ) -> None:
+        # None is a title promoted before names were marked: it cannot be told
+        # from an ordinary title, so it is served as promoted.
+        _promote_event(event_log, **({"name_source": marker} if marker else {}))
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == SOURCE_TITLE
+
+    def test_a_node_that_does_not_vouch_for_its_excerpt_serves_the_neutral_name(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+        _node(graph_store, source_excerpt_status="no_content")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == NEUTRAL_TITLE
+
+    def test_an_included_node_serves_the_promoted_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log, name_source="source_text")
+        _node(graph_store, source_excerpt_status="included", name_source="source_text")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == SOURCE_TITLE
+
+    def test_a_node_a_scrub_renamed_serves_its_own_name(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        # The promotion event predates the marker, so only the node says so.
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            name="Learning: fam :: renamed",
+            name_source="neutral",
+            source_excerpt_status="no_content",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == "Learning: fam :: renamed"
+
+    @pytest.mark.parametrize(
+        ("marker", "title"),
+        [
+            (None, NEUTRAL_TITLE),  # scrubbed before names were marked
+            ("source_text", NEUTRAL_TITLE),
+            ("item_title", SOURCE_TITLE),  # a scrub kept a name with no source text
+        ],
+    )
+    def test_a_node_scrubbed_before_names_were_renamed(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        marker: str | None,
+        title: str,
+    ) -> None:
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            source_excerpt_status="source_redacted",
+            **({"name_source": marker} if marker else {}),
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == title

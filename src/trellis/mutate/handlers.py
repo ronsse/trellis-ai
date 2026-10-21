@@ -44,6 +44,7 @@ from trellis.mutate.retention import (
     RetentionCriteria,
     resolve_candidates,
 )
+from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -384,6 +385,12 @@ class PrecedentPromoteHandler:
         source_item_id = args.get("source_item_id")
         if source_item_id is not None:
             payload["source_item_id"] = source_item_id
+        # How ``title`` was derived (see ``trellis.learning.scoring``'s
+        # ``NAME_SOURCE_*``): the log is immutable, so this is how a reader
+        # tells a title copied from the source from one that was not.
+        name_source = args.get("name_source")
+        if name_source is not None:
+            payload["name_source"] = name_source
 
         event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
@@ -453,23 +460,28 @@ def _was_auto_promoted(event_log: EventLog, entity_id: str) -> bool:
 
 
 def _is_promoted_precedent_event(event_log: EventLog, entity_id: str) -> bool:
-    """Whether ``entity_id`` has a ``PRECEDENT_PROMOTED`` event, any source.
+    """Whether ``entity_id`` has a promotion event, whichever handler path wrote it.
 
     ``PrecedentPromoteHandler`` emits this event for two unlike sources
-    (its own docstring): a trace- or miner-sourced precedent, whose
-    ``entity_id`` names a trace and never gets a graph entity, and a
-    learning-candidate promotion, whose ``entity_id`` is a graph entity
+    (its own docstring): a trace-sourced precedent, whose ``entity_id``
+    names a trace and never gets a graph entity, and a learning-candidate
+    promotion, whose ``entity_id`` is a graph entity
     ``submit_learning_promotion`` minted first. This answers "is this id
     a real precedent, just not a graph-backed one" so
     :class:`PrecedentDemoteHandler` can name that gap specifically
     instead of reporting the same "Node not found" a garbage id gets.
+
+    A row the precedent miner wrote (:func:`is_miner_candidate_event`) is
+    not a promotion: it is an ungoverned candidate, so an id that has only
+    that row reads as "not found", the same as an id with no event at all.
+    The scan reads every ``PRECEDENT_PROMOTED`` row for the id rather than
+    the newest one, so a miner row cannot shadow a real promotion.
     """
     events = event_log.get_events(
         event_type=EventType.PRECEDENT_PROMOTED,
         entity_id=entity_id,
-        limit=1,
     )
-    return bool(events)
+    return any(not is_miner_candidate_event(e) for e in events)
 
 
 def _current_lifecycle_state(node: dict[str, Any]) -> str:
@@ -595,8 +607,8 @@ class PrecedentDemoteHandler:
         node = graph.get_node(target_id)
         if node is None:
             if _is_promoted_precedent_event(event_log, target_id):
-                # A real precedent — it has a PRECEDENT_PROMOTED event — but
-                # the trace-/miner-sourced path never mints a graph entity
+                # A real precedent — it has a non-miner PRECEDENT_PROMOTED event — but
+                # the trace-sourced path never mints a graph entity
                 # for it (see PrecedentPromoteHandler's docstring), so there
                 # is no node to stamp. Distinct from "nothing by this id
                 # exists at all" below.
@@ -2560,26 +2572,28 @@ MAX_REDACTION_REASON_CHARS = 2000
 _LINKED_SIGNAL_LIMIT = 100
 
 
-#: Cap on the precedent nodes one redaction reads when it looks for the
-#: ones that copied a source document. The graph API has no index on
-#: ``source_item_id`` and its property filter is equality only, which cannot
-#: express "a chunk of this document"; so the lookup is one bounded read of
-#: the precedent-typed nodes, filtered here. Precedents are human-approved
-#: promotions, so the population is small; a read that fills the cap is
-#: reported on the audit event instead of being taken for complete.
-_PRECEDENT_SCAN_LIMIT = 5000
+#: Page size of the precedent walk below. Not a cap: the walk continues
+#: until it has read every precedent.
+_PRECEDENT_PAGE_SIZE = 500
 
 
-def _precedents_sourced_from(
-    graph: GraphStore, target_id: str
-) -> tuple[list[dict[str, Any]], bool]:
-    """Current precedent nodes whose excerpt was copied from ``target_id``.
+def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str, Any]]:
+    """Current precedent nodes that copied text from ``target_id``.
+
+    The graph API has no index on ``source_item_id`` and its property filter
+    is equality only, which cannot express "a chunk of this document", so
+    this reads every precedent-typed node, page by page through
+    :meth:`~trellis.stores.base.graph.GraphStore.search_nodes` (the one node
+    read every backend pages, with a stable order), and filters here. The
+    walk finishes before anything is scrubbed, so a scrub's re-created node
+    cannot move under it. A read that raises propagates before anything is
+    purged: a partial scan never reaches success.
 
     A precedent's ``source_item_id`` names a document or one of its
     ``<parent>#chunk-N`` fragments. A parent target matches itself and its
     chunks (the chunk id must start with ``<target>#chunk-``, so a sibling
     document sharing a prefix does not match); a chunk target matches only
-    that chunk. Returns the rows and whether the scan hit its cap.
+    that chunk. Returns the matching rows.
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
     from trellis.ingest_corpus.models import (  # noqa: PLC0415
@@ -2590,19 +2604,49 @@ def _precedents_sourced_from(
     chunk_prefix = (
         None if is_chunk_doc_id(target_id) else f"{target_id}{CHUNK_ID_SEPARATOR}"
     )
-    rows = graph.query(node_type="precedent", limit=_PRECEDENT_SCAN_LIMIT)
-    matched = []
-    for row in rows:
-        source = (row.get("properties") or {}).get("source_item_id")
-        if not isinstance(source, str) or not source:
-            continue
-        if source == target_id or (chunk_prefix and source.startswith(chunk_prefix)):
-            matched.append(row)
-    return matched, len(rows) >= _PRECEDENT_SCAN_LIMIT
+    matched: list[dict[str, Any]] = []
+    offset = 0
+    first_total: int | None = None
+    while True:
+        rows, total = graph.search_nodes(
+            node_type="precedent",
+            sort="node_type",
+            descending=False,
+            limit=_PRECEDENT_PAGE_SIZE,
+            offset=offset,
+        )
+        # Offset paging skips a row when an earlier one disappears between
+        # pages, so a set that changed size mid-scan refuses rather than
+        # risk leaving an excerpt behind. Nothing has been purged yet.
+        if first_total is None:
+            first_total = total
+        elif total != first_total:
+            msg = (
+                "precedent set changed during the redaction scan "
+                f"({first_total} -> {total} nodes); re-run the redaction"
+            )
+            raise StoreError(msg, store="graph")
+        for row in rows:
+            source = (row.get("properties") or {}).get("source_item_id")
+            if not isinstance(source, str) or not source:
+                continue
+            if source == target_id or (
+                chunk_prefix and source.startswith(chunk_prefix)
+            ):
+                matched.append(row)
+        offset += len(rows)
+        if not rows or offset >= total:
+            return matched
 
 
 def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bool:
-    """Remove a precedent's copied source excerpt from every version it has.
+    """Remove a precedent's copied source text from every version it has.
+
+    The text is the excerpt in its description and, when the name was derived
+    from the source's first line (``name_source``, see
+    :func:`~trellis.learning.scoring.name_may_hold_source_text`), the name:
+    that becomes :func:`~trellis.learning.scoring.neutral_precedent_name`,
+    marked ``neutral``. A name that came from a title or a reviewer stays.
 
     Matches how ``redaction.apply`` treats its own target: a purge, not an
     SCD-2 close. A new version would leave the excerpt readable through
@@ -2615,30 +2659,45 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
     the precedent's own earlier versions (which is the point) and the ids
     and timestamps of its edge rows.
 
-    Returns ``False`` when no version carries an excerpt (nothing to scrub,
-    and the history is left alone). The vector row is deleted first: it was
-    embedded from the description. If the re-create fails after the purge,
-    the precedent is gone, never half-redacted, and the error names its id.
+    Returns ``False`` when no version carries an excerpt or a source-derived
+    name (nothing to scrub, and the history is left alone). The vector row is
+    deleted first: it was embedded from the description. If the re-create
+    fails after the purge, the precedent is gone, never half-redacted, and
+    the error names its id.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
+        NAME_SOURCE_NEUTRAL,
         SOURCE_EXCERPT_REDACTED,
         carries_source_excerpt,
+        name_may_hold_source_text,
+        neutral_precedent_name,
         strip_source_excerpt,
     )
 
     graph = registry.knowledge.graph_store
     precedent_id = row["node_id"]
     versions = graph.get_node_history(precedent_id) or [row]
-    if not any(carries_source_excerpt(v.get("properties") or {}) for v in versions):
+    version_props = [v.get("properties") or {} for v in versions]
+    has_excerpt = any(carries_source_excerpt(p) for p in version_props)
+    has_source_name = any(
+        name_may_hold_source_text(p, precedent_id) for p in version_props
+    )
+    if not (has_excerpt or has_source_name):
         return False
 
     properties = dict(row.get("properties") or {})
-    description = properties.get("description")
-    if isinstance(description, str):
-        properties["description"] = strip_source_excerpt(
-            description, str(properties.get("source_item_id") or "")
+    if has_excerpt:
+        description = properties.get("description")
+        if isinstance(description, str):
+            properties["description"] = strip_source_excerpt(
+                description, str(properties.get("source_item_id") or "")
+            )
+        properties["source_excerpt_status"] = SOURCE_EXCERPT_REDACTED
+    if name_may_hold_source_text(properties, precedent_id):
+        properties["name"] = neutral_precedent_name(
+            precedent_id, properties.get("intent_family")
         )
-    properties["source_excerpt_status"] = SOURCE_EXCERPT_REDACTED
+        properties["name_source"] = NAME_SOURCE_NEUTRAL
 
     edges = {e["edge_id"]: e for e in graph.get_edges(precedent_id, direction="both")}
     aliases = graph.get_aliases(precedent_id)
@@ -2793,18 +2852,22 @@ class RedactionApplyHandler:
 
     **Precedents that copied the target's text are scrubbed (#927).** A
     promoted precedent's description opens with up to 600 chars of its
-    source document (``source_item_id``). When the target is that document
-    or a ``<document>#chunk-N`` fragment of it, the excerpt is removed from
-    the precedent (every version, see :func:`_scrub_precedent_excerpt`),
-    ``source_excerpt_status`` becomes ``source_redacted`` and the rest of
-    the precedent stays. The ids ride the payload as
+    source document (``source_item_id``), and a precedent with no readable
+    name takes up to 96 chars of the source's first line as its name. When
+    the target is that document or a ``<document>#chunk-N`` fragment of it,
+    the excerpt is removed from the precedent (every version, see
+    :func:`_scrub_precedent_excerpt`), ``source_excerpt_status`` becomes
+    ``source_redacted``, a source-derived name becomes a neutral one, and
+    the rest of the precedent stays. The lookup reads every precedent, page
+    by page, so no precedent is missed; a read that fails refuses the
+    redaction before anything is purged. The ids ride the payload as
     ``scrubbed_precedent_ids``. Only a *graph node* can be a target, so
     this runs for a document that has one (memory extraction mints a
     node whose id is the document id); a document with no node is refused
     like any other missing target. The ``PRECEDENT_PROMOTED`` event keeps
-    its copy of the description by design — the log is immutable — so
-    ``list_precedents`` serves the node's description for a scrubbed
-    precedent instead.
+    its copy of the description and title by design — the log is immutable —
+    so ``list_precedents`` serves the node's text, or a neutral title, for a
+    scrubbed precedent instead.
 
     **Scope: graph entities only; linked records become pointers.**
     Documents linked from any purged version are *not* cascaded — a
@@ -2901,9 +2964,7 @@ class RedactionApplyHandler:
         # re-run (a scrubbed precedent no longer matches), where the other
         # order would strand a scrub that has nothing left to be triggered
         # by. No precedent sourced from the target is a no-op.
-        precedent_rows, precedent_scan_capped = _precedents_sourced_from(
-            graph, target_id
-        )
+        precedent_rows = _precedents_sourced_from(graph, target_id)
         scrubbed_precedent_ids = _scrub_precedents(
             self._registry, command, precedent_rows
         )
@@ -2956,12 +3017,6 @@ class RedactionApplyHandler:
             message += (
                 f"; source excerpt scrubbed from {len(scrubbed_precedent_ids)} "
                 "precedent(s)"
-            )
-        if precedent_scan_capped:
-            payload["precedent_scan_capped"] = True
-            message += (
-                f"; precedent scan hit its {_PRECEDENT_SCAN_LIMIT}-node cap, "
-                "so later precedents may still carry an excerpt"
             )
         try:
             event_log.emit(
