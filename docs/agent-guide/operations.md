@@ -1306,20 +1306,36 @@ Scope boundaries, stated plainly:
   document-level redaction.
 - **Precedents that copied the target's text are scrubbed.** A promoted
   precedent's description opens with an excerpt of its source document
-  (`source_item_id`). When the target is that document or one of its
-  `<document>#chunk-N` chunks (a chunk target matches only that chunk), the
-  excerpt is removed from every version of the precedent, its
-  `source_excerpt_status` becomes `source_redacted`, and the rest of the
-  precedent stays; `get_lessons` serves the node's text, not the immutable
-  promotion event's. The ids ride the payload as `scrubbed_precedent_ids`
+  (`source_item_id`), and a precedent with no readable name takes the first
+  line of that document as its name. When the target is that document or one
+  of its `<document>#chunk-N` chunks (a chunk target matches only that chunk),
+  the excerpt is removed from every version of the precedent, its
+  `source_excerpt_status` becomes `source_redacted`, and a source-derived name
+  becomes `Learning: <intent family> :: <precedent id>` with `name_source`
+  `neutral`. The rest of the precedent stays; `get_lessons` serves the node's
+  text, not the immutable promotion event's. Promotion records how the name
+  was derived as `name_source` (`source_text`, `item_title`, `item_id`,
+  `reviewer`) on the node and in the `PRECEDENT_PROMOTED` payload; a title, a
+  bare id and a reviewer's rewrite of either hold no source text and are kept. A
+  name with no marker (promoted before it existed) fails closed: the scrub
+  renames it unless it is already a bare-id name, so a title-derived name may
+  be renamed too. The ids ride the payload as `scrubbed_precedent_ids`
   (absent when none). Only a graph node can be a target, so this reaches a
   document that has one; a document with none is refused like any missing
-  target. A scrub purges and re-creates the precedent: if the re-create
-  fails the command fails with the target intact and the precedent gone,
-  and `get_lessons` serves the promotion event's text with the excerpt cut
-  out rather than the copy; if a link fails to come back, the error and the
-  `redaction.precedent_links_not_restored` log line name each edge and
-  alias, because a re-run no longer matches the scrubbed precedent.
+  target. The lookup reads every precedent, page by page, before anything is
+  purged; if a page read fails the command fails with the target and every
+  precedent untouched, so a redaction never succeeds on a partial scan. A
+  scrub purges and re-creates the precedent: if the re-create fails the
+  command fails with the target intact and the precedent gone, and
+  `get_lessons` serves the promotion event's text with the excerpt cut out
+  rather than the copy, and a neutral title when the event marks its title
+  `source_text`; if a link fails to come back, the error and the
+  `redaction.precedent_links_not_restored` log line name each edge and alias,
+  because a re-run no longer matches the scrubbed precedent. A promotion title
+  with no marker cannot be told from an ordinary title, so the listing serves
+  it as promoted for a node that is missing or never scrubbed; only a node a
+  scrub touched serves its own name. A reviewer's edit of a source-derived
+  name keeps `source_text`, so the scrub still renames it.
 - **Observation/Measurement nodes about the subject are not cascaded** — they
   are independent governed nodes and property-based queries
   (`query_observations`, `GET /measurements`) keep serving them after the
@@ -1547,8 +1563,9 @@ in `results`:
 
 The exit code and the payload's top-level `status` come from one reading of
 those entries, taken before either format renders, so neither depends on
-`--format`; the text form ends with a `Verdict:` line naming the same status
-and code. `review-ready --approve` reads its outcomes the same way.
+`--format`; the text form ends with a `Verdict: <status> (exit N)` line naming
+the same status and code. `review-ready --approve` reads its outcomes the same
+way and prints the same line.
 
 | Exit | `status` | When |
 |---|---|---|
@@ -1556,9 +1573,27 @@ and code. `review-ready --approve` reads its outcomes the same way.
 | `2` | `refused` | at least one row was refused and no write failed |
 | `5` | `failed` | at least one write did not land, whether or not another row was refused |
 
-`--dry-run` submits nothing, so it has no outcome to read: it exits `0` and
-reports `ok`, with each row's planned status in `results`. `promoted_count`
-counts the rows that fully landed.
+`promoted_count` counts the rows that fully landed. `approved_count` counts
+the rows marked `approved: true`, including a row with a blank
+`candidate_id`; such a row names nothing to promote, so it is skipped without
+a result and without effect on the verdict. `named_count` counts the approved
+rows that do name a candidate, which is exactly the rows `results` answers,
+and the text form says how many approved rows were skipped for want of an id.
+
+`--dry-run` submits nothing, so it has no outcome to read: it **always exits
+`0`** and reports `ok`, whatever it previews. It adds a preview of the verdict
+a real run would reach, named so it cannot be read as one:
+
+| Field | Meaning |
+|---|---|
+| `would_verdict`, `would_exit_code` | the `status` and exit code a real run would give if every ready write landed (text form: a `Would-be verdict:` line, never `Verdict:`) |
+| `results[].would_status` | the status a real run would give that row: `promoted`, or its refusal |
+
+The preview reads, and never writes. It sees a refusal the planner decides
+(`missing_candidate`, `skipped_non_promotable`) and one an existing
+precedent's lifecycle state decides (`refused_demoted`, `refused_archived`,
+`refused_not_current`). It cannot see a policy-gate refusal or a write that
+fails, so a preview of `ok` can still become `refused` or `failed`.
 
 ### `trellis curate review-ready`
 
@@ -1617,7 +1652,10 @@ promote-learning`. Every id gets its own entry in `results`.
 The exit code does not depend on `--format`, and the payload's `status`
 comes from the same reading: `0` / `ok` when every named id landed, `2` /
 `refused` when any was refused and none failed, `5` / `failed` when a write
-did not land. Listing always exits `0`.
+did not land. With `--approve` the text form ends with the same
+`Verdict: <status> (exit N)` line `promote-learning` prints. Listing (no
+`--approve`) always exits `0` and prints no verdict: nothing was promoted, so
+there is no outcome to judge.
 
 ### `trellis curate auto-promote-candidates`
 

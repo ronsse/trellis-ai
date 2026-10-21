@@ -83,6 +83,51 @@ def _served_description(
     return None if stripped == promoted else stripped
 
 
+def _served_title(
+    node: dict[str, Any] | None, payload: dict[str, Any], entity_id: str | None
+) -> str | None:
+    """The title to serve in place of the promoted one, if any.
+
+    The payload title can be the first line of the precedent's source (marked
+    ``name_source="source_text"``), and the log that holds it is immutable.
+    The same cases fail closed as in :func:`_served_description`:
+
+    * a node a scrub renamed (``name_source="neutral"``) serves its own name;
+    * a node scrubbed before names were marked, whose name was kept, serves a
+      neutral one, unless its marker says the name held no source text;
+    * a missing node, or one that does not vouch for its excerpt, serves a
+      neutral name when the payload marks its title source-derived.
+
+    A promotion title with no marker (promoted before names were marked) is
+    served as promoted: it cannot be told from an ordinary title without the
+    pack data that chose it, and guessing would rename every such precedent.
+    ``None`` means serve the title unchanged.
+    """
+    # Deferred: ``trellis.learning`` imports the retrieve package.
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        NAME_SOURCE_NEUTRAL,
+        NAME_SOURCE_SOURCE_TEXT,
+        NAME_SOURCES_WITHOUT_SOURCE_TEXT,
+        SOURCE_EXCERPT_INCLUDED,
+        SOURCE_EXCERPT_REDACTED,
+        neutral_precedent_name,
+    )
+
+    props = (node or {}).get("properties") or {}
+    neutral = neutral_precedent_name(entity_id or "", props.get("intent_family"))
+    if node is not None:
+        marker = props.get("name_source")
+        if marker == NAME_SOURCE_NEUTRAL:
+            name = props.get("name")
+            return name if isinstance(name, str) and name else neutral
+        status = props.get("source_excerpt_status")
+        if status == SOURCE_EXCERPT_REDACTED:
+            return None if marker in NAME_SOURCES_WITHOUT_SOURCE_TEXT else neutral
+        if status == SOURCE_EXCERPT_INCLUDED:
+            return None
+    return neutral if payload.get("name_source") == NAME_SOURCE_SOURCE_TEXT else None
+
+
 def list_precedents(
     event_log: EventLog,
     *,
@@ -155,7 +200,11 @@ def list_precedents(
             if node is not None and _node_is_withheld(node):
                 continue
             results.append(
-                _serialize(e, description=_served_description(node, e.payload))
+                _serialize(
+                    e,
+                    description=_served_description(node, e.payload),
+                    title=_served_title(node, e.payload, e.entity_id),
+                )
             )
             if len(results) >= limit:
                 break
@@ -166,14 +215,18 @@ def list_precedents(
     return results
 
 
-def _serialize(e: Event, *, description: str | None = None) -> dict[str, Any]:
+def _serialize(
+    e: Event, *, description: str | None = None, title: str | None = None
+) -> dict[str, Any]:
     payload = e.payload
     if description is not None:
         payload = {**payload, "description": description}
+    if title is not None:
+        payload = {**payload, "title": title}
     return {
         "event_id": e.event_id,
         "entity_id": e.entity_id,
-        "title": e.payload.get("title", ""),
+        "title": payload.get("title", ""),
         "description": payload.get("description", ""),
         "domain": e.payload.get("domain"),
         "occurred_at": e.occurred_at.isoformat(),

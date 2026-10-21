@@ -18,7 +18,10 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from trellis.learning.scoring import precedent_entity_id_for_candidate
+from trellis.learning.scoring import (
+    precedent_entity_id_for_candidate,
+    prepare_learning_promotions,
+)
 from trellis_cli import curate as curate_cli
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app
@@ -84,6 +87,7 @@ def _promote(
     decisions: list[tuple[str, bool]],
     *,
     fmt: str,
+    dry_run: bool = False,
 ) -> tuple[int, dict[str, Any] | None, str]:
     candidates_path = tmp_path / "candidates.json"
     decisions_path = tmp_path / "decisions.json"
@@ -108,12 +112,31 @@ def _promote(
             str(candidates_path),
             "--decisions",
             str(decisions_path),
+            *(["--dry-run"] if dry_run else []),
             "--format",
             fmt,
         ],
     )
     data = json.loads(result.stdout.strip()) if fmt == "json" else None
     return result.exit_code, data, plain(result.stdout)
+
+
+def _store_counts() -> tuple[int, ...]:
+    """Row counts of every store a promotion or its meta-trace could write."""
+    registry = curate_cli._get_registry()
+    try:
+        graph = registry.knowledge.graph_store
+        events = registry.operational.event_log.get_events(limit=100_000)
+        return (
+            len(events),
+            graph.count_nodes(),
+            graph.count_edges(),
+            registry.knowledge.document_store.count(),
+            registry.knowledge.vector_store.count(),
+            registry.operational.trace_store.count(),
+        )
+    finally:
+        registry.close()
 
 
 # scenario -> (candidates, decisions, demoted ids, exit, status, promoted_count)
@@ -296,36 +319,204 @@ class TestVerdictFollowsOutcomes:
             assert data["status"] == "failed"
             assert data["results"][0]["status"] == "entity_failed"
 
+
+class TestDryRunPreview:
+    """``--dry-run`` previews the verdict as ``would_*`` and always exits ``0``.
+
+    The preview is read-only and says what a real run would reach if every
+    ready write landed. It is never an exit code: a script that gates on a
+    dry run's exit must not be told the run failed when nothing ran.
+    """
+
     @pytest.mark.parametrize("fmt", ["json", "text"])
-    def test_dry_run_writes_nothing_and_stays_ok(
+    @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
+    def test_a_dry_run_always_exits_zero_whatever_it_previews(
+        self, scenario: str, fmt: str, tmp_path: Path
+    ) -> None:
+        candidates, decisions, demoted, _, _, _ = _SCENARIOS[scenario]
+        for candidate_id in demoted:
+            _demote(candidate_id)
+        before = _store_counts()
+
+        code, data, out = _promote(
+            tmp_path, candidates, decisions, fmt=fmt, dry_run=True
+        )
+
+        assert code == EXIT_OK, out
+        assert _store_counts() == before
+        if data is not None:
+            # The command's own status is the dry run's, never the preview's.
+            assert data["status"] == "ok"
+            assert data["dry_run"] is True
+            assert "promoted_count" not in data
+        else:
+            assert not any(line.startswith("Verdict:") for line in out.splitlines())
+            assert "this dry run exits 0" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    @pytest.mark.parametrize(
+        ("scenario", "would_exit", "would_status"),
+        [
+            ("all_landed", EXIT_OK, "ok"),
+            ("one_refused_rest_landed", EXIT_VALIDATION, "refused"),
+            ("only_refused", EXIT_VALIDATION, "refused"),
+            ("approved_id_names_no_candidate", EXIT_VALIDATION, "refused"),
+            ("approved_candidate_not_promotable", EXIT_VALIDATION, "refused"),
+            ("unapproved_row_beside_landed", EXIT_OK, "ok"),
+            # A dangling edge target is rejected by the graph during the write,
+            # so no read can foresee it: the preview stops at what it can see.
+            ("half_landed_is_a_failure", EXIT_OK, "ok"),
+        ],
+    )
+    def test_the_preview_names_the_verdict_a_real_run_reaches(
+        self,
+        scenario: str,
+        would_exit: int,
+        would_status: str,
+        fmt: str,
+        tmp_path: Path,
+    ) -> None:
+        candidates, decisions, demoted, real_exit, real_status, _ = _SCENARIOS[scenario]
+        for candidate_id in demoted:
+            _demote(candidate_id)
+
+        _, data, out = _promote(tmp_path, candidates, decisions, fmt=fmt, dry_run=True)
+
+        if data is not None:
+            assert (data["would_verdict"], data["would_exit_code"]) == (
+                would_status,
+                would_exit,
+            )
+        else:
+            assert (
+                f"Would-be verdict: {would_status} (a real run would exit "
+                f"{would_exit}; this dry run exits 0)" in out
+            )
+        if scenario != "half_landed_is_a_failure":
+            # Where the preview can see everything, it equals the real run.
+            assert (would_exit, would_status) == (real_exit, real_status)
+
+    def test_each_row_carries_the_status_a_real_run_would_give_it(
+        self, tmp_path: Path
+    ) -> None:
+        _demote("refused")
+        _, data, _ = _promote(
+            tmp_path,
+            [_OK, _REFUSED, _NOISE],
+            [("ok", True), ("refused", True), ("noise", True), ("ghost", True)],
+            fmt="json",
+            dry_run=True,
+        )
+        assert data is not None
+        assert [
+            (r["candidate_id"], r["status"], r["would_status"]) for r in data["results"]
+        ] == [
+            ("ok", "ready", "promoted"),
+            ("refused", "ready", "refused_demoted"),
+            ("noise", "skipped_non_promotable", "skipped_non_promotable"),
+            ("ghost", "missing_candidate", "missing_candidate"),
+        ]
+
+    def test_text_names_the_row_a_real_run_would_refuse(self, tmp_path: Path) -> None:
+        _demote("refused")
+        _, _, out = _promote(
+            tmp_path,
+            [_OK, _REFUSED],
+            [("ok", True), ("refused", True)],
+            fmt="text",
+            dry_run=True,
+        )
+        assert "- ok: ready (would be promoted)" in out
+        assert "- refused: ready (would be refused_demoted)" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_dry_run_with_nothing_approved_would_be_ok(
         self, fmt: str, tmp_path: Path
     ) -> None:
-        # A dry run submits nothing, so there is no outcome to read.
-        _demote("refused")
-        candidates_path = tmp_path / "candidates.json"
-        decisions_path = tmp_path / "decisions.json"
-        candidates_path.write_text(
-            json.dumps({"candidates": [_REFUSED]}), encoding="utf-8"
+        code, data, out = _promote(
+            tmp_path, [_OK], [("ok", False)], fmt=fmt, dry_run=True
         )
-        decisions_path.write_text(
-            json.dumps({"decisions": [{"candidate_id": "refused", "approved": True}]}),
-            encoding="utf-8",
+        assert code == EXIT_OK
+        if data is not None:
+            assert (data["would_verdict"], data["would_exit_code"]) == ("ok", EXIT_OK)
+        else:
+            assert "Would-be verdict: ok" in out
+
+
+_BLANK_ID_ROWS: list[tuple[str, bool]] = [
+    ("ok", True),
+    ("", True),
+    ("   ", True),
+    ("ok2", False),
+    ("ghost", True),
+]
+
+
+class TestApprovedRowsWithoutAnId:
+    """``approved_count`` is what was marked; ``named_count`` is what could run.
+
+    An approved row with a blank ``candidate_id`` never becomes a result, so
+    it is neither refused nor promoted. Counting it as submitted overstated
+    the run, and ``approved_count`` stays as it was for the readers that
+    parse it.
+    """
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_a_blank_id_is_approved_but_not_named(
+        self, dry_run: bool, tmp_path: Path
+    ) -> None:
+        _, data, _ = _promote(
+            tmp_path,
+            [_OK, _OK2],
+            _BLANK_ID_ROWS,
+            fmt="json",
+            dry_run=dry_run,
         )
-        result = runner.invoke(
-            app,
-            [
-                "curate",
-                "promote-learning",
-                "--candidates",
-                str(candidates_path),
-                "--decisions",
-                str(decisions_path),
-                "--dry-run",
-                "--format",
-                fmt,
-            ],
+        assert data is not None
+        assert data["approved_count"] == 4
+        assert data["named_count"] == 2
+        assert [r["candidate_id"] for r in data["results"]] == ["ok", "ghost"]
+
+    def test_the_planner_counts_named_rows_apart_from_approved_ones(self) -> None:
+        plan = prepare_learning_promotions(
+            candidates_payload={"candidates": [_OK]},
+            decisions_payload={
+                "decisions": [
+                    {"candidate_id": "ok", "approved": True},
+                    {"candidate_id": "", "approved": True},
+                    {"approved": True},
+                    {"candidate_id": "ok", "approved": False},
+                ]
+            },
         )
-        assert result.exit_code == EXIT_OK, result.output
+        assert (plan["approved_count"], plan["named_count"]) == (3, 1)
+        assert len(plan["results"]) == plan["named_count"]
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_text_says_how_many_approved_rows_were_skipped(
+        self, dry_run: bool, tmp_path: Path
+    ) -> None:
+        _, _, out = _promote(
+            tmp_path, [_OK], _BLANK_ID_ROWS, fmt="text", dry_run=dry_run
+        )
+        assert "2 approved row(s) name no candidate_id and were skipped." in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_only_blank_ids_is_still_a_no_op_that_says_what_it_skipped(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        code, data, out = _promote(tmp_path, [_OK], [("", True), ("  ", True)], fmt=fmt)
+        assert code == EXIT_OK, out
+        if data is not None:
+            assert (data["approved_count"], data["named_count"]) == (2, 0)
+            assert data["results"] == []
+        else:
+            assert "2 approved row(s) name no candidate_id" in out
+            assert "No approved promotions found" not in out
+
+    def test_a_run_with_no_blank_ids_prints_no_note(self, tmp_path: Path) -> None:
+        _, _, out = _promote(tmp_path, [_OK], [("ok", True)], fmt="text")
+        assert "no candidate_id" not in out
 
 
 class TestMalformedLifecycleReadsAsCurrent:

@@ -1610,3 +1610,78 @@ class TestIsPromotionReady:
             "1",
             "0",
         ]
+
+
+# ---------------------------------------------------------------------------
+# How a promoted precedent's name was derived (name_source)
+# ---------------------------------------------------------------------------
+
+
+class TestPrecedentNameSource:
+    def _candidates(self, registry: ParameterRegistry, title: str) -> list[dict]:
+        item = _make_item(item_id="doc-n", item_type="guidance", title=title)
+        obs = [
+            _make_observation(run_id=f"r{i}", outcome="success", items=[item])
+            for i in range(3)
+        ]
+        return analyze_learning_observations(
+            observations=obs, registry=registry, min_support=1
+        )["candidates"]
+
+    def test_a_title_and_a_bare_id_are_marked(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        (titled,) = self._candidates(learning_registry, "A real title")
+        (bare,) = self._candidates(learning_registry, "")
+        assert titled["precedent_name_source"] == "item_title"
+        assert bare["precedent_name_source"] == "item_id"
+
+    def test_the_first_line_fallback_is_marked_source_text(
+        self, tmp_path: Path
+    ) -> None:
+        candidate = _make_promotable_candidate(item_id="doc-n", title=None)
+        assert "precedent_name_source" not in candidate
+        store = _FakeDocumentStore({"doc-n": {"content": "First line of body\n\nrest"}})
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        assert report["candidates"][0]["precedent_name_source"] == "source_text"
+
+    def test_promotion_records_the_marker_on_node_and_event(self) -> None:
+        candidate = _make_promotable_candidate()
+        candidate["precedent_name_source"] = "source_text"
+        payloads = build_learning_promotion_payloads(
+            candidate=candidate, promotion_name="", rationale=""
+        )
+        assert payloads["entity_payload"]["properties"]["name_source"] == "source_text"
+
+    def test_an_edited_source_derived_name_stays_source_text(self) -> None:
+        # The review template pre-fills the derived name, so an edit is a
+        # touch-up of source text and must stay scrubbable.
+        candidate = _make_promotable_candidate()
+        candidate["precedent_name_source"] = "source_text"
+        kept = build_learning_promotion_payloads(
+            candidate=candidate,
+            promotion_name=candidate["precedent_name"],
+            rationale="",
+        )
+        edited = build_learning_promotion_payloads(
+            candidate=candidate, promotion_name="Reviewer wording", rationale=""
+        )
+        assert kept["entity_payload"]["properties"]["name_source"] == "source_text"
+        assert edited["entity_payload"]["properties"]["name_source"] == "source_text"
+
+    def test_a_name_the_reviewer_changed_from_a_title_is_theirs(self) -> None:
+        candidate = _make_promotable_candidate()
+        candidate["precedent_name_source"] = "item_title"
+        edited = build_learning_promotion_payloads(
+            candidate=candidate, promotion_name="Reviewer wording", rationale=""
+        )
+        assert edited["entity_payload"]["properties"]["name_source"] == "reviewer"
+
+    def test_a_candidate_with_no_marker_records_none(self) -> None:
+        payloads = build_learning_promotion_payloads(
+            candidate=_make_promotable_candidate(), promotion_name="", rationale=""
+        )
+        assert "name_source" not in payloads["entity_payload"]["properties"]

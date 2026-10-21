@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
@@ -11,6 +12,7 @@ import pytest
 
 from trellis.core.hashing import content_hash
 from trellis.retrieve import pack_builder as pack_builder_module
+from trellis.retrieve.class_prior import CLASS_PRIOR_REJECTION_REASON, ClassPriorConfig
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
@@ -552,6 +554,296 @@ class TestClassPriorGate:
         }
         assert reasons.get("succ") == CLASS_PRIOR_REJECTION_REASON
         assert reasons.get("loser") == SUPERSEDED_REJECTION_REASON
+
+
+# ---------------------------------------------------------------------------
+# Class prior: grouping must survive copies of the pooled items
+# ---------------------------------------------------------------------------
+
+
+class _FreshStrategy:
+    """A strategy that builds new ``PackItem`` objects on every call.
+
+    ``_make_strategy`` hands back the very same objects each time, and its
+    mock keeps them alive, so a freed-and-reused address could never arise
+    from it. Here nothing but the pool holds the items.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        item_ids: list[str],
+        *,
+        declare_source: bool,
+        form: str | None = "conversation",
+    ) -> None:
+        self.name = name
+        self._item_ids = item_ids
+        self._declare_source = declare_source
+        self._form = form
+
+    def search(
+        self,
+        intent: str,
+        *,
+        limit: int = 10,
+        filters: dict | None = None,
+    ) -> list[PackItem]:
+        metadata: dict[str, str] = {}
+        if self._form is not None:
+            metadata["document_form"] = self._form
+        if self._declare_source:
+            metadata["source_strategy"] = self.name
+        return [
+            PackItem(
+                item_id=item_id,
+                item_type="document",
+                excerpt="x" * 60,
+                relevance_score=0.5,
+                metadata=dict(metadata),
+            )
+            for item_id in self._item_ids
+        ]
+
+
+def _copy_pool_after_collection(
+    monkeypatch: pytest.MonkeyPatch, arm: str
+) -> list[PackItem]:
+    """Make ``model_copy`` of every pooled item happen between collection
+    and the class prior, as a gate that copies would.
+
+    ``partition_superseded`` is the seam: it runs after collection and
+    ``_promote_strategy_source``, immediately before the prior, in both
+    ``build`` and ``build_sectioned``. Returns the list the ``alive`` arm
+    parks the originals in; the ``dropped`` arm releases them before it
+    makes the copies, so their addresses are free for the copies to take.
+    ``none`` leaves the pool alone.
+    """
+    keepalive: list[PackItem] = []
+    real = pack_builder_module.partition_superseded
+
+    def copying(items: list[PackItem]) -> tuple[list[PackItem], list[PackItem]]:
+        kept, withheld = real(items)
+        if arm == "none":
+            return kept, withheld
+        if arm == "alive":
+            keepalive.extend(kept)
+            return [item.model_copy() for item in kept], withheld
+        snapshots = [item.model_dump() for item in kept]
+        items.clear()
+        kept.clear()
+        gc.collect()
+        # Newest-first, so the copies take the freed addresses in a
+        # different order from the one the originals gave them up in.
+        rebuilt = [PackItem(**snap) for snap in reversed(snapshots)]
+        rebuilt.reverse()
+        return rebuilt, withheld
+
+    monkeypatch.setattr(pack_builder_module, "partition_superseded", copying)
+    return keepalive
+
+
+def _build_pool(
+    kind: str, builder: PackBuilder
+) -> tuple[list[str], dict[str, str | None], dict[str, int]]:
+    """Run ``builder``; return served ids, served ``strategy_source`` by id,
+    and the ``class_prior`` rejection count by ``strategy_source``."""
+    if kind == "flat":
+        pack = builder.build("q")
+        served = pack.items
+        rows = [
+            r
+            for r in pack.retrieval_report.rejected_items
+            if r.reason == CLASS_PRIOR_REJECTION_REASON
+        ]
+        by_strategy: dict[str, int] = {}
+        for row in rows:
+            key = row.strategy_source or ""
+            by_strategy[key] = by_strategy.get(key, 0) + 1
+    else:
+        pack = builder.build_sectioned(
+            intent="q", sections=[SectionRequest(name="all")]
+        )
+        served = pack.sections[0].items
+        by_strategy = {
+            "": pack.metadata["withholding"]["by_reason"].get(
+                CLASS_PRIOR_REJECTION_REASON, 0
+            )
+        }
+    return (
+        [item.item_id for item in served],
+        {item.item_id: item.strategy_source for item in served},
+        by_strategy,
+    )
+
+
+class TestClassPriorGroupingSurvivesCopies:
+    """The class prior judges each pooled item under the strategy that
+    collected it, even when every item has been copied since.
+
+    The default axis is ``keyword``, so with two strategies the keyword
+    conversation parents are withheld and the semantic ones are served.
+    """
+
+    @staticmethod
+    def _builder(
+        strategies: list[_FreshStrategy], axes: frozenset[str] | None = None
+    ) -> PackBuilder:
+        config = (
+            ClassPriorConfig(mode="withhold")
+            if axes is None
+            else ClassPriorConfig(mode="withhold", axes=axes)
+        )
+        return PackBuilder(
+            strategies=strategies,  # type: ignore[arg-type]
+            class_prior_config=config,
+            content_floor=ContentFloorConfig(mode="off"),
+        )
+
+    @pytest.mark.parametrize("arm", ["none", "alive", "dropped"])
+    @pytest.mark.parametrize("declare_source", [True, False])
+    @pytest.mark.parametrize("kind", ["flat", "sectioned"])
+    def test_grouping_is_identical_when_every_item_is_copied(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        declare_source: bool,
+        arm: str,
+    ) -> None:
+        """``declare_source=False`` is the sectioned path's normal case and a
+        directly-built item's: no ``metadata["source_strategy"]`` anywhere,
+        so the strategy can only come from the collection loop."""
+        strategies = [
+            _FreshStrategy(
+                "keyword", ["k0", "k1", "k2"], declare_source=declare_source
+            ),
+            _FreshStrategy(
+                "semantic", ["s0", "s1", "s2"], declare_source=declare_source
+            ),
+        ]
+        _copy_pool_after_collection(monkeypatch, arm)
+        served, sources, withheld = _build_pool(kind, self._builder(strategies))
+
+        assert sorted(served) == ["s0", "s1", "s2"]
+        assert set(sources.values()) == {"semantic"}
+        withheld_rows = sum(withheld.values())
+        assert withheld_rows == 3
+        if kind == "flat":
+            assert withheld == {"keyword": 3}
+
+    @pytest.mark.parametrize("copy_between", [False, True])
+    @pytest.mark.parametrize("kind", ["flat", "sectioned"])
+    @pytest.mark.parametrize(
+        ("axes", "served_from", "withheld_from"),
+        [
+            (frozenset({"keyword"}), "semantic", {"keyword": 1}),
+            (frozenset({"semantic"}), "keyword", {"semantic": 1}),
+            (frozenset({"keyword", "semantic"}), None, {"keyword": 1, "semantic": 1}),
+            (frozenset({"graph"}), "keyword", {}),
+        ],
+    )
+    def test_same_item_id_from_two_strategies_is_judged_under_each_rule(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        axes: frozenset[str],
+        served_from: str | None,
+        withheld_from: dict[str, int],
+        kind: str,
+        copy_between: bool,
+    ) -> None:
+        """One document, one ``item_id``, collected by two strategies: two
+        pooled items, each owed the verdict of the axis it came from.
+
+        Keyed on ``item_id`` alone the two could not be told apart, so one
+        verdict would cover both. The last case names an axis neither
+        strategy ran on: nothing is withheld, and the item is served once
+        (deduplication keeps the higher-scored first copy).
+        """
+        strategies = [
+            _FreshStrategy("keyword", ["x"], declare_source=False),
+            _FreshStrategy("semantic", ["x"], declare_source=False),
+        ]
+        _copy_pool_after_collection(monkeypatch, "alive" if copy_between else "none")
+        served, sources, withheld = _build_pool(kind, self._builder(strategies, axes))
+
+        if served_from is None:
+            assert served == []
+        else:
+            assert served == ["x"]
+            if kind == "flat":
+                assert sources["x"] == served_from
+        if kind == "flat":
+            assert withheld == withheld_from
+        else:
+            # The sectioned summary counts withheld *ids*, and an id served
+            # through its other copy is not withheld.
+            assert withheld[""] == (1 if served_from is None else 0)
+
+    @pytest.mark.parametrize("kind", ["flat", "sectioned"])
+    def test_a_declared_source_beats_the_collecting_strategy_on_both_paths(
+        self, kind: str
+    ) -> None:
+        """A semantic-collected item that declares ``graph`` is judged as
+        ``graph``, so a semantic-only axis serves it on both paths. Before,
+        flat served it and sectioned withheld it."""
+
+        class _DeclaresGraph(_FreshStrategy):
+            def search(
+                self,
+                intent: str,
+                *,
+                limit: int = 10,
+                filters: dict | None = None,
+            ) -> list[PackItem]:
+                items = super().search(intent, limit=limit, filters=filters)
+                for item in items:
+                    item.metadata["source_strategy"] = "graph"
+                return items
+
+        strategies = [_DeclaresGraph("semantic", ["x"], declare_source=False)]
+        served, _, withheld = _build_pool(
+            kind, self._builder(strategies, frozenset({"semantic"}))
+        )
+
+        assert served == ["x"]
+        assert sum(withheld.values()) == 0
+
+    def test_prior_off_stamps_nothing_and_copies_nothing(self) -> None:
+        """The shipped default stays byte-identical: no ``strategy_source``
+        appears on an item that did not declare one, and the stamp is a
+        pass-through of the very same list."""
+        items = [_item("a", 0.9), _item("b", 0.8)]
+        off = ClassPriorConfig()
+        assert PackBuilder._stamp_collecting_strategy(items, "keyword", config=off) is (
+            items
+        )
+        pack = PackBuilder(
+            strategies=[_make_strategy("keyword", items)],
+            content_floor=ContentFloorConfig(mode="off"),
+        ).build("q")
+        assert [i.strategy_source for i in pack.items] == [None, None]
+
+    def test_stamp_defers_to_a_declared_source_and_never_mutates(self) -> None:
+        """An item's own declaration wins, as ``_promote_strategy_source``
+        would have it; only an undeclared one takes the collecting name; and
+        the strategy's own objects are left as they were."""
+        bare = _item("bare", 0.5)
+        via_metadata = _strategy_item("meta", 0.5, "semantic")
+        own = PackItem(
+            item_id="own",
+            item_type="document",
+            excerpt="t",
+            relevance_score=0.5,
+            strategy_source="graph",
+        )
+        on = ClassPriorConfig(mode="withhold")
+        stamped = PackBuilder._stamp_collecting_strategy(
+            [bare, via_metadata, own], "keyword", config=on
+        )
+        assert [i.strategy_source for i in stamped] == ["keyword", "semantic", "graph"]
+        assert stamped[2] is own
+        assert bare.strategy_source is None
+        assert via_metadata.strategy_source is None
 
 
 class TestBuildSectioned:
