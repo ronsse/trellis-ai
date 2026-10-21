@@ -779,6 +779,35 @@ class TestClassPriorGroupingSurvivesCopies:
             # through its other copy is not withheld.
             assert withheld[""] == (1 if served_from is None else 0)
 
+    @pytest.mark.parametrize("kind", ["flat", "sectioned"])
+    def test_a_declared_source_beats_the_collecting_strategy_on_both_paths(
+        self, kind: str
+    ) -> None:
+        """A semantic-collected item that declares ``graph`` is judged as
+        ``graph``, so a semantic-only axis serves it on both paths. Before,
+        flat served it and sectioned withheld it."""
+
+        class _DeclaresGraph(_FreshStrategy):
+            def search(
+                self,
+                intent: str,
+                *,
+                limit: int = 10,
+                filters: dict | None = None,
+            ) -> list[PackItem]:
+                items = super().search(intent, limit=limit, filters=filters)
+                for item in items:
+                    item.metadata["source_strategy"] = "graph"
+                return items
+
+        strategies = [_DeclaresGraph("semantic", ["x"], declare_source=False)]
+        served, _, withheld = _build_pool(
+            kind, self._builder(strategies, frozenset({"semantic"}))
+        )
+
+        assert served == ["x"]
+        assert sum(withheld.values()) == 0
+
     def test_prior_off_stamps_nothing_and_copies_nothing(self) -> None:
         """The shipped default stays byte-identical: no ``strategy_source``
         appears on an item that did not declare one, and the stamp is a
