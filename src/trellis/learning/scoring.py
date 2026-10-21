@@ -786,12 +786,16 @@ def prepare_learning_promotions(
         decisions = []
 
     results: list[dict[str, Any]] = []
+    named_count = 0
     for decision in decisions:
         if not isinstance(decision, Mapping):
             continue
         candidate_id = str(decision.get("candidate_id", "")).strip()
         if not candidate_id or not bool(decision.get("approved")):
             continue
+        # An approved row with no id is skipped above and never becomes a
+        # result, so it is in ``approved_count`` and not in ``named_count``.
+        named_count += 1
 
         candidate = candidate_lookup.get(candidate_id)
         if candidate is None:
@@ -826,11 +830,17 @@ def prepare_learning_promotions(
         )
 
     return {
+        # Rows the operator marked approved, blank ids included: what they
+        # asked for. Kept as it was because the Review queue and the audit
+        # event read it.
         "approved_count": sum(
             1
             for decision in decisions
             if isinstance(decision, Mapping) and bool(decision.get("approved"))
         ),
+        # Approved rows that name a candidate: exactly the rows ``results``
+        # answers, whether ready, missing or not promotable.
+        "named_count": named_count,
         "results": results,
     }
 
@@ -1102,6 +1112,20 @@ def _precedent_reapproval_refusal(
             f"re-approved by promoting its learning candidate again; {remedy}"
         ),
     }
+
+
+def preview_learning_promotion_refusal(
+    entity_id: str, *, graph_store: GraphStore
+) -> dict[str, Any] | None:
+    """The refusal :func:`submit_learning_promotion` would answer, or ``None``.
+
+    Read-only: one graph read and the same
+    :func:`_precedent_reapproval_refusal` the submission runs before its
+    first write, so a dry run and a real run cannot disagree about it. It
+    cannot foresee a policy-gate refusal or a write that fails; those exist
+    only once the executor runs.
+    """
+    return _precedent_reapproval_refusal(graph_store.get_node(entity_id), entity_id)
 
 
 def submit_learning_promotion(
@@ -1400,6 +1424,7 @@ __all__ = [
     "normalize_intent_family",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
+    "preview_learning_promotion_refusal",
     "promotion_ready_sort_key",
     "resolve_source_excerpt",
     "strip_source_excerpt",
