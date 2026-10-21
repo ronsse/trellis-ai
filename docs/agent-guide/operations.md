@@ -1504,6 +1504,46 @@ Also reachable via `POST /precedents/{target_id}/reinstate` (`{"reason":
 `execute_mutation` (`operation="precedent.reinstate"`,
 `args={"target_id", "reason"}`).
 
+### `trellis curate promote-learning`
+
+Promote the learning candidates a human approved in a decisions file into
+`precedent` nodes, through the governed pipeline (`ENTITY_CREATE`, a
+`precedent_applies_to` `LINK_CREATE` per target, then `PRECEDENT_PROMOTE`),
+with `requested_by="cli:promote-learning"`.
+
+```bash
+trellis curate promote-learning --candidates PATH --decisions PATH \
+  [--dry-run] [--format text|json]
+```
+
+Only rows with `approved: true` are acted on; a row left unapproved is not
+an outcome and never affects the verdict. Each approved row gets one entry
+in `results`:
+
+| Entry `status` | Class | Meaning |
+|---|---|---|
+| `promoted` | landed | the entity, every edge and the `PRECEDENT_PROMOTE` event all landed |
+| `promoted_incomplete` | failed | the entity was written but an edge or the event was not; `get_lessons` may not show it |
+| `entity_failed` | failed | the entity write did not land; no edge was tried |
+| `refused_demoted`, `refused_archived`, `refused_not_current` | refused | a precedent already exists in that lifecycle state; re-approval would erase it, so nothing is written |
+| `missing_candidate` | refused | the approved id is not in `--candidates` |
+| `skipped_non_promotable` | refused | the candidate's `recommendation_type` is not `promote_precedent` or `promote_guidance` |
+
+The exit code and the payload's top-level `status` come from one reading of
+those entries, taken before either format renders, so neither depends on
+`--format`; the text form ends with a `Verdict:` line naming the same status
+and code. `review-ready --approve` reads its outcomes the same way.
+
+| Exit | `status` | When |
+|---|---|---|
+| `0` | `ok` | every approved row landed, or none was approved |
+| `2` | `refused` | at least one row was refused and no write failed |
+| `5` | `failed` | at least one write did not land, whether or not another row was refused |
+
+`--dry-run` submits nothing, so it has no outcome to read: it exits `0` and
+reports `ok`, with each row's planned status in `results`. `promoted_count`
+counts the rows that fully landed.
+
 ### `trellis curate review-ready`
 
 Review the promotion-ready learning candidates and approve the ones you

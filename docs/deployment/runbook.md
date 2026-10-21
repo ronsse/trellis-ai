@@ -301,6 +301,11 @@ trellis curate promote-learning \
 
 `--dry-run` prints the planned mutations without executing them.
 
+The command exits `0` when every approved row landed, `2` when any was refused
+and none failed, and `5` when a write did not land, in either format; the JSON
+`status` reads `ok`, `refused` or `failed` to match. See
+[`operations.md`](../agent-guide/operations.md#trellis-curate-promote-learning).
+
 ## Recovery operations
 
 ### Feedback reconciliation

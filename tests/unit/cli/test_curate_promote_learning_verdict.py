@@ -1,0 +1,369 @@
+"""``trellis curate promote-learning`` derives its verdict from its outcomes (#930).
+
+The per-candidate statuses were always right. The command-level ``status`` and
+the exit code ignored them, so a script reading either took a refused or
+half-written promotion as done. Both now come from one reading of the
+outcomes, shared with ``review-ready --approve``: ``0`` / ``ok`` when every
+approved row landed, ``2`` / ``refused`` when any was refused and none
+failed, ``5`` / ``failed`` when a write did not land, in either format.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from typer.testing import CliRunner
+
+from tests.cli_output import plain
+from trellis.learning.scoring import precedent_entity_id_for_candidate
+from trellis_cli import curate as curate_cli
+from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.main import app
+
+runner = CliRunner()
+
+#: A target that is never seeded, so the ``precedent_applies_to`` edge to it is
+#: rejected after the entity is written: a half-landed promotion.
+DANGLING = "entity://not-in-the-graph"
+
+
+@pytest.fixture(autouse=True)
+def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "stores").mkdir(parents=True)
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+
+
+def _candidate(
+    candidate_id: str,
+    *,
+    recommendation_type: str = "promote_guidance",
+    targets: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "intent_family": "fam",
+        "recommendation_type": recommendation_type,
+        "item_id": f"doc:{candidate_id}",
+        "item_type": "document",
+        "title": f"title {candidate_id}",
+        "precedent_name": f"Learning: {candidate_id}",
+        "precedent_properties": {"source_of_truth": "reviewed_promotion"},
+        "target_entity_ids": list(targets),
+        "supporting_run_ids": ["run-1"],
+        "phases": [],
+        "domain_systems": [],
+    }
+
+
+def _demote(candidate_id: str) -> None:
+    """Seed a demoted precedent, so re-approving the candidate is refused."""
+    registry = curate_cli._get_registry()
+    try:
+        registry.knowledge.graph_store.upsert_node(
+            precedent_entity_id_for_candidate(candidate_id),
+            "precedent",
+            {"lifecycle": {"state": "demoted"}},
+        )
+    finally:
+        registry.close()
+
+
+def _promote(
+    tmp_path: Path,
+    candidates: list[dict[str, Any]],
+    decisions: list[tuple[str, bool]],
+    *,
+    fmt: str,
+) -> tuple[int, dict[str, Any] | None, str]:
+    candidates_path = tmp_path / "candidates.json"
+    decisions_path = tmp_path / "decisions.json"
+    candidates_path.write_text(json.dumps({"candidates": candidates}), encoding="utf-8")
+    decisions_path.write_text(
+        json.dumps(
+            {
+                "decisions": [
+                    {"candidate_id": cid, "approved": approved, "rationale": "r"}
+                    for cid, approved in decisions
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "curate",
+            "promote-learning",
+            "--candidates",
+            str(candidates_path),
+            "--decisions",
+            str(decisions_path),
+            "--format",
+            fmt,
+        ],
+    )
+    data = json.loads(result.stdout.strip()) if fmt == "json" else None
+    return result.exit_code, data, plain(result.stdout)
+
+
+# scenario -> (candidates, decisions, demoted ids, exit, status, promoted_count)
+_OK = _candidate("ok")
+_OK2 = _candidate("ok2")
+_REFUSED = _candidate("refused")  # seeded demoted
+_INCOMPLETE = _candidate("incomplete", targets=(DANGLING,))
+_NOISE = _candidate("noise", recommendation_type="investigate_noise")
+
+_SCENARIOS: dict[str, tuple[Any, ...]] = {
+    "all_landed": ([_OK, _OK2], [("ok", True), ("ok2", True)], [], EXIT_OK, "ok", 2),
+    "one_refused_rest_landed": (
+        [_OK, _REFUSED],
+        [("ok", True), ("refused", True)],
+        ["refused"],
+        EXIT_VALIDATION,
+        "refused",
+        1,
+    ),
+    "only_refused": (
+        [_REFUSED],
+        [("refused", True)],
+        ["refused"],
+        EXIT_VALIDATION,
+        "refused",
+        0,
+    ),
+    "approved_id_names_no_candidate": (
+        [_OK],
+        [("ghost", True)],
+        [],
+        EXIT_VALIDATION,
+        "refused",
+        0,
+    ),
+    "approved_candidate_not_promotable": (
+        [_NOISE],
+        [("noise", True)],
+        [],
+        EXIT_VALIDATION,
+        "refused",
+        0,
+    ),
+    "half_landed_is_a_failure": (
+        [_INCOMPLETE],
+        [("incomplete", True)],
+        [],
+        EXIT_STORE,
+        "failed",
+        0,
+    ),
+    "failed_beside_landed": (
+        [_OK, _INCOMPLETE],
+        [("ok", True), ("incomplete", True)],
+        [],
+        EXIT_STORE,
+        "failed",
+        1,
+    ),
+    # Both orders: the verdict must not depend on which came first.
+    "refused_then_failed": (
+        [_REFUSED, _INCOMPLETE],
+        [("refused", True), ("incomplete", True)],
+        ["refused"],
+        EXIT_STORE,
+        "failed",
+        0,
+    ),
+    "failed_then_refused": (
+        [_INCOMPLETE, _REFUSED],
+        [("incomplete", True), ("refused", True)],
+        ["refused"],
+        EXIT_STORE,
+        "failed",
+        0,
+    ),
+    "refused_failed_and_landed": (
+        [_OK, _REFUSED, _INCOMPLETE],
+        [("ok", True), ("refused", True), ("incomplete", True)],
+        ["refused"],
+        EXIT_STORE,
+        "failed",
+        1,
+    ),
+    # Not asking to promote a row is not a failure to promote it.
+    "unapproved_row_beside_landed": (
+        [_OK, _REFUSED],
+        [("ok", True), ("refused", False)],
+        ["refused"],
+        EXIT_OK,
+        "ok",
+        1,
+    ),
+}
+
+
+class TestVerdictFollowsOutcomes:
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
+    def test_exit_code_and_status_do_not_depend_on_format(
+        self, scenario: str, fmt: str, tmp_path: Path
+    ) -> None:
+        candidates, decisions, demoted, exit_code, status, promoted = _SCENARIOS[
+            scenario
+        ]
+        for candidate_id in demoted:
+            _demote(candidate_id)
+
+        code, data, out = _promote(tmp_path, candidates, decisions, fmt=fmt)
+
+        assert code == exit_code, out
+        if fmt == "json":
+            assert data is not None
+            assert data["status"] == status
+            assert data["promoted_count"] == promoted
+        else:
+            # The human surface states the verdict; it does not only exit.
+            assert f"Verdict: {status} (exit {exit_code})" in out
+
+    def test_half_landed_promotion_is_labelled_incomplete(self, tmp_path: Path) -> None:
+        code, data, _ = _promote(
+            tmp_path, [_INCOMPLETE], [("incomplete", True)], fmt="json"
+        )
+        assert data is not None
+        assert code == EXIT_STORE
+        assert data["results"][0]["status"] == "promoted_incomplete"
+        assert data["promoted_count"] == 0
+
+    def test_a_refused_row_keeps_its_own_status(self, tmp_path: Path) -> None:
+        _demote("refused")
+        _, data, _ = _promote(
+            tmp_path, [_OK, _REFUSED], [("ok", True), ("refused", True)], fmt="json"
+        )
+        assert data is not None
+        assert [(r["candidate_id"], r["status"]) for r in data["results"]] == [
+            ("ok", "promoted"),
+            ("refused", "refused_demoted"),
+        ]
+
+    def test_an_unreadyable_approved_row_is_reported_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        # No row is ready, so nothing reaches the executor; the refusals still
+        # have to appear, because the verdict reads them.
+        _, data, _ = _promote(
+            tmp_path, [_NOISE], [("noise", True), ("ghost", True)], fmt="json"
+        )
+        assert data is not None
+        assert data["approved_count"] == 2
+        assert data["ready_count"] == 0
+        assert [(r["candidate_id"], r["status"]) for r in data["results"]] == [
+            ("noise", "skipped_non_promotable"),
+            ("ghost", "missing_candidate"),
+        ]
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_an_empty_run_is_ok_in_both_formats(self, fmt: str, tmp_path: Path) -> None:
+        for decisions in ([("ok", False)], []):
+            code, data, out = _promote(tmp_path, [_OK], decisions, fmt=fmt)
+            assert code == EXIT_OK, out
+            if fmt == "json":
+                assert data is not None
+                assert data["status"] == "ok"
+                assert data["results"] == []
+            else:
+                assert "No approved promotions found" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_write_the_executor_reports_failed_is_a_failure(
+        self, fmt: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            curate_cli,
+            "submit_learning_promotion",
+            lambda *_a, **_k: {"status": "entity_failed", "message": "boom"},
+        )
+        code, data, out = _promote(tmp_path, [_OK], [("ok", True)], fmt=fmt)
+        assert code == EXIT_STORE, out
+        if data is not None:
+            assert data["status"] == "failed"
+            assert data["results"][0]["status"] == "entity_failed"
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_dry_run_writes_nothing_and_stays_ok(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        # A dry run submits nothing, so there is no outcome to read.
+        _demote("refused")
+        candidates_path = tmp_path / "candidates.json"
+        decisions_path = tmp_path / "decisions.json"
+        candidates_path.write_text(
+            json.dumps({"candidates": [_REFUSED]}), encoding="utf-8"
+        )
+        decisions_path.write_text(
+            json.dumps({"decisions": [{"candidate_id": "refused", "approved": True}]}),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote-learning",
+                "--candidates",
+                str(candidates_path),
+                "--decisions",
+                str(decisions_path),
+                "--dry-run",
+                "--format",
+                fmt,
+            ],
+        )
+        assert result.exit_code == EXIT_OK, result.output
+
+
+class TestPromotionVerdict:
+    """The shared helper, read directly: the same table both commands use."""
+
+    @staticmethod
+    def _landed() -> dict[str, Any]:
+        return {
+            "status": "promoted",
+            "edges": [{"edge_kind": "k", "status": "success"}],
+            "precedent_event_status": "success",
+        }
+
+    @pytest.mark.parametrize(
+        ("statuses", "expected"),
+        [
+            ([], (EXIT_OK, "ok")),
+            (["landed"], (EXIT_OK, "ok")),
+            (["landed", "refused_demoted"], (EXIT_VALIDATION, "refused")),
+            (["refused_not_current"], (EXIT_VALIDATION, "refused")),
+            (["missing_candidate"], (EXIT_VALIDATION, "refused")),
+            (["skipped_non_promotable"], (EXIT_VALIDATION, "refused")),
+            (["entity_failed"], (EXIT_STORE, "failed")),
+            (["promoted_incomplete"], (EXIT_STORE, "failed")),
+            (["refused_demoted", "entity_failed"], (EXIT_STORE, "failed")),
+            (["entity_failed", "refused_demoted"], (EXIT_STORE, "failed")),
+            # An unknown status is a failure, never an ``ok`` or a refusal.
+            (["something_new"], (EXIT_STORE, "failed")),
+        ],
+    )
+    def test_table(self, statuses: list[str], expected: tuple[int, str]) -> None:
+        outcomes = [
+            self._landed() if status == "landed" else {"status": status}
+            for status in statuses
+        ]
+        assert curate_cli._promotion_verdict(outcomes) == expected
+
+    def test_a_promoted_status_that_did_not_fully_land_is_a_failure(self) -> None:
+        # Whatever the label says: the edge or the event did not land.
+        edge_down = {
+            **self._landed(),
+            "edges": [{"edge_kind": "k", "status": "failed"}],
+        }
+        event_down = {**self._landed(), "precedent_event_status": "rejected"}
+        for outcome in (edge_down, event_down):
+            assert curate_cli._promotion_verdict([outcome]) == (EXIT_STORE, "failed")

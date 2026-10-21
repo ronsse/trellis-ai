@@ -36,7 +36,7 @@ from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.base.graph import GraphStore
 from trellis.stores.settings_store import SettingsStore
 from trellis_cli import curate as curate_cli
-from trellis_cli.exit_codes import EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -1111,7 +1111,9 @@ class TestCuratePromoteLearning:
             ],
         )
 
-        assert result.exit_code == 0, result.output
+        # The stub's edge answered ``ok-[v]``, not ``success``: a half-landed
+        # promotion, which the verdict reads as a failed write (#930).
+        assert result.exit_code == EXIT_STORE, result.output
         rendered = assert_coloured(result.stdout)
         assert "s-[k]:ok-[v]" in rendered
 

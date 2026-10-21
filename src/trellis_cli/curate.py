@@ -783,6 +783,11 @@ def promote_learning(
 
     Use ``--dry-run`` to preview the entity / edge payloads before
     committing — the planner is pure, so dry-run is safe to rerun.
+
+    The exit code and the payload's ``status`` read the per-candidate
+    outcomes, in either format: ``0`` / ``ok`` when every approved row
+    landed (or none was approved), ``2`` / ``refused`` when any was refused
+    and no write failed, ``5`` / ``failed`` when a write did not land.
     """
     candidates_payload = json.loads(candidates.read_text(encoding="utf-8"))
     decisions_payload = json.loads(decisions.read_text(encoding="utf-8"))
@@ -820,7 +825,8 @@ def promote_learning(
             console.print(f"  - {escape(entry['candidate_id'])}: {entry['status']}")
         return
 
-    if not ready:
+    if not plan["results"]:
+        # Nothing was approved: a no-op, so ``0`` / ``ok`` in both formats.
         if output_format == "json":
             print(
                 json.dumps(
@@ -842,11 +848,14 @@ def promote_learning(
         )
         return
 
-    executor = build_curate_executor(registry)
+    # Only a ready entry reaches the executor; an approved row the planner
+    # could not ready (an unknown id, a non-promotable type) passes through
+    # as its own outcome, so it is counted in the verdict and not dropped.
+    executor = build_curate_executor(registry) if ready else None
 
     submission_results: list[dict[str, Any]] = []
     for entry in plan["results"]:
-        if entry["status"] != "ready":
+        if executor is None or entry["status"] != "ready":
             submission_results.append({"candidate_id": entry["candidate_id"], **entry})
             continue
         outcome = submit_learning_promotion(
@@ -857,20 +866,26 @@ def promote_learning(
             graph_store=registry.knowledge.graph_store,
         )
         submission_results.append(
-            {
-                "candidate_id": entry["candidate_id"],
-                "entity_id": entry["entity_id"],
-                **outcome,
-            }
+            _settle_promotion(
+                {
+                    "candidate_id": entry["candidate_id"],
+                    "entity_id": entry["entity_id"],
+                    **outcome,
+                }
+            )
         )
 
-    promoted_count = sum(1 for r in submission_results if r.get("status") == "promoted")
+    promoted_count = sum(1 for r in submission_results if _landed(r))
+    # One reading of the outcomes, taken before either format renders, so the
+    # exit code and the payload's ``status`` cannot depend on ``--format``
+    # (tests/unit/test_format_exit_parity_rule.py).
+    exit_code, status = _promotion_verdict(submission_results)
 
     if output_format == "json":
         print(
             json.dumps(
                 {
-                    "status": "ok",
+                    "status": status,
                     "dry_run": False,
                     "approved_count": plan["approved_count"],
                     "ready_count": len(ready),
@@ -879,39 +894,43 @@ def promote_learning(
                 }
             )
         )
-        return
+    else:
+        console.print(
+            f"[bold]Promote Learning[/bold] — {promoted_count}/"
+            f"{plan['approved_count']} approved candidates promoted"
+        )
+        table = Table(title="Promotion Results")
+        table.add_column("Candidate ID", style="cyan", max_width=24)
+        table.add_column("Status", style="bold")
+        table.add_column("Node ID", style="dim", max_width=30)
+        table.add_column("Edges")
+        for entry in submission_results:
+            edges = entry.get("edges") or []
+            edge_summary = (
+                ", ".join(f"{e['edge_kind']}:{e['status']}" for e in edges)
+                if edges
+                else "-"
+            )
+            status_style = "green" if _landed(entry) else "red"
+            table.add_row(
+                escape(entry["candidate_id"]),
+                f"[{status_style}]{entry['status']}[/{status_style}]",
+                # ``or`` rather than a ``.get`` default: ``CommandResult.
+                # created_id`` is ``str | None`` and a failed submission writes
+                # the key with ``None``, so the default never fires and
+                # ``escape(None)`` is a ``TypeError``. Rich took ``None`` as an
+                # empty cell before the escape went in, so this is a crash the
+                # sweep itself would have introduced — and mypy is blind to it
+                # because ``entry`` is a ``dict[str, Any]``.
+                escape(entry.get("node_id") or "-"),
+                escape(edge_summary),
+            )
+        console.print(table)
+        _print_verdict(status, exit_code)
 
-    console.print(
-        f"[bold]Promote Learning[/bold] — {promoted_count}/"
-        f"{plan['approved_count']} approved candidates promoted"
-    )
-    table = Table(title="Promotion Results")
-    table.add_column("Candidate ID", style="cyan", max_width=24)
-    table.add_column("Status", style="bold")
-    table.add_column("Node ID", style="dim", max_width=30)
-    table.add_column("Edges")
-    for entry in submission_results:
-        edges = entry.get("edges") or []
-        edge_summary = (
-            ", ".join(f"{e['edge_kind']}:{e['status']}" for e in edges)
-            if edges
-            else "-"
-        )
-        status_style = "green" if entry.get("status") == "promoted" else "red"
-        table.add_row(
-            escape(entry["candidate_id"]),
-            f"[{status_style}]{entry['status']}[/{status_style}]",
-            # ``or`` rather than a ``.get`` default: ``CommandResult.
-            # created_id`` is ``str | None`` and a failed submission writes
-            # the key with ``None``, so the default never fires and
-            # ``escape(None)`` is a ``TypeError``. Rich took ``None`` as an
-            # empty cell before the escape went in, so this is a crash the
-            # sweep itself would have introduced — and mypy is blind to it
-            # because ``entry`` is a ``dict[str, Any]``.
-            escape(entry.get("node_id") or "-"),
-            escape(edge_summary),
-        )
-    console.print(table)
+    # Below the format branch, so both formats exit alike.
+    if exit_code != EXIT_OK:
+        raise typer.Exit(code=exit_code)
 
 
 # ---------------------------------------------------------------------------
@@ -938,21 +957,56 @@ def _landed(outcome: dict[str, Any]) -> bool:
     )
 
 
-def _review_ready_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
-    """``(exit_code, status)`` for an approval run, from one reading of the outcomes.
+#: Planner answers for an approved row that never reached the executor: the
+#: id names no candidate, or a candidate that is not a promotion. The
+#: operator asked for the row and it was declined, so each is a refusal
+#: beside ``refused_*``, not a write that failed.
+_UNSUBMITTED_STATUSES = frozenset({"missing_candidate", "skipped_non_promotable"})
 
-    The exit code and the payload's ``status`` are derived together, before
-    either format renders, so neither can depend on ``--format``
-    (``tests/unit/test_format_exit_parity_rule.py``). A refusal is the
-    operator's to fix (``EXIT_VALIDATION``); a write that did not land is the
-    deployment's (``EXIT_STORE``).
+
+def _is_refusal(outcome: dict[str, Any]) -> bool:
+    """Whether an outcome is a refusal: declined before anything was written."""
+    status = str(outcome.get("status", ""))
+    return status.startswith("refused") or status in _UNSUBMITTED_STATUSES
+
+
+def _settle_promotion(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Relabel a ``promoted`` outcome whose edges or event did not all land.
+
+    ``submit_learning_promotion`` answers ``promoted`` once the entity is
+    written, so a table row reading ``promoted`` could sit beside a command
+    that failed. ``promoted_incomplete`` says the entity exists and the rest
+    does not; it is a write that did not land, never a refusal.
     """
-    failed = [o for o in outcomes if not _landed(o)]
-    if not failed:
+    if outcome.get("status") == "promoted" and not _landed(outcome):
+        outcome["status"] = "promoted_incomplete"
+    return outcome
+
+
+def _promotion_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
+    """``(exit_code, status)`` for a promotion run, from one reading of the outcomes.
+
+    Shared by ``promote-learning`` and ``review-ready --approve``. The exit
+    code and the payload's ``status`` are derived together, before either
+    format renders, so neither can depend on ``--format``
+    (``tests/unit/test_format_exit_parity_rule.py``). A refusal is the
+    operator's to fix (``EXIT_VALIDATION``); a write that did not land,
+    including ``promoted_incomplete``, is the deployment's (``EXIT_STORE``),
+    and outranks a refusal when a run has both. No outcomes is ``ok``: a row
+    the operator did not approve never becomes an outcome.
+    """
+    unlanded = [o for o in outcomes if not _landed(o)]
+    if not unlanded:
         return EXIT_OK, "ok"
-    if any(not str(o.get("status", "")).startswith("refused") for o in failed):
+    if any(not _is_refusal(o) for o in unlanded):
         return EXIT_STORE, "failed"
     return EXIT_VALIDATION, "refused"
+
+
+def _print_verdict(status: str, exit_code: int) -> None:
+    """State the run's verdict on the human surface, beside the exit code."""
+    style = "green" if exit_code == EXIT_OK else "red"
+    console.print(f"Verdict: [{style}]{status}[/{style}] (exit {exit_code})")
 
 
 def _approve_candidates(
@@ -1001,14 +1055,15 @@ def _approve_candidates(
             requested_by=REVIEW_READY_REQUESTED_BY,
             graph_store=registry.knowledge.graph_store,
         )
-        outcome = {
-            "candidate_id": candidate_id,
-            "entity_id": entry["entity_id"],
-            **outcome,
-        }
-        if outcome["status"] == "promoted" and not _landed(outcome):
-            outcome["status"] = "promoted_incomplete"
-        outcomes.append(outcome)
+        outcomes.append(
+            _settle_promotion(
+                {
+                    "candidate_id": candidate_id,
+                    "entity_id": entry["entity_id"],
+                    **outcome,
+                }
+            )
+        )
     return outcomes
 
 
@@ -1148,7 +1203,7 @@ def review_ready(
             rationale=rationale,
             force_contradicted=force_contradicted,
         )
-        exit_code, status = _review_ready_verdict(outcomes)
+        exit_code, status = _promotion_verdict(outcomes)
         payload["approved_count"] = len(outcomes)
         payload["promoted_count"] = sum(1 for o in outcomes if _landed(o))
         payload["results"] = outcomes
