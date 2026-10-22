@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from trellis.schemas.pack import PackItem, SectionRequest
+from trellis.schemas.well_known import canonicalize_entity_type
 
 # Default affinity → (content_types, scopes, item_types) mapping.
 # Used when an item has no explicit retrieval_affinity tags.
@@ -131,10 +132,17 @@ class TierMapper:
         inferred: list[str] = []
         item_ct = _get_content_type(item)
         item_scope = _get_scope(item)
+        node_types = _get_node_types(item)
 
         for affinity, rules in self._heuristics.items():
-            # Check item_type match
-            if rules["item_types"] and item.item_type in rules["item_types"]:
+            # Check item_type match. A graph candidate is always
+            # ``item_type="entity"`` and carries what it is in
+            # ``metadata["node_type"]``, so ``item_types`` is matched against
+            # both -- otherwise a rule naming ``precedent`` is unreachable.
+            if rules["item_types"] and (
+                item.item_type in rules["item_types"]
+                or _node_type_in(node_types, rules["item_types"])
+            ):
                 inferred.append(affinity)
                 continue
 
@@ -154,6 +162,34 @@ class TierMapper:
                 inferred.append(affinity)
 
         return inferred
+
+
+def _get_node_types(item: PackItem) -> set[str]:
+    """Canonical node type(s) a graph-sourced item carries, else empty.
+
+    ``GraphSearch`` stamps ``node_type`` (the stored spelling) and
+    ``node_type_canonical`` after the property spread, so both are the
+    strategy's own claim. Canonicalising here makes ``team`` and ``Team``
+    one bucket; a non-string value is ignored rather than raised on.
+    """
+    found: set[str] = set()
+    for key in ("node_type", "node_type_canonical"):
+        value = item.metadata.get(key)
+        if isinstance(value, str) and value:
+            found.add(canonicalize_entity_type(value))
+    return found
+
+
+def _node_type_in(node_types: set[str], item_types: set[str]) -> bool:
+    """Whether any node type is named by a rule's ``item_types``.
+
+    The rule side is canonicalised too, so a rule written ``"team"`` matches
+    a row stored ``"Team"`` (and the reverse). Types outside the well-known
+    set pass through unchanged, so ``precedent`` compares as itself.
+    """
+    if not node_types:
+        return False
+    return not node_types.isdisjoint(canonicalize_entity_type(t) for t in item_types)
 
 
 def _get_content_type(item: PackItem) -> str | None:
