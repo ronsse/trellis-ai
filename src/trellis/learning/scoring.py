@@ -23,7 +23,7 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -1345,6 +1345,79 @@ def submit_learning_promotion(
     }
 
 
+#: A promotion run's verdict. ``ok``: every approved row landed (or none was
+#: approved). ``refused``: at least one row was declined before anything was
+#: written and no write failed. ``failed``: a write did not land.
+PromotionVerdict = Literal["ok", "refused", "failed"]
+
+#: Planner answers for an approved row that never reached the executor: the
+#: id names no candidate, or a candidate that is not a promotion. The
+#: operator asked for the row and it was declined, so each is a refusal
+#: beside ``refused_*``, not a write that failed.
+_UNSUBMITTED_STATUSES = frozenset({"missing_candidate", "skipped_non_promotable"})
+
+
+def promotion_landed(outcome: Mapping[str, Any]) -> bool:
+    """Whether a submitted promotion wrote everything it promised.
+
+    :func:`submit_learning_promotion` answers ``promoted`` once the entity is
+    written, whatever became of the edges and of the ``PRECEDENT_PROMOTE``
+    event that makes the precedent visible to ``get_lessons``. A reviewer's
+    approval is only honoured when all of them landed.
+    """
+    from trellis.mutate import CommandStatus  # noqa: PLC0415
+
+    ok = CommandStatus.SUCCESS.value
+    return (
+        outcome.get("status") == "promoted"
+        and outcome.get("precedent_event_status") == ok
+        and all(e.get("status") == ok for e in outcome.get("edges") or [])
+    )
+
+
+def promotion_is_refusal(outcome: Mapping[str, Any]) -> bool:
+    """Whether an outcome is a refusal: declined before anything was written."""
+    status = str(outcome.get("status", ""))
+    return status.startswith("refused") or status in _UNSUBMITTED_STATUSES
+
+
+def settle_promotion(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Relabel a ``promoted`` outcome whose edges or event did not all land.
+
+    :func:`submit_learning_promotion` answers ``promoted`` once the entity is
+    written, so a row reading ``promoted`` could sit beside a run that
+    failed. ``promoted_incomplete`` says the entity exists and the rest does
+    not; it is a write that did not land, never a refusal.
+    """
+    if outcome.get("status") == "promoted" and not promotion_landed(outcome):
+        outcome["status"] = "promoted_incomplete"
+    return outcome
+
+
+def promotion_verdict(outcomes: Sequence[Mapping[str, Any]]) -> PromotionVerdict:
+    """The verdict for a promotion run, from one reading of its outcomes.
+
+    One rule for every surface that runs a reviewed promotion (CLI
+    ``promote-learning`` and ``review-ready --approve``, the REST
+    ``POST /learning/promotions``), so they cannot disagree about one run.
+    A refusal is the operator's to fix; a write that did not land,
+    including ``promoted_incomplete``, is the deployment's, and outranks a
+    refusal when a run has both. No outcomes is ``ok``: a row the operator
+    did not approve never becomes an outcome.
+
+    Each outcome is the dict :func:`submit_learning_promotion` returned (or a
+    planner row that never reached it), read by :func:`promotion_landed` and
+    :func:`promotion_is_refusal`, so pass it before :func:`settle_promotion`
+    or after: the answer is the same.
+    """
+    unlanded = [o for o in outcomes if not promotion_landed(o)]
+    if not unlanded:
+        return "ok"
+    if any(not promotion_is_refusal(o) for o in unlanded):
+        return "failed"
+    return "refused"
+
+
 #: Recommendation values that flow through ``prepare_learning_promotions``
 #: into ENTITY_CREATE payloads. The CLI surface checks the candidate's
 #: ``recommendation_type`` against this set to decide whether to surface
@@ -1508,6 +1581,7 @@ __all__ = [
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "SOURCE_EXCERPT_REDACTED",
+    "PromotionVerdict",
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
     "carries_source_excerpt",
@@ -1518,8 +1592,12 @@ __all__ = [
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
     "preview_learning_promotion_refusal",
+    "promotion_is_refusal",
+    "promotion_landed",
     "promotion_ready_sort_key",
+    "promotion_verdict",
     "resolve_source_excerpt",
+    "settle_promotion",
     "strip_source_excerpt",
     "submit_learning_promotion",
     "write_learning_review_artifacts",

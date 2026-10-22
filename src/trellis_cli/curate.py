@@ -51,7 +51,13 @@ from trellis.learning.review_ready import (
     build_review_rows,
     make_promoted_probe,
 )
-from trellis.learning.scoring import preview_learning_promotion_refusal
+from trellis.learning.scoring import (
+    PromotionVerdict,
+    preview_learning_promotion_refusal,
+    promotion_landed,
+    promotion_verdict,
+    settle_promotion,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -903,7 +909,7 @@ def promote_learning(
             graph_store=registry.knowledge.graph_store,
         )
         submission_results.append(
-            _settle_promotion(
+            settle_promotion(
                 {
                     "candidate_id": entry["candidate_id"],
                     "entity_id": entry["entity_id"],
@@ -912,7 +918,7 @@ def promote_learning(
             )
         )
 
-    promoted_count = sum(1 for r in submission_results if _landed(r))
+    promoted_count = sum(1 for r in submission_results if promotion_landed(r))
     # One reading of the outcomes, taken before either format renders, so the
     # exit code and the payload's ``status`` cannot depend on ``--format``
     # (tests/unit/test_format_exit_parity_rule.py).
@@ -950,7 +956,7 @@ def promote_learning(
                 if edges
                 else "-"
             )
-            status_style = "green" if _landed(entry) else "red"
+            status_style = "green" if promotion_landed(entry) else "red"
             table.add_row(
                 escape(entry["candidate_id"]),
                 f"[{status_style}]{entry['status']}[/{status_style}]",
@@ -980,66 +986,28 @@ def promote_learning(
 REVIEW_READY_REQUESTED_BY = "cli:review-ready"
 
 
-def _landed(outcome: dict[str, Any]) -> bool:
-    """Whether a submitted promotion wrote everything it promised.
-
-    ``submit_learning_promotion`` answers ``promoted`` once the entity is
-    written, whatever became of the edges and of the ``PRECEDENT_PROMOTE``
-    event that makes the precedent visible to ``get_lessons``. A reviewer's
-    approval is only honoured when all of them landed.
-    """
-    ok = CommandStatus.SUCCESS.value
-    return (
-        outcome.get("status") == "promoted"
-        and outcome.get("precedent_event_status") == ok
-        and all(e.get("status") == ok for e in outcome.get("edges") or [])
-    )
-
-
-#: Planner answers for an approved row that never reached the executor: the
-#: id names no candidate, or a candidate that is not a promotion. The
-#: operator asked for the row and it was declined, so each is a refusal
-#: beside ``refused_*``, not a write that failed.
-_UNSUBMITTED_STATUSES = frozenset({"missing_candidate", "skipped_non_promotable"})
-
-
-def _is_refusal(outcome: dict[str, Any]) -> bool:
-    """Whether an outcome is a refusal: declined before anything was written."""
-    status = str(outcome.get("status", ""))
-    return status.startswith("refused") or status in _UNSUBMITTED_STATUSES
-
-
-def _settle_promotion(outcome: dict[str, Any]) -> dict[str, Any]:
-    """Relabel a ``promoted`` outcome whose edges or event did not all land.
-
-    ``submit_learning_promotion`` answers ``promoted`` once the entity is
-    written, so a table row reading ``promoted`` could sit beside a command
-    that failed. ``promoted_incomplete`` says the entity exists and the rest
-    does not; it is a write that did not land, never a refusal.
-    """
-    if outcome.get("status") == "promoted" and not _landed(outcome):
-        outcome["status"] = "promoted_incomplete"
-    return outcome
+#: The exit code each verdict maps to. A refusal is the operator's to fix
+#: (``EXIT_VALIDATION``); a write that did not land is the deployment's
+#: (``EXIT_STORE``).
+_EXIT_BY_VERDICT: dict[PromotionVerdict, int] = {
+    "ok": EXIT_OK,
+    "refused": EXIT_VALIDATION,
+    "failed": EXIT_STORE,
+}
 
 
 def _promotion_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
     """``(exit_code, status)`` for a promotion run, from one reading of the outcomes.
 
-    Shared by ``promote-learning`` and ``review-ready --approve``. The exit
-    code and the payload's ``status`` are derived together, before either
-    format renders, so neither can depend on ``--format``
-    (``tests/unit/test_format_exit_parity_rule.py``). A refusal is the
-    operator's to fix (``EXIT_VALIDATION``); a write that did not land,
-    including ``promoted_incomplete``, is the deployment's (``EXIT_STORE``),
-    and outranks a refusal when a run has both. No outcomes is ``ok``: a row
-    the operator did not approve never becomes an outcome.
+    Shared by ``promote-learning`` and ``review-ready --approve``. The status
+    is :func:`trellis.learning.scoring.promotion_verdict`, the same one the
+    REST route states, so no surface has its own rule; this only maps it to an
+    exit code. The exit code and the payload's ``status`` are derived together,
+    before either format renders, so neither can depend on ``--format``
+    (``tests/unit/test_format_exit_parity_rule.py``).
     """
-    unlanded = [o for o in outcomes if not _landed(o)]
-    if not unlanded:
-        return EXIT_OK, "ok"
-    if any(not _is_refusal(o) for o in unlanded):
-        return EXIT_STORE, "failed"
-    return EXIT_VALIDATION, "refused"
+    status = promotion_verdict(outcomes)
+    return _EXIT_BY_VERDICT[status], status
 
 
 def _print_verdict(status: str, exit_code: int) -> None:
@@ -1135,7 +1103,7 @@ def _approve_candidates(
             graph_store=registry.knowledge.graph_store,
         )
         outcomes.append(
-            _settle_promotion(
+            settle_promotion(
                 {
                     "candidate_id": candidate_id,
                     "entity_id": entry["entity_id"],
@@ -1200,7 +1168,7 @@ def _print_review_rows(rows: list[dict[str, Any]], *, ready_count: int) -> None:
 def _print_approval_outcomes(outcomes: list[dict[str, Any]]) -> None:
     """Render one line per approved id."""
     for outcome in outcomes:
-        style = "green" if _landed(outcome) else "red"
+        style = "green" if promotion_landed(outcome) else "red"
         status = escape(str(outcome["status"]))
         message = outcome.get("message")
         tail = f" — {escape(str(message))}" if message else ""
@@ -1286,7 +1254,7 @@ def review_ready(
         )
         exit_code, status = _promotion_verdict(outcomes)
         payload["approved_count"] = len(outcomes)
-        payload["promoted_count"] = sum(1 for o in outcomes if _landed(o))
+        payload["promoted_count"] = sum(1 for o in outcomes if promotion_landed(o))
         payload["results"] = outcomes
     else:
         status = "ok"

@@ -1883,11 +1883,39 @@ components:
       type: object
     LearningPromotionResponse:
       additionalProperties: false
-      description: Aggregate outcome of a learning-promotion submission.
+      description: 'Aggregate outcome of a learning-promotion submission.
+
+
+        ``status`` is the run''s verdict, the one ``trellis curate
+
+        promote-learning`` states: ``"ok"`` when every approved row landed (or
+
+        none was approved), ``"refused"`` when a row was declined before
+
+        anything was written and no write failed, ``"failed"`` when a write did
+
+        not land. The HTTP status is 200 whatever the verdict.
+
+
+        ``approved_count`` is the rows marked approved, blank ids included;
+
+        ``named_count`` is the approved rows that name a candidate, the ones the
+
+        run acted on and the right denominator for ``promoted_count``.
+
+        ``promoted_count`` counts rows whose entity, edges and precedent event
+
+        all landed; a row that wrote its entity but not the rest reads
+
+        ``promoted_incomplete``.'
       properties:
         approved_count:
           default: 0
           title: Approved Count
+          type: integer
+        named_count:
+          default: 0
+          title: Named Count
           type: integer
         promoted_count:
           default: 0
@@ -4969,7 +4997,14 @@ paths:
 
         the path ``trellis curate promote-learning`` uses. A
 
-        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.'
+        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
+
+
+        The response''s ``status`` is the verdict ``promote-learning`` states,
+
+        from the same function (:func:`promotion_verdict`), and the status code
+
+        stays 200 for every verdict.'
       operationId: promote_learning_candidates_api_v1_learning_promotions_post
       requestBody:
         content:

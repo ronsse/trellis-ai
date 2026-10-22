@@ -42,6 +42,9 @@ from trellis.learning.artifacts import (
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
     prepare_learning_promotions,
+    promotion_landed,
+    promotion_verdict,
+    settle_promotion,
     submit_learning_promotion,
 )
 from trellis.learning.tuners import (
@@ -1443,6 +1446,10 @@ def promote_learning_candidates(
     ``LINK_CREATE`` commands through :class:`MutationExecutor` — exactly
     the path ``trellis curate promote-learning`` uses. A
     ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
+
+    The response's ``status`` is the verdict ``promote-learning`` states,
+    from the same function (:func:`promotion_verdict`), and the status code
+    stays 200 for every verdict.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
@@ -1469,24 +1476,31 @@ def promote_learning_candidates(
 
     executor = build_curate_executor(registry)
     rows: list[LearningPromotionResultRow] = []
-    promoted_count = 0
+    # What the verdict reads: the executor's own answer, edges and precedent
+    # event included, which the response rows do not carry. The CLI reads the
+    # same outcomes, so the two surfaces cannot disagree about one run.
+    outcomes: list[dict[str, Any]] = []
     for entry in plan["results"]:
         if entry["status"] != "ready":
+            outcomes.append(
+                {"candidate_id": entry["candidate_id"], "status": entry["status"]}
+            )
             rows.append(
                 LearningPromotionResultRow(
                     candidate_id=entry["candidate_id"], status=entry["status"]
                 )
             )
             continue
-        outcome = submit_learning_promotion(
-            executor,
-            entry["entity_payload"],
-            entry["edge_payloads"],
-            requested_by="api:review.promote-learning",
-            graph_store=registry.knowledge.graph_store,
+        outcome = settle_promotion(
+            submit_learning_promotion(
+                executor,
+                entry["entity_payload"],
+                entry["edge_payloads"],
+                requested_by="api:review.promote-learning",
+                graph_store=registry.knowledge.graph_store,
+            )
         )
-        if outcome["status"] == "promoted":
-            promoted_count += 1
+        outcomes.append({"candidate_id": entry["candidate_id"], **outcome})
         rows.append(
             LearningPromotionResultRow(
                 candidate_id=entry["candidate_id"],
@@ -1497,6 +1511,8 @@ def promote_learning_candidates(
             )
         )
 
+    promoted_count = sum(1 for o in outcomes if promotion_landed(o))
+    status = promotion_verdict(outcomes)
     _emit_review_decision(
         registry.operational.event_log,
         surface="learning_promotion",
@@ -1505,13 +1521,19 @@ def promote_learning_candidates(
         entity_id=None,
         detail={
             "approved_count": plan["approved_count"],
+            "named_count": plan["named_count"],
             "ready_count": len(ready),
             "promoted_count": promoted_count,
             "candidate_ids": [r.candidate_id for r in rows],
         },
     )
+    # HTTP 200 whatever the verdict: ``status`` is the run's outcome, not the
+    # request's. Mapping ``refused`` / ``failed`` onto an error status is a
+    # separate decision.
     return LearningPromotionResponse(
+        status=status,
         approved_count=plan["approved_count"],
+        named_count=plan["named_count"],
         ready_count=len(ready),
         promoted_count=promoted_count,
         results=rows,

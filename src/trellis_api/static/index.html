@@ -4058,7 +4058,10 @@
             });
             try {
                 const r = await postJSON('/learning/promotions', { decisions });
-                toastReview(`Promoted ${r.promoted_count}/${r.approved_count} approved candidate(s).`, r.promoted_count > 0);
+                // Divide by the rows that named a candidate: a blank-id row never
+                // runs, so counting it would read as a promotion that fell short.
+                toastReview(`Promoted ${r.promoted_count}/${r.named_count} approved candidate(s).` +
+                    (r.status === 'ok' ? '' : ` Run ${r.status}.`), r.status === 'ok');
             } catch (err) {
                 toastReview('Learning promotion failed: ' + err.message, false);
             }

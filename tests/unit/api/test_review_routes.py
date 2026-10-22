@@ -24,7 +24,10 @@ from trellis.auth import (
     SCOPE_READ,
     generate_api_key,
 )
-from trellis.learning.scoring import prepare_learning_promotions
+from trellis.learning.scoring import (
+    precedent_entity_id_for_candidate,
+    prepare_learning_promotions,
+)
 from trellis.schemas.parameters import (
     ParameterProposal,
     ParameterScope,
@@ -210,6 +213,20 @@ def _learning_candidate(
 
 def _count_events(registry, event_type):
     return registry.operational.event_log.count(event_type=event_type)
+
+
+#: The entity ``_learning_candidate`` promises an edge to. Absent from a fresh
+#: graph, so the edge is rejected after the precedent is written: a promotion
+#: that is half landed. Seed it for one that lands whole.
+_CANDIDATE_TARGET = "entity://table/orders"
+
+
+def _seed_candidate_target(registry):
+    registry.knowledge.graph_store.upsert_node(_CANDIDATE_TARGET, "table", {})
+
+
+def _post_promotions(client, decisions):
+    return client.post("/api/v1/learning/promotions", json={"decisions": decisions})
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +544,7 @@ class TestLearningCandidates:
     def test_promotion_routes_through_executor(
         self, client, registry, tmp_path, monkeypatch
     ):
+        _seed_candidate_target(registry)
         cand = _learning_candidate()
         _write_learning_candidates(tmp_path, monkeypatch, [cand])
         before = _count_events(registry, EventType.ENTITY_CREATED)
@@ -636,6 +654,169 @@ class TestLearningCandidates:
         assert body["promoted_count"] == 0
         assert body["results"][0]["status"] == "skipped_non_promotable"
         assert _count_events(registry, EventType.ENTITY_CREATED) == before
+
+
+class TestLearningPromotionVerdict:
+    """``POST /learning/promotions`` states the run's verdict, as the CLI does.
+
+    The status is the one ``trellis curate promote-learning`` states, from the
+    same function, and the HTTP status stays 200 for every verdict. A row
+    that wrote its precedent but not its edges is ``promoted_incomplete`` and
+    is not counted as promoted.
+    """
+
+    def _candidates(self, tmp_path, monkeypatch, *ids):
+        cands = [_learning_candidate(candidate_id=cid) for cid in ids]
+        _write_learning_candidates(tmp_path, monkeypatch, cands)
+        return cands
+
+    def _demote(self, registry, candidate_id):
+        registry.knowledge.graph_store.upsert_node(
+            precedent_entity_id_for_candidate(candidate_id),
+            "precedent",
+            {"lifecycle": {"state": "demoted"}},
+        )
+
+    def test_a_blank_id_approved_row_is_not_named(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        _seed_candidate_target(registry)
+        (cand,) = self._candidates(tmp_path, monkeypatch, "c-ok")
+        resp = _post_promotions(
+            client,
+            [
+                {"candidate_id": "", "approved": True},
+                {"candidate_id": "   ", "approved": True},
+                {"candidate_id": cand["candidate_id"], "approved": True},
+                {"candidate_id": cand["candidate_id"], "approved": False},
+            ],
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["approved_count"] == 3
+        assert body["named_count"] == 1
+        assert body["named_count"] < body["approved_count"]
+        # The blank rows never run, so they cannot be a shortfall.
+        assert body["promoted_count"] == body["named_count"] == 1
+        assert body["status"] == "ok"
+
+    def test_named_count_is_in_the_audit_detail(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        _seed_candidate_target(registry)
+        (cand,) = self._candidates(tmp_path, monkeypatch, "c-ok")
+        _post_promotions(
+            client,
+            [
+                {"candidate_id": "", "approved": True},
+                {"candidate_id": cand["candidate_id"], "approved": True},
+            ],
+        )
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.REVIEW_DECISION_RECORDED, limit=10
+        )
+        assert event.payload["approved_count"] == 2
+        assert event.payload["named_count"] == 1
+
+    @pytest.mark.parametrize("decisions", [[], [{"candidate_id": "c-ok"}]])
+    def test_a_run_with_no_approved_row_is_ok(
+        self, client, registry, tmp_path, monkeypatch, decisions
+    ):
+        self._candidates(tmp_path, monkeypatch, "c-ok")
+        body = _post_promotions(client, decisions).json()
+        assert (body["status"], body["named_count"], body["results"]) == ("ok", 0, [])
+
+    def test_ok_when_every_approved_row_landed(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        _seed_candidate_target(registry)
+        self._candidates(tmp_path, monkeypatch, "c-1", "c-2")
+        resp = _post_promotions(
+            client,
+            [{"candidate_id": c, "approved": True} for c in ("c-1", "c-2")],
+        )
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["status"] == "ok"
+        assert body["promoted_count"] == body["named_count"] == 2
+        assert [r["status"] for r in body["results"]] == ["promoted", "promoted"]
+
+    @pytest.mark.parametrize(
+        "decision_ids",
+        [["c-refused"], ["c-ok", "c-refused"], ["ghost"]],
+        ids=["refused", "refused-beside-landed", "names-no-candidate"],
+    )
+    def test_refused_when_a_row_is_declined_and_no_write_failed(
+        self, client, registry, tmp_path, monkeypatch, decision_ids
+    ):
+        _seed_candidate_target(registry)
+        self._candidates(tmp_path, monkeypatch, "c-ok", "c-refused")
+        self._demote(registry, "c-refused")
+        resp = _post_promotions(
+            client, [{"candidate_id": c, "approved": True} for c in decision_ids]
+        )
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["status"] == "refused"
+        assert body["promoted_count"] == decision_ids.count("c-ok")
+
+    def test_approving_a_non_promotable_candidate_is_refused(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        cand = _learning_candidate(recommendation_type="investigate_noise")
+        _write_learning_candidates(tmp_path, monkeypatch, [cand])
+        resp = _post_promotions(
+            client, [{"candidate_id": cand["candidate_id"], "approved": True}]
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "refused"
+
+    def test_failed_when_a_promotion_wrote_its_entity_but_not_its_edges(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        # The target entity is never seeded, so the edge is rejected after the
+        # precedent is written.
+        (cand,) = self._candidates(tmp_path, monkeypatch, "c-half")
+        resp = _post_promotions(
+            client, [{"candidate_id": cand["candidate_id"], "approved": True}]
+        )
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["status"] == "failed"
+        assert body["results"][0]["status"] == "promoted_incomplete"
+        assert body["promoted_count"] == 0
+        assert body["named_count"] == 1
+
+    def test_failed_outranks_refused_in_either_order(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        self._candidates(tmp_path, monkeypatch, "c-half", "c-refused")
+        self._demote(registry, "c-refused")
+        for ids in (["c-half", "c-refused"], ["c-refused", "c-half"]):
+            body = _post_promotions(
+                client, [{"candidate_id": c, "approved": True} for c in ids]
+            ).json()
+            assert body["status"] == "failed"
+
+    def test_failed_when_the_executor_reports_the_entity_failed(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        from trellis_api.routes import admin
+
+        monkeypatch.setattr(
+            admin,
+            "submit_learning_promotion",
+            lambda *_a, **_k: {"status": "entity_failed", "message": "boom"},
+        )
+        (cand,) = self._candidates(tmp_path, monkeypatch, "c-boom")
+        resp = _post_promotions(
+            client, [{"candidate_id": cand["candidate_id"], "approved": True}]
+        )
+        body = resp.json()
+        assert resp.status_code == 200
+        assert body["status"] == "failed"
+        assert body["results"][0]["status"] == "entity_failed"
+        assert body["results"][0]["message"] == "boom"
 
 
 # ---------------------------------------------------------------------------

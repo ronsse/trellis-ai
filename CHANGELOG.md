@@ -907,6 +907,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`POST /api/v1/learning/promotions` states the verdict `promote-learning`
+  states.** `LearningPromotionResponse.status` was always the default `"ok"`,
+  even when every ready row was refused or failed to land, and the response
+  had no `named_count`, so the Review tab divided by `approved_count` and read
+  an approved row with a blank `candidate_id` as a promotion that fell short.
+  `status` is now `"ok"`, `"refused"` or `"failed"` from
+  `trellis.learning.scoring.promotion_verdict`, the function the CLI now maps
+  to its exit code (rules and exit codes unchanged), so the two surfaces
+  cannot disagree about one run. `named_count` (additive, default `0`) is the
+  approved rows that name a candidate, and is in the
+  `REVIEW_DECISION_RECORDED` detail. The HTTP status stays 200 for every
+  verdict. Behaviour change: `promoted_count` and each row's `status` now
+  apply the CLI's landed check, so a promotion whose edges or precedent event
+  did not land reads `promoted_incomplete` and is not counted, where the route
+  used to count it as `promoted`. The Review tab divides by `named_count` and
+  shows the toast as an error when `status` is not `"ok"`.
+
 - **Stored metadata can no longer relabel the strategy that collected an item.**
   The keyword, semantic and graph strategies built item metadata as
   `{"source_strategy": <name>, **stored}`, so a stored `source_strategy` key
