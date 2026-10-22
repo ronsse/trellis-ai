@@ -519,8 +519,12 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
     * ``graph_selection`` — how the graph axis chose the candidate:
       ``"seeded"`` (the intent reached the store, via
       :class:`~trellis.retrieve.strategies.GraphSeedExtractor` or an
-      explicit ``seed_ids``) or ``"recency_window"`` (it did not — the
-      axis returned the newest rows and never consulted the query, #371).
+      explicit ``seed_ids``), ``"seeded_priority_first"`` (seeded, and the
+      neighbourhood was larger than the axis's limit, so seeds and the
+      precedents applying to them were kept ahead of the rest rather than
+      the first rows in ``node_id`` order, #949) or ``"recency_window"`` (it
+      did not — the axis returned the newest rows and never consulted the
+      query, #371).
       Only graph items carry it. Without it, whether a served entity was
       query-relevant at all is not a property of the record — it has to be
       inferred from which wiring was deployed that week, which §1.2 of

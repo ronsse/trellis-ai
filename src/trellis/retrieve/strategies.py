@@ -21,6 +21,7 @@ import structlog
 from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
+from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -40,7 +41,7 @@ from trellis.schemas.well_known import (
 from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from trellis.ops.registry import ParameterRegistry
     from trellis.retrieve.pack_builder import StrategyFailure
@@ -207,6 +208,17 @@ GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
 #: the caller's query.
 GRAPH_SELECTION_SEEDED = "seeded"
 
+#: Value of ``PackItem.metadata["graph_selection"]`` when a *seeded* search
+#: found more rows than ``limit`` and :func:`_prioritise_seeded_nodes`
+#: changed which rows the slice kept: seeds first, then the precedents that
+#: ``precedent_applies_to`` a seed, then the rest in the store's order. Without
+#: it the slice keeps the first ``limit`` rows of ``(depth, node_id)`` order
+#: (SQLite, Postgres) or of an unordered set (the Bolt backends), and a hub
+#: seed loses every precedent whose id sorts late (#949). Absent from a pack
+#: the rule did not touch, which keeps :data:`GRAPH_SELECTION_SEEDED` and is
+#: byte-identical to what shipped before the rule.
+GRAPH_SELECTION_SEEDED_PRIORITY = "seeded_priority_first"
+
 #: ``PackItem.metadata`` key under which a *seeded* graph search records the
 #: seeds it expanded from, restricted to the ones that resolved to a node in
 #: the subgraph it got back. Absent on the recency branch, which has no seeds
@@ -298,6 +310,95 @@ def _exclude_and_log(
     if len(kept) != len(nodes):
         logger.debug(event, excluded=len(nodes) - len(kept))
     return kept
+
+
+def _prioritise_seeded_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    seeds: Collection[str],
+    edges: Collection[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Stable partition of a seeded neighbourhood: seeds, precedents, the rest.
+
+    Called only when the slice to ``limit`` would drop rows, so it decides
+    who survives a neighbourhood too large to serve whole. Three tiers, each
+    keeping the store's own order inside it:
+
+    0. the seeds themselves (a store with no order, as the Bolt backends are,
+       can return the seed after its neighbours);
+    1. a node that is the *source* of a ``precedent_applies_to`` edge whose
+       target is a seed, which is the direction promotion writes it in
+       (``trellis.learning.scoring.build_learning_promotion_payloads``);
+    2. everything else.
+
+    Tier 1 is judged by the edge, never by an id that looks like a precedent.
+    The base score is positional, so the tier a row lands in is also the
+    score band it competes in; that is what lets a promoted lesson win a slot
+    at the pack builder's budget and not merely reach it.
+
+    ``sorted`` is stable, so a neighbourhood with no tier-0 or tier-1 row
+    comes back in its input order.
+    """
+    seed_set = set(seeds)
+    kind = EdgeKind.PRECEDENT_APPLIES_TO.value
+    applying = {
+        e.get("source_id")
+        for e in edges
+        if e.get("edge_type") == kind and e.get("target_id") in seed_set
+    }
+
+    def tier(node: dict[str, Any]) -> int:
+        node_id = node.get("node_id")
+        if node_id in seed_set:
+            return 0
+        return 1 if node_id in applying else 2
+
+    return sorted(nodes, key=tier)
+
+
+def _select_for_scoring(
+    nodes: list[dict[str, Any]],
+    *,
+    limit: int,
+    selection: str,
+    seeds: Collection[str],
+    edges: Collection[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str]:
+    """Slice the candidates to ``limit``, prioritising a seeded overflow first.
+
+    A seeded neighbourhood larger than ``limit`` is sliced, and the store's
+    order is ``(depth, node_id)`` or no order at all, so the rows that
+    survive are the ones that happen to sort first: a hub seed lost its
+    promoted precedents to that (#949). So the rule runs only when the slice
+    would drop something, and only on the seeded branch, whose position is
+    arbitrary; the recency window's position *is* recency and is left alone.
+    Scoring every row and slicing afterwards would not help, because the
+    base score is positional and a late row scores zero.
+
+    Returns the rows to score and the ``graph_selection`` value to stamp:
+    :data:`GRAPH_SELECTION_SEEDED_PRIORITY` only when the partition actually
+    moved a row, otherwise *selection* unchanged and the slice exactly what it
+    was before the rule existed.
+    """
+    if selection != GRAPH_SELECTION_SEEDED or len(nodes) <= limit:
+        return nodes[:limit], selection
+    prioritised = _prioritise_seeded_nodes(nodes, seeds=seeds, edges=edges)
+    if all(a is b for a, b in zip(prioritised, nodes, strict=True)):
+        return nodes[:limit], selection
+    return prioritised[:limit], GRAPH_SELECTION_SEEDED_PRIORITY
+
+
+def _node_matches_domain(props: dict[str, Any], domain: str) -> bool:
+    """Whether a graph node's stored domain is the requested one.
+
+    ``domain`` is the scalar a hand-written node carries; ``primary_domain``
+    is what a promoted precedent carries (``build_learning_promotion_payloads``
+    writes the latter and never the former), so reading only ``domain`` left
+    every promoted precedent without the boost (#949). Scoring only:
+    :func:`_passes_domain_scope` is deliberately unchanged, so a precedent
+    filed under another domain is still not *excluded* by it.
+    """
+    return domain in (props.get("domain"), props.get("primary_domain"))
 
 
 def strip_graph_controls(filters: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1434,6 +1535,17 @@ class GraphSearch(SearchStrategy):
     re-version — a lifecycle stamp, a property merge — read as freshness on
     an axis whose window that re-version cannot widen (#420).
 
+    **A seeded neighbourhood larger than ``limit`` is prioritised before it
+    is sliced** (#949). The stores return it ordered by ``(depth, node_id)``
+    (SQLite, Postgres) or in no order (the Bolt backends), so slicing it
+    as returned kept whichever ids sort first, and a hub seed such as a
+    ``domain:*`` node lost every promoted precedent (``precedent://…`` sorts
+    after every id beginning a-o). :func:`_prioritise_seeded_nodes` runs
+    only when the slice would drop rows, and puts seeds, then the
+    precedents that ``precedent_applies_to`` a seed, ahead of the rest; the
+    items are then stamped :data:`GRAPH_SELECTION_SEEDED_PRIORITY`. A
+    neighbourhood that fits is not reordered, so its pack is unchanged.
+
     Structural nodes (``node_role == "structural"``) are excluded by default
     — they represent fine-grained plumbing (columns, parameters, file
     lines) that is retrieved only as part of its parent's context. Pass
@@ -1621,13 +1733,14 @@ class GraphSearch(SearchStrategy):
         seed_ids: list[str],
         *,
         filters: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """The seeded branch: expand a neighbourhood around known ids.
 
         This is the only branch in which the caller's intent has reached
         the store — via ``filters["seed_ids"]`` or a
         :class:`GraphSeedExtractor`. Consumes ``depth`` / ``edge_types``
-        from *filters*.
+        from *filters*. Returns the nodes and the edges between them; the
+        edges are read only by :func:`_prioritise_seeded_nodes`.
         """
         depth = filters.pop("depth", 2)
         edge_types = filters.pop("edge_types", None)
@@ -1637,13 +1750,14 @@ class GraphSearch(SearchStrategy):
             edge_types=edge_types,
         )
         nodes: list[dict[str, Any]] = subgraph.get("nodes", [])
+        edges: list[dict[str, Any]] = subgraph.get("edges", [])
         logger.debug(
             "graph_search_seeded",
             seed_count=len(seed_ids),
             depth=depth,
             nodes_returned=len(nodes),
         )
-        return nodes
+        return nodes, edges
 
     def _recency_window_nodes(
         self,
@@ -1719,9 +1833,10 @@ class GraphSearch(SearchStrategy):
         request_domain = filters.get("domain")
 
         resolved_seeds: list[str] = []
+        edges: list[dict[str, Any]] = []
         if seed_ids:
             selection = GRAPH_SELECTION_SEEDED
-            nodes = self._expand_seeds(seed_ids, filters=filters)
+            nodes, edges = self._expand_seeds(seed_ids, filters=filters)
             # Before the structural / unconfirmed / domain filters below: a
             # seed is "resolved" when the store returned its node, however
             # the later filters treat that node. A caller-named seed that
@@ -1826,7 +1941,15 @@ class GraphSearch(SearchStrategy):
             request_domain,
         )
 
-        scored = nodes[:limit]
+        # A seeded neighbourhood larger than ``limit`` is prioritised before it
+        # is sliced (#949); see :func:`_select_for_scoring`.
+        scored, selection = _select_for_scoring(
+            nodes,
+            limit=limit,
+            selection=selection,
+            seeds=resolved_seeds,
+            edges=edges,
+        )
         # ``_apply_recency_decay`` fails open on an unusable timestamp, which
         # is the right per-item behaviour and the wrong thing to leave silent
         # in bulk: a backend that stores no ``created_at`` (the bolt adapter
@@ -1864,7 +1987,7 @@ class GraphSearch(SearchStrategy):
             base_score = max(0.0, 1.0 - (i * position_decay_step))
 
             # Domain match boost: nodes matching requested domain score higher
-            if request_domain and props.get("domain") == request_domain:
+            if request_domain and _node_matches_domain(props, request_domain):
                 base_score *= domain_match_boost
 
             # Curated nodes are pre-digested synthesis — boost them.
