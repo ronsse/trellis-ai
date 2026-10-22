@@ -82,15 +82,67 @@ class TestInferredAffinityFromNodeType:
         assert TierMapper().matches_section(item, _DOMAIN) is True
 
     @pytest.mark.parametrize("key", ["node_type", "node_type_canonical"])
-    def test_either_stamped_key_alone_is_enough(self, key: str) -> None:
-        """``GraphSearch`` writes both, but a caller-built item may carry one."""
+    @pytest.mark.parametrize("node_type", ["precedent", "team", "Team"])
+    def test_either_stamped_key_alone_is_enough(self, key: str, node_type: str) -> None:
+        """``GraphSearch`` writes both, but a caller-built item may carry one.
+
+        ``team`` / ``Team`` are in the matrix so each key alone is also checked
+        for canonicalisation: a stored spelling must meet a rule's spelling.
+        """
         item = PackItem(
             item_id="p1",
             item_type="entity",
             excerpt=_BODY,
-            metadata={key: "precedent"},
+            metadata={"source_strategy": "graph", key: node_type},
         )
         assert TierMapper().matches_section(item, _DOMAIN) is True
+
+    @pytest.mark.parametrize("source", ["graph", "observation"])
+    def test_graph_and_observation_sources_are_read(self, source: str) -> None:
+        item = PackItem(
+            item_id="p1",
+            item_type="entity",
+            excerpt=_BODY,
+            metadata={"source_strategy": source, "node_type": "precedent"},
+        )
+        assert TierMapper().matches_section(item, _DOMAIN) is True
+
+    @pytest.mark.parametrize("source", ["keyword", "semantic", None])
+    @pytest.mark.parametrize(
+        ("node_type", "affinity"),
+        [
+            ("team", "domain_knowledge"),
+            ("precedent", "domain_knowledge"),
+            ("trace", "operational"),
+            ("observation", "operational"),
+        ],
+    )
+    def test_a_document_bag_cannot_pick_a_section(
+        self, source: str | None, node_type: str, affinity: str
+    ) -> None:
+        """Keyword and semantic items spread the document's open metadata bag.
+
+        A saved memory that carries ``{"node_type": "team"}`` is author text,
+        not a graph fact, so it must not route by it (and neither may an item
+        that names no source at all).
+        """
+        metadata: dict[str, object] = {"node_type": node_type}
+        if source is not None:
+            metadata["source_strategy"] = source
+        item = PackItem(
+            item_id="d1",
+            item_type="vector" if source == "semantic" else "document",
+            excerpt=_BODY,
+            metadata=metadata,
+        )
+        section = SectionRequest(name=affinity, retrieval_affinities=[affinity])
+        assert TierMapper().matches_section(item, section) is False
+
+    def test_a_graph_node_typed_trace_routes_to_operational(self) -> None:
+        """The operational rule is live for graph rows too; pinned so it is chosen."""
+        item = _graph_item("t1", "trace")
+        section = SectionRequest(name="ops", retrieval_affinities=["operational"])
+        assert TierMapper().matches_section(item, section) is True
 
     def test_a_plain_entity_is_not_routed_to_domain_knowledge(self) -> None:
         item = _graph_item("c1", "concept")

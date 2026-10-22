@@ -164,14 +164,28 @@ class TierMapper:
         return inferred
 
 
-def _get_node_types(item: PackItem) -> set[str]:
-    """Canonical node type(s) a graph-sourced item carries, else empty.
+#: ``metadata["source_strategy"]`` values whose ``node_type`` stamp is the
+#: strategy's own claim about a graph row. ``GraphSearch`` and
+#: ``ObservationSearch`` write it after the property spread. ``KeywordSearch``
+#: and ``SemanticSearch`` spread the *document's* open metadata bag instead,
+#: so a ``node_type`` key there is author-supplied text, not a graph fact, and
+#: must not pick a section (#945 is the same class of defect).
+_NODE_TYPE_SOURCES = frozenset({"graph", "observation"})
 
-    ``GraphSearch`` stamps ``node_type`` (the stored spelling) and
-    ``node_type_canonical`` after the property spread, so both are the
-    strategy's own claim. Canonicalising here makes ``team`` and ``Team``
-    one bucket; a non-string value is ignored rather than raised on.
+
+def _get_node_types(item: PackItem) -> set[str]:
+    """Canonical node type(s) of a graph-sourced item; empty for any other.
+
+    Only an item the graph or observation strategy collected is read. For
+    those, ``node_type`` (the stored spelling) and ``node_type_canonical`` are
+    stamped by the strategy after the property spread, so a stored property
+    cannot forge them. An item with no ``source_strategy``, or one from the
+    keyword or semantic axis, returns empty whatever its metadata says.
+    Canonicalising makes ``team`` and ``Team`` one bucket; a non-string value
+    is ignored rather than raised on.
     """
+    if item.metadata.get("source_strategy") not in _NODE_TYPE_SOURCES:
+        return set()
     found: set[str] = set()
     for key in ("node_type", "node_type_canonical"):
         value = item.metadata.get(key)
