@@ -185,23 +185,23 @@ class TestNamedEntitySeedsTheGraphAxis:
         assert {PRECEDENT, OTHER_PRECEDENT} <= set(served)
 
     def test_the_extractor_keeps_contributing(self, registry: StoreRegistry) -> None:
-        """Union, not replacement: an intent that names ``domain:fincore``
+        """Union, not replacement: an intent that names ``domain:payroll``
         and an entity that is named in ``entity_ids`` get both
         neighbourhoods."""
         _precedent_on(registry, ENTITY, PRECEDENT)
-        _node(registry, "domain:fincore", "domain", "fincore")
-        _node(registry, "act:fincore-1", "activity", "reconcile fincore books")
+        _node(registry, "domain:payroll", "domain", "payroll")
+        _node(registry, "act:payroll-1", "activity", "reconcile payroll books")
         registry.knowledge.graph_store.upsert_edge(
-            "domain:fincore", "act:fincore-1", "relates_to"
+            "domain:payroll", "act:payroll-1", "relates_to"
         )
         _bury(registry)
 
-        served = _build(registry, "what happened in fincore", entity_ids=[ENTITY])
+        served = _build(registry, "what happened in payroll", entity_ids=[ENTITY])
 
         # The stamp describes the expansion (one ``get_subgraph`` call over
         # the whole seed set), not the single item, so it is not asserted
         # per neighbourhood here.
-        assert {PRECEDENT, "act:fincore-1"} <= set(served)
+        assert {PRECEDENT, "act:payroll-1"} <= set(served)
 
     def test_it_applies_with_graph_seeding_switched_off(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -284,18 +284,18 @@ class TestAnUnknownEntityCostsNothing:
     def test_an_extractor_seed_is_credited_to_the_extractor(
         self, registry: StoreRegistry
     ) -> None:
-        _node(registry, "domain:fincore", "domain", "fincore")
-        _node(registry, "act:fincore-1", "activity", "reconcile fincore books")
+        _node(registry, "domain:payroll", "domain", "payroll")
+        _node(registry, "act:payroll-1", "activity", "reconcile payroll books")
         registry.knowledge.graph_store.upsert_edge(
-            "domain:fincore", "act:fincore-1", "relates_to"
+            "domain:payroll", "act:payroll-1", "relates_to"
         )
 
         served = _build(
-            registry, "what happened in fincore", entity_ids=["tbl:does-not-exist"]
+            registry, "what happened in payroll", entity_ids=["tbl:does-not-exist"]
         )
 
         assert (
-            served["act:fincore-1"].metadata["graph_selection"]
+            served["act:payroll-1"].metadata["graph_selection"]
             == GRAPH_SELECTION_SEEDED
         )
 
@@ -403,16 +403,20 @@ class TestGraphSearchSeedResolution:
         assert seeds[: len(named)] == named
         assert seeds[len(named) :] == ["d0", "d1", "d2"]
 
-    def test_an_extractor_alone_is_capped_as_before(self) -> None:
+    def test_an_extractor_alone_is_not_recapped(self) -> None:
+        """With no caller seeds the extractor's own bound is the only one:
+        an injected extractor over the default keeps every seed, as before."""
+        over = DEFAULT_MAX_SEEDS + 2
+
         class _Extractor:
             def extract(self, intent: str) -> list[str]:
-                return [f"d{i}" for i in range(DEFAULT_MAX_SEEDS)]
+                return [f"d{i}" for i in range(over)]
 
         store = _RecordingStore()
 
         GraphSearch(store, seed_extractor=_Extractor()).search("q")
 
-        assert len(store.subgraph_calls[0]["seed_ids"]) == DEFAULT_MAX_SEEDS
+        assert len(store.subgraph_calls[0]["seed_ids"]) == over
 
     @pytest.mark.parametrize("junk", [None, "tbl:x", 42, [], [None, "", 7]])
     def test_a_malformed_value_costs_the_hint_not_the_pack(self, junk: Any) -> None:

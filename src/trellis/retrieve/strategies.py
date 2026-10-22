@@ -1786,7 +1786,8 @@ class GraphSearch(SearchStrategy):
         first, because every seed is a BFS root and the extractor already
         holds its own seeds to that bound: capping each side separately
         would let the two together reach twice it. A pack that names no
-        entity is capped by the extractor alone, as before. The overflow is
+        entity is left to the extractor's own bound, exactly as before: the
+        cap applies only when the caller named at least one. The overflow is
         logged at warning, not dropped silently.
         """
         named = self._caller_seeds(filters.pop(GRAPH_CALLER_SEED_IDS_KEY, None))
@@ -1800,7 +1801,7 @@ class GraphSearch(SearchStrategy):
 
         derived = self._seeds_from_extractor(query)
         seed_ids = list(dict.fromkeys([*named, *derived]))
-        if len(seed_ids) > DEFAULT_MAX_SEEDS:
+        if named and len(seed_ids) > DEFAULT_MAX_SEEDS:
             logger.warning(
                 "graph_seeds_truncated",
                 named=len(named),
