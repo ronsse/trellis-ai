@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.document_write import put_document
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.stores.base.document import DocumentStore
 
 if TYPE_CHECKING:
@@ -23,7 +24,8 @@ class NoiseTagResult:
 
     ``updated`` is the write count — the same contract the function's bare
     ``int`` return used to carry. ``refused_not_document`` lists the ids
-    the caller handed in that resolve to nothing in ``document_store``: the
+    the caller handed in that resolve to nothing in ``document_store`` (and
+    the ids of promoted precedents' document rows, which are refused unread): the
     demotion gate (:mod:`trellis.classify.demotion_gate`) admitted them on
     citation evidence alone, with no notion of which store an id belongs
     to, so an admitted trace id or other non-document id reaches here and
@@ -71,6 +73,10 @@ def apply_noise_tags(
     missing (never embedded) is still legitimately demoted.
     ``refused_not_document`` names every candidate that was not: nothing
     was written for those ids, and a caller must not count them as applied.
+    A promoted precedent's own document row is refused into the same list,
+    unread (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`):
+    its lifecycle belongs to the precedent handlers, and hand-promoted
+    precedents are exempt from automatic demotion.
     """
     if not noise_candidates:
         return NoiseTagResult(updated=0)
@@ -80,6 +86,14 @@ def apply_noise_tags(
     refused_not_document: list[str] = []
     stamp = datetime.now(UTC).isoformat()
     for item_id in noise_candidates:
+        if is_promoted_precedent_document(item_id):
+            # A hand-promoted precedent is exempt from automatic demotion, and
+            # its document row (written so keyword and semantic retrieval can
+            # serve it) must not become a way round that. Refused here, before
+            # any read, so the row is never tagged.
+            refused_not_document.append(item_id)
+            logger.debug("noise_candidate_promoted_precedent", item_id=item_id)
+            continue
         doc = document_store.get(item_id)
         if doc is None:
             refused_not_document.append(item_id)

@@ -12,6 +12,7 @@ import structlog
 
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
 from trellis.core.text_safety import (
     contains_nul_or_lone_surrogate,
@@ -68,6 +69,26 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+def _evidence_document_id(value: object) -> str:
+    """``evidence.doc_id`` as a caller-chosen document id, or a refusal.
+
+    A promoted precedent's document row is written by the promote handler
+    alone. Letting a caller choose an id in that namespace would let it exempt
+    its own memory from noise demotion and retention (see
+    :mod:`trellis.core.precedent_document`).
+    """
+    if not isinstance(value, str) or not value:
+        msg = "evidence.doc_id must be a non-empty string"
+        raise ValidationError(msg, code="evidence_ingest_shape")
+    if is_promoted_precedent_document(value):
+        msg = (
+            f"evidence.doc_id {value!r} is in the reserved precedent namespace; "
+            "a precedent's document row is written by its promotion"
+        )
+        raise ValidationError(msg, code="reserved_document_id")
+    return value
+
+
 class EvidenceIngestHandler:
     """Store a document and optionally create its vector row.
 
@@ -97,12 +118,9 @@ class EvidenceIngestHandler:
             msg = "evidence must be a mapping"
             raise ValidationError(msg, code="evidence_ingest_shape")
 
-        doc_id = evidence.get("doc_id")
+        doc_id = _evidence_document_id(evidence.get("doc_id"))
         content = evidence.get("content")
         uri = evidence.get("uri")
-        if not isinstance(doc_id, str) or not doc_id:
-            msg = "evidence.doc_id must be a non-empty string"
-            raise ValidationError(msg, code="evidence_ingest_shape")
         if not isinstance(content, str):
             msg = "evidence.content must be a string"
             raise ValidationError(msg, code="evidence_ingest_shape")
@@ -353,6 +371,148 @@ class TraceIngestHandler:
         return trace_id, f"Trace ingested: {trace_id}"
 
 
+def _write_precedent_document(
+    registry: StoreRegistry,
+    precedent_id: str,
+    properties: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    """Write a promoted precedent's document row, then embed it when that is on.
+
+    Keyword and semantic retrieval read documents and vector rows, never graph
+    nodes, so without this row a precedent outside the graph axis's recency
+    window (or unseeded) is unreachable by its own title. The text is the node's
+    name and description, built by the same function the redaction scrub uses.
+    A content write (``preserve_updated_at=False``); a document-store failure
+    propagates, so the promotion reads as not landed and can be retried.
+    """
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        precedent_document_content,
+        precedent_document_metadata,
+    )
+    from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+        run_embed_on_ingest,
+    )
+
+    content = precedent_document_content(
+        properties.get("name"), properties.get("description")
+    )
+    if not content:
+        return
+    metadata = precedent_document_metadata(properties)
+    put_document(
+        registry.knowledge.document_store,
+        resolve_vector_store(registry),
+        precedent_id,
+        content,
+        metadata,
+        preserve_updated_at=False,
+    )
+    run_embed_on_ingest(registry, precedent_id, content, metadata, source=source)
+
+
+def _stamp_precedent_document(
+    registry: StoreRegistry, precedent_id: str, lifecycle: dict[str, Any]
+) -> bool:
+    """Stamp ``lifecycle`` onto a precedent's document row, if it has one.
+
+    A metadata-only write that also mirrors the stamp onto the vector row
+    (:func:`~trellis.core.document_write.put_document`). A precedent promoted
+    before it wrote a document has none, and is not given one here. Returns
+    whether a row was stamped; a document-store failure propagates.
+    """
+    document_store = registry.knowledge.document_store
+    document = document_store.get(precedent_id)
+    if not document:
+        return False
+    metadata = dict(document.get("metadata") or {})
+    metadata[LIFECYCLE_KEY] = lifecycle
+    put_document(
+        document_store,
+        resolve_vector_store(registry),
+        precedent_id,
+        str(document.get("content") or ""),
+        metadata,
+        preserve_updated_at=True,
+    )
+    return True
+
+
+def _precedent_document_state(registry: StoreRegistry, precedent_id: str) -> str | None:
+    """``Lifecycle.state`` stamped on a precedent's document row, if it has one."""
+    document = registry.knowledge.document_store.get(precedent_id)
+    if not document:
+        return None
+    record = (document.get("metadata") or {}).get(LIFECYCLE_KEY)
+    if not isinstance(record, dict):
+        return None
+    state = record.get("state")
+    return state if isinstance(state, str) else None
+
+
+def _rewrite_precedent_document(
+    registry: StoreRegistry, precedent_id: str, properties: dict[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    """Re-derive a precedent's existing document row from its scrubbed properties.
+
+    Keeps the row's other metadata (a noise tag, a lifecycle stamp) and
+    replaces its text and title with what the node now says. ``None`` when
+    the precedent has no document row; nothing is created.
+    """
+    from trellis.learning.scoring import (  # noqa: PLC0415
+        precedent_document_content,
+    )
+
+    document_store = registry.knowledge.document_store
+    document = document_store.get(precedent_id)
+    if not document:
+        return None
+    content = precedent_document_content(
+        properties.get("name"), properties.get("description")
+    )
+    metadata = dict(document.get("metadata") or {})
+    name = properties.get("name")
+    if isinstance(name, str) and name.strip():
+        metadata["title"] = name.strip()
+    put_document(
+        document_store,
+        resolve_vector_store(registry),
+        precedent_id,
+        content,
+        metadata,
+        preserve_updated_at=False,
+    )
+    return content, metadata
+
+
+def _tombstone_precedent_document(registry: StoreRegistry, precedent_id: str) -> None:
+    """Blank a redacted precedent's document row, which holds the excerpt too.
+
+    The document plane has no governed delete, so the row keeps its id with no
+    text, no title and an archived stamp. Nothing is created for a precedent
+    that never had one.
+    """
+    from trellis.learning.scoring import PRECEDENT_DOCUMENT_FORM  # noqa: PLC0415
+
+    document_store = registry.knowledge.document_store
+    if not document_store.get(precedent_id):
+        return
+    lifecycle = Lifecycle(
+        state="archived",
+        valid_until=datetime.now(UTC),
+        deprecation_reason="redacted",
+    ).model_dump(mode="json")
+    put_document(
+        document_store,
+        resolve_vector_store(registry),
+        precedent_id,
+        "",
+        {"document_form": PRECEDENT_DOCUMENT_FORM, LIFECYCLE_KEY: lifecycle},
+        preserve_updated_at=False,
+    )
+
+
 class PrecedentPromoteHandler:
     """Emit PRECEDENT_PROMOTED event with title/description/domain from args.
 
@@ -364,6 +524,14 @@ class PrecedentPromoteHandler:
     * **Learning-scoring** promotions pass the promoted graph entity's id as
       ``target_id`` with ``entity_type="precedent"`` and no ``trace_id``;
       without this the entity landed but stayed invisible to ``get_lessons``.
+
+    The learning path also writes the precedent's **document row** (its name
+    and description, tagged ``decision``) before the event, and embeds it when
+    embed-on-ingest is on. The graph axis reaches a node only through seeds or
+    its recency window, so without the row keyword and semantic retrieval
+    never served a promoted precedent. The row goes first: a failure raises, the
+    promotion reads as not landed, and the retry rewrites it. The event payload
+    is unchanged.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -391,6 +559,20 @@ class PrecedentPromoteHandler:
         name_source = args.get("name_source")
         if name_source is not None:
             payload["name_source"] = name_source
+
+        if (
+            args.get("entity_type") == "precedent"
+            and trace_id is None
+            and command.target_id
+        ):
+            node = self._registry.knowledge.graph_store.get_node(command.target_id)
+            if node is not None and node["node_type"] == "precedent":
+                _write_precedent_document(
+                    self._registry,
+                    command.target_id,
+                    node.get("properties") or {},
+                    source=command.requested_by,
+                )
 
         event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
@@ -583,6 +765,12 @@ class PrecedentDemoteHandler:
     copy — see :func:`_sync_vector_lifecycle`), so the handler re-stamps
     the precedent's vector row with the same ``lifecycle`` dict it just
     wrote to the graph, in the same call.
+
+    **Document row.** A precedent's document row (see
+    :class:`PrecedentPromoteHandler`) is stamped first, so a keyword hit and,
+    through the mirror, a semantic hit stop serving it; a failure raises before
+    the node changes. A precedent promoted before that row existed has none, and
+    none is created.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -683,6 +871,10 @@ class PrecedentDemoteHandler:
             props[LIFECYCLE_KEY] = lifecycle
             return {"properties": props}
 
+        # Before the node, so a failure leaves a precedent no axis withholds
+        # rather than one the graph withholds and the keyword axis serves.
+        _stamp_precedent_document(self._registry, target_id, lifecycle)
+
         if _rewrite_current_node(graph, target_id, demote) is None:
             # Vanished between the read above and the write (purged
             # mid-command) — refused the same way as a target that was
@@ -751,11 +943,52 @@ class PrecedentReinstateHandler:
     SCD-2: the write closes the demoted version and opens a fresh
     ``current`` one, so the demoted version stays readable via
     ``get_node_history``/``as_of``. The vector row is re-synced in the
-    same call, so a semantic hit stops carrying the demoted snapshot.
+    same call, so a semantic hit stops carrying the demoted snapshot. The
+    precedent's document row, when it has one, is re-stamped after the node: a
+    failure there leaves the row withheld, and is reported on the result's
+    warnings and as ``document_sync_failed`` on the event. Re-issuing the
+    reinstate then repairs it: a target whose node is already ``current`` but
+    whose document row is still ``demoted`` is accepted, re-stamps the row and
+    nothing else, and marks the event ``document_resync_only``.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
+
+    def _restamp_document(
+        self,
+        command: Command,
+        target_id: str,
+        lifecycle: dict[str, Any],
+        *,
+        strict: bool,
+    ) -> bool:
+        """Re-stamp the precedent's document row; ``True`` when that failed.
+
+        After the node write a failure is fail-soft: the reinstatement stands,
+        the row stays withheld, and the warning names the repair (re-issue the
+        command). ``strict`` is the repair itself, where the node is already
+        current and this stamp is the whole job, so a failure raises rather
+        than reporting a repair that did not happen.
+        """
+        try:
+            _stamp_precedent_document(self._registry, target_id, lifecycle)
+        except Exception:
+            if strict:
+                raise
+            logger.warning(
+                "precedent_reinstate_document_sync_failed",
+                item_id=target_id,
+                exc_info=True,
+            )
+            command.metadata.setdefault("handler_warnings", []).append(
+                f"precedent_reinstate_document_sync_failed: document row for "
+                f"{target_id} was not re-stamped; keyword retrieval keeps "
+                "withholding it until it is. Re-issue precedent.reinstate "
+                "for this id to re-stamp the row"
+            )
+            return True
+        return False
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
@@ -806,7 +1039,14 @@ class PrecedentReinstateHandler:
             raise ValidationError(msg, errors=[msg], code="target_not_precedent")
 
         current_state = _current_lifecycle_state(node)
-        if current_state != "demoted":
+        # A reinstate whose document stamp failed leaves the node ``current``
+        # and the row ``demoted``. That is the one case a ``current`` target
+        # is accepted: the retry re-stamps the row and touches nothing else.
+        document_resync_only = (
+            current_state == CURRENT_STATE
+            and _precedent_document_state(self._registry, target_id) == "demoted"
+        )
+        if current_state != "demoted" and not document_resync_only:
             msg = (
                 f"Precedent {target_id} cannot be reinstated: its lifecycle "
                 f"state is {current_state!r}, not 'demoted'"
@@ -824,9 +1064,16 @@ class PrecedentReinstateHandler:
             props[LIFECYCLE_KEY] = lifecycle
             return {"properties": props}
 
-        if _rewrite_current_node(graph, target_id, reinstate) is None:
+        if (
+            not document_resync_only
+            and _rewrite_current_node(graph, target_id, reinstate) is None
+        ):
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        document_sync_failed = self._restamp_document(
+            command, target_id, lifecycle, strict=document_resync_only
+        )
 
         vector_sync_outcome = _sync_vector_lifecycle(
             self._registry,
@@ -844,6 +1091,10 @@ class PrecedentReinstateHandler:
         }
         if vector_sync_outcome == "failed":
             event_payload["vector_sync_failed"] = True
+        if document_sync_failed:
+            event_payload["document_sync_failed"] = True
+        if document_resync_only:
+            event_payload["document_resync_only"] = True
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_REINSTATED,
             source="mutation_executor",
@@ -2660,10 +2911,13 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
     and timestamps of its edge rows.
 
     Returns ``False`` when no version carries an excerpt or a source-derived
-    name (nothing to scrub, and the history is left alone). The vector row is
-    deleted first: it was embedded from the description. If the re-create
-    fails after the purge, the precedent is gone, never half-redacted, and
-    the error names its id.
+    name (nothing to scrub, and the history is left alone). The precedent's
+    document row, when it has one, is rewritten from the scrubbed name and
+    description before anything is purged (a failure there leaves the
+    redaction re-runnable) and re-embedded after the node is back. The vector
+    row is deleted first: it was embedded from the description. If the
+    re-create fails after the purge, the precedent is gone, never
+    half-redacted, and the error names its id.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
         NAME_SOURCE_NEUTRAL,
@@ -2702,6 +2956,7 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
     edges = {e["edge_id"]: e for e in graph.get_edges(precedent_id, direction="both")}
     aliases = graph.get_aliases(precedent_id)
 
+    scrubbed_document = _rewrite_precedent_document(registry, precedent_id, properties)
     registry.knowledge.vector_store.delete(precedent_id)
     if not graph.delete_node(precedent_id):
         return False  # a concurrent purge already removed it
@@ -2732,6 +2987,19 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
             "must be re-promoted"
         )
         raise StoreError(msg, store="graph") from exc
+
+    if scrubbed_document is not None:
+        from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+            run_embed_on_ingest,
+        )
+
+        run_embed_on_ingest(
+            registry,
+            precedent_id,
+            scrubbed_document[0],
+            scrubbed_document[1],
+            source="redaction.apply",
+        )
 
     # Each link is restored on its own, so one failure does not strand the
     # rest. A re-run cannot finish the job (no version carries an excerpt
@@ -2869,6 +3137,11 @@ class RedactionApplyHandler:
     so ``list_precedents`` serves the node's text, or a neutral title, for a
     scrubbed precedent instead.
 
+    **A precedent's own document row is blanked, not deleted.** Redacting a
+    promoted precedent keeps its document id but empties the text and title and
+    archives it (:func:`_tombstone_precedent_document`), since the document plane
+    has no governed delete. The payload is unchanged.
+
     **Scope: graph entities only; linked records become pointers.**
     Documents linked from any purged version are *not* cascaded — a
     document may back many entities — and their union across versions rides
@@ -2973,6 +3246,9 @@ class RedactionApplyHandler:
         # fails with the graph untouched — nothing irreversible has
         # happened yet.
         vector_deleted = self._registry.knowledge.vector_store.delete(target_id)
+        if entity_type == "precedent":
+            # The precedent's own document row holds the same text as the node.
+            _tombstone_precedent_document(self._registry, target_id)
 
         if not graph.delete_node(target_id):
             # Lost a race: another writer purged the node between our read
@@ -3221,6 +3497,12 @@ def _prune_message(
             f"; {report.skipped_restored} protected (state=current — "
             "asserted in service)"
         )
+    if report.skipped_precedent:
+        message += (
+            f"; {report.skipped_precedent} promoted-precedent item(s) (document "
+            "rows and graph nodes) exempt (their lifecycle belongs to the "
+            "precedent handlers)"
+        )
     return message
 
 
@@ -3352,6 +3634,7 @@ class RetentionPruneHandler:
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
             "skipped_restored": report.skipped_restored,
+            "skipped_precedent": report.skipped_precedent,
             # #419: which requested lifecycle states contributed a
             # guaranteed zero. Audited alongside the criteria that named
             # them so a reviewer reading this event later can tell an inert

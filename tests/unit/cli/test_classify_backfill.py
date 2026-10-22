@@ -90,6 +90,34 @@ class TestClassifyBackfillCLI:
         assert rerun["refreshed"] == 0
         assert rerun["skipped_fresh"] == 3
 
+    def test_a_promoted_precedent_row_lands_in_its_own_bucket(self, cli_env) -> None:
+        """The buckets sum to ``scanned``, and the precedent row keeps its tags.
+
+        Its lifecycle and tags belong to the precedent handlers, so the refresh
+        skips it; the summary must say so rather than leave a gap.
+        """
+        _seed_documents(2)
+        store = _get_registry().knowledge.document_store
+        store.put("precedent://learning/pooling", _TAGGABLE, {"title": "pooling"})
+
+        summary = _run_json()
+
+        assert summary["scanned"] == 3
+        assert summary["refreshed"] == 2
+        assert summary["skipped_precedent"] == 1
+        assert "precedent://learning/pooling" not in summary["item_ids_refreshed"]
+        buckets = (
+            "refreshed",
+            "skipped_fresh",
+            "skipped_unchanged",
+            "skipped_no_signal",
+            "skipped_missing_content",
+            "skipped_precedent",
+            "errors",
+        )
+        assert sum(summary[b] for b in buckets) == summary["scanned"]
+        assert _tags("precedent://learning/pooling") == {}
+
     def test_max_age_days_zero_rescans_everything(self, cli_env) -> None:
         _seed_documents()
         _run_json()

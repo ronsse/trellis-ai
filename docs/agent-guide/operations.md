@@ -755,7 +755,7 @@ Tag writes pass `preserve_updated_at=True`: re-tagging is derived metadata and d
 
 Like the two backfills above, this command does **not** require the `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` flag — invoking it *is* the opt-in. It never deletes tags: an item the pipeline produces no signal for keeps whatever it had, and is counted under `skipped_no_signal`. Each write emits a `TAGS_REFRESHED` event carrying the before/after tag diff; a dry run emits nothing.
 
-Every scanned document lands in exactly one bucket: `refreshed`, `skipped_fresh` (stamp newer than `--max-age-days`), `skipped_unchanged` (stale stamp, but re-running the pipeline produces the same tags — so nothing is written and no event is emitted), `skipped_no_signal`, `skipped_missing_content`, or `errors`. That means **`--dry-run` previews what would *change*, not what is merely stale**, and the two runs agree. An unchanged document keeps its old `classified_at` and is re-scanned (never rewritten) by the next backfill.
+Every scanned document lands in exactly one bucket: `refreshed`, `skipped_fresh` (stamp newer than `--max-age-days`), `skipped_unchanged` (stale stamp, but re-running the pipeline produces the same tags — so nothing is written and no event is emitted), `skipped_no_signal`, `skipped_missing_content`, `skipped_precedent` (a promoted precedent's row, whose lifecycle and tags belong to the precedent handlers), or `errors`. That means **`--dry-run` previews what would *change*, not what is merely stale**, and the two runs agree. An unchanged document keeps its old `classified_at` and is re-scanned (never rewritten) by the next backfill.
 
 The scan is fail-soft per document: a row that fails to process — a hand-edited `auto_importance`, a `content_tags` value of the wrong shape — is logged with a traceback, counted in `errors`, and skipped; the rest of the store is still backfilled. `status` is then `"partial"` rather than `"ok"`. The exit code stays `0` (matching `admin reindex-vectors`) — read `errors` / `status`, not the exit code, to detect a partial run. A malformed `classify:` block in `config.yaml` is a different failure: the command exits `1` with `{"status": "error", ...}` before scanning anything.
 
@@ -769,7 +769,7 @@ Two things to know about how this differs from classify-on-write:
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_unchanged": 0, "skipped_no_signal": 6, "skipped_missing_content": 3, "errors": 0, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
+{"status": "ok", "scanned": 240, "refreshed": 31, "skipped_fresh": 200, "skipped_unchanged": 0, "skipped_no_signal": 6, "skipped_missing_content": 3, "skipped_precedent": 0, "errors": 0, "dry_run": false, "include_domain": false, "item_ids_refreshed": ["doc-1", "doc-2"]}
 ```
 
 ### `trellis classify shadow`

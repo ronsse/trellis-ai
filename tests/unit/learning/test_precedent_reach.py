@@ -37,7 +37,7 @@ from trellis.learning.scoring import (
     SOURCE_EXCERPT_INCLUDED,
 )
 from trellis.mutate import build_curate_executor
-from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.builder_factory import build_pack_builder, build_strategies
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import GRAPH_SEED_IDS_KEY, SearchStrategy
 from trellis.schemas.pack import PackItem
@@ -190,7 +190,7 @@ class TestContent:
 
 
 class TestReach:
-    def test_seeded_flat_pack_serves_the_precedent_but_the_recency_window_cannot(
+    def test_seeded_pack_serves_the_precedent_and_so_does_an_unseeded_one_by_keyword(
         self, registry: StoreRegistry, tmp_path: Path
     ) -> None:
         _serve_and_grade(registry, tmp_path, intent=_SEEDED_INTENT)
@@ -205,8 +205,34 @@ class TestReach:
         unseeded = builder.build(_UNSEEDED_INTENT, limit_per_strategy=_LIMIT)
         seeded = builder.build(_SEEDED_INTENT, limit_per_strategy=_LIMIT)
 
-        assert precedent_id not in [i.item_id for i in unseeded.items]
         assert precedent_id in [i.item_id for i in seeded.items]
+        # This pinned the opposite until the promotion wrote a document row:
+        # the graph axis alone cannot reach an unseeded intent once newer nodes
+        # fill its recency window, and that is still true (see
+        # ``test_the_graph_axis_alone_still_cannot_reach_it_unseeded``). What
+        # changed is that the keyword axis now can, through the precedent's
+        # own document.
+        by_id = {i.item_id: i for i in unseeded.items}
+        assert precedent_id in by_id
+        assert by_id[precedent_id].metadata["source_strategy"] == "keyword"
+
+    def test_the_graph_axis_alone_still_cannot_reach_it_unseeded(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _serve_and_grade(registry, tmp_path, intent=_SEEDED_INTENT)
+        precedent_id = _promote(registry, _doc_candidate(registry))
+        for i in range(_CLUTTER_NODES):
+            registry.knowledge.graph_store.upsert_node(
+                f"clutter:{i}", "concept", {"name": f"clutter {i}"}
+            )
+        graph_only = [
+            s for s in build_strategies(registry).strategies if s.name == "graph"
+        ]
+        assert len(graph_only) == 1
+
+        items = graph_only[0].search(_UNSEEDED_INTENT, limit=_LIMIT)
+
+        assert precedent_id not in [i.item_id for i in items]
 
 
 class _StubStrategy(SearchStrategy):
