@@ -15,6 +15,16 @@ from typing import Any
 
 import pytest
 
+from trellis.classify.feedback import apply_noise_tags
+from trellis.classify.pipeline import ClassifierPipeline
+from trellis.classify.protocol import ClassificationContext, ClassificationResult
+from trellis.classify.refresh import (
+    REASON_PRECEDENT,
+    reclassify_item,
+    reclassify_stale,
+)
+from trellis.core.document_write import put_document
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.errors import StoreError
 from trellis.learning.scoring import (
     _apply_readable_name_fallback,
@@ -23,7 +33,7 @@ from trellis.learning.scoring import (
     resolve_source_excerpt,
     submit_learning_promotion,
 )
-from trellis.mutate import build_curate_executor
+from trellis.mutate import build_curate_executor, build_evidence_ingest_command
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     PrecedentDemoteHandler,
@@ -442,3 +452,300 @@ class TestRedaction:
         # source text past a redaction that matches on ``source_item_id``.
         assert excerpt is None
         assert reason == "document_not_found"
+
+
+# ---------------------------------------------------------------------------
+# A hand-promoted precedent is exempt from automatic demotion, and its document
+# row must not be a way round that. Each document-plane loop below is tested
+# against the row a real promotion wrote.
+# ---------------------------------------------------------------------------
+
+FORGED_ID = "memory-that-claims-to-be-a-precedent"
+
+
+def _signal_quality(registry: StoreRegistry, doc_id: str = NODE_ID) -> Any:
+    return _document(registry, doc_id)["metadata"]["content_tags"].get("signal_quality")
+
+
+def _tag_noise_directly(registry: StoreRegistry, doc_id: str = NODE_ID) -> None:
+    """Write the noise tag the way a test (or a past bug) could: bypassing the pass."""
+    document = _document(registry, doc_id)
+    metadata = dict(document["metadata"])
+    tags = metadata.get("content_tags") or {}
+    metadata["content_tags"] = {**tags, "signal_quality": "noise"}
+    put_document(
+        registry.knowledge.document_store,
+        registry.knowledge.vector_store,
+        doc_id,
+        document["content"],
+        metadata,
+        preserve_updated_at=True,
+    )
+
+
+def _put_memory_claiming_to_be_a_precedent(registry: StoreRegistry) -> None:
+    """An ordinary caller's document that sets ``document_form`` to ``precedent``."""
+    result = build_curate_executor(registry, evidence_embed="none").execute(
+        build_evidence_ingest_command(
+            doc_id=FORGED_ID,
+            content=f"{TITLE}\n\n{DESCRIPTION}",
+            metadata={"document_form": "precedent"},
+            requested_by="test",
+            embed_mode="none",
+        )
+    )
+    assert result.status == CommandStatus.SUCCESS, result.message
+
+
+class TestPredicateIsUnforgeable:
+    def test_it_reads_the_id_namespace_and_nothing_else(self) -> None:
+        assert is_promoted_precedent_document(NODE_ID)
+        assert not is_promoted_precedent_document(FORGED_ID)
+        assert not is_promoted_precedent_document(None)
+
+    def test_a_caller_cannot_choose_an_id_in_the_reserved_namespace(
+        self, registry: StoreRegistry
+    ) -> None:
+        command = build_evidence_ingest_command(
+            doc_id="precedent://learning/mine",
+            content="a memory that wants a precedent's exemptions",
+            requested_by="test",
+            embed_mode="none",
+        )
+
+        result = build_curate_executor(registry, evidence_embed="none").execute(command)
+
+        assert result.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
+        assert "reserved precedent namespace" in (result.message or "")
+        assert (
+            registry.knowledge.document_store.get("precedent://learning/mine") is None
+        )
+
+    def test_setting_document_form_to_precedent_earns_no_exemption(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_memory_claiming_to_be_a_precedent(registry)
+
+        result = apply_noise_tags(
+            [FORGED_ID],
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+        )
+
+        assert result.updated == 1
+        assert result.refused_not_document == []
+        assert _signal_quality(registry, FORGED_ID) == "noise"
+
+
+class TestNoisePassSparesPromotedPrecedents:
+    def test_the_noise_pass_refuses_the_row_and_leaves_its_tags_alone(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        before = _document(registry)["metadata"]["content_tags"]
+
+        result = apply_noise_tags(
+            [NODE_ID],
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+        )
+
+        assert result.updated == 0
+        assert result.refused_not_document == [NODE_ID]
+        assert _document(registry)["metadata"]["content_tags"] == before
+        assert _signal_quality(registry) != "noise"
+        assert _served(registry, "keyword")
+
+    def test_a_demote_then_reinstate_leaves_no_noise_tag_to_clear(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        apply_noise_tags(
+            [NODE_ID],
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+        )
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+        PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+        assert _signal_quality(registry) != "noise"
+        assert _served(registry, "keyword")
+
+
+class TestRetentionSparesPromotedPrecedents:
+    def _prune(self, registry: StoreRegistry, criteria: dict[str, Any]) -> Any:
+        return build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_PRUNE,
+                args={"criteria": criteria, "reason": "hygiene", "dry_run": False},
+            )
+        )
+
+    def test_a_noise_tagged_precedent_row_is_not_archived(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        _tag_noise_directly(registry)
+        before = _document(registry)
+
+        result = self._prune(registry, {"noise_documents": True})
+
+        assert result.status == CommandStatus.SUCCESS
+        assert _document(registry) == before
+        assert LIFECYCLE_KEY not in _document(registry)["metadata"]
+
+    def test_a_demoted_precedent_row_is_not_selected_by_lifecycle_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.mutate.retention import RetentionCriteria, resolve_candidates
+
+        _promote(registry)
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                noise_documents=True,
+                lifecycle_states=["demoted", "deprecated", "superseded"],  # type: ignore[list-item]
+                older_than_days=0,
+            ),
+            registry,
+        )
+
+        assert NODE_ID not in {
+            c.item_id for c in report.candidates if c.kind == "document"
+        }
+        assert report.skipped_precedent == 1
+
+    def test_an_ordinary_noise_row_is_still_archived(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put_memory_claiming_to_be_a_precedent(registry)
+        _tag_noise_directly(registry, FORGED_ID)
+
+        self._prune(registry, {"noise_documents": True})
+
+        lifecycle = _document(registry, FORGED_ID)["metadata"][LIFECYCLE_KEY]
+        assert lifecycle["state"] == "archived"
+
+
+class _FixedClassifier:
+    name = "fixed"
+
+    def classify(
+        self, content: str, *, context: ClassificationContext | None = None
+    ) -> ClassificationResult:
+        return ClassificationResult(
+            tags={"content_type": ["procedure"]},
+            confidence=1.0,
+            classifier_name=self.name,
+        )
+
+
+class TestClassifyRefreshSparesPromotedPrecedents:
+    def test_reclassify_item_keeps_the_decision_tag(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        before = _document(registry)["metadata"]["content_tags"]
+
+        outcome = reclassify_item(
+            NODE_ID,
+            pipeline=ClassifierPipeline(classifiers=[_FixedClassifier()]),
+            document_store=registry.knowledge.document_store,
+            vector_store=registry.knowledge.vector_store,
+        )
+
+        assert outcome.refreshed is False
+        assert outcome.reason == REASON_PRECEDENT
+        assert _document(registry)["metadata"]["content_tags"] == before
+        assert before["content_type"] == "decision"
+
+    def test_the_stale_scan_counts_it_and_re_tags_everything_else(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        _put_memory_claiming_to_be_a_precedent(registry)
+        # Untagged, so the scan treats it as stale and refreshes it.
+        registry.knowledge.document_store.put(
+            "plain-doc", "an ordinary untagged memory", {}
+        )
+
+        result = reclassify_stale(
+            pipeline=ClassifierPipeline(classifiers=[_FixedClassifier()]),
+            document_store=registry.knowledge.document_store,
+            max_age_days=0,
+            vector_store=registry.knowledge.vector_store,
+        )
+
+        assert result.skipped_precedent == 1
+        assert "plain-doc" in result.item_ids_refreshed
+        assert NODE_ID not in result.item_ids_refreshed
+        assert _document(registry)["metadata"]["content_tags"]["content_type"] == (
+            "decision"
+        )
+
+
+class TestReinstateRepairsAStrandedRow:
+    def _strand(self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Reinstate with a failing document stamp; returns the real ``put``."""
+        _promote(registry)
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+        store = registry.knowledge.document_store
+        real_put = store.put
+        _break_document_writes(registry, monkeypatch)
+        PrecedentReinstateHandler(registry).handle(_reinstate_command())
+        assert not _served(registry, "keyword")
+        return real_put
+
+    def test_the_warning_names_the_repair(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _promote(registry)
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+        _break_document_writes(registry, monkeypatch)
+        command = _reinstate_command()
+
+        PrecedentReinstateHandler(registry).handle(command)
+
+        assert any(
+            "Re-issue precedent.reinstate" in w
+            for w in command.metadata["handler_warnings"]
+        )
+
+    def test_a_second_reinstate_re_stamps_the_row_and_touches_nothing_else(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_put = self._strand(registry, monkeypatch)
+        monkeypatch.setattr(registry.knowledge.document_store, "put", real_put)
+        versions_before = len(registry.knowledge.graph_store.get_node_history(NODE_ID))
+
+        PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+        assert _served(registry, "keyword")
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert (
+            len(registry.knowledge.graph_store.get_node_history(NODE_ID))
+            == versions_before
+        )
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_REINSTATED
+        )
+        assert events[-1].payload["document_resync_only"] is True
+
+    def test_a_failing_repair_raises_rather_than_reporting_success(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._strand(registry, monkeypatch)
+
+        with pytest.raises(StoreError):
+            PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+    def test_a_healthy_current_precedent_is_still_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+        PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+        with pytest.raises(Exception, match="not 'demoted'"):
+            PrecedentReinstateHandler(registry).handle(_reinstate_command())

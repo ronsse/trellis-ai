@@ -46,6 +46,7 @@ from trellis.classify.importance import compute_importance
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext
 from trellis.core.document_write import put_document
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ _STAMP_FIELDS = frozenset({"classified_at", "importance_scored_at"})
 #: :attr:`RefreshOutcome.reason` values. Constants, not free text, so the
 #: batch pass buckets outcomes by identity instead of sniffing prose.
 REASON_NOT_FOUND = "document not found"
+REASON_PRECEDENT = "promoted precedent document row — tags are not refreshed"
 REASON_NO_SIGNAL = "pipeline produced no tags — keeping prior"
 REASON_UNCHANGED = "tags unchanged"
 REASON_DRY_RUN = "tags would be updated (dry-run)"
@@ -97,6 +99,7 @@ class BatchRefreshResult:
     skipped_fresh: int = 0
     skipped_unchanged: int = 0
     skipped_no_signal: int = 0
+    skipped_precedent: int = 0
     errors: int = 0
     item_ids_refreshed: list[str] = field(default_factory=list)
 
@@ -157,6 +160,12 @@ def reclassify_item(
         :class:`RefreshOutcome` with the before/after tag diffs and a
         ``refreshed`` flag.
     """
+    if is_promoted_precedent_document(item_id):
+        # The row's ``decision`` tag is what makes it retrievable by intent, and
+        # a re-run of the deterministic pipeline would overwrite it. Its tags
+        # belong to the promote handler.
+        return RefreshOutcome(item_id=item_id, refreshed=False, reason=REASON_PRECEDENT)
+
     doc = document_store.get(item_id)
     if doc is None:
         logger.debug("reclassify_item_not_found", item_id=item_id)
@@ -343,7 +352,8 @@ def reclassify_stale(
         :class:`BatchRefreshResult` with counts and the list of refreshed
         item IDs. Every scanned document lands in exactly one bucket:
         ``refreshed``, ``skipped_missing_content``, ``skipped_fresh``,
-        ``skipped_unchanged`` (stale stamp, but re-running the pipeline
+        ``skipped_precedent`` (a promoted precedent's own document row, never
+        re-tagged), ``skipped_unchanged`` (stale stamp, but re-running the pipeline
         produces the same tags), ``skipped_no_signal``, or ``errors``.
 
     A failure on one document is counted in ``errors`` and skipped — the scan
@@ -430,6 +440,8 @@ def _tally(result: BatchRefreshResult, item_id: str, outcome: RefreshOutcome) ->
         result.skipped_no_signal += 1
     elif outcome.reason == REASON_UNCHANGED:
         result.skipped_unchanged += 1
+    elif outcome.reason == REASON_PRECEDENT:
+        result.skipped_precedent += 1
     else:
         # REASON_NOT_FOUND: the store listed the row and then could not read
         # it back. Rare (a concurrent delete), but it is a document we were

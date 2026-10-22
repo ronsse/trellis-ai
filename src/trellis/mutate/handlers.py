@@ -12,6 +12,7 @@ import structlog
 
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
 from trellis.core.text_safety import (
     contains_nul_or_lone_surrogate,
@@ -68,6 +69,26 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+def _evidence_document_id(value: object) -> str:
+    """``evidence.doc_id`` as a caller-chosen document id, or a refusal.
+
+    A promoted precedent's document row is written by the promote handler
+    alone. Letting a caller choose an id in that namespace would let it exempt
+    its own memory from noise demotion and retention (see
+    :mod:`trellis.core.precedent_document`).
+    """
+    if not isinstance(value, str) or not value:
+        msg = "evidence.doc_id must be a non-empty string"
+        raise ValidationError(msg, code="evidence_ingest_shape")
+    if is_promoted_precedent_document(value):
+        msg = (
+            f"evidence.doc_id {value!r} is in the reserved precedent namespace; "
+            "a precedent's document row is written by its promotion"
+        )
+        raise ValidationError(msg, code="reserved_document_id")
+    return value
+
+
 class EvidenceIngestHandler:
     """Store a document and optionally create its vector row.
 
@@ -97,12 +118,9 @@ class EvidenceIngestHandler:
             msg = "evidence must be a mapping"
             raise ValidationError(msg, code="evidence_ingest_shape")
 
-        doc_id = evidence.get("doc_id")
+        doc_id = _evidence_document_id(evidence.get("doc_id"))
         content = evidence.get("content")
         uri = evidence.get("uri")
-        if not isinstance(doc_id, str) or not doc_id:
-            msg = "evidence.doc_id must be a non-empty string"
-            raise ValidationError(msg, code="evidence_ingest_shape")
         if not isinstance(content, str):
             msg = "evidence.content must be a string"
             raise ValidationError(msg, code="evidence_ingest_shape")
@@ -419,6 +437,18 @@ def _stamp_precedent_document(
         preserve_updated_at=True,
     )
     return True
+
+
+def _precedent_document_state(registry: StoreRegistry, precedent_id: str) -> str | None:
+    """``Lifecycle.state`` stamped on a precedent's document row, if it has one."""
+    document = registry.knowledge.document_store.get(precedent_id)
+    if not document:
+        return None
+    record = (document.get("metadata") or {}).get(LIFECYCLE_KEY)
+    if not isinstance(record, dict):
+        return None
+    state = record.get("state")
+    return state if isinstance(state, str) else None
 
 
 def _rewrite_precedent_document(
@@ -916,11 +946,49 @@ class PrecedentReinstateHandler:
     same call, so a semantic hit stops carrying the demoted snapshot. The
     precedent's document row, when it has one, is re-stamped after the node: a
     failure there leaves the row withheld, and is reported on the result's
-    warnings and as ``document_sync_failed`` on the event.
+    warnings and as ``document_sync_failed`` on the event. Re-issuing the
+    reinstate then repairs it: a target whose node is already ``current`` but
+    whose document row is still ``demoted`` is accepted, re-stamps the row and
+    nothing else, and marks the event ``document_resync_only``.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
+
+    def _restamp_document(
+        self,
+        command: Command,
+        target_id: str,
+        lifecycle: dict[str, Any],
+        *,
+        strict: bool,
+    ) -> bool:
+        """Re-stamp the precedent's document row; ``True`` when that failed.
+
+        After the node write a failure is fail-soft: the reinstatement stands,
+        the row stays withheld, and the warning names the repair (re-issue the
+        command). ``strict`` is the repair itself, where the node is already
+        current and this stamp is the whole job, so a failure raises rather
+        than reporting a repair that did not happen.
+        """
+        try:
+            _stamp_precedent_document(self._registry, target_id, lifecycle)
+        except Exception:
+            if strict:
+                raise
+            logger.warning(
+                "precedent_reinstate_document_sync_failed",
+                item_id=target_id,
+                exc_info=True,
+            )
+            command.metadata.setdefault("handler_warnings", []).append(
+                f"precedent_reinstate_document_sync_failed: document row for "
+                f"{target_id} was not re-stamped; keyword retrieval keeps "
+                "withholding it until it is. Re-issue precedent.reinstate "
+                "for this id to re-stamp the row"
+            )
+            return True
+        return False
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
@@ -971,7 +1039,14 @@ class PrecedentReinstateHandler:
             raise ValidationError(msg, errors=[msg], code="target_not_precedent")
 
         current_state = _current_lifecycle_state(node)
-        if current_state != "demoted":
+        # A reinstate whose document stamp failed leaves the node ``current``
+        # and the row ``demoted``. That is the one case a ``current`` target
+        # is accepted: the retry re-stamps the row and touches nothing else.
+        document_resync_only = (
+            current_state == CURRENT_STATE
+            and _precedent_document_state(self._registry, target_id) == "demoted"
+        )
+        if current_state != "demoted" and not document_resync_only:
             msg = (
                 f"Precedent {target_id} cannot be reinstated: its lifecycle "
                 f"state is {current_state!r}, not 'demoted'"
@@ -989,25 +1064,16 @@ class PrecedentReinstateHandler:
             props[LIFECYCLE_KEY] = lifecycle
             return {"properties": props}
 
-        if _rewrite_current_node(graph, target_id, reinstate) is None:
+        if (
+            not document_resync_only
+            and _rewrite_current_node(graph, target_id, reinstate) is None
+        ):
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
-        document_sync_failed = False
-        try:
-            _stamp_precedent_document(self._registry, target_id, lifecycle)
-        except Exception:
-            logger.warning(
-                "precedent_reinstate_document_sync_failed",
-                item_id=target_id,
-                exc_info=True,
-            )
-            command.metadata.setdefault("handler_warnings", []).append(
-                f"precedent_reinstate_document_sync_failed: document row for "
-                f"{target_id} was not re-stamped; keyword retrieval keeps "
-                "withholding it until it is"
-            )
-            document_sync_failed = True
+        document_sync_failed = self._restamp_document(
+            command, target_id, lifecycle, strict=document_resync_only
+        )
 
         vector_sync_outcome = _sync_vector_lifecycle(
             self._registry,
@@ -1027,6 +1093,8 @@ class PrecedentReinstateHandler:
             event_payload["vector_sync_failed"] = True
         if document_sync_failed:
             event_payload["document_sync_failed"] = True
+        if document_resync_only:
+            event_payload["document_resync_only"] = True
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_REINSTATED,
             source="mutation_executor",
@@ -3429,6 +3497,11 @@ def _prune_message(
             f"; {report.skipped_restored} protected (state=current — "
             "asserted in service)"
         )
+    if report.skipped_precedent:
+        message += (
+            f"; {report.skipped_precedent} promoted-precedent document row(s) "
+            "exempt (their lifecycle belongs to the precedent handlers)"
+        )
     return message
 
 
@@ -3560,6 +3633,7 @@ class RetentionPruneHandler:
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
             "skipped_restored": report.skipped_restored,
+            "skipped_precedent": report.skipped_precedent,
             # #419: which requested lifecycle states contributed a
             # guaranteed zero. Audited alongside the criteria that named
             # them so a reviewer reading this event later can tell an inert

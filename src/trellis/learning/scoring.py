@@ -27,6 +27,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
+    is_promoted_precedent_document,
+)
 from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
 from trellis.learning.evidence_gate import (
     NOT_SCREENED,
@@ -34,7 +38,6 @@ from trellis.learning.evidence_gate import (
     screen_noise_candidates,
 )
 from trellis.schemas.classification import LIFECYCLE_KEY, ContentTags
-from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
@@ -887,7 +890,7 @@ def precedent_entity_id_for_candidate(candidate_id: str) -> str:
     check (``already_promoted``) all resolve the same candidate to the same
     precedent this way; there is no second id scheme to drift from it.
     """
-    return f"precedent://learning/{_slugify(candidate_id)}"
+    return f"{PRECEDENT_ENTITY_ID_PREFIX}{_slugify(candidate_id)}"
 
 
 def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bool:
@@ -932,7 +935,7 @@ def resolve_source_excerpt(
         return None, "no_source_item"
     try:
         document = document_store.get(item_id)
-        if document and _is_precedent_document(document):
+        if document and is_promoted_precedent_document(item_id):
             # A precedent's own document row (see ``precedent_document_content``)
             # holds the excerpt its parent copied. Copying that row would carry
             # a redacted source into a second precedent that
@@ -999,13 +1002,6 @@ def carries_source_excerpt(properties: Mapping[str, Any]) -> bool:
 #: ``document_form`` of the document row a promoted precedent writes for itself,
 #: so a reader can tell it from a source document without parsing its id.
 PRECEDENT_DOCUMENT_FORM = "precedent"
-
-
-def _is_precedent_document(document: Mapping[str, Any]) -> bool:
-    meta = document.get("metadata")
-    return document_form_of(meta if isinstance(meta, dict) else None) == (
-        PRECEDENT_DOCUMENT_FORM
-    )
 
 
 def precedent_document_content(name: object, description: object) -> str:

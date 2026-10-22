@@ -95,8 +95,9 @@ reachable from here at all — this module reads the document store and the
 graph store and nothing else, so the "never prune a trace" hard rule is
 enforced by construction rather than by a check that could be edited away.
 Confirmed entities are dropped explicitly (:data:`EXTRACTION_STATUS_CONFIRMED`),
-and items already archived are skipped so a re-run is a no-op instead of a
-second version bump.
+the document row of a promoted precedent is skipped by every criterion
+(:attr:`ResolutionReport.skipped_precedent`), and items already archived are
+skipped so a re-run is a no-op instead of a second version bump.
 """
 
 from __future__ import annotations
@@ -108,6 +109,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.schemas.classification import LIFECYCLE_KEY, LifecycleState
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_CONFIRMED,
@@ -233,6 +235,9 @@ class ResolutionReport(TrellisModel):
     skipped_already_archived: int = 0
     skipped_confirmed: int = 0
     skipped_restored: int = 0
+    skipped_precedent: int = 0
+    """Promoted-precedent document rows no criterion may select; see
+    :func:`~trellis.core.precedent_document.is_promoted_precedent_document`."""
 
     unselectable_lifecycle_states: list[LifecycleState] = Field(default_factory=list)
     """Requested ``lifecycle_states`` this phase can never select (#419).
@@ -474,6 +479,13 @@ def _resolve_documents(
             report.documents_scanned += 1
             doc_id = doc.get("doc_id") or doc.get("id")
             if not doc_id or doc_id in seen:
+                continue
+            if is_promoted_precedent_document(doc_id):
+                # Exempt from every criterion: a hand-promoted precedent is not
+                # auto-demoted, and its row's lifecycle is written by the
+                # precedent handlers alone. Skipped before classification so no
+                # criterion (a noise tag, a stale ``demoted`` stamp) reaches it.
+                report.skipped_precedent += 1
                 continue
             metadata = doc.get("metadata") or {}
 
