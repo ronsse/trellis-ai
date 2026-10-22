@@ -890,10 +890,25 @@ class LearningPromotionResultRow(WireModel):
 
 
 class LearningPromotionResponse(WireModel):
-    """Aggregate outcome of a learning-promotion submission."""
+    """Aggregate outcome of a learning-promotion submission.
+
+    ``status`` is the run's verdict, the one ``trellis curate
+    promote-learning`` states: ``"ok"`` when every approved row landed (or
+    none was approved), ``"refused"`` when a row was declined before
+    anything was written and no write failed, ``"failed"`` when a write did
+    not land. The HTTP status is 200 whatever the verdict.
+
+    ``approved_count`` is the rows marked approved, blank ids included;
+    ``named_count`` is the approved rows that name a candidate, the ones the
+    run acted on and the right denominator for ``promoted_count``.
+    ``promoted_count`` counts rows whose entity, edges and precedent event
+    all landed; a row that wrote its entity but not the rest reads
+    ``promoted_incomplete``.
+    """
 
     status: str = "ok"
     approved_count: int = 0
+    named_count: int = 0
     ready_count: int = 0
     promoted_count: int = 0
     results: list[LearningPromotionResultRow] = Field(default_factory=list)
