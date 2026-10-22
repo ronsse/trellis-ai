@@ -611,10 +611,51 @@ class TestRetentionSparesPromotedPrecedents:
             registry,
         )
 
-        assert NODE_ID not in {
-            c.item_id for c in report.candidates if c.kind == "document"
-        }
-        assert report.skipped_precedent == 1
+        # Every candidate kind, not only documents: the node shares the row's
+        # id, and a ``kind == "document"`` filter hid the node being selected.
+        assert NODE_ID not in {c.item_id for c in report.candidates}
+        assert report.skipped_precedent == 2  # the row and the node
+
+    def test_a_pruned_demoted_precedent_is_never_split_and_stays_reinstatable(
+        self, registry: StoreRegistry
+    ) -> None:
+        """promote, demote, prune, restore, reinstate: node and row end current.
+
+        Before the node was exempt, the prune skipped the row (still
+        ``demoted``) but archived the node. ``retention.restore`` reads the row
+        first, found it not archived and reported "not archived (skipped)"
+        without reaching the node, and ``precedent.reinstate`` then refused an
+        ``archived`` node, so the pair could not be recovered.
+        """
+        _promote(registry)
+        PrecedentDemoteHandler(registry).handle(_demote_command())
+        graph = registry.knowledge.graph_store
+
+        pruned = self._prune(
+            registry, {"lifecycle_states": ["demoted"], "older_than_days": 0}
+        )
+
+        assert pruned.status == CommandStatus.SUCCESS
+        node = graph.get_node(NODE_ID)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "demoted"
+
+        restored = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": [NODE_ID], "reason": "undo"},
+            )
+        )
+        assert restored.status == CommandStatus.SUCCESS
+
+        PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+        node = graph.get_node(NODE_ID)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "current"
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert _served(registry, "keyword")
 
     def test_an_ordinary_noise_row_is_still_archived(
         self, registry: StoreRegistry
@@ -739,6 +780,38 @@ class TestReinstateRepairsAStrandedRow:
 
         with pytest.raises(StoreError):
             PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+    def test_a_row_archived_beside_a_current_node_is_not_resynced(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The resync accepts a ``demoted`` row only.
+
+        An ``archived`` row (a redaction or a prune stamped it) beside a
+        current node is somebody else's state; a reinstate must refuse it
+        rather than stamp the row ``current`` and un-archive redacted content.
+        """
+        _promote(registry)
+        document = _document(registry)
+        metadata = dict(document["metadata"])
+        metadata[LIFECYCLE_KEY] = {
+            "state": "archived",
+            "deprecation_reason": "redacted",
+        }
+        put_document(
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+            NODE_ID,
+            document["content"],
+            metadata,
+            preserve_updated_at=True,
+        )
+
+        with pytest.raises(Exception, match="not 'demoted'"):
+            PrecedentReinstateHandler(registry).handle(_reinstate_command())
+
+        stamped = _document(registry)["metadata"][LIFECYCLE_KEY]
+        assert stamped["state"] == "archived"
+        assert stamped["deprecation_reason"] == "redacted"
 
     def test_a_healthy_current_precedent_is_still_refused(
         self, registry: StoreRegistry

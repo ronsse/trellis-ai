@@ -3499,8 +3499,9 @@ def _prune_message(
         )
     if report.skipped_precedent:
         message += (
-            f"; {report.skipped_precedent} promoted-precedent document row(s) "
-            "exempt (their lifecycle belongs to the precedent handlers)"
+            f"; {report.skipped_precedent} promoted-precedent item(s) (document "
+            "rows and graph nodes) exempt (their lifecycle belongs to the "
+            "precedent handlers)"
         )
     return message
 

@@ -11,12 +11,15 @@ side door. Every such loop asks :func:`is_promoted_precedent_document`.
 open bag that ``save_memory`` and ``POST /documents`` forward verbatim, so
 ``document_form="precedent"`` is something any caller can write, and a predicate
 that read it would let a caller exempt their own memory from noise demotion and
-retention. The id namespace is different: ``precedent://learning/`` is produced
-only by :func:`~trellis.learning.scoring.precedent_entity_id_for_candidate`, and
+retention. The id namespace is different: ``precedent://learning/`` is minted by
+:func:`~trellis.learning.scoring.precedent_entity_id_for_candidate`, and
 ``EvidenceIngestHandler`` refuses a caller-chosen document id inside it, which is
 the one funnel ``save_memory``, ``POST /documents`` and the generic mutation
-surface share. The promote handler writes its row through ``put_document``
-directly, so it is not stopped by that refusal.
+surface share. Another route also mints an id there: ``entity.create`` with such
+an ``entity_id``, then ``precedent.promote``. That route needs promotion
+authority, which is the authority the exemption is meant to protect, so it is
+not a hole. The promote handler writes its row through ``put_document``
+directly, so it is not stopped by the ingest refusal.
 
 This module imports nothing from the package, so ``classify``, ``mutate`` and
 ``learning`` can all import it without a cycle.
