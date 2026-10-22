@@ -209,6 +209,33 @@ GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
 #: the caller's query.
 GRAPH_SELECTION_SEEDED = "seeded"
 
+#: Value of ``PackItem.metadata["graph_selection"]`` when the expanded seed
+#: set held at least one entity the *caller* named (a section's
+#: ``entity_ids``, see :data:`GRAPH_CALLER_SEED_IDS_KEY`) and the store
+#: resolved it. Distinct from :data:`GRAPH_SELECTION_SEEDED` because the two
+#: answer different questions: a derived seed is the extractor's inference
+#: from a word in the intent, a caller seed is a claim the caller made about
+#: where to look. A caller id the graph does not hold is not credited; a
+#: pack whose only resolved seeds came from the extractor stays ``seeded``.
+#: The stamp describes the expansion, not the item: one ``get_subgraph`` call
+#: covers the whole seed set, so when caller and derived seeds are expanded
+#: together every item of that expansion carries it. It is still a statement
+#: about who chose the seeds only: a caller-seeded hub whose neighbourhood
+#: overflows the limit is prioritised like any seeded one, and says so
+#: under :data:`GRAPH_SLICE_PRIORITISED_KEY`, not here.
+GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
+
+#: Filter key carrying the entity ids the caller named, as seeds for the
+#: graph axis. ``PackBuilder.build_sectioned`` fills it from the union of
+#: its sections' ``entity_ids``; it is a control addressed to the graph axis
+#: (see :data:`GRAPH_CONTROL_FILTER_KEYS`), never a metadata predicate.
+#:
+#: Not ``seed_ids``: that key means "expand *exactly this* set and do not
+#: consult the intent", so reusing it would switch the extractor off the
+#: moment a caller named an entity, and the caller named it *in addition to*
+#: an intent, not instead of one.
+GRAPH_CALLER_SEED_IDS_KEY = "caller_seed_ids"
+
 #: ``PackItem.metadata`` key, set to ``True`` on every item of a *seeded*
 #: search whose slice :func:`_select_for_scoring` changed: the neighbourhood
 #: held more rows than ``limit`` and prioritising (seeds, then the sources of
@@ -224,6 +251,7 @@ GRAPH_SELECTION_SEEDED = "seeded"
 #:
 #: A key of its own, not a value of ``graph_selection``: that one says who
 #: chose the seeds (:data:`GRAPH_SELECTION_SEEDED` /
+#: :data:`GRAPH_SELECTION_CALLER_SEEDED` /
 #: :data:`GRAPH_SELECTION_RECENCY_WINDOW`) and this one says what the slice
 #: did, and folding the two into one field multiplies its values with every
 #: new selection mode.
@@ -292,6 +320,7 @@ GRAPH_STRATEGY_NAME = "graph"
 GRAPH_CONTROL_FILTER_KEYS = frozenset(
     {
         "seed_ids",
+        GRAPH_CALLER_SEED_IDS_KEY,
         "include_structural",
         "include_unconfirmed",
         "depth",
@@ -320,6 +349,14 @@ def _exclude_and_log(
     if len(kept) != len(nodes):
         logger.debug(event, excluded=len(nodes) - len(kept))
     return kept
+
+
+#: The ``graph_selection`` values whose neighbourhood is a seeded expansion,
+#: so :func:`_select_for_scoring` may prioritise it. Both name who chose the
+#: seeds; neither says anything about the slice.
+_PRIORITISED_SELECTIONS = frozenset(
+    {GRAPH_SELECTION_SEEDED, GRAPH_SELECTION_CALLER_SEEDED}
+)
 
 
 def _prioritise_seeded_nodes(
@@ -391,8 +428,11 @@ def _select_for_scoring(
     order is ``(depth, node_id)`` or no order at all, so the rows that
     survive are the ones that happen to sort first: a hub seed lost its
     promoted precedents to that (#949). So the rule runs only when the slice
-    would drop something, and only on the seeded branch, whose position is
+    would drop something, and only on a seeded branch (derived or
+    caller-named seeds, :data:`_PRIORITISED_SELECTIONS`), whose position is
     arbitrary; the recency window's position *is* recency and is left alone.
+    A hub the caller named through ``entity_ids`` loses its late-sorting
+    precedents to the slice exactly as a derived one does.
     Scoring every row and slicing afterwards would not help, because the
     base score is positional and a late row scores zero.
 
@@ -404,7 +444,7 @@ def _select_for_scoring(
     it was before the rule existed.
     """
     kept = nodes[:limit]
-    if selection != GRAPH_SELECTION_SEEDED or len(nodes) <= limit:
+    if selection not in _PRIORITISED_SELECTIONS or len(nodes) <= limit:
         return kept, False
     prioritised = _prioritise_seeded_nodes(nodes, seeds=seeds, edges=edges)[:limit]
     if all(a is b for a, b in zip(prioritised, kept, strict=True)):
@@ -1525,9 +1565,20 @@ class GraphSearch(SearchStrategy):
     and it stands. And ``seed_ids`` still has no in-repo producer: the
     entity-neighbourhood surfaces (``GET /entities/{id}``, MCP
     ``get_graph``) call ``graph_store.get_subgraph`` *directly* and never
-    reach this class, and a section's ``entity_ids`` is a
+    reach this class.
+
+    **A caller can also name the entities itself.** A sectioned pack's
+    ``entity_ids`` are both a
     :class:`~trellis.retrieve.tier_mapping.TierMapper` routing filter over
-    items already retrieved, not a seed.
+    the items already retrieved *and* — through
+    :data:`GRAPH_CALLER_SEED_IDS_KEY` — seeds, merged ahead of the
+    extractor's. Before that, an agent that named exactly the entity it was
+    about to touch still got the recency window, and a precedent attached
+    to that entity was unreachable once enough newer nodes existed. Items
+    reached that way carry ``graph_selection ==``
+    :data:`GRAPH_SELECTION_CALLER_SEEDED`. Ids the graph does not hold are
+    dropped; if that leaves no seed at all the axis serves its recency
+    window, so naming an unknown entity costs nothing.
 
     **The recency window is still the branch that runs when the intent
     names nothing resolvable**, which on the reference deployment is 34 of
@@ -1549,11 +1600,16 @@ class GraphSearch(SearchStrategy):
       spanning **0.0 hours** — every candidate came from one write batch.
 
     Every item carries ``metadata["graph_selection"]``
-    (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_RECENCY_WINDOW`),
-    which says who chose the candidates, so which branch ran is legible in
-    ``PACK_ASSEMBLED.injected_items[]`` rather than inferred from the wiring.
-    What the slice then did is a separate fact under its own key,
-    :data:`GRAPH_SLICE_PRIORITISED_KEY`, described below; it is not a third
+    (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_CALLER_SEEDED` /
+    :data:`GRAPH_SELECTION_RECENCY_WINDOW`),
+    which says who chose the candidates. On a flat pack it is forwarded into
+    ``PACK_ASSEMBLED.injected_items[]``, so which branch ran is legible
+    there rather than inferred from the wiring. ``caller_seeded`` arises only
+    in a sectioned pack, and ``build_sectioned`` emits no ``injected_items[]``,
+    so that value is readable on the served item's own metadata and is not
+    in the event log (a telemetry gap, not a design choice). What the slice
+    then did is a separate fact under its own key,
+    :data:`GRAPH_SLICE_PRIORITISED_KEY`, described below; it is not another
     value of ``graph_selection``.
 
     **Selection and ranking share one clock**
@@ -1700,36 +1756,83 @@ class GraphSearch(SearchStrategy):
         )
         return rows
 
-    def _resolve_seeds(self, query: str, filters: dict[str, Any]) -> list[str]:
+    def _resolve_seeds(
+        self, query: str, filters: dict[str, Any]
+    ) -> tuple[list[str], list[str]]:
         """Decide which seeds this search expands, consuming ``filters``.
 
-        Mutates ``filters`` — it pops the ``seed_ids`` control key and,
-        on the derived path only, defaults ``depth``. Both are the
-        caller's own copy, made at the top of :meth:`search`.
+        Returns ``(seeds, caller_seeds)``: the ids to expand, and the subset
+        of them the caller named through :data:`GRAPH_CALLER_SEED_IDS_KEY`
+        (always ``[]`` on the ``seed_ids`` path, which names no subset).
 
-        An explicit seed set always wins: a caller that passed
-        ``seed_ids`` has already decided which neighbourhood it wants, and
-        re-deriving seeds from prose would silently widen a deliberately
-        narrow request. No in-repo production caller does this today — see
-        the class docstring.
+        Mutates ``filters`` — it pops the ``seed_ids`` and caller-seed
+        control keys and, on the derived paths only, defaults ``depth``. All
+        are the caller's own copy, made at the top of :meth:`search`.
+
+        An explicit ``seed_ids`` set always wins: a caller that passed it
+        has already decided which neighbourhood it wants, and re-deriving
+        seeds from prose would silently widen a deliberately narrow request.
+        It also discards :data:`GRAPH_CALLER_SEED_IDS_KEY` rather than
+        merging it, for the same reason.
+
+        Otherwise the seeds are the entities the caller named, then the ones
+        the extractor derived from the intent. They are expanded in one
+        ``get_subgraph`` call, so they share one depth — the derived one
+        (:data:`EXTRACTED_SEED_DEPTH`) — which is the depth a named entity's
+        directly attached nodes, a promoted precedent among them, are
+        already inside.
+
+        The merged set is capped at :data:`DEFAULT_MAX_SEEDS`, caller seeds
+        first, because every seed is a BFS root and the extractor already
+        holds its own seeds to that bound: capping each side separately
+        would let the two together reach twice it. A pack that names no
+        entity is left to the extractor's own bound, exactly as before: the
+        cap applies only when the caller named at least one. The overflow is
+        logged at warning, not dropped silently.
         """
+        named = self._caller_seeds(filters.pop(GRAPH_CALLER_SEED_IDS_KEY, None))
         if "seed_ids" in filters:
             # Annotated rather than returned straight out of the bag: the
             # value is caller-supplied and unvalidated, and this is the
             # same ``list[str]`` assertion the pre-#375 code made at this
             # same point. Nothing here starts trusting it more than before.
             named_seeds: list[str] = filters.pop("seed_ids")
-            return named_seeds
+            return named_seeds, []
 
-        seed_ids = self._seeds_from_extractor(query)
+        derived = self._seeds_from_extractor(query)
+        seed_ids = list(dict.fromkeys([*named, *derived]))
+        if named and len(seed_ids) > DEFAULT_MAX_SEEDS:
+            logger.warning(
+                "graph_seeds_truncated",
+                named=len(named),
+                derived=len(derived),
+                kept=DEFAULT_MAX_SEEDS,
+            )
+            seed_ids = seed_ids[:DEFAULT_MAX_SEEDS]
+        kept = set(seed_ids)
+        caller_seeds = [s for s in named if s in kept]
         if seed_ids:
-            # A derived seed gets one hop, a named one keeps the historical
-            # two — see :data:`EXTRACTED_SEED_DEPTH`. ``setdefault`` and
-            # not an assignment: a caller who passed ``depth`` explicitly
-            # asked for that depth, and this path is about the *absence* of
-            # an instruction.
+            # One hop, not the historical two — see
+            # :data:`EXTRACTED_SEED_DEPTH`. ``setdefault`` and not an
+            # assignment: a caller who passed ``depth`` explicitly asked
+            # for that depth, and this path is about the *absence* of an
+            # instruction.
             filters.setdefault("depth", EXTRACTED_SEED_DEPTH)
-        return seed_ids
+        return seed_ids, caller_seeds
+
+    @staticmethod
+    def _caller_seeds(raw: Any) -> list[str]:
+        """The caller-named seeds, validated and de-duplicated, in order.
+
+        Unvalidated input in, ids out: a non-list or a non-string member is
+        skipped rather than raised on, because this runs on the pack path
+        and a malformed hint must cost the hint, not the pack. No cap here:
+        :meth:`_resolve_seeds` bounds the *merged* set, which is the number
+        of BFS roots the store is actually asked to expand.
+        """
+        if not isinstance(raw, list | tuple):
+            return []
+        return list(dict.fromkeys(i for i in raw if isinstance(i, str) and i))
 
     def _seeds_from_extractor(self, query: str) -> list[str]:
         """Ask the injected extractor for seeds; never let it break a pack.
@@ -1848,6 +1951,50 @@ class GraphSearch(SearchStrategy):
         )
         return nodes
 
+    def _select_nodes(
+        self,
+        seed_ids: list[str],
+        caller_seeds: list[str],
+        *,
+        filters: dict[str, Any],
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, list[str]]:
+        """Fetch the candidates: ``(nodes, edges, graph_selection, resolved_seeds)``.
+
+        ``edges`` are the edges between the returned nodes, read only by
+        :func:`_select_for_scoring`; the recency window has none.
+        ``resolved_seeds`` are the seeds whose node the store returned,
+        before the structural / unconfirmed / domain filters in
+        :meth:`search`: a caller-named seed that matches nothing is dropped
+        here rather than recorded. They are the caller's and the
+        extractor's seeds together, which is what the precedent partition
+        keys on.
+
+        When the caller named entities this graph does not hold and the
+        extractor found none (its seeds are confirmed live, so any would
+        have resolved), the axis serves the recency window it served before
+        rather than an empty one — an id that names nothing must cost the
+        caller no more than not naming it did. The explicit ``seed_ids``
+        path is untouched: that caller asked for exactly that set.
+        """
+        if seed_ids:
+            nodes, edges = self._expand_seeds(seed_ids, filters=filters)
+            returned_ids = {n.get("node_id") for n in nodes}
+            resolved = [s for s in dict.fromkeys(seed_ids) if s in returned_ids]
+            if resolved or not caller_seeds:
+                selection = (
+                    GRAPH_SELECTION_CALLER_SEEDED
+                    if any(s in caller_seeds for s in resolved)
+                    else GRAPH_SELECTION_SEEDED
+                )
+                return nodes, edges, selection, resolved
+        return (
+            self._recency_window_nodes(filters=filters, limit=limit),
+            [],
+            GRAPH_SELECTION_RECENCY_WINDOW,
+            [],
+        )
+
     def search(
         self,
         query: str,
@@ -1856,7 +2003,7 @@ class GraphSearch(SearchStrategy):
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
         filters = dict(filters) if filters else {}
-        seed_ids = self._resolve_seeds(query, filters)
+        seed_ids, caller_seeds = self._resolve_seeds(query, filters)
 
         include_structural = bool(filters.pop("include_structural", False))
         include_unconfirmed = bool(filters.pop("include_unconfirmed", False))
@@ -1864,20 +2011,9 @@ class GraphSearch(SearchStrategy):
         # Extract domain for scoring (keep in filters for graph query too)
         request_domain = filters.get("domain")
 
-        resolved_seeds: list[str] = []
-        edges: list[dict[str, Any]] = []
-        if seed_ids:
-            selection = GRAPH_SELECTION_SEEDED
-            nodes, edges = self._expand_seeds(seed_ids, filters=filters)
-            # Before the structural / unconfirmed / domain filters below: a
-            # seed is "resolved" when the store returned its node, however
-            # the later filters treat that node. A caller-named seed that
-            # matches nothing is dropped here rather than recorded.
-            returned_ids = {n.get("node_id") for n in nodes}
-            resolved_seeds = [s for s in dict.fromkeys(seed_ids) if s in returned_ids]
-        else:
-            selection = GRAPH_SELECTION_RECENCY_WINDOW
-            nodes = self._recency_window_nodes(filters=filters, limit=limit)
+        nodes, edges, selection, resolved_seeds = self._select_nodes(
+            seed_ids, caller_seeds, filters=filters, limit=limit
+        )
 
         # Filter structural nodes client-side unless explicitly requested.
         #

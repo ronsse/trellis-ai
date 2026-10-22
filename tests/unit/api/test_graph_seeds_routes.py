@@ -104,3 +104,26 @@ def test_sectioned_response_items_carry_no_seed_list(
     assert GRAPH_SEED_IDS_KEY not in json.dumps(body)
     (payload,) = _event_payloads(registry)
     assert GRAPH_SEED_IDS_KEY not in json.dumps(payload)
+
+
+def test_sectioned_entity_ids_seed_the_graph_axis(
+    client: TestClient, registry: StoreRegistry
+) -> None:
+    """The REST route builds through the same ``build_sectioned``, so a
+    section's ``entity_ids`` anchor the graph axis there too — the intent
+    here names nothing resolvable."""
+    response = client.post(
+        "/api/v1/packs/sectioned",
+        json={
+            "intent": "do the next step",
+            "sections": [{"name": "everything", "entity_ids": [_SEED]}],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    served = [i for section in body["sections"] for i in section["items"]]
+    by_id = {i["item_id"]: i for i in _graph_items(served)}
+    assert _NEIGHBOUR in by_id
+    assert by_id[_NEIGHBOUR]["metadata"]["graph_selection"] == "caller_seeded"
+    assert GRAPH_SEED_IDS_KEY not in json.dumps(body)

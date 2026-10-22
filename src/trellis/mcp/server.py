@@ -3652,7 +3652,8 @@ def get_task_context(
 
     Args:
         intent: Description of the specific task being performed.
-        entity_ids: Entity IDs being touched (e.g., table URIs).
+        entity_ids: Entity IDs being touched (e.g., table URIs). They also
+            seed the graph axis, so a precedent attached to one is reachable.
         domain: Optional domain filter.
         max_tokens: Token budget override. Pass ``0`` (default) to use the
             configured budget from ``retrieval.budgets`` in ``config.yaml``;
