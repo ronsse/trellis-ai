@@ -2521,7 +2521,8 @@ def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> b
       writer. ``mark_document_superseded`` preserves content (SCD-2), so a
       content-hash check alone would let two racing SUPERSEDE verdicts both
       commit and fork the supersession chain — ``superseded_by`` can only name
-      one successor. Any non-``current`` lifecycle state fails re-verify.
+      one successor. Any real non-``current`` lifecycle state fails re-verify; an
+      empty or non-string one is malformed and reads as current.
     """
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
@@ -2531,9 +2532,11 @@ def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> b
     if content_hash(current["content"]) != content_hash(candidate.content):
         return True
     lifecycle = (current.get("metadata") or {}).get(LIFECYCLE_KEY)
-    return (
-        isinstance(lifecycle, dict) and lifecycle.get("state", "current") != "current"
-    )
+    state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
+    # A missing, empty or non-string state is malformed, not a state of its own,
+    # and reads as current here as it does in the precedent handler (#942) and
+    # the retrieval gates: a bad record is never by itself a reason to refuse.
+    return isinstance(state, str) and state not in ("", "current")
 
 
 def _reverify_candidate(
