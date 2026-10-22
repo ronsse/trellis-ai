@@ -20,12 +20,15 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import trellis.retrieve as retrieve_pkg
 import trellis.retrieve.strategies as strategies_mod
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_SEEDED,
+    GRAPH_SLICE_PRIORITISED_KEY,
     GraphSearch,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
@@ -212,32 +215,139 @@ class TestOnlyTheNamedRelationPromotes:
         assert "zzz-target" not in ids
 
 
-class TestSelectionStamp:
-    def test_a_reordered_slice_records_the_rule(self, graph: Any) -> None:
+class TestSliceStamp:
+    """``graph_slice_prioritised`` says what the slice did; ``graph_selection``
+    keeps saying who chose the seeds."""
+
+    def test_a_changed_slice_is_stamped(self, graph: Any) -> None:
         _hub(graph)
         items = _seeded(graph)
-        assert {i.metadata["graph_selection"] for i in items} == {
-            strategies_mod.GRAPH_SELECTION_SEEDED_PRIORITY
-        }
+        assert len(items) == LIMIT
+        assert all(i.metadata[GRAPH_SLICE_PRIORITISED_KEY] is True for i in items)
 
-    def test_the_new_value_is_distinct_from_the_old_ones(self) -> None:
-        values = {
-            strategies_mod.GRAPH_SELECTION_SEEDED,
-            strategies_mod.GRAPH_SELECTION_RECENCY_WINDOW,
-            strategies_mod.GRAPH_SELECTION_SEEDED_PRIORITY,
-        }
-        assert len(values) == 3
-
-    def test_a_hub_with_nothing_to_promote_keeps_the_old_value(
-        self, graph: Any
-    ) -> None:
-        # The partition is a no-op here (the seed is already first), so
-        # claiming the rule applied would be a statement about the wiring.
-        _hub(graph, precedent=False)
+    def test_the_stamp_is_not_a_selection_value(self, graph: Any) -> None:
+        # The two dimensions stay apart: a prioritised slice is still a
+        # *seeded* one, and no selection value names the slice rule.
+        _hub(graph)
         items = _seeded(graph)
         assert {i.metadata["graph_selection"] for i in items} == {
             GRAPH_SELECTION_SEEDED
         }
+        assert GRAPH_SLICE_PRIORITISED_KEY != "graph_selection"
+
+    def test_the_key_is_exported_from_the_package(self) -> None:
+        assert retrieve_pkg.GRAPH_SLICE_PRIORITISED_KEY == GRAPH_SLICE_PRIORITISED_KEY
+        assert "GRAPH_SLICE_PRIORITISED_KEY" in retrieve_pkg.__all__
+
+    def test_a_hub_with_nothing_to_promote_carries_no_stamp(self, graph: Any) -> None:
+        # The partition is a no-op here (the seed is already first), so
+        # claiming the rule applied would be a statement about the wiring.
+        _hub(graph, precedent=False)
+        items = _seeded(graph)
+        assert len(items) == LIMIT
+        assert not any(GRAPH_SLICE_PRIORITISED_KEY in i.metadata for i in items)
+        assert {i.metadata["graph_selection"] for i in items} == {
+            GRAPH_SELECTION_SEEDED
+        }
+
+    def test_a_reorder_beyond_the_kept_window_is_not_stamped(self) -> None:
+        # The partition moves P2 ahead of the concept, but with limit 2 both
+        # orders keep [seed, P1]: the slice did not change, so nothing stamps.
+        nodes = [
+            _node(SEED),
+            _node("precedent://p1", "precedent"),
+            _node("concept:c000"),
+            _node("precedent://p2", "precedent"),
+        ]
+        edges = [
+            _edge("precedent://p1", SEED, APPLIES),
+            _edge("precedent://p2", SEED, APPLIES),
+        ]
+        items = _search(_SubgraphStore(nodes, edges), limit=2)
+        assert {i.item_id for i in items} == {SEED, "precedent://p1"}
+        assert not any(GRAPH_SLICE_PRIORITISED_KEY in i.metadata for i in items)
+
+    def test_the_same_nodes_are_stamped_when_the_window_changes(self) -> None:
+        # Same rows, one position different: now the kept window differs.
+        nodes = [
+            _node(SEED),
+            _node("concept:c000"),
+            _node("precedent://p1", "precedent"),
+        ]
+        edges = [_edge("precedent://p1", SEED, APPLIES)]
+        items = _search(_SubgraphStore(nodes, edges), limit=2)
+        assert {i.item_id for i in items} == {SEED, "precedent://p1"}
+        assert all(i.metadata[GRAPH_SLICE_PRIORITISED_KEY] is True for i in items)
+
+    def test_a_stored_property_cannot_forge_the_stamp(self) -> None:
+        nodes = [_node(SEED, **{GRAPH_SLICE_PRIORITISED_KEY: True})]
+        (item,) = _search(_SubgraphStore(nodes), limit=2)
+        assert GRAPH_SLICE_PRIORITISED_KEY not in item.metadata
+
+
+class TestADemotedPrecedentTakesNoPrioritySlot:
+    """``PrecedentDemoteHandler`` stamps the node and leaves its edge, and the
+    pack builder withholds it downstream, so a slot spent on it is lost."""
+
+    DEAD = 5
+
+    @staticmethod
+    def _stamped(state: str) -> dict[str, Any]:
+        return {LIFECYCLE_KEY: {"state": state}}
+
+    def _hub_parts(
+        self, state: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        concepts = [_node(f"concept:c{i:03d}") for i in range(30)]
+        dead = [
+            _node(f"precedent://dead{i}", "precedent", **self._stamped(state))
+            for i in range(self.DEAD)
+        ]
+        edges = [_edge(d["node_id"], SEED, APPLIES) for d in dead]
+        return [_node(SEED), *concepts, *dead], edges
+
+    def _hub_store(self, state: str) -> _SubgraphStore:
+        return _SubgraphStore(*self._hub_parts(state))
+
+    @pytest.mark.parametrize("state", ["demoted", "archived"])
+    def test_every_slot_goes_to_a_servable_node(self, state: str) -> None:
+        items = _search(self._hub_store(state))
+        ids = [i.item_id for i in items]
+        assert len(ids) == LIMIT
+        assert not [i for i in ids if i.startswith("precedent://dead")]
+        assert ids.count(SEED) == 1
+        assert sum(i.startswith("concept:") for i in ids) == LIMIT - 1
+
+    @pytest.mark.parametrize("state", ["demoted", "archived"])
+    def test_the_pack_serves_twenty_not_fifteen(self, state: str) -> None:
+        # The measured defect: 1 seed, 30 concepts, 5 dead precedents, limit
+        # 20 served 15 once the builder withheld the five it had been handed.
+        builder = PackBuilder(
+            strategies=[
+                GraphSearch(self._hub_store(state), seed_extractor=_Extractor([SEED]))
+            ]
+        )
+        pack = builder.build("anything", limit_per_strategy=LIMIT)
+        ids = [i.item_id for i in pack.items]
+        assert len(ids) == LIMIT
+        assert not [i for i in ids if i.startswith("precedent://dead")]
+
+    def test_a_live_precedent_is_still_promoted_beside_dead_ones(self) -> None:
+        nodes, edges = self._hub_parts("demoted")
+        nodes.append(_node("precedent://live", "precedent"))
+        edges.append(_edge("precedent://live", SEED, APPLIES))
+        ids = [i.item_id for i in _search(_SubgraphStore(nodes, edges))]
+        assert "precedent://live" in ids
+        assert not [i for i in ids if i.startswith("precedent://dead")]
+
+    def test_a_malformed_lifecycle_stamp_still_promotes(self) -> None:
+        # ``is_demoted`` reads a bad record as "not demoted"; so do we.
+        concepts = [_node(f"concept:c{i:03d}") for i in range(30)]
+        odd = _node("precedent://odd", "precedent", **{LIFECYCLE_KEY: "demoted"})
+        nodes = [_node(SEED), *concepts, odd]
+        edges = [_edge("precedent://odd", SEED, APPLIES)]
+        ids = {i.item_id for i in _search(_SubgraphStore(nodes, edges))}
+        assert "precedent://odd" in ids
 
 
 def _identity(nodes: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:

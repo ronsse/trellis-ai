@@ -53,7 +53,7 @@ from trellis.retrieve.pack_builder import (
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
-    GRAPH_SELECTION_SEEDED_PRIORITY,
+    GRAPH_SLICE_PRIORITISED_KEY,
     RECENCY_CLOCK_METADATA_KEY,
     RECENCY_CLOCK_NONE,
     RECENCY_CLOCK_ROW,
@@ -104,7 +104,7 @@ __all__ = [
     "EvaluationScenario",
     "GRAPH_SELECTION_RECENCY_WINDOW",
     "GRAPH_SELECTION_SEEDED",
-    "GRAPH_SELECTION_SEEDED_PRIORITY",
+    "GRAPH_SLICE_PRIORITISED_KEY",
     "GraphSearch",
     "GraphSeedExtractor",
     "HeuristicTokenCounter",

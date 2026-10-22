@@ -21,6 +21,7 @@ import structlog
 from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
+from trellis.retrieve.lifecycle import is_archived, is_demoted
 from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -208,16 +209,25 @@ GRAPH_SELECTION_RECENCY_WINDOW = "recency_window"
 #: the caller's query.
 GRAPH_SELECTION_SEEDED = "seeded"
 
-#: Value of ``PackItem.metadata["graph_selection"]`` when a *seeded* search
-#: found more rows than ``limit`` and :func:`_prioritise_seeded_nodes`
-#: changed which rows the slice kept: seeds first, then the precedents that
-#: ``precedent_applies_to`` a seed, then the rest in the store's order. Without
-#: it the slice keeps the first ``limit`` rows of ``(depth, node_id)`` order
-#: (SQLite, Postgres) or of an unordered set (the Bolt backends), and a hub
-#: seed loses every precedent whose id sorts late (#949). Absent from a pack
-#: the rule did not touch, which keeps :data:`GRAPH_SELECTION_SEEDED` and is
-#: byte-identical to what shipped before the rule.
-GRAPH_SELECTION_SEEDED_PRIORITY = "seeded_priority_first"
+#: ``PackItem.metadata`` key, set to ``True`` on every item of a *seeded*
+#: search whose slice :func:`_select_for_scoring` changed: the neighbourhood
+#: held more rows than ``limit`` and prioritising (seeds, then the sources of
+#: ``precedent_applies_to`` edges into a seed, then the rest) made the first
+#: ``limit`` rows differ from the first ``limit`` rows of the store's own
+#: order. That is the whole condition, compared as ``prioritised[:limit]``
+#: against ``nodes[:limit]``: a reorder confined to rows beyond the kept
+#: window does not stamp. Without the rule the slice keeps the first ``limit``
+#: rows of ``(depth, node_id)`` order (SQLite, Postgres) or of an unordered
+#: set (the Bolt backends), and a hub seed loses every precedent whose id
+#: sorts late (#949). Absent, never ``False``, from an item the rule did not
+#: touch, so that pack is byte-identical to what shipped before the rule.
+#:
+#: A key of its own, not a value of ``graph_selection``: that one says who
+#: chose the seeds (:data:`GRAPH_SELECTION_SEEDED` /
+#: :data:`GRAPH_SELECTION_RECENCY_WINDOW`) and this one says what the slice
+#: did, and folding the two into one field multiplies its values with every
+#: new selection mode.
+GRAPH_SLICE_PRIORITISED_KEY = "graph_slice_prioritised"
 
 #: ``PackItem.metadata`` key under which a *seeded* graph search records the
 #: seeds it expanded from, restricted to the ones that resolved to a node in
@@ -328,8 +338,16 @@ def _prioritise_seeded_nodes(
        can return the seed after its neighbours);
     1. a node that is the *source* of a ``precedent_applies_to`` edge whose
        target is a seed, which is the direction promotion writes it in
-       (``trellis.learning.scoring.build_learning_promotion_payloads``);
-    2. everything else.
+       (``trellis.learning.scoring.build_learning_promotion_payloads``),
+       unless its lifecycle stamp says demoted or archived;
+    2. everything else, including a demoted or archived precedent.
+
+    The lifecycle exception is there because ``PrecedentDemoteHandler``
+    stamps the node and leaves its ``precedent_applies_to`` edge in place, and
+    the pack builder withholds such a node downstream. Promoted into tier 1
+    it would take a slot only to be withheld, displacing a servable
+    neighbour: one seed, 30 concepts, 5 demoted precedents and ``limit=20``
+    served 15 items instead of 20. It falls into tier 2 in its original order.
 
     Tier 1 is judged by the edge, never by an id that looks like a precedent.
     The base score is positional, so the tier a row lands in is also the
@@ -351,7 +369,10 @@ def _prioritise_seeded_nodes(
         node_id = node.get("node_id")
         if node_id in seed_set:
             return 0
-        return 1 if node_id in applying else 2
+        props = node.get("properties") or {}
+        if node_id in applying and not (is_demoted(props) or is_archived(props)):
+            return 1
+        return 2
 
     return sorted(nodes, key=tier)
 
@@ -363,7 +384,7 @@ def _select_for_scoring(
     selection: str,
     seeds: Collection[str],
     edges: Collection[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Slice the candidates to ``limit``, prioritising a seeded overflow first.
 
     A seeded neighbourhood larger than ``limit`` is sliced, and the store's
@@ -375,17 +396,20 @@ def _select_for_scoring(
     Scoring every row and slicing afterwards would not help, because the
     base score is positional and a late row scores zero.
 
-    Returns the rows to score and the ``graph_selection`` value to stamp:
-    :data:`GRAPH_SELECTION_SEEDED_PRIORITY` only when the partition actually
-    moved a row, otherwise *selection* unchanged and the slice exactly what it
-    was before the rule existed.
+    Returns the rows to score and whether the slice changed, which is what
+    :data:`GRAPH_SLICE_PRIORITISED_KEY` stamps. The comparison is
+    ``prioritised[:limit]`` against ``nodes[:limit]``, row for row: a
+    partition that only moved rows beyond the kept window, or that left the
+    kept window as it was, is not a change and returns the slice exactly as
+    it was before the rule existed.
     """
+    kept = nodes[:limit]
     if selection != GRAPH_SELECTION_SEEDED or len(nodes) <= limit:
-        return nodes[:limit], selection
-    prioritised = _prioritise_seeded_nodes(nodes, seeds=seeds, edges=edges)
-    if all(a is b for a, b in zip(prioritised, nodes, strict=True)):
-        return nodes[:limit], selection
-    return prioritised[:limit], GRAPH_SELECTION_SEEDED_PRIORITY
+        return kept, False
+    prioritised = _prioritise_seeded_nodes(nodes, seeds=seeds, edges=edges)[:limit]
+    if all(a is b for a, b in zip(prioritised, kept, strict=True)):
+        return kept, False
+    return prioritised, True
 
 
 def _node_matches_domain(props: dict[str, Any], domain: str) -> bool:
@@ -1525,9 +1549,12 @@ class GraphSearch(SearchStrategy):
       spanning **0.0 hours** — every candidate came from one write batch.
 
     Every item carries ``metadata["graph_selection"]``
-    (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_RECENCY_WINDOW`)
-    so which branch ran is legible in ``PACK_ASSEMBLED.injected_items[]``
-    rather than inferred from the wiring.
+    (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_RECENCY_WINDOW`),
+    which says who chose the candidates, so which branch ran is legible in
+    ``PACK_ASSEMBLED.injected_items[]`` rather than inferred from the wiring.
+    What the slice then did is a separate fact under its own key,
+    :data:`GRAPH_SLICE_PRIORITISED_KEY`, described below; it is not a third
+    value of ``graph_selection``.
 
     **Selection and ranking share one clock**
     (:data:`GRAPH_RECENCY_CLOCK_FIELD`, ``created_at``). Ranking by
@@ -1543,8 +1570,13 @@ class GraphSearch(SearchStrategy):
     after every id beginning a-o). :func:`_prioritise_seeded_nodes` runs
     only when the slice would drop rows, and puts seeds, then the
     precedents that ``precedent_applies_to`` a seed, ahead of the rest; the
-    items are then stamped :data:`GRAPH_SELECTION_SEEDED_PRIORITY`. A
-    neighbourhood that fits is not reordered, so its pack is unchanged.
+    items are then stamped ``metadata[GRAPH_SLICE_PRIORITISED_KEY] = True``
+    (:data:`GRAPH_SLICE_PRIORITISED_KEY`), and only when the kept ``limit``
+    rows differ from what the store's own order would have kept. A
+    neighbourhood that fits, or whose kept rows the partition leaves as they
+    were, is not reordered and carries no stamp, so its pack is unchanged. A
+    demoted or archived precedent is not promoted into the front tier, since
+    the pack builder would withhold it and the slot would be wasted.
 
     Structural nodes (``node_role == "structural"``) are excluded by default
     — they represent fine-grained plumbing (columns, parameters, file
@@ -1943,7 +1975,7 @@ class GraphSearch(SearchStrategy):
 
         # A seeded neighbourhood larger than ``limit`` is prioritised before it
         # is sliced (#949); see :func:`_select_for_scoring`.
-        scored, selection = _select_for_scoring(
+        scored, slice_prioritised = _select_for_scoring(
             nodes,
             limit=limit,
             selection=selection,
@@ -2038,6 +2070,7 @@ class GraphSearch(SearchStrategy):
                                 "description",
                                 "comment",
                                 GRAPH_SEED_IDS_KEY,
+                                GRAPH_SLICE_PRIORITISED_KEY,
                             )
                         },
                         # All five sit after the property spread,
@@ -2072,6 +2105,13 @@ class GraphSearch(SearchStrategy):
                         **(
                             {GRAPH_SEED_IDS_KEY: list(resolved_seeds)}
                             if resolved_seeds
+                            else {}
+                        ),
+                        # Likewise withheld from the spread: only this search
+                        # can say it changed the slice.
+                        **(
+                            {GRAPH_SLICE_PRIORITISED_KEY: True}
+                            if slice_prioritised
                             else {}
                         ),
                     },
