@@ -48,10 +48,17 @@ Six defects, pinned one test group each:
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
 import trellis_api
+from tests.integration._live_server import repo_src_pythonpath
 
 INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
 
@@ -486,3 +493,110 @@ def test_apply_noise_tags_posts_to_the_existing_route_and_shows_counts() -> None
     # with noise_tags_written populated) rather than re-fetching GET
     # /effectiveness, which would revert noise_tags_written back to null.
     assert "renderNoiseSection(data)" in body
+
+
+# ---------------------------------------------------------------------------
+# 7. The learning-promotion toast names the rows it skipped
+# ---------------------------------------------------------------------------
+
+
+def _submit_learning_promotions_source(page: str) -> str:
+    return "async function submitLearningPromotions() {" + _between(
+        page,
+        "async function submitLearningPromotions() {",
+        "// -- Section 3: Schema-evolution candidates --",
+    )
+
+
+def _toast_for(response: dict[str, object], tmp_path: Path) -> tuple[str, bool]:
+    """Run the page's own ``submitLearningPromotions`` against a stub response."""
+    harness = f"""
+const toasts = [];
+const document = {{ getElementById: () => ({{ querySelectorAll: () => [] }}) }};
+const postJSON = async () => ({json.dumps(response)});
+const toastReview = (msg, ok) => toasts.push([msg, ok]);
+const loadReviewLearning = () => {{}};
+{_submit_learning_promotions_source(_page())}
+submitLearningPromotions().then(() => console.log(JSON.stringify(toasts)));
+"""
+    script = tmp_path / "harness.js"
+    script.write_text(harness, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603
+        [NODE, str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+        # node never imports trellis; the pin is here because the repo rule
+        # (test_subprocess_pythonpath_rule) covers every launch under tests/.
+        env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
+        timeout=30,
+    )
+    (toast,) = json.loads(done.stdout)
+    return toast[0], toast[1]
+
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+
+@needs_node
+def test_a_run_where_every_approved_row_is_blank_says_they_were_skipped(
+    tmp_path: Path,
+) -> None:
+    msg, ok = _toast_for(
+        {"status": "ok", "approved_count": 2, "named_count": 0, "promoted_count": 0},
+        tmp_path,
+    )
+
+    assert msg.startswith("Promoted 0/0 approved candidate(s).")
+    assert "2 approved row(s) name no candidate_id and were skipped." in msg
+    assert ok is True
+
+
+@needs_node
+def test_a_partly_blank_run_counts_only_the_blank_rows(tmp_path: Path) -> None:
+    msg, _ = _toast_for(
+        {"status": "ok", "approved_count": 5, "named_count": 3, "promoted_count": 3},
+        tmp_path,
+    )
+
+    assert msg.startswith("Promoted 3/3 approved candidate(s).")
+    assert "2 approved row(s) name no candidate_id and were skipped." in msg
+
+
+@needs_node
+def test_a_run_that_skipped_nothing_adds_no_note(tmp_path: Path) -> None:
+    msg, ok = _toast_for(
+        {"status": "ok", "approved_count": 3, "named_count": 3, "promoted_count": 3},
+        tmp_path,
+    )
+
+    assert msg == "Promoted 3/3 approved candidate(s)."
+    assert ok is True
+
+
+@needs_node
+def test_the_skip_note_sits_beside_a_failed_verdict(tmp_path: Path) -> None:
+    msg, ok = _toast_for(
+        {
+            "status": "failed",
+            "approved_count": 4,
+            "named_count": 3,
+            "promoted_count": 1,
+        },
+        tmp_path,
+    )
+
+    assert msg.startswith("Promoted 1/3 approved candidate(s).")
+    assert "1 approved row(s) name no candidate_id and were skipped." in msg
+    assert msg.endswith(" Run failed.")
+    assert ok is False
+
+
+def test_the_toast_reads_the_difference_the_cli_reads() -> None:
+    """Source pin, so the behaviour tests above cannot skip away the rule."""
+    body = _submit_learning_promotions_source(_page())
+
+    assert "r.approved_count - r.named_count" in body
+    assert "name no candidate_id and were skipped." in body
