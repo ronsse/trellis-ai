@@ -12,7 +12,7 @@ in [TODO.md — Step 2](../../TODO.md).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -906,7 +906,7 @@ class LearningPromotionResponse(WireModel):
     ``promoted_incomplete``.
     """
 
-    status: str = "ok"
+    status: Literal["ok", "refused", "failed"] = "ok"
     approved_count: int = 0
     named_count: int = 0
     ready_count: int = 0

@@ -593,6 +593,68 @@ class TestReverifyUnderLock:
         assert lifecycle["superseded_by"] == "someone-elses-successor"
         assert _judged_events(temp_registry) == []
 
+    def test_empty_lifecycle_state_midflight_does_not_fail_reverify(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty ``state`` is malformed, so it reads as current at re-verify.
+
+        The precedent handler and the retrieval gates both read a malformed
+        lifecycle record as current (#942); re-verify used to read the empty
+        string as a state of its own and downgrade a live SUPERSEDE to an ADD.
+        """
+        base_id = _doc_id(save_memory(_BASE))
+        docs = temp_registry.knowledge.document_store
+
+        def blank_the_state() -> None:
+            # Content byte-identical, so only the lifecycle axis can fail it.
+            docs.put(
+                base_id,
+                _BASE,
+                metadata={"lifecycle": {"state": ""}},
+                preserve_updated_at=True,
+            )
+
+        _enable(
+            monkeypatch,
+            FakeLLMClient(content=_verdict_json("supersede"), on_call=blank_the_state),
+        )
+
+        result = save_memory(_NEAR)
+
+        assert f"(supersedes {base_id})" in result, result
+        assert docs.get(base_id)["metadata"]["lifecycle"]["state"] == "superseded"
+        assert _degraded_events(temp_registry) == []
+
+    @pytest.mark.parametrize(
+        ("metadata", "stale"),
+        [
+            pytest.param({}, False, id="no-record"),
+            pytest.param({"lifecycle": "garbled"}, False, id="record-not-a-dict"),
+            pytest.param({"lifecycle": {}}, False, id="no-state"),
+            pytest.param({"lifecycle": {"state": ""}}, False, id="empty-state"),
+            pytest.param({"lifecycle": {"state": None}}, False, id="null-state"),
+            pytest.param({"lifecycle": {"state": 7}}, False, id="non-string-state"),
+            pytest.param({"lifecycle": {"state": "current"}}, False, id="current"),
+            pytest.param({"lifecycle": {"state": "superseded"}}, True, id="superseded"),
+            pytest.param({"lifecycle": {"state": "archived"}}, True, id="archived"),
+            pytest.param({"lifecycle": {"state": "demoted"}}, True, id="demoted"),
+        ],
+    )
+    def test_lifecycle_axis_of_candidate_staleness(
+        self,
+        temp_registry: StoreRegistry,
+        metadata: dict[str, Any],
+        stale: bool,
+    ) -> None:
+        """Only a real non-current state is stale; real states keep failing."""
+        from trellis.mcp.reconcile import ReconcileCandidate
+
+        docs = temp_registry.knowledge.document_store
+        doc_id = docs.put(None, _BASE, metadata=metadata)
+        candidate = ReconcileCandidate(doc_id=doc_id, content=_BASE, similarity=0.9)
+
+        assert server_mod._candidate_is_stale(docs, candidate) is stale
+
     def test_double_supersede_race_single_successor(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
