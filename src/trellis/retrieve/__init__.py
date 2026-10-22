@@ -51,6 +51,7 @@ from trellis.retrieve.pack_builder import (
     StrategyFailure,
 )
 from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_CALLER_SEEDED,
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
     RECENCY_CLOCK_METADATA_KEY,
@@ -101,6 +102,7 @@ __all__ = [
     "EfficiencyScorer",
     "EvaluationProfile",
     "EvaluationScenario",
+    "GRAPH_SELECTION_CALLER_SEEDED",
     "GRAPH_SELECTION_RECENCY_WINDOW",
     "GRAPH_SELECTION_SEEDED",
     "GraphSearch",

@@ -88,6 +88,7 @@ from trellis.retrieve.parent_verdicts import (
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
+    GRAPH_CALLER_SEED_IDS_KEY,
     GRAPH_SEED_IDS_KEY,
     GRAPH_STRATEGY_NAME,
     RECENCY_CLOCK_METADATA_KEY,
@@ -519,13 +520,15 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
     * ``graph_selection`` — how the graph axis chose the candidate:
       ``"seeded"`` (the intent reached the store, via
       :class:`~trellis.retrieve.strategies.GraphSeedExtractor` or an
-      explicit ``seed_ids``) or ``"recency_window"`` (it did not — the
-      axis returned the newest rows and never consulted the query, #371).
+      explicit ``seed_ids``), ``"caller_seeded"`` (the caller named an
+      entity, through a section's ``entity_ids``, and the store held it) or
+      ``"recency_window"`` (neither happened — the axis returned the
+      newest rows and never consulted the query, #371).
       Only graph items carry it. Without it, whether a served entity was
       query-relevant at all is not a property of the record — it has to be
       inferred from which wiring was deployed that week, which §1.2 of
       `docs/design/swarm-handoff.md` shows is exactly the inference that
-      goes wrong. It reveals nothing about content: two enum values
+      goes wrong. It reveals nothing about content: three enum values
       describing the *mechanism*, next to a ``title`` that already names
       the thing.
     * ``recency_clock`` — which clock recency decay actually read for this
@@ -1436,6 +1439,19 @@ class PackBuilder:
         if include_structural:
             merged_filters = dict(merged_filters) if merged_filters else {}
             merged_filters["include_structural"] = True
+        # A section's ``entity_ids`` route items to that section (TierMapper)
+        # *and* name where the caller wants the graph axis to look. Without
+        # the second half an agent that named exactly the entity it is about
+        # to touch still got the newest-nodes window, so anything attached
+        # to that entity and older than the window was unreachable. The
+        # union across sections, in first-named order; ``[]`` adds no key, so
+        # a pack that names no entity builds exactly as it did.
+        caller_entity_ids = list(
+            dict.fromkeys(eid for section in sections for eid in section.entity_ids)
+        )
+        if caller_entity_ids:
+            merged_filters = dict(merged_filters) if merged_filters else {}
+            merged_filters[GRAPH_CALLER_SEED_IDS_KEY] = caller_entity_ids
 
         class_prior_config = self._effective_class_prior_config()
         # One cache for the whole build — see the matching note in
