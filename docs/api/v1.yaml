@@ -1932,6 +1932,10 @@ components:
           type: array
         status:
           default: ok
+          enum:
+          - ok
+          - refused
+          - failed
           title: Status
           type: string
       title: LearningPromotionResponse
