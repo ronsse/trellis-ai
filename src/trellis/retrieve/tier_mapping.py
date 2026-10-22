@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from trellis.schemas.pack import PackItem, SectionRequest
+from trellis.schemas.well_known import canonicalize_entity_type
 
 # Default affinity → (content_types, scopes, item_types) mapping.
 # Used when an item has no explicit retrieval_affinity tags.
@@ -131,10 +132,17 @@ class TierMapper:
         inferred: list[str] = []
         item_ct = _get_content_type(item)
         item_scope = _get_scope(item)
+        node_types = _get_node_types(item)
 
         for affinity, rules in self._heuristics.items():
-            # Check item_type match
-            if rules["item_types"] and item.item_type in rules["item_types"]:
+            # Check item_type match. A graph candidate is always
+            # ``item_type="entity"`` and carries what it is in
+            # ``metadata["node_type"]``, so ``item_types`` is matched against
+            # both -- otherwise a rule naming ``precedent`` is unreachable.
+            if rules["item_types"] and (
+                item.item_type in rules["item_types"]
+                or _node_type_in(node_types, rules["item_types"])
+            ):
                 inferred.append(affinity)
                 continue
 
@@ -154,6 +162,48 @@ class TierMapper:
                 inferred.append(affinity)
 
         return inferred
+
+
+#: ``metadata["source_strategy"]`` values whose ``node_type`` stamp is the
+#: strategy's own claim about a graph row. ``GraphSearch`` and
+#: ``ObservationSearch`` write it after the property spread. ``KeywordSearch``
+#: and ``SemanticSearch`` spread the *document's* open metadata bag instead,
+#: so a ``node_type`` key there is author-supplied text, not a graph fact, and
+#: must not pick a section (#945 is the same class of defect).
+_NODE_TYPE_SOURCES = frozenset({"graph", "observation"})
+
+
+def _get_node_types(item: PackItem) -> set[str]:
+    """Canonical node type(s) of a graph-sourced item; empty for any other.
+
+    Only an item the graph or observation strategy collected is read. For
+    those, ``node_type`` (the stored spelling) and ``node_type_canonical`` are
+    stamped by the strategy after the property spread, so a stored property
+    cannot forge them. An item with no ``source_strategy``, or one from the
+    keyword or semantic axis, returns empty whatever its metadata says.
+    Canonicalising makes ``team`` and ``Team`` one bucket; a non-string value
+    is ignored rather than raised on.
+    """
+    if item.metadata.get("source_strategy") not in _NODE_TYPE_SOURCES:
+        return set()
+    found: set[str] = set()
+    for key in ("node_type", "node_type_canonical"):
+        value = item.metadata.get(key)
+        if isinstance(value, str) and value:
+            found.add(canonicalize_entity_type(value))
+    return found
+
+
+def _node_type_in(node_types: set[str], item_types: set[str]) -> bool:
+    """Whether any node type is named by a rule's ``item_types``.
+
+    The rule side is canonicalised too, so a rule written ``"team"`` matches
+    a row stored ``"Team"`` (and the reverse). Types outside the well-known
+    set pass through unchanged, so ``precedent`` compares as itself.
+    """
+    if not node_types:
+        return False
+    return not node_types.isdisjoint(canonicalize_entity_type(t) for t in item_types)
 
 
 def _get_content_type(item: PackItem) -> str | None:
