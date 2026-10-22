@@ -35,6 +35,7 @@ from trellis.retrieve.strategies import (
     GRAPH_SELECTION_CALLER_SEEDED,
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
+    GRAPH_SLICE_PRIORITISED_KEY,
     GraphSearch,
     KeywordSearch,
 )
@@ -55,6 +56,11 @@ OTHER_PRECEDENT = "precedent:orders-rule"
 #: More than ``limit`` (20) newer nodes, so the recency window cannot reach
 #: anything written before them.
 _NEWER = 30
+
+#: A named hub with more neighbours than any graph-axis ``limit`` the
+#: sectioned builder uses, so its neighbourhood is sliced.
+_HUB_NEIGHBOURS = 60
+LATE_PRECEDENT = "precedent:zz-late-rule"
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +129,28 @@ class TestNamedEntitySeedsTheGraphAxis:
             served[PRECEDENT].metadata["graph_selection"]
             == GRAPH_SELECTION_CALLER_SEEDED
         )
+
+    def test_a_named_hub_keeps_a_late_sorting_precedent(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A caller-named hub whose neighbourhood overflows the limit gets the
+        same precedent partition a derived seed does. The stores return the
+        neighbourhood in ``(depth, node_id)`` order and the precedent's id
+        sorts after every neighbour's, so slicing it as returned drops it."""
+        graph = registry.knowledge.graph_store
+        _node(registry, ENTITY, "table")
+        for i in range(_HUB_NEIGHBOURS):
+            _node(registry, f"concept:hub-{i:03d}", "concept", f"hub {i}")
+            graph.upsert_edge(f"concept:hub-{i:03d}", ENTITY, "related_to")
+        _node(registry, LATE_PRECEDENT, "precedent")
+        graph.upsert_edge(LATE_PRECEDENT, ENTITY, "precedent_applies_to")
+
+        served = _build(registry, entity_ids=[ENTITY])
+
+        assert LATE_PRECEDENT in served
+        meta = served[LATE_PRECEDENT].metadata
+        assert meta["graph_selection"] == GRAPH_SELECTION_CALLER_SEEDED
+        assert meta[GRAPH_SLICE_PRIORITISED_KEY] is True
 
     def test_the_control_without_entity_ids_buries_it(
         self, registry: StoreRegistry
@@ -353,6 +381,38 @@ class TestGraphSearchSeedResolution:
         GraphSearch(store).search("q", filters={GRAPH_CALLER_SEED_IDS_KEY: named})
 
         assert store.subgraph_calls[0]["seed_ids"] == named[:DEFAULT_MAX_SEEDS]
+
+    def test_the_merged_set_is_capped_caller_seeds_first(self) -> None:
+        """Caller and extractor seeds are one ``get_subgraph`` call, so the
+        bound is on the merged set: capping each side alone would let the two
+        reach twice the number of BFS roots."""
+
+        class _Extractor:
+            def extract(self, intent: str) -> list[str]:
+                return [f"d{i}" for i in range(DEFAULT_MAX_SEEDS)]
+
+        store = _RecordingStore()
+        named = [f"n{i}" for i in range(DEFAULT_MAX_SEEDS - 3)]
+
+        GraphSearch(store, seed_extractor=_Extractor()).search(
+            "q", filters={GRAPH_CALLER_SEED_IDS_KEY: named}
+        )
+
+        seeds = store.subgraph_calls[0]["seed_ids"]
+        assert len(seeds) == DEFAULT_MAX_SEEDS
+        assert seeds[: len(named)] == named
+        assert seeds[len(named) :] == ["d0", "d1", "d2"]
+
+    def test_an_extractor_alone_is_capped_as_before(self) -> None:
+        class _Extractor:
+            def extract(self, intent: str) -> list[str]:
+                return [f"d{i}" for i in range(DEFAULT_MAX_SEEDS)]
+
+        store = _RecordingStore()
+
+        GraphSearch(store, seed_extractor=_Extractor()).search("q")
+
+        assert len(store.subgraph_calls[0]["seed_ids"]) == DEFAULT_MAX_SEEDS
 
     @pytest.mark.parametrize("junk", [None, "tbl:x", 42, [], [None, "", 7]])
     def test_a_malformed_value_costs_the_hint_not_the_pack(self, junk: Any) -> None:

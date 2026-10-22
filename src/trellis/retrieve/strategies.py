@@ -21,6 +21,8 @@ import structlog
 from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
+from trellis.retrieve.lifecycle import is_archived, is_demoted
+from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -40,7 +42,7 @@ from trellis.schemas.well_known import (
 from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from trellis.ops.registry import ParameterRegistry
     from trellis.retrieve.pack_builder import StrategyFailure
@@ -217,7 +219,10 @@ GRAPH_SELECTION_SEEDED = "seeded"
 #: pack whose only resolved seeds came from the extractor stays ``seeded``.
 #: The stamp describes the expansion, not the item: one ``get_subgraph`` call
 #: covers the whole seed set, so when caller and derived seeds are expanded
-#: together every item of that expansion carries it.
+#: together every item of that expansion carries it. It is still a statement
+#: about who chose the seeds only: a caller-seeded hub whose neighbourhood
+#: overflows the limit is prioritised like any seeded one, and says so
+#: under :data:`GRAPH_SLICE_PRIORITISED_KEY`, not here.
 GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
 
 #: Filter key carrying the entity ids the caller named, as seeds for the
@@ -230,6 +235,27 @@ GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
 #: moment a caller named an entity, and the caller named it *in addition to*
 #: an intent, not instead of one.
 GRAPH_CALLER_SEED_IDS_KEY = "caller_seed_ids"
+
+#: ``PackItem.metadata`` key, set to ``True`` on every item of a *seeded*
+#: search whose slice :func:`_select_for_scoring` changed: the neighbourhood
+#: held more rows than ``limit`` and prioritising (seeds, then the sources of
+#: ``precedent_applies_to`` edges into a seed, then the rest) made the first
+#: ``limit`` rows differ from the first ``limit`` rows of the store's own
+#: order. That is the whole condition, compared as ``prioritised[:limit]``
+#: against ``nodes[:limit]``: a reorder confined to rows beyond the kept
+#: window does not stamp. Without the rule the slice keeps the first ``limit``
+#: rows of ``(depth, node_id)`` order (SQLite, Postgres) or of an unordered
+#: set (the Bolt backends), and a hub seed loses every precedent whose id
+#: sorts late (#949). Absent, never ``False``, from an item the rule did not
+#: touch, so that pack is byte-identical to what shipped before the rule.
+#:
+#: A key of its own, not a value of ``graph_selection``: that one says who
+#: chose the seeds (:data:`GRAPH_SELECTION_SEEDED` /
+#: :data:`GRAPH_SELECTION_CALLER_SEEDED` /
+#: :data:`GRAPH_SELECTION_RECENCY_WINDOW`) and this one says what the slice
+#: did, and folding the two into one field multiplies its values with every
+#: new selection mode.
+GRAPH_SLICE_PRIORITISED_KEY = "graph_slice_prioritised"
 
 #: ``PackItem.metadata`` key under which a *seeded* graph search records the
 #: seeds it expanded from, restricted to the ones that resolved to a node in
@@ -323,6 +349,120 @@ def _exclude_and_log(
     if len(kept) != len(nodes):
         logger.debug(event, excluded=len(nodes) - len(kept))
     return kept
+
+
+#: The ``graph_selection`` values whose neighbourhood is a seeded expansion,
+#: so :func:`_select_for_scoring` may prioritise it. Both name who chose the
+#: seeds; neither says anything about the slice.
+_PRIORITISED_SELECTIONS = frozenset(
+    {GRAPH_SELECTION_SEEDED, GRAPH_SELECTION_CALLER_SEEDED}
+)
+
+
+def _prioritise_seeded_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    seeds: Collection[str],
+    edges: Collection[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Stable partition of a seeded neighbourhood: seeds, precedents, the rest.
+
+    Called only when the slice to ``limit`` would drop rows, so it decides
+    who survives a neighbourhood too large to serve whole. Three tiers, each
+    keeping the store's own order inside it:
+
+    0. the seeds themselves (a store with no order, as the Bolt backends are,
+       can return the seed after its neighbours);
+    1. a node that is the *source* of a ``precedent_applies_to`` edge whose
+       target is a seed, which is the direction promotion writes it in
+       (``trellis.learning.scoring.build_learning_promotion_payloads``),
+       unless its lifecycle stamp says demoted or archived;
+    2. everything else, including a demoted or archived precedent.
+
+    The lifecycle exception is there because ``PrecedentDemoteHandler``
+    stamps the node and leaves its ``precedent_applies_to`` edge in place, and
+    the pack builder withholds such a node downstream. Promoted into tier 1
+    it would take a slot only to be withheld, displacing a servable
+    neighbour: one seed, 30 concepts, 5 demoted precedents and ``limit=20``
+    served 15 items instead of 20. It falls into tier 2 in its original order.
+
+    Tier 1 is judged by the edge, never by an id that looks like a precedent.
+    The base score is positional, so the tier a row lands in is also the
+    score band it competes in; that is what lets a promoted lesson win a slot
+    at the pack builder's budget and not merely reach it.
+
+    ``sorted`` is stable, so a neighbourhood with no tier-0 or tier-1 row
+    comes back in its input order.
+    """
+    seed_set = set(seeds)
+    kind = EdgeKind.PRECEDENT_APPLIES_TO.value
+    applying = {
+        e.get("source_id")
+        for e in edges
+        if e.get("edge_type") == kind and e.get("target_id") in seed_set
+    }
+
+    def tier(node: dict[str, Any]) -> int:
+        node_id = node.get("node_id")
+        if node_id in seed_set:
+            return 0
+        props = node.get("properties") or {}
+        if node_id in applying and not (is_demoted(props) or is_archived(props)):
+            return 1
+        return 2
+
+    return sorted(nodes, key=tier)
+
+
+def _select_for_scoring(
+    nodes: list[dict[str, Any]],
+    *,
+    limit: int,
+    selection: str,
+    seeds: Collection[str],
+    edges: Collection[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Slice the candidates to ``limit``, prioritising a seeded overflow first.
+
+    A seeded neighbourhood larger than ``limit`` is sliced, and the store's
+    order is ``(depth, node_id)`` or no order at all, so the rows that
+    survive are the ones that happen to sort first: a hub seed lost its
+    promoted precedents to that (#949). So the rule runs only when the slice
+    would drop something, and only on a seeded branch (derived or
+    caller-named seeds, :data:`_PRIORITISED_SELECTIONS`), whose position is
+    arbitrary; the recency window's position *is* recency and is left alone.
+    A hub the caller named through ``entity_ids`` loses its late-sorting
+    precedents to the slice exactly as a derived one does.
+    Scoring every row and slicing afterwards would not help, because the
+    base score is positional and a late row scores zero.
+
+    Returns the rows to score and whether the slice changed, which is what
+    :data:`GRAPH_SLICE_PRIORITISED_KEY` stamps. The comparison is
+    ``prioritised[:limit]`` against ``nodes[:limit]``, row for row: a
+    partition that only moved rows beyond the kept window, or that left the
+    kept window as it was, is not a change and returns the slice exactly as
+    it was before the rule existed.
+    """
+    kept = nodes[:limit]
+    if selection not in _PRIORITISED_SELECTIONS or len(nodes) <= limit:
+        return kept, False
+    prioritised = _prioritise_seeded_nodes(nodes, seeds=seeds, edges=edges)[:limit]
+    if all(a is b for a, b in zip(prioritised, kept, strict=True)):
+        return kept, False
+    return prioritised, True
+
+
+def _node_matches_domain(props: dict[str, Any], domain: str) -> bool:
+    """Whether a graph node's stored domain is the requested one.
+
+    ``domain`` is the scalar a hand-written node carries; ``primary_domain``
+    is what a promoted precedent carries (``build_learning_promotion_payloads``
+    writes the latter and never the former), so reading only ``domain`` left
+    every promoted precedent without the boost (#949). Scoring only:
+    :func:`_passes_domain_scope` is deliberately unchanged, so a precedent
+    filed under another domain is still not *excluded* by it.
+    """
+    return domain in (props.get("domain"), props.get("primary_domain"))
 
 
 def strip_graph_controls(filters: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1461,15 +1601,38 @@ class GraphSearch(SearchStrategy):
 
     Every item carries ``metadata["graph_selection"]``
     (:data:`GRAPH_SELECTION_SEEDED` / :data:`GRAPH_SELECTION_CALLER_SEEDED` /
-    :data:`GRAPH_SELECTION_RECENCY_WINDOW`)
-    so which branch ran is legible in ``PACK_ASSEMBLED.injected_items[]``
-    rather than inferred from the wiring.
+    :data:`GRAPH_SELECTION_RECENCY_WINDOW`),
+    which says who chose the candidates. On a flat pack it is forwarded into
+    ``PACK_ASSEMBLED.injected_items[]``, so which branch ran is legible
+    there rather than inferred from the wiring. ``caller_seeded`` arises only
+    in a sectioned pack, and ``build_sectioned`` emits no ``injected_items[]``,
+    so that value is readable on the served item's own metadata and is not
+    in the event log (a telemetry gap, not a design choice). What the slice
+    then did is a separate fact under its own key,
+    :data:`GRAPH_SLICE_PRIORITISED_KEY`, described below; it is not another
+    value of ``graph_selection``.
 
     **Selection and ranking share one clock**
     (:data:`GRAPH_RECENCY_CLOCK_FIELD`, ``created_at``). Ranking by
     ``updated_at`` while selecting by ``created_at`` let an SCD-2
     re-version — a lifecycle stamp, a property merge — read as freshness on
     an axis whose window that re-version cannot widen (#420).
+
+    **A seeded neighbourhood larger than ``limit`` is prioritised before it
+    is sliced** (#949). The stores return it ordered by ``(depth, node_id)``
+    (SQLite, Postgres) or in no order (the Bolt backends), so slicing it
+    as returned kept whichever ids sort first, and a hub seed such as a
+    ``domain:*`` node lost every promoted precedent (``precedent://…`` sorts
+    after every id beginning a-o). :func:`_prioritise_seeded_nodes` runs
+    only when the slice would drop rows, and puts seeds, then the
+    precedents that ``precedent_applies_to`` a seed, ahead of the rest; the
+    items are then stamped ``metadata[GRAPH_SLICE_PRIORITISED_KEY] = True``
+    (:data:`GRAPH_SLICE_PRIORITISED_KEY`), and only when the kept ``limit``
+    rows differ from what the store's own order would have kept. A
+    neighbourhood that fits, or whose kept rows the partition leaves as they
+    were, is not reordered and carries no stamp, so its pack is unchanged. A
+    demoted or archived precedent is not promoted into the front tier, since
+    the pack builder would withhold it and the slot would be wasted.
 
     Structural nodes (``node_role == "structural"``) are excluded by default
     — they represent fine-grained plumbing (columns, parameters, file
@@ -1618,8 +1781,15 @@ class GraphSearch(SearchStrategy):
         (:data:`EXTRACTED_SEED_DEPTH`) — which is the depth a named entity's
         directly attached nodes, a promoted precedent among them, are
         already inside.
+
+        The merged set is capped at :data:`DEFAULT_MAX_SEEDS`, caller seeds
+        first, because every seed is a BFS root and the extractor already
+        holds its own seeds to that bound: capping each side separately
+        would let the two together reach twice it. A pack that names no
+        entity is capped by the extractor alone, as before. The overflow is
+        logged at warning, not dropped silently.
         """
-        caller_seeds = self._caller_seeds(filters.pop(GRAPH_CALLER_SEED_IDS_KEY, None))
+        named = self._caller_seeds(filters.pop(GRAPH_CALLER_SEED_IDS_KEY, None))
         if "seed_ids" in filters:
             # Annotated rather than returned straight out of the bag: the
             # value is caller-supplied and unvalidated, and this is the
@@ -1628,9 +1798,18 @@ class GraphSearch(SearchStrategy):
             named_seeds: list[str] = filters.pop("seed_ids")
             return named_seeds, []
 
-        seed_ids = list(
-            dict.fromkeys([*caller_seeds, *self._seeds_from_extractor(query)])
-        )
+        derived = self._seeds_from_extractor(query)
+        seed_ids = list(dict.fromkeys([*named, *derived]))
+        if len(seed_ids) > DEFAULT_MAX_SEEDS:
+            logger.warning(
+                "graph_seeds_truncated",
+                named=len(named),
+                derived=len(derived),
+                kept=DEFAULT_MAX_SEEDS,
+            )
+            seed_ids = seed_ids[:DEFAULT_MAX_SEEDS]
+        kept = set(seed_ids)
+        caller_seeds = [s for s in named if s in kept]
         if seed_ids:
             # One hop, not the historical two — see
             # :data:`EXTRACTED_SEED_DEPTH`. ``setdefault`` and not an
@@ -1642,25 +1821,17 @@ class GraphSearch(SearchStrategy):
 
     @staticmethod
     def _caller_seeds(raw: Any) -> list[str]:
-        """The caller-named seeds, de-duplicated, capped at the BFS-root bound.
+        """The caller-named seeds, validated and de-duplicated, in order.
 
         Unvalidated input in, ids out: a non-list or a non-string member is
         skipped rather than raised on, because this runs on the pack path
-        and a malformed hint must cost the hint, not the pack. The cap is
-        :data:`DEFAULT_MAX_SEEDS` — the bound the extractor holds its own
-        seeds to, for the same reason (every seed is a BFS root) — and the
-        overflow is logged at warning, not dropped silently.
+        and a malformed hint must cost the hint, not the pack. No cap here:
+        :meth:`_resolve_seeds` bounds the *merged* set, which is the number
+        of BFS roots the store is actually asked to expand.
         """
         if not isinstance(raw, list | tuple):
             return []
-        ids = list(dict.fromkeys(i for i in raw if isinstance(i, str) and i))
-        if len(ids) > DEFAULT_MAX_SEEDS:
-            logger.warning(
-                "graph_caller_seeds_truncated",
-                named=len(ids),
-                kept=DEFAULT_MAX_SEEDS,
-            )
-        return ids[:DEFAULT_MAX_SEEDS]
+        return list(dict.fromkeys(i for i in raw if isinstance(i, str) and i))
 
     def _seeds_from_extractor(self, query: str) -> list[str]:
         """Ask the injected extractor for seeds; never let it break a pack.
@@ -1696,13 +1867,14 @@ class GraphSearch(SearchStrategy):
         seed_ids: list[str],
         *,
         filters: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """The seeded branch: expand a neighbourhood around known ids.
 
         This is the only branch in which the caller's intent has reached
         the store — via ``filters["seed_ids"]`` or a
         :class:`GraphSeedExtractor`. Consumes ``depth`` / ``edge_types``
-        from *filters*.
+        from *filters*. Returns the nodes and the edges between them; the
+        edges are read only by :func:`_prioritise_seeded_nodes`.
         """
         depth = filters.pop("depth", 2)
         edge_types = filters.pop("edge_types", None)
@@ -1712,13 +1884,14 @@ class GraphSearch(SearchStrategy):
             edge_types=edge_types,
         )
         nodes: list[dict[str, Any]] = subgraph.get("nodes", [])
+        edges: list[dict[str, Any]] = subgraph.get("edges", [])
         logger.debug(
             "graph_search_seeded",
             seed_count=len(seed_ids),
             depth=depth,
             nodes_returned=len(nodes),
         )
-        return nodes
+        return nodes, edges
 
     def _recency_window_nodes(
         self,
@@ -1784,13 +1957,17 @@ class GraphSearch(SearchStrategy):
         *,
         filters: dict[str, Any],
         limit: int,
-    ) -> tuple[list[dict[str, Any]], str, list[str]]:
-        """Fetch the candidate nodes: ``(nodes, graph_selection, resolved_seeds)``.
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, list[str]]:
+        """Fetch the candidates: ``(nodes, edges, graph_selection, resolved_seeds)``.
 
+        ``edges`` are the edges between the returned nodes, read only by
+        :func:`_select_for_scoring`; the recency window has none.
         ``resolved_seeds`` are the seeds whose node the store returned,
         before the structural / unconfirmed / domain filters in
         :meth:`search`: a caller-named seed that matches nothing is dropped
-        here rather than recorded.
+        here rather than recorded. They are the caller's and the
+        extractor's seeds together, which is what the precedent partition
+        keys on.
 
         When the caller named entities this graph does not hold and the
         extractor found none (its seeds are confirmed live, so any would
@@ -1799,24 +1976,23 @@ class GraphSearch(SearchStrategy):
         caller no more than not naming it did. The explicit ``seed_ids``
         path is untouched: that caller asked for exactly that set.
         """
-        if not seed_ids:
-            return (
-                self._recency_window_nodes(filters=filters, limit=limit),
-                GRAPH_SELECTION_RECENCY_WINDOW,
-                [],
-            )
-        nodes = self._expand_seeds(seed_ids, filters=filters)
-        returned_ids = {n.get("node_id") for n in nodes}
-        resolved = [s for s in dict.fromkeys(seed_ids) if s in returned_ids]
-        if caller_seeds and not resolved:
-            return (
-                self._recency_window_nodes(filters=filters, limit=limit),
-                GRAPH_SELECTION_RECENCY_WINDOW,
-                [],
-            )
-        if any(s in caller_seeds for s in resolved):
-            return nodes, GRAPH_SELECTION_CALLER_SEEDED, resolved
-        return nodes, GRAPH_SELECTION_SEEDED, resolved
+        if seed_ids:
+            nodes, edges = self._expand_seeds(seed_ids, filters=filters)
+            returned_ids = {n.get("node_id") for n in nodes}
+            resolved = [s for s in dict.fromkeys(seed_ids) if s in returned_ids]
+            if resolved or not caller_seeds:
+                selection = (
+                    GRAPH_SELECTION_CALLER_SEEDED
+                    if any(s in caller_seeds for s in resolved)
+                    else GRAPH_SELECTION_SEEDED
+                )
+                return nodes, edges, selection, resolved
+        return (
+            self._recency_window_nodes(filters=filters, limit=limit),
+            [],
+            GRAPH_SELECTION_RECENCY_WINDOW,
+            [],
+        )
 
     def search(
         self,
@@ -1834,7 +2010,7 @@ class GraphSearch(SearchStrategy):
         # Extract domain for scoring (keep in filters for graph query too)
         request_domain = filters.get("domain")
 
-        nodes, selection, resolved_seeds = self._select_nodes(
+        nodes, edges, selection, resolved_seeds = self._select_nodes(
             seed_ids, caller_seeds, filters=filters, limit=limit
         )
 
@@ -1932,7 +2108,15 @@ class GraphSearch(SearchStrategy):
             request_domain,
         )
 
-        scored = nodes[:limit]
+        # A seeded neighbourhood larger than ``limit`` is prioritised before it
+        # is sliced (#949); see :func:`_select_for_scoring`.
+        scored, slice_prioritised = _select_for_scoring(
+            nodes,
+            limit=limit,
+            selection=selection,
+            seeds=resolved_seeds,
+            edges=edges,
+        )
         # ``_apply_recency_decay`` fails open on an unusable timestamp, which
         # is the right per-item behaviour and the wrong thing to leave silent
         # in bulk: a backend that stores no ``created_at`` (the bolt adapter
@@ -1970,7 +2154,7 @@ class GraphSearch(SearchStrategy):
             base_score = max(0.0, 1.0 - (i * position_decay_step))
 
             # Domain match boost: nodes matching requested domain score higher
-            if request_domain and props.get("domain") == request_domain:
+            if request_domain and _node_matches_domain(props, request_domain):
                 base_score *= domain_match_boost
 
             # Curated nodes are pre-digested synthesis — boost them.
@@ -2021,6 +2205,7 @@ class GraphSearch(SearchStrategy):
                                 "description",
                                 "comment",
                                 GRAPH_SEED_IDS_KEY,
+                                GRAPH_SLICE_PRIORITISED_KEY,
                             )
                         },
                         # All five sit after the property spread,
@@ -2055,6 +2240,13 @@ class GraphSearch(SearchStrategy):
                         **(
                             {GRAPH_SEED_IDS_KEY: list(resolved_seeds)}
                             if resolved_seeds
+                            else {}
+                        ),
+                        # Likewise withheld from the spread: only this search
+                        # can say it changed the slice.
+                        **(
+                            {GRAPH_SLICE_PRIORITISED_KEY: True}
+                            if slice_prioritised
                             else {}
                         ),
                     },

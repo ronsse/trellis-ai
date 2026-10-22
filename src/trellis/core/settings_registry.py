@@ -587,7 +587,9 @@ _SPECS: tuple[SettingSpec, ...] = (
             "ignores what the request is about. On by default. "
             "Turning this off makes graph results an intent-blind "
             "recency window, which generally returns less relevant "
-            "graph context."
+            "graph context. Governs only seeds inferred from the "
+            "intent: entity ids a caller names explicitly still seed "
+            "the graph axis when this is off."
         ),
         # Kept out of write_config.py/WriteBehaviourConfig on purpose:
         # mixing a retrieval toggle into the write-behaviour module

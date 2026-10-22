@@ -84,6 +84,11 @@ SEMANTIC_AXIS = "semantic"
 #: ``PACK_ASSEMBLED.injected_items[]`` (#371), so "did seeding run, and did
 #: it help?" is answerable from the event log without a second instrument
 #: — and only produces data once the branch actually runs.
+#:
+#: It gates seeds *inferred* from the intent and nothing else. A sectioned
+#: pack's ``entity_ids`` (``GRAPH_CALLER_SEED_IDS_KEY`` in
+#: :mod:`trellis.retrieve.strategies`) and an explicit ``seed_ids`` are
+#: instructions, and apply with it off.
 GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
 
 #: Settings-store key for the same knob (#settings-store PR 2/2) — see
