@@ -236,6 +236,7 @@ def _summary(
         "skipped_unchanged": result.skipped_unchanged,
         "skipped_no_signal": result.skipped_no_signal,
         "skipped_missing_content": result.skipped_missing_content,
+        "skipped_precedent": result.skipped_precedent,
         "errors": result.errors,
         "dry_run": dry_run,
         "include_domain": include_domain,
@@ -252,7 +253,13 @@ def _render_text(summary: dict[str, object]) -> None:
         f"({summary['skipped_fresh']} still fresh, "
         f"{summary['skipped_unchanged']} unchanged, "
         f"{summary['skipped_no_signal']} no signal, "
-        f"{summary['skipped_missing_content']} empty)"
+        f"{summary['skipped_missing_content']} empty"
+        + (
+            f", {summary['skipped_precedent']} promoted precedent"
+            if summary["skipped_precedent"]
+            else ""
+        )
+        + ")"
     )
     if summary["errors"]:
         console.print(

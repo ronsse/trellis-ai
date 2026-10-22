@@ -27,13 +27,17 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
+    is_promoted_precedent_document,
+)
 from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
 from trellis.learning.evidence_gate import (
     NOT_SCREENED,
     CitationEvidence,
     screen_noise_candidates,
 )
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import LIFECYCLE_KEY, ContentTags
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
@@ -886,7 +890,7 @@ def precedent_entity_id_for_candidate(candidate_id: str) -> str:
     check (``already_promoted``) all resolve the same candidate to the same
     precedent this way; there is no second id scheme to drift from it.
     """
-    return f"precedent://learning/{_slugify(candidate_id)}"
+    return f"{PRECEDENT_ENTITY_ID_PREFIX}{_slugify(candidate_id)}"
 
 
 def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bool:
@@ -922,7 +926,8 @@ def resolve_source_excerpt(
     content says why. A promotion never fails on this: a missing store, a
     missing or empty document and a store that raises all degrade to "no
     excerpt". Only documents are read — a candidate whose item is a trace,
-    an entity or another precedent resolves to ``document_not_found``.
+    an entity or another precedent resolves to ``document_not_found``, and so
+    does the document row a precedent writes for itself.
     """
     if document_store is None:
         return None, "no_document_store"
@@ -930,6 +935,12 @@ def resolve_source_excerpt(
         return None, "no_source_item"
     try:
         document = document_store.get(item_id)
+        if document and is_promoted_precedent_document(item_id):
+            # A precedent's own document row (see ``precedent_document_content``)
+            # holds the excerpt its parent copied. Copying that row would carry
+            # a redacted source into a second precedent that
+            # ``redaction.apply`` never finds (it matches on ``source_item_id``).
+            document = None
         withheld = _withheld_from_packs(document, document_store) if document else False
     except Exception as exc:  # advisory step; never fail the promotion
         logger.warning(
@@ -986,6 +997,50 @@ def carries_source_excerpt(properties: Mapping[str, Any]) -> bool:
         return True
     description = properties.get("description")
     return isinstance(description, str) and _SOURCE_EXCERPT_PREFIX in description
+
+
+#: ``document_form`` of the document row a promoted precedent writes for itself,
+#: so a reader can tell it from a source document without parsing its id.
+PRECEDENT_DOCUMENT_FORM = "precedent"
+
+
+def precedent_document_content(name: object, description: object) -> str:
+    """The text of a precedent's document row: its name, then its description.
+
+    The one builder for the promotion and the redaction scrub, so a document
+    loses an excerpt exactly as the node does. Keyword and semantic retrieval
+    read this row; the graph axis reads the node.
+    """
+    parts = [part.strip() for part in (name, description) if isinstance(part, str)]
+    return "\n\n".join(part for part in parts if part)
+
+
+def precedent_document_metadata(
+    properties: Mapping[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Metadata for a precedent's document row, built from its node properties.
+
+    ``lifecycle`` is copied from the node when present, so a precedent that
+    was demoted before a retried promotion keeps its document withheld.
+    ``domain`` is left out on purpose: a domain tag hard-excludes on mismatch,
+    and a precedent is reachable by intent, not by a mined keyword.
+    """
+    tags = ContentTags(
+        content_type="decision",
+        classified_by=["precedent_promotion"],
+        classified_at=now or datetime.now(UTC),
+    )
+    metadata: dict[str, Any] = {
+        "document_form": PRECEDENT_DOCUMENT_FORM,
+        "content_tags": tags.model_dump(mode="json"),
+    }
+    name = properties.get("name")
+    if isinstance(name, str) and name.strip():
+        metadata["title"] = name.strip()
+    lifecycle = properties.get(LIFECYCLE_KEY)
+    if isinstance(lifecycle, dict):
+        metadata[LIFECYCLE_KEY] = dict(lifecycle)
+    return metadata
 
 
 def neutral_precedent_name(entity_id: str, intent_family: object = None) -> str:
@@ -1578,6 +1633,7 @@ __all__ = [
     "NAME_SOURCES_WITHOUT_SOURCE_TEXT",
     "NAME_SOURCE_NEUTRAL",
     "NAME_SOURCE_SOURCE_TEXT",
+    "PRECEDENT_DOCUMENT_FORM",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "SOURCE_EXCERPT_REDACTED",
@@ -1589,6 +1645,8 @@ __all__ = [
     "name_may_hold_source_text",
     "neutral_precedent_name",
     "normalize_intent_family",
+    "precedent_document_content",
+    "precedent_document_metadata",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
     "preview_learning_promotion_refusal",
