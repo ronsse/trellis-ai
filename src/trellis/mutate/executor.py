@@ -51,6 +51,12 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
     "outcome this result reports stands; only its audit record is missing."
 )
 
+#: Value of the ``policy_scope_unevaluated`` event key: the command went ahead
+#: because every policy that could read the entities it reaches can only warn,
+#: and those warnings were not evaluated per entity. See
+#: ``MutationExecutor._check_policy``.
+_SCOPE_UNEVALUATED_WARN_ONLY = "warn_only"
+
 # Exception classes the executor treats as "unexpected handler panic".
 # The catch is intentionally enumerated rather than bare ``Exception``
 # so the silent-fallback audit (``scripts/audit_silent_fallbacks.py``)
@@ -182,11 +188,17 @@ class PolicyGate(Protocol):
         """
         ...
 
-    # Optional, not declared here so a gate without it still conforms:
+    # Optional, not declared here so a gate without them still conforms:
     # ``scopes_by_target_type(operation) -> bool``. A gate that answers
     # ``False`` says its answer does not depend on the command's target type,
     # and the executor then skips the handler's ``policy_scope_commands``.
     # A gate without it is asked for every scoped command.
+    #
+    # ``could_deny_by_target_type(operation) -> bool``. A gate that answers
+    # ``False`` says the extra checks could only add warnings, so a command
+    # whose scope cannot be resolved proceeds, marked
+    # ``policy_scope_unevaluated`` on its event, instead of being refused.
+    # A gate without it is treated as one that could deny.
 
 
 class CommandHandler(Protocol):
@@ -310,9 +322,10 @@ class MutationExecutor:
         # the only outcome that omits them, because it runs before the
         # gate and there is nothing yet to forward.
         policy_warnings: list[str] = []
+        scope_unevaluated: str | None = None
         if self._policy_gate is not None:
-            allowed, message, policy_warnings, refusal = self._check_policy(
-                command, log
+            allowed, message, policy_warnings, refusal, scope_unevaluated = (
+                self._check_policy(command, log)
             )
             if not allowed:
                 log.warning("policy_rejected", message=message, reason=refusal)
@@ -321,6 +334,7 @@ class MutationExecutor:
                     reason=refusal,
                     message=message,
                     policy_warnings=policy_warnings,
+                    policy_scope_unevaluated=scope_unevaluated,
                 )
                 return CommandResult(
                     command_id=command.command_id,
@@ -332,7 +346,9 @@ class MutationExecutor:
                 )
 
         # Stage 3: Idempotency Check
-        idempotency_outcome = self._check_idempotency(command, log, policy_warnings)
+        idempotency_outcome = self._check_idempotency(
+            command, log, policy_warnings, scope_unevaluated
+        )
         if idempotency_outcome is not None:
             return idempotency_outcome
 
@@ -364,6 +380,7 @@ class MutationExecutor:
                 reason=reason,
                 message=summary["message"],
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
@@ -394,6 +411,7 @@ class MutationExecutor:
                 reason="policy_violation",
                 message=str(exc),
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -414,6 +432,7 @@ class MutationExecutor:
                 reason="idempotency_replay",
                 message=str(exc),
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -453,6 +472,7 @@ class MutationExecutor:
                 CommandStatus.FAILED,
                 summary["message"],
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
@@ -489,6 +509,7 @@ class MutationExecutor:
                 CommandStatus.FAILED,
                 summary["message"],
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
@@ -532,6 +553,7 @@ class MutationExecutor:
             CommandStatus.SUCCESS,
             message,
             policy_warnings=policy_warnings,
+            policy_scope_unevaluated=scope_unevaluated,
         )
 
         log.info("command_executed", created_id=created_id)
@@ -551,8 +573,8 @@ class MutationExecutor:
 
     def _check_policy(
         self, command: Command, log: Any
-    ) -> tuple[bool, str, list[str], str]:
-        """Stage 2: ``(allowed, message, warnings, refusal_reason)``.
+    ) -> tuple[bool, str, list[str], str, str | None]:
+        """Stage 2: ``(allowed, message, warnings, refusal_reason, unevaluated)``.
 
         The gate sees the command, then one command per entity the handler
         will touch beyond it (``redaction.apply`` rewrites the precedents that
@@ -560,31 +582,57 @@ class MutationExecutor:
         consulted before anything is written. Deny wins, as it does for the
         command itself. A handler that cannot say what it will touch leaves
         the gate unable to answer, so the command is refused
-        (``policy_scope_unresolved``) rather than written past it.
+        (``policy_scope_unresolved``) rather than written past it, unless the
+        gate could only have warned.
 
         The scope is resolved only when the gate could answer differently for
         it: an empty gate, or one with no ``entity_type`` policy for this
         operation, is transparent, so a redaction does not walk the precedent
         set for a gate that cannot use the result. A gate that does not say
         (no ``scopes_by_target_type``) is asked.
+
+        Three outcomes follow from what the gate could do with it. A gate that
+        could deny (``could_deny_by_target_type``, or one that does not say)
+        refuses a command whose scope cannot be read. A gate that could only
+        warn reads the scope all the same, but a failed read lets the command
+        through with ``unevaluated`` set to ``"warn_only"``: refusing would
+        block a command the gate could never have blocked, and the missing
+        per-entity warnings are recorded instead. ``unevaluated`` is ``None``
+        on every other path.
         """
         assert self._policy_gate is not None
         allowed, message, warnings = self._policy_gate.check(command)
         if not allowed:
-            return False, message, warnings, "policy_violation"
+            return False, message, warnings, "policy_violation", None
         scopes_by_target = getattr(self._policy_gate, "scopes_by_target_type", None)
         if callable(scopes_by_target) and not scopes_by_target(command.operation):
-            return True, message, warnings, "policy_violation"
+            return True, message, warnings, "policy_violation", None
         # Asked of the handler through an optional ``policy_scope_commands``
         # method, because only the handler can say what a command reaches.
         resolve = getattr(
             self._handlers.get(command.operation), "policy_scope_commands", None
         )
         if not callable(resolve):
-            return True, message, warnings, "policy_violation"
+            return True, message, warnings, "policy_violation", None
+        could_deny = getattr(self._policy_gate, "could_deny_by_target_type", None)
+        warn_only = callable(could_deny) and not could_deny(command.operation)
         try:
             scoped_commands = list(resolve(command))
         except Exception as exc:
+            if warn_only:
+                # The type name only; a store's message can carry query text.
+                log.warning(
+                    "policy_scope_unevaluated",
+                    reason=_SCOPE_UNEVALUATED_WARN_ONLY,
+                    error_type=type(exc).__name__,
+                )
+                return (
+                    True,
+                    message,
+                    warnings,
+                    "policy_violation",
+                    (_SCOPE_UNEVALUATED_WARN_ONLY),
+                )
             # The type name only; a store's message can carry query text.
             log.error(  # noqa: TRY400
                 "policy_scope_unresolved", error_type=type(exc).__name__
@@ -593,7 +641,7 @@ class MutationExecutor:
                 f"Policy scope could not be resolved ({type(exc).__name__}); "
                 "nothing was written"
             )
-            return False, unresolved, warnings, "policy_scope_unresolved"
+            return False, unresolved, warnings, "policy_scope_unresolved", None
         for scoped in scoped_commands:
             allowed, scoped_message, scoped_warnings = self._policy_gate.check(scoped)
             # A probe repeats every warning the command itself drew (a global
@@ -604,8 +652,8 @@ class MutationExecutor:
                     f"{scoped_message} (applies to {scoped.target_type} "
                     f"{scoped.target_id})"
                 )
-                return False, message, warnings, "policy_violation"
-        return True, message, warnings, "policy_violation"
+                return False, message, warnings, "policy_violation", None
+        return True, message, warnings, "policy_violation", None
 
     def execute_batch(self, batch: CommandBatch) -> list[CommandResult]:
         """Execute a batch of commands according to the batch strategy.
@@ -685,6 +733,7 @@ class MutationExecutor:
         message: str,
         *,
         policy_warnings: list[str] | None = None,
+        policy_scope_unevaluated: str | None = None,
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
@@ -716,6 +765,7 @@ class MutationExecutor:
             status,
             message,
             policy_warnings=policy_warnings,
+            policy_scope_unevaluated=policy_scope_unevaluated,
             error_type=error_type,
             error_code=error_code,
             constraint=constraint,
@@ -727,6 +777,7 @@ class MutationExecutor:
         command: Command,
         log: structlog.stdlib.BoundLogger,
         policy_warnings: list[str],
+        scope_unevaluated: str | None,
     ) -> CommandResult | None:
         """Stage 3 — return a DUPLICATE result if this command is a replay.
 
@@ -738,9 +789,9 @@ class MutationExecutor:
         corrected retry. Returns a FAILED result, with a ``mutation.rejected``
         event whose ``reason`` is ``idempotency_check_failed``, when the
         event log raises instead of answering whether the key was seen.
-        ``policy_warnings`` is threaded in rather than recomputed: both
-        results are outcomes reachable after Stage 2, so they carry the
-        warnings like every other one.
+        ``policy_warnings`` and ``scope_unevaluated`` are threaded in rather
+        than recomputed: both results are outcomes reachable after Stage 2, so
+        they carry them like every other one.
         """
         if not command.idempotency_key:
             return None
@@ -755,6 +806,7 @@ class MutationExecutor:
                 reason="idempotency_replay",
                 message=message,
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -795,6 +847,7 @@ class MutationExecutor:
                 reason="idempotency_check_failed",
                 message=f"Idempotency check failed: {summary['message']}",
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
@@ -817,6 +870,7 @@ class MutationExecutor:
                 reason="idempotency_replay",
                 message=message,
                 policy_warnings=policy_warnings,
+                policy_scope_unevaluated=scope_unevaluated,
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -835,6 +889,7 @@ class MutationExecutor:
         reason: str,
         message: str,
         policy_warnings: list[str] | None = None,
+        policy_scope_unevaluated: str | None = None,
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
@@ -871,6 +926,7 @@ class MutationExecutor:
             message,
             reason=reason,
             policy_warnings=policy_warnings,
+            policy_scope_unevaluated=policy_scope_unevaluated,
             error_type=error_type,
             error_code=error_code,
             constraint=constraint,
@@ -886,6 +942,7 @@ class MutationExecutor:
         *,
         reason: str | None = None,
         policy_warnings: list[str] | None = None,
+        policy_scope_unevaluated: str | None = None,
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
@@ -989,6 +1046,12 @@ class MutationExecutor:
         # makes the default posture verifiably transparent.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
+        # Added only when Stage 2 let a command through without evaluating
+        # the policies scoped to the entities it reaches (see
+        # ``_check_policy``), so a reader can tell "no policy warned" from
+        # "none was asked". Absent otherwise, like ``policy_warnings``.
+        if policy_scope_unevaluated is not None:
+            payload["policy_scope_unevaluated"] = policy_scope_unevaluated
         # Scrubbed on the copy handed to ``emit`` only; see _scrub_jsonb_unsafe.
         try:
             self._event_log.emit(

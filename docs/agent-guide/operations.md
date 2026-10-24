@@ -1323,9 +1323,16 @@ Scope boundaries, stated plainly:
   nothing is written. This is a superset of the precedents actually rewritten.
   The set is read for this only when the gate holds an `entity_type` policy
   with a non-allow rule for the operation (`scopes_by_target_type`; a warn or
-  audit-only rule counts); an empty gate is not asked, so it stays transparent. A gate without that method is asked every time. If the
-  precedent set cannot be read the command is refused
-  (`policy_scope_unresolved`, exit `5`). A precedent promoted from the target
+  audit-only rule counts); an empty gate is not asked, so it stays transparent.
+  A gate without that method is asked every time. If the precedent set cannot
+  be read, what happens depends on whether the gate could have refused for a
+  precedent (`could_deny_by_target_type`: an `entity_type` policy with a `deny`
+  or `require_approval` rule under `enforce`; a gate without that method counts
+  as able to). If it could, the command is refused (`policy_scope_unresolved`,
+  exit `5`). If it could only warn, the command proceeds, the event payload
+  carries `policy_scope_unevaluated: "warn_only"` (key absent otherwise) to say
+  the per-precedent warnings were not evaluated, and a `policy_scope_unevaluated`
+  warning is logged. A precedent promoted from the target
   between that check and the scrub is scrubbed without having been gated.
 - **A scrubbed precedent reads as new.** The scrub purges and re-creates the
   node, and the graph API cannot set `valid_from`, so a recency window ranks it

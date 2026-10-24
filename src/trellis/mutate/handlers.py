@@ -493,7 +493,9 @@ def _rewrite_precedent_document(
     return content, metadata
 
 
-def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
+def _tombstone_document(
+    registry: StoreRegistry, doc_id: str, *, vector_gone: set[str]
+) -> bool:
     """Blank one document row and drop its vector row; whether a row existed.
 
     The document plane has no governed delete, so the row keeps its id with no
@@ -509,6 +511,10 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
     retention's prune reads ``updated_at``, so the tombstone is pruned later
     than its original row would have been. The vector row goes first, so the
     metadata mirror in ``put_document`` has nothing left to sync.
+
+    ``vector_gone`` names the row between its vector delete and the end of its
+    ``put``: if the write raises, the row is unblanked but no longer in vector
+    search, and the id is left in the set for the caller's failure log.
     """
     document_store = registry.knowledge.document_store
     document = document_store.get(doc_id)
@@ -526,6 +532,7 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
     if isinstance(old.get("chunk_count"), int):
         metadata["chunk_count"] = old["chunk_count"]
     registry.knowledge.vector_store.delete(doc_id)
+    vector_gone.add(doc_id)
     put_document(
         document_store,
         resolve_vector_store(registry),
@@ -534,6 +541,7 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
         metadata,
         preserve_updated_at=False,
     )
+    vector_gone.discard(doc_id)
     return True
 
 
@@ -560,7 +568,9 @@ def _tombstone_redacted_documents(
     Nothing is purged until this has finished, so a failure leaves the target
     in place and the redaction re-runnable; the rows blanked before it are
     logged (:func:`_log_blanked_before_failure`), with ``vector_deleted``,
-    the target's own vector row the caller already removed.
+    the target's own vector row the caller already removed. A row whose write
+    fails after its vector delete is in neither list of blanked rows, so the
+    log names it apart (``documents_vector_deleted_not_blanked``).
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
     from trellis.ingest_corpus.models import (  # noqa: PLC0415
@@ -570,6 +580,7 @@ def _tombstone_redacted_documents(
 
     document_store = registry.knowledge.document_store
     tombstoned: list[str] = []
+    vector_gone: set[str] = set()
     try:
         if not is_chunk_doc_id(target_id):
             parent = document_store.get(target_id)
@@ -577,22 +588,33 @@ def _tombstone_redacted_documents(
             index = 0
             while True:
                 chunk_id = chunk_doc_id(target_id, index)
-                exists = _tombstone_document(registry, chunk_id)
+                exists = _tombstone_document(
+                    registry, chunk_id, vector_gone=vector_gone
+                )
                 if exists:
                     tombstoned.append(chunk_id)
                 elif not isinstance(declared, int) or index >= declared:
                     break
                 index += 1
-        if _tombstone_document(registry, target_id):
+        if _tombstone_document(registry, target_id, vector_gone=vector_gone):
             tombstoned.append(target_id)
     except Exception:
-        _log_blanked_before_failure(command, tombstoned, vector_deleted=vector_deleted)
+        _log_blanked_before_failure(
+            command,
+            tombstoned,
+            vector_deleted=vector_deleted,
+            vector_gone=vector_gone,
+        )
         raise
     return tombstoned
 
 
 def _log_blanked_before_failure(
-    command: Command, blanked: list[str], *, vector_deleted: bool
+    command: Command,
+    blanked: list[str],
+    *,
+    vector_deleted: bool,
+    vector_gone: set[str] | None = None,
 ) -> None:
     """Record document rows and the target vector a failed redaction removed.
 
@@ -600,13 +622,16 @@ def _log_blanked_before_failure(
     reading the failure, who otherwise cannot tell which rows already stopped
     serving their text. The target's vector row does not stay: a re-run's
     ``REDACTION_APPLIED`` reads ``vector_deleted: false``, so this line is the
-    only record that this run deleted it.
+    only record that this run deleted it. ``vector_gone`` is the row whose
+    write failed after its vector was deleted: it is not blanked, so it is not
+    in ``blanked``, yet it already left vector search.
     """
-    if blanked or vector_deleted:
+    if blanked or vector_deleted or vector_gone:
         logger.warning(
             "redaction.documents_blanked_before_failure",
             command_id=command.command_id,
             documents_blanked=sorted(blanked),
+            documents_vector_deleted_not_blanked=sorted(vector_gone or ()),
             target_vector_deleted=vector_deleted,
         )
 
