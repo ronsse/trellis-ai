@@ -1322,8 +1322,8 @@ Scope boundaries, stated plainly:
   policy scoped to the `precedent` entity type is consulted; deny wins and
   nothing is written. This is a superset of the precedents actually rewritten.
   The set is read for this only when the gate holds an `entity_type` policy
-  for the operation (`scopes_by_target_type`); an empty gate is not asked, so it
-  stays transparent. A gate without that method is asked every time. If the
+  with a non-allow rule for the operation (`scopes_by_target_type`; a warn or
+  audit-only rule counts); an empty gate is not asked, so it stays transparent. A gate without that method is asked every time. If the
   precedent set cannot be read the command is refused
   (`policy_scope_unresolved`, exit `5`). A precedent promoted from the target
   between that check and the scrub is scrubbed without having been gated.

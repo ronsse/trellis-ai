@@ -639,6 +639,9 @@ class TestFailureOrder:
         precedent_id = _promote(registry, "doc-a")
         _put_doc(registry, "doc-a", chunk_count=1)
         _put_doc(registry, "doc-a#chunk-0")
+        # Deleted before the documents are touched, and a re-run cannot
+        # report it, so the failure log is its only record.
+        registry.knowledge.vector_store.upsert("doc-a", [0.1, 0.2, 0.3])
         history_before = _everything_stored(registry, precedent_id)
         real_put = store.put
 
@@ -663,6 +666,7 @@ class TestFailureOrder:
             if e["event"] == "redaction.documents_blanked_before_failure"
         )
         assert blanked["documents_blanked"] == ["doc-a#chunk-0"]
+        assert blanked["target_vector_deleted"] is True
         assert not any(
             e["event"] == "redaction.precedents_scrubbed_before_failure" for e in logs
         )
@@ -697,6 +701,29 @@ class TestFailureOrder:
         assert scrubbed["scrubbed_precedent_ids"] == [precedent_id]
         blanked = events["redaction.documents_blanked_before_failure"]
         assert blanked["documents_blanked"] == ["doc-a"]
+        assert blanked["target_vector_deleted"] is False
+
+    def test_a_failed_purge_with_no_documents_still_names_the_deleted_vector(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        registry.knowledge.vector_store.upsert("doc-a", [0.1, 0.2, 0.3])
+        real_delete = graph.delete_node
+        monkeypatch.setattr(
+            graph,
+            "delete_node",
+            lambda node_id: False if node_id == "doc-a" else real_delete(node_id),
+        )
+
+        with capture_logs() as logs, pytest.raises(NotFoundError):
+            _redact(registry, "doc-a")
+
+        assert registry.knowledge.vector_store.get("doc-a") is None
+        events = {e["event"]: e for e in logs}
+        blanked = events["redaction.documents_blanked_before_failure"]
+        assert blanked["documents_blanked"] == []
+        assert blanked["target_vector_deleted"] is True
 
     def test_failed_edge_restore_names_every_unrestored_link(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

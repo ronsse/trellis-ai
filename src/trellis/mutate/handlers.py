@@ -532,7 +532,11 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
 
 
 def _tombstone_redacted_documents(
-    registry: StoreRegistry, command: Command, target_id: str
+    registry: StoreRegistry,
+    command: Command,
+    target_id: str,
+    *,
+    vector_deleted: bool,
 ) -> list[str]:
     """Blank the target's own document row and its chunks; the ids blanked.
 
@@ -549,7 +553,8 @@ def _tombstone_redacted_documents(
     re-run after a partial failure finds the chunks, so it must outlive them.
     Nothing is purged until this has finished, so a failure leaves the target
     in place and the redaction re-runnable; the rows blanked before it are
-    logged (:func:`_log_blanked_before_failure`).
+    logged (:func:`_log_blanked_before_failure`), with ``vector_deleted``,
+    the target's own vector row the caller already removed.
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
     from trellis.ingest_corpus.models import (  # noqa: PLC0415
@@ -575,23 +580,28 @@ def _tombstone_redacted_documents(
         if _tombstone_document(registry, target_id):
             tombstoned.append(target_id)
     except Exception:
-        _log_blanked_before_failure(command, tombstoned)
+        _log_blanked_before_failure(command, tombstoned, vector_deleted=vector_deleted)
         raise
     return tombstoned
 
 
-def _log_blanked_before_failure(command: Command, blanked: list[str]) -> None:
-    """Record document rows a failed redaction had already blanked.
+def _log_blanked_before_failure(
+    command: Command, blanked: list[str], *, vector_deleted: bool
+) -> None:
+    """Record document rows and the target vector a failed redaction removed.
 
     A blanked row stays, so a re-run lists it again; this is for the operator
     reading the failure, who otherwise cannot tell which rows already stopped
-    serving their text.
+    serving their text. The target's vector row does not stay: a re-run's
+    ``REDACTION_APPLIED`` reads ``vector_deleted: false``, so this line is the
+    only record that this run deleted it.
     """
-    if blanked:
+    if blanked or vector_deleted:
         logger.warning(
             "redaction.documents_blanked_before_failure",
             command_id=command.command_id,
             documents_blanked=sorted(blanked),
+            target_vector_deleted=vector_deleted,
         )
 
 
@@ -3225,6 +3235,8 @@ def _scrub_then_purge(
     command: Command,
     target_id: str,
     blanked: list[str],
+    *,
+    vector_deleted: bool,
 ) -> tuple[list[str], list[str]]:
     """Scrub the precedents sourced from ``target_id``, then purge it.
 
@@ -3248,14 +3260,14 @@ def _scrub_then_purge(
         purged = graph.delete_node(target_id)
     except Exception:
         _log_scrubbed_before_failure(command, scrubbed)
-        _log_blanked_before_failure(command, blanked)
+        _log_blanked_before_failure(command, blanked, vector_deleted=vector_deleted)
         raise
     if not purged:
         # Lost a race: another writer purged the node between our read and
         # the delete. Fail rather than emit a second REDACTION_APPLIED
         # carrying counts this command did not purge.
         _log_scrubbed_before_failure(command, scrubbed)
-        _log_blanked_before_failure(command, blanked)
+        _log_blanked_before_failure(command, blanked, vector_deleted=vector_deleted)
         raise NotFoundError(entity_type="entity", entity_id=target_id)
     return scrubbed, vector_lost
 
@@ -3466,11 +3478,15 @@ class RedactionApplyHandler:
         # cannot be undone: the other order purges a precedent's history, then
         # fails with no event naming it. It reads no graph state.
         documents_tombstoned = _tombstone_redacted_documents(
-            self._registry, command, target_id
+            self._registry, command, target_id, vector_deleted=vector_deleted
         )
 
         scrubbed_precedent_ids, vector_lost_ids = _scrub_then_purge(
-            self._registry, command, target_id, documents_tombstoned
+            self._registry,
+            command,
+            target_id,
+            documents_tombstoned,
+            vector_deleted=vector_deleted,
         )
 
         # ``target_id`` can carry the exact hazard this handler exists to
