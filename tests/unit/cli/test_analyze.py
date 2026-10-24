@@ -449,6 +449,237 @@ class TestReplay:
         assert "Class-Prior Replay" in rendered
         assert "mode=off" in rendered
 
+    @staticmethod
+    def _seed_graph_selection(registry: StoreRegistry, count: int) -> None:
+        """Packs serving one recency-window graph item (cited unhelpful) and
+        one semantic item (cited helpful), with a candidate the 250-token
+        budget turned away that the freed 100 tokens would admit."""
+        event_log = registry.operational.event_log
+        for index in range(count):
+            pack_id = f"gpack_{index}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "budget_max_tokens": 250,
+                    "injected_items": [
+                        {
+                            "item_id": f"{pack_id}_g",
+                            "item_type": "entity",
+                            "rank": 1,
+                            "estimated_tokens": 100,
+                            "strategy_source": "graph",
+                            "graph_selection": "recency_window",
+                        },
+                        {
+                            "item_id": f"{pack_id}_s",
+                            "item_type": "document",
+                            "rank": 2,
+                            "estimated_tokens": 100,
+                            "strategy_source": "semantic",
+                        },
+                    ],
+                    "rejected_items": [
+                        {
+                            "item_id": f"{pack_id}_t",
+                            "item_type": "document",
+                            "relevance_score": 0.1,
+                            "reason": "token_budget",
+                            "strategy_source": "semantic",
+                        }
+                    ],
+                    "budget_trace": [
+                        {
+                            "item_id": f"{pack_id}_{suffix}",
+                            "item_tokens": 100,
+                            "running_total": 0,
+                            "included": included,
+                        }
+                        for suffix, included in (("g", True), ("s", True), ("t", False))
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [f"{pack_id}_s"],
+                    "unhelpful_item_ids": [f"{pack_id}_g"],
+                    "rating": 0.5,
+                    "success": True,
+                },
+            )
+
+    def test_graph_selection_flag_with_no_events_reports_zero(self) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "recency_window",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["attributed_packs"] == 0
+        assert data["matched_servings"] == 0
+        assert data["graph_selection"] == "recency_window"
+
+    def test_graph_selection_json_reports_what_was_withheld_and_refilled(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_graph_selection(temp_stores, 5)
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "recency_window",
+                "--format",
+                "json",
+                "--no-meta-trace",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["attributed_packs"] == 5
+        assert data["matched_servings"] == 5
+        assert data["unhelpful_removed"] == 5
+        assert data["helpful_lost"] == 0
+        assert data["tokens_freed"] == 500
+        # 100 + 100 + 100 overflowed 250; without the graph item the turned-away
+        # semantic candidate fits.
+        assert data["refilled_packs"] == 5
+        assert data["replacement_servings"] == 5
+        assert data["replacement_by_strategy"] == {"semantic": 5}
+
+    def test_graph_selection_text_output_names_the_value_and_the_refill(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_graph_selection(temp_stores, 5)
+        result = runner.invoke(
+            app,
+            ["analyze", "replay", "--graph-selection", "recency_window"],
+        )
+        assert result.exit_code == 0, result.output
+        rendered = " ".join(plain(result.stdout).split())
+        assert "Graph-Selection Replay" in rendered
+        assert "graph_selection=recency_window" in rendered
+        assert "unhelpful removed: 5" in rendered
+        assert "freed budget would admit: 5 serving(s)" in rendered
+        assert "none of these were ever served, so none is graded" in rendered
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_graph_selection_unknown_value_exits_two_in_either_format(
+        self, output_format: str
+    ) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "recency-window",
+                "--format",
+                output_format,
+            ],
+        )
+        assert result.exit_code == 2
+        assert "unknown graph_selection" in plain(result.output)
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "other",
+        [
+            ["--class-prior"],
+            ["--body-items", "4"],
+            ["--excerpt-max-chars", "200"],
+            ["--max-items", "5"],
+            ["--no-refill"],
+        ],
+    )
+    def test_graph_selection_cannot_be_combined_with_another_arm(
+        self, other: list[str], output_format: str
+    ) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "seeded",
+                *other,
+                "--format",
+                output_format,
+            ],
+        )
+        assert result.exit_code == 2
+        assert "cannot be combined" in " ".join(plain(result.output).split())
+
+    def test_graph_selection_with_no_meta_trace_writes_nothing(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_graph_selection(temp_stores, 5)
+        graph = temp_stores.knowledge.graph_store
+        event_log = temp_stores.operational.event_log
+        nodes_before = {n["node_id"] for n in graph.query(limit=10_000)}
+        edges_before = graph.count_edges()
+        events_before = event_log.count()
+
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "seeded",
+                "--no-meta-trace",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert {n["node_id"] for n in graph.query(limit=10_000)} == nodes_before
+        assert graph.count_edges() == edges_before
+        assert event_log.count() == events_before
+
+    def test_graph_selection_default_run_records_its_activity_like_its_siblings(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """Parity with ``--class-prior``: unless ``--no-meta-trace`` is given
+        the run is recorded as a meta-Activity, which is a graph write."""
+        self._seed_graph_selection(temp_stores, 5)
+
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "replay",
+                "--graph-selection",
+                "recency_window",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        activities = temp_stores.knowledge.graph_store.query(
+            node_type="Activity",
+            properties={"analyzer_name": "cli.analyze.replay-graph-selection"},
+            limit=10,
+        )
+        assert len(activities) == 1
+
 
 class TestValue:
     """``trellis analyze value`` — serving precision, with its coverage."""
@@ -563,6 +794,118 @@ class TestValue:
         assert result.exit_code == 0
         assert "Ratio refused" in result.stdout
         assert "minimum" in result.stdout
+
+    @staticmethod
+    def _seed_graph_selection_packs(registry: StoreRegistry, count: int) -> None:
+        """Per pack: a recency-window graph item cited unhelpful, a seeded
+        graph item cited helpful, and a semantic item with no verdict. The
+        first two packs also serve a caller-seeded item, so that bucket is
+        thin (2 packs) and has its rates refused."""
+        event_log = registry.operational.event_log
+        for index in range(count):
+            pack_id = f"spack_{index}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "injected_items": [
+                        {
+                            "item_id": f"{pack_id}_{suffix}",
+                            "item_type": "entity",
+                            "strategy_source": axis,
+                            "estimated_tokens": 100,
+                            "rank": rank,
+                            "graph_selection": stamp,
+                        }
+                        for rank, (suffix, axis, stamp) in enumerate(
+                            (
+                                ("r", "graph", "recency_window"),
+                                ("s", "graph", "seeded"),
+                                ("n", "semantic", None),
+                                *(
+                                    [("c", "graph", "caller_seeded")]
+                                    if index < 2
+                                    else []
+                                ),
+                            )
+                        )
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                entity_id=pack_id,
+                payload={
+                    "pack_id": pack_id,
+                    "helpful_item_ids": [f"{pack_id}_s"],
+                    "unhelpful_item_ids": [f"{pack_id}_r"],
+                    "rating": 0.5,
+                    "success": True,
+                },
+            )
+
+    def test_json_splits_servings_by_graph_selection_and_reconciles(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_graph_selection_packs(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "value", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+
+        cells = {c["key"]: c for c in data["by_graph_selection"]}
+        assert list(cells) == [
+            "recency_window",
+            "seeded",
+            "caller_seeded",
+            "(graph, no stamp)",
+            "(not graph axis)",
+        ]
+        recency = cells["recency_window"]
+        assert (
+            recency["servings"],
+            recency["helpful_servings"],
+            recency["unhelpful_servings"],
+            recency["unjudged_servings"],
+            recency["attributed_packs"],
+        ) == (6, 0, 6, 0, 6)
+        assert cells["seeded"]["helpful_servings"] == 6
+        assert cells["(not graph axis)"]["unjudged_servings"] == 6
+        assert cells["caller_seeded"]["servings"] == 2
+        assert cells["caller_seeded"]["suppressed"] is True
+        assert cells["caller_seeded"]["helpful_per_serving"] is None
+        assert cells["(graph, no stamp)"]["servings"] == 0
+        assert data["attributed_servings"] == 20
+        assert sum(c["servings"] for c in cells.values()) == data["attributed_servings"]
+
+    def test_text_prints_the_graph_selection_table_with_every_n(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_graph_selection_packs(temp_stores, 6)
+        result = runner.invoke(app, ["analyze", "value"], env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        rendered = plain(result.stdout)
+        assert "Citations per serving by graph selection" in rendered
+        for key in (
+            "recency_window",
+            "seeded",
+            "caller_seeded",
+            "(graph, no stamp)",
+            "(not graph axis)",
+        ):
+            assert key in rendered
+        assert "servings (n)" in rendered
+        # An empty bucket prints its counts and refuses only its rates.
+        assert "refused (n<5)" in rendered
+
+    def test_text_omits_the_graph_selection_table_when_nothing_was_served(
+        self,
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "value"])
+        assert result.exit_code == 0
+        assert "graph selection" not in plain(result.stdout)
 
     def test_price_override_moves_dollars_per_cited_item(
         self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch

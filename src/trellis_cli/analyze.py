@@ -949,6 +949,46 @@ def _print_value_axis(title: str, cells: list[Any], *, minimum: int) -> None:
     console.print(table)
 
 
+def _print_graph_selection_axis(cells: list[Any], *, minimum: int) -> None:
+    """Render citations per serving by ``graph_selection``, every ``n`` shown.
+
+    Unlike the token axes this counts servings, and prints the raw counts
+    for a thin bucket too: only its rates are refused. Every bucket prints,
+    including an empty one, so the buckets visibly sum to the total.
+    """
+    if not any(cell.servings for cell in cells):
+        return
+    table = Table(title="Citations per serving by graph selection")
+    table.add_column("graph_selection", style="cyan")
+    table.add_column("packs (n)", justify="right")
+    table.add_column("servings (n)", justify="right")
+    table.add_column("helpful", justify="right")
+    table.add_column("unhelpful", justify="right")
+    table.add_column("no verdict", justify="right")
+    table.add_column("helpful/serving", justify="right")
+    table.add_column("unhelpful/serving", justify="right")
+    refused = f"[dim]refused (n<{minimum})[/dim]"
+    for cell in cells:
+        if cell.suppressed:
+            helpful_rate = unhelpful_rate = refused
+        elif cell.helpful_per_serving is None:
+            helpful_rate = unhelpful_rate = "[dim]—[/dim]"
+        else:
+            helpful_rate = f"{cell.helpful_per_serving:.3f}"
+            unhelpful_rate = f"{cell.unhelpful_per_serving:.3f}"
+        table.add_row(
+            escape(cell.key),
+            str(cell.attributed_packs),
+            str(cell.servings),
+            str(cell.helpful_servings),
+            str(cell.unhelpful_servings),
+            str(cell.unjudged_servings),
+            helpful_rate,
+            unhelpful_rate,
+        )
+    console.print(table)
+
+
 @analyze_app.command("replay")
 def replay(
     days: int = typer.Option(30, help="Days of history to replay"),
@@ -987,6 +1027,16 @@ def replay(
             "to do."
         ),
     ),
+    graph_selection: str | None = typer.Option(
+        None,
+        "--graph-selection",
+        help=(
+            "Withhold every serving whose graph_selection equals this value "
+            "(recency_window, seeded or caller_seeded): reports servings "
+            "matched, helpful lost, unhelpful removed, tokens freed, and "
+            "what the freed budget would have admitted instead."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
         False,
@@ -1015,6 +1065,13 @@ def replay(
     ``trellis.retrieve.pack_replay.replay_class_prior``. It cannot be
     combined with the width options above.
 
+    ``--graph-selection`` is a third kind: it withholds the servings the
+    graph axis chose one way (``recency_window`` ignores the intent;
+    ``seeded`` and ``caller_seeded`` expand a seed set) and re-runs each
+    affected pack's token walk to say what the freed budget would admit; see
+    ``trellis.retrieve.pack_replay.replay_graph_selection``. It cannot be
+    combined with ``--class-prior`` or the width options.
+
     Examples::
 
         trellis analyze replay --body-items 12
@@ -1022,7 +1079,35 @@ def replay(
         trellis analyze replay --excerpt-max-chars 300 --no-refill
         trellis analyze replay --max-items 12
         trellis analyze replay --class-prior
+        trellis analyze replay --graph-selection recency_window
     """
+    if graph_selection is not None:
+        refusal = _graph_selection_refusal(
+            graph_selection,
+            conflicts=[
+                flag
+                for flag, given in (
+                    ("--class-prior", class_prior),
+                    ("--excerpt-max-chars", excerpt_max_chars is not None),
+                    ("--body-items", body_items is not None),
+                    ("--max-items", max_items is not None),
+                    ("--no-refill", no_refill),
+                )
+                if given
+            ],
+        )
+        if refusal is not None:
+            # Above the format branch: a refused invocation exits 2 whatever
+            # ``--format`` says (``tests/unit/test_format_exit_parity_rule.py``).
+            console.print(f"[red]{refusal}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2)
+        _replay_graph_selection_command(
+            graph_selection,
+            days=days,
+            output_format=output_format,
+            no_meta_trace=no_meta_trace,
+        )
+        return
     if class_prior:
         from trellis.retrieve.class_prior import (  # noqa: PLC0415
             resolve_class_prior_config,
@@ -1083,6 +1168,114 @@ def replay(
         return
 
     _render_replay(report)
+
+
+def _graph_selection_refusal(
+    graph_selection: str, *, conflicts: list[str]
+) -> str | None:
+    """Why ``--graph-selection`` cannot run as invoked, or ``None``.
+
+    Pure, so the exit stays in the command where the exit-parity rule can see
+    it. The message is already markup-escaped.
+    """
+    from trellis.retrieve.strategies import (  # noqa: PLC0415
+        GRAPH_SELECTION_CALLER_SEEDED,
+        GRAPH_SELECTION_RECENCY_WINDOW,
+        GRAPH_SELECTION_SEEDED,
+    )
+
+    known = (
+        GRAPH_SELECTION_RECENCY_WINDOW,
+        GRAPH_SELECTION_SEEDED,
+        GRAPH_SELECTION_CALLER_SEEDED,
+    )
+    if conflicts:
+        return (
+            f"--graph-selection cannot be combined with {escape(', '.join(conflicts))}"
+        )
+    if graph_selection.strip() not in known:
+        # A typo would otherwise replay as "nothing matched", which reads
+        # as a finding about the corpus.
+        return (
+            f"unknown graph_selection {escape(graph_selection)!r}; "
+            f"expected one of {escape(', '.join(known))}"
+        )
+    return None
+
+
+def _replay_graph_selection_command(
+    graph_selection: str,
+    *,
+    days: int,
+    output_format: str,
+    no_meta_trace: bool,
+) -> None:
+    """The ``--graph-selection`` arm of ``analyze replay``, once validated."""
+    from trellis.retrieve.pack_replay import (  # noqa: PLC0415
+        replay_graph_selection,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.replay-graph-selection",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = replay_graph_selection(
+            event_log, graph_selection=graph_selection, days=days
+        )
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-replay-graph-selection-report-d{days}",
+                finding_type="GraphSelectionReplayReport",
+            )
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+    _render_graph_selection_replay(report)
+
+
+def _render_graph_selection_replay(report: Any) -> None:
+    """Render a GraphSelectionReplayReport."""
+    console.print(
+        f"[bold]Graph-Selection Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(
+        f"  withholding: [cyan]graph_selection={escape(report.graph_selection)}[/cyan]"
+    )
+    console.print()
+    console.print(
+        f"  matched servings:   {report.matched_servings} "
+        f"[dim](in {report.affected_packs} pack(s))[/dim]"
+    )
+    console.print(f"  helpful lost:       {report.helpful_lost}")
+    console.print(f"  unhelpful removed:  {report.unhelpful_removed}")
+    console.print(f"  no verdict removed: {report.unjudged_removed}")
+    console.print(
+        f"  still served by another axis: {report.still_served_by_other_axis}"
+    )
+    console.print(f"  tokens freed:       {report.tokens_freed:,}")
+    console.print()
+    by_axis = ", ".join(
+        f"{escape(axis)} {count}"
+        for axis, count in report.replacement_by_strategy.items()
+    )
+    console.print(
+        f"  freed budget would admit: {report.replacement_servings} serving(s), "
+        f"{report.replacement_tokens:,} tokens"
+        + (f" [dim]({by_axis})[/dim]" if by_axis else "")
+    )
+    console.print(
+        f"    [dim]walk re-run on {report.refilled_packs} pack(s); "
+        f"{report.unmodelled_packs} not re-runnable; none of these were ever "
+        "served, so none is graded[/dim]"
+    )
+
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{escape(note)}[/dim]")
 
 
 def _render_replay(report: Any) -> None:
@@ -1278,6 +1471,9 @@ def value(
         ("Intent family", report.by_intent_family),
     ):
         _print_value_axis(title, cells, minimum=report.min_attributed_packs)
+    _print_graph_selection_axis(
+        report.by_graph_selection, minimum=report.min_attributed_packs
+    )
 
     console.print()
     console.print(
