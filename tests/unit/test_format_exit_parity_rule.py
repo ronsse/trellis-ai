@@ -894,6 +894,10 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # a command, not a helper another command delegates to). Admitted
         # deliberately, per this docstring.
         "classify": {"effective_rules"},
+        # ``trellis curate advisory restore``'s argument refusal (#968):
+        # renders on the caller's surface, then raises ``typer.Exit`` with
+        # no ``return``. Admitted deliberately, per this docstring.
+        "curate_advisory": {"_refuse_usage"},
         "ingest": {"_fail"},
         # These three are the shared boundary's renderers — #459's for
         # ``TrellisError``, #493's for ``PackAssemblyError``, and this
@@ -963,6 +967,9 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
         ],
         # Exits on a REJECTED or FAILED command and returns on any other.
         "curate": ["_execute_command"],
+        # Refuses a bad argument combination through ``_refuse_usage`` and
+        # returns when the selection is valid (#968).
+        "curate_advisory": ["_validate_selection"],
         "ingest_corpus": ["_parse_tags"],
         "policy": ["_exit_if_degraded", "_refuse_stale"],
         "stores": ["_get_registry"],
