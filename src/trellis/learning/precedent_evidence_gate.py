@@ -65,7 +65,7 @@ from trellis.core.base import TrellisModel
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.mutate.commands import Operation
 from trellis.mutate.retention import ARCHIVED_STATE, CURRENT_STATE
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import lifecycle_state_of
 from trellis.stores.base.event_log import (
     Event,
     EventLog,
@@ -532,11 +532,8 @@ def precedent_skip_reason(graph_store: GraphStore, entity_id: str) -> str | None
     node = graph_store.get_node(entity_id)
     if node is None:
         return SKIPPED_NOT_GRAPH_BACKED
-    record = node.get("properties", {}).get(LIFECYCLE_KEY)
-    if not isinstance(record, dict):
-        return None
-    state = record.get("state")
-    if not isinstance(state, str) or state in ("", CURRENT_STATE):
+    state = lifecycle_state_of(node.get("properties"))
+    if state == CURRENT_STATE:
         return None
     if state == "demoted":
         return SKIPPED_ALREADY_DEMOTED

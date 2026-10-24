@@ -634,10 +634,13 @@ class TestReverifyUnderLock:
             pytest.param({"lifecycle": {"state": ""}}, False, id="empty-state"),
             pytest.param({"lifecycle": {"state": None}}, False, id="null-state"),
             pytest.param({"lifecycle": {"state": 7}}, False, id="non-string-state"),
+            pytest.param({"lifecycle": {"state": "zombie"}}, False, id="unknown-state"),
+            pytest.param({"lifecycle": {"state": "Archived"}}, False, id="wrong-case"),
             pytest.param({"lifecycle": {"state": "current"}}, False, id="current"),
             pytest.param({"lifecycle": {"state": "superseded"}}, True, id="superseded"),
             pytest.param({"lifecycle": {"state": "archived"}}, True, id="archived"),
             pytest.param({"lifecycle": {"state": "demoted"}}, True, id="demoted"),
+            pytest.param({"lifecycle": {"state": "draft"}}, True, id="draft"),
         ],
     )
     def test_lifecycle_axis_of_candidate_staleness(
@@ -646,7 +649,10 @@ class TestReverifyUnderLock:
         metadata: dict[str, Any],
         stale: bool,
     ) -> None:
-        """Only a real non-current state is stale; real states keep failing."""
+        """Only a real non-current state is stale; real states keep failing.
+
+        A string that is not a ``Lifecycle`` state reads as current, the same
+        answer the retrieval gates give (#959)."""
         from trellis.mcp.reconcile import ReconcileCandidate
 
         docs = temp_registry.knowledge.document_store
@@ -654,6 +660,29 @@ class TestReverifyUnderLock:
         candidate = ReconcileCandidate(doc_id=doc_id, content=_BASE, similarity=0.9)
 
         assert server_mod._candidate_is_stale(docs, candidate) is stale
+
+    @pytest.mark.parametrize("state", ["zombie", "Archived", "", 7])
+    def test_an_unknown_state_agrees_with_the_retrieval_gates(
+        self, temp_registry: StoreRegistry, state: Any
+    ) -> None:
+        """Re-verify and the retrieval gates answer one question about a
+        malformed stamp: it is current, so nothing is withheld or refused."""
+        from trellis.mcp.reconcile import ReconcileCandidate
+        from trellis.retrieve.lifecycle import (
+            declared_successor,
+            is_archived,
+            is_demoted,
+        )
+
+        metadata = {"lifecycle": {"state": state, "superseded_by": "other-doc"}}
+        docs = temp_registry.knowledge.document_store
+        doc_id = docs.put(None, _BASE, metadata=metadata)
+        candidate = ReconcileCandidate(doc_id=doc_id, content=_BASE, similarity=0.9)
+
+        assert server_mod._candidate_is_stale(docs, candidate) is False
+        assert not is_archived(metadata)
+        assert not is_demoted(metadata)
+        assert declared_successor(metadata) is None
 
     def test_double_supersede_race_single_successor(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

@@ -5,8 +5,9 @@ anything, and the SQLite and Postgres stores hand that neighbourhood back
 ordered by ``(depth, node_id)``. A seed with more than ``limit`` neighbours
 therefore fills the slice with whichever ids sort first, and a promoted
 precedent (``precedent_applies_to`` the seed) sorts after every id that
-begins a-o. The Bolt backends return no order at all (a ``set`` of ids
-through an unordered bulk match), so the same slice is arbitrary there.
+begins a-o. The Bolt backends used to return no order at all (a ``set`` of
+ids through an unordered bulk match), so the same slice was arbitrary there;
+they now return ``(depth, node_id)`` too, pinned by the graph contract suite.
 
 Scoring every node and slicing afterwards was considered and does not help:
 the base score is positional (``1 - i * step``, zero from the twentieth row),
@@ -22,13 +23,14 @@ import pytest
 
 import trellis.retrieve as retrieve_pkg
 import trellis.retrieve.strategies as strategies_mod
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, _item_attribution
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_SEEDED,
     GRAPH_SLICE_PRIORITISED_KEY,
     GraphSearch,
 )
 from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.pack import PackItem
 from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
@@ -234,6 +236,34 @@ class TestSliceStamp:
             GRAPH_SELECTION_SEEDED
         }
         assert GRAPH_SLICE_PRIORITISED_KEY != "graph_selection"
+
+    def test_the_stamp_reaches_the_pack_event_rows(self, graph: Any) -> None:
+        # ``_item_attribution`` copied string values only, so the bool never
+        # reached ``PACK_ASSEMBLED.injected_items[]`` and a prioritised slice
+        # could not be told from a plain one after the fact (#958).
+        _hub(graph)
+        rows = PackBuilder._injected_item_rows(_seeded(graph))
+        assert len(rows) == LIMIT
+        assert all(r[GRAPH_SLICE_PRIORITISED_KEY] is True for r in rows)
+
+    def test_an_untouched_item_has_no_key_in_its_row(self, graph: Any) -> None:
+        _hub(graph, precedent=False)
+        rows = PackBuilder._injected_item_rows(_seeded(graph))
+        assert rows
+        assert not any(GRAPH_SLICE_PRIORITISED_KEY in r for r in rows)
+
+    @pytest.mark.parametrize("value", [False, None, "true", 1, {"x": True}])
+    def test_only_the_literal_true_passes_the_allowlist(self, value: Any) -> None:
+        # An allowlist of one key and one value: no other non-string metadata
+        # (a flag, a count, a mapping) rides into the event with it.
+        item = PackItem(
+            item_id="n1",
+            item_type="entity",
+            excerpt="x",
+            relevance_score=1.0,
+            metadata={GRAPH_SLICE_PRIORITISED_KEY: value, "other_flag": True, "n": 3},
+        )
+        assert _item_attribution(item) == {}
 
     def test_the_key_is_exported_from_the_package(self) -> None:
         assert retrieve_pkg.GRAPH_SLICE_PRIORITISED_KEY == GRAPH_SLICE_PRIORITISED_KEY

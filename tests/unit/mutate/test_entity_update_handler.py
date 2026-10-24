@@ -926,6 +926,7 @@ class TestEntityCreateOverExistingPrecedentRefusal:
             {"state": ""},
             {"state": None},
             {"state": 5},
+            {"state": "zombie"},
             {},
             "demoted",
             ["demoted"],
@@ -934,6 +935,7 @@ class TestEntityCreateOverExistingPrecedentRefusal:
             "empty_state",
             "null_state",
             "non_str_state",
+            "unknown_state",
             "no_state_key",
             "non_dict_record",
             "list_record",
@@ -1162,6 +1164,7 @@ class TestLifecycleStateReadersAgree:
             {LIFECYCLE_KEY: {"state": ""}},
             {LIFECYCLE_KEY: {"state": None}},
             {LIFECYCLE_KEY: {"state": 5}},
+            {LIFECYCLE_KEY: {"state": "zombie"}},
             {LIFECYCLE_KEY: {"state": "current"}},
             {LIFECYCLE_KEY: {"state": "demoted"}},
             {LIFECYCLE_KEY: {"state": "archived"}},
@@ -1182,3 +1185,15 @@ class TestLifecycleStateReadersAgree:
         node = {"properties": {LIFECYCLE_KEY: {"state": ""}}}
 
         assert _current_lifecycle_state(node) == "current"
+
+    def test_a_string_that_is_no_lifecycle_state_reads_as_current(self) -> None:
+        """Not a ``Lifecycle`` state, so not a state of its own (#959): the
+        precedent readers, re-verify and the retrieval gates all read it as
+        current."""
+        from trellis.learning.scoring import _precedent_lifecycle_state
+        from trellis.mutate.handlers import _current_lifecycle_state
+
+        node = {"properties": {LIFECYCLE_KEY: {"state": "zombie"}}}
+
+        assert _current_lifecycle_state(node) == "current"
+        assert _precedent_lifecycle_state(node) == "current"
