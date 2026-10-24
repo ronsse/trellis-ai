@@ -373,6 +373,78 @@ class TestAdvisorySuppressionLifecycle:
         store = AdvisoryStore(tmp_path / "a.json")
         assert store.restore("does-not-exist") is None
 
+    def test_restore_many_is_one_write_and_skips_what_restore_would(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#968 — a bulk restore is one file rewrite, and clears the retirement."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        marker = {"retired_by": "some.rule", "retired_rule": "document_frequency"}
+        first = store.put(_advisory(scope="one", metadata={"keyword": "a"}))
+        second = store.put(_advisory(scope="two"))
+        active = store.put(_advisory(scope="active"))
+        for row in (first, second):
+            store.suppress(row.advisory_id, reason="r", metadata=marker)
+        saves: list[str] = []
+        real_save = store._save
+        monkeypatch.setattr(
+            store,
+            "_save",
+            lambda: (saves.append("save"), real_save())[1],  # type: ignore[method-assign]
+        )
+
+        restored = store.restore_many(
+            [first.advisory_id, "missing", active.advisory_id, second.advisory_id]
+        )
+
+        assert saves == ["save"]
+        assert [a.advisory_id for a in restored] == [
+            first.advisory_id,
+            second.advisory_id,
+        ]
+        reread = AdvisoryStore(tmp_path / "a.json")
+        got = reread.get(first.advisory_id)
+        assert got is not None
+        assert got.status == AdvisoryStatus.ACTIVE
+        assert got.suppression_reason is None
+        assert got.metadata == {"keyword": "a"}
+
+    def test_restore_many_with_nothing_to_do_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        monkeypatch.setattr(
+            store,
+            "_save",
+            lambda: pytest.fail("no row changed, so nothing should be written"),  # type: ignore[method-assign]
+        )
+
+        assert store.restore_many([adv.advisory_id, "missing"]) == []
+        assert store.restore_many([]) == []
+
+    def test_a_failed_bulk_restore_leaves_every_row_suppressed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All or nothing, so a refusal never leaves a prefix restored."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        rows = [store.put(_advisory(scope=f"s{i}")) for i in range(3)]
+        for row in rows:
+            store.suppress(row.advisory_id, reason="r")
+
+        def boom() -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(store, "_save", boom)  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="disk full"):
+            store.restore_many([r.advisory_id for r in rows])
+
+        assert all(
+            (got := store.get(r.advisory_id)) is not None
+            and got.status == AdvisoryStatus.SUPPRESSED
+            for r in rows
+        )
+
     def test_suppression_survives_reload(self, tmp_path: Path) -> None:
         from trellis.schemas.advisory import AdvisoryStatus
 
@@ -628,6 +700,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
             lambda: store.put_many([_advisory()]),
             lambda: store.suppress(keeper.advisory_id),
             lambda: store.restore(dropped.advisory_id),
+            lambda: store.restore_many([dropped.advisory_id]),
             lambda: store.remove(keeper.advisory_id),
             store.clear,
         ):
@@ -685,6 +758,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
             lambda: store.suppress(keeper.advisory_id),
             lambda: store.suppress_many({keeper.advisory_id: (None, None)}),
             lambda: store.restore(suppressed.advisory_id),
+            lambda: store.restore_many([suppressed.advisory_id]),
             lambda: store.remove(keeper.advisory_id),
             store.clear,
         ):
@@ -1182,6 +1256,7 @@ class TestDegradationIsNotTheOnlyStaleView:
             "suppress",
             "suppress_many",
             "restore",
+            "restore_many",
             "remove",
             "clear",
         ],
@@ -1225,6 +1300,7 @@ class TestDegradationIsNotTheOnlyStaleView:
                 {seeded.advisory_id: ("x", None)}
             ),
             "restore": lambda: mine.restore(seeded.advisory_id),
+            "restore_many": lambda: mine.restore_many([seeded.advisory_id]),
             "remove": lambda: mine.remove(seeded.advisory_id),
             "clear": mine.clear,
         }
@@ -1253,7 +1329,7 @@ class TestDegradationIsNotTheOnlyStaleView:
         with pytest.raises(StaleStoreWriteError):
             store._save()
 
-    @pytest.mark.parametrize("write", ["suppress", "restore", "remove"])
+    @pytest.mark.parametrize("write", ["suppress", "restore", "restore_many", "remove"])
     def test_a_stale_lookup_does_not_report_not_found(
         self, tmp_path: Path, write: str
     ) -> None:
@@ -1275,6 +1351,7 @@ class TestDegradationIsNotTheOnlyStaleView:
         calls = {
             "suppress": lambda: mine.suppress(theirs.advisory_id, reason="x"),
             "restore": lambda: mine.restore(theirs.advisory_id),
+            "restore_many": lambda: mine.restore_many([theirs.advisory_id]),
             "remove": lambda: mine.remove(theirs.advisory_id),
         }
         with pytest.raises(StaleStoreWriteError):

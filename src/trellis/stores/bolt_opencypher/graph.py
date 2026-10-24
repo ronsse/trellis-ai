@@ -136,6 +136,24 @@ engine (Neo4j's Cypher Manual says only ``ORDER BY`` guarantees a row
 order), so this is relied-upon, not cited. ArcadeDB's bulk path takes
 no lock from this touch at all, for the same OCC reason as above.
 
+On Neo4j the endpoint lookup after those locks can still read a node as
+absent. Measured against ``neo4j:2025.12`` with one thread re-versioning a
+node while three wrote edges from it (13 failed writes of 31,139, though
+no endpoint ever lacked a current row): a ``node_id`` lookup for the
+current row, made once the lock was held, returned nothing for 0.7-3.7 ms
+in eleven of twelve sampled cases (70 ms in the twelfth), while a label
+scan run right after found it, and ``upsert_edge`` raised "no current
+version" for it. The same harness with the re-run below: 0 of 31,705. This is the live
+failure ``check_edge_write_racing_node_upsert_keeps_one_current_node``
+showed on ``live-infra.yml`` on 2026-10-22 and 2026-10-24. Locking the
+closed rows as well did not close it (it failed more often, and
+deadlocked). So ``upsert_edge`` re-runs a write that found no endpoint, up
+to ``len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)`` times, but only while
+both endpoints still have a row of some version
+(:meth:`_endpoints_have_a_version_row`); a node with no row at all is
+refused at once, as before. ``upsert_edges_bulk`` reads its endpoints the
+same way, in its pre-check and its ``UNWIND``, and is not retried.
+
 Per-backend subclasses override the **seams**:
 
 - ``SCHEMA_STATEMENTS`` (class attribute) — DDL run by
@@ -497,6 +515,12 @@ _UNIQUE_VIOLATION_MARKERS: tuple[str, ...] = ("duplicated key", "already exists"
 #: violation which is *not* contention surfaces as an error instead of
 #: spinning.
 _ALIAS_CLAIM_RETRY_ATTEMPTS = 3
+
+#: Sleeps before each re-run of an edge write whose endpoint lookup came
+#: back empty though both endpoints have rows: a concurrent re-version's new
+#: row, not yet readable (module docstring). Its length is the re-run bound,
+#: so a node that really is gone surfaces as an error instead of waiting.
+_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.01, 0.05, 0.15)
 
 
 def _names_token(message: str, token: str) -> bool:
@@ -1237,6 +1261,24 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     )
         raise last_error  # type: ignore[misc]
 
+    def _endpoints_have_a_version_row(self, *node_ids: str) -> bool:
+        """Whether every id has a row of any version, current or closed.
+
+        Told apart from "no current version" on purpose: while a
+        re-version's new row is not yet readable the closed row still is, so
+        a node that has rows is one the edge write may find on a re-run, and
+        one with none is gone.
+        """
+        cypher = (
+            "MATCH (n:Node) WHERE n.node_id IN $ids "
+            "RETURN DISTINCT n.node_id AS node_id"
+        )
+        with self._driver.session(database=self._database) as session:
+            records = session.execute_read(
+                lambda tx: list(tx.run(cypher, ids=list(node_ids)))
+            )
+        return {r["node_id"] for r in records} >= set(node_ids)
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -1687,6 +1729,28 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ).single()
 
         record = self._execute_edge_claim_write(_tx)
+        rereads = 0
+        for backoff in _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS:
+            # An endpoint with a row but no readable current one is a
+            # concurrent re-version caught mid-commit (module docstring):
+            # wait it out and re-read. One with no row is a missing node.
+            if record is not None or not self._endpoints_have_a_version_row(
+                source_id, target_id
+            ):
+                break
+            rereads += 1
+            time.sleep(backoff)
+            record = self._execute_edge_claim_write(_tx)
+        if rereads:
+            # A warning, not debug: no shipped configuration prints debug,
+            # and whether this window is the one CI hit (#969) is unproven.
+            logger.warning(
+                "edge_endpoint_reread",
+                source_id=source_id,
+                target_id=target_id,
+                rereads=rereads,
+                recovered=record is not None,
+            )
         if record is None:
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "

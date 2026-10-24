@@ -40,10 +40,11 @@ FLOORS: dict[str, tuple[int, int]] = {
     "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 19),
     # Run 39334674588 at e16e24a7 (2026-10-19): every row below passed all of
     # its cases and skipped none. The three graph rows rose 151 -> 155 with the
-    # four subgraph-order cases of #958.
-    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (155, 0),
-    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (155, 0),
-    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (155, 0),
+    # four subgraph-order cases of #958, then 155 -> 158 with the three
+    # code-point-order cases of #966 (one subgraph, two search_nodes).
+    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (158, 0),
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (158, 0),
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (158, 0),
     "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
     "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
 }
