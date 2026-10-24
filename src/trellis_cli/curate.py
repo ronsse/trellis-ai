@@ -65,6 +65,7 @@ from trellis.mutate import (
     build_curate_executor,
 )
 from trellis.stores.settings_store import load_settings_values
+from trellis_cli.curate_advisory import advisory_app
 from trellis_cli.exit_codes import (
     EXIT_OK,
     EXIT_STORE,
@@ -75,6 +76,7 @@ from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log, get_graph_store
 
 curate_app = typer.Typer(no_args_is_help=True)
+curate_app.add_typer(advisory_app, name="advisory")
 console = build_console()
 logger = structlog.get_logger(__name__)
 

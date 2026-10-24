@@ -30,6 +30,11 @@ RETIRED_BY_QUERY_FILTER = "advisory_generator.query_filter"
 #: that tracks a nightly measurement (the second), which must not be undone by
 #: the next night's noise.
 RETIRED_RULE_KEY = "retired_rule"
+#: Every value :data:`RETIRED_RULE_KEY` takes; the generator's ``_RULE_*`` names
+#: (``tests/unit/retrieve/test_advisory_generator.py`` pins the two together).
+#: ``trellis curate advisory restore --rule`` validates against it, so a typo is
+#: a usage error and not a bulk restore of zero rows.
+RETIRED_RULES = ("stop_list", "document_frequency", "unnormalised_keyword")
 #: The document-frequency ceiling in force when the row was retired, stored only
 #: for that rule. A later ceiling above it is the operator relaxing the rule, as
 #: opposed to the word's share drifting under the same bar.

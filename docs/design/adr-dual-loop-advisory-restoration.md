@@ -160,6 +160,8 @@ The fitness loop is **not** modified. The unreachable auto-restore branch stays 
 2. Add `POST /api/v1/advisories/{advisory_id}/restore` REST endpoint with the same semantics.
 3. Add `trellis analyze list-advisories --status suppressed` to the existing `analyze` CLI surface (paired with `--status active` and `--status all`).
 4. Tests: round-trip restore via CLI + via REST, `ADVISORY_RESTORED` event payload assertion, idempotency assertion (restoring an already-active advisory is a no-op).
+
+**Status (#968):** step 1 shipped under a different name, `trellis curate advisory restore <advisory_id>` (with `--rule <rule> --all` for a bulk restore, `--dry-run`, `--reason`, and `source="cli:curate"` on the event rather than `"operator"`). Steps 2 and 3, the REST route and `list-advisories`, are not built.
 5. No change to `run_advisory_fitness_loop`, `AdvisoryStore.list()`, or `PackBuilder`. The architectural fence stays.
 
 ## 4. How to decide — what would move us off the manual baseline?

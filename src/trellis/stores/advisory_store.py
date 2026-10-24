@@ -362,7 +362,47 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
         if advisory.status == AdvisoryStatus.ACTIVE:
             return advisory
         restore = self._snapshot()
-        updated = advisory.model_copy(
+        updated = self._restored_copy(advisory)
+        self._rows[advisory_id] = updated
+        self._save_or_roll_back(restore)
+        logger.info("advisory_restored", advisory_id=advisory_id)
+        return updated
+
+    def restore_many(self, advisory_ids: Sequence[str]) -> Sequence[Advisory]:
+        """Restore several advisories in one write.
+
+        The counterpart of :meth:`suppress_many`, for the same reason: a bulk
+        restore (``trellis curate advisory restore --rule ... --all``) is one
+        file rewrite and one rollback scope instead of one per row, so a
+        refusal or a failed write part-way leaves every row as it was rather
+        than a prefix restored.
+
+        Skips what :meth:`restore` would answer without writing — an unknown id
+        and an already-active row — and returns only the rows it restored, in
+        the order given. Guarded before the lookups for the reasons
+        :meth:`suppress` gives.
+        """
+        self.refuse_if_degraded()
+        self.refuse_if_stale()
+        restore = self._snapshot()
+        restored: list[Advisory] = []
+        for advisory_id in advisory_ids:
+            advisory = self._rows.get(advisory_id)
+            if advisory is None or advisory.status == AdvisoryStatus.ACTIVE:
+                continue
+            updated = self._restored_copy(advisory)
+            self._rows[advisory_id] = updated
+            restored.append(updated)
+        if not restored:
+            return restored
+        self._save_or_roll_back(restore)
+        logger.info("advisories_restored", count=len(restored))
+        return restored
+
+    @staticmethod
+    def _restored_copy(advisory: Advisory) -> Advisory:
+        """``advisory`` flipped to active, suppression and retirement cleared."""
+        return advisory.model_copy(
             update={
                 "status": AdvisoryStatus.ACTIVE,
                 "suppressed_at": None,
@@ -375,10 +415,6 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
                 },
             }
         )
-        self._rows[advisory_id] = updated
-        self._save_or_roll_back(restore)
-        logger.info("advisory_restored", advisory_id=advisory_id)
-        return updated
 
     def remove(self, advisory_id: str) -> bool:
         """Hard-delete an advisory by ID.  Returns ``True`` if found.
