@@ -138,6 +138,7 @@ CASES = [
             "suppress": lambda: store.suppress(seeded, reason="x"),
             "suppress_many": lambda: store.suppress_many({seeded: ("x", None)}),
             "restore": lambda: store.restore(seeded),
+            "restore_many": lambda: store.restore_many([seeded]),
             "remove": lambda: store.remove(seeded),
             "clear": store.clear,
         },

@@ -257,17 +257,22 @@ longer write are **suppressed**, never deleted, with an `ADVISORY_SUPPRESSED`
 event naming the rule; the row records which rule (and, for frequency, which
 ceiling) in its metadata. A frequency-retired row comes back only when the word
 is emitted again, because it must clear `min_sample_size`, `min_effect_size` and
-the comparison arm; otherwise it is restored only by `AdvisoryStore.restore`,
-and no CLI exists for that yet. While the rule is enforced it also needs a night
+the comparison arm; otherwise restore it by hand with
+`trellis curate advisory restore <advisory_id>`, or every row the rule retired
+with `--rule document_frequency --all` (preview with `--dry-run`; each restore
+emits an `ADVISORY_RESTORED` event, and the command exits `5` without writing
+while the advisory file is degraded or was rewritten by another process). While
+the rule is enforced it also needs a night
 that enforces the ceiling, and a ceiling higher than the one that retired it or
 a share fallen to 80% of the ceiling, so a share hovering at the bar, or a
 window too short to enforce it, does not flip the row nightly. With the rule
 off, the word being emitted again is enough. A stop-list retirement comes back
-once the word leaves the list. `AdvisoryStore.restore` also restores a row (and
-clears its retirement), but the next run retires it again while the word is
-still excluded. The JSON report counts each rule under `query_keywords_withheld`
-and `query_rows_retired`, and says which state the frequency rule is in under
-`query_keyword_df_rule` (`off`, `enforced` or `stood_down`).
+once the word leaves the list. The restore command also restores a stop-list row
+(`--rule stop_list --all`, and it clears the retirement), but the next run
+retires it again while the word is still excluded. The JSON report counts each
+rule under `query_keywords_withheld` and `query_rows_retired`, and says which
+state the frequency rule is in under `query_keyword_df_rule` (`off`, `enforced`
+or `stood_down`).
 
 REST equivalent:
 

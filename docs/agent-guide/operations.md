@@ -1927,6 +1927,95 @@ for any other reason and `5` when it fails, with
 and no `node_id`. Invalid `--properties` JSON exits `2` with `"status": "error"`
 and no `warnings` key, because nothing was submitted.
 
+### `trellis curate advisory restore`
+
+Undo an advisory suppression: flip the row back to `active`, clear
+`suppressed_at` / `suppression_reason`, and clear the keys a rule retirement
+wrote to its metadata (`retired_by`, `retired_rule`, `retired_ceiling`). The
+way back for a QUERY advisory the generator retired under the
+document-frequency rule, which un-retires on its own only when the generator
+emits that word again (it must clear `min_sample_size`, `min_effect_size` and
+the comparison-arm floor, which a word whose share has fallen may no longer do).
+
+```bash
+trellis curate advisory restore <advisory_id> [--reason <text>] [--dry-run] [--format text|json]
+trellis curate advisory restore --rule <rule> --all [--reason <text>] [--dry-run] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `advisory_id` | One of this or `--rule --all` | -- | Restore this row, however it was suppressed (retirement or fitness loop) |
+| `--rule` | With `--all` | -- | `stop_list`, `document_frequency` or `unnormalised_keyword`: the `retired_rule` metadata value to restore |
+| `--all` | With `--rule` | off | Restore every suppressed row that rule retired, in one file write |
+| `--dry-run` | No | off | List what would be restored; write nothing and emit no event |
+| `--reason` | No | -- | Audit-trail justification, recorded in each event payload |
+| `--format` | No | `text` | Output format |
+
+`--all` without `--rule` is refused, so a bulk restore cannot reverse the fitness
+loop's evidence-based suppressions; `--rule` without `--all`, an id together with
+`--all`, nothing named, and an unknown rule are refused too. A bulk restore
+matches on `retired_rule`, so a row the fitness loop suppressed (it carries no
+`retired_rule`) is only restored by naming its id.
+
+Each restored row emits an `ADVISORY_RESTORED` event (`source="cli:curate"`,
+`entity_type="advisory"`; payload `advisory_id`, `restored_via`,
+`previous_suppression_reason`, `previous_retired_rule` and `reason` when given,
+and no `new_confidence`, which the fitness-loop events carry and the dashboard
+averages). The write is not routed through `MutationExecutor`: no advisory write
+is, and `AdvisoryStore`'s own degraded and stale guards are what protect the
+file. The event follows the same posture as suppression's: the store write is
+the source of truth, the event is emitted after it and fail-soft, and a miss is
+reported in `audit_events_failed` (a `Warning:` line in text) with the restore
+still landed and the exit unchanged.
+
+A restore is not a pardon. The next `generate-advisories` run retires a
+restored row again while the rule that retired it still excludes the word (a
+stop-list word stays retired; a frequency retirement holds only while
+`--max-keyword-df` is set and the word's share stays over it), and the fitness
+loop scores the row again as it does any active one.
+
+Exit codes, the same in both formats (the exit sits below the format branch):
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Restored, previewed, or nothing to do: an already-active id (`"status": "noop"`) or a rule with no suppressed rows (`"count": 0`) |
+| `2` | A refused argument combination or unknown rule (`"status": "invalid"`), or an unknown advisory id (`"status": "not_found"`) |
+| `5` | The advisory file is degraded (`"status": "degraded"`, with `store_degradation`) or another process rewrote it since this command read it (`"status": "refused"`, `"code": "STALE_STORE_WRITE"`, re-run); nothing is written. `--dry-run` refuses on a degraded file too, since it would preview a set missing the rows that failed to parse |
+
+**Example:**
+
+```bash
+trellis curate advisory restore --rule document_frequency --all --dry-run --format json
+```
+
+**JSON output:**
+
+```json
+{
+  "status": "dry_run",
+  "dry_run": true,
+  "advisory_id": null,
+  "rule": "document_frequency",
+  "count": 1,
+  "audit_events_failed": 0,
+  "advisories": [
+    {
+      "advisory_id": "01JRK5N7QF",
+      "category": "query",
+      "scope": "global",
+      "message": "Include 'deploy' in your context query",
+      "previous_suppression_reason": "query keyword excluded by document_frequency: 'deploy'",
+      "previous_retired_rule": "document_frequency"
+    }
+  ]
+}
+```
+
+`status` is `restored` on a real run, and `advisories[]` lists the rows restored,
+each as it was before the restore (a dry run lists the same shape). This command
+has no `warnings` array, unlike the rest of this section, because it submits no
+`Command`.
+
 ---
 
 ## Settings Store

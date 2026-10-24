@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 
 from tests.recovery_command import expected_recovery
 from trellis.retrieve.advisory_generator import (
+    _RULE_DOC_FREQ,
+    _RULE_STOP_LIST,
+    _RULE_UNNORMALISED,
     DEFAULT_MAX_KEYWORD_DOC_FREQ,
     MIN_EFFECT_SIZE_ENV,
     MIN_EFFECT_SIZE_SETTING,
@@ -32,6 +35,7 @@ from trellis.schemas.advisory import (
     RETIRED_BY_QUERY_FILTER,
     RETIRED_CEILING_KEY,
     RETIRED_RULE_KEY,
+    RETIRED_RULES,
     RETIREMENT_KEYS,
     Advisory,
     AdvisoryCategory,
@@ -2372,3 +2376,14 @@ class TestFitnessLoopLeavesRetiredRowsAlone:
         assert not any(k in suppressed.metadata for k in RETIREMENT_KEYS)
         report = run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
         assert report.advisories_restored == [row.advisory_id]
+
+
+def test_the_published_rule_names_are_the_ones_the_generator_writes() -> None:
+    """``trellis curate advisory restore --rule`` validates against the schema's list.
+
+    The generator stamps one of its own ``_RULE_*`` names into
+    ``retired_rule``; if the two spellings drift, a bulk restore either refuses a
+    rule the generator writes or accepts one it never does.
+    """
+    assert set(RETIRED_RULES) == {_RULE_STOP_LIST, _RULE_DOC_FREQ, _RULE_UNNORMALISED}
+    assert len(RETIRED_RULES) == len(set(RETIRED_RULES))
