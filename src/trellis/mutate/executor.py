@@ -631,7 +631,7 @@ class MutationExecutor:
                     message,
                     warnings,
                     "policy_violation",
-                    (_SCOPE_UNEVALUATED_WARN_ONLY),
+                    _SCOPE_UNEVALUATED_WARN_ONLY,
                 )
             # The type name only; a store's message can carry query text.
             log.error(  # noqa: TRY400
