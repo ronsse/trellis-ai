@@ -95,7 +95,6 @@ from trellis.mcp.auth import (
 )
 from trellis.mcp.knowledge_links import link_knowledge_node
 from trellis.mcp.reconcile import (
-    LIFECYCLE_KEY,
     MARKER_SKIPPED,
     MARKER_STALE,
     RECONCILIATION_KEY,
@@ -159,6 +158,7 @@ from trellis.retrieve.withholding import (
     format_withholding_note,
     withholding_from_payload,
 )
+from trellis.schemas.classification import lifecycle_state_of
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -2521,8 +2521,9 @@ def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> b
       writer. ``mark_document_superseded`` preserves content (SCD-2), so a
       content-hash check alone would let two racing SUPERSEDE verdicts both
       commit and fork the supersession chain — ``superseded_by`` can only name
-      one successor. Any real non-``current`` lifecycle state fails re-verify; an
-      empty or non-string one is malformed and reads as current.
+      one successor. Any real non-``current`` lifecycle state fails re-verify;
+      one that is missing, empty, non-string or not a ``Lifecycle`` state is
+      malformed and reads as current (:func:`lifecycle_state_of`).
     """
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
@@ -2531,12 +2532,10 @@ def _candidate_is_stale(document_store: Any, candidate: ReconcileCandidate) -> b
         return True
     if content_hash(current["content"]) != content_hash(candidate.content):
         return True
-    lifecycle = (current.get("metadata") or {}).get(LIFECYCLE_KEY)
-    state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
-    # A missing, empty or non-string state is malformed, not a state of its own,
-    # and reads as current here as it does in the precedent handler (#942) and
-    # the retrieval gates: a bad record is never by itself a reason to refuse.
-    return isinstance(state, str) and state not in ("", "current")
+    # A missing, empty, non-string or unknown state is malformed, not a state of
+    # its own, and reads as current here as it does in the precedent handlers
+    # and the retrieval gates: a bad record is never by itself a reason to refuse.
+    return lifecycle_state_of(current.get("metadata")) != "current"
 
 
 def _reverify_candidate(

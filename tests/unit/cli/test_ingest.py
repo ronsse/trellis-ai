@@ -354,6 +354,66 @@ class TestIngestEvidence:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ingested"
 
+    def _evidence_in_the_reserved_namespace(self, tmp_path: Path) -> str:
+        f = tmp_path / "reserved.json"
+        f.write_text(
+            json.dumps(
+                {
+                    "evidence_id": "precedent://learning/mine",
+                    "evidence_type": "snippet",
+                    "content": "a memory that wants a precedent's exemptions",
+                    "source_origin": "trace",
+                }
+            )
+        )
+        return str(f)
+
+    def test_ingest_evidence_refuses_an_id_in_the_reserved_namespace(
+        self, tmp_path: Path
+    ) -> None:
+        """Same refusal and code as ``EvidenceIngestHandler``'s: this command
+        writes through ``put_document`` directly, so the handler's check does
+        not cover it.
+
+        Defective subject: drop the ``is_promoted_precedent_document`` check in
+        ``ingest_evidence`` and the exit code is 0 with a row written.
+        """
+        from trellis_cli.stores import get_document_store
+
+        path = self._evidence_in_the_reserved_namespace(tmp_path)
+
+        text = runner.invoke(app, ["ingest", "evidence", path])
+        as_json = runner.invoke(app, ["ingest", "evidence", path, "--format", "json"])
+
+        assert text.exit_code == 2
+        assert "reserved precedent namespace" in plain(text.stdout)
+        assert as_json.exit_code == text.exit_code
+        payload = json.loads(as_json.stdout.strip())
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ValidationError"
+        assert payload["code"] == "reserved_document_id"
+        assert "reserved precedent namespace" in payload["message"]
+        assert get_document_store().get("precedent://learning/mine") is None
+
+    def test_the_cli_and_the_handler_refuse_with_one_code_and_message(
+        self, tmp_path: Path
+    ) -> None:
+        from trellis.errors import ValidationError
+        from trellis.mutate.handlers import _evidence_document_id
+
+        path = self._evidence_in_the_reserved_namespace(tmp_path)
+        as_json = runner.invoke(app, ["ingest", "evidence", path, "--format", "json"])
+        payload = json.loads(as_json.stdout.strip())
+
+        with pytest.raises(ValidationError) as excinfo:
+            _evidence_document_id("precedent://learning/mine")
+
+        assert excinfo.value.code == payload["code"]
+        assert (
+            str(excinfo.value).replace("evidence.doc_id", "evidence_id")
+            == (payload["message"])
+        )
+
     def test_ingest_evidence_invalid(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.json"
         f.write_text(json.dumps({"bad": "data"}))

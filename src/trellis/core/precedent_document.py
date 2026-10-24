@@ -15,11 +15,18 @@ retention. The id namespace is different: ``precedent://learning/`` is minted by
 :func:`~trellis.learning.scoring.precedent_entity_id_for_candidate`, and
 ``EvidenceIngestHandler`` refuses a caller-chosen document id inside it, which is
 the one funnel ``save_memory``, ``POST /documents`` and the generic mutation
-surface share. Another route also mints an id there: ``entity.create`` with such
-an ``entity_id``, then ``precedent.promote``. That route needs promotion
-authority, which is the authority the exemption is meant to protect, so it is
-not a hole. The promote handler writes its row through ``put_document``
-directly, so it is not stopped by the ingest refusal.
+surface share (``trellis ingest evidence`` refuses it the same way). That
+refusal protects the *row*, which only ``precedent.promote`` writes (through
+``put_document`` directly, so the ingest refusal does not stop it), and only for
+a precedent-typed node whose id is in the namespace.
+
+The *node* is a different matter. ``entity.create`` takes a caller-supplied
+``entity_id`` and is the very call ``submit_learning_promotion`` makes to write
+a promoted precedent's node, so it cannot refuse the namespace, and a node there
+is skipped by ``retention.prune`` whoever created it. That grants nothing new:
+``lifecycle.state=current`` already makes any node prune-immune (counted as
+``skipped_restored``). So the promotion-authority argument holds for the row
+alone, and the exemption is keyed on the id and nothing else.
 
 This module imports nothing from the package, so ``classify``, ``mutate`` and
 ``learning`` can all import it without a cycle.
@@ -28,8 +35,25 @@ This module imports nothing from the package, so ``classify``, ``mutate`` and
 from __future__ import annotations
 
 #: The id namespace of a promoted learning precedent, graph node and document
-#: row alike. Reserved: ``EvidenceIngestHandler`` rejects a document id here.
+#: row alike. Reserved for the *row*: ``EvidenceIngestHandler`` and
+#: ``trellis ingest evidence`` reject a document id here.
 PRECEDENT_ENTITY_ID_PREFIX = "precedent://learning/"
+
+#: ``ValidationError.code`` of a caller-chosen document id inside the namespace,
+#: shared by every surface that refuses one so they cannot disagree.
+RESERVED_DOCUMENT_ID_CODE = "reserved_document_id"
+
+
+def reserved_document_id_message(field: str, doc_id: str) -> str:
+    """The refusal text for a caller-chosen ``doc_id`` in the reserved namespace.
+
+    ``field`` names where the caller supplied it (``evidence.doc_id``,
+    ``evidence_id``).
+    """
+    return (
+        f"{field} {doc_id!r} is in the reserved precedent namespace; "
+        "a precedent's document row is written by its promotion"
+    )
 
 
 def is_promoted_precedent_document(doc_id: object) -> bool:
@@ -41,4 +65,9 @@ def is_promoted_precedent_document(doc_id: object) -> bool:
     return isinstance(doc_id, str) and doc_id.startswith(PRECEDENT_ENTITY_ID_PREFIX)
 
 
-__all__ = ["PRECEDENT_ENTITY_ID_PREFIX", "is_promoted_precedent_document"]
+__all__ = [
+    "PRECEDENT_ENTITY_ID_PREFIX",
+    "RESERVED_DOCUMENT_ID_CODE",
+    "is_promoted_precedent_document",
+    "reserved_document_id_message",
+]
