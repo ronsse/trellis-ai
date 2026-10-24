@@ -3314,17 +3314,19 @@ class RedactionApplyHandler:
         graph = self._registry.knowledge.graph_store
         if not isinstance(target_id, str) or graph.get_node(target_id) is None:
             return []
+        # A copy of the command re-aimed at each precedent: the gate reads its
+        # operation, ``target_type`` and metadata, and nothing runs from it.
         return [
-            Command(
-                operation=command.operation,
-                target_id=row["node_id"],
-                target_type=row["node_type"],
-                args={
+            command.model_copy(
+                update={
                     "target_id": row["node_id"],
-                    "reason": command.args.get("reason"),
-                },
-                requested_by=command.requested_by,
-                metadata=dict(command.metadata),
+                    "target_type": row["node_type"],
+                    "args": {
+                        "target_id": row["node_id"],
+                        "reason": command.args.get("reason"),
+                    },
+                    "metadata": dict(command.metadata),
+                }
             )
             for row in _precedents_sourced_from(graph, target_id)
         ]
