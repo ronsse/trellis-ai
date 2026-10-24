@@ -812,6 +812,9 @@ def _gs_pack_event(
     *,
     turned_away: list[dict[str, Any]] | None = None,
     dedup_losers: list[dict[str, Any]] | None = None,
+    cut_by_items: list[dict[str, Any]] | None = None,
+    max_items: int | None = None,
+    price_cut_rows: bool = True,
     max_tokens: int = 10_000,
     with_trace: bool = True,
     holdout: bool = False,
@@ -823,6 +826,9 @@ def _gs_pack_event(
     ``budget_trace`` and as ``token_budget`` in ``rejected_items`` (which,
     like the real event, carries no stamp). ``dedup_losers`` are
     ``{item_id, axis}`` copies that lost dedup to a served row.
+    ``cut_by_items`` rows never reach ``budget_trace``: they are recorded as
+    ``max_items`` rejections, priced with ``estimated_tokens`` unless
+    ``price_cut_rows`` is off.
     """
     away = turned_away or []
     rejected = [
@@ -844,6 +850,17 @@ def _gs_pack_event(
         }
         for row in (dedup_losers or [])
     ]
+    for row in cut_by_items or []:
+        cut_row: dict[str, Any] = {
+            "item_id": row["item_id"],
+            "item_type": "document",
+            "relevance_score": 0.0,
+            "reason": "max_items",
+            "strategy_source": row["axis"],
+        }
+        if price_cut_rows:
+            cut_row["estimated_tokens"] = row["tokens"]
+        rejected.append(cut_row)
     payload: dict[str, Any] = {
         "pack_id": pack_id,
         "budget_max_tokens": max_tokens,
@@ -874,6 +891,8 @@ def _gs_pack_event(
             else []
         ),
     }
+    if max_items is not None:
+        payload["budget_max_items"] = max_items
     if holdout:
         payload["holdout"] = True
     return Event(
@@ -1294,3 +1313,266 @@ def test_a_real_builder_pack_reproduces_and_refills(tmp_path: Path) -> None:
     assert report.unmodelled_packs == 0
     assert report.replacement_by_strategy == {"semantic": 2}
     assert report.replacement_tokens == 2 * per_item
+
+
+# -- the max_items cut and the effective budget ----------------------------------
+
+
+def _cut_log(
+    *,
+    max_tokens: int = 10_000,
+    cut_tokens: int = 100,
+    price_cut_rows: bool = True,
+    max_items: int | None = 3,
+) -> _FakeEventLog:
+    """A pack that served three rows and lost two more at the ``max_items`` cut."""
+    log = _FakeEventLog()
+    log.append(
+        _gs_pack_event(
+            "pack-0",
+            [
+                _gs_row("rw", stamp=_RW),
+                _gs_row("sem-1", axis="semantic"),
+                _gs_row("sem-2", axis="semantic"),
+            ],
+            cut_by_items=[
+                _gs_row("cut-1", cut_tokens, axis="semantic"),
+                _gs_row("cut-2", axis="keyword"),
+            ],
+            max_items=max_items,
+            price_cut_rows=price_cut_rows,
+            max_tokens=max_tokens,
+        )
+    )
+    log.append(_gs_feedback("pack-0", helpful=["sem-1"]))
+    return log
+
+
+def test_a_freed_item_slot_admits_what_the_max_items_cut_turned_away() -> None:
+    report = replay_graph_selection(_cut_log(), graph_selection=_RW)
+
+    # Three slots, and ``rw`` held one of them: without it the cut that had
+    # turned ``cut-1`` and ``cut-2`` away lets exactly one back in. The token
+    # budget is nowhere near binding, so this is the item stage alone.
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+    assert report.replacement_servings == 1
+    assert report.replacement_tokens == 100
+    assert report.replacement_by_strategy == {"semantic": 1}
+
+
+def test_a_freed_slot_still_has_to_fit_the_token_budget() -> None:
+    # ``cut-1`` takes the freed slot but 100 + 100 + 150 overflows 300; the
+    # walk stops there, and ``cut-2`` behind it is past the item cut anyway.
+    log = _cut_log(max_tokens=300, cut_tokens=150)
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.refilled_packs == 1
+    assert report.replacement_servings == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"max_items": None}, "budget_max_items"),
+        ({"price_cut_rows": False}, "token cost the event does not record"),
+    ],
+)
+def test_a_cut_that_cannot_be_re_run_is_unmodelled_not_zero(
+    kwargs: dict[str, Any], reason: str
+) -> None:
+    report = replay_graph_selection(_cut_log(**kwargs), graph_selection=_RW)
+
+    # Reporting 0 replacements here would be a claim the data cannot back.
+    assert report.matched_servings == 1
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert report.replacement_servings == 0
+    assert any(reason in note for note in report.notes)
+
+
+def _with_trace(trace: list[Any]) -> _FakeEventLog:
+    event = _gs_pack_event(
+        "pack-0", [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")]
+    )
+    event.payload["budget_trace"] = trace
+    log = _FakeEventLog()
+    log.append(event)
+    log.append(_gs_feedback("pack-0", helpful=["sem"]))
+    return log
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        # Nothing usable in it: an empty walk "reproduces" an empty record.
+        ["not a step"],
+        # The withheld serving is not in it: the re-run never saw what it removes.
+        [
+            {
+                "item_id": "sem",
+                "item_tokens": 100,
+                "running_total": 100,
+                "included": True,
+            }
+        ],
+    ],
+    ids=["empty_candidates", "withheld_id_missing"],
+)
+def test_a_reproduction_that_saw_nothing_is_not_a_reproduction(
+    trace: list[Any],
+) -> None:
+    report = replay_graph_selection(_with_trace(trace), graph_selection=_RW)
+
+    assert report.matched_servings == 1
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert any("budget_trace" in note for note in report.notes)
+
+
+def _build_logged(
+    log: SQLiteEventLog,
+    strategies: list[SearchStrategy],
+    budget: PackBudget,
+    **builder_kwargs: Any,
+) -> tuple[str, dict[str, Any]]:
+    """Build one pack through the real ``PackBuilder``; return its id and payload."""
+    PackBuilder(
+        strategies=strategies,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+        **builder_kwargs,
+    ).build("q", budget=budget)
+    event = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[0]
+    return event.payload.get("pack_id") or event.entity_id, event.payload
+
+
+def _served(payload: dict[str, Any]) -> list[str]:
+    return [row["item_id"] for row in payload.get("injected_items") or []]
+
+
+def test_a_real_max_items_bound_pack_matches_the_builder_without_the_graph_rows(
+    tmp_path: Path,
+) -> None:
+    """The refill against the real builder when ``max_items`` is the binding cut.
+
+    The counterfactual is the builder's own answer: the same candidates
+    without the recency-window rows. Today the builder records no
+    ``estimated_tokens`` on a ``max_items`` rejection, so the event as written
+    is refused rather than priced; once a row carries its cost, the replay has
+    to agree with the builder, so the second half hands it those costs
+    (taken from the counterfactual build's own serving) and compares.
+    """
+    graph = _axis_strategy(
+        "graph", [_graph_item("g1", 0.95, _RW), _graph_item("g2", 0.94, _RW)]
+    )
+    semantic = _axis_strategy(
+        "semantic",
+        [
+            _semantic_item("s1", 0.9),
+            _semantic_item("s2", 0.8),
+            _semantic_item("s3", 0.7),
+        ],
+    )
+    budget = PackBudget(max_items=3, max_tokens=100_000)
+    log = SQLiteEventLog(tmp_path / "events.db")
+    pack_id, payload = _build_logged(log, [graph, semantic], budget)
+    assert _served(payload) == ["g1", "g2", "s1"]
+    assert [r["reason"] for r in payload["rejected_items"]] == ["max_items"] * 2
+    feedback = _gs_feedback(pack_id, helpful=["g1"], unhelpful=["g2"])
+    log.append(feedback)
+    _, cf_payload = _build_logged(
+        SQLiteEventLog(tmp_path / "cf.db"), [semantic], budget
+    )
+    expected = set(_served(cf_payload)) - set(_served(payload))
+    assert expected == {"s2", "s3"}
+
+    as_written = replay_graph_selection(log, graph_selection=_RW)
+
+    assert as_written.matched_servings == 2
+    assert as_written.refilled_packs == 0
+    assert as_written.unmodelled_packs == 1
+    assert as_written.replacement_servings == 0
+
+    cost = {
+        row["item_id"]: row["estimated_tokens"] for row in cf_payload["injected_items"]
+    }
+    priced = {
+        **payload,
+        "rejected_items": [
+            {**row, "estimated_tokens": cost[row["item_id"]]}
+            for row in payload["rejected_items"]
+        ],
+    }
+    priced_log = SQLiteEventLog(tmp_path / "priced.db")
+    priced_log.append(
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="pack_builder",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload=priced,
+        )
+    )
+    priced_log.append(feedback)
+
+    report = replay_graph_selection(priced_log, graph_selection=_RW)
+
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+    assert report.replacement_servings == len(expected)
+    assert report.replacement_tokens == sum(cost[i] for i in expected)
+    assert report.replacement_by_strategy == {"semantic": len(expected)}
+
+
+def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
+    tmp_path: Path,
+) -> None:
+    """``token_budget_safety_margin`` shrinks the walk's budget below ``max_tokens``.
+
+    The builder records that as ``token_budget_effective``. A refill that
+    walked ``budget_max_tokens`` instead would admit a candidate the builder,
+    given the same candidates without the graph row, turns away.
+    """
+
+    def item(item_id: str, score: float, words: int, axis: str) -> PackItem:
+        meta: dict[str, Any] = {"source_strategy": axis}
+        if axis == "graph":
+            meta["graph_selection"] = _RW
+        return PackItem(
+            item_id=item_id,
+            item_type="document",
+            excerpt=" ".join(f"{item_id}w{i}" for i in range(words)),
+            relevance_score=score,
+            metadata=meta,
+        )
+
+    graph = _axis_strategy("graph", [item("g1", 0.95, 50, "graph")])
+    semantic = _axis_strategy("semantic", [item("s1", 0.9, 90, "semantic")])
+    probe = PackBuilder(
+        strategies=[graph, semantic], content_floor=ContentFloorConfig(mode="off")
+    ).build("q", budget=PackBudget(max_items=50, max_tokens=1_000_000))
+    tokens = {i.item_id: i.estimated_tokens for i in probe.items}
+    # s1 fits the nominal budget and not the 20%-reserved one, and g1 + s1
+    # fits neither, so the real pack serves g1 alone.
+    max_tokens = int(tokens["s1"] / 0.9) + 1
+    budget = PackBudget(max_items=50, max_tokens=max_tokens)
+    margin = {"token_budget_safety_margin": 0.2}
+    log = SQLiteEventLog(tmp_path / "events.db")
+    pack_id, payload = _build_logged(log, [graph, semantic], budget, **margin)
+    assert payload["token_budget_effective"] < max_tokens
+    assert tokens["s1"] <= max_tokens
+    assert tokens["s1"] > payload["token_budget_effective"]
+    assert _served(payload) == ["g1"]
+    log.append(_gs_feedback(pack_id, helpful=["g1"]))
+    _, cf_payload = _build_logged(
+        SQLiteEventLog(tmp_path / "cf.db"), [semantic], budget, **margin
+    )
+    expected = set(_served(cf_payload)) - set(_served(payload))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+    assert report.replacement_servings == len(expected) == 0

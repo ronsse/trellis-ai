@@ -867,13 +867,14 @@ class GraphSelectionReplayReport(TrellisModel):
     #: recorded decisions before the servings were removed, so it is the
     #: walk and not a model of it.
     refilled_packs: int = 0
-    #: Affected packs that could not be re-run: no ``budget_trace`` or
-    #: ``budget_max_tokens``, or the re-run did not reproduce what was
-    #: recorded (a safety margin, index mode, graduated disclosure). Their
+    #: Affected packs that could not be re-run: no ``budget_trace`` or token
+    #: budget, the re-run did not reproduce what was recorded (index mode,
+    #: graduated disclosure), or the pack lost candidates at the ``max_items``
+    #: cut whose cost the event does not record. ``notes`` says which. Their
     #: withheld servings are still counted above; their freed budget is not.
     unmodelled_packs: int = 0
-    #: Candidates the original walk rejected on tokens that the freed budget
-    #: would admit. Never served, so ungraded.
+    #: Candidates the original build rejected, on ``max_items`` or on tokens,
+    #: that the freed slots and tokens would admit. Never served, so ungraded.
     replacement_servings: int = 0
     replacement_tokens: int = 0
     #: ``replacement_servings`` by the axis that collected each, from the
@@ -886,21 +887,41 @@ class GraphSelectionReplayReport(TrellisModel):
     notes: list[str] = Field(default_factory=list)
 
 
-def _walk(candidates: list[_Candidate], max_tokens: int) -> set[str]:
-    """The builder's budget walk: take in order, stop at the first overflow.
+def _walk(
+    candidates: list[_Candidate], max_tokens: int, max_items: int | None = None
+) -> set[str]:
+    """The builder's two-stage budget: the item cut, then the token walk.
 
-    Mirrors ``PackBuilder._apply_token_budget_tracked``, whose
+    Mirrors ``PackBuilder.build``: only the first ``max_items`` candidates
+    reach ``PackBuilder._apply_token_budget_tracked``, whose
     ``budget_exceeded`` latch means a small candidate behind an overflow is
-    never admitted.
+    never admitted. ``max_items=None`` leaves the item cut off.
     """
     admitted: set[str] = set()
     total = 0
-    for candidate in candidates:
+    for candidate in candidates[:max_items]:
         if total + candidate.served_tokens > max_tokens:
             break
         total += candidate.served_tokens
         admitted.add(candidate.item_id)
     return admitted
+
+
+#: Why an affected pack's walk could not be re-run, keyed by the tag
+#: :func:`_refill_pack` records and worded for the note that reports it.
+_UNMODELLED_REASONS = {
+    "no_budget_trace": "recorded no budget_trace",
+    "no_token_budget": "recorded no token budget",
+    "trace_incomplete": ("had an empty budget_trace or one missing a withheld item"),
+    "walk_not_reproduced": "did not reproduce the recorded walk",
+    "max_items_unbounded": (
+        "lost candidates at the max_items cut but recorded no budget_max_items"
+    ),
+    "max_items_unpriced": (
+        "lost candidates at the max_items cut whose token cost the event "
+        "does not record"
+    ),
+}
 
 
 def _graph_selection_notes(
@@ -910,17 +931,19 @@ def _graph_selection_notes(
     matched_servings: int,
     saw_stamp: bool,
     still_served_by_other_axis: int,
-    unmodelled_packs: int,
+    unmodelled_reasons: Mapping[str, int],
     unclassified: int,
 ) -> list[str]:
     """Caveats that travel with the graph-selection counts."""
     notes = [
         (
             "Counterfactual over the SAME packs and the SAME citations. The "
-            "freed budget is re-spent by re-running the pack's token walk "
-            "without the withheld servings; what it admits was never served, "
-            "so nobody graded it and it is counted, not scored. Rank order is "
-            "held fixed, and a withheld item's absence is not re-ranked."
+            "freed budget is re-spent by re-running the pack's two-stage "
+            "budget without the withheld servings: the max_items cut, then "
+            "the token walk against the effective budget. What it admits was "
+            "never served, so nobody graded it and it is counted, not "
+            "scored. Rank order is held fixed, and a withheld item's absence "
+            "is not re-ranked."
         ),
     ]
     if attributed_packs < MIN_ATTRIBUTED_PACKS:
@@ -951,12 +974,15 @@ def _graph_selection_notes(
             "withhold would let win. Under budget pressure that copy can miss "
             "the cut, so this is an upper bound on survivals."
         )
-    if unmodelled_packs:
+    if unmodelled_reasons:
+        why = "; ".join(
+            f"{count} {_UNMODELLED_REASONS.get(reason, reason)}"
+            for reason, count in sorted(unmodelled_reasons.items())
+        )
         notes.append(
-            f"{unmodelled_packs} affected pack(s) could not have their token "
-            "walk re-run (no budget_trace, no budget_max_tokens, or the "
-            "re-run did not reproduce the recorded walk). Their withheld "
-            "servings are counted; their freed budget is not."
+            f"{sum(unmodelled_reasons.values())} affected pack(s) could not "
+            f"have their token walk re-run ({why}). Their withheld servings "
+            "are counted; their freed budget is not."
         )
     if unclassified:
         notes.append(
@@ -981,6 +1007,7 @@ class _GraphSelectionTally:
     affected: int = 0
     refilled: int = 0
     unmodelled: int = 0
+    unmodelled_reasons: dict[str, int] = field(default_factory=dict)
     replacement_tokens: int = 0
     unclassified: int = 0
     saw_stamp: bool = False
@@ -1038,6 +1065,103 @@ def _withhold_pack(
     return withheld
 
 
+def _unmodelled(tally: _GraphSelectionTally, reason: str) -> None:
+    """Count one affected pack whose walk could not be re-run, and say why."""
+    tally.unmodelled += 1
+    tally.unmodelled_reasons[reason] = tally.unmodelled_reasons.get(reason, 0) + 1
+
+
+def _int_or_none(raw: object) -> int | None:
+    """``raw`` as an ``int`` when it is a real number, else ``None``."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return int(raw)
+
+
+def _max_items_cut(
+    rejected_rows: list[Mapping[str, Any]], max_items: int | None
+) -> list[_Candidate] | str:
+    """The candidates the ``max_items`` cut turned away, in rank order.
+
+    ``[]`` when it turned none away; otherwise the ``_UNMODELLED_REASONS``
+    tag when the cut cannot be re-run: no ``budget_max_items`` to re-apply, or
+    a row with no ``estimated_tokens``. The cut runs before the token walk, so
+    ``budget_trace`` never lists these items and their cost is recorded
+    nowhere else in the event.
+    """
+    cut_rows = [r for r in rejected_rows if r.get("reason") == "max_items"]
+    if not cut_rows:
+        return []
+    if max_items is None:
+        return "max_items_unbounded"
+    cut: list[_Candidate] = []
+    for row in cut_rows:
+        item_id = row.get("item_id")
+        tokens = _int_or_none(row.get("estimated_tokens"))
+        if not isinstance(item_id, str) or not item_id or tokens is None or tokens < 0:
+            return "max_items_unpriced"
+        cut.append(
+            _Candidate(
+                item_id=item_id,
+                served_tokens=tokens,
+                included=False,
+                verdict="unjudged",
+                title=None,
+            )
+        )
+    return cut
+
+
+@dataclass(frozen=True)
+class _RefillPlan:
+    """What a pack's two-stage budget is re-run over."""
+
+    #: The walk's candidates, in walk order, as ``budget_trace`` records them.
+    candidates: list[_Candidate]
+    #: The candidates the ``max_items`` cut turned away, in rank order.
+    cut: list[_Candidate]
+    #: The budget the builder walked against, safety margin applied.
+    budget: int
+    max_items: int | None
+
+
+def _plan_refill(
+    payload: Mapping[str, Any],
+    rejected_rows: list[Mapping[str, Any]],
+    withheld: set[str],
+    verdicts: tuple[set[str], set[str]],
+) -> _RefillPlan | str:
+    """The inputs of the re-run, or the ``_UNMODELLED_REASONS`` tag saying why not.
+
+    The re-run is trusted only if, before anything is removed, it reproduces
+    the walk the pack recorded.
+    """
+    candidates = _candidates(payload, verdicts)
+    if candidates is None:
+        return "no_budget_trace"
+    # The builder walks against ``_effective_token_budget`` (the safety
+    # margin applied), which it records beside the nominal ``max_tokens``.
+    budget = _int_or_none(payload.get("token_budget_effective"))
+    if budget is None:
+        budget = _int_or_none(payload.get("budget_max_tokens"))
+    if budget is None:
+        return "no_token_budget"
+    max_items = _int_or_none(payload.get("budget_max_items"))
+    if max_items is not None and max_items < 1:
+        max_items = None
+    if not candidates or not withheld <= {c.item_id for c in candidates}:
+        # A re-run that cannot even see what it removes proves nothing.
+        return "trace_incomplete"
+    if _walk(candidates, budget, max_items) != {
+        c.item_id for c in candidates if c.included
+    }:
+        return "walk_not_reproduced"
+    cut = _max_items_cut(rejected_rows, max_items)
+    if isinstance(cut, str):
+        return cut
+    return _RefillPlan(candidates, cut, budget, max_items)
+
+
 def _refill_pack(
     payload: Mapping[str, Any],
     rows: list[Mapping[str, Any]],
@@ -1048,26 +1172,24 @@ def _refill_pack(
     verdicts: tuple[set[str], set[str]],
     tally: _GraphSelectionTally,
 ) -> None:
-    """Re-run one pack's token walk without ``withheld`` and tally what it admits.
+    """Re-run one pack's two-stage budget without ``withheld``; tally what it admits.
 
-    The re-run is trusted only if, before anything is removed, it reproduces
-    the walk the pack recorded; otherwise the pack counts as unmodelled.
+    The builder cuts to ``max_items`` first and walks tokens second, so a
+    withheld serving frees an item slot as well as tokens: the candidates the
+    cut turned away join the pool behind the trace, in rank order, and the
+    walk runs against the effective budget the builder used. A pack that
+    :func:`_plan_refill` cannot vouch for counts as unmodelled.
     """
-    candidates = _candidates(payload, verdicts)
-    raw_budget = payload.get("budget_max_tokens")
-    if (
-        candidates is None
-        or not isinstance(raw_budget, int | float)
-        or _walk(candidates, int(raw_budget))
-        != {c.item_id for c in candidates if c.included}
-    ):
-        tally.unmodelled += 1
+    plan = _plan_refill(payload, rejected_rows, withheld, verdicts)
+    if isinstance(plan, str):
+        _unmodelled(tally, plan)
         return
-    budget = int(raw_budget)
+    budget, max_items = plan.budget, plan.max_items
     strategy_by_rejected = {
         r["item_id"]: r.get("strategy_source")
         for r in rejected_rows
-        if r.get("reason") == "token_budget" and isinstance(r.get("item_id"), str)
+        if r.get("reason") in ("token_budget", "max_items")
+        and isinstance(r.get("item_id"), str)
     }
     # Only served rows record ``graph_selection``, but one graph search stamps
     # every item it returns alike, so a pack whose served graph rows agree on
@@ -1080,7 +1202,7 @@ def _refill_pack(
     pack_selection = next(iter(served_stamps)) if len(served_stamps) == 1 else None
 
     pool: list[_Candidate] = []
-    for candidate in candidates:
+    for candidate in [*plan.candidates, *plan.cut]:
         if candidate.item_id in withheld:
             continue
         if (
@@ -1096,7 +1218,7 @@ def _refill_pack(
         pool.append(candidate)
 
     tally.refilled += 1
-    admitted = _walk(pool, budget)
+    admitted = _walk(pool, budget, max_items)
     for candidate in pool:
         if candidate.included or candidate.item_id not in admitted:
             continue
@@ -1207,7 +1329,7 @@ def replay_graph_selection(
             matched_servings=tally.matched,
             saw_stamp=tally.saw_stamp,
             still_served_by_other_axis=tally.other_axis,
-            unmodelled_packs=tally.unmodelled,
+            unmodelled_reasons=tally.unmodelled_reasons,
             unclassified=tally.unclassified,
         ),
     )

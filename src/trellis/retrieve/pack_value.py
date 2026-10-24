@@ -770,6 +770,8 @@ class _GraphSelectionAxis:
     ) -> None:
         # ``(pack, item)`` is the serving. A pack dedups by id, so a repeat
         # is not expected; skipping it keeps the unit true if one appears.
+        # The token axes (``_Axis``) still charge such a repeat, so the two
+        # would diverge on one; builder dedup makes that unreachable today.
         if (pack_id, item_id) in self._seen:
             return
         self._seen.add((pack_id, item_id))
