@@ -963,7 +963,12 @@ def run_advisory_fitness_loop(
         # Score suppressed advisories too so they can be restored when
         # new evidence shifts their fitness back above the threshold.
         advisory = advisory_store.get(score.advisory_id)
-        if advisory is None:
+        # A row retired by rule is skipped outright, never scored: the
+        # generator withdrew its keyword (a function word, one in too many
+        # intents), and the blend below would lift its still-healthy
+        # confidence over the restore bar and revive it in the same nightly
+        # cycle. The generator un-retires it if its own rule stops holding.
+        if advisory is None or advisory.retired_by:
             continue
 
         from trellis.schemas.advisory import AdvisoryStatus  # noqa: PLC0415

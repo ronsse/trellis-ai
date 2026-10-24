@@ -34,6 +34,7 @@ from trellis.schemas.advisory import (
     Advisory,
     AdvisoryCategory,
     AdvisoryEvidence,
+    AdvisoryStatus,
 )
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
@@ -3770,3 +3771,72 @@ class TestWorkerLlmRouting:
             assert payload["setting"] == "llm.routes.enrichment"
         else:
             assert "(defined: none)" in plain(result.output)
+
+
+class TestWorkerCurateRetiresQueryRows:
+    """#960 — the nightly cycle reports the QUERY rows its filter retired."""
+
+    def test_a_function_word_row_is_suppressed_and_counted(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        path = Path(temp_stores.stores_dir) / ADVISORY_FILENAME
+        row = Advisory(
+            advisory_id="adv-query-seeded",
+            category=AdvisoryCategory.QUERY,
+            confidence=0.6,
+            message="seeded",
+            evidence=AdvisoryEvidence(
+                sample_size=7,
+                success_rate_with=0.8,
+                success_rate_without=0.2,
+                effect_size=0.6,
+            ),
+            scope="global",
+            metadata={"keyword": "for"},
+        )
+        AdvisoryStore(path).put(row)
+        event_log = temp_stores.operational.event_log
+        for i in range(2):
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=f"q-pack-{i}",
+                entity_type="pack",
+                payload={
+                    "intent": "widget for rollout",
+                    "domain": "wc-test",
+                    "injected_items": [],
+                    "injected_item_ids": [],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=f"q-pack-{i}",
+                entity_type="pack",
+                payload={"pack_id": f"q-pack-{i}", "success": True},
+            )
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+                "--skip-noise-tags",
+                "--skip-learning",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["advisory_query_rows_retired"] == 1
+        # Two packs: too few for the off-by-default frequency rule to preview.
+        assert data["advisory_query_df_preview"] is None
+        after = AdvisoryStore(path).get(row.advisory_id)
+        assert after is not None
+        assert after.status == AdvisoryStatus.SUPPRESSED
+        assert after.retired_by is not None

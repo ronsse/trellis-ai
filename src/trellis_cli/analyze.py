@@ -48,7 +48,10 @@ from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
 from trellis.ops.serving_builds import ServingBuildsReport
 from trellis.retrieve.advisory_generator import (
+    DEFAULT_MAX_KEYWORD_DOC_FREQ,
+    SUGGESTED_MAX_KEYWORD_DOC_FREQ,
     AdvisoryGenerator,
+    AdvisoryReport,
     resolve_advisory_thresholds,
 )
 from trellis.retrieve.effectiveness import (
@@ -2013,6 +2016,50 @@ def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -
     raise typer.Exit(code=EXIT_STORE)
 
 
+def _check_keyword_df(value: float | None) -> None:
+    """Reject a ``--max-keyword-df`` the generator would refuse, as a usage error."""
+    if value is not None and not 0.0 < value <= 1.0:
+        msg = f"must be greater than 0 and at most 1, got {value}"
+        raise typer.BadParameter(msg, param_hint="--max-keyword-df")
+
+
+def _render_query_filter(report: AdvisoryReport) -> None:
+    """Print the QUERY-keyword filter's counts, when it did anything."""
+    withheld = report.query_keywords_withheld
+    if any(withheld.values()):
+        console.print(
+            "  Query keywords withheld:"
+            f" {withheld['stop_list']} stop-list,"
+            f" {withheld['document_frequency']} document frequency"
+        )
+    preview = report.query_keyword_df_preview
+    if report.query_keyword_df_rule == "off":
+        # Said plainly, not left as a null: an owner reading this run decides
+        # whether to turn the frequency rule on.
+        console.print(
+            "  Document-frequency rule: off"
+            + (
+                f" (at {preview['ceiling']} it would withhold"
+                f" {preview['keywords_would_withhold']} keywords and suppress"
+                f" {preview['rows_would_retire']} active rows;"
+                f" enable with --max-keyword-df {preview['ceiling']})"
+                if preview
+                else " (window too small to preview it)"
+            )
+        )
+    elif report.query_keyword_df_rule == "stood_down":
+        console.print("  Document-frequency rule: stood down (window too small)")
+    retired = report.query_rows_retired
+    if any(retired.values()) or report.query_rows_unretired:
+        console.print(
+            "  Query rows suppressed (keyword no longer emitted):"
+            f" {retired['stop_list']} stop-list,"
+            f" {retired['document_frequency']} document frequency,"
+            f" {retired['unnormalised_keyword']} edge punctuation;"
+            f" {report.query_rows_unretired} restored"
+        )
+
+
 @analyze_app.command("generate-advisories")
 def generate_advisories(
     days: int = typer.Option(30, help="Days of history to analyze"),
@@ -2025,6 +2072,15 @@ def generate_advisories(
         None,
         "--min-effect",
         help="Min effect size to emit an advisory; defaults to the configured setting",
+    ),
+    max_keyword_df: float | None = typer.Option(
+        DEFAULT_MAX_KEYWORD_DOC_FREQ,
+        "--max-keyword-df",
+        help=(
+            "Skip a query keyword found in more than this share of the analysed"
+            " packs' intents (0-1). Off by default; the report previews what"
+            f" {SUGGESTED_MAX_KEYWORD_DOC_FREQ} would withhold."
+        ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
@@ -2039,6 +2095,7 @@ def generate_advisories(
     that correlate with success or failure, then stores deterministic
     advisories that can be delivered alongside future context packs.
     """
+    _check_keyword_df(max_keyword_df)
     event_log = get_event_log()
     # Off the cached registry (:func:`_get_registry`), not
     # ``get_data_dir()``: that builds a second ``StoreRegistry`` and
@@ -2066,6 +2123,7 @@ def generate_advisories(
                 store,
                 min_sample_size=effective_min_sample,
                 min_effect_size=effective_min_effect,
+                max_keyword_doc_freq=max_keyword_df,
             )
             report = generator.generate(days=days)
             if _meta_record.enabled and report.advisories_generated > 0:
@@ -2111,6 +2169,7 @@ def generate_advisories(
                 "  Findings refused (no comparison arm):"
                 f" {report.findings_refused_no_comparison_arm}"
             )
+        _render_query_filter(report)
         if report.coverage.note:
             console.print(f"  [yellow]{report.coverage.note}[/yellow]")
 
