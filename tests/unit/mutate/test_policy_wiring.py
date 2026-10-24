@@ -1540,23 +1540,171 @@ class TestPolicyScopeHook:
             enforcement=enforcement,
         )
 
-    def test_a_policy_that_reads_the_target_type_gets_the_scope_asked(self) -> None:
-        handler = _ScopedHandler()
-        gate = DefaultPolicyGate(
+    @staticmethod
+    def _typed(action: str, enforcement: Enforcement) -> DefaultPolicyGate:
+        """A gate with one ``precedent`` policy holding one rule."""
+        return DefaultPolicyGate(
             [
-                self._warn(
+                _policy(
                     level="entity_type",
                     value="precedent",
-                    enforcement=Enforcement.ENFORCE,
+                    rules=[PolicyRule(operation="redaction.apply", action=action)],  # type: ignore[arg-type]
+                    enforcement=enforcement,
                 )
             ]
         )
+
+    def test_a_policy_that_can_deny_gets_the_scope_asked(self) -> None:
+        handler = _ScopedHandler()
+        gate = self._typed("deny", Enforcement.ENFORCE)
 
         result = self._run(handler, gate)
 
         assert handler.asked == 1
         assert result.status == CommandStatus.REJECTED
         assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+
+    @pytest.mark.parametrize(
+        ("action", "enforcement"),
+        [("deny", Enforcement.ENFORCE), ("require_approval", Enforcement.ENFORCE)],
+    )
+    def test_an_unreadable_scope_refuses_when_the_gate_could_deny(
+        self, action: str, enforcement: Enforcement
+    ) -> None:
+        log = _RecordingEventLog()
+        handler = _ScopedHandler()
+        result = MutationExecutor(
+            event_log=log,
+            handlers={Operation.REDACTION_APPLY: handler},
+            policy_gate=self._typed(action, enforcement),
+        ).execute(_redaction_command())
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+        assert "precedent set unreadable" not in result.message
+        (event,) = log.events
+        assert event["payload"]["reason"] == "policy_scope_unresolved"
+        assert "policy_scope_unevaluated" not in event["payload"]
+
+    def test_one_blocking_policy_among_warnings_still_refuses(self) -> None:
+        gate = DefaultPolicyGate(
+            [
+                *self._typed("warn", Enforcement.ENFORCE)._policies,
+                *self._typed("deny", Enforcement.ENFORCE)._policies,
+            ]
+        )
+
+        result = self._run(_ScopedHandler(), gate)
+
+        assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+
+    @pytest.mark.parametrize(
+        ("action", "enforcement"),
+        [
+            ("warn", Enforcement.ENFORCE),
+            ("warn", Enforcement.WARN),
+            ("deny", Enforcement.WARN),
+            ("deny", Enforcement.AUDIT_ONLY),
+            ("require_approval", Enforcement.WARN),
+        ],
+    )
+    def test_an_unreadable_scope_proceeds_when_the_gate_could_only_warn(
+        self, action: str, enforcement: Enforcement
+    ) -> None:
+        log = _RecordingEventLog()
+        handler = _ScopedHandler()
+
+        with capture_logs() as logs:
+            result = MutationExecutor(
+                event_log=log,
+                handlers={Operation.REDACTION_APPLY: handler},
+                policy_gate=self._typed(action, enforcement),
+            ).execute(_redaction_command())
+
+        assert handler.asked == 1
+        assert result.status == CommandStatus.SUCCESS
+        (event,) = log.events
+        assert event["payload"]["policy_scope_unevaluated"] == "warn_only"
+        (line,) = (e for e in logs if e["event"] == "policy_scope_unevaluated")
+        assert line["log_level"] == "warning"
+        assert line["error_type"] == "StoreError"
+        assert "precedent set unreadable" not in repr(line)
+
+    def test_a_readable_scope_under_a_warn_only_gate_is_evaluated_and_unmarked(
+        self,
+    ) -> None:
+        log = _RecordingEventLog()
+        gate = self._typed("warn", Enforcement.ENFORCE)
+        (policy,) = gate._policies
+
+        result = MutationExecutor(
+            event_log=log,
+            handlers={Operation.REDACTION_APPLY: _ScopedHandler([_probe("p1")])},
+            policy_gate=gate,
+        ).execute(_redaction_command())
+
+        assert result.status == CommandStatus.SUCCESS
+        assert [w for w in result.warnings if policy.policy_id in w]
+        (event,) = log.events
+        assert "policy_warnings" in event["payload"]
+        assert "policy_scope_unevaluated" not in event["payload"]
+
+    def test_the_unevaluated_key_rides_a_failed_write_and_a_duplicate(self) -> None:
+        class FailingScoped(_ScopedHandler):
+            def handle(self, command: Command) -> tuple[str | None, str]:
+                msg = "write failed"
+                raise StoreError(msg, store="graph")
+
+        log = _RecordingEventLog()
+        gate = self._typed("warn", Enforcement.ENFORCE)
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.REDACTION_APPLY: FailingScoped()},
+            policy_gate=gate,
+        )
+        failed = executor.execute(_redaction_command())
+        assert failed.status == CommandStatus.FAILED
+
+        keyed = _redaction_command().model_copy(update={"idempotency_key": "k1"})
+        ok = MutationExecutor(
+            event_log=log,
+            handlers={Operation.REDACTION_APPLY: _ScopedHandler()},
+            policy_gate=gate,
+        )
+        assert ok.execute(keyed).status == CommandStatus.SUCCESS
+        assert ok.execute(keyed).status == CommandStatus.DUPLICATE
+
+        assert len(log.events) == 3
+        for event in log.events:
+            assert event["payload"]["policy_scope_unevaluated"] == "warn_only"
+
+    def test_a_gate_with_scopes_but_not_could_deny_is_asked_as_before(self) -> None:
+        """Only a gate that says it cannot deny gets the tolerant path."""
+
+        class ScopesOnly:
+            def check(self, command: Command) -> tuple[bool, str, list[str]]:
+                return True, "", []
+
+            def scopes_by_target_type(self, operation: str) -> bool:
+                return True
+
+        result = self._run(_ScopedHandler(), ScopesOnly())
+
+        assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+
+    def test_a_gate_that_says_it_cannot_deny_proceeds_without_scopes_by_target(
+        self,
+    ) -> None:
+        class CannotDeny:
+            def check(self, command: Command) -> tuple[bool, str, list[str]]:
+                return True, "", []
+
+            def could_deny_by_target_type(self, operation: str) -> bool:
+                return False
+
+        result = self._run(_ScopedHandler(), CannotDeny())
+
+        assert result.status == CommandStatus.SUCCESS
 
     def test_a_gate_that_does_not_say_is_asked_as_before(self) -> None:
         """A third-party gate without the capability keeps today's behaviour."""

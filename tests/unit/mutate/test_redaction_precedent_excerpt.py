@@ -679,6 +679,65 @@ class TestFailureOrder:
         assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
         assert graph.get_node("doc-a") is None
 
+    def test_a_row_whose_write_fails_after_its_vector_delete_is_named(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not blanked, so not in ``documents_blanked``; its vector is gone."""
+        _node(registry, "doc-a")
+        _put_doc(registry, "doc-a", chunk_count=2)
+        _put_doc(registry, "doc-a#chunk-0")
+        _put_doc(registry, "doc-a#chunk-1")
+        vectors = registry.knowledge.vector_store
+        for doc_id in ("doc-a#chunk-0", "doc-a#chunk-1"):
+            vectors.upsert(doc_id, [0.1, 0.2, 0.3])
+        store = registry.knowledge.document_store
+        real_put = store.put
+
+        def failing_put(doc_id: str | None, *args: Any, **kwargs: Any) -> str:
+            if doc_id == "doc-a#chunk-1":
+                msg = "document write failed"
+                raise StoreError(msg, store="document")
+            return real_put(doc_id, *args, **kwargs)
+
+        monkeypatch.setattr(store, "put", failing_put)
+        with capture_logs() as logs, pytest.raises(StoreError, match="document write"):
+            _redact(registry, "doc-a")
+
+        (blanked,) = (
+            e
+            for e in logs
+            if e["event"] == "redaction.documents_blanked_before_failure"
+        )
+        assert blanked["documents_blanked"] == ["doc-a#chunk-0"]
+        assert blanked["documents_vector_deleted_not_blanked"] == ["doc-a#chunk-1"]
+        assert vectors.get("doc-a#chunk-1") is None
+        unblanked = store.get("doc-a#chunk-1")
+        assert unblanked is not None
+        assert unblanked["content"]
+
+    def test_a_failed_purge_names_no_row_that_lost_only_its_vector(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        _put_doc(registry, "doc-a")
+        real_delete = graph.delete_node
+        monkeypatch.setattr(
+            graph,
+            "delete_node",
+            lambda node_id: False if node_id == "doc-a" else real_delete(node_id),
+        )
+
+        with capture_logs() as logs, pytest.raises(NotFoundError):
+            _redact(registry, "doc-a")
+
+        (blanked,) = (
+            e
+            for e in logs
+            if e["event"] == "redaction.documents_blanked_before_failure"
+        )
+        assert blanked["documents_vector_deleted_not_blanked"] == []
+
     def test_a_failed_purge_logs_what_the_run_had_already_done(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1010,6 +1069,45 @@ class TestPolicyScope:
         assert "graph unavailable" not in result.message
         assert graph.get_node("doc-a") is not None
         assert _served(registry) == ["doc-a"]
+
+    def test_an_unreadable_precedent_set_does_not_refuse_a_warn_only_policy(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gate that can only warn must not block what it could never block."""
+        _node(registry, "doc-a")
+        _put_doc(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        graph = registry.knowledge.graph_store
+        real_search = graph.search_nodes
+        reads: list[int] = []
+
+        def unreadable_once(**kwargs: Any) -> Any:
+            # The policy-scope read is the first; the scrub's own read, which
+            # runs inside the handler, is not the failure under test.
+            reads.append(1)
+            if len(reads) == 1:
+                msg = "graph unavailable"
+                raise StoreError(msg, store="graph")
+            return real_search(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", unreadable_once)
+        executor = self._executor(
+            registry, scope="precedent", action="warn", enforcement=Enforcement.ENFORCE
+        )
+
+        result = executor.execute(self._command())
+
+        assert result.status == CommandStatus.SUCCESS
+        assert graph.get_node("doc-a") is None
+        assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
+        (executed,) = (
+            event
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED
+            )
+            if event.payload["operation"] == "redaction.apply"
+        )
+        assert executed.payload["policy_scope_unevaluated"] == "warn_only"
 
     def test_an_empty_gate_neither_walks_the_set_twice_nor_refuses(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
