@@ -131,7 +131,10 @@ class EventType(StrEnum):
     #: target is a document (or chunk) that promoted precedents copied an
     #: excerpt from, ``scrubbed_precedent_ids`` / ``scrubbed_precedent_count``
     #: name the precedents scrubbed (ids and count only); both keys are
-    #: absent when none were.
+    #: absent when none were. ``documents_tombstoned`` names the document
+    #: rows blanked (the target's own and its ``#chunk-N`` fragments) and
+    #: ``precedent_vectors_to_reembed`` the scrubbed precedents whose vector
+    #: row was deleted and not re-embedded; each is absent when empty.
     REDACTION_APPLIED = "redaction.applied"
 
     #: Emitted by :class:`~trellis.mutate.handlers.RetentionPruneHandler`

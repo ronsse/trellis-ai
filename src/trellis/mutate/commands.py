@@ -114,7 +114,9 @@ POLICY_REFUSAL_REASONS = frozenset({"policy_violation"})
 #: (:func:`trellis.mutate.name_aliases._classify_result`) classify a
 #: reason exactly once; a reason added to the pipeline is categorized for
 #: both callers by changing it here.
-STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
+STORE_REFUSAL_REASONS = frozenset(
+    {"degraded_store_write", "stale_store_write", "policy_scope_unresolved"}
+)
 
 
 class CommandResult(VersionedModel):
