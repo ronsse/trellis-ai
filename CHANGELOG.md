@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`analyze value` splits citations by `graph_selection`; `analyze replay
+  --graph-selection` prices withholding one value (#961, part).** `value`
+  gains a `by_graph_selection` block (JSON and a text table) counting
+  per-`(pack_id, item_id)` servings in `recency_window`, `seeded` and
+  `caller_seeded` buckets, plus `(graph, no stamp)` and `(not graph
+  axis)` so the buckets sum to the new `attributed_servings`; counts
+  print for every bucket and only the rates of a bucket under five
+  attributed packs are refused. `replay --graph-selection VALUE`
+  reports the matched servings with their recorded helpful, unhelpful
+  and no-verdict counts, and, which `--class-prior` cannot, what the
+  freed budget would have admitted, by re-running each pack's token
+  walk only after it reproduces the recorded one (otherwise the pack is
+  counted `unmodelled`). Holdout packs are dropped; both are read-only,
+  and the replay records a meta-Activity unless `--no-meta-trace` is
+  given, like its siblings. The decision the issue's third box asks for
+  stays open.
 - **Packs record `retrieval_phase` and `refresh`.** `get_context`,
   `search`, `get_objective_context`, `get_task_context`, and
   `get_sectioned_context` take an optional `retrieval_phase` —
