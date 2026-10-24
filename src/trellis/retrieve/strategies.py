@@ -244,10 +244,11 @@ GRAPH_CALLER_SEED_IDS_KEY = "caller_seed_ids"
 #: order. That is the whole condition, compared as ``prioritised[:limit]``
 #: against ``nodes[:limit]``: a reorder confined to rows beyond the kept
 #: window does not stamp. Without the rule the slice keeps the first ``limit``
-#: rows of ``(depth, node_id)`` order (SQLite, Postgres) or of an unordered
-#: set (the Bolt backends), and a hub seed loses every precedent whose id
-#: sorts late (#949). Absent, never ``False``, from an item the rule did not
-#: touch, so that pack is byte-identical to what shipped before the rule.
+#: rows of ``(depth, node_id)`` order, which every backend returns (a contract
+#: case pins it, #958; the Bolt backends returned an unordered set before), and
+#: a hub seed loses every precedent whose id sorts late (#949). Absent, never
+#: ``False``, from an item the rule did not touch, so that pack is
+#: byte-identical to what shipped before the rule.
 #:
 #: A key of its own, not a value of ``graph_selection``: that one says who
 #: chose the seeds (:data:`GRAPH_SELECTION_SEEDED` /
@@ -425,7 +426,7 @@ def _select_for_scoring(
     """Slice the candidates to ``limit``, prioritising a seeded overflow first.
 
     A seeded neighbourhood larger than ``limit`` is sliced, and the store's
-    order is ``(depth, node_id)`` or no order at all, so the rows that
+    order is ``(depth, node_id)``, so the rows that
     survive are the ones that happen to sort first: a hub seed lost its
     promoted precedents to that (#949). So the rule runs only when the slice
     would drop something, and only on a seeded branch (derived or
@@ -1802,10 +1803,16 @@ class GraphSearch(SearchStrategy):
         derived = self._seeds_from_extractor(query)
         seed_ids = list(dict.fromkeys([*named, *derived]))
         if named and len(seed_ids) > DEFAULT_MAX_SEEDS:
+            # ``named`` is already de-duplicated; ``derived`` is not, and a
+            # derived id may repeat a named one, so the merged size is the
+            # number of distinct BFS roots and ``dropped`` is what the cap cut
+            # from it, neither of which the two raw counts can give.
             logger.warning(
                 "graph_seeds_truncated",
                 named=len(named),
                 derived=len(derived),
+                merged=len(seed_ids),
+                dropped=len(seed_ids) - DEFAULT_MAX_SEEDS,
                 kept=DEFAULT_MAX_SEEDS,
             )
             seed_ids = seed_ids[:DEFAULT_MAX_SEEDS]
