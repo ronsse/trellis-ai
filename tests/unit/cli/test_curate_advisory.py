@@ -213,6 +213,8 @@ class TestRestoreOne:
         assert result.exit_code == EXIT_OK, result.output
         assert "[/oops]" in plain(result.stdout)
         assert "[bold]this[/bold]" in plain(result.stdout)
+        # The category's own brackets are markup too, not just the values.
+        assert "[query]" in plain(result.stdout)
 
 
 class TestRestoreByRule:

@@ -134,9 +134,9 @@ def _emit_restored_event(before: Advisory, reason: str | None) -> bool:
 
     The store write already landed and is the source of truth; the event is an
     audit side effect that must not turn a restored row into a failed command.
-    The failure is not silent, though: the report counts it, because an
-    ``ADVISORY_RESTORED`` row the operator expected is what ``trellis analyze``
-    reads back.
+    The failure is not silent, though: the report counts it, because the
+    advisory-fitness time series counts ``ADVISORY_RESTORED`` rows, and one the
+    operator expected would otherwise be missing without a trace.
     """
     payload: dict[str, Any] = {
         "advisory_id": before.advisory_id,
@@ -219,9 +219,9 @@ def _render_text(report: dict[str, Any], rows: list[Advisory]) -> None:
         message = advisory.message
         if len(message) > _MESSAGE_WIDTH:
             message = message[: _MESSAGE_WIDTH - 1] + "…"
+        category = escape(f"[{advisory.category.value}]")
         console.print(
-            f"  {escape(advisory.advisory_id)}  [{escape(advisory.category.value)}]  "
-            f"{escape(message)}",
+            f"  {escape(advisory.advisory_id)}  {category}  {escape(message)}",
             soft_wrap=True,
         )
     if report["audit_events_failed"]:

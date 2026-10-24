@@ -2385,5 +2385,14 @@ def test_the_published_rule_names_are_the_ones_the_generator_writes() -> None:
     ``retired_rule``; if the two spellings drift, a bulk restore either refuses a
     rule the generator writes or accepts one it never does.
     """
-    assert set(RETIRED_RULES) == {_RULE_STOP_LIST, _RULE_DOC_FREQ, _RULE_UNNORMALISED}
+    from trellis.retrieve import advisory_generator
+
+    # Every ``_RULE_*`` constant, so a fourth rule cannot be stamped unpublished.
+    written = {
+        value
+        for name, value in vars(advisory_generator).items()
+        if name.startswith("_RULE_") and isinstance(value, str)
+    }
+    assert written >= {_RULE_STOP_LIST, _RULE_DOC_FREQ, _RULE_UNNORMALISED}
+    assert set(RETIRED_RULES) == written
     assert len(RETIRED_RULES) == len(set(RETIRED_RULES))
