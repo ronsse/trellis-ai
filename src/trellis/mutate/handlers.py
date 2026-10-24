@@ -13,6 +13,7 @@ import structlog
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
     RESERVED_DOCUMENT_ID_CODE,
     is_promoted_precedent_document,
     reserved_document_id_message,
@@ -591,6 +592,10 @@ class PrecedentPromoteHandler:
                         "precedent_document_skipped_outside_namespace",
                         target_id=command.target_id,
                     )
+                    # The log line is not a record: the event and the result
+                    # say it too, so a reader of either learns the node has no
+                    # row for keyword or semantic retrieval to serve.
+                    payload["document_row"] = "skipped_outside_namespace"
 
         event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
@@ -599,7 +604,10 @@ class PrecedentPromoteHandler:
             entity_type=args.get("entity_type", "trace"),
             payload=payload,
         )
-        return event.event_id, f"Precedent promoted: {args['title']}"
+        message = f"Precedent promoted: {args['title']}"
+        if payload.get("document_row") == "skipped_outside_namespace":
+            message += f" (no document row: id outside {PRECEDENT_ENTITY_ID_PREFIX})"
+        return event.event_id, message
 
 
 #: Requester identity :mod:`trellis.learning.precedent_auto_demote`'s

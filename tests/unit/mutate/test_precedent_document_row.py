@@ -35,7 +35,7 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.mutate import build_curate_executor, build_evidence_ingest_command
-from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
 from trellis.mutate.handlers import (
     PrecedentDemoteHandler,
     PrecedentReinstateHandler,
@@ -235,11 +235,11 @@ class TestPromotionOutsideTheNamespace:
 
     OUTSIDE_ID = "precedent-by-hand"
 
-    def _promote_outside(self, registry: StoreRegistry) -> CommandStatus:
+    def _promote_outside(self, registry: StoreRegistry) -> CommandResult:
         registry.knowledge.graph_store.upsert_node(
             self.OUTSIDE_ID, "precedent", {"name": TITLE, "description": DESCRIPTION}
         )
-        result = build_curate_executor(registry).execute(
+        return build_curate_executor(registry).execute(
             Command(
                 operation=Operation.PRECEDENT_PROMOTE,
                 args={
@@ -252,12 +252,11 @@ class TestPromotionOutsideTheNamespace:
                 requested_by="test",
             )
         )
-        return result.status
 
     def test_a_precedent_typed_target_outside_it_gets_the_event_and_no_row(
         self, registry: StoreRegistry, embed_on: None
     ) -> None:
-        assert self._promote_outside(registry) == CommandStatus.SUCCESS
+        assert self._promote_outside(registry).status == CommandStatus.SUCCESS
 
         assert registry.knowledge.document_store.get(self.OUTSIDE_ID) is None
         assert registry.knowledge.vector_store.get(self.OUTSIDE_ID) is None
@@ -265,6 +264,21 @@ class TestPromotionOutsideTheNamespace:
             event_type=EventType.PRECEDENT_PROMOTED
         )
         assert [e.entity_id for e in events] == [self.OUTSIDE_ID]
+
+    def test_the_skip_is_recorded_in_the_event_and_the_result(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Defective subject: drop the ``document_row`` payload key and both
+        assertions fail; the warning alone reaches no event reader."""
+        result = self._promote_outside(registry)
+
+        assert result.message.endswith(
+            "(no document row: id outside precedent://learning/)"
+        )
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED
+        )
+        assert event.payload["document_row"] == "skipped_outside_namespace"
 
     def test_the_skip_is_logged_where_the_default_cli_shows_it(
         self, registry: StoreRegistry
