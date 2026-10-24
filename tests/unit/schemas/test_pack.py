@@ -320,6 +320,18 @@ class TestBudgetStep:
         assert b.item_tokens == 25
         assert b.running_total == 25
         assert b.included is True
+        # Unset reads as "item_tokens is the walk's charge".
+        assert b.walk_tokens is None
+
+    def test_walk_tokens_round_trips(self) -> None:
+        b = BudgetStep(
+            item_id="d1",
+            item_tokens=9,
+            running_total=9,
+            included=True,
+            walk_tokens=25,
+        )
+        assert BudgetStep(**b.model_dump()).walk_tokens == 25
 
 
 class TestRetrievalReportDecisionTrail:

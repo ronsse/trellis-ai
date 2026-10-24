@@ -24,6 +24,32 @@ All notable changes to Trellis will be documented in this file.
   truncated (an integral float such as `8000.0` still reads), with the
   unmodelled-pack note no longer saying the token walk failed when it was
   the item cut.
+- **`BudgetStep.walk_tokens`: the replay refill walks the prices the builder's
+  walk charged, not the ones disclosure re-priced to (#970).** Graduated
+  disclosure (on by default, `DEFAULT_BODY_ITEMS=12` against `max_items=50`)
+  rewrites tail excerpts after the walk, and `_recharge_budget_trace` then
+  re-prices the served `budget_trace` steps to pointers, while a
+  `max_items`-cut row stays priced at the walk's full charge. The refill
+  summed the two, so removing a withheld item freed more budget than it had
+  and it admitted a row the builder's own counterfactual build turns away.
+  Whenever disclosure demotes anything the builder now keeps the walk's
+  charge on every included step as `walk_tokens` (additive; absent when
+  nothing was demoted, where `item_tokens` is the walk's charge). Both replay
+  arms walk `walk_tokens` when present, so the policy replay (`--body-items`
+  and siblings) also prices a demoted row at its body, where it had read the
+  pointer's price as the body. Its as-served baseline still reads
+  `item_tokens`, what was paid. An event written before the field, whose
+  `disclosure.pointer_item_ids` names an included step with no `walk_tokens`,
+  cannot have its walk rebuilt: the graph-selection replay counts that pack
+  unmodelled as `disclosure_repriced` rather than guessing. The policy replay
+  keeps pricing such events as before, a known approximation. Two smaller
+  gate fixes: a pack whose `token_budget_effective` is present but
+  unreadable is excluded from the policy replay (counted under
+  `packs_without_budget_trace`) when the policy refills, instead of walking a
+  budget of 0; and a `budget_trace` step with a missing, fractional, `nan` or
+  `inf` `item_tokens`/`walk_tokens` refuses its pack (`trace_unreadable`)
+  instead of aborting the replay on `int()` or reading a missing charge as 0.
+  `docs/api/v1.yaml` does not expose `BudgetStep`, so the spec is unchanged.
 - **`analyze value` splits citations by `graph_selection`; `analyze replay
   --graph-selection` prices withholding one value (#961, part).** `value`
   gains a `by_graph_selection` block (JSON and a text table) counting

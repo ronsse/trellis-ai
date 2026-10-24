@@ -130,6 +130,17 @@ class BudgetStep(VersionedModel):
     item_tokens: int
     running_total: int
     included: bool
+    #: The charge the budget walk made for this step, recorded only when
+    #: ``item_tokens`` is no longer that charge. Graduated disclosure rewrites
+    #: tail excerpts after the walk and the builder then re-prices the served
+    #: steps at what the pack carries, so ``item_tokens`` is the cost paid and
+    #: this is the cost the walk saw. A counterfactual that re-runs the walk
+    #: (``trellis analyze replay``) needs the second: a ``max_items``-cut row
+    #: is priced at the walk's charge, so mixing the two over-admits. Set on
+    #: every included step of a pack disclosure demoted something in, and
+    #: ``None`` otherwise, where ``item_tokens`` is the walk's charge; an event
+    #: written before the field reads as ``None`` too.
+    walk_tokens: int | None = None
 
 
 class RetrievalReport(VersionedModel):

@@ -1281,7 +1281,10 @@ class PackBuilder:
         )
         selected = disclosure_result.items
         budget_trace = self._recharge_budget_trace(
-            budget_trace, selected, index_mode=index_mode
+            budget_trace,
+            selected,
+            index_mode=index_mode,
+            demoted=frozenset(disclosure_result.pointer_item_ids),
         )
 
         selected = self._annotate_selected_items(selected)
@@ -2373,6 +2376,13 @@ class PackBuilder:
                         "item_tokens": b.item_tokens,
                         "running_total": b.running_total,
                         "included": b.included,
+                        # Only when the step was re-priced; absent reads as
+                        # "item_tokens is the walk's charge" (see BudgetStep).
+                        **(
+                            {"walk_tokens": b.walk_tokens}
+                            if b.walk_tokens is not None
+                            else {}
+                        ),
                     }
                     for b in report.budget_trace
                 ],
@@ -3612,6 +3622,7 @@ class PackBuilder:
         items: list[PackItem],
         *,
         index_mode: bool,
+        demoted: frozenset[str] = frozenset(),
     ) -> list[BudgetStep]:
         """Re-price the included steps against the text actually served.
 
@@ -3627,6 +3638,15 @@ class PackBuilder:
         pre-disclosure arithmetic — rewriting its charge would claim the
         walk had rejected it at a price it was never offered at.
 
+        The walk's own charge is not thrown away: every included step of a
+        rewritten trace keeps it as ``walk_tokens``. A ``max_items``-cut row
+        is priced at the walk's charge, never a pointer's, so a replay that
+        re-spends freed budget has to walk the same prices. ``demoted`` is
+        the set of ids disclosure turned into pointers; a pack with any gets
+        the stamp even when a pointer happens to cost the same tokens as the
+        body, so "a demoted step has no ``walk_tokens``" can only mean an
+        event written before the field.
+
         Returns the trace unchanged when nothing was demoted, so the
         common path allocates nothing.
         """
@@ -3639,7 +3659,7 @@ class PackBuilder:
             charge = self._item_budget_tokens(item, index_mode=index_mode)
             return charge != step.item_tokens
 
-        if not any(repriced(step) for step in budget_trace):
+        if not demoted and not any(repriced(step) for step in budget_trace):
             return budget_trace
 
         recharged: list[BudgetStep] = []
@@ -3657,6 +3677,7 @@ class PackBuilder:
                     item_tokens=tokens,
                     running_total=running,
                     included=True,
+                    walk_tokens=step.item_tokens,
                 )
             )
         return recharged
