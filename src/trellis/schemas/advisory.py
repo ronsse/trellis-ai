@@ -17,6 +17,27 @@ from pydantic import Field
 from trellis.core.base import TimestampedModel, VersionedModel
 from trellis.core.ids import generate_ulid
 
+#: ``Advisory.metadata`` key naming the rule-owner that retired a row. Set when
+#: :class:`~trellis.retrieve.advisory_generator.AdvisoryGenerator` suppresses a
+#: QUERY row whose keyword it no longer emits; read by the fitness loop, which
+#: must leave such a row alone (see :attr:`Advisory.retired_by`).
+RETIRED_BY_KEY = "retired_by"
+#: The only value :data:`RETIRED_BY_KEY` takes today.
+RETIRED_BY_QUERY_FILTER = "advisory_generator.query_filter"
+#: Which of the generator's rules retired the row (``stop_list``,
+#: ``document_frequency`` or ``unnormalised_keyword``). The generator needs it
+#: to tell a retirement a code change can relax (the first and third) from one
+#: that tracks a nightly measurement (the second), which must not be undone by
+#: the next night's noise.
+RETIRED_RULE_KEY = "retired_rule"
+#: The document-frequency ceiling in force when the row was retired, stored only
+#: for that rule. A later ceiling above it is the operator relaxing the rule, as
+#: opposed to the word's share drifting under the same bar.
+RETIRED_CEILING_KEY = "retired_ceiling"
+#: Every metadata key a retirement writes; :meth:`AdvisoryStore.restore` clears
+#: them together so a later suppression cannot inherit a retirement.
+RETIREMENT_KEYS = (RETIRED_BY_KEY, RETIRED_RULE_KEY, RETIRED_CEILING_KEY)
+
 
 class AdvisoryCategory(StrEnum):
     """Category of advice an advisory provides."""
@@ -121,3 +142,23 @@ class Advisory(TimestampedModel, VersionedModel):
     #: above ``suppress_below = 0.1`` in a single pass, and demotion would be
     #: arithmetically unreachable no matter how badly the advice performed.
     fitness_scored_at: datetime | None = None
+
+    @property
+    def retired_by(self) -> str | None:
+        """Who has this row retired by rule *now*, or ``None``.
+
+        ``None`` for an active row even if the marker is still in its
+        metadata (an operator restored it): the marker records a past
+        retirement, and only a suppressed row is retired.
+
+        Distinct from a fitness suppression, which is a verdict on how the
+        advice *performed*. A retired row was never judged on outcomes: the
+        generator withdrew the rule that produced it (a function word, a
+        keyword in too many intents). The fitness loop would otherwise score
+        it, blend its still-healthy ``confidence`` back above the restore
+        bar and revive it, undoing the retirement in the same nightly cycle.
+        """
+        value = self.metadata.get(RETIRED_BY_KEY)
+        if self.status != AdvisoryStatus.SUPPRESSED or not isinstance(value, str):
+            return None
+        return value
