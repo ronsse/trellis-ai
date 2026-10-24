@@ -391,3 +391,31 @@ class Lifecycle(TrellisModel):
     superseded_by: str | None = None
     deprecation_reason: str | None = None
     classification_version: str = "1"
+
+
+#: The :data:`LifecycleState` vocabulary as a set, for callers that have to
+#: *test* membership rather than annotate with it.
+LIFECYCLE_STATE_VALUES: frozenset[str] = frozenset(get_args(LifecycleState))
+
+
+def lifecycle_state_of(bag: Mapping[str, Any] | None) -> LifecycleState:
+    """The ``Lifecycle.state`` stamped in a metadata or properties bag.
+
+    Fails open to ``"current"``: a bag with no lifecycle record, a record that
+    is not a mapping, and a ``state`` that is missing, empty, not a string or
+    not one of :data:`LIFECYCLE_STATE_VALUES` all read as current. A bad
+    record is never by itself a reason to withhold, refuse or downgrade, which
+    is the rule the retrieval gates (:mod:`trellis.retrieve.lifecycle`) apply
+    by testing for one named state. Every reader that asks "is this not
+    current?" goes through here, so an unknown string cannot read as a state of
+    its own in one place and as current in another (#959).
+    """
+    if not isinstance(bag, Mapping):
+        return "current"
+    record = bag.get(LIFECYCLE_KEY)
+    if not isinstance(record, Mapping):
+        return "current"
+    state = record.get("state")
+    if isinstance(state, str) and state in LIFECYCLE_STATE_VALUES:
+        return state  # type: ignore[return-value]
+    return "current"

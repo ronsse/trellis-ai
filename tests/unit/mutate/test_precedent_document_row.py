@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.pipeline import ClassifierPipeline
@@ -219,6 +220,96 @@ class TestPromotion:
         assert not registry.operational.event_log.get_events(
             event_type=EventType.PRECEDENT_PROMOTED
         )
+
+
+class TestPromotionOutsideTheNamespace:
+    """The row's exemptions key on the id namespace alone.
+
+    A row written for a precedent-typed node outside ``precedent://learning/``
+    would be open to the noise pass, retention and classify refresh, so the
+    promotion records the event and writes no row.
+
+    Defective subject: drop the ``is_promoted_precedent_document`` branch in
+    ``PrecedentPromoteHandler`` and the first test finds a row.
+    """
+
+    OUTSIDE_ID = "precedent-by-hand"
+
+    def _promote_outside(self, registry: StoreRegistry) -> CommandStatus:
+        registry.knowledge.graph_store.upsert_node(
+            self.OUTSIDE_ID, "precedent", {"name": TITLE, "description": DESCRIPTION}
+        )
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.PRECEDENT_PROMOTE,
+                args={
+                    "title": TITLE,
+                    "description": DESCRIPTION,
+                    "entity_type": "precedent",
+                },
+                target_id=self.OUTSIDE_ID,
+                target_type="entity",
+                requested_by="test",
+            )
+        )
+        return result.status
+
+    def test_a_precedent_typed_target_outside_it_gets_the_event_and_no_row(
+        self, registry: StoreRegistry, embed_on: None
+    ) -> None:
+        assert self._promote_outside(registry) == CommandStatus.SUCCESS
+
+        assert registry.knowledge.document_store.get(self.OUTSIDE_ID) is None
+        assert registry.knowledge.vector_store.get(self.OUTSIDE_ID) is None
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED
+        )
+        assert [e.entity_id for e in events] == [self.OUTSIDE_ID]
+
+    def test_the_skip_is_logged_where_the_default_cli_shows_it(
+        self, registry: StoreRegistry
+    ) -> None:
+        with capture_logs() as logs:
+            self._promote_outside(registry)
+
+        skipped = [
+            e
+            for e in logs
+            if e["event"] == "precedent_document_skipped_outside_namespace"
+        ]
+        assert [(e["log_level"], e["target_id"]) for e in skipped] == [
+            ("warning", self.OUTSIDE_ID)
+        ]
+
+    def test_entity_create_accepts_a_namespace_id_because_promotion_uses_it(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``entity.create`` cannot refuse the namespace: ``submit_learning_promotion``
+        writes a promoted precedent's node with it. The row is what the namespace
+        protects, and only ``precedent.promote`` writes that."""
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_type": "precedent",
+                    "entity_id": NODE_ID,
+                    "name": TITLE,
+                },
+                requested_by="test",
+            )
+        )
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is not None
+        assert registry.knowledge.document_store.get(NODE_ID) is None
+
+    def test_a_learning_promotion_still_writes_its_row(
+        self, registry: StoreRegistry
+    ) -> None:
+        entity_id = _promote_from_source(registry, "doc-source")
+
+        assert is_promoted_precedent_document(entity_id)
+        assert registry.knowledge.document_store.get(entity_id) is not None
 
 
 class TestLifecycle:
@@ -656,6 +747,40 @@ class TestRetentionSparesPromotedPrecedents:
         assert node["properties"][LIFECYCLE_KEY]["state"] == "current"
         assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
         assert _served(registry, "keyword")
+
+    def test_a_node_archived_before_the_exemption_counts_as_already_archived(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A node pruned before #955 carries ``archived``; the skip that says so
+        is ``skipped_already_archived``, not ``skipped_precedent``, which counts
+        only what the exemption spared.
+
+        Defective subject: run the precedent skip before the archived check in
+        ``_resolve_entities`` and the node lands in ``skipped_precedent``.
+        """
+        from trellis.mutate.retention import RetentionCriteria, resolve_candidates
+
+        registry.knowledge.graph_store.upsert_node(
+            NODE_ID,
+            "precedent",
+            {"name": TITLE, LIFECYCLE_KEY: {"state": "archived"}},
+        )
+        spared = "precedent://learning/spared"
+        registry.knowledge.graph_store.upsert_node(
+            spared, "precedent", {"name": "Other", LIFECYCLE_KEY: {"state": "demoted"}}
+        )
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["demoted"],  # type: ignore[list-item]
+                older_than_days=0,
+            ),
+            registry,
+        )
+
+        assert report.candidates == []
+        assert report.skipped_already_archived == 1
+        assert report.skipped_precedent == 1
 
     def test_an_ordinary_noise_row_is_still_archived(
         self, registry: StoreRegistry

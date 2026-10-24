@@ -12,7 +12,11 @@ import structlog
 
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
-from trellis.core.precedent_document import is_promoted_precedent_document
+from trellis.core.precedent_document import (
+    RESERVED_DOCUMENT_ID_CODE,
+    is_promoted_precedent_document,
+    reserved_document_id_message,
+)
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
 from trellis.core.text_safety import (
     contains_nul_or_lone_surrogate,
@@ -46,7 +50,11 @@ from trellis.mutate.retention import (
     resolve_candidates,
 )
 from trellis.retrieve.precedents import is_miner_candidate_event
-from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
+from trellis.schemas.classification import (
+    LIFECYCLE_KEY,
+    Lifecycle,
+    lifecycle_state_of,
+)
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.trace import Trace
@@ -81,11 +89,8 @@ def _evidence_document_id(value: object) -> str:
         msg = "evidence.doc_id must be a non-empty string"
         raise ValidationError(msg, code="evidence_ingest_shape")
     if is_promoted_precedent_document(value):
-        msg = (
-            f"evidence.doc_id {value!r} is in the reserved precedent namespace; "
-            "a precedent's document row is written by its promotion"
-        )
-        raise ValidationError(msg, code="reserved_document_id")
+        msg = reserved_document_id_message("evidence.doc_id", value)
+        raise ValidationError(msg, code=RESERVED_DOCUMENT_ID_CODE)
     return value
 
 
@@ -531,7 +536,10 @@ class PrecedentPromoteHandler:
     its recency window, so without the row keyword and semantic retrieval
     never served a promoted precedent. The row goes first: a failure raises, the
     promotion reads as not landed, and the retry rewrites it. The event payload
-    is unchanged.
+    is unchanged. A precedent-typed target whose id lies outside the
+    ``precedent://learning/`` namespace gets the event and no row: the row's
+    exemptions key on that namespace alone, so a row written beside it would
+    be left open to the passes the exemption closes.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -567,12 +575,22 @@ class PrecedentPromoteHandler:
         ):
             node = self._registry.knowledge.graph_store.get_node(command.target_id)
             if node is not None and node["node_type"] == "precedent":
-                _write_precedent_document(
-                    self._registry,
-                    command.target_id,
-                    node.get("properties") or {},
-                    source=command.requested_by,
-                )
+                if is_promoted_precedent_document(command.target_id):
+                    _write_precedent_document(
+                        self._registry,
+                        command.target_id,
+                        node.get("properties") or {},
+                        source=command.requested_by,
+                    )
+                else:
+                    # A row outside the namespace would not be exempt from the
+                    # noise pass, retention or classify refresh, which key on
+                    # the id alone. Only a hand-built command reaches here:
+                    # every learning promotion mints its id in the namespace.
+                    logger.warning(
+                        "precedent_document_skipped_outside_namespace",
+                        target_id=command.target_id,
+                    )
 
         event = self._registry.operational.event_log.emit(
             EventType.PRECEDENT_PROMOTED,
@@ -675,13 +693,10 @@ def _current_lifecycle_state(node: dict[str, Any]) -> str:
     informative than an absent one — both read as current, matching
     ``retrieve.lifecycle``'s own fail-open convention for this key: a
     bad or missing lifecycle record is never by itself a reason to
-    refuse. An empty ``state`` is malformed, not a state of its own.
+    refuse. An empty or unknown ``state`` is malformed, not a state of its
+    own (:func:`~trellis.schemas.classification.lifecycle_state_of`).
     """
-    record = node["properties"].get(LIFECYCLE_KEY)
-    if not isinstance(record, dict):
-        return CURRENT_STATE
-    state = record.get("state")
-    return state if isinstance(state, str) and state else CURRENT_STATE
+    return lifecycle_state_of(node["properties"])
 
 
 def precedent_already_demoted_message(target_id: str) -> str:
@@ -3769,7 +3784,10 @@ def _pre_archival_lifecycle(graph: GraphStore, item_id: str) -> dict[str, Any]:
     that was *demoted*, then pruned, straight back to ``"current"`` --
     laundering the demotion through a prune/restore round-trip with no
     trace of it in the new version (the demoted one is still in history,
-    but nothing about the restored version says to look). Walks back past
+    but nothing about the restored version says to look). A promoted
+    precedent in the ``precedent://learning/`` namespace is never pruned
+    now, so that case is reachable only for a precedent outside the
+    namespace or one archived before the exemption existed. Walks back past
     every consecutive archived-state version -- an intervening write that
     never touches ``lifecycle`` (e.g. ``entity.update``) carries
     ``"archived"`` forward through the property merge, so more than one
@@ -3879,7 +3897,10 @@ class RetentionRestoreHandler:
     via :func:`_pre_archival_lifecycle` rather than assumed to be
     ``"current"`` — so a precedent that was demoted and then pruned comes
     back demoted, not reinstated: prune-then-restore is not a second,
-    unaudited way to undo a demotion.
+    unaudited way to undo a demotion. Only a precedent outside the
+    ``precedent://learning/`` namespace, or one archived before the
+    exemption existed, can have been pruned: a promoted precedent in the
+    namespace is never a prune candidate.
 
     A vector row's metadata is an embed-time snapshot, not a live read of
     the graph store, so a graph-node restore also re-stamps the node's

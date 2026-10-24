@@ -18,6 +18,11 @@ from trellis.core.error_sanitize import (
     sanitized_error_payload,
 )
 from trellis.core.path_presence import path_is_present
+from trellis.core.precedent_document import (
+    RESERVED_DOCUMENT_ID_CODE,
+    is_promoted_precedent_document,
+    reserved_document_id_message,
+)
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
@@ -55,7 +60,11 @@ console = build_console()
 
 
 def _fail(
-    message: str, output_format: str, *, error_type: str = "FileNotFoundError"
+    message: str,
+    output_format: str,
+    *,
+    error_type: str = "FileNotFoundError",
+    code: str | None = None,
 ) -> NoReturn:
     """Report *message* on the caller's chosen surface, then exit ``EXIT_VALIDATION``.
 
@@ -77,15 +86,20 @@ def _fail(
     change added — two error shapes out of one command. ``FileNotFoundError``
     is the name the condition would have raised under, so the value is the
     one a caller would already be matching on.
+
+    ``code`` is the refusal's stable identifier (the ``ValidationError.code`` a
+    governed write would have raised); it is added to the JSON envelope only
+    when given, so the existing missing-file envelope is unchanged.
     """
     if output_format == "json":
-        emit_json(
-            {
-                "status": "error",
-                "error_type": error_type,
-                "message": message,
-            }
-        )
+        envelope: dict[str, str] = {
+            "status": "error",
+            "error_type": error_type,
+            "message": message,
+        }
+        if code is not None:
+            envelope["code"] = code
+        emit_json(envelope)
     else:
         console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
     raise typer.Exit(code=EXIT_VALIDATION)
@@ -212,6 +226,17 @@ def ingest_evidence(
                 f"[red]Invalid evidence: {escape(str(exc))}[/red]", soft_wrap=True
             )
         raise typer.Exit(code=EXIT_VALIDATION) from None
+
+    # The same refusal ``EvidenceIngestHandler`` makes: this command writes
+    # through ``put_document`` directly, so without it a file could name a row
+    # inside the reserved precedent namespace.
+    if is_promoted_precedent_document(evidence.evidence_id):
+        _fail(
+            reserved_document_id_message("evidence_id", evidence.evidence_id),
+            output_format,
+            error_type="ValidationError",
+            code=RESERVED_DOCUMENT_ID_CODE,
+        )
 
     # Persist to document store
     registry = _get_registry()

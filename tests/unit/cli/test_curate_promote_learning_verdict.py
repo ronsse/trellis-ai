@@ -551,8 +551,15 @@ class TestMalformedLifecycleReadsAsCurrent:
 
     @pytest.mark.parametrize(
         "lifecycle",
-        [{"state": ""}, {"state": None}, {"state": 5}, {}, "demoted"],
-        ids=["empty", "null", "non_str", "no_state_key", "non_dict"],
+        [
+            {"state": ""},
+            {"state": None},
+            {"state": 5},
+            {"state": "zombie"},
+            {},
+            "demoted",
+        ],
+        ids=["empty", "null", "non_str", "unknown", "no_state_key", "non_dict"],
     )
     def test_a_malformed_record_re_approves(
         self, lifecycle: Any, tmp_path: Path
