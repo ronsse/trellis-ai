@@ -53,7 +53,7 @@ cannot drift from the one that command prints.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +66,7 @@ from trellis.retrieve.class_prior import ClassPriorConfig
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
+from trellis.retrieve.strategies import GRAPH_STRATEGY_NAME
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import EventLog
@@ -663,6 +664,32 @@ def _class_prior_notes(
     return notes
 
 
+def _dedup_copy_outside_axes(
+    item_id: str,
+    rejected_rows: list[Mapping[str, Any]],
+    axes: frozenset[str] | set[str],
+) -> bool:
+    """``True`` when the pack's own dedup shows another axis's copy of
+    ``item_id`` losing to the copy on one of ``axes``.
+
+    Withholding the ``axes`` copy removes it from dedup's contest, so that
+    losing copy — on an axis outside ``axes`` — would win instead and the id
+    would still be served. A gate scoped to some axes therefore cannot count
+    such an id as removed (see ``trellis.retrieve.withholding``'s
+    ``NON_ABSENCE_REASONS`` treatment of the same ``dedup`` row): only a
+    ``dedup`` rejection on an axis the gate does not touch means the id
+    survives; any other reason, or a loser inside ``axes``, says nothing
+    about what withhold would do.
+    """
+    return any(
+        r.get("item_id") == item_id
+        and r.get("reason") == "dedup"
+        and isinstance(r.get("strategy_source"), str)
+        and r["strategy_source"] not in axes
+        for r in rejected_rows
+    )
+
+
 def replay_class_prior(
     event_log: EventLog,
     *,
@@ -744,30 +771,13 @@ def replay_class_prior(
                 *,
                 rejected_rows: list[Mapping[str, Any]] = rejected_rows,
             ) -> bool:
-                """``True`` when the pack's own dedup shows another axis's
-                copy of ``item_id`` losing to the configured-axis one.
-
-                Withholding the configured-axis copy removes it from
-                dedup's contest, so that losing copy — on an axis outside
-                ``config.axes`` — would win instead and the id would still
-                be served. The gate is axis-scoped by design (see
-                ``trellis.retrieve.withholding``'s ``NON_ABSENCE_REASONS``
-                treatment of the same ``dedup`` row): only a ``dedup``
-                rejection on an axis the config does not touch means the
-                id survives; any other reason, or a loser inside
-                ``config.axes``, says nothing about what withhold would do.
+                """See :func:`_dedup_copy_outside_axes`.
 
                 ``rejected_rows`` is bound as a default argument, not read
                 from the enclosing loop, so this closure cannot drift onto
                 a later pack's rows (ruff B023).
                 """
-                return any(
-                    r.get("item_id") == item_id
-                    and r.get("reason") == "dedup"
-                    and isinstance(r.get("strategy_source"), str)
-                    and r["strategy_source"] not in config.axes
-                    for r in rejected_rows
-                )
+                return _dedup_copy_outside_axes(item_id, rejected_rows, config.axes)
 
             for row in rows:
                 if isinstance(row.get("document_form"), str):
@@ -813,12 +823,412 @@ def replay_class_prior(
     return report
 
 
+class GraphSelectionReplayReport(TrellisModel):
+    """What withholding one ``graph_selection`` value would have cost, and
+    what the freed budget would have served instead (#961).
+
+    Same population and unit as :class:`ClassPriorReplayReport`: servings
+    the original pack actually served, counted per ``(pack_id, item_id)``,
+    over attributed packs. It adds what that arm says it cannot: a pack's
+    ``budget_trace[]`` lists the candidates the token walk turned away, so
+    the walk is re-run without the withheld servings and whatever it now
+    admits is the freed budget's replacement. Those replacements were never
+    served, so nobody graded them; they are counted and attributed to an
+    axis, never scored.
+    """
+
+    window_days: int
+    #: The ``graph_selection`` value withheld.
+    graph_selection: str
+    attributed_packs: int = 0
+    #: Packs holding at least one matched serving.
+    affected_packs: int = 0
+    #: Servings stamped with the value, including the
+    #: ``still_served_by_other_axis`` subset withhold would not remove.
+    matched_servings: int = 0
+    #: Withheld servings cited helpful: the recall this arm costs.
+    helpful_lost: int = 0
+    #: Withheld servings cited unhelpful: what the arm is for.
+    unhelpful_removed: int = 0
+    #: Withheld servings no grader named. ``helpful_lost +
+    #: unhelpful_removed + unjudged_removed + still_served_by_other_axis ==
+    #: matched_servings``.
+    unjudged_removed: int = 0
+    #: Gross ``estimated_tokens`` of the withheld servings, as
+    #: :attr:`ClassPriorReplayReport.tokens_freed` counts it.
+    tokens_freed: int = 0
+    #: Matched servings whose id the pack's own ``rejected_items`` shows a
+    #: dedup copy of on a non-graph axis, which withhold would let win; as
+    #: in :class:`ClassPriorReplayReport`, none counts as removed or freed.
+    still_served_by_other_axis: int = 0
+
+    # -- the freed budget ------------------------------------------------
+    #: Affected packs whose token walk was re-run. The re-run reproduced the
+    #: recorded decisions before the servings were removed, so it is the
+    #: walk and not a model of it.
+    refilled_packs: int = 0
+    #: Affected packs that could not be re-run: no ``budget_trace`` or
+    #: ``budget_max_tokens``, or the re-run did not reproduce what was
+    #: recorded (a safety margin, index mode, graduated disclosure). Their
+    #: withheld servings are still counted above; their freed budget is not.
+    unmodelled_packs: int = 0
+    #: Candidates the original walk rejected on tokens that the freed budget
+    #: would admit. Never served, so ungraded.
+    replacement_servings: int = 0
+    replacement_tokens: int = 0
+    #: ``replacement_servings`` by the axis that collected each, from the
+    #: pack's ``rejected_items``; ``(unknown)`` when it names none.
+    replacement_by_strategy: dict[str, int] = Field(default_factory=dict)
+    #: Graph-axis candidates the walk rejected whose selection no served row
+    #: of that pack settles; left out of the re-run rather than guessed at.
+    unclassified_graph_candidates: int = 0
+
+    notes: list[str] = Field(default_factory=list)
+
+
+def _walk(candidates: list[_Candidate], max_tokens: int) -> set[str]:
+    """The builder's budget walk: take in order, stop at the first overflow.
+
+    Mirrors ``PackBuilder._apply_token_budget_tracked``, whose
+    ``budget_exceeded`` latch means a small candidate behind an overflow is
+    never admitted.
+    """
+    admitted: set[str] = set()
+    total = 0
+    for candidate in candidates:
+        if total + candidate.served_tokens > max_tokens:
+            break
+        total += candidate.served_tokens
+        admitted.add(candidate.item_id)
+    return admitted
+
+
+def _graph_selection_notes(
+    *,
+    graph_selection: str,
+    attributed_packs: int,
+    matched_servings: int,
+    saw_stamp: bool,
+    still_served_by_other_axis: int,
+    unmodelled_packs: int,
+    unclassified: int,
+) -> list[str]:
+    """Caveats that travel with the graph-selection counts."""
+    notes = [
+        (
+            "Counterfactual over the SAME packs and the SAME citations. The "
+            "freed budget is re-spent by re-running the pack's token walk "
+            "without the withheld servings; what it admits was never served, "
+            "so nobody graded it and it is counted, not scored. Rank order is "
+            "held fixed, and a withheld item's absence is not re-ranked."
+        ),
+    ]
+    if attributed_packs < MIN_ATTRIBUTED_PACKS:
+        notes.append(
+            f"{attributed_packs} attributed pack(s) is below the "
+            f"{MIN_ATTRIBUTED_PACKS}-pack minimum every other ratio in "
+            "`analyze value` is held to; read these counts as raw tallies, "
+            "not as a measurement."
+        )
+    if matched_servings == 0:
+        if saw_stamp:
+            notes.append(
+                f"No serving in the window carries graph_selection="
+                f"{graph_selection!r}, so every count above is zero because "
+                "nothing was eligible, not because the arm found nothing to do."
+            )
+        else:
+            notes.append(
+                "No served item in the window carries a graph_selection stamp "
+                "at all, so every count above is zero because there is no "
+                "history yet for this arm to grade."
+            )
+    if still_served_by_other_axis:
+        notes.append(
+            f"{still_served_by_other_axis} matched serving(s) are not counted "
+            "as removed or freed: the pack's own rejected_items has a dedup "
+            "row for a copy of the same id on a non-graph axis, which "
+            "withhold would let win. Under budget pressure that copy can miss "
+            "the cut, so this is an upper bound on survivals."
+        )
+    if unmodelled_packs:
+        notes.append(
+            f"{unmodelled_packs} affected pack(s) could not have their token "
+            "walk re-run (no budget_trace, no budget_max_tokens, or the "
+            "re-run did not reproduce the recorded walk). Their withheld "
+            "servings are counted; their freed budget is not."
+        )
+    if unclassified:
+        notes.append(
+            f"{unclassified} rejected graph-axis candidate(s) were left out "
+            "of the re-run: only served items record graph_selection, and the "
+            "pack's served graph rows do not agree on one value, so whether "
+            "withhold would also have dropped them is unknown."
+        )
+    return notes
+
+
+@dataclass
+class _GraphSelectionTally:
+    """Running counts for :func:`replay_graph_selection`."""
+
+    matched: int = 0
+    helpful: int = 0
+    unhelpful: int = 0
+    unjudged: int = 0
+    tokens_freed: int = 0
+    other_axis: int = 0
+    affected: int = 0
+    refilled: int = 0
+    unmodelled: int = 0
+    replacement_tokens: int = 0
+    unclassified: int = 0
+    saw_stamp: bool = False
+    replacement_by_strategy: dict[str, int] = field(default_factory=dict)
+
+
+def _stamp_of(row: Mapping[str, Any]) -> str:
+    """The row's ``graph_selection``, or ``""`` when it carries none."""
+    stamp = row.get("graph_selection")
+    return stamp.strip() if isinstance(stamp, str) else ""
+
+
+def _withhold_pack(
+    rows: list[Mapping[str, Any]],
+    rejected_rows: list[Mapping[str, Any]],
+    value: str,
+    *,
+    helpful: set[str],
+    unhelpful: set[str],
+    tally: _GraphSelectionTally,
+) -> set[str]:
+    """Count one pack's servings stamped ``value``; return the ids withhold removes."""
+    withheld: set[str] = set()
+    seen: set[str] = set()
+    matched = 0
+    for row in rows:
+        stamp = _stamp_of(row)
+        tally.saw_stamp = tally.saw_stamp or bool(stamp)
+        item_id = row["item_id"]
+        # One serving per ``(pack, item)``; a pack dedups by id, so a repeat
+        # is not expected, and skipping it keeps the unit true.
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        if stamp != value:
+            continue
+        matched += 1
+        if _dedup_copy_outside_axes(
+            item_id, rejected_rows, frozenset({GRAPH_STRATEGY_NAME})
+        ):
+            tally.other_axis += 1
+            continue
+        withheld.add(item_id)
+        raw_tokens = row.get("estimated_tokens")
+        if isinstance(raw_tokens, int | float):
+            tally.tokens_freed += int(raw_tokens)
+        if item_id in helpful:
+            tally.helpful += 1
+        elif item_id in unhelpful:
+            tally.unhelpful += 1
+        else:
+            tally.unjudged += 1
+    tally.matched += matched
+    tally.affected += 1 if matched else 0
+    return withheld
+
+
+def _refill_pack(
+    payload: Mapping[str, Any],
+    rows: list[Mapping[str, Any]],
+    rejected_rows: list[Mapping[str, Any]],
+    value: str,
+    *,
+    withheld: set[str],
+    verdicts: tuple[set[str], set[str]],
+    tally: _GraphSelectionTally,
+) -> None:
+    """Re-run one pack's token walk without ``withheld`` and tally what it admits.
+
+    The re-run is trusted only if, before anything is removed, it reproduces
+    the walk the pack recorded; otherwise the pack counts as unmodelled.
+    """
+    candidates = _candidates(payload, verdicts)
+    raw_budget = payload.get("budget_max_tokens")
+    if (
+        candidates is None
+        or not isinstance(raw_budget, int | float)
+        or _walk(candidates, int(raw_budget))
+        != {c.item_id for c in candidates if c.included}
+    ):
+        tally.unmodelled += 1
+        return
+    budget = int(raw_budget)
+    strategy_by_rejected = {
+        r["item_id"]: r.get("strategy_source")
+        for r in rejected_rows
+        if r.get("reason") == "token_budget" and isinstance(r.get("item_id"), str)
+    }
+    # Only served rows record ``graph_selection``, but one graph search stamps
+    # every item it returns alike, so a pack whose served graph rows agree on
+    # one value settles the candidates the budget turned away.
+    served_stamps = {
+        _stamp_of(row)
+        for row in rows
+        if row.get("strategy_source") == GRAPH_STRATEGY_NAME and _stamp_of(row)
+    }
+    pack_selection = next(iter(served_stamps)) if len(served_stamps) == 1 else None
+
+    pool: list[_Candidate] = []
+    for candidate in candidates:
+        if candidate.item_id in withheld:
+            continue
+        if (
+            not candidate.included
+            and strategy_by_rejected.get(candidate.item_id) == GRAPH_STRATEGY_NAME
+        ):
+            if pack_selection is None:
+                tally.unclassified += 1
+                continue
+            if pack_selection == value:
+                # Withhold would drop it too; it was never served.
+                continue
+        pool.append(candidate)
+
+    tally.refilled += 1
+    admitted = _walk(pool, budget)
+    for candidate in pool:
+        if candidate.included or candidate.item_id not in admitted:
+            continue
+        tally.replacement_tokens += candidate.served_tokens
+        axis = strategy_by_rejected.get(candidate.item_id)
+        label = axis if isinstance(axis, str) and axis else "(unknown)"
+        tally.replacement_by_strategy[label] = (
+            tally.replacement_by_strategy.get(label, 0) + 1
+        )
+
+
+def replay_graph_selection(
+    event_log: EventLog,
+    *,
+    graph_selection: str,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+) -> GraphSelectionReplayReport:
+    """Price withholding every serving whose ``graph_selection`` equals a value.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED`` and
+            ``FEEDBACK_RECORDED``. Read only; holdout packs and the
+            feedback naming them are dropped by the join.
+        graph_selection: The ``injected_items[].graph_selection`` value to
+            withhold, e.g. ``"recency_window"``.
+        days: Look-back window, matching ``trellis analyze value``.
+        limit: Per-event-type scan limit.
+
+    Returns:
+        A :class:`GraphSelectionReplayReport`. See its docstring and
+        ``notes`` for what this arm cannot measure.
+
+    Raises:
+        ValueError: ``graph_selection`` is empty.
+    """
+    value = graph_selection.strip()
+    if not value:
+        msg = "graph_selection must be a non-empty string"
+        raise ValueError(msg)
+
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    feedback_events, pack_payloads, _ = join_pack_feedback(
+        event_log, since=since, limit=limit
+    )
+    flat_packs = {
+        pack_id: payload
+        for pack_id, payload in pack_payloads.items()
+        if payload.get("injected_items")
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    tally = _GraphSelectionTally()
+    for pack_id in attributed:
+        payload = flat_packs[pack_id]
+        helpful = helpful_by_pack.get(pack_id, set())
+        unhelpful = unhelpful_by_pack.get(pack_id, set())
+        rows = [
+            row
+            for row in (payload.get("injected_items") or [])
+            if isinstance(row, Mapping) and isinstance(row.get("item_id"), str)
+        ]
+        rejected_rows = [
+            r for r in (payload.get("rejected_items") or []) if isinstance(r, Mapping)
+        ]
+        withheld = _withhold_pack(
+            rows,
+            rejected_rows,
+            value,
+            helpful=helpful,
+            unhelpful=unhelpful,
+            tally=tally,
+        )
+        if withheld:
+            _refill_pack(
+                payload,
+                rows,
+                rejected_rows,
+                value,
+                withheld=withheld,
+                verdicts=(helpful, unhelpful),
+                tally=tally,
+            )
+
+    report = GraphSelectionReplayReport(
+        window_days=days,
+        graph_selection=value,
+        attributed_packs=len(attributed),
+        affected_packs=tally.affected,
+        matched_servings=tally.matched,
+        helpful_lost=tally.helpful,
+        unhelpful_removed=tally.unhelpful,
+        unjudged_removed=tally.unjudged,
+        tokens_freed=tally.tokens_freed,
+        still_served_by_other_axis=tally.other_axis,
+        refilled_packs=tally.refilled,
+        unmodelled_packs=tally.unmodelled,
+        replacement_servings=sum(tally.replacement_by_strategy.values()),
+        replacement_tokens=tally.replacement_tokens,
+        replacement_by_strategy=dict(sorted(tally.replacement_by_strategy.items())),
+        unclassified_graph_candidates=tally.unclassified,
+        notes=_graph_selection_notes(
+            graph_selection=value,
+            attributed_packs=len(attributed),
+            matched_servings=tally.matched,
+            saw_stamp=tally.saw_stamp,
+            still_served_by_other_axis=tally.other_axis,
+            unmodelled_packs=tally.unmodelled,
+            unclassified=tally.unclassified,
+        ),
+    )
+    logger.debug(
+        "pack_value_graph_selection_replayed",
+        window_days=days,
+        graph_selection=value,
+        attributed_packs=report.attributed_packs,
+        matched_servings=report.matched_servings,
+    )
+    return report
+
+
 __all__ = [
     "EXCERPT_MAX_CHARS",
     "ClassPriorReplayReport",
+    "GraphSelectionReplayReport",
     "ReplayArm",
     "ReplayPolicy",
     "ReplayReport",
     "replay_class_prior",
+    "replay_graph_selection",
     "replay_pack_value",
 ]

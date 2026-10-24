@@ -30,10 +30,16 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.pack_replay import (
     ReplayPolicy,
     replay_class_prior,
+    replay_graph_selection,
     replay_pack_value,
 )
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS
-from trellis.retrieve.strategies import SearchStrategy
+from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_CALLER_SEEDED,
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
+    SearchStrategy,
+)
 from trellis.schemas.pack import PackBudget, PackItem
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -777,3 +783,514 @@ def test_builder_noise_rejected_other_axis_copy_does_not_block_removal(
 
     assert report.unhelpful_removed == 1
     assert report.still_served_by_other_axis == 0
+
+
+# --------------------------------------------------------------------------
+# 5. replay_graph_selection (#961)
+# --------------------------------------------------------------------------
+#
+# The class-prior arm counts what a gate would withhold but says it cannot
+# say what the freed budget would serve. This arm can, because each pack's
+# ``budget_trace`` lists the candidates the token walk turned away: it
+# re-runs the walk without the withheld servings, trusting the re-run only
+# once it has reproduced the walk the pack recorded.
+
+_RW = GRAPH_SELECTION_RECENCY_WINDOW
+_SD = GRAPH_SELECTION_SEEDED
+_CS = GRAPH_SELECTION_CALLER_SEEDED
+
+
+def _gs_row(
+    item_id: str, tokens: int = 100, axis: str = "graph", stamp: str | None = None
+) -> dict[str, Any]:
+    return {"item_id": item_id, "tokens": tokens, "axis": axis, "stamp": stamp}
+
+
+def _gs_pack_event(
+    pack_id: str,
+    served: list[dict[str, Any]],
+    *,
+    turned_away: list[dict[str, Any]] | None = None,
+    dedup_losers: list[dict[str, Any]] | None = None,
+    max_tokens: int = 10_000,
+    with_trace: bool = True,
+    holdout: bool = False,
+) -> Event:
+    """A flat PACK_ASSEMBLED carrying ``graph_selection`` and both walk halves.
+
+    ``served`` rows are ``{item_id, tokens, axis, stamp}``; ``turned_away``
+    rows are the same shape, recorded as ``included: false`` in
+    ``budget_trace`` and as ``token_budget`` in ``rejected_items`` (which,
+    like the real event, carries no stamp). ``dedup_losers`` are
+    ``{item_id, axis}`` copies that lost dedup to a served row.
+    """
+    away = turned_away or []
+    rejected = [
+        {
+            "item_id": row["item_id"],
+            "item_type": "document",
+            "relevance_score": 0.0,
+            "reason": "token_budget",
+            "strategy_source": row["axis"],
+        }
+        for row in away
+    ] + [
+        {
+            "item_id": row["item_id"],
+            "item_type": "document",
+            "relevance_score": 0.0,
+            "reason": "dedup",
+            "strategy_source": row["axis"],
+        }
+        for row in (dedup_losers or [])
+    ]
+    payload: dict[str, Any] = {
+        "pack_id": pack_id,
+        "budget_max_tokens": max_tokens,
+        "injected_items": [
+            {
+                "item_id": row["item_id"],
+                "item_type": "document",
+                "rank": rank,
+                "estimated_tokens": row["tokens"],
+                "strategy_source": row["axis"],
+                "graph_selection": row["stamp"],
+            }
+            for rank, row in enumerate(served, start=1)
+        ],
+        "rejected_items": rejected,
+        "budget_trace": (
+            [
+                {
+                    "item_id": row["item_id"],
+                    "item_tokens": row["tokens"],
+                    "running_total": 0,
+                    "included": included,
+                }
+                for rows, included in ((served, True), (away, False))
+                for row in rows
+            ]
+            if with_trace
+            else []
+        ),
+    }
+    if holdout:
+        payload["holdout"] = True
+    return Event(
+        event_type=EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload=payload,
+    )
+
+
+def _gs_feedback(
+    pack_id: str, helpful: list[str] | None = None, unhelpful: list[str] | None = None
+) -> Event:
+    return Event(
+        event_type=EventType.FEEDBACK_RECORDED,
+        source="mcp",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload={
+            "pack_id": pack_id,
+            "rating": 0.5,
+            "success": bool(helpful),
+            "helpful_item_ids": helpful or [],
+            "unhelpful_item_ids": unhelpful or [],
+        },
+    )
+
+
+def _selection_log(*, holdout_pack: bool = False) -> _FakeEventLog:
+    """Five attributed packs, every selection value present, one non-graph item.
+
+    Each pack serves ``sem`` (semantic, unstamped, cited helpful so the pack
+    is attributed) beside up to three stamped graph servings whose ids end in
+    ``rw`` (every pack), ``sd`` (packs 0-2) and ``cs`` (packs 0-1). Pack 0
+    cites its graph servings helpful, pack 1 unhelpful, the rest not at all,
+    so the three values give three different answers.
+    """
+    log = _FakeEventLog()
+    for n in range(MIN_ATTRIBUTED_PACKS):
+        pack_id = f"pack-{n}"
+        served = [_gs_row(f"p{n}-rw", stamp=_RW)]
+        if n < 3:
+            served.append(_gs_row(f"p{n}-sd", stamp=_SD))
+        if n < 2:
+            served.append(_gs_row(f"p{n}-cs", stamp=_CS))
+        served.append(_gs_row(f"p{n}-sem", axis="semantic"))
+        log.append(_gs_pack_event(pack_id, served))
+        graph_ids = [r["item_id"] for r in served if r["axis"] == "graph"]
+        log.append(
+            _gs_feedback(
+                pack_id,
+                helpful=[f"p{n}-sem", *(graph_ids if n == 0 else [])],
+                unhelpful=graph_ids if n == 1 else [],
+            )
+        )
+    if holdout_pack:
+        # Blind by design: neither the pack nor the feedback naming it may
+        # reach any count.
+        log.append(
+            _gs_pack_event(
+                "pack-held",
+                [_gs_row("held-rw", stamp=_RW), _gs_row("held-sem", axis="semantic")],
+                holdout=True,
+            )
+        )
+        log.append(_gs_feedback("pack-held", helpful=["held-rw", "held-sem"]))
+    return log
+
+
+@pytest.mark.parametrize(
+    ("value", "matched", "helpful", "unhelpful", "unjudged", "tokens"),
+    [
+        (_RW, 5, 1, 1, 3, 500),
+        (_SD, 3, 1, 1, 1, 300),
+        (_CS, 2, 1, 1, 0, 200),
+    ],
+)
+def test_graph_selection_counts_each_value_per_serving(
+    value: str,
+    matched: int,
+    helpful: int,
+    unhelpful: int,
+    unjudged: int,
+    tokens: int,
+) -> None:
+    log = _selection_log()
+    events_before = len(log.events)
+
+    report = replay_graph_selection(log, graph_selection=value)
+
+    assert report.graph_selection == value
+    assert report.attributed_packs == MIN_ATTRIBUTED_PACKS
+    assert report.matched_servings == matched
+    assert report.helpful_lost == helpful
+    assert report.unhelpful_removed == unhelpful
+    assert report.unjudged_removed == unjudged
+    assert report.tokens_freed == tokens
+    assert report.still_served_by_other_axis == 0
+    # The buckets reconcile to what matched, so nothing is dropped silently.
+    assert (
+        report.helpful_lost
+        + report.unhelpful_removed
+        + report.unjudged_removed
+        + report.still_served_by_other_axis
+        == report.matched_servings
+    )
+    # Read only: the replay appended nothing.
+    assert len(log.events) == events_before
+
+
+def test_a_holdout_pack_and_its_feedback_reach_no_count() -> None:
+    clean = replay_graph_selection(_selection_log(), graph_selection=_RW)
+    held = replay_graph_selection(
+        _selection_log(holdout_pack=True), graph_selection=_RW
+    )
+
+    assert held.model_dump() == clean.model_dump()
+    assert held.attributed_packs == MIN_ATTRIBUTED_PACKS
+
+
+def test_the_value_is_matched_exactly_not_by_prefix_or_case() -> None:
+    log = _selection_log()
+
+    # "seeded" is not a substring match for "caller_seeded", and vice versa.
+    assert replay_graph_selection(log, graph_selection=_SD).matched_servings == 3
+    assert replay_graph_selection(log, graph_selection="SEEDED").matched_servings == 0
+    assert replay_graph_selection(log, graph_selection=f" {_CS} ").matched_servings == 2
+
+
+def test_a_non_graph_item_is_never_matched() -> None:
+    log = _FakeEventLog()
+    for n in range(MIN_ATTRIBUTED_PACKS):
+        log.append(_gs_pack_event(f"pack-{n}", [_gs_row(f"p{n}-sem", axis="semantic")]))
+        log.append(_gs_feedback(f"pack-{n}", helpful=[f"p{n}-sem"]))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 0
+    assert report.tokens_freed == 0
+    assert report.refilled_packs == 0
+    assert any("graph_selection stamp at all" in note for note in report.notes)
+
+
+def test_an_absent_value_says_nothing_was_eligible_not_nothing_found() -> None:
+    log = _FakeEventLog()
+    for n in range(MIN_ATTRIBUTED_PACKS):
+        log.append(_gs_pack_event(f"pack-{n}", [_gs_row(f"p{n}-g", stamp=_SD)]))
+        log.append(_gs_feedback(f"pack-{n}", helpful=[f"p{n}-g"]))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 0
+    assert any("nothing was eligible" in note for note in report.notes)
+
+
+def test_a_thin_window_is_labelled_as_raw_tallies() -> None:
+    thin = replay_graph_selection(_selection_log(), graph_selection=_RW, days=30)
+    assert not any("minimum" in note for note in thin.notes)
+
+    log = _FakeEventLog()
+    log.append(_gs_pack_event("pack-0", [_gs_row("g0", stamp=_RW)]))
+    log.append(_gs_feedback("pack-0", helpful=["g0"]))
+    report = replay_graph_selection(log, graph_selection=_RW)
+    assert report.attributed_packs == 1
+    assert any("raw tallies" in note for note in report.notes)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_value_is_refused(value: str) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        replay_graph_selection(_FakeEventLog(), graph_selection=value)
+
+
+def test_a_matched_serving_with_a_dedup_copy_on_another_axis_still_survives() -> None:
+    log = _FakeEventLog()
+    log.append(
+        _gs_pack_event(
+            "pack-0",
+            [_gs_row("dup", stamp=_RW), _gs_row("sem", axis="semantic")],
+            dedup_losers=[{"item_id": "dup", "axis": "semantic"}],
+        )
+    )
+    log.append(_gs_feedback("pack-0", helpful=["sem"], unhelpful=["dup"]))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 1
+    assert report.still_served_by_other_axis == 1
+    assert report.unhelpful_removed == 0
+    assert report.tokens_freed == 0
+    assert any("non-graph axis" in note for note in report.notes)
+
+
+# -- the freed budget --------------------------------------------------------
+
+
+def _refill_log(
+    served: list[dict[str, Any]],
+    turned_away: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+    helpful: list[str],
+) -> _FakeEventLog:
+    log = _FakeEventLog()
+    log.append(
+        _gs_pack_event("pack-0", served, turned_away=turned_away, max_tokens=max_tokens)
+    )
+    log.append(_gs_feedback("pack-0", helpful=helpful))
+    return log
+
+
+def test_the_freed_budget_admits_what_the_walk_had_turned_away() -> None:
+    log = _refill_log(
+        [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")],
+        [
+            _gs_row("fat", 150, axis="semantic"),
+            _gs_row("thin", 50, axis="keyword"),
+        ],
+        max_tokens=300,
+        helpful=["sem"],
+    )
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    # 100 + 100 + 150 overflowed 300 originally; without ``rw`` the walk
+    # takes sem 100, fat 150 and thin 50, exactly 300.
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+    assert report.replacement_servings == 2
+    assert report.replacement_tokens == 200
+    assert report.replacement_by_strategy == {"semantic": 1, "keyword": 1}
+
+
+def test_the_refill_stops_at_the_first_overflow_like_the_builder() -> None:
+    log = _refill_log(
+        [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")],
+        [
+            _gs_row("huge", 250, axis="semantic"),
+            _gs_row("small", 10, axis="keyword"),
+        ],
+        max_tokens=300,
+        helpful=["sem"],
+    )
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    # sem 100 + huge 250 overflows again; ``small`` would fit but sits behind
+    # the overflow, which the builder's ``budget_exceeded`` latch never admits.
+    assert report.refilled_packs == 1
+    assert report.replacement_servings == 0
+    assert report.replacement_tokens == 0
+
+
+def test_an_unserved_graph_candidate_of_the_withheld_value_is_not_a_replacement() -> (
+    None
+):
+    log = _refill_log(
+        [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")],
+        [
+            _gs_row("rw-extra", 100, axis="graph"),
+            _gs_row("tail", 100, axis="semantic"),
+        ],
+        max_tokens=250,
+        helpful=["sem"],
+    )
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    # The pack's served graph rows all say recency_window, so the turned-away
+    # graph candidate was chosen the same way and withhold drops it too.
+    assert report.unclassified_graph_candidates == 0
+    assert report.replacement_by_strategy == {"semantic": 1}
+
+
+def test_an_unserved_graph_candidate_is_left_out_when_the_pack_mixes_values() -> None:
+    log = _refill_log(
+        [
+            _gs_row("rw", stamp=_RW),
+            _gs_row("sd", stamp=_SD),
+        ],
+        [
+            _gs_row("unknown", 100, axis="graph"),
+            _gs_row("tail", 50, axis="semantic"),
+        ],
+        max_tokens=250,
+        helpful=["sd"],
+    )
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    # Only served rows record a stamp and the two disagree, so the graph
+    # candidate's selection is unknowable: counted, not guessed at.
+    assert report.unclassified_graph_candidates == 1
+    assert report.replacement_by_strategy == {"semantic": 1}
+    assert any("left out of the re-run" in note for note in report.notes)
+
+
+def test_a_pack_with_no_budget_trace_keeps_its_counts_but_not_a_refill() -> None:
+    log = _FakeEventLog()
+    log.append(
+        _gs_pack_event(
+            "pack-0",
+            [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")],
+            with_trace=False,
+        )
+    )
+    log.append(_gs_feedback("pack-0", helpful=["sem"], unhelpful=["rw"]))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.unhelpful_removed == 1
+    assert report.tokens_freed == 100
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert any("could not have their token walk re-run" in n for n in report.notes)
+
+
+def test_a_walk_that_does_not_reproduce_the_record_is_not_trusted() -> None:
+    # The pack served 200 tokens under a recorded 150-token budget, as a
+    # safety margin or graduated disclosure would leave it; a re-run that
+    # cannot reproduce that walk has no standing to say what comes next.
+    log = _refill_log(
+        [_gs_row("rw", stamp=_RW), _gs_row("sem", axis="semantic")],
+        [_gs_row("tail", 20, axis="semantic")],
+        max_tokens=150,
+        helpful=["sem"],
+    )
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 1
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert report.replacement_servings == 0
+
+
+# -- the same thing through the real builder ----------------------------------
+
+
+def _graph_item(item_id: str, score: float, stamp: str) -> PackItem:
+    return PackItem(
+        item_id=item_id,
+        item_type="entity",
+        excerpt=f"{item_id} distinct body words here " * 6,
+        relevance_score=score,
+        metadata={"source_strategy": "graph", "graph_selection": stamp},
+    )
+
+
+def _semantic_item(item_id: str, score: float) -> PackItem:
+    return PackItem(
+        item_id=item_id,
+        item_type="document",
+        excerpt=f"{item_id} distinct body words here " * 6,
+        relevance_score=score,
+        metadata={"source_strategy": "semantic"},
+    )
+
+
+def test_a_real_builder_pack_reproduces_and_refills(tmp_path: Path) -> None:
+    """Replay over an event the real ``PackBuilder`` wrote, not a fixture.
+
+    A fixture can agree with the replay about a field the builder does not
+    write. Here the two graph items carry a stamp, the budget turns two
+    semantic candidates away, and the replay must read the stamp from the
+    event, reproduce the recorded walk from ``budget_trace`` and
+    ``budget_max_tokens``, and admit the turned-away candidates once the
+    recency-window servings are gone.
+    """
+    strategies = [
+        _axis_strategy(
+            "graph",
+            [
+                _graph_item("g1", 0.95, _RW),
+                _graph_item("g2", 0.94, _RW),
+            ],
+        ),
+        _axis_strategy(
+            "semantic",
+            [
+                _semantic_item("s1", 0.9),
+                _semantic_item("s2", 0.8),
+                _semantic_item("s3", 0.7),
+            ],
+        ),
+    ]
+    probe = PackBuilder(
+        strategies=strategies, content_floor=ContentFloorConfig(mode="off")
+    ).build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    per_item = probe.items[0].estimated_tokens or 0
+    assert per_item > 0
+
+    log = SQLiteEventLog(tmp_path / "events.db")
+    builder = PackBuilder(
+        strategies=strategies,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+    )
+    # Room for three items: g1, g2 and the best semantic one are served.
+    pack = builder.build(
+        "q", budget=PackBudget(max_items=50, max_tokens=per_item * 3 + 5)
+    )
+    served = [item.item_id for item in pack.items]
+    assert served == ["g1", "g2", "s1"]
+
+    event = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[0]
+    pack_id = event.payload.get("pack_id") or event.entity_id
+    log.append(_gs_feedback(pack_id, helpful=["g1", "s1"], unhelpful=["g2"]))
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 2
+    assert report.helpful_lost == 1
+    assert report.unhelpful_removed == 1
+    assert report.tokens_freed == 2 * per_item
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+    assert report.replacement_by_strategy == {"semantic": 2}
+    assert report.replacement_tokens == 2 * per_item

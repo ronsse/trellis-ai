@@ -129,6 +129,12 @@ from trellis.feedback.attribution import (
     stray_shape,
 )
 from trellis.learning.pack_observations import join_pack_feedback_with_coverage
+from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_CALLER_SEEDED,
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
+    GRAPH_STRATEGY_NAME,
+)
 from trellis.retrieve.token_pricing import estimate_dollars, resolve_pricing
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
@@ -166,6 +172,78 @@ _DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 # both sit below ``retrieve`` in the import graph. They are re-exported
 # from here, where the ``by_item_namespace`` axis introduced them, and
 # ``__all__`` at the foot of this module still names both.
+
+
+#: ``by_graph_selection`` bucket for a graph-axis serving whose row carries no
+#: ``graph_selection`` stamp — a pack assembled before the stamp existed.
+#: Named rather than folded into ``recency_window``: the stamp's absence says
+#: nothing about which way the axis chose.
+GRAPH_SELECTION_UNSTAMPED = "(graph, no stamp)"
+
+#: ``by_graph_selection`` bucket for every serving that did not come from the
+#: graph axis. Its only job is to make the buckets sum to the total, so a
+#: reader can see the graph axis's share rather than assume it.
+GRAPH_SELECTION_NOT_GRAPH = "(not graph axis)"
+
+#: Bucket order, fixed so the JSON has one shape and an empty bucket reads as
+#: "no servings" rather than as a missing key. A stamp outside this list
+#: (a value a later build adds) gets its own bucket after them.
+_GRAPH_SELECTION_BUCKETS = (
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
+    GRAPH_SELECTION_CALLER_SEEDED,
+    GRAPH_SELECTION_UNSTAMPED,
+    GRAPH_SELECTION_NOT_GRAPH,
+)
+
+
+def graph_selection_bucket(row: Mapping[str, Any]) -> str:
+    """The ``by_graph_selection`` bucket for one ``injected_items[]`` row.
+
+    The stamp decides when there is one: only graph items carry it, so it is
+    the sharper signal than ``strategy_source`` (an id retrieved by two axes
+    is attributed to whichever won dedup). Without a stamp, a
+    ``strategy_source`` of the graph axis is :data:`GRAPH_SELECTION_UNSTAMPED`
+    and anything else is :data:`GRAPH_SELECTION_NOT_GRAPH`.
+    """
+    stamp = row.get("graph_selection")
+    if isinstance(stamp, str) and stamp.strip():
+        return stamp.strip()
+    if row.get("strategy_source") == GRAPH_STRATEGY_NAME:
+        return GRAPH_SELECTION_UNSTAMPED
+    return GRAPH_SELECTION_NOT_GRAPH
+
+
+class GraphSelectionBreakdown(TrellisModel):
+    """Citations per serving for one ``graph_selection`` bucket (#961).
+
+    Counted per ``(pack_id, item_id)`` **serving**, the unit
+    :mod:`trellis.retrieve.pack_replay` counts in, not per token: the
+    question is whether the unseeded recency window draws unhelpful verdicts,
+    and a token weighting would let one long excerpt outvote ten short ones.
+    Every serving in an attributed pack is exactly one of helpful, unhelpful
+    or unjudged (helpful wins a contradictory pair), so the three counts sum
+    to :attr:`servings` and the three rates to 1.
+
+    Rates are refused below :data:`MIN_ATTRIBUTED_PACKS` attributed packs, as
+    every other cell is; the counts are never refused.
+    """
+
+    key: str
+    #: Attributed packs contributing at least one serving to this bucket.
+    attributed_packs: int = 0
+    #: **The ``n``.** ``(pack, item)`` servings in attributed packs.
+    servings: int = 0
+    helpful_servings: int = 0
+    unhelpful_servings: int = 0
+    #: Servings no grader named. No verdict, not an unhelpful one.
+    unjudged_servings: int = 0
+    #: ``helpful_servings / servings``, ``None`` when suppressed or empty.
+    helpful_per_serving: float | None = None
+    unhelpful_per_serving: float | None = None
+    unjudged_per_serving: float | None = None
+    suppressed: bool = False
+    suppressed_reason: str = ""
 
 
 class ValueBreakdown(TrellisModel):
@@ -359,6 +437,14 @@ class PackValueReport(TrellisModel):
     #: reported as their average (#298).
     by_item_namespace: list[ValueBreakdown] = Field(default_factory=list)
     by_intent_family: list[ValueBreakdown] = Field(default_factory=list)
+    #: Servings split by ``injected_items[].graph_selection`` (#961), in the
+    #: fixed order of :data:`_GRAPH_SELECTION_BUCKETS`, so the graph axis's
+    #: recency window can be read against its seeded alternatives. Counts
+    #: servings, not tokens; see :class:`GraphSelectionBreakdown`.
+    by_graph_selection: list[GraphSelectionBreakdown] = Field(default_factory=list)
+    #: ``(pack, item)`` servings in attributed packs — the total every
+    #: :attr:`by_graph_selection` bucket sums to.
+    attributed_servings: int = 0
 
     #: Machine-readable caveats a renderer must not drop.
     notes: list[str] = Field(default_factory=list)
@@ -465,6 +551,7 @@ def summarize_pack_value(
     by_strategy = tally["by_strategy"]
     by_item_type = tally["by_item_type"]
     by_namespace = tally["by_item_namespace"]
+    by_graph_selection = tally["by_graph_selection"]
     by_family = tally["by_family"]
     distinct_helpful = tally["distinct_helpful"]
     cited_not_served = tally["cited_not_served"]
@@ -550,6 +637,8 @@ def summarize_pack_value(
         by_item_type=_sorted_cells(by_item_type),
         by_item_namespace=_sorted_cells(by_namespace),
         by_intent_family=_sorted_cells(by_family),
+        by_graph_selection=by_graph_selection,
+        attributed_servings=sum(cell.servings for cell in by_graph_selection),
         notes=_build_notes(
             attributed_packs=attributed_packs,
             sectioned=sectioned,
@@ -561,6 +650,14 @@ def summarize_pack_value(
             helpful=totals["helpful"],
             scan=scan,
             response=response,
+            unstamped_graph_servings=next(
+                (
+                    cell.servings
+                    for cell in by_graph_selection
+                    if cell.key == GRAPH_SELECTION_UNSTAMPED
+                ),
+                0,
+            ),
         ),
     )
     logger.debug(
@@ -650,6 +747,65 @@ class _Axis:
         return self.cells
 
 
+class _GraphSelectionAxis:
+    """The ``graph_selection`` axis: one tally per bucket, per **serving**.
+
+    Kept apart from :class:`_Axis` because its unit is different — a
+    serving counts once whatever it weighs — and because every bucket in
+    :data:`_GRAPH_SELECTION_BUCKETS` exists from the start, so an empty one
+    is reported as zero servings instead of going missing.
+    """
+
+    __slots__ = ("_cells", "_packs", "_seen")
+
+    def __init__(self) -> None:
+        self._cells = {
+            key: GraphSelectionBreakdown(key=key) for key in _GRAPH_SELECTION_BUCKETS
+        }
+        self._packs: dict[str, set[str]] = defaultdict(set)
+        self._seen: set[tuple[str, str]] = set()
+
+    def charge(
+        self, pack_id: str, item_id: str, row: Mapping[str, Any], verdict: str
+    ) -> None:
+        # ``(pack, item)`` is the serving. A pack dedups by id, so a repeat
+        # is not expected; skipping it keeps the unit true if one appears.
+        if (pack_id, item_id) in self._seen:
+            return
+        self._seen.add((pack_id, item_id))
+        key = graph_selection_bucket(row)
+        cell = self._cells.setdefault(key, GraphSelectionBreakdown(key=key))
+        self._packs[key].add(pack_id)
+        cell.servings += 1
+        if verdict == "helpful":
+            cell.helpful_servings += 1
+        elif verdict == "unhelpful":
+            cell.unhelpful_servings += 1
+        else:
+            cell.unjudged_servings += 1
+
+    def finalize(self) -> list[GraphSelectionBreakdown]:
+        known = [self._cells[key] for key in _GRAPH_SELECTION_BUCKETS]
+        extra = sorted(
+            (c for k, c in self._cells.items() if k not in _GRAPH_SELECTION_BUCKETS),
+            key=lambda c: c.key,
+        )
+        for cell in (*known, *extra):
+            cell.attributed_packs = len(self._packs.get(cell.key, ()))
+            if not cell.servings:
+                continue
+            if cell.attributed_packs < MIN_ATTRIBUTED_PACKS:
+                cell.suppressed = True
+                cell.suppressed_reason = SUPPRESSED_THIN_SAMPLE
+                continue
+            cell.helpful_per_serving = _fraction(cell.helpful_servings, cell.servings)
+            cell.unhelpful_per_serving = _fraction(
+                cell.unhelpful_servings, cell.servings
+            )
+            cell.unjudged_per_serving = _fraction(cell.unjudged_servings, cell.servings)
+        return [*known, *extra]
+
+
 def _charge_cells(cells: tuple[ValueBreakdown, ...], tokens: int, verdict: str) -> None:
     """Add one item's tokens to every axis cell it belongs to."""
     for cell in cells:
@@ -673,6 +829,7 @@ def _accumulate(
     """Sum injected tokens into helpful / unhelpful / unjudged, per axis."""
     totals = {"injected": 0, "helpful": 0, "unhelpful": 0}
     strategy_axis, type_axis, namespace_axis = _Axis(), _Axis(), _Axis()
+    graph_axis = _GraphSelectionAxis()
     by_family: dict[str, ValueBreakdown] = {}
     distinct_helpful: set[str] = set()
     cited_not_served = 0
@@ -724,6 +881,7 @@ def _accumulate(
                 tokens,
                 verdict,
             )
+            graph_axis.charge(pack_id, item_id, raw, verdict)
 
             totals["injected"] += tokens
             if verdict == "helpful":
@@ -743,6 +901,7 @@ def _accumulate(
         "by_strategy": strategy_axis.finalize(),
         "by_item_type": type_axis.finalize(),
         "by_item_namespace": namespace_axis.finalize(),
+        "by_graph_selection": graph_axis.finalize(),
         "by_family": by_family,
         "distinct_helpful": distinct_helpful,
         "cited_not_served": cited_not_served,
@@ -852,6 +1011,7 @@ def _build_notes(
     helpful: int,
     scan: ScanCoverage,
     response: dict[str, Any],
+    unstamped_graph_servings: int = 0,
 ) -> list[str]:
     """Caveats that travel with the numbers, in both output formats."""
     notes: list[str] = [
@@ -905,6 +1065,13 @@ def _build_notes(
             "name an id the pack DID serve, under a different namespace "
             "prefix."
         )
+    if unstamped_graph_servings:
+        notes.append(
+            f"{unstamped_graph_servings} graph-axis serving(s) carry no "
+            "graph_selection stamp (assembled before it was recorded), so "
+            f'they sit in the "{GRAPH_SELECTION_UNSTAMPED}" bucket, not in '
+            "recency_window or seeded."
+        )
     if not response["with_pack_id"]:
         notes.append(
             "No TOKEN_TRACKED event carries a pack_id, so response-token cost "
@@ -915,13 +1082,17 @@ def _build_notes(
 
 
 __all__ = [
+    "GRAPH_SELECTION_NOT_GRAPH",
+    "GRAPH_SELECTION_UNSTAMPED",
     "MIN_ATTRIBUTED_PACKS",
     "NO_NAMESPACE",
     "collect_pack_verdicts",
     "SUPPRESSED_NO_JUDGED_TOKENS",
     "SUPPRESSED_THIN_SAMPLE",
+    "GraphSelectionBreakdown",
     "PackValueReport",
     "ValueBreakdown",
+    "graph_selection_bucket",
     "item_namespace",
     "summarize_pack_value",
 ]
