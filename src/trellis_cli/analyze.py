@@ -49,6 +49,7 @@ from trellis.ops.capture_coverage import CaptureCoverageReport
 from trellis.ops.serving_builds import ServingBuildsReport
 from trellis.retrieve.advisory_generator import (
     DEFAULT_MAX_KEYWORD_DOC_FREQ,
+    SUGGESTED_MAX_KEYWORD_DOC_FREQ,
     AdvisoryGenerator,
     AdvisoryReport,
     resolve_advisory_thresholds,
@@ -2015,9 +2016,9 @@ def _exit_if_advisory_store_degraded(store: AdvisoryStore, output_format: str) -
     raise typer.Exit(code=EXIT_STORE)
 
 
-def _check_keyword_df(value: float) -> None:
+def _check_keyword_df(value: float | None) -> None:
     """Reject a ``--max-keyword-df`` the generator would refuse, as a usage error."""
-    if not 0.0 < value <= 1.0:
+    if value is not None and not 0.0 < value <= 1.0:
         msg = f"must be greater than 0 and at most 1, got {value}"
         raise typer.BadParameter(msg, param_hint="--max-keyword-df")
 
@@ -2031,6 +2032,23 @@ def _render_query_filter(report: AdvisoryReport) -> None:
             f" {withheld['stop_list']} stop-list,"
             f" {withheld['document_frequency']} document frequency"
         )
+    preview = report.query_keyword_df_preview
+    if report.query_keyword_df_rule == "off":
+        # Said plainly, not left as a null: an owner reading this run decides
+        # whether to turn the frequency rule on.
+        console.print(
+            "  Document-frequency rule: off"
+            + (
+                f" (at {preview['ceiling']} it would withhold"
+                f" {preview['keywords_would_withhold']} keywords and suppress"
+                f" {preview['rows_would_retire']} active rows;"
+                f" enable with --max-keyword-df {preview['ceiling']})"
+                if preview
+                else " (window too small to preview it)"
+            )
+        )
+    elif report.query_keyword_df_rule == "stood_down":
+        console.print("  Document-frequency rule: stood down (window too small)")
     retired = report.query_rows_retired
     if any(retired.values()) or report.query_rows_unretired:
         console.print(
@@ -2055,12 +2073,13 @@ def generate_advisories(
         "--min-effect",
         help="Min effect size to emit an advisory; defaults to the configured setting",
     ),
-    max_keyword_df: float = typer.Option(
+    max_keyword_df: float | None = typer.Option(
         DEFAULT_MAX_KEYWORD_DOC_FREQ,
         "--max-keyword-df",
         help=(
             "Skip a query keyword found in more than this share of the analysed"
-            " packs' intents (0-1; 1 turns the rule off)."
+            " packs' intents (0-1). Off by default; the report previews what"
+            f" {SUGGESTED_MAX_KEYWORD_DOC_FREQ} would withhold."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),

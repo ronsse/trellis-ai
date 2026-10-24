@@ -133,14 +133,20 @@ _SCOPE_LARGE = 15
 _MIN_BIN_COUNT = 2
 #: Document-frequency ceiling for a QUERY keyword: a word in more than this
 #: share of the analysed packs' intents is background vocabulary, not a choice
-#: of query, and its "effect" is the task mix it happens to sit in. 0.25 is a
-#: judgement, not a fit: it is the point past which the packs *without* the
+#: of query, and its "effect" is the task mix it happens to sit in. The rule is
+#: **off by default** (``None``): at 0.25 it would also retire domain nouns that
+#: still have a 75% comparison arm, and nobody has counted on production data
+#: how many rows that is. A run with the rule off still measures the
+#: ``SUGGESTED_MAX_KEYWORD_DOC_FREQ`` ceiling without acting on it
+#: (:attr:`AdvisoryReport.query_keyword_df_preview`), so the figure can be read
+#: from one nightly before the rule is turned on
+#: (``trellis analyze generate-advisories --max-keyword-df 0.25``).
+DEFAULT_MAX_KEYWORD_DOC_FREQ: float | None = None
+#: The ceiling to enable the rule at, and the one an off run previews. 0.25 is
+#: a judgement, not a fit: it is the point past which the packs *without* the
 #: word are under three quarters of the sample, and it was not tuned against a
-#: measured intent distribution. The run reports how many rows it withheld
-#: (:attr:`AdvisoryReport.query_keywords_withheld`) so an operator can move it
-#: (``trellis analyze generate-advisories --max-keyword-df``); ``1.0`` turns
-#: the rule off.
-DEFAULT_MAX_KEYWORD_DOC_FREQ = 0.25
+#: measured intent distribution.
+SUGGESTED_MAX_KEYWORD_DOC_FREQ = 0.25
 #: Rule names, shared by the report's two per-rule tallies and the audit event.
 _RULE_STOP_LIST = "stop_list"
 _RULE_DOC_FREQ = "document_frequency"
@@ -356,11 +362,23 @@ class AdvisoryReport(TrellisModel):
     #: ceiling was raised, or the word's share fell), put back to ``active``.
     query_rows_unretired: int = 0
     #: The document-frequency ceiling this run enforced, or ``None`` when it
-    #: was not enforced: the ceiling is skipped while the analysed packs are so
-    #: few that it could never admit a word the sample floor would (fewer than
-    #: ``min_sample_size / ceiling`` of them), rather than silently turning
-    #: QUERY analysis off. The stop-list applies either way.
+    #: was not enforced, for either reason in :attr:`query_keyword_df_rule`.
+    #: The stop-list applies either way.
     query_keyword_df_ceiling: float | None = None
+    #: Why :attr:`query_keyword_df_ceiling` is what it is: ``"enforced"``;
+    #: ``"off"`` (the default, no ceiling was asked for); or ``"stood_down"``
+    #: (a ceiling was set, but the analysed packs were so few that it could never
+    #: admit a word the sample floor would, fewer than ``min_sample_size /
+    #: ceiling`` of them, so it was skipped rather than silently turning QUERY
+    #: analysis off).
+    query_keyword_df_rule: str = "off"
+    #: What the rule *would* have done at ``SUGGESTED_MAX_KEYWORD_DOC_FREQ``,
+    #: measured and not acted on: ``ceiling``; ``keywords_would_withhold``
+    #: (rows the rule would keep out, counted as :attr:`query_keywords_withheld`
+    #: counts them); ``rows_would_retire`` (active QUERY rows it would suppress).
+    #: ``None`` unless the rule is off and the window is large enough for the
+    #: suggested ceiling to admit a word.
+    query_keyword_df_preview: dict[str, float | int] | None = None
     #: Coverage of the two capped event reads. A run whose window held
     #: more than ``DEFAULT_SCAN_LIMIT`` events of either type analysed
     #: only the newest of them, and says so here rather than reporting a
@@ -394,11 +412,11 @@ class AdvisoryGenerator:
         *,
         min_sample_size: int = _MIN_SAMPLE_SIZE,
         min_effect_size: float = _MIN_EFFECT_SIZE,
-        max_keyword_doc_freq: float = DEFAULT_MAX_KEYWORD_DOC_FREQ,
+        max_keyword_doc_freq: float | None = DEFAULT_MAX_KEYWORD_DOC_FREQ,
     ) -> None:
         # ``not (0 < x <= 1)`` rather than ``x <= 0 or x > 1``: nan fails
         # every comparison and would otherwise fail *open* here.
-        if not 0.0 < max_keyword_doc_freq <= 1.0:
+        if max_keyword_doc_freq is not None and not 0.0 < max_keyword_doc_freq <= 1.0:
             msg = f"max_keyword_doc_freq must be in (0, 1], got {max_keyword_doc_freq}"
             raise ValueError(msg)
         self._event_log = event_log
@@ -421,6 +439,11 @@ class AdvisoryGenerator:
         self._query_withheld: Counter[str] = Counter()
         self._df_excluded: set[str] = set()
         self._df_ceiling_applied = False
+        #: Rule-off only: the suggested ceiling, measured and not enforced.
+        self._df_probe_applied = False
+        self._df_probe_excluded: set[str] = set()
+        self._df_probe_would_withhold = 0
+        self._df_probe_would_retire = 0
         #: Tonight's share of analysed packs for every keyword that became an
         #: advisory: what :meth:`_may_unretire` compares against the ceiling.
         self._query_shares: dict[str, float] = {}
@@ -474,6 +497,10 @@ class AdvisoryGenerator:
         self._query_withheld = Counter()
         self._df_excluded = set()
         self._df_ceiling_applied = False
+        self._df_probe_applied = False
+        self._df_probe_excluded = set()
+        self._df_probe_would_withhold = 0
+        self._df_probe_would_retire = 0
         self._query_shares = {}
         self._unretired = []
 
@@ -511,6 +538,7 @@ class AdvisoryGenerator:
                 total_feedback=len(feedback_events),
                 analysis_window_days=days,
                 coverage=coverage,
+                query_keyword_df_rule=self._df_rule_state(),
             )
 
         # Run all five analysis methods
@@ -580,8 +608,23 @@ class AdvisoryGenerator:
             query_keyword_df_ceiling=(
                 self._max_keyword_doc_freq if self._df_ceiling_applied else None
             ),
+            query_keyword_df_rule=self._df_rule_state(),
+            query_keyword_df_preview=(
+                {
+                    "ceiling": SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+                    "keywords_would_withhold": self._df_probe_would_withhold,
+                    "rows_would_retire": self._df_probe_would_retire,
+                }
+                if self._df_probe_applied
+                else None
+            ),
             coverage=coverage,
         )
+
+    def _df_rule_state(self) -> str:
+        if self._max_keyword_doc_freq is None:
+            return "off"
+        return "enforced" if self._df_ceiling_applied else "stood_down"
 
     # --- Data preparation ---
 
@@ -873,10 +916,11 @@ class AdvisoryGenerator:
         """Find intent keywords that correlate with successful packs.
 
         A keyword is dropped before it is scored when it cannot be a query
-        choice: a function word (:data:`QUERY_STOP_WORDS`), or a word in more
-        than ``max_keyword_doc_freq`` of the analysed packs' intents. Both
-        left a ``for`` or ``with`` "correlating with success" at n of a handful,
-        which is the task mix of whatever packs carried it, not the query.
+        choice: a function word (:data:`QUERY_STOP_WORDS`), or, when
+        ``max_keyword_doc_freq`` is set (off by default), a word in more than
+        that share of the analysed packs' intents. Both left a ``for`` or
+        ``with`` "correlating with success" at n of a handful, which is the task
+        mix of whatever packs carried it, not the query.
         """
         total_success = sum(1 for p in packs if p["success"])
         tally = self._tally(packs, lambda p: _intent_words(p.get("intent")))
@@ -884,8 +928,13 @@ class AdvisoryGenerator:
         # fewer packs than ``min_sample_size / ceiling`` every word that has
         # enough carriers is already over it, and enforcing it would end QUERY
         # analysis outright instead of filtering it.
+        ceiling = self._max_keyword_doc_freq
         self._df_ceiling_applied = (
-            len(packs) * self._max_keyword_doc_freq >= self._min_sample_size
+            ceiling is not None and len(packs) * ceiling >= self._min_sample_size
+        )
+        self._df_probe_applied = (
+            ceiling is None
+            and len(packs) * SUGGESTED_MAX_KEYWORD_DOC_FREQ >= self._min_sample_size
         )
 
         advisories: list[Advisory] = []
@@ -905,6 +954,12 @@ class AdvisoryGenerator:
                     self._query_withheld[rule] += 1
                 continue
 
+            share = outcomes.presentations / len(packs)
+            over_probe = (
+                self._df_probe_applied and share > SUGGESTED_MAX_KEYWORD_DOC_FREQ
+            )
+            if over_probe:
+                self._df_probe_excluded.add(word)
             supported = self._supported_effect(outcomes, total_success, len(packs))
             if supported is None:
                 continue
@@ -912,7 +967,9 @@ class AdvisoryGenerator:
             if effect < self._min_effect_size:
                 continue
 
-            self._query_shares[word] = outcomes.presentations / len(packs)
+            if over_probe:
+                self._df_probe_would_withhold += 1
+            self._query_shares[word] = share
             advisories.append(
                 Advisory(
                     advisory_id=self._stable_id(AdvisoryCategory.QUERY, word),
@@ -943,9 +1000,11 @@ class AdvisoryGenerator:
         """The rule that keeps ``word`` from keying an advisory, if any."""
         if word in QUERY_STOP_WORDS:
             return _RULE_STOP_LIST
+        ceiling = self._max_keyword_doc_freq
         if (
             self._df_ceiling_applied
-            and outcomes.presentations / total_packs > self._max_keyword_doc_freq
+            and ceiling is not None
+            and outcomes.presentations / total_packs > ceiling
         ):
             return _RULE_DOC_FREQ
         return None
@@ -980,6 +1039,8 @@ class AdvisoryGenerator:
                 continue
             rule = self._retirement_rule(keyword)
             if rule is None:
+                if keyword in self._df_probe_excluded:
+                    self._df_probe_would_retire += 1
                 continue
             reason = f"query keyword excluded by {rule}: {keyword!r}"
             marker: dict[str, Any] = {
@@ -1289,6 +1350,9 @@ class AdvisoryGenerator:
         * ``stop_list`` and ``unnormalised_keyword``: a property of the code,
           not of the night. The word is being emitted, so the rule no longer
           excludes it; un-retire.
+        * **Rule off** (no ceiling configured): nothing excludes a word on
+          frequency, so a row it retired earlier, under a ceiling the operator
+          has since dropped, comes back as soon as the word is emitted.
         * ``document_frequency``: a property of tonight's pack mix, so being
           emitted proves little. Un-retire only when the ceiling was enforced
           tonight *and* either the ceiling is above the one that retired the
@@ -1308,9 +1372,11 @@ class AdvisoryGenerator:
         rule = prior.metadata.get(RETIRED_RULE_KEY)
         if rule in (_RULE_STOP_LIST, _RULE_UNNORMALISED):
             return True
+        ceiling = self._max_keyword_doc_freq
+        if ceiling is None:
+            return True
         if not self._df_ceiling_applied:
             return False
-        ceiling = self._max_keyword_doc_freq
         retired_ceiling = prior.metadata.get(RETIRED_CEILING_KEY)
         if isinstance(retired_ceiling, int | float) and ceiling > retired_ceiling:
             return True

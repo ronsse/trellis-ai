@@ -3834,6 +3834,8 @@ class TestWorkerCurateRetiresQueryRows:
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
         assert data["advisory_query_rows_retired"] == 1
+        # Two packs: too few for the off-by-default frequency rule to preview.
+        assert data["advisory_query_df_preview"] is None
         after = AdvisoryStore(path).get(row.advisory_id)
         assert after is not None
         assert after.status == AdvisoryStatus.SUPPRESSED

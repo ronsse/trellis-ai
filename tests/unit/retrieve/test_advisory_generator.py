@@ -21,6 +21,7 @@ from trellis.retrieve.advisory_generator import (
     MIN_SAMPLE_SIZE_ENV,
     MIN_SAMPLE_SIZE_SETTING,
     QUERY_STOP_WORDS,
+    SUGGESTED_MAX_KEYWORD_DOC_FREQ,
     AdvisoryGenerator,
     resolve_advisory_thresholds,
 )
@@ -815,7 +816,8 @@ class TestRefusalIsReported:
         Two: the ``ubiquitous`` and ``narrow`` strategies. The five words of
         the shared intent used to make it seven, each being on all 20 packs;
         the QUERY filter now takes them out before they are priced (two are
-        function words, three are over the document-frequency ceiling), so
+        function words, three are over the document-frequency ceiling, which
+        this test turns on at 0.25: it is off by default), so
         they are neither refused nor withheld rows: none could have been
         written, there being no comparison arm. The count still separates
         "the analysis found nothing" from "found things it could not
@@ -824,7 +826,11 @@ class TestRefusalIsReported:
         packs, feedback = _two_arm_corpus()
         event_log = MagicMock(spec=EventLog)
         event_log.get_events.side_effect = [packs, feedback]
-        gen = AdvisoryGenerator(event_log, AdvisoryStore(tmp_path / "adv.json"))
+        gen = AdvisoryGenerator(
+            event_log,
+            AdvisoryStore(tmp_path / "adv.json"),
+            max_keyword_doc_freq=SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+        )
 
         report = gen.generate(days=30)
 
@@ -1582,25 +1588,33 @@ class TestQueryKeywordDocumentFrequency:
     """#960 — a word in a large share of intents cannot discriminate."""
 
     def test_a_word_over_the_ceiling_is_withheld(self, tmp_path: Path) -> None:
-        # 12 of 30 packs: share 0.40 against the 0.25 default.
+        # 12 of 30 packs: share 0.40 against a 0.25 ceiling.
         packs, feedback = _intent_corpus(12, 18, carrier_intent="widget rollout")
         event_log = MagicMock(spec=EventLog)
         event_log.get_events.side_effect = [packs, feedback]
         store = AdvisoryStore(tmp_path / "adv.json")
 
-        report = AdvisoryGenerator(event_log, store).generate(days=30)
+        report = AdvisoryGenerator(
+            event_log, store, max_keyword_doc_freq=SUGGESTED_MAX_KEYWORD_DOC_FREQ
+        ).generate(days=30)
 
         assert _keywords(store) == set()
         assert report.query_keywords_withheld == {
             "stop_list": 0,
             "document_frequency": 2,
         }
-        assert report.query_keyword_df_ceiling == DEFAULT_MAX_KEYWORD_DOC_FREQ
+        assert report.query_keyword_df_ceiling == SUGGESTED_MAX_KEYWORD_DOC_FREQ
+        assert report.query_keyword_df_rule == "enforced"
 
     def test_the_same_word_under_the_ceiling_is_kept(self, tmp_path: Path) -> None:
         # 6 of 30: share 0.20.
         packs, feedback = _intent_corpus(6, 24, carrier_intent="widget rollout")
-        store, _ = _run(tmp_path, packs, feedback)
+        store, _ = _run(
+            tmp_path,
+            packs,
+            feedback,
+            max_keyword_doc_freq=SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+        )
 
         assert _keywords(store) == {"widget", "rollout"}
 
@@ -1622,6 +1636,7 @@ class TestQueryKeywordDocumentFrequency:
 
         assert _keywords(store) == {"widget", "rollout"}
         assert report.query_keywords_withheld["document_frequency"] == 0
+        assert report.query_keyword_df_rule == "enforced"
 
     def test_the_ceiling_is_skipped_when_it_could_never_admit_a_word(
         self, tmp_path: Path
@@ -1636,16 +1651,24 @@ class TestQueryKeywordDocumentFrequency:
         event_log.get_events.side_effect = [packs, feedback]
         store = AdvisoryStore(tmp_path / "adv.json")
 
-        report = AdvisoryGenerator(event_log, store).generate(days=30)
+        report = AdvisoryGenerator(
+            event_log, store, max_keyword_doc_freq=SUGGESTED_MAX_KEYWORD_DOC_FREQ
+        ).generate(days=30)
 
         assert _keywords(store) == {"widget", "rollout"}
         assert report.query_keyword_df_ceiling is None
+        assert report.query_keyword_df_rule == "stood_down"
 
     def test_the_stop_list_still_applies_when_the_ceiling_stands_down(
         self, tmp_path: Path
     ) -> None:
         packs, feedback = _intent_corpus(6, 6, carrier_intent="widget for rollout")
-        store, _ = _run(tmp_path, packs, feedback)
+        store, _ = _run(
+            tmp_path,
+            packs,
+            feedback,
+            max_keyword_doc_freq=SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+        )
 
         assert _keywords(store) == {"widget", "rollout"}
 
@@ -1669,6 +1692,8 @@ class TestQueryRowRetirement:
         feedback: list[MagicMock],
         **kwargs: object,
     ) -> tuple[object, MagicMock]:
+        # The frequency rule is off by default; these tests are about it.
+        kwargs.setdefault("max_keyword_doc_freq", SUGGESTED_MAX_KEYWORD_DOC_FREQ)
         event_log = MagicMock(spec=EventLog)
         event_log.get_events.side_effect = [packs, feedback]
         report = AdvisoryGenerator(event_log, store, **kwargs).generate(days=30)  # type: ignore[arg-type]
@@ -1894,7 +1919,7 @@ class TestDocumentFrequencyRetirementIsStable:
         assert row.retired_by == RETIRED_BY_QUERY_FILTER
         # The marker is carried across the regenerated row, not dropped by it.
         assert row.metadata[RETIRED_RULE_KEY] == "document_frequency"
-        assert row.metadata[RETIRED_CEILING_KEY] == DEFAULT_MAX_KEYWORD_DOC_FREQ
+        assert row.metadata[RETIRED_CEILING_KEY] == SUGGESTED_MAX_KEYWORD_DOC_FREQ
         assert report.query_rows_unretired == 0  # type: ignore[attr-defined]
 
     def test_a_retirement_records_its_rule_and_the_ceiling(
@@ -1917,7 +1942,7 @@ class TestDocumentFrequencyRetirementIsStable:
         assert meta("rollout") == {
             **base,
             RETIRED_RULE_KEY: "document_frequency",
-            RETIRED_CEILING_KEY: DEFAULT_MAX_KEYWORD_DOC_FREQ,
+            RETIRED_CEILING_KEY: SUGGESTED_MAX_KEYWORD_DOC_FREQ,
         }
 
     def test_a_short_night_does_not_un_retire(self, tmp_path: Path) -> None:
@@ -2105,6 +2130,141 @@ class TestDocumentFrequencyRetirementIsStable:
             if c.args[0] == EventType.ADVISORY_SUPPRESSED
         ]
         assert len(suppressed) == 3
+
+
+class TestDocumentFrequencyRuleShipsOff:
+    """The frequency rule is off by default; the stop-list is not.
+
+    At 0.25 the rule would also retire domain nouns that still have a 75%
+    comparison arm, and nobody has counted on production data how many rows
+    that is. So a default run measures it (the preview) and retires nothing on
+    frequency grounds, while the stop-list and unnormalised-keyword rules stay on.
+    """
+
+    def test_the_default_is_off(self) -> None:
+        assert DEFAULT_MAX_KEYWORD_DOC_FREQ is None
+        assert SUGGESTED_MAX_KEYWORD_DOC_FREQ == 0.25
+
+    def test_a_default_run_retires_nothing_on_frequency_but_the_stop_list_still_does(
+        self, tmp_path: Path
+    ) -> None:
+        store = TestQueryRowRetirement()._seeded(tmp_path)
+        packs, feedback = TestQueryRowRetirement()._corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+
+        report = AdvisoryGenerator(event_log, store).generate(days=30)
+
+        by_keyword = {
+            a.metadata["keyword"]: a for a in store.list(include_suppressed=True)
+        }
+        # "rollout" is in 12 of 30 intents: over 0.25, and it is kept.
+        assert by_keyword["rollout"].status == AdvisoryStatus.ACTIVE
+        assert by_keyword["care"].status == AdvisoryStatus.ACTIVE
+        assert by_keyword["for"].status == AdvisoryStatus.SUPPRESSED
+        assert by_keyword["widget,"].status == AdvisoryStatus.SUPPRESSED
+        assert report.query_rows_retired == {
+            "stop_list": 1,
+            "document_frequency": 0,
+            "unnormalised_keyword": 1,
+        }
+        assert report.query_keywords_withheld["document_frequency"] == 0
+        # The report says the ceiling is off rather than leaving a bare null.
+        assert report.query_keyword_df_ceiling is None
+        assert report.query_keyword_df_rule == "off"
+
+    def test_the_stop_list_withholds_with_the_rule_off(self, tmp_path: Path) -> None:
+        packs, feedback = _intent_corpus(6, 24, carrier_intent="widget for rollout")
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+
+        report = AdvisoryGenerator(
+            event_log, AdvisoryStore(tmp_path / "a.json")
+        ).generate(days=30)
+
+        assert report.query_keywords_withheld == {
+            "stop_list": 1,
+            "document_frequency": 0,
+        }
+
+    def test_the_preview_counts_what_the_suggested_ceiling_would_do(
+        self, tmp_path: Path
+    ) -> None:
+        """Off, the run reports the figure an enforced run would act on."""
+        packs, feedback = TestQueryRowRetirement()._corpus()
+        (tmp_path / "off").mkdir()
+        (tmp_path / "on").mkdir()
+        off_store = TestQueryRowRetirement()._seeded(tmp_path / "off")
+        on_store = TestQueryRowRetirement()._seeded(tmp_path / "on")
+        off_report, _ = TestQueryRowRetirement._generate(
+            off_store, packs, feedback, max_keyword_doc_freq=None
+        )
+        on_report, _ = TestQueryRowRetirement._generate(on_store, packs, feedback)
+
+        preview = off_report.query_keyword_df_preview  # type: ignore[attr-defined]
+        assert preview == {
+            "ceiling": SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+            "keywords_would_withhold": on_report.query_keywords_withheld[  # type: ignore[attr-defined]
+                "document_frequency"
+            ],
+            "rows_would_retire": on_report.query_rows_retired["document_frequency"],  # type: ignore[attr-defined]
+        }
+        # Non-vacuous: the corpus has a word over the ceiling and a row on it.
+        assert preview["keywords_would_withhold"] >= 1
+        assert preview["rows_would_retire"] == 1
+        # Measured, not acted on.
+        assert (
+            off_store.get(  # type: ignore[union-attr]
+                AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "rollout")
+            ).status
+            == AdvisoryStatus.ACTIVE
+        )
+
+    def test_there_is_no_preview_when_enforced_or_when_the_window_is_too_small(
+        self, tmp_path: Path
+    ) -> None:
+        packs, feedback = TestQueryRowRetirement()._corpus()
+        enforced, _ = TestQueryRowRetirement._generate(
+            AdvisoryStore(tmp_path / "e.json"), packs, feedback
+        )
+        assert enforced.query_keyword_df_preview is None  # type: ignore[attr-defined]
+
+        short_packs, short_feedback = _intent_corpus(6, 6, carrier_intent="widget")
+        short, _ = TestQueryRowRetirement._generate(
+            AdvisoryStore(tmp_path / "s.json"),
+            short_packs,
+            short_feedback,
+            max_keyword_doc_freq=None,
+        )
+        assert short.query_keyword_df_preview is None  # type: ignore[attr-defined]
+        assert short.query_keyword_df_rule == "off"  # type: ignore[attr-defined]
+
+    def test_dropping_the_ceiling_puts_a_frequency_retired_row_back(
+        self, tmp_path: Path
+    ) -> None:
+        """Retired under 0.25, then the operator runs with the rule off."""
+        store = TestDocumentFrequencyRetirementIsStable()._retired(tmp_path)
+        row_id = TestDocumentFrequencyRetirementIsStable.ID
+        assert store.get(row_id).status == AdvisoryStatus.SUPPRESSED  # type: ignore[union-attr]
+
+        report, _ = TestDocumentFrequencyRetirementIsStable._night(
+            store, 12, 18, max_keyword_doc_freq=None
+        )
+
+        assert store.get(row_id).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+
+    def test_a_bad_ceiling_is_still_refused_and_none_is_not(self) -> None:
+        import pytest
+
+        AdvisoryGenerator(
+            MagicMock(spec=EventLog), MagicMock(), max_keyword_doc_freq=None
+        )
+        for bad in (0.0, 1.5, float("nan")):
+            with pytest.raises(ValueError, match="max_keyword_doc_freq"):
+                AdvisoryGenerator(
+                    MagicMock(spec=EventLog), MagicMock(), max_keyword_doc_freq=bad
+                )
 
 
 class TestFitnessLoopLeavesRetiredRowsAlone:
