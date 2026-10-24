@@ -1729,6 +1729,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ).single()
 
         record = self._execute_edge_claim_write(_tx)
+        rereads = 0
         for backoff in _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS:
             # An endpoint with a row but no readable current one is a
             # concurrent re-version caught mid-commit (module docstring):
@@ -1737,8 +1738,19 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 source_id, target_id
             ):
                 break
+            rereads += 1
             time.sleep(backoff)
             record = self._execute_edge_claim_write(_tx)
+        if rereads:
+            # A warning, not debug: no shipped configuration prints debug,
+            # and whether this window is the one CI hit (#969) is unproven.
+            logger.warning(
+                "edge_endpoint_reread",
+                source_id=source_id,
+                target_id=target_id,
+                rereads=rereads,
+                recovered=record is not None,
+            )
         if record is None:
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "

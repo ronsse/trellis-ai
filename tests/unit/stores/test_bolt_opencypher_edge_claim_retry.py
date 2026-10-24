@@ -238,9 +238,10 @@ class TestEndpointThatIsMomentarilyUnreadable:
     """An endpoint a concurrent ``upsert_node`` is re-versioning can read as absent.
 
     Measured against ``neo4j:2025.12``: right after a re-version commits, the
-    ``node_id`` index lookup can return neither the closed row nor the new
-    one for a millisecond or so, though both exist. The edge write then
-    sees "no current version" for a node that never lacked one
+    edge write's current-row match can miss the new row for a millisecond
+    or so while the closed row still reads, which is what the row probe
+    relies on. The edge write then sees "no current version" for a node
+    that never lacked one
     (``test_edge_write_racing_node_upsert_keeps_one_current_node`` in
     ``live-infra.yml``). A node with no row at all is a different answer
     and is refused at once, as above.
@@ -260,9 +261,21 @@ class TestEndpointThatIsMomentarilyUnreadable:
         store._endpoints_have_a_version_row = MagicMock(return_value=True)  # type: ignore[method-assign]
         execute_write = _arm_execute_write(store, [None, {"edge_id": "edge_01"}])
 
-        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
+        with capture_logs() as logs:
+            assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
 
         assert execute_write.call_count == 2
+        rereads = [e for e in logs if e["event"] == "edge_endpoint_reread"]
+        assert rereads == [
+            {
+                "event": "edge_endpoint_reread",
+                "log_level": "warning",
+                "source_id": "src",
+                "target_id": "tgt",
+                "rereads": 1,
+                "recovered": True,
+            }
+        ]
         assert sleeps == [_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[0]]
         store._endpoints_have_a_version_row.assert_called_once_with("src", "tgt")
 
@@ -276,10 +289,17 @@ class TestEndpointThatIsMomentarilyUnreadable:
         attempts = 1 + len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
         execute_write = _arm_execute_write(store, [None] * (attempts + 2))
 
-        with pytest.raises(ValueError, match="no current version"):
+        with (
+            capture_logs() as logs,
+            pytest.raises(ValueError, match="no current version"),
+        ):
             store.upsert_edge("src", "tgt", "race-rel", {})
 
         assert execute_write.call_count == attempts
+        rereads = [e for e in logs if e["event"] == "edge_endpoint_reread"]
+        assert [(e["rereads"], e["recovered"]) for e in rereads] == [
+            (len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS), False)
+        ]
         assert sleeps == list(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
 
     def test_an_endpoint_with_no_row_at_all_is_refused_without_sleeping(
