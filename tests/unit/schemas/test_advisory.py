@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+from trellis.schemas.advisory import (
+    RETIRED_BY_KEY,
+    RETIRED_BY_QUERY_FILTER,
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+    AdvisoryStatus,
+)
 
 
 class TestAdvisoryEvidence:
@@ -101,3 +108,44 @@ class TestAdvisory:
         assert restored.advisory_id == adv.advisory_id
         assert restored.confidence == adv.confidence
         assert restored.evidence.effect_size == -0.44
+
+
+class TestAdvisoryRetiredBy:
+    """#960 — ``retired_by`` is the marker, read only while it is in force."""
+
+    @staticmethod
+    def _advisory(status: AdvisoryStatus, **metadata: object) -> Advisory:
+        return Advisory(
+            category=AdvisoryCategory.QUERY,
+            confidence=0.5,
+            message="m",
+            evidence=AdvisoryEvidence(
+                sample_size=5,
+                success_rate_with=0.8,
+                success_rate_without=0.2,
+                effect_size=0.6,
+            ),
+            scope="global",
+            status=status,
+            metadata=dict(metadata),
+        )
+
+    def test_a_suppressed_row_with_the_marker_is_retired(self) -> None:
+        adv = self._advisory(
+            AdvisoryStatus.SUPPRESSED, **{RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER}
+        )
+        assert adv.retired_by == RETIRED_BY_QUERY_FILTER
+
+    def test_an_active_row_with_a_stale_marker_is_not(self) -> None:
+        """``restore`` leaves metadata alone, so the status has to decide."""
+        adv = self._advisory(
+            AdvisoryStatus.ACTIVE, **{RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER}
+        )
+        assert adv.retired_by is None
+
+    def test_a_suppressed_row_without_the_marker_is_not(self) -> None:
+        assert self._advisory(AdvisoryStatus.SUPPRESSED).retired_by is None
+
+    def test_a_malformed_marker_is_ignored(self) -> None:
+        adv = self._advisory(AdvisoryStatus.SUPPRESSED, **{RETIRED_BY_KEY: 7})
+        assert adv.retired_by is None

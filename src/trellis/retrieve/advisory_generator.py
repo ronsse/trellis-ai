@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -78,6 +79,11 @@ from trellis.core.settings_registry import get_setting, validate_value
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
+    RETIRED_BY_KEY,
+    RETIRED_BY_QUERY_FILTER,
+    RETIRED_CEILING_KEY,
+    RETIRED_RULE_KEY,
+    RETIREMENT_KEYS,
     Advisory,
     AdvisoryCategory,
     AdvisoryEvidence,
@@ -125,6 +131,76 @@ _MIN_WORD_LENGTH = 3
 _SCOPE_SMALL = 5
 _SCOPE_LARGE = 15
 _MIN_BIN_COUNT = 2
+#: Document-frequency ceiling for a QUERY keyword: a word in more than this
+#: share of the analysed packs' intents is background vocabulary, not a choice
+#: of query, and its "effect" is the task mix it happens to sit in. The rule is
+#: **off by default** (``None``): at 0.25 it would also retire domain nouns that
+#: still have a 75% comparison arm, and nobody has counted on production data
+#: how many rows that is. A run with the rule off still measures the
+#: ``SUGGESTED_MAX_KEYWORD_DOC_FREQ`` ceiling without acting on it
+#: (:attr:`AdvisoryReport.query_keyword_df_preview`), so the figure can be read
+#: from one nightly before the rule is turned on
+#: (``trellis analyze generate-advisories --max-keyword-df 0.25``).
+DEFAULT_MAX_KEYWORD_DOC_FREQ: float | None = None
+#: The ceiling to enable the rule at, and the one an off run previews. 0.25 is
+#: a judgement, not a fit: it is the point past which the packs *without* the
+#: word are under three quarters of the sample, and it was not tuned against a
+#: measured intent distribution.
+SUGGESTED_MAX_KEYWORD_DOC_FREQ = 0.25
+#: Rule names, shared by the report's two per-rule tallies and the audit event.
+_RULE_STOP_LIST = "stop_list"
+_RULE_DOC_FREQ = "document_frequency"
+#: Retirement only: a stored keyword that is not what the tokenizer would now
+#: produce from it (edge punctuation, e.g. ``"deploy,"``). The generator emits
+#: the cleaned word under its own id, so the old row would sit beside it.
+_RULE_UNNORMALISED = "unnormalised_keyword"
+#: A row the document-frequency rule retired comes back on frequency alone only
+#: once its word's share is at or below this fraction of the ceiling. The share
+#: is a nightly measurement of a changing task mix, so a word hovering at the
+#: bar would otherwise be retired and restored on alternate nights, an audit
+#: event each time. Re-retirement needs the share *over* the ceiling, which
+#: leaves the band between this fraction and the ceiling as a dead zone.
+_DF_UNRETIRE_FRACTION = 0.8
+_RETIREMENT_SOURCE = "retrieve.advisory_generator.query_filter"
+_EDGE_PUNCTUATION = re.compile(r"^\W+|\W+$")
+
+#: English function words, which cannot name a topic: determiners, pronouns,
+#: prepositions, conjunctions, auxiliaries and a few particles, at least
+#: ``_MIN_WORD_LENGTH`` long (shorter words never reach the filter). Deliberately
+#: nothing a task could be *about*, so no verbs of work ("fix", "add") and no
+#: nouns: a topic word that is merely common is the document-frequency
+#: ceiling's job, where it can be measured rather than guessed.
+QUERY_STOP_WORDS: frozenset[str] = frozenset(
+    """
+    about above across after again against all also although among and another
+    any are because been before being below between both but can could did does
+    doing during each either else ever every few for from further had has have
+    having her here hers him his how into its itself just may might more most
+    must much neither never nor not off once one only onto other our ours out
+    over own per same shall she should since some such than that the their
+    theirs them then there these they this those though through too toward
+    towards under unless until upon very via was were what when where whether
+    which while who whom whose why will with within without would yet you your
+    yours yourself yourselves himself herself themselves ourselves myself
+    """.split()  # noqa: SIM905 - a word block reads and diffs better than 120 quoted strings
+)
+
+
+def _normalise_word(token: str) -> str:
+    """``token`` without leading or trailing punctuation.
+
+    ``str.split()`` leaves it attached, so ``"deploy,"`` and ``"deploy"`` were
+    two keywords with two advisory ids, each with half the evidence.
+    """
+    return _EDGE_PUNCTUATION.sub("", token)
+
+
+def _intent_words(intent: str | None) -> set[str]:
+    """The candidate QUERY keywords of one intent, before any rule is applied."""
+    words = (_normalise_word(t) for t in (intent or "").lower().split())
+    return {w for w in words if len(w) >= _MIN_WORD_LENGTH}
+
+
 #: How many pack ids to carry as evidence on one advisory. Enough for a
 #: reviewer to spot-check the claim, short enough that the row stays small.
 _MAX_REPRESENTATIVE = 5
@@ -263,6 +339,46 @@ class AdvisoryReport(TrellisModel):
     #: alike to attribute anything to — which is what the reference
     #: deployment was saying, in silence, while emitting the claim anyway.
     findings_refused_no_comparison_arm: int = 0
+    #: QUERY keywords this run declined to key an advisory on, by rule
+    #: (``stop_list``, ``document_frequency``), counted as the rows the rule
+    #: kept out: only a word that would otherwise have cleared the sample and
+    #: effect floors counts, so the figure is "advisories not written", not
+    #: "words skipped". A word is counted under the first rule that catches it.
+    query_keywords_withheld: dict[str, int] = Field(
+        default_factory=lambda: {_RULE_STOP_LIST: 0, _RULE_DOC_FREQ: 0}
+    )
+    #: Active QUERY rows this run suppressed because the generator no longer
+    #: emits their keyword, by rule (``stop_list``, ``document_frequency``,
+    #: ``unnormalised_keyword``). Suppressed, not deleted, and each carries an
+    #: ``advisory.suppressed`` event.
+    query_rows_retired: dict[str, int] = Field(
+        default_factory=lambda: {
+            _RULE_STOP_LIST: 0,
+            _RULE_DOC_FREQ: 0,
+            _RULE_UNNORMALISED: 0,
+        }
+    )
+    #: Rows a previous run retired whose keyword is no longer excluded (the
+    #: ceiling was raised, or the word's share fell), put back to ``active``.
+    query_rows_unretired: int = 0
+    #: The document-frequency ceiling this run enforced, or ``None`` when it
+    #: was not enforced, for either reason in :attr:`query_keyword_df_rule`.
+    #: The stop-list applies either way.
+    query_keyword_df_ceiling: float | None = None
+    #: Why :attr:`query_keyword_df_ceiling` is what it is: ``"enforced"``;
+    #: ``"off"`` (the default, no ceiling was asked for); or ``"stood_down"``
+    #: (a ceiling was set, but the analysed packs were so few that it could never
+    #: admit a word the sample floor would, fewer than ``min_sample_size /
+    #: ceiling`` of them, so it was skipped rather than silently turning QUERY
+    #: analysis off).
+    query_keyword_df_rule: str = "off"
+    #: What the rule *would* have done at ``SUGGESTED_MAX_KEYWORD_DOC_FREQ``,
+    #: measured and not acted on: ``ceiling``; ``keywords_would_withhold``
+    #: (rows the rule would keep out, counted as :attr:`query_keywords_withheld`
+    #: counts them); ``rows_would_retire`` (active QUERY rows it would suppress).
+    #: ``None`` unless the rule is off and the window is large enough for the
+    #: suggested ceiling to admit a word.
+    query_keyword_df_preview: dict[str, float | int] | None = None
     #: Coverage of the two capped event reads. A run whose window held
     #: more than ``DEFAULT_SCAN_LIMIT`` events of either type analysed
     #: only the newest of them, and says so here rather than reporting a
@@ -296,11 +412,18 @@ class AdvisoryGenerator:
         *,
         min_sample_size: int = _MIN_SAMPLE_SIZE,
         min_effect_size: float = _MIN_EFFECT_SIZE,
+        max_keyword_doc_freq: float | None = DEFAULT_MAX_KEYWORD_DOC_FREQ,
     ) -> None:
+        # ``not (0 < x <= 1)`` rather than ``x <= 0 or x > 1``: nan fails
+        # every comparison and would otherwise fail *open* here.
+        if max_keyword_doc_freq is not None and not 0.0 < max_keyword_doc_freq <= 1.0:
+            msg = f"max_keyword_doc_freq must be in (0, 1], got {max_keyword_doc_freq}"
+            raise ValueError(msg)
         self._event_log = event_log
         self._advisory_store = advisory_store
         self._min_sample_size = min_sample_size
         self._min_effect_size = min_effect_size
+        self._max_keyword_doc_freq = max_keyword_doc_freq
         #: Per-run refusal tally, reset at the top of :meth:`generate`. A
         #: refusal nobody can see is the quiet half of the defect this fix
         #: is about: an operator whose advisory count drops needs to be
@@ -309,6 +432,22 @@ class AdvisoryGenerator:
         #: state, so a generator is single-run and not thread-safe — which
         #: is how all three call sites already use it.
         self._refusals: Counter[str] = Counter()
+        #: Per-run QUERY-filter tallies, reset with ``_refusals``: rows each
+        #: rule kept out, the keywords the document-frequency rule excluded
+        #: (what retirement matches stored rows against), and whether that
+        #: rule was enforced at all.
+        self._query_withheld: Counter[str] = Counter()
+        self._df_excluded: set[str] = set()
+        self._df_ceiling_applied = False
+        #: Rule-off only: the suggested ceiling, measured and not enforced.
+        self._df_probe_applied = False
+        self._df_probe_excluded: set[str] = set()
+        self._df_probe_would_withhold = 0
+        self._df_probe_would_retire = 0
+        #: Tonight's share of analysed packs for every keyword that became an
+        #: advisory: what :meth:`_may_unretire` compares against the ceiling.
+        self._query_shares: dict[str, float] = {}
+        self._unretired: list[str] = []
 
     def generate(self, *, days: int = 30) -> AdvisoryReport:
         """Run all analysis methods and store resulting advisories.
@@ -355,6 +494,15 @@ class AdvisoryGenerator:
 
         since = datetime.now(tz=UTC) - timedelta(days=days)
         self._refusals = Counter()
+        self._query_withheld = Counter()
+        self._df_excluded = set()
+        self._df_ceiling_applied = False
+        self._df_probe_applied = False
+        self._df_probe_excluded = set()
+        self._df_probe_would_withhold = 0
+        self._df_probe_would_retire = 0
+        self._query_shares = {}
+        self._unretired = []
 
         # Capped reads go through scan_events so a window with more than
         # DEFAULT_SCAN_LIMIT matches keeps the *newest* events. The
@@ -390,6 +538,7 @@ class AdvisoryGenerator:
                 total_feedback=len(feedback_events),
                 analysis_window_days=days,
                 coverage=coverage,
+                query_keyword_df_rule=self._df_rule_state(),
             )
 
         # Run all five analysis methods
@@ -414,6 +563,17 @@ class AdvisoryGenerator:
         if advisories:
             advisories = [self._carry_forward_status(a) for a in advisories]
             stored = self._advisory_store.put_many(advisories)
+            # After the write, so an event never names a row the store does
+            # not hold.
+            for advisory_id in self._unretired:
+                self._emit_query_filter_event(
+                    EventType.ADVISORY_RESTORED,
+                    advisory_id,
+                    {"reason": "query keyword no longer excluded"},
+                )
+        unretired = len(self._unretired)
+
+        retired = self._retire_excluded_query_rows()
 
         logger.info(
             "advisories_generated",
@@ -422,6 +582,9 @@ class AdvisoryGenerator:
             packs_analyzed=len(packs),
             refused_no_comparison_arm=self._refusals["no_comparison_arm"],
             refused_too_few_observations=self._refusals["too_few_observations"],
+            query_withheld=dict(self._query_withheld),
+            query_retired=dict(retired),
+            query_unretired=unretired,
             truncated=coverage.truncated,
         )
 
@@ -432,8 +595,36 @@ class AdvisoryGenerator:
             total_feedback=len(feedback_events),
             analysis_window_days=days,
             findings_refused_no_comparison_arm=self._refusals["no_comparison_arm"],
+            query_keywords_withheld={
+                _RULE_STOP_LIST: self._query_withheld[_RULE_STOP_LIST],
+                _RULE_DOC_FREQ: self._query_withheld[_RULE_DOC_FREQ],
+            },
+            query_rows_retired={
+                _RULE_STOP_LIST: retired[_RULE_STOP_LIST],
+                _RULE_DOC_FREQ: retired[_RULE_DOC_FREQ],
+                _RULE_UNNORMALISED: retired[_RULE_UNNORMALISED],
+            },
+            query_rows_unretired=unretired,
+            query_keyword_df_ceiling=(
+                self._max_keyword_doc_freq if self._df_ceiling_applied else None
+            ),
+            query_keyword_df_rule=self._df_rule_state(),
+            query_keyword_df_preview=(
+                {
+                    "ceiling": SUGGESTED_MAX_KEYWORD_DOC_FREQ,
+                    "keywords_would_withhold": self._df_probe_would_withhold,
+                    "rows_would_retire": self._df_probe_would_retire,
+                }
+                if self._df_probe_applied
+                else None
+            ),
             coverage=coverage,
         )
+
+    def _df_rule_state(self) -> str:
+        if self._max_keyword_doc_freq is None:
+            return "off"
+        return "enforced" if self._df_ceiling_applied else "stood_down"
 
     # --- Data preparation ---
 
@@ -722,19 +913,53 @@ class AdvisoryGenerator:
         return advisories
 
     def _query_improvement(self, packs: list[dict[str, Any]]) -> list[Advisory]:
-        """Find intent keywords that correlate with successful packs."""
+        """Find intent keywords that correlate with successful packs.
+
+        A keyword is dropped before it is scored when it cannot be a query
+        choice: a function word (:data:`QUERY_STOP_WORDS`), or, when
+        ``max_keyword_doc_freq`` is set (off by default), a word in more than
+        that share of the analysed packs' intents. Both left a ``for`` or
+        ``with`` "correlating with success" at n of a handful, which is the task
+        mix of whatever packs carried it, not the query.
+        """
         total_success = sum(1 for p in packs if p["success"])
-        tally = self._tally(
-            packs,
-            lambda p: {
-                word
-                for word in p.get("intent", "").lower().split()
-                if len(word) >= _MIN_WORD_LENGTH
-            },
+        tally = self._tally(packs, lambda p: _intent_words(p.get("intent")))
+        # The ceiling is only meaningful while it can admit something: with
+        # fewer packs than ``min_sample_size / ceiling`` every word that has
+        # enough carriers is already over it, and enforcing it would end QUERY
+        # analysis outright instead of filtering it.
+        ceiling = self._max_keyword_doc_freq
+        self._df_ceiling_applied = (
+            ceiling is not None and len(packs) * ceiling >= self._min_sample_size
+        )
+        self._df_probe_applied = (
+            ceiling is None
+            and len(packs) * SUGGESTED_MAX_KEYWORD_DOC_FREQ >= self._min_sample_size
         )
 
         advisories: list[Advisory] = []
         for word, outcomes in tally.items():
+            rule = self._exclusion_rule(word, outcomes, len(packs))
+            if rule is not None:
+                if rule == _RULE_DOC_FREQ:
+                    self._df_excluded.add(word)
+                # What the rule cost: the row that *would* have been written.
+                # Refusals are not counted for it (``count_refusal=False``),
+                # so ``findings_refused_no_comparison_arm`` keeps meaning
+                # "refused among the words that were let through".
+                supported = self._supported_effect(
+                    outcomes, total_success, len(packs), count_refusal=False
+                )
+                if supported is not None and supported[2] >= self._min_effect_size:
+                    self._query_withheld[rule] += 1
+                continue
+
+            share = outcomes.presentations / len(packs)
+            over_probe = (
+                self._df_probe_applied and share > SUGGESTED_MAX_KEYWORD_DOC_FREQ
+            )
+            if over_probe:
+                self._df_probe_excluded.add(word)
             supported = self._supported_effect(outcomes, total_success, len(packs))
             if supported is None:
                 continue
@@ -742,6 +967,9 @@ class AdvisoryGenerator:
             if effect < self._min_effect_size:
                 continue
 
+            if over_probe:
+                self._df_probe_would_withhold += 1
+            self._query_shares[word] = share
             advisories.append(
                 Advisory(
                     advisory_id=self._stable_id(AdvisoryCategory.QUERY, word),
@@ -766,6 +994,120 @@ class AdvisoryGenerator:
 
         return advisories
 
+    def _exclusion_rule(
+        self, word: str, outcomes: _KeyOutcomes, total_packs: int
+    ) -> str | None:
+        """The rule that keeps ``word`` from keying an advisory, if any."""
+        if word in QUERY_STOP_WORDS:
+            return _RULE_STOP_LIST
+        ceiling = self._max_keyword_doc_freq
+        if (
+            self._df_ceiling_applied
+            and ceiling is not None
+            and outcomes.presentations / total_packs > ceiling
+        ):
+            return _RULE_DOC_FREQ
+        return None
+
+    def _retire_excluded_query_rows(self) -> Counter[str]:
+        """Suppress active QUERY rows whose keyword the generator now excludes.
+
+        Without this the rules above only stop *new* rows: the 176 rows already
+        written stay active, keep their slots in every pack, and wait for the
+        fitness loop to score them down, which needs ``min_presentations``
+        presentations each and a confidence that clears ``suppress_below``.
+
+        It is a **suppression**, the store's own reversible mechanism, with the
+        row marked (:attr:`Advisory.retired_by`) so the fitness loop leaves it
+        alone, and an ``advisory.suppressed`` event naming the rule. Rows are
+        matched on ``metadata["keyword"]``; other categories, and QUERY rows
+        without one, are untouched. So are already-suppressed rows: a fitness
+        suppression stays the fitness loop's.
+
+        Run only after the generator has packs to analyse (the
+        document-frequency rule needs a corpus), and a row whose keyword is
+        absent from this run's window is never retired on frequency.
+        """
+        retired: Counter[str] = Counter()
+        suppressions: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+        events: list[tuple[str, dict[str, Any]]] = []
+        for advisory in self._advisory_store.list():
+            if advisory.category != AdvisoryCategory.QUERY:
+                continue
+            keyword = advisory.metadata.get("keyword")
+            if not isinstance(keyword, str):
+                continue
+            rule = self._retirement_rule(keyword)
+            if rule is None:
+                if keyword in self._df_probe_excluded:
+                    self._df_probe_would_retire += 1
+                continue
+            reason = f"query keyword excluded by {rule}: {keyword!r}"
+            marker: dict[str, Any] = {
+                RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER,
+                RETIRED_RULE_KEY: rule,
+            }
+            if rule == _RULE_DOC_FREQ:
+                marker[RETIRED_CEILING_KEY] = self._max_keyword_doc_freq
+            suppressions[advisory.advisory_id] = (reason, marker)
+            events.append(
+                (
+                    advisory.advisory_id,
+                    {"reason": reason, "rule": rule, "keyword": keyword},
+                )
+            )
+            retired[rule] += 1
+        # One write for the whole set (the first night after a rule change
+        # retires about a hundred rows), and events only for rows it landed.
+        if suppressions:
+            self._advisory_store.suppress_many(suppressions)
+            for advisory_id, payload in events:
+                self._emit_query_filter_event(
+                    EventType.ADVISORY_SUPPRESSED, advisory_id, payload
+                )
+        return retired
+
+    def _retirement_rule(self, keyword: str) -> str | None:
+        """Why a *stored* keyword would no longer be emitted, or ``None``."""
+        if _normalise_word(keyword) != keyword:
+            return _RULE_UNNORMALISED
+        if keyword in QUERY_STOP_WORDS:
+            return _RULE_STOP_LIST
+        if keyword in self._df_excluded:
+            return _RULE_DOC_FREQ
+        return None
+
+    def _emit_query_filter_event(
+        self, event_type: EventType, advisory_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Audit event for a retirement or un-retirement, fail-soft.
+
+        The store write is the source of truth (same posture as the fitness
+        loop's events). ``new_confidence`` is deliberately absent: the
+        dashboard averages it over fitness events, and this row's confidence did
+        not move.
+        """
+        try:
+            self._event_log.emit(
+                event_type,
+                source=_RETIREMENT_SOURCE,
+                entity_id=advisory_id,
+                entity_type="advisory",
+                payload={
+                    "advisory_id": advisory_id,
+                    RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER,
+                    **payload,
+                },
+            )
+        # GRACEFUL-DEGRADATION: the suppression/restore already landed in the
+        # store; the event is an audit side-effect and must not fail the run.
+        except Exception:
+            logger.exception(
+                "advisory_query_filter_event_emit_failed",
+                event_type=event_type.value,
+                advisory_id=advisory_id,
+            )
+
     # --- Helpers ---
 
     def _supported_effect(
@@ -773,6 +1115,8 @@ class AdvisoryGenerator:
         outcomes: _KeyOutcomes,
         total_successes: int,
         total_packs: int,
+        *,
+        count_refusal: bool = True,
     ) -> tuple[float, float, float] | None:
         """``(rate_with, rate_without, effect)``, or ``None`` if unsupported.
 
@@ -795,13 +1139,19 @@ class AdvisoryGenerator:
         emitted at all, and if it somehow were, the shared fallback would
         still report lift 0 rather than the old ``0.0`` literal's
         fabricated effect.
+
+        ``count_refusal=False`` asks the question without recording an
+        answer: the QUERY filter uses it to price a word it already excluded,
+        which must not read as a refusal of a word that was let through.
         """
         presentations = outcomes.presentations
         if presentations < self._min_sample_size:
-            self._refusals["too_few_observations"] += 1
+            if count_refusal:
+                self._refusals["too_few_observations"] += 1
             return None
         if total_packs - presentations < self._min_sample_size:
-            self._refusals["no_comparison_arm"] += 1
+            if count_refusal:
+                self._refusals["no_comparison_arm"] += 1
             return None
         return lift_vs_baseline(
             outcomes.successes, presentations, total_successes, total_packs
@@ -952,19 +1302,87 @@ class AdvisoryGenerator:
         prior = self._advisory_store.get(advisory.advisory_id)
         if prior is None:
             return advisory
+        # A row *this generator* retired is the one suppression it owns, so
+        # it is the one it may undo, but only when the rule that retired it
+        # has actually been relaxed (:meth:`_may_unretire`): being emitted
+        # again is not enough, since a document-frequency retirement tracks a
+        # nightly measurement that a quiet night or a drifting share would
+        # otherwise reverse. Carrying SUPPRESSED forever instead would pin a
+        # relaxed rule's row off, since the fitness loop is barred from
+        # restoring it. Fresh ``metadata`` drops the marker, so a row that
+        # stays retired has to have it carried across.
+        retired = prior.retired_by == RETIRED_BY_QUERY_FILTER
+        unretire = retired and self._may_unretire(prior, advisory)
+        if unretire:
+            self._unretired.append(advisory.advisory_id)
         carried: dict[str, Any] = {
             "created_at": prior.created_at,
             "updated_at": datetime.now(tz=UTC),
-            "status": prior.status,
-            "suppressed_at": prior.suppressed_at,
-            "suppression_reason": prior.suppression_reason,
             "fitness_scored_at": prior.fitness_scored_at,
         }
-        if prior.fitness_scored_at is not None or prior.status == (
-            AdvisoryStatus.SUPPRESSED
+        if not unretire:
+            carried.update(
+                status=prior.status,
+                suppressed_at=prior.suppressed_at,
+                suppression_reason=prior.suppression_reason,
+            )
+            if retired:
+                carried["metadata"] = {
+                    **advisory.metadata,
+                    **{
+                        k: prior.metadata[k]
+                        for k in RETIREMENT_KEYS
+                        if k in prior.metadata
+                    },
+                }
+        if prior.fitness_scored_at is not None or (
+            prior.status == AdvisoryStatus.SUPPRESSED and not unretire
         ):
             carried["confidence"] = prior.confidence
         return advisory.model_copy(update=carried)
+
+    def _may_unretire(self, prior: Advisory, regenerated: Advisory) -> bool:
+        """Whether tonight's evidence relaxes the rule that retired ``prior``.
+
+        Called for a row this generator retired whose finding was emitted
+        again tonight.
+
+        * ``stop_list`` and ``unnormalised_keyword``: a property of the code,
+          not of the night. The word is being emitted, so the rule no longer
+          excludes it; un-retire.
+        * **Rule off** (no ceiling configured): nothing excludes a word on
+          frequency, so a row it retired earlier, under a ceiling the operator
+          has since dropped, comes back as soon as the word is emitted.
+        * ``document_frequency``: a property of tonight's pack mix, so being
+          emitted proves little. Un-retire only when the ceiling was enforced
+          tonight *and* either the ceiling is above the one that retired the
+          row (the operator relaxed it) or the word's share is at or below
+          :data:`_DF_UNRETIRE_FRACTION` of it. On a night with too few packs
+          the ceiling stands down, so every word is emitted: that is the
+          absence of a measurement, not a measurement, and the row stays
+          retired.
+        * **No recorded rule** (a row retired by a build that did not store
+          one) or an unrecognised one is held to the strictest, the
+          document-frequency test with no known retiring ceiling. That is the
+          only rule whose condition changes nightly; if the row was in fact a
+          static-rule retirement it stays suppressed until its share is
+          comfortably low, a reversible outcome, where the other guess could
+          flap.
+        """
+        rule = prior.metadata.get(RETIRED_RULE_KEY)
+        if rule in (_RULE_STOP_LIST, _RULE_UNNORMALISED):
+            return True
+        ceiling = self._max_keyword_doc_freq
+        if ceiling is None:
+            return True
+        if not self._df_ceiling_applied:
+            return False
+        retired_ceiling = prior.metadata.get(RETIRED_CEILING_KEY)
+        if isinstance(retired_ceiling, int | float) and ceiling > retired_ceiling:
+            return True
+        keyword = regenerated.metadata.get("keyword")
+        share = self._query_shares.get(keyword) if isinstance(keyword, str) else None
+        return share is not None and share <= _DF_UNRETIRE_FRACTION * ceiling
 
     @staticmethod
     def _compute_confidence(sample_size: int, effect_size: float) -> float:

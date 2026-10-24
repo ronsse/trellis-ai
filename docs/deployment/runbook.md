@@ -243,6 +243,32 @@ trellis analyze generate-advisories \
   --days 30 --min-sample 5 --min-effect 0.15 --format json
 ```
 
+QUERY advisories are keyed on words from the pack intent. Function words
+(a stop-list in `advisory_generator.py`) are always withheld. A second rule,
+off by default, withholds any word in more than `--max-keyword-df` of the
+analysed packs (try `0.25`; it is skipped on a window too small for it to admit
+any word). It ships off because at 0.25 it also retires domain nouns that still
+have a 75% comparison arm, and nobody has counted on production data how many
+rows that is: with it off, the report previews the 0.25 figure
+(`query_keyword_df_preview`: `keywords_would_withhold` and `rows_would_retire`;
+`worker curate` carries it as `advisory_query_df_preview`), so read it from one
+nightly before enabling the rule. Active QUERY rows the generator would no
+longer write are **suppressed**, never deleted, with an `ADVISORY_SUPPRESSED`
+event naming the rule; the row records which rule (and, for frequency, which
+ceiling) in its metadata. A frequency-retired row comes back only when the word
+is emitted again, because it must clear `min_sample_size`, `min_effect_size` and
+the comparison arm; otherwise it is restored only by `AdvisoryStore.restore`,
+and no CLI exists for that yet. While the rule is enforced it also needs a night
+that enforces the ceiling, and a ceiling higher than the one that retired it or
+a share fallen to 80% of the ceiling, so a share hovering at the bar, or a
+window too short to enforce it, does not flip the row nightly. With the rule
+off, the word being emitted again is enough. A stop-list retirement comes back
+once the word leaves the list. `AdvisoryStore.restore` also restores a row (and
+clears its retirement), but the next run retires it again while the word is
+still excluded. The JSON report counts each rule under `query_keywords_withheld`
+and `query_rows_retired`, and says which state the frequency rule is in under
+`query_keyword_df_rule` (`off`, `enforced` or `stood_down`).
+
 REST equivalent:
 
 ```bash

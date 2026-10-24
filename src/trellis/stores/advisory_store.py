@@ -113,13 +113,13 @@ the file; the refusal carries the ``mv`` an operator would run.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import structlog
 
-from trellis.schemas.advisory import Advisory, AdvisoryStatus
+from trellis.schemas.advisory import RETIREMENT_KEYS, Advisory, AdvisoryStatus
 from trellis.stores.degradable_json_store import DegradableJsonStore, LoadDegradation
 
 logger = structlog.get_logger(__name__)
@@ -243,8 +243,14 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
         advisory_id: str,
         *,
         reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Advisory | None:
         """Soft-suppress an advisory: flip status, stamp metadata, persist.
+
+        ``metadata`` is merged into the row's own ``metadata`` in the same
+        write, for a caller that has to mark *who* suppressed it (the
+        generator's rule retirement, :attr:`Advisory.retired_by`). Ignored
+        on the idempotent branch, like ``reason``.
 
         Returns the updated advisory, or ``None`` if the id is unknown.
         Idempotent — suppressing an already-suppressed advisory is a
@@ -273,14 +279,7 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
         if advisory.status == AdvisoryStatus.SUPPRESSED:
             return advisory
         restore = self._snapshot()
-        updated = advisory.model_copy(
-            update={
-                "status": AdvisoryStatus.SUPPRESSED,
-                "suppressed_at": datetime.now(UTC),
-                "suppression_reason": reason,
-                "updated_at": datetime.now(UTC),
-            }
-        )
+        updated = self._suppressed_copy(advisory, reason, metadata)
         self._rows[advisory_id] = updated
         self._save_or_roll_back(restore)
         logger.info(
@@ -290,12 +289,66 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
         )
         return updated
 
+    def suppress_many(
+        self,
+        suppressions: Mapping[str, tuple[str | None, dict[str, Any] | None]],
+    ) -> Sequence[Advisory]:
+        """Suppress several advisories in one write.
+
+        ``suppressions`` maps an advisory id to the ``(reason, metadata)`` that
+        :meth:`suppress` would take for it. One file rewrite and one rollback
+        scope instead of one per row: the generator's first night after a rule
+        change retires on the order of a hundred rows, and a refusal part-way
+        through a row-at-a-time loop left a prefix retired and the rest not.
+        Here a refusal or a failed write leaves every row as it was.
+
+        Skips what :meth:`suppress` would answer without writing — an unknown
+        id and an already-suppressed row — and returns only the rows it
+        suppressed, in the order given. Guarded before the lookups for the
+        reasons :meth:`suppress` gives.
+        """
+        self.refuse_if_degraded()
+        self.refuse_if_stale()
+        restore = self._snapshot()
+        suppressed: list[Advisory] = []
+        for advisory_id, (reason, metadata) in suppressions.items():
+            advisory = self._rows.get(advisory_id)
+            if advisory is None or advisory.status == AdvisoryStatus.SUPPRESSED:
+                continue
+            updated = self._suppressed_copy(advisory, reason, metadata)
+            self._rows[advisory_id] = updated
+            suppressed.append(updated)
+        if not suppressed:
+            return suppressed
+        self._save_or_roll_back(restore)
+        logger.info("advisories_suppressed", count=len(suppressed))
+        return suppressed
+
+    @staticmethod
+    def _suppressed_copy(
+        advisory: Advisory, reason: str | None, metadata: dict[str, Any] | None
+    ) -> Advisory:
+        """``advisory`` flipped to suppressed, with ``metadata`` merged in."""
+        return advisory.model_copy(
+            update={
+                "status": AdvisoryStatus.SUPPRESSED,
+                "suppressed_at": datetime.now(UTC),
+                "suppression_reason": reason,
+                "updated_at": datetime.now(UTC),
+                **({"metadata": {**advisory.metadata, **metadata}} if metadata else {}),
+            }
+        )
+
     def restore(self, advisory_id: str) -> Advisory | None:
         """Restore a suppressed advisory to active status.
 
         Returns the updated advisory, or ``None`` if the id is unknown.
         Idempotent — restoring an already-active advisory is a no-op.
-        Clears ``suppressed_at`` and ``suppression_reason``.
+        Clears ``suppressed_at`` and ``suppression_reason``, and the keys a rule
+        retirement wrote to ``metadata`` (:data:`RETIREMENT_KEYS`): the row is
+        no longer retired, and a marker left behind would be inherited by the
+        next, unrelated suppression, which the fitness loop would then skip
+        forever and the generator would un-retire.
 
         Guarded before the lookup for the reasons :meth:`suppress` gives:
         both early returns answer from a view that may no longer be the
@@ -315,6 +368,11 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
                 "suppressed_at": None,
                 "suppression_reason": None,
                 "updated_at": datetime.now(UTC),
+                "metadata": {
+                    k: v
+                    for k, v in advisory.metadata.items()
+                    if k not in RETIREMENT_KEYS
+                },
             }
         )
         self._rows[advisory_id] = updated
