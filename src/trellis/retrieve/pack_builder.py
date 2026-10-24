@@ -1249,8 +1249,19 @@ class PackBuilder:
         deduped.sort(key=lambda x: x.relevance_score, reverse=True)
 
         # Apply budget: max_items first
+        # A row cut here never reaches the token walk, so it is priced now
+        # at what the walk would have charged (``_item_budget_tokens``): the
+        # replay re-spends freed budget on it and has no other source.
         if len(deduped) > budget.max_items:
-            rejected.extend(self._reject(deduped[budget.max_items :], "max_items"))
+            rejected.extend(
+                self._reject(
+                    deduped[budget.max_items :],
+                    "max_items",
+                    price=lambda item: self._item_budget_tokens(
+                        item, index_mode=index_mode
+                    ),
+                )
+            )
         selected = deduped[: budget.max_items]
 
         # Apply budget: max_tokens (estimate ~4 chars per token). In index
@@ -1270,7 +1281,10 @@ class PackBuilder:
         )
         selected = disclosure_result.items
         budget_trace = self._recharge_budget_trace(
-            budget_trace, selected, index_mode=index_mode
+            budget_trace,
+            selected,
+            index_mode=index_mode,
+            demoted=frozenset(disclosure_result.pointer_item_ids),
         )
 
         selected = self._annotate_selected_items(selected)
@@ -2348,6 +2362,7 @@ class PackBuilder:
                         "relevance_score": r.relevance_score,
                         "reason": r.reason,
                         "strategy_source": r.strategy_source,
+                        "estimated_tokens": r.estimated_tokens,
                     }
                     for r in report.rejected_items
                 ],
@@ -2361,6 +2376,13 @@ class PackBuilder:
                         "item_tokens": b.item_tokens,
                         "running_total": b.running_total,
                         "included": b.included,
+                        # Only when the step was re-priced; absent reads as
+                        # "item_tokens is the walk's charge" (see BudgetStep).
+                        **(
+                            {"walk_tokens": b.walk_tokens}
+                            if b.walk_tokens is not None
+                            else {}
+                        ),
                     }
                     for b in report.budget_trace
                 ],
@@ -3215,6 +3237,7 @@ class PackBuilder:
         reason: str,
         *,
         strategy_source: str | None = None,
+        price: Callable[[PackItem], int] | None = None,
     ) -> list[RejectedItem]:
         """Record ``items`` as rejected under ``reason``.
 
@@ -3225,9 +3248,19 @@ class PackBuilder:
         ``self._reject(deduped[budget.max_items :], "max_items")`` *is* the
         gate; the gates that reject one item at a time inside a loop call
         ``from_pack_item`` directly instead of wrapping it in a list.
+
+        ``price`` maps an item to the tokens the budget walk charges it. Pass
+        it only for a budget cut, where the row records that cost
+        (:attr:`RejectedItem.estimated_tokens`); every other gate leaves the
+        row unpriced.
         """
         return [
-            RejectedItem.from_pack_item(item, reason, strategy_source=strategy_source)
+            RejectedItem.from_pack_item(
+                item,
+                reason,
+                strategy_source=strategy_source,
+                estimated_tokens=price(item) if price is not None else None,
+            )
             for item in items
         ]
 
@@ -3501,7 +3534,11 @@ class PackBuilder:
                         included=False,
                     )
                 )
-                rejected.append(RejectedItem.from_pack_item(item, "token_budget"))
+                rejected.append(
+                    RejectedItem.from_pack_item(
+                        item, "token_budget", estimated_tokens=item_tokens
+                    )
+                )
 
         return result, rejected, budget_trace
 
@@ -3585,6 +3622,7 @@ class PackBuilder:
         items: list[PackItem],
         *,
         index_mode: bool,
+        demoted: frozenset[str] = frozenset(),
     ) -> list[BudgetStep]:
         """Re-price the included steps against the text actually served.
 
@@ -3600,6 +3638,15 @@ class PackBuilder:
         pre-disclosure arithmetic — rewriting its charge would claim the
         walk had rejected it at a price it was never offered at.
 
+        The walk's own charge is not thrown away: every included step of a
+        rewritten trace keeps it as ``walk_tokens``. A ``max_items``-cut row
+        is priced at the walk's charge, never a pointer's, so a replay that
+        re-spends freed budget has to walk the same prices. ``demoted`` is
+        the set of ids disclosure turned into pointers; a pack with any gets
+        the stamp even when a pointer happens to cost the same tokens as the
+        body, so "a demoted step has no ``walk_tokens``" can only mean an
+        event written before the field.
+
         Returns the trace unchanged when nothing was demoted, so the
         common path allocates nothing.
         """
@@ -3612,7 +3659,7 @@ class PackBuilder:
             charge = self._item_budget_tokens(item, index_mode=index_mode)
             return charge != step.item_tokens
 
-        if not any(repriced(step) for step in budget_trace):
+        if not demoted and not any(repriced(step) for step in budget_trace):
             return budget_trace
 
         recharged: list[BudgetStep] = []
@@ -3630,6 +3677,7 @@ class PackBuilder:
                     item_tokens=tokens,
                     running_total=running,
                     included=True,
+                    walk_tokens=step.item_tokens,
                 )
             )
         return recharged

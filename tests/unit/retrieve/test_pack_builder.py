@@ -1339,6 +1339,80 @@ class TestRejectionTracking:
         rejected = pack.retrieval_report.rejected_items
         assert rejected[0].strategy_source == "keyword"
 
+    def test_max_items_rejection_is_priced_at_the_walks_charge(self) -> None:
+        """A row cut at ``max_items`` never reaches the token walk (#970).
+
+        ``budget_trace`` therefore lists it nowhere, so its own
+        ``estimated_tokens`` is the only record of what the walk would have
+        charged: the excerpt's tokens, ``len // 4 + 1`` by default.
+        """
+        items = [
+            _item("d0", 0.9, excerpt="x" * 40),  # 11 tokens
+            _item("d1", 0.8, excerpt="y" * 80),  # 21 tokens
+            _item("d2", 0.7, excerpt="z" * 200),  # 51 tokens
+        ]
+        builder = PackBuilder(strategies=[_make_strategy("kw", items)])
+        pack = builder.build("q", budget=PackBudget(max_items=1, max_tokens=100_000))
+
+        priced = {
+            r.item_id: r.estimated_tokens
+            for r in pack.retrieval_report.rejected_items
+            if r.reason == "max_items"
+        }
+        assert priced == {"d1": 21, "d2": 51}
+        assert {s.item_id for s in pack.retrieval_report.budget_trace} == {"d0"}
+
+    def test_token_budget_rejection_carries_the_charge_the_trace_records(
+        self,
+    ) -> None:
+        items = [
+            _item("d0", 0.9, excerpt="x" * 40),  # 11 tokens
+            _item("d1", 0.8, excerpt="y" * 200),  # 51 tokens
+        ]
+        builder = PackBuilder(strategies=[_make_strategy("kw", items)])
+        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=30))
+
+        (rejected,) = pack.retrieval_report.rejected_items
+        assert rejected.reason == "token_budget"
+        assert rejected.estimated_tokens == 51
+        charged = {s.item_id: s.item_tokens for s in pack.retrieval_report.budget_trace}
+        assert rejected.estimated_tokens == charged["d1"]
+
+    def test_a_gate_that_is_not_a_budget_cut_leaves_the_row_unpriced(self) -> None:
+        s1 = _make_strategy("kw", [_strategy_item("d1", 0.7, "keyword")])
+        s2 = _make_strategy("sem", [_strategy_item("d1", 0.9, "semantic")])
+        pack = PackBuilder(strategies=[s1, s2]).build("q")
+
+        (rejected,) = pack.retrieval_report.rejected_items
+        assert rejected.reason == "dedup"
+        # Unpriced is None, never 0: a zero would read as a free item.
+        assert rejected.estimated_tokens is None
+
+    def test_the_pack_assembled_payload_carries_the_price(self, tmp_path: Path) -> None:
+        """The event is where replay reads the row, so the copy is pinned there."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        items = [
+            _item("d0", 0.9, excerpt="x" * 40),
+            _item("d1", 0.8, excerpt="y" * 80),
+            _item("d2", 0.7, excerpt="z" * 200),
+        ]
+        s = _make_strategy("kw", items)
+        s_dup = _make_strategy("sem", [_strategy_item("d0", 0.5, "semantic")])
+        PackBuilder(strategies=[s, s_dup], event_log=log).build(
+            "q", budget=PackBudget(max_items=2, max_tokens=22)
+        )
+
+        (event,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
+        rows = {
+            (r["item_id"], r["reason"]): r["estimated_tokens"]
+            for r in event.payload["rejected_items"]
+        }
+        assert rows == {
+            ("d0", "dedup"): None,
+            ("d2", "max_items"): 51,
+            ("d1", "token_budget"): 21,
+        }
+
 
 class TestBudgetTrace:
     """Budget consumption trace records running token totals."""
@@ -3736,6 +3810,26 @@ class TestIndexMode:
             strategies=[_make_strategy("kw", self._items(count))],
             event_log=event_log,
         )
+
+    def test_a_max_items_rejection_is_priced_at_its_index_line(self) -> None:
+        """The cut is priced at what the walk would have charged *in this mode*."""
+        pack = self._builder(5).build(
+            "q",
+            budget=PackBudget(max_items=2, max_tokens=100_000),
+            index_mode=True,
+        )
+        cut = [
+            r for r in pack.retrieval_report.rejected_items if r.reason == "max_items"
+        ]
+        assert [r.item_id for r in cut] == ["d2", "d3", "d4"]
+        # An index line is a pointer, far cheaper than the 200-word excerpt;
+        # the charge is the one the served rows' own trace entries record.
+        charged = {s.item_id: s.item_tokens for s in pack.retrieval_report.budget_trace}
+        full = len(self._BODY) // 4 + 1
+        for r in cut:
+            assert r.estimated_tokens is not None
+            assert 0 < r.estimated_tokens < full // 4
+            assert r.estimated_tokens == charged["d0"]
 
     def test_admits_far_more_items_under_the_same_token_budget(self) -> None:
         budget = PackBudget(max_items=50, max_tokens=600)

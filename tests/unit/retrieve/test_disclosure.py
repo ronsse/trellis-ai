@@ -14,6 +14,7 @@ depends on:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,7 +30,9 @@ from trellis.retrieve.disclosure import (
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
-from trellis.schemas.pack import PackBudget, PackItem
+from trellis.schemas.pack import BudgetStep, PackBudget, PackItem
+from trellis.stores.base.event_log import EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 #: Long enough that a pointer is unambiguously cheaper than the body.
 _BODY = "deployment runbook step for the northwind loader " * 10
@@ -215,6 +218,74 @@ def test_budget_trace_is_repriced_to_the_text_actually_served() -> None:
 
     for item in pack.items:
         assert charged[item.item_id] == item.estimated_tokens
+
+
+def test_budget_trace_keeps_the_walks_own_charge_beside_the_repriced_one() -> None:
+    """``walk_tokens`` is what the walk charged; ``item_tokens`` is what was paid.
+
+    A ``max_items``-cut row is priced at the walk's charge, so a counterfactual
+    that re-runs the walk needs the demoted rows at theirs, not the pointer's.
+    """
+    off = _build(DISCLOSURE_OFF)
+    pack = _build(DisclosureConfig(body_items=3))
+    walk_charge = {s.item_id: s.item_tokens for s in off.retrieval_report.budget_trace}
+    trace = [s for s in pack.retrieval_report.budget_trace if s.included]
+    demoted = {
+        i.item_id for i in pack.items if i.selection_reason == POINTER_SELECTION_REASON
+    }
+
+    assert demoted
+    for step in trace:
+        assert step.walk_tokens == walk_charge[step.item_id]
+        if step.item_id in demoted:
+            assert step.item_tokens < step.walk_tokens
+        else:
+            assert step.item_tokens == step.walk_tokens
+
+
+def test_walk_tokens_is_absent_when_disclosure_demoted_nothing() -> None:
+    """``None`` says ``item_tokens`` is already the walk's charge."""
+    for pack in (_build(DISCLOSURE_OFF), _build(DisclosureConfig(body_items=50))):
+        assert pack.retrieval_report.budget_trace
+        assert all(s.walk_tokens is None for s in pack.retrieval_report.budget_trace)
+
+
+def test_a_demoted_pointer_that_costs_the_same_tokens_still_stamps_the_walk() -> None:
+    """So "a demoted step lacks ``walk_tokens``" can only mean an older event."""
+    builder = PackBuilder(strategies=[_FixedStrategy([])])
+    item = PackItem(item_id="a", item_type="document", excerpt="x" * 40)
+    step = BudgetStep(item_id="a", item_tokens=11, running_total=11, included=True)
+
+    untouched = builder._recharge_budget_trace([step], [item], index_mode=False)
+    stamped = builder._recharge_budget_trace(
+        [step], [item], index_mode=False, demoted=frozenset({"a"})
+    )
+
+    assert untouched == [step]
+    assert [(s.item_tokens, s.walk_tokens) for s in stamped] == [(11, 11)]
+
+
+def test_the_pack_assembled_payload_writes_walk_tokens_only_when_set(
+    tmp_path: Path,
+) -> None:
+    """The event is what replay reads; absent is how an older event reads."""
+    for disclosure, expect_key in (
+        (DisclosureConfig(body_items=3), True),
+        (DISCLOSURE_OFF, False),
+    ):
+        log = SQLiteEventLog(tmp_path / f"{expect_key}.db")
+        PackBuilder(
+            strategies=[_FixedStrategy([_item(i) for i in range(30)])],
+            disclosure=disclosure,
+            event_log=log,
+        ).build("deploy", budget=PackBudget(max_items=50, max_tokens=3000))
+        (event,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
+        trace = event.payload["budget_trace"]
+
+        assert trace
+        assert all(("walk_tokens" in step) is expect_key for step in trace)
+        if expect_key:
+            assert all(isinstance(step["walk_tokens"], int) for step in trace)
 
 
 def test_graduation_runs_after_the_walk_so_the_saving_is_not_refilled() -> None:

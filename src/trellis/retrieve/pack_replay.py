@@ -52,6 +52,7 @@ cannot drift from the one that command prints.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -246,7 +247,14 @@ def _pointer_chars(title: str | None) -> int:
 @dataclass(frozen=True)
 class _Candidate:
     item_id: str
+    #: What the pack paid for the item: ``budget_trace[].item_tokens``, which
+    #: graduated disclosure re-prices to the pointer after the walk.
     served_tokens: int
+    #: What the walk charged it (``budget_trace[].walk_tokens`` when the
+    #: builder recorded one, else ``item_tokens``). Every counterfactual that
+    #: re-runs the walk sums this, because a ``max_items``-cut candidate is
+    #: priced at the walk's charge too and the two must not be mixed.
+    walk_tokens: int
     included: bool
     verdict: str
     title: str | None
@@ -254,15 +262,19 @@ class _Candidate:
 
 def _candidates(
     payload: Mapping[str, Any], verdicts: tuple[set[str], set[str]]
-) -> list[_Candidate] | None:
+) -> list[_Candidate] | str:
     """Every candidate that reached the token walk, in walk order.
 
-    ``None`` when the pack carries no ``budget_trace`` — the walk cannot be
-    re-run from an event that did not record it.
+    The ``_UNMODELLED_REASONS`` tag instead when the walk cannot be re-run
+    from the event: ``no_budget_trace`` when it recorded none, or
+    ``trace_unreadable`` when a step's token charge is missing, fractional,
+    ``nan`` or ``inf``. A corrupt charge refuses the pack rather than
+    aborting the replay (``int()`` of ``inf`` raises) or being replayed as a
+    different number.
     """
     trace = payload.get("budget_trace")
     if not isinstance(trace, list) or not trace:
-        return None
+        return "no_budget_trace"
     helpful, unhelpful = verdicts
     meta = {
         raw["item_id"]: raw
@@ -276,13 +288,20 @@ def _candidates(
         item_id = step.get("item_id")
         if not isinstance(item_id, str) or not item_id:
             continue
-        raw_tokens = step.get("item_tokens")
-        tokens = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
+        tokens = _int_or_none(step.get("item_tokens"))
+        # ``walk_tokens`` is absent unless the builder re-priced the step, and
+        # then the walk charged ``item_tokens``; present-but-unreadable is
+        # refused, not read as absent.
+        raw_walk = step.get("walk_tokens")
+        walk = tokens if raw_walk is None else _int_or_none(raw_walk)
+        if tokens is None or walk is None:
+            return "trace_unreadable"
         title = meta.get(item_id, {}).get("title")
         out.append(
             _Candidate(
                 item_id=item_id,
                 served_tokens=tokens,
+                walk_tokens=walk,
                 included=bool(step.get("included")),
                 verdict=(
                     "helpful"
@@ -313,7 +332,7 @@ def _price(
         pool = pool[: policy.max_items]
 
     def body_tokens(candidate: _Candidate) -> int:
-        chars = _chars_from_tokens(candidate.served_tokens)
+        chars = _chars_from_tokens(candidate.walk_tokens)
         if policy.excerpt_max_chars is not None:
             chars = min(chars, policy.excerpt_max_chars)
         return _tokens_from_chars(chars)
@@ -429,7 +448,15 @@ def replay_pack_value(
             unhelpful_by_pack.get(pack_id, set()),
         )
         candidates = _candidates(payload, pack_verdicts)
-        if candidates is None:
+        if isinstance(candidates, str):
+            no_trace += 1
+            continue
+        # A refilling policy walks the recorded budget, so a pack whose budget
+        # is absent or unreadable is refused like one with no trace. Walking 0
+        # instead would empty the pack and read as a policy that serves
+        # nothing. Without refill the budget is never consulted.
+        max_tokens = _walk_budget(payload)
+        if max_tokens is None and policy.refill:
             no_trace += 1
             continue
         helpful_servings |= {
@@ -440,9 +467,7 @@ def replay_pack_value(
         baseline_served.extend(
             (c, c.served_tokens, False) for c in candidates if c.included
         )
-        raw_budget = payload.get("budget_max_tokens")
-        max_tokens = int(raw_budget) if isinstance(raw_budget, int | float) else 0
-        served, ungraded = _price(candidates, max_tokens=max_tokens, policy=policy)
+        served, ungraded = _price(candidates, max_tokens=max_tokens or 0, policy=policy)
         counter_served.extend(served)
         admitted_ungraded += ungraded
         counter_served_servings |= {(pack_id, c.item_id) for c, _, _ in served}
@@ -551,8 +576,9 @@ def _notes(
         )
     if no_trace:
         notes.append(
-            f"{no_trace} attributed pack(s) carry no budget_trace and could "
-            "not be re-priced; they are excluded from both arms."
+            f"{no_trace} attributed pack(s) carry no usable budget_trace or "
+            "token budget and could not be re-priced; they are excluded from "
+            "both arms."
         )
     return notes
 
@@ -900,9 +926,9 @@ def _walk(
     admitted: set[str] = set()
     total = 0
     for candidate in candidates[:max_items]:
-        if total + candidate.served_tokens > max_tokens:
+        if total + candidate.walk_tokens > max_tokens:
             break
-        total += candidate.served_tokens
+        total += candidate.walk_tokens
         admitted.add(candidate.item_id)
     return admitted
 
@@ -914,12 +940,18 @@ _UNMODELLED_REASONS = {
     "no_token_budget": "recorded no token budget",
     "trace_incomplete": ("had an empty budget_trace or one missing a withheld item"),
     "walk_not_reproduced": "did not reproduce the recorded walk",
+    "trace_unreadable": "recorded a budget_trace with an unreadable token charge",
+    "disclosure_repriced": (
+        "were served under graduated disclosure, which re-priced the trace "
+        "after the walk, and were written before the event kept the walk's "
+        "charge (walk_tokens)"
+    ),
     "max_items_unbounded": (
         "lost candidates at the max_items cut but recorded no budget_max_items"
     ),
     "max_items_unpriced": (
         "lost candidates at the max_items cut whose token cost the event "
-        "does not record"
+        "does not record (written before the builder priced the cut)"
     ),
 }
 
@@ -981,8 +1013,9 @@ def _graph_selection_notes(
         )
         notes.append(
             f"{sum(unmodelled_reasons.values())} affected pack(s) could not "
-            f"have their token walk re-run ({why}). Their withheld servings "
-            "are counted; their freed budget is not."
+            f"have their two-stage budget (item cut, then token walk) re-run "
+            f"({why}). Their withheld servings are counted; their freed "
+            "budget is not."
         )
     if unclassified:
         notes.append(
@@ -1072,10 +1105,72 @@ def _unmodelled(tally: _GraphSelectionTally, reason: str) -> None:
 
 
 def _int_or_none(raw: object) -> int | None:
-    """``raw`` as an ``int`` when it is a real number, else ``None``."""
+    """``raw`` as an ``int`` when it is a whole number, else ``None``.
+
+    A float is accepted only when it is integral (``8000.0``, which some JSON
+    writers emit for an int). A fractional one is refused rather than
+    truncated: no token count or budget the builder writes is fractional, so
+    ``7999.5`` is a corrupted field, and quietly replaying it as ``7999``
+    would model a budget the pack never had. ``nan`` and ``inf`` are refused
+    too (``int()`` of either raises, which would abort the whole replay).
+    """
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
+    if isinstance(raw, float) and not (math.isfinite(raw) and raw.is_integer()):
+        return None
     return int(raw)
+
+
+def _walk_budget(payload: Mapping[str, Any]) -> int | None:
+    """The token budget the pack's walk ran against, or ``None`` if unrecorded.
+
+    The builder walks ``_effective_token_budget`` (the safety margin applied),
+    which it records as ``token_budget_effective`` beside the nominal
+    ``budget_max_tokens``. Events from before that key fall back to the
+    nominal budget, but only when the key is *absent*: an effective budget
+    that is present and unreadable is refused, because the nominal one is the
+    larger whenever a margin applied and would walk a budget the pack never
+    had. **Every replay arm reads its budget here**, so two arms of one
+    replay cannot disagree about what a pack was allowed to spend.
+    """
+    raw = payload.get("token_budget_effective")
+    if raw is None:
+        raw = payload.get("budget_max_tokens")
+    return _int_or_none(raw)
+
+
+def _disclosure_repriced(payload: Mapping[str, Any]) -> bool:
+    """True when the trace's served prices are pointers the walk never charged.
+
+    Graduated disclosure runs after the token walk and the builder then
+    re-prices the demoted steps in ``budget_trace`` to the pointer, while a
+    ``max_items``-cut row stays priced at the walk's charge. Re-spending freed
+    budget over that mix frees more than the pack ever paid, so the refill
+    needs the walk's own charge, which the builder keeps as ``walk_tokens``
+    on every included step of such a pack. An event that names demoted ids in
+    ``disclosure.pointer_item_ids`` and lacks it on one of their steps was
+    written before that, and its walk cannot be reconstructed. A ``disclosure``
+    block whose ``pointer_item_ids`` is not a list is refused too: this
+    cannot tell it from the case above.
+    """
+    disclosure = payload.get("disclosure")
+    if not disclosure:
+        # Absent or ``{}``: graduation never ran, so nothing was re-priced.
+        return False
+    pointers = (
+        disclosure.get("pointer_item_ids") if isinstance(disclosure, Mapping) else None
+    )
+    if not isinstance(pointers, list):
+        return True
+    demoted = {p for p in pointers if isinstance(p, str)}
+    return any(
+        isinstance(step, Mapping)
+        and step.get("included")
+        and isinstance(step.get("item_id"), str)
+        and step["item_id"] in demoted
+        and step.get("walk_tokens") is None
+        for step in payload.get("budget_trace") or []
+    )
 
 
 def _max_items_cut(
@@ -1086,8 +1181,9 @@ def _max_items_cut(
     ``[]`` when it turned none away; otherwise the ``_UNMODELLED_REASONS``
     tag when the cut cannot be re-run: no ``budget_max_items`` to re-apply, or
     a row with no ``estimated_tokens``. The cut runs before the token walk, so
-    ``budget_trace`` never lists these items and their cost is recorded
-    nowhere else in the event.
+    ``budget_trace`` never lists these items and the row's own
+    ``estimated_tokens`` (written by the builder since #970) is the only
+    record of their cost; an older event has none and stays unpriced.
     """
     cut_rows = [r for r in rejected_rows if r.get("reason") == "max_items"]
     if not cut_rows:
@@ -1104,6 +1200,7 @@ def _max_items_cut(
             _Candidate(
                 item_id=item_id,
                 served_tokens=tokens,
+                walk_tokens=tokens,
                 included=False,
                 verdict="unjudged",
                 title=None,
@@ -1125,6 +1222,26 @@ class _RefillPlan:
     max_items: int | None
 
 
+def _unreproducible(
+    payload: Mapping[str, Any],
+    candidates: list[_Candidate],
+    withheld: set[str],
+    budget: int,
+    max_items: int | None,
+) -> str | None:
+    """The ``_UNMODELLED_REASONS`` tag if the recorded walk cannot be re-run."""
+    if not candidates or not withheld <= {c.item_id for c in candidates}:
+        # A re-run that cannot even see what it removes proves nothing.
+        return "trace_incomplete"
+    if _disclosure_repriced(payload):
+        return "disclosure_repriced"
+    if _walk(candidates, budget, max_items) != {
+        c.item_id for c in candidates if c.included
+    }:
+        return "walk_not_reproduced"
+    return None
+
+
 def _plan_refill(
     payload: Mapping[str, Any],
     rejected_rows: list[Mapping[str, Any]],
@@ -1137,25 +1254,17 @@ def _plan_refill(
     the walk the pack recorded.
     """
     candidates = _candidates(payload, verdicts)
-    if candidates is None:
-        return "no_budget_trace"
-    # The builder walks against ``_effective_token_budget`` (the safety
-    # margin applied), which it records beside the nominal ``max_tokens``.
-    budget = _int_or_none(payload.get("token_budget_effective"))
-    if budget is None:
-        budget = _int_or_none(payload.get("budget_max_tokens"))
+    if isinstance(candidates, str):
+        return candidates
+    budget = _walk_budget(payload)
     if budget is None:
         return "no_token_budget"
     max_items = _int_or_none(payload.get("budget_max_items"))
     if max_items is not None and max_items < 1:
         max_items = None
-    if not candidates or not withheld <= {c.item_id for c in candidates}:
-        # A re-run that cannot even see what it removes proves nothing.
-        return "trace_incomplete"
-    if _walk(candidates, budget, max_items) != {
-        c.item_id for c in candidates if c.included
-    }:
-        return "walk_not_reproduced"
+    flaw = _unreproducible(payload, candidates, withheld, budget, max_items)
+    if flaw:
+        return flaw
     cut = _max_items_cut(rejected_rows, max_items)
     if isinstance(cut, str):
         return cut
@@ -1222,7 +1331,7 @@ def _refill_pack(
     for candidate in pool:
         if candidate.included or candidate.item_id not in admitted:
             continue
-        tally.replacement_tokens += candidate.served_tokens
+        tally.replacement_tokens += candidate.walk_tokens
         axis = strategy_by_rejected.get(candidate.item_id)
         label = axis if isinstance(axis, str) and axis else "(unknown)"
         tally.replacement_by_strategy[label] = (
