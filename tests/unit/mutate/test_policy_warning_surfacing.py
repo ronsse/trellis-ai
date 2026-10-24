@@ -91,6 +91,25 @@ class _Handler:
         return "created-1", "ok"
 
 
+class _ScopeFailingHandler(_Handler):
+    """A handler whose policy scope cannot be read, as a redaction's can fail."""
+
+    def policy_scope_commands(self, command: Command) -> list[Command]:
+        msg = "scope read failed"
+        raise StoreError(msg, store="graph")
+
+
+def _warn_only_entity_type_policy() -> Policy:
+    """An ``entity_type`` policy that can only warn: the scope is read, not needed."""
+    return Policy(
+        policy_id="pol-scope-warn",
+        policy_type=PolicyType.MUTATION,
+        scope=PolicyScope(level="entity_type", value="precedent"),
+        rules=[PolicyRule(operation="*", condition="scoped write", action="warn")],
+        enforcement=Enforcement.ENFORCE,
+    )
+
+
 def _policy(*, deny: bool) -> Policy:
     """A warn rule, optionally followed by a deny rule in the same policy.
 
@@ -136,10 +155,13 @@ OUTCOMES: list[tuple[str, CommandStatus, bool]] = [
     ("handler_policy_violation", CommandStatus.REJECTED, True),
     ("handler_idempotency_error", CommandStatus.DUPLICATE, True),
     ("handler_store_error", CommandStatus.FAILED, True),
+    ("handler_unexpected_error", CommandStatus.FAILED, True),
 ]
 
 
-def _run(outcome: str, *, gate: DefaultPolicyGate | None) -> tuple[Any, list[dict]]:
+def _run(
+    outcome: str, *, gate: DefaultPolicyGate | None, scope_fails: bool = False
+) -> tuple[Any, list[dict]]:
     """Drive ``execute`` to one named outcome; return its result and events."""
     log = _RecordingEventLog(
         known_key="seen-elsewhere" if outcome == "duplicate_persisted" else None,
@@ -154,9 +176,13 @@ def _run(outcome: str, *, gate: DefaultPolicyGate | None) -> tuple[Any, list[dic
         "handler_policy_violation": PolicyViolationError("nope", policy_id="p9"),
         "handler_idempotency_error": IdempotencyError(idempotency_key="k9"),
         "handler_store_error": StoreError("backend down", store="graph"),
+        "handler_unexpected_error": RuntimeError("handler panic"),
     }.get(outcome)
+    handler_cls = _ScopeFailingHandler if scope_fails else _Handler
     handlers = (
-        {} if outcome == "no_handler" else {Operation.ENTITY_CREATE: _Handler(raises)}
+        {}
+        if outcome == "no_handler"
+        else {Operation.ENTITY_CREATE: handler_cls(raises)}
     )
     executor = MutationExecutor(
         policy_gate=gate,
@@ -213,6 +239,45 @@ class TestEveryPostGateOutcomeCarriesWarnings:
         payload = events[-1]["payload"]
         assert payload["reason"] == "policy_violation"
         assert payload["policy_warnings"] == [WARNING_TEXT]
+
+
+class TestEveryPostGateOutcomeCarriesTheUnevaluatedScopeMarker:
+    """``policy_scope_unevaluated`` rides every outcome, like the warnings.
+
+    A warn-only gate lets a command through when its scope cannot be read,
+    and the marker is the only record that per-target warnings were skipped.
+    It is threaded through as many emit sites as the warnings are, so it is
+    enumerated the same way. ``policy_deny`` cannot arise under a warn-only
+    gate, and ``no_handler`` has no handler to read a scope from.
+    """
+
+    @pytest.mark.parametrize(
+        ("outcome", "status", "emits"),
+        [o for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+        ids=[o[0] for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+    )
+    def test_event_carries_the_marker(
+        self, outcome: str, status: CommandStatus, emits: bool
+    ) -> None:
+        gate = DefaultPolicyGate([_warn_only_entity_type_policy()])
+        result, events = _run(outcome, gate=gate, scope_fails=True)
+
+        assert result.status == status
+        assert events, f"{outcome} emitted no event"
+        assert events[-1]["payload"]["policy_scope_unevaluated"] == "warn_only"
+
+    @pytest.mark.parametrize(
+        ("outcome", "status", "emits"),
+        [o for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+        ids=[o[0] for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+    )
+    def test_a_readable_scope_carries_no_marker(
+        self, outcome: str, status: CommandStatus, emits: bool
+    ) -> None:
+        gate = DefaultPolicyGate([_warn_only_entity_type_policy()])
+        _, events = _run(outcome, gate=gate)
+
+        assert "policy_scope_unevaluated" not in events[-1]["payload"]
 
 
 class TestStage1IsTheOneException:

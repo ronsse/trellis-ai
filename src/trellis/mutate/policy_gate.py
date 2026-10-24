@@ -90,9 +90,7 @@ class DefaultPolicyGate:
                 if rule.action == "allow":
                     continue
 
-                blocking = rule.action in ("deny", "require_approval")
-
-                if blocking and policy.enforcement == Enforcement.ENFORCE:
+                if self._rule_can_block(policy, rule):
                     message = (
                         f"Denied by policy: {rule.condition}"
                         if rule.action == "deny"
@@ -144,11 +142,38 @@ class DefaultPolicyGate:
         target type, so with no such policy holding a rule for ``operation``
         every one of those extra checks would repeat the first answer and its
         warnings. An empty gate returns ``False``: it stays transparent.
+
+        A ``warn`` or audit-only rule counts here, because it changes the
+        warnings the extra checks return. :meth:`could_deny_by_target_type`
+        asks the narrower question of whether the answer could be a refusal.
         """
         return any(
             policy.scope.level == "entity_type"
             and any(
                 rule.action != "allow" and self._rule_matches_operation(rule, operation)
+                for rule in policy.rules
+            )
+            for policy in self._policies
+        )
+
+    def could_deny_by_target_type(self, operation: str) -> bool:
+        """Whether a policy could refuse ``operation`` for another target type.
+
+        The narrower half of :meth:`scopes_by_target_type`: an ``entity_type``
+        policy holding a rule for ``operation`` that can block, as :meth:`check`
+        decides it (a ``deny`` or ``require_approval`` action under ``enforce``).
+        When this is ``False`` and ``scopes_by_target_type`` is ``True``, the
+        extra checks can only add warnings, so a caller that could not
+        enumerate the entities may proceed and say the warnings were not
+        evaluated, rather than refuse a command the gate could never have
+        refused. A ``deny`` rule under ``warn`` or ``audit_only`` enforcement
+        cannot block, so it does not count.
+        """
+        return any(
+            policy.scope.level == "entity_type"
+            and any(
+                self._rule_can_block(policy, rule)
+                and self._rule_matches_operation(rule, operation)
                 for rule in policy.rules
             )
             for policy in self._policies
@@ -179,6 +204,18 @@ class DefaultPolicyGate:
 
         matching.sort(key=lambda p: _SCOPE_SPECIFICITY.get(p.scope.level, 99))
         return matching
+
+    @staticmethod
+    def _rule_can_block(policy: Policy, rule: PolicyRule) -> bool:
+        """Whether a matching ``rule`` stops the command rather than warning.
+
+        The one place the blocking predicate lives, shared by :meth:`check` and
+        :meth:`could_deny_by_target_type` so the two cannot disagree.
+        """
+        return (
+            rule.action in ("deny", "require_approval")
+            and policy.enforcement == Enforcement.ENFORCE
+        )
 
     @staticmethod
     def _rule_matches_operation(rule: PolicyRule, operation: str) -> bool:

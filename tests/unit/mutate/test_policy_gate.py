@@ -340,3 +340,83 @@ class TestScopesByTargetType:
             [_policy("entity_type", "precedent", [self._rule(operation="*")])]
         )
         assert gate.scopes_by_target_type("redaction.apply") is True
+
+
+class TestCouldDenyByTargetType:
+    """The narrower capability: could the extra checks refuse, not just warn."""
+
+    @staticmethod
+    def _gate(
+        action: str, enforcement: Enforcement, operation: str = "redaction.apply"
+    ):
+        rule = PolicyRule(operation=operation, action=action)  # type: ignore[arg-type]
+        return DefaultPolicyGate(
+            [_policy("entity_type", "precedent", [rule], enforcement)]
+        )
+
+    def test_an_empty_gate_could_not(self) -> None:
+        assert DefaultPolicyGate().could_deny_by_target_type("redaction.apply") is False
+
+    def test_an_enforced_deny_or_approval_rule_could(self) -> None:
+        for action in ("deny", "require_approval"):
+            gate = self._gate(action, Enforcement.ENFORCE)
+            assert gate.could_deny_by_target_type("redaction.apply") is True, action
+
+    def test_a_rule_that_can_only_warn_could_not_though_it_still_scopes(self) -> None:
+        for action, enforcement in (
+            ("warn", Enforcement.ENFORCE),
+            ("warn", Enforcement.WARN),
+            ("deny", Enforcement.WARN),
+            ("deny", Enforcement.AUDIT_ONLY),
+            ("require_approval", Enforcement.WARN),
+            ("allow", Enforcement.ENFORCE),
+        ):
+            gate = self._gate(action, enforcement)
+            assert gate.could_deny_by_target_type("redaction.apply") is False, (
+                action,
+                enforcement,
+            )
+        # ``scopes_by_target_type`` is unchanged: a warning still counts.
+        warn_gate = self._gate("warn", Enforcement.ENFORCE)
+        assert warn_gate.scopes_by_target_type("redaction.apply") is True
+
+    def test_only_the_entity_type_level_reads_the_target_type(self) -> None:
+        rule = PolicyRule(operation="redaction.apply", action="deny")
+        for level, value in (("global", None), ("domain", "d"), ("team", "t")):
+            gate = DefaultPolicyGate([_policy(level, value, [rule])])
+            assert gate.could_deny_by_target_type("redaction.apply") is False, level
+
+    def test_a_deny_for_another_operation_could_not(self) -> None:
+        gate = self._gate("deny", Enforcement.ENFORCE, operation="entity.*")
+        assert gate.could_deny_by_target_type("redaction.apply") is False
+        assert gate.could_deny_by_target_type("entity.create") is True
+
+    def test_one_blocking_rule_among_warnings_could(self) -> None:
+        gate = DefaultPolicyGate(
+            [
+                _policy(
+                    "entity_type",
+                    "precedent",
+                    [PolicyRule(operation="redaction.apply", action="warn")],
+                    Enforcement.ENFORCE,
+                ),
+                _policy(
+                    "entity_type",
+                    "precedent",
+                    [PolicyRule(operation="redaction.apply", action="deny")],
+                    Enforcement.ENFORCE,
+                ),
+            ]
+        )
+        assert gate.could_deny_by_target_type("redaction.apply") is True
+
+    def test_it_agrees_with_check_for_every_action_and_enforcement(self) -> None:
+        """The answer must be what ``check`` would do for a matching target."""
+        probe = _cmd(Operation.REDACTION_APPLY, target_type="precedent")
+        for action in ("allow", "warn", "deny", "require_approval"):
+            for enforcement in Enforcement:
+                gate = self._gate(action, enforcement)
+                allowed, _message, _warnings = gate.check(probe)
+                assert gate.could_deny_by_target_type("redaction.apply") is (
+                    not allowed
+                ), (action, enforcement)
