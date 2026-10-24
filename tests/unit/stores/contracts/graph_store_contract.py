@@ -1023,6 +1023,44 @@ class GraphStoreContractTests:
         with pytest.raises(ValueError, match="depth"):
             store.get_subgraph(["x"], depth=-1)
 
+    def test_subgraph_orders_nodes_by_depth_then_node_id(
+        self, store: GraphStore
+    ) -> None:
+        """Nodes come back in ``(depth, node_id)`` order, whatever the write order.
+
+        The graph axis keeps the first ``limit`` rows of an over-limit
+        neighbourhood, so an unordered store (a hash-set order, in the Bolt
+        backends) made the kept slice differ from run to run (#958). Depth is
+        the *shortest* distance from any seed, so ``n_x`` (one hop from
+        ``s1``, two via ``n_a``) sorts with the depth-1 rows; ``a_far`` sorts
+        before ``z_far`` but after every depth-1 row, so depth outranks the id.
+        Edges run in both directions because traversal ignores direction.
+        Nodes are written in an order that is neither the expected one nor
+        its reverse.
+        """
+        for node_id in ["z_far", "n_c", "s2", "n_x", "a_far", "n_b", "s1", "n_a"]:
+            store.upsert_node(node_id, "service", {})
+        store.upsert_edge("s1", "n_b", "depends_on")
+        store.upsert_edge("n_a", "s1", "depends_on")
+        store.upsert_edge("s1", "n_x", "depends_on")
+        store.upsert_edge("n_a", "n_x", "depends_on")
+        store.upsert_edge("n_c", "s2", "depends_on")
+        store.upsert_edge("n_a", "z_far", "depends_on")
+        store.upsert_edge("a_far", "n_a", "depends_on")
+
+        expected = ["s1", "s2", "n_a", "n_b", "n_c", "n_x", "a_far", "z_far"]
+        for _ in range(3):
+            sg = store.get_subgraph(["s2", "s1"], depth=2)
+            assert [n["node_id"] for n in sg["nodes"]] == expected
+
+    def test_subgraph_orders_seeds_by_node_id_at_depth_zero(
+        self, store: GraphStore
+    ) -> None:
+        for node_id in ["c", "a", "b"]:
+            store.upsert_node(node_id, "service", {})
+        sg = store.get_subgraph(["c", "b", "a"], depth=0)
+        assert [n["node_id"] for n in sg["nodes"]] == ["a", "b", "c"]
+
     @pytest.mark.parametrize("depth", [0, 1])
     def test_subgraph_returns_the_full_node_payload(
         self, store: GraphStore, depth: int
