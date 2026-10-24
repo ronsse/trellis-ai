@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import lifecycle_state_of
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventLog, EventType
 from trellis.stores.base.graph import GraphStore
 
@@ -72,8 +72,7 @@ def is_withheld_precedent(graph_store: GraphStore | None, entity_id: str) -> boo
 
 
 def _node_is_withheld(node: dict[str, Any]) -> bool:
-    lifecycle = node.get("properties", {}).get(LIFECYCLE_KEY) or {}
-    return lifecycle.get("state") in WITHHELD_PRECEDENT_STATES
+    return lifecycle_state_of(node.get("properties")) in WITHHELD_PRECEDENT_STATES
 
 
 def _served_description(

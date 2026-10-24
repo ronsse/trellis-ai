@@ -522,6 +522,19 @@ def _resolve_documents(
             return
 
 
+def _count_precedent_node_skip(report: ResolutionReport, node: dict[str, Any]) -> None:
+    """Count a promoted-precedent node that no criterion may select.
+
+    A node archived before the exemption existed is the archived skip it is, so
+    ``skipped_precedent`` counts only nodes the exemption itself spared and a
+    reader sees the same bucket for an archived node in either namespace.
+    """
+    if _lifecycle_state(node.get("properties")) == ARCHIVED_STATE:
+        report.skipped_already_archived += 1
+    else:
+        report.skipped_precedent += 1
+
+
 def _resolve_entities(
     criteria: RetentionCriteria,
     registry: StoreRegistry,
@@ -564,7 +577,7 @@ def _resolve_entities(
             # archived and never reaches the node) or reinstated. Keyed on the
             # id, not on ``seen``, so it holds when the row is absent or the
             # document scan stopped at its cap before reaching it.
-            report.skipped_precedent += 1
+            _count_precedent_node_skip(report, node)
             continue
         props = node.get("properties") or {}
 

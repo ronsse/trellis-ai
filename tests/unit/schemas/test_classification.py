@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +13,7 @@ from trellis.schemas.classification import (
     ContentTags,
     DataClassification,
     Lifecycle,
+    lifecycle_state_of,
 )
 
 
@@ -392,3 +394,56 @@ class TestLifecycle:
     def test_forbids_extra_fields(self) -> None:
         with pytest.raises(ValidationError, match="extra_forbidden"):
             Lifecycle(nope="bad")  # type: ignore[call-arg]
+
+
+class TestLifecycleStateOf:
+    """One reader for "what state is this record in", failing open to current.
+
+    Defective subject: return ``state`` for any non-empty string and the
+    ``unknown_state`` / ``wrong_case`` rows read as states of their own, which
+    is how re-verify disagreed with the retrieval gates (#959).
+    """
+
+    @pytest.mark.parametrize(
+        "state", ["draft", "current", "deprecated", "superseded", "archived", "demoted"]
+    )
+    def test_every_lifecycle_state_reads_as_itself(self, state: str) -> None:
+        assert lifecycle_state_of({"lifecycle": {"state": state}}) == state
+
+    @pytest.mark.parametrize(
+        "bag",
+        [
+            None,
+            "not-a-bag",
+            {},
+            {"lifecycle": None},
+            {"lifecycle": "demoted"},
+            {"lifecycle": ["demoted"]},
+            {"lifecycle": {}},
+            {"lifecycle": {"state": ""}},
+            {"lifecycle": {"state": None}},
+            {"lifecycle": {"state": 5}},
+            {"lifecycle": {"state": ["archived"]}},
+            {"lifecycle": {"state": "zombie"}},
+            {"lifecycle": {"state": "Archived"}},
+            {"lifecycle": {"state": " archived"}},
+        ],
+        ids=[
+            "no_bag",
+            "bag_not_a_mapping",
+            "no_record",
+            "null_record",
+            "string_record",
+            "list_record",
+            "no_state",
+            "empty",
+            "null",
+            "non_str",
+            "list_state",
+            "unknown_state",
+            "wrong_case",
+            "padded",
+        ],
+    )
+    def test_anything_else_reads_as_current(self, bag: Any) -> None:
+        assert lifecycle_state_of(bag) == "current"
