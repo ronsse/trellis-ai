@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import unicodedata
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -486,31 +487,88 @@ def _rewrite_precedent_document(
     return content, metadata
 
 
-def _tombstone_precedent_document(registry: StoreRegistry, precedent_id: str) -> None:
-    """Blank a redacted precedent's document row, which holds the excerpt too.
+def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
+    """Blank one document row and drop its vector row; whether a row existed.
 
     The document plane has no governed delete, so the row keeps its id with no
-    text, no title and an archived stamp. Nothing is created for a precedent
-    that never had one.
-    """
-    from trellis.learning.scoring import PRECEDENT_DOCUMENT_FORM  # noqa: PLC0415
+    text, no title and an archived stamp. Every other metadata key is dropped
+    (a title, a tag, a source excerpt can all hold the redacted text); only
+    ``document_form`` (a class label) and ``chunk_count`` (the bookkeeping a
+    re-run needs to find the chunks again) survive. Nothing is created for an
+    id that never had a row.
 
+    A content write (``preserve_updated_at=False``): the row's text did
+    change, and an archived, empty row is withheld from every reader that
+    ranks or prunes on ``updated_at``. The vector row goes first, so the
+    metadata mirror in ``put_document`` has nothing left to sync.
+    """
     document_store = registry.knowledge.document_store
-    if not document_store.get(precedent_id):
-        return
+    document = document_store.get(doc_id)
+    if not document:
+        return False
+    old = document.get("metadata") or {}
     lifecycle = Lifecycle(
         state="archived",
         valid_until=datetime.now(UTC),
         deprecation_reason="redacted",
     ).model_dump(mode="json")
+    metadata: dict[str, Any] = {LIFECYCLE_KEY: lifecycle}
+    if isinstance(old.get("document_form"), str):
+        metadata["document_form"] = old["document_form"]
+    if isinstance(old.get("chunk_count"), int):
+        metadata["chunk_count"] = old["chunk_count"]
+    registry.knowledge.vector_store.delete(doc_id)
     put_document(
         document_store,
         resolve_vector_store(registry),
-        precedent_id,
+        doc_id,
         "",
-        {"document_form": PRECEDENT_DOCUMENT_FORM, LIFECYCLE_KEY: lifecycle},
+        metadata,
         preserve_updated_at=False,
     )
+    return True
+
+
+def _tombstone_redacted_documents(registry: StoreRegistry, target_id: str) -> list[str]:
+    """Blank the target's own document row and its chunks; the ids blanked.
+
+    Redaction covers the Document Plane for the document the target *is*: a
+    graph node whose id is a document id (memory extraction mints one per
+    document, and a promoted precedent has one). Documents a node merely links
+    through ``document_ids`` are not touched, since one may back many
+    entities. A chunk target blanks only that chunk; a parent also blanks its
+    ``<parent>#chunk-N`` fragments, found from the parent's ``chunk_count``
+    and then probed past it until an id is missing, because chunks are
+    separate rows that serve the same text.
+
+    Chunks go first and the parent last: the parent's ``chunk_count`` is how a
+    re-run after a partial failure finds the chunks, so it must outlive them.
+    Nothing is purged until this has finished, so a failure leaves the target
+    in place and the redaction re-runnable.
+    """
+    # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
+    from trellis.ingest_corpus.models import (  # noqa: PLC0415
+        chunk_doc_id,
+        is_chunk_doc_id,
+    )
+
+    document_store = registry.knowledge.document_store
+    tombstoned: list[str] = []
+    if not is_chunk_doc_id(target_id):
+        parent = document_store.get(target_id)
+        declared = ((parent or {}).get("metadata") or {}).get("chunk_count")
+        index = 0
+        while True:
+            chunk_id = chunk_doc_id(target_id, index)
+            exists = _tombstone_document(registry, chunk_id)
+            if exists:
+                tombstoned.append(chunk_id)
+            elif not isinstance(declared, int) or index >= declared:
+                break
+            index += 1
+    if _tombstone_document(registry, target_id):
+        tombstoned.append(target_id)
+    return tombstoned
 
 
 class PrecedentPromoteHandler:
@@ -2890,7 +2948,57 @@ def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str
             return matched
 
 
-def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bool:
+def _reembed_scrubbed_precedent(
+    registry: StoreRegistry,
+    precedent_id: str,
+    scrubbed_document: tuple[str, dict[str, Any]] | None,
+    *,
+    vector_removed: bool,
+) -> bool:
+    """Re-embed a scrubbed precedent's document; whether its vector row is lost.
+
+    Lost means a row existed and was deleted and nothing wrote one back:
+    embed-on-ingest is off, no embedder resolves, the embed failed, or the
+    precedent has no document row to embed. It is logged here and named in
+    the redaction event, so the precedent's absence from semantic search is
+    a record.
+    """
+    reembedded = False
+    if scrubbed_document is not None:
+        from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+            run_embed_on_ingest,
+        )
+
+        outcome = run_embed_on_ingest(
+            registry,
+            precedent_id,
+            scrubbed_document[0],
+            scrubbed_document[1],
+            source="redaction.apply",
+        )
+        reembedded = bool(outcome and outcome.get("embedded"))
+    lost = vector_removed and not reembedded
+    if lost:
+        logger.warning(
+            "redaction.precedent_vector_not_reembedded", precedent_id=precedent_id
+        )
+    return lost
+
+
+@dataclass(frozen=True)
+class _PrecedentScrub:
+    """What one scrub did that the redaction event has to say."""
+
+    precedent_id: str
+    #: A vector row existed, was deleted, and was not written back (embed-on-
+    #: ingest off, no embedder, or the embed failed): the precedent is
+    #: unreachable by semantic search until something re-embeds it.
+    vector_lost: bool
+
+
+def _scrub_precedent_excerpt(
+    registry: StoreRegistry, row: dict[str, Any]
+) -> _PrecedentScrub | None:
     """Remove a precedent's copied source text from every version it has.
 
     The text is the excerpt in its description and, when the name was derived
@@ -2910,14 +3018,22 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
     the precedent's own earlier versions (which is the point) and the ids
     and timestamps of its edge rows.
 
-    Returns ``False`` when no version carries an excerpt or a source-derived
+    Returns ``None`` when no version carries an excerpt or a source-derived
     name (nothing to scrub, and the history is left alone). The precedent's
     document row, when it has one, is rewritten from the scrubbed name and
     description before anything is purged (a failure there leaves the
     redaction re-runnable) and re-embedded after the node is back. The vector
-    row is deleted first: it was embedded from the description. If the
+    row is deleted first: it was embedded from the description. When no
+    embedder writes it back, ``vector_lost`` says so and the redaction event
+    names the id, so the loss is a record rather than a silence. If the
     re-create fails after the purge, the precedent is gone, never
     half-redacted, and the error names its id.
+
+    **``valid_from`` is not carried forward.** The graph API has no way to set
+    it: ``upsert_node`` stamps now, and the only way to drop the old versions
+    (which is the point) is a purge. The re-created node therefore reads as
+    new, and a recency window can rank it as such. Every other field the old
+    version held, ``created_at`` aside, is restored.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
         NAME_SOURCE_NEUTRAL,
@@ -2937,7 +3053,7 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
         name_may_hold_source_text(p, precedent_id) for p in version_props
     )
     if not (has_excerpt or has_source_name):
-        return False
+        return None
 
     properties = dict(row.get("properties") or {})
     if has_excerpt:
@@ -2957,9 +3073,9 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
     aliases = graph.get_aliases(precedent_id)
 
     scrubbed_document = _rewrite_precedent_document(registry, precedent_id, properties)
-    registry.knowledge.vector_store.delete(precedent_id)
+    vector_removed = registry.knowledge.vector_store.delete(precedent_id)
     if not graph.delete_node(precedent_id):
-        return False  # a concurrent purge already removed it
+        return None  # a concurrent purge already removed it
     try:
         graph.upsert_node(
             precedent_id,
@@ -2988,18 +3104,9 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
         )
         raise StoreError(msg, store="graph") from exc
 
-    if scrubbed_document is not None:
-        from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
-            run_embed_on_ingest,
-        )
-
-        run_embed_on_ingest(
-            registry,
-            precedent_id,
-            scrubbed_document[0],
-            scrubbed_document[1],
-            source="redaction.apply",
-        )
+    vector_lost = _reembed_scrubbed_precedent(
+        registry, precedent_id, scrubbed_document, vector_removed=bool(vector_removed)
+    )
 
     # Each link is restored on its own, so one failure does not strand the
     # rest. A re-run cannot finish the job (no version carries an excerpt
@@ -3050,26 +3157,33 @@ def _scrub_precedent_excerpt(registry: StoreRegistry, row: dict[str, Any]) -> bo
             f"{'; '.join(unrestored_edges + unrestored_aliases)}"
         )
         raise StoreError(msg, store="graph")
-    return True
+    return _PrecedentScrub(precedent_id, vector_lost=vector_lost)
 
 
 def _scrub_precedents(
     registry: StoreRegistry, command: Command, rows: list[dict[str, Any]]
-) -> list[str]:
-    """Scrub each precedent in ``rows``; the sorted ids of those scrubbed."""
+) -> tuple[list[str], list[str]]:
+    """Scrub each precedent in ``rows``.
+
+    Returns the sorted ids scrubbed, and the sorted subset whose vector row
+    was deleted and not re-embedded.
+    """
     scrubbed: list[str] = []
+    vector_lost: list[str] = []
     try:
         for row in rows:
-            did_scrub = _scrub_precedent_excerpt(registry, row)
-            if did_scrub:
-                scrubbed.append(row["node_id"])
+            done = _scrub_precedent_excerpt(registry, row)
+            if done is not None:
+                scrubbed.append(done.precedent_id)
+                if done.vector_lost:
+                    vector_lost.append(done.precedent_id)
     except Exception:
         # A scrub purges history irreversibly and REDACTION_APPLIED is never
         # emitted on this path, so the earlier scrubs are recorded here or
         # nowhere.
         _log_scrubbed_before_failure(command, scrubbed)
         raise
-    return sorted(scrubbed)
+    return sorted(scrubbed), sorted(vector_lost)
 
 
 def _log_scrubbed_before_failure(command: Command, scrubbed: list[str]) -> None:
@@ -3137,10 +3251,19 @@ class RedactionApplyHandler:
     so ``list_precedents`` serves the node's text, or a neutral title, for a
     scrubbed precedent instead.
 
-    **A precedent's own document row is blanked, not deleted.** Redacting a
-    promoted precedent keeps its document id but empties the text and title and
-    archives it (:func:`_tombstone_precedent_document`), since the document plane
-    has no governed delete. The payload is unchanged.
+    **The target's own document row is blanked, not deleted (#935).** A node
+    whose id is a document id (memory extraction, a promoted precedent) keeps
+    that document id, with the text, title and every other metadata key
+    emptied and an archived stamp (:func:`_tombstone_document`), since the
+    document plane has no governed delete. A parent's ``<parent>#chunk-N``
+    fragments go with it, and each blanked row's vector row is deleted. Linked
+    documents (``document_ids``) are not touched. The ids blanked ride the
+    payload as ``documents_tombstoned``; a precedent whose vector row was
+    deleted and not re-embedded rides it as ``precedent_vectors_to_reembed``.
+
+    **Stage 2 sees the precedents the scrub rewrites.** The executor asks
+    :meth:`policy_scope_commands` and puts one ``precedent`` command per
+    candidate to the gate (see ``MutationExecutor``).
 
     **Scope: graph entities only; linked records become pointers.**
     Documents linked from any purged version are *not* cascaded — a
@@ -3170,6 +3293,41 @@ class RedactionApplyHandler:
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
+
+    def policy_scope_commands(self, command: Command) -> list[Command]:
+        """One command per precedent the scrub may rewrite, for Stage 2.
+
+        The gate matches on a command's ``target_type`` and metadata, so a
+        policy scoped to ``precedent`` never saw a redaction aimed at a
+        document, though the scrub rewrites precedents. The executor puts each
+        command returned here to the gate before :meth:`handle` runs. A
+        superset of what the scrub rewrites (every precedent sourced from the
+        target, not only those still carrying an excerpt), which errs toward
+        refusing. A target that is no node returns nothing: :meth:`handle`
+        refuses it. A graph read that raises propagates and the executor
+        refuses the command.
+
+        The precedent set is read again in :meth:`handle`; one promoted from
+        the target in between is scrubbed without having been gated.
+        """
+        target_id = command.args.get("target_id")
+        graph = self._registry.knowledge.graph_store
+        if not isinstance(target_id, str) or graph.get_node(target_id) is None:
+            return []
+        return [
+            Command(
+                operation=command.operation,
+                target_id=row["node_id"],
+                target_type=row["node_type"],
+                args={
+                    "target_id": row["node_id"],
+                    "reason": command.args.get("reason"),
+                },
+                requested_by=command.requested_by,
+                metadata=dict(command.metadata),
+            )
+            for row in _precedents_sourced_from(graph, target_id)
+        ]
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
@@ -3238,7 +3396,7 @@ class RedactionApplyHandler:
         # order would strand a scrub that has nothing left to be triggered
         # by. No precedent sourced from the target is a no-op.
         precedent_rows = _precedents_sourced_from(graph, target_id)
-        scrubbed_precedent_ids = _scrub_precedents(
+        scrubbed_precedent_ids, vector_lost_ids = _scrub_precedents(
             self._registry, command, precedent_rows
         )
 
@@ -3246,9 +3404,10 @@ class RedactionApplyHandler:
         # fails with the graph untouched — nothing irreversible has
         # happened yet.
         vector_deleted = self._registry.knowledge.vector_store.delete(target_id)
-        if entity_type == "precedent":
-            # The precedent's own document row holds the same text as the node.
-            _tombstone_precedent_document(self._registry, target_id)
+        # The target's own document row (and its chunks) serves the same text
+        # as the node, through keyword search and ``get_items``. Before the
+        # purge, so a failure here leaves the redaction re-runnable.
+        documents_tombstoned = _tombstone_redacted_documents(self._registry, target_id)
 
         if not graph.delete_node(target_id):
             # Lost a race: another writer purged the node between our read
@@ -3287,6 +3446,17 @@ class RedactionApplyHandler:
         )
         # Keys only when there is something to say, so a redaction that
         # reaches no precedent emits the payload it always did.
+        if documents_tombstoned:
+            payload["documents_tombstoned"] = documents_tombstoned
+            message += f"; {len(documents_tombstoned)} document row(s) blanked"
+        if vector_lost_ids:
+            # Their vector rows were deleted with the excerpt and nothing
+            # re-embedded them; the ids are what a later re-embed needs.
+            payload["precedent_vectors_to_reembed"] = vector_lost_ids
+            message += (
+                f"; {len(vector_lost_ids)} precedent vector row(s) deleted and "
+                "not re-embedded"
+            )
         if scrubbed_precedent_ids:
             payload["scrubbed_precedent_ids"] = scrubbed_precedent_ids
             payload["scrubbed_precedent_count"] = len(scrubbed_precedent_ids)

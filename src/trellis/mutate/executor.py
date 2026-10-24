@@ -305,12 +305,14 @@ class MutationExecutor:
         # gate and there is nothing yet to forward.
         policy_warnings: list[str] = []
         if self._policy_gate is not None:
-            allowed, message, policy_warnings = self._policy_gate.check(command)
+            allowed, message, policy_warnings, refusal = self._check_policy(
+                command, log
+            )
             if not allowed:
-                log.warning("policy_rejected", message=message)
+                log.warning("policy_rejected", message=message, reason=refusal)
                 audit = self._emit_rejection(
                     command,
-                    reason="policy_violation",
+                    reason=refusal,
                     message=message,
                     policy_warnings=policy_warnings,
                 )
@@ -320,7 +322,7 @@ class MutationExecutor:
                     operation=command.operation,
                     message=message,
                     warnings=[*policy_warnings, *_audit_warnings(audit)],
-                    metadata={"rejection_reason": "policy_violation"},
+                    metadata={"rejection_reason": refusal},
                 )
 
         # Stage 3: Idempotency Check
@@ -540,6 +542,53 @@ class MutationExecutor:
                 *_audit_warnings(audit),
             ],
         )
+
+    def _check_policy(
+        self, command: Command, log: Any
+    ) -> tuple[bool, str, list[str], str]:
+        """Stage 2: ``(allowed, message, warnings, refusal_reason)``.
+
+        The gate sees the command, then one command per entity the handler
+        will touch beyond it (``redaction.apply`` rewrites the precedents that
+        copied its target's text), so a policy scoped to that entity type is
+        consulted before anything is written. Deny wins, as it does for the
+        command itself. A handler that cannot say what it will touch leaves
+        the gate unable to answer, so the command is refused
+        (``policy_scope_unresolved``) rather than written past it.
+        """
+        assert self._policy_gate is not None
+        allowed, message, warnings = self._policy_gate.check(command)
+        if not allowed:
+            return False, message, warnings, "policy_violation"
+        # Asked of the handler through an optional ``policy_scope_commands``
+        # method, because only the handler can say what a command reaches.
+        resolve = getattr(
+            self._handlers.get(command.operation), "policy_scope_commands", None
+        )
+        if not callable(resolve):
+            return True, message, warnings, "policy_violation"
+        try:
+            scoped_commands = list(resolve(command))
+        except Exception as exc:
+            # The type name only; a store's message can carry query text.
+            log.error(  # noqa: TRY400
+                "policy_scope_unresolved", error_type=type(exc).__name__
+            )
+            unresolved = (
+                f"Policy scope could not be resolved ({type(exc).__name__}); "
+                "nothing was written"
+            )
+            return False, unresolved, warnings, "policy_scope_unresolved"
+        for scoped in scoped_commands:
+            allowed, scoped_message, scoped_warnings = self._policy_gate.check(scoped)
+            warnings = [*warnings, *scoped_warnings]
+            if not allowed:
+                message = (
+                    f"{scoped_message} (applies to {scoped.target_type} "
+                    f"{scoped.target_id})"
+                )
+                return False, message, warnings, "policy_violation"
+        return True, message, warnings, "policy_violation"
 
     def execute_batch(self, batch: CommandBatch) -> list[CommandResult]:
         """Execute a batch of commands according to the batch strategy.
