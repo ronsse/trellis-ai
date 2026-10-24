@@ -1084,6 +1084,35 @@ class GraphStoreContractTests:
         sg = store.get_subgraph(["c", "b", "a"], depth=0)
         assert [n["node_id"] for n in sg["nodes"]] == ["a", "b", "c"]
 
+    def test_subgraph_orders_node_ids_by_code_point(self, store: GraphStore) -> None:
+        """Ids that differ in case or punctuation sort by code point (#966).
+
+        ``(depth, node_id)`` decides which rows an over-limit neighbourhood
+        keeps, so every backend must compare ids the same way. SQLite
+        (BINARY) and the Bolt backends (a Python sort) compare by code point;
+        a Postgres column sorts by the database collation unless the query
+        says otherwise. Under ``en_US.UTF-8`` punctuation is ignored at the
+        first pass and case at the second, so ``svc_a`` sorts before
+        ``Svc-b``; by code point every capital precedes every lowercase
+        letter, and ``-`` (0x2d) precedes ``_`` (0x5f). The seeds and the
+        depth-1 rows each carry a pair that the two orders disagree on.
+        """
+        seeds = ["svc_a", "Svc-b"]
+        near = ["svc-d", "SVC-c", "Svc_e"]
+        for node_id in [*near, *seeds]:
+            store.upsert_node(node_id, "service", {})
+        for node_id in near:
+            store.upsert_edge("svc_a", node_id, "depends_on")
+
+        sg = store.get_subgraph(seeds, depth=1)
+        assert [n["node_id"] for n in sg["nodes"]] == [
+            "Svc-b",
+            "svc_a",
+            "SVC-c",
+            "Svc_e",
+            "svc-d",
+        ]
+
     @pytest.mark.parametrize("depth", [0, 1])
     def test_subgraph_returns_the_full_node_payload(
         self, store: GraphStore, depth: int
@@ -1882,6 +1911,32 @@ class GraphStoreContractTests:
                 # Every page together shows each node once, in the stated order.
                 assert sorted(walked) == ids, (sort, descending)
                 assert walked == expected, (sort, descending)
+
+    @pytest.mark.parametrize("descending", [False, True])
+    def test_search_nodes_breaks_ties_by_code_point(
+        self, store: GraphStore, descending: bool
+    ) -> None:
+        """Tied rows order by node_id's code points, not a database collation.
+
+        Same trap as ``test_subgraph_orders_node_ids_by_code_point`` (#966):
+        every row has one name, so ``sort="name"`` is decided entirely by the
+        tie-break, and ids that differ in case or punctuation come out in a
+        different order under ``en_US.UTF-8`` than by code point.
+        """
+        ids = ["svc_a", "Svc-b", "SVC-c", "svc-d", "Svc_e"]
+        store.upsert_nodes_bulk(
+            [
+                {
+                    "node_id": node_id,
+                    "node_type": "service",
+                    "properties": {"name": "x"},
+                }
+                for node_id in ids
+            ]
+        )
+        rows, _ = store.search_nodes(sort="name", descending=descending)
+        expected = sorted(ids, reverse=descending)
+        assert [r["node_id"] for r in rows] == expected
 
     def test_search_nodes_refuses_an_unknown_sort_or_a_negative_page(
         self, store: GraphStore

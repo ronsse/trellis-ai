@@ -1334,6 +1334,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             edge_filter = "AND e.edge_type = ANY(%s)"
             edge_params = [edge_types]
 
+        # ``COLLATE "C"`` orders ids by code point, as SQLite and the Bolt
+        # backends do. The column's own collation reorders ids that differ in
+        # case or punctuation, and the graph axis keeps a prefix of this order (#966).
         query = f"""
         WITH RECURSIVE traversal(node_id, depth) AS (
             SELECT n.node_id, 0 FROM nodes n
@@ -1362,7 +1365,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         SELECT {_node_select_list("n")}
         FROM unique_nodes un
         JOIN nodes n ON n.node_id = un.node_id AND {node_temporal}
-        ORDER BY un.min_depth, n.node_id
+        ORDER BY un.min_depth, n.node_id COLLATE "C"
         """
 
         params: list[Any] = [
@@ -1618,6 +1621,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             "node_type": "node_type",
         }.get(sort, "created_at")
         sort_dir = "DESC" if descending else "ASC"
+        # The node_id tie-break is ``COLLATE "C"`` for the same reason as in
+        # ``get_subgraph`` (#966).
         # Both reads share one pooled connection, but under the default READ
         # COMMITTED isolation each statement takes its own snapshot, so a
         # write landing between them can make the count disagree with the
@@ -1633,7 +1638,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 cur.execute(
                     f"SELECT {_node_select_list()} FROM nodes"
                     f" WHERE {where}"
-                    f" ORDER BY {sort_col} {sort_dir}, node_id {sort_dir}"
+                    f" ORDER BY {sort_col} {sort_dir},"
+                    f' node_id COLLATE "C" {sort_dir}'
                     " LIMIT %s OFFSET %s",
                     [*params, limit, offset],
                 )
