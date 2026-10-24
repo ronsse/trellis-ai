@@ -25,7 +25,7 @@ from tests.unreadable_paths import (
     UnreadablePathShape,
     unreadable,
 )
-from trellis.errors import ConfigError
+from trellis.errors import ConfigError, StoreError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
@@ -76,6 +76,36 @@ class _EchoHandler:
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         return "created-1", "ok"
+
+
+class _ScopedHandler(_EchoHandler):
+    """A handler whose policy scope cannot be resolved; counts the asks."""
+
+    def __init__(self, probes: list[Command] | None = None) -> None:
+        self.asked = 0
+        self._probes = probes
+
+    def policy_scope_commands(self, command: Command) -> list[Command]:
+        self.asked += 1
+        if self._probes is None:
+            msg = "precedent set unreadable"
+            raise StoreError(msg, store="graph")
+        return self._probes
+
+
+def _redaction_command() -> Command:
+    return Command(
+        operation=Operation.REDACTION_APPLY,
+        args={"target_id": "n1", "reason": "owner request"},
+        target_id="n1",
+        target_type="entity",
+    )
+
+
+def _probe(target_id: str) -> Command:
+    return _redaction_command().model_copy(
+        update={"target_id": target_id, "target_type": "precedent"}
+    )
 
 
 def _cmd(
@@ -219,6 +249,38 @@ class TestDefaultPostureIsTransparent:
         # exactly — including the absence of ``policy_warnings``.
         assert ungated_log.events[0] == gated_log.events[0]
         assert "policy_warnings" not in gated_log.events[0]["payload"]
+
+    def test_a_handler_with_a_policy_scope_is_not_asked_under_an_empty_gate(
+        self,
+    ) -> None:
+        """``redaction.apply`` must not gain a failure mode from an empty gate.
+
+        Its handler can name more entities for the gate to check, and
+        resolving them walks the precedent set, which can fail. Run for a
+        gate that has nothing to say about them, that turns a command that
+        succeeds with no gate into a ``policy_scope_unresolved`` refusal.
+        """
+        command = _redaction_command()
+        outcomes = []
+        for gate in (None, DefaultPolicyGate(policies=[])):
+            handler = _ScopedHandler()
+            log = _RecordingEventLog()
+            result = MutationExecutor(
+                event_log=log,
+                handlers={Operation.REDACTION_APPLY: handler},
+                policy_gate=gate,
+            ).execute(command)
+            outcomes.append((result, handler.asked, log.events))
+
+        (ungated, ungated_asked, ungated_events), (gated, gated_asked, gated_events) = (
+            outcomes
+        )
+        assert ungated.status == gated.status == CommandStatus.SUCCESS
+        assert ungated.message == gated.message
+        assert ungated.warnings == gated.warnings == []
+        assert ungated_asked == gated_asked == 0
+        assert ungated_events == gated_events
+        assert "policy_warnings" not in gated_events[0]["payload"]
 
     def test_rejection_still_happens_at_stage_1_with_empty_gate(self) -> None:
         """An empty gate must not mask validation failures."""
@@ -1456,3 +1518,77 @@ class TestAnUnreadablePathIsNotAnAbsentOne:
                 self._attempt_mutation(stores_dir)
 
         assert str(legacy) in str(exc_info.value)
+
+
+class TestPolicyScopeHook:
+    """When the executor asks a handler which entities a command reaches."""
+
+    @staticmethod
+    def _run(handler: Any, gate: Any) -> Any:
+        return MutationExecutor(
+            event_log=_RecordingEventLog(),
+            handlers={Operation.REDACTION_APPLY: handler},
+            policy_gate=gate,
+        ).execute(_redaction_command())
+
+    @staticmethod
+    def _warn(*, level: str, value: str | None, enforcement: Enforcement) -> Policy:
+        return _policy(
+            level=level,
+            value=value,
+            rules=[PolicyRule(operation="redaction.apply", action="warn")],
+            enforcement=enforcement,
+        )
+
+    def test_a_policy_that_reads_the_target_type_gets_the_scope_asked(self) -> None:
+        handler = _ScopedHandler()
+        gate = DefaultPolicyGate(
+            [
+                self._warn(
+                    level="entity_type",
+                    value="precedent",
+                    enforcement=Enforcement.ENFORCE,
+                )
+            ]
+        )
+
+        result = self._run(handler, gate)
+
+        assert handler.asked == 1
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+
+    def test_a_gate_that_does_not_say_is_asked_as_before(self) -> None:
+        """A third-party gate without the capability keeps today's behaviour."""
+
+        class OpaqueGate:
+            def check(self, command: Command) -> tuple[bool, str, list[str]]:
+                return True, "", []
+
+        handler = _ScopedHandler()
+
+        result = self._run(handler, OpaqueGate())
+
+        assert handler.asked == 1
+        assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
+
+    def test_a_probe_does_not_repeat_the_warning_the_command_drew(self) -> None:
+        handler = _ScopedHandler([_probe("p1"), _probe("p2")])
+        gate = DefaultPolicyGate(
+            [
+                self._warn(level="global", value=None, enforcement=Enforcement.WARN),
+                self._warn(
+                    level="entity_type", value="precedent", enforcement=Enforcement.WARN
+                ),
+            ]
+        )
+        global_policy, typed_policy = gate._policies
+
+        result = self._run(handler, gate)
+
+        assert result.status == CommandStatus.SUCCESS
+        # Each once: the command drew the global one, the probes the typed one.
+        for policy in (global_policy, typed_policy):
+            assert [w for w in result.warnings if policy.policy_id in w] == [
+                f"Policy warning ({policy.policy_id}): always"
+            ]
