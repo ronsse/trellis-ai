@@ -656,7 +656,10 @@ class GraphStore(ABC):
             as_of: Optional point-in-time filter.
 
         Returns:
-            Dict with ``nodes`` and ``edges`` lists.
+            Dict with ``nodes`` and ``edges`` lists. ``nodes`` are ordered
+            by ``(depth, node_id)``, depth being the shortest distance from
+            any seed, so a caller that slices the list keeps the same rows on
+            every run (``test_subgraph_orders_nodes_by_depth_then_node_id``).
         """
 
     @abstractmethod

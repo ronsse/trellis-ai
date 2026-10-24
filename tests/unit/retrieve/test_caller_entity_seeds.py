@@ -403,6 +403,44 @@ class TestGraphSearchSeedResolution:
         assert seeds[: len(named)] == named
         assert seeds[len(named) :] == ["d0", "d1", "d2"]
 
+    def test_the_truncation_warning_reports_the_merged_size_and_the_drop(
+        self,
+    ) -> None:
+        """``named`` and ``derived`` are counted before de-duplication, so
+        they cannot say how many distinct seeds the cap cut (#958): a derived
+        id that repeats a named one is in both counts and in the merge once."""
+        from structlog.testing import capture_logs
+
+        class _Extractor:
+            def extract(self, intent: str) -> list[str]:
+                return ["n0", "n1", *(f"d{i}" for i in range(DEFAULT_MAX_SEEDS))]
+
+        named = [f"n{i}" for i in range(DEFAULT_MAX_SEEDS - 3)]
+        merged = len(named) + DEFAULT_MAX_SEEDS
+
+        with capture_logs() as logs:
+            GraphSearch(_RecordingStore(), seed_extractor=_Extractor()).search(
+                "q", filters={GRAPH_CALLER_SEED_IDS_KEY: named}
+            )
+
+        (event,) = [e for e in logs if e["event"] == "graph_seeds_truncated"]
+        assert event["log_level"] == "warning"
+        assert event["named"] == len(named)
+        assert event["derived"] == DEFAULT_MAX_SEEDS + 2
+        assert event["merged"] == merged
+        assert event["dropped"] == merged - DEFAULT_MAX_SEEDS
+        assert event["kept"] == DEFAULT_MAX_SEEDS
+
+    def test_no_truncation_warning_below_the_cap(self) -> None:
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            GraphSearch(_RecordingStore()).search(
+                "q", filters={GRAPH_CALLER_SEED_IDS_KEY: ["a", "b"]}
+            )
+
+        assert not [e for e in logs if e["event"] == "graph_seeds_truncated"]
+
     def test_an_extractor_alone_is_not_recapped(self) -> None:
         """With no caller seeds the extractor's own bound is the only one:
         an injected extractor over the default keeps every seed, as before."""
