@@ -1309,8 +1309,9 @@ Scope boundaries, stated plainly:
   has no governed delete. A document's `<document>#chunk-N` chunks are blanked
   with it (a chunk target blanks only that chunk) and each blanked row's vector
   row is deleted. The ids ride the payload as `documents_tombstoned` (absent
-  when none). This happens before the purge, so a failure leaves the target in
-  place and the redaction re-runnable.
+  when none). This happens before the precedent scrub and the purge, so a
+  failure leaves the target in place, every precedent unscrubbed and the
+  redaction re-runnable.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
@@ -1320,7 +1321,10 @@ Scope boundaries, stated plainly:
   may rewrite and puts one `precedent` command per id to the policy gate, so a
   policy scoped to the `precedent` entity type is consulted; deny wins and
   nothing is written. This is a superset of the precedents actually rewritten.
-  If the precedent set cannot be read the command is refused
+  The set is read for this only when the gate holds an `entity_type` policy
+  for the operation (`scopes_by_target_type`); an empty gate is not asked, so it
+  stays transparent. A gate without that method is asked every time. If the
+  precedent set cannot be read the command is refused
   (`policy_scope_unresolved`, exit `5`). A precedent promoted from the target
   between that check and the scrub is scrubbed without having been gated.
 - **A scrubbed precedent reads as new.** The scrub purges and re-creates the

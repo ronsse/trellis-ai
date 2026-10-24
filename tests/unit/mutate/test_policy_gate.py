@@ -303,3 +303,40 @@ class TestWarnActionIsLive:
         assert allowed is False
         assert "Denied" in msg
         assert len(warnings) == 1
+
+
+class TestScopesByTargetType:
+    """The capability the executor asks before resolving a handler's scope."""
+
+    @staticmethod
+    def _rule(action: str = "deny", operation: str = "redaction.apply") -> PolicyRule:
+        return PolicyRule(operation=operation, action=action)  # type: ignore[arg-type]
+
+    def test_an_empty_gate_does_not(self) -> None:
+        assert DefaultPolicyGate().scopes_by_target_type("redaction.apply") is False
+
+    def test_only_the_entity_type_level_reads_the_target_type(self) -> None:
+        for level, value in (("global", None), ("domain", "d"), ("team", "t")):
+            gate = DefaultPolicyGate([_policy(level, value, [self._rule()])])
+            assert gate.scopes_by_target_type("redaction.apply") is False, level
+        gate = DefaultPolicyGate([_policy("entity_type", "precedent", [self._rule()])])
+        assert gate.scopes_by_target_type("redaction.apply") is True
+
+    def test_an_entity_type_policy_for_another_operation_does_not(self) -> None:
+        gate = DefaultPolicyGate(
+            [_policy("entity_type", "precedent", [self._rule(operation="entity.*")])]
+        )
+        assert gate.scopes_by_target_type("redaction.apply") is False
+        assert gate.scopes_by_target_type("entity.create") is True
+
+    def test_an_allow_rule_grants_nothing_so_it_does_not(self) -> None:
+        gate = DefaultPolicyGate(
+            [_policy("entity_type", "precedent", [self._rule(action="allow")])]
+        )
+        assert gate.scopes_by_target_type("redaction.apply") is False
+
+    def test_a_wildcard_operation_does(self) -> None:
+        gate = DefaultPolicyGate(
+            [_policy("entity_type", "precedent", [self._rule(operation="*")])]
+        )
+        assert gate.scopes_by_target_type("redaction.apply") is True

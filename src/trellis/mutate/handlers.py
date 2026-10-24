@@ -497,9 +497,11 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
     re-run needs to find the chunks again) survive. Nothing is created for an
     id that never had a row.
 
-    A content write (``preserve_updated_at=False``): the row's text did
-    change, and an archived, empty row is withheld from every reader that
-    ranks or prunes on ``updated_at``. The vector row goes first, so the
+    A content write (``preserve_updated_at=False``) because the row's content
+    did change. What withholds the blanked row from readers is the archived
+    lifecycle, not the clock. The restamp has a cost: the age gate of
+    retention's prune reads ``updated_at``, so the tombstone is pruned later
+    than its original row would have been. The vector row goes first, so the
     metadata mirror in ``put_document`` has nothing left to sync.
     """
     document_store = registry.knowledge.document_store
@@ -529,7 +531,9 @@ def _tombstone_document(registry: StoreRegistry, doc_id: str) -> bool:
     return True
 
 
-def _tombstone_redacted_documents(registry: StoreRegistry, target_id: str) -> list[str]:
+def _tombstone_redacted_documents(
+    registry: StoreRegistry, command: Command, target_id: str
+) -> list[str]:
     """Blank the target's own document row and its chunks; the ids blanked.
 
     Redaction covers the Document Plane for the document the target *is*: a
@@ -544,7 +548,8 @@ def _tombstone_redacted_documents(registry: StoreRegistry, target_id: str) -> li
     Chunks go first and the parent last: the parent's ``chunk_count`` is how a
     re-run after a partial failure finds the chunks, so it must outlive them.
     Nothing is purged until this has finished, so a failure leaves the target
-    in place and the redaction re-runnable.
+    in place and the redaction re-runnable; the rows blanked before it are
+    logged (:func:`_log_blanked_before_failure`).
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
     from trellis.ingest_corpus.models import (  # noqa: PLC0415
@@ -554,21 +559,40 @@ def _tombstone_redacted_documents(registry: StoreRegistry, target_id: str) -> li
 
     document_store = registry.knowledge.document_store
     tombstoned: list[str] = []
-    if not is_chunk_doc_id(target_id):
-        parent = document_store.get(target_id)
-        declared = ((parent or {}).get("metadata") or {}).get("chunk_count")
-        index = 0
-        while True:
-            chunk_id = chunk_doc_id(target_id, index)
-            exists = _tombstone_document(registry, chunk_id)
-            if exists:
-                tombstoned.append(chunk_id)
-            elif not isinstance(declared, int) or index >= declared:
-                break
-            index += 1
-    if _tombstone_document(registry, target_id):
-        tombstoned.append(target_id)
+    try:
+        if not is_chunk_doc_id(target_id):
+            parent = document_store.get(target_id)
+            declared = ((parent or {}).get("metadata") or {}).get("chunk_count")
+            index = 0
+            while True:
+                chunk_id = chunk_doc_id(target_id, index)
+                exists = _tombstone_document(registry, chunk_id)
+                if exists:
+                    tombstoned.append(chunk_id)
+                elif not isinstance(declared, int) or index >= declared:
+                    break
+                index += 1
+        if _tombstone_document(registry, target_id):
+            tombstoned.append(target_id)
+    except Exception:
+        _log_blanked_before_failure(command, tombstoned)
+        raise
     return tombstoned
+
+
+def _log_blanked_before_failure(command: Command, blanked: list[str]) -> None:
+    """Record document rows a failed redaction had already blanked.
+
+    A blanked row stays, so a re-run lists it again; this is for the operator
+    reading the failure, who otherwise cannot tell which rows already stopped
+    serving their text.
+    """
+    if blanked:
+        logger.warning(
+            "redaction.documents_blanked_before_failure",
+            command_id=command.command_id,
+            documents_blanked=sorted(blanked),
+        )
 
 
 class PrecedentPromoteHandler:
@@ -3196,6 +3220,46 @@ def _log_scrubbed_before_failure(command: Command, scrubbed: list[str]) -> None:
         )
 
 
+def _scrub_then_purge(
+    registry: StoreRegistry,
+    command: Command,
+    target_id: str,
+    blanked: list[str],
+) -> tuple[list[str], list[str]]:
+    """Scrub the precedents sourced from ``target_id``, then purge it.
+
+    Returns what :func:`_scrub_precedents` does. Precedents that copied the
+    document's text are scrubbed *before* the target is purged: a failure here
+    leaves the target in place, so the redaction can simply be re-run (a
+    scrubbed precedent no longer matches), where the other order would strand a
+    scrub that has nothing left to be triggered by. No precedent sourced from
+    the target is a no-op.
+
+    No ``REDACTION_APPLIED`` follows a failure, so what this run had already
+    done is recorded here or nowhere: the scrubs, and the document rows
+    ``blanked`` before it. The scrubs a failing :func:`_scrub_precedents`
+    completed are logged by that function.
+    """
+    graph = registry.knowledge.graph_store
+    scrubbed: list[str] = []
+    try:
+        precedent_rows = _precedents_sourced_from(graph, target_id)
+        scrubbed, vector_lost = _scrub_precedents(registry, command, precedent_rows)
+        purged = graph.delete_node(target_id)
+    except Exception:
+        _log_scrubbed_before_failure(command, scrubbed)
+        _log_blanked_before_failure(command, blanked)
+        raise
+    if not purged:
+        # Lost a race: another writer purged the node between our read and
+        # the delete. Fail rather than emit a second REDACTION_APPLIED
+        # carrying counts this command did not purge.
+        _log_scrubbed_before_failure(command, scrubbed)
+        _log_blanked_before_failure(command, blanked)
+        raise NotFoundError(entity_type="entity", entity_id=target_id)
+    return scrubbed, vector_lost
+
+
 class RedactionApplyHandler:
     """Hard-purge a graph entity, emitting ``REDACTION_APPLIED``.
 
@@ -3391,32 +3455,23 @@ class RedactionApplyHandler:
             )
         ]
 
-        # Precedents that copied this document's text into their
-        # description are scrubbed *before* the target is purged: a failure
-        # here leaves the target in place, so the redaction can simply be
-        # re-run (a scrubbed precedent no longer matches), where the other
-        # order would strand a scrub that has nothing left to be triggered
-        # by. No precedent sourced from the target is a no-op.
-        precedent_rows = _precedents_sourced_from(graph, target_id)
-        scrubbed_precedent_ids, vector_lost_ids = _scrub_precedents(
-            self._registry, command, precedent_rows
-        )
-
         # Vector entry first: if the vector backend raises, the command
         # fails with the graph untouched — nothing irreversible has
-        # happened yet.
+        # happened yet. It also precedes the tombstone below, which deletes
+        # the same row, so ``vector_deleted`` reports it.
         vector_deleted = self._registry.knowledge.vector_store.delete(target_id)
         # The target's own document row (and its chunks) serves the same text
-        # as the node, through keyword search and ``get_items``. Before the
-        # purge, so a failure here leaves the redaction re-runnable.
-        documents_tombstoned = _tombstone_redacted_documents(self._registry, target_id)
+        # as the node, through keyword search and ``get_items``. It runs ahead
+        # of the precedent scrub because a document write can fail and a scrub
+        # cannot be undone: the other order purges a precedent's history, then
+        # fails with no event naming it. It reads no graph state.
+        documents_tombstoned = _tombstone_redacted_documents(
+            self._registry, command, target_id
+        )
 
-        if not graph.delete_node(target_id):
-            # Lost a race: another writer purged the node between our read
-            # and the delete. Fail rather than emit a second
-            # REDACTION_APPLIED carrying counts this command did not purge.
-            _log_scrubbed_before_failure(command, scrubbed_precedent_ids)
-            raise NotFoundError(entity_type="entity", entity_id=target_id)
+        scrubbed_precedent_ids, vector_lost_ids = _scrub_then_purge(
+            self._registry, command, target_id, documents_tombstoned
+        )
 
         # ``target_id`` can carry the exact hazard this handler exists to
         # purge: ``redaction.apply`` is deliberately absent from

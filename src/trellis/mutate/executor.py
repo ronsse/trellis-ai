@@ -182,6 +182,12 @@ class PolicyGate(Protocol):
         """
         ...
 
+    # Optional, not declared here so a gate without it still conforms:
+    # ``scopes_by_target_type(operation) -> bool``. A gate that answers
+    # ``False`` says its answer does not depend on the command's target type,
+    # and the executor then skips the handler's ``policy_scope_commands``.
+    # A gate without it is asked for every scoped command.
+
 
 class CommandHandler(Protocol):
     """Protocol for operation handlers. Maps operation to store writes."""
@@ -555,11 +561,20 @@ class MutationExecutor:
         command itself. A handler that cannot say what it will touch leaves
         the gate unable to answer, so the command is refused
         (``policy_scope_unresolved``) rather than written past it.
+
+        The scope is resolved only when the gate could answer differently for
+        it: an empty gate, or one with no ``entity_type`` policy for this
+        operation, is transparent, so a redaction does not walk the precedent
+        set for a gate that cannot use the result. A gate that does not say
+        (no ``scopes_by_target_type``) is asked.
         """
         assert self._policy_gate is not None
         allowed, message, warnings = self._policy_gate.check(command)
         if not allowed:
             return False, message, warnings, "policy_violation"
+        scopes_by_target = getattr(self._policy_gate, "scopes_by_target_type", None)
+        if callable(scopes_by_target) and not scopes_by_target(command.operation):
+            return True, message, warnings, "policy_violation"
         # Asked of the handler through an optional ``policy_scope_commands``
         # method, because only the handler can say what a command reaches.
         resolve = getattr(
@@ -581,7 +596,9 @@ class MutationExecutor:
             return False, unresolved, warnings, "policy_scope_unresolved"
         for scoped in scoped_commands:
             allowed, scoped_message, scoped_warnings = self._policy_gate.check(scoped)
-            warnings = [*warnings, *scoped_warnings]
+            # A probe repeats every warning the command itself drew (a global
+            # policy matches it too); each is reported once.
+            warnings = [*warnings, *(w for w in scoped_warnings if w not in warnings)]
             if not allowed:
                 message = (
                     f"{scoped_message} (applies to {scoped.target_type} "

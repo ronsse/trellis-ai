@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
-from trellis.errors import StoreError
+from trellis.errors import NotFoundError, StoreError
 from trellis.learning.scoring import (
     SOURCE_EXCERPT_REDACTED,
     _apply_readable_name_fallback,
@@ -628,6 +629,75 @@ class TestFailureOrder:
         (row,) = list_precedents(log, graph_store=graph)
         assert COPIED_TEXT not in repr(row)
 
+    def test_a_failed_document_write_leaves_every_precedent_unscrubbed(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The scrub is irreversible, so nothing that can fail runs after it."""
+        graph = registry.knowledge.graph_store
+        store = registry.knowledge.document_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        _put_doc(registry, "doc-a", chunk_count=1)
+        _put_doc(registry, "doc-a#chunk-0")
+        history_before = _everything_stored(registry, precedent_id)
+        real_put = store.put
+
+        def failing_put(doc_id: str | None, *args: Any, **kwargs: Any) -> str:
+            if doc_id == "doc-a":
+                msg = "document write failed"
+                raise StoreError(msg, store="document")
+            return real_put(doc_id, *args, **kwargs)
+
+        monkeypatch.setattr(store, "put", failing_put)
+        with capture_logs() as logs, pytest.raises(StoreError, match="document write"):
+            _redact(registry, "doc-a")
+
+        # The precedent was not touched: still carrying the excerpt it was
+        # promoted with, so the re-run finds and reports it.
+        assert _everything_stored(registry, precedent_id) == history_before
+        assert COPIED_TEXT in _everything_stored(registry, precedent_id)
+        assert graph.get_node("doc-a") is not None
+        (blanked,) = (
+            e
+            for e in logs
+            if e["event"] == "redaction.documents_blanked_before_failure"
+        )
+        assert blanked["documents_blanked"] == ["doc-a#chunk-0"]
+        assert not any(
+            e["event"] == "redaction.precedents_scrubbed_before_failure" for e in logs
+        )
+
+        monkeypatch.setattr(store, "put", real_put)
+        payload = _redact(registry, "doc-a")
+
+        assert payload["scrubbed_precedent_ids"] == [precedent_id]
+        assert payload["documents_tombstoned"] == ["doc-a#chunk-0", "doc-a"]
+        assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
+        assert graph.get_node("doc-a") is None
+
+    def test_a_failed_purge_logs_what_the_run_had_already_done(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a")
+        _put_doc(registry, "doc-a")
+        real_delete = graph.delete_node
+        monkeypatch.setattr(
+            graph,
+            "delete_node",
+            lambda node_id: False if node_id == "doc-a" else real_delete(node_id),
+        )
+
+        with capture_logs() as logs, pytest.raises(NotFoundError):
+            _redact(registry, "doc-a")
+
+        events = {e["event"]: e for e in logs}
+        scrubbed = events["redaction.precedents_scrubbed_before_failure"]
+        assert scrubbed["scrubbed_precedent_ids"] == [precedent_id]
+        blanked = events["redaction.documents_blanked_before_failure"]
+        assert blanked["documents_blanked"] == ["doc-a"]
+
     def test_failed_edge_restore_names_every_unrestored_link(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -903,7 +973,7 @@ class TestPolicyScope:
 
         monkeypatch.setattr(graph, "search_nodes", unreadable)
         executor = self._executor(
-            registry, scope="entity", action="allow", enforcement=Enforcement.ENFORCE
+            registry, scope="precedent", action="deny", enforcement=Enforcement.ENFORCE
         )
 
         result = executor.execute(self._command())
@@ -913,6 +983,39 @@ class TestPolicyScope:
         assert "graph unavailable" not in result.message
         assert graph.get_node("doc-a") is not None
         assert _served(registry) == ["doc-a"]
+
+    def test_an_empty_gate_neither_walks_the_set_twice_nor_refuses(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No policy, no scope: the outcome and the reads are the ungated ones."""
+        _node(registry, "doc-a")
+        _put_doc(registry, "doc-a")
+        graph = registry.knowledge.graph_store
+        reads: list[int] = []
+
+        def unreadable(**_kwargs: Any) -> Any:
+            reads.append(1)
+            msg = "graph unavailable"
+            raise StoreError(msg, store="graph")
+
+        monkeypatch.setattr(graph, "search_nodes", unreadable)
+        outcomes = []
+        for gate in (None, DefaultPolicyGate([])):
+            reads.clear()
+            result = MutationExecutor(
+                event_log=registry.operational.event_log,
+                handlers=create_curate_handlers(registry),
+                policy_gate=gate,
+            ).execute(self._command())
+            outcomes.append(
+                (result.status, result.message, result.metadata, len(reads))
+            )
+
+        assert outcomes[0] == outcomes[1]
+        status, _message, metadata, walks = outcomes[1]
+        assert status == CommandStatus.FAILED
+        assert "rejection_reason" not in metadata
+        assert walks == 1
 
 
 class TestPrecedentVectorRecord:
