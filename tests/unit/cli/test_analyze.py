@@ -2392,3 +2392,72 @@ class TestAnalyzeHealthWriteSurfaceTable:
         assert result.exit_code == 0, result.output
         out = plain(result.stdout)
         assert "bypass the executor" not in out
+
+
+class TestGenerateAdvisoriesQueryFilter:
+    """#960 — the QUERY filter is visible, and tunable, from the command."""
+
+    def test_json_reports_what_each_rule_withheld_and_retired(self) -> None:
+        result = runner.invoke(
+            app, ["analyze", "generate-advisories", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["query_keywords_withheld"] == {
+            "stop_list": 0,
+            "document_frequency": 0,
+        }
+        assert data["query_rows_retired"] == {
+            "stop_list": 0,
+            "document_frequency": 0,
+            "unnormalised_keyword": 0,
+        }
+        assert data["query_rows_unretired"] == 0
+        # Off by default, and said so rather than left as a bare null.
+        assert data["query_keyword_df_ceiling"] is None
+        assert data["query_keyword_df_rule"] == "off"
+        assert data["query_keyword_df_preview"] is None
+
+    def test_text_says_the_frequency_rule_is_off(self) -> None:
+        result = runner.invoke(app, ["analyze", "generate-advisories"])
+
+        assert result.exit_code == 0, result.output
+        assert "Document-frequency rule: off" in plain(result.stdout)
+
+    def test_the_suggested_ceiling_is_accepted(self) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "generate-advisories",
+                "--max-keyword-df",
+                "0.25",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        # No packs in the fixture store, so a set ceiling has nothing to enforce on.
+        assert data["query_keyword_df_rule"] == "stood_down"
+
+    @pytest.mark.parametrize("bad", ["0", "-0.1", "1.5", "nan"])
+    def test_a_ceiling_outside_the_open_unit_interval_is_a_usage_error(
+        self, bad: str
+    ) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "generate-advisories",
+                "--max-keyword-df",
+                bad,
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "--max-keyword-df" in plain(result.output)
