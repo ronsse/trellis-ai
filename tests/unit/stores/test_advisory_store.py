@@ -181,6 +181,136 @@ class TestAdvisorySuppressionLifecycle:
         assert second.suppressed_at == first.suppressed_at
         assert second.suppression_reason == "r1"
 
+    def test_suppress_merges_metadata_in_the_same_write(self, tmp_path: Path) -> None:
+        """#960 — a retirement marker lands with the status, not after it."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory(metadata={"keyword": "widget"}))
+
+        updated = store.suppress(
+            adv.advisory_id, reason="r", metadata={"retired_by": "some.rule"}
+        )
+
+        assert updated is not None
+        assert updated.metadata == {"keyword": "widget", "retired_by": "some.rule"}
+        reread = AdvisoryStore(tmp_path / "a.json").get(adv.advisory_id)
+        assert reread is not None
+        assert reread.metadata == updated.metadata
+
+    def test_suppress_metadata_is_ignored_on_the_idempotent_branch(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        store.suppress(adv.advisory_id, reason="r1")
+
+        again = store.suppress(
+            adv.advisory_id, reason="r2", metadata={"retired_by": "some.rule"}
+        )
+
+        assert again is not None
+        assert "retired_by" not in again.metadata
+
+    def test_suppress_many_is_one_write_and_skips_what_suppress_would(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#965 — a batch is one file rewrite, not one per row."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        first = store.put(_advisory(scope="one", metadata={"keyword": "a"}))
+        second = store.put(_advisory(scope="two"))
+        done = store.put(_advisory(scope="done"))
+        store.suppress(done.advisory_id, reason="earlier")
+        saves: list[str] = []
+        real_save = store._save
+        monkeypatch.setattr(
+            store,
+            "_save",
+            lambda: (saves.append("save"), real_save())[1],  # type: ignore[method-assign]
+        )
+
+        suppressed = store.suppress_many(
+            {
+                first.advisory_id: ("r1", {"retired_by": "some.rule"}),
+                "missing": ("r", None),
+                done.advisory_id: ("r2", None),
+                second.advisory_id: ("r3", None),
+            }
+        )
+
+        assert saves == ["save"]
+        assert [a.advisory_id for a in suppressed] == [
+            first.advisory_id,
+            second.advisory_id,
+        ]
+        reread = AdvisoryStore(tmp_path / "a.json")
+        got_first = reread.get(first.advisory_id)
+        assert got_first is not None
+        assert got_first.status == AdvisoryStatus.SUPPRESSED
+        assert got_first.suppression_reason == "r1"
+        assert got_first.metadata == {"keyword": "a", "retired_by": "some.rule"}
+        got_done = reread.get(done.advisory_id)
+        assert got_done is not None
+        assert got_done.suppression_reason == "earlier"
+
+    def test_suppress_many_with_nothing_to_do_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        store.suppress(adv.advisory_id, reason="r")
+        monkeypatch.setattr(
+            store,
+            "_save",
+            lambda: pytest.fail("no row changed, so nothing should be written"),  # type: ignore[method-assign]
+        )
+
+        assert store.suppress_many({adv.advisory_id: ("r2", None)}) == []
+        assert store.suppress_many({}) == []
+
+    def test_a_failed_batch_write_leaves_every_row_as_it_was(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All or nothing: the point of batching over a row-at-a-time loop."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        rows = [store.put(_advisory(scope=f"s{i}")) for i in range(3)]
+
+        def boom() -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(store, "_save", boom)  # type: ignore[method-assign]
+        with pytest.raises(OSError, match="disk full"):
+            store.suppress_many({r.advisory_id: ("r", None) for r in rows})
+
+        assert all(
+            (got := store.get(r.advisory_id)) is not None
+            and got.status == AdvisoryStatus.ACTIVE
+            for r in rows
+        )
+
+    def test_restore_clears_the_retirement_keys_and_only_those(
+        self, tmp_path: Path
+    ) -> None:
+        """#965 — a leftover marker would be inherited by the next suppression."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory(metadata={"keyword": "widget"}))
+        store.suppress(
+            adv.advisory_id,
+            reason="r",
+            metadata={
+                "retired_by": "some.rule",
+                "retired_rule": "document_frequency",
+                "retired_ceiling": 0.25,
+            },
+        )
+
+        restored = store.restore(adv.advisory_id)
+
+        assert restored is not None
+        assert restored.metadata == {"keyword": "widget"}
+        reread = AdvisoryStore(tmp_path / "a.json").get(adv.advisory_id)
+        assert reread is not None
+        assert reread.metadata == {"keyword": "widget"}
+
     def test_list_excludes_suppressed_by_default(self, tmp_path: Path) -> None:
         store = AdvisoryStore(tmp_path / "a.json")
         keep = store.put(_advisory(scope="keep"))
@@ -553,6 +683,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
             lambda: store.put(_advisory()),
             lambda: store.put_many([_advisory()]),
             lambda: store.suppress(keeper.advisory_id),
+            lambda: store.suppress_many({keeper.advisory_id: (None, None)}),
             lambda: store.restore(suppressed.advisory_id),
             lambda: store.remove(keeper.advisory_id),
             store.clear,
@@ -1044,7 +1175,16 @@ class TestDegradationIsNotTheOnlyStaleView:
         assert excinfo.value.recovery.startswith("mv ")
 
     @pytest.mark.parametrize(
-        "write", ["put", "put_many", "suppress", "restore", "remove", "clear"]
+        "write",
+        [
+            "put",
+            "put_many",
+            "suppress",
+            "suppress_many",
+            "restore",
+            "remove",
+            "clear",
+        ],
     )
     def test_a_stale_write_never_enters_the_write_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: str
@@ -1081,6 +1221,9 @@ class TestDegradationIsNotTheOnlyStaleView:
             "put": lambda: mine.put(_advisory(scope="mine")),
             "put_many": lambda: mine.put_many([_advisory(scope="mine")]),
             "suppress": lambda: mine.suppress(seeded.advisory_id, reason="x"),
+            "suppress_many": lambda: mine.suppress_many(
+                {seeded.advisory_id: ("x", None)}
+            ),
             "restore": lambda: mine.restore(seeded.advisory_id),
             "remove": lambda: mine.remove(seeded.advisory_id),
             "clear": mine.clear,
