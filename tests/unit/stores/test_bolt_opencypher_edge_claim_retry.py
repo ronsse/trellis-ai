@@ -32,11 +32,13 @@ from structlog.testing import capture_logs
 pytest.importorskip("neo4j")
 
 from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+from trellis.stores.bolt_opencypher import graph as bolt_graph
 from trellis.stores.bolt_opencypher.graph import (
     _ALIAS_CLAIM_RETRY_ATTEMPTS,
     _DEFAULT_SCHEMA_STATEMENTS,
     _EDGE_CLAIM_KEY_PROPERTY,
     _EDGE_CLAIM_LABEL,
+    _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS,
     BoltOpenCypherGraphStore,
     _is_edge_claim_contention,
 )
@@ -230,6 +232,94 @@ class TestUpsertEdgeRetries:
             store.upsert_edge("src", "tgt", "race-rel", {})
 
         assert execute_write.call_count == 1
+
+
+class TestEndpointThatIsMomentarilyUnreadable:
+    """An endpoint a concurrent ``upsert_node`` is re-versioning can read as absent.
+
+    Measured against ``neo4j:2025.12``: right after a re-version commits, the
+    ``node_id`` index lookup can return neither the closed row nor the new
+    one for a millisecond or so, though both exist. The edge write then
+    sees "no current version" for a node that never lacked one
+    (``test_edge_write_racing_node_upsert_keeps_one_current_node`` in
+    ``live-infra.yml``). A node with no row at all is a different answer
+    and is refused at once, as above.
+    """
+
+    @staticmethod
+    def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        sleeps: list[float] = []
+        monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+        return sleeps
+
+    def test_a_none_row_is_re_run_when_both_endpoints_have_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps = self._record_sleeps(monkeypatch)
+        store = _make_store()
+        store._endpoints_have_a_version_row = MagicMock(return_value=True)  # type: ignore[method-assign]
+        execute_write = _arm_execute_write(store, [None, {"edge_id": "edge_01"}])
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
+
+        assert execute_write.call_count == 2
+        assert sleeps == [_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[0]]
+        store._endpoints_have_a_version_row.assert_called_once_with("src", "tgt")
+
+    def test_an_endpoint_that_stays_unreadable_raises_after_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bound is what separates a blip from a node that is gone."""
+        sleeps = self._record_sleeps(monkeypatch)
+        store = _make_store()
+        store._endpoints_have_a_version_row = MagicMock(return_value=True)  # type: ignore[method-assign]
+        attempts = 1 + len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+        execute_write = _arm_execute_write(store, [None] * (attempts + 2))
+
+        with pytest.raises(ValueError, match="no current version"):
+            store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert execute_write.call_count == attempts
+        assert sleeps == list(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+
+    def test_an_endpoint_with_no_row_at_all_is_refused_without_sleeping(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dangling edge must not pay the retry's latency."""
+        sleeps = self._record_sleeps(monkeypatch)
+        store = _make_store()
+        store._endpoints_have_a_version_row = MagicMock(return_value=False)  # type: ignore[method-assign]
+        execute_write = _arm_execute_write(store, [None, {"edge_id": "edge_01"}])
+
+        with pytest.raises(ValueError, match="no current version"):
+            store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert execute_write.call_count == 1
+        assert sleeps == []
+
+    def test_the_row_probe_asks_for_any_version_of_both_endpoints(self) -> None:
+        """Closed rows count: during the blip the old row is all that reads."""
+        store = _make_store()
+        session = MagicMock()
+        session.execute_read.return_value = [{"node_id": "src"}, {"node_id": "tgt"}]
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+
+        assert store._endpoints_have_a_version_row("src", "tgt") is True
+
+        tx = MagicMock()
+        tx.run.return_value = []
+        session.execute_read.call_args.args[0](tx)
+        cypher = tx.run.call_args.args[0]
+        assert "valid_to" not in cypher
+        assert tx.run.call_args.kwargs == {"ids": ["src", "tgt"]}
+
+    def test_the_row_probe_is_false_when_either_endpoint_has_none(self) -> None:
+        store = _make_store()
+        session = MagicMock()
+        session.execute_read.return_value = [{"node_id": "src"}]
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+
+        assert store._endpoints_have_a_version_row("src", "tgt") is False
 
 
 class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
