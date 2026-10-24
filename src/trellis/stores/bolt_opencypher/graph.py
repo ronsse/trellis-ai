@@ -1976,11 +1976,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             edge_type_clause = "AND r.edge_type IN $edge_types"
             edge_type_params = {"edge_types": edge_types}
 
-        # Step 1 — reachable node ids via variable-length match. The
-        # bounds of `*M..N` must be literal Cypher, so we inline `depth`
-        # after the validation above.
+        # Step 1 — reachable node ids, each with its shortest distance from
+        # a seed, via variable-length match. The bounds of `*M..N` must be
+        # literal Cypher, so we inline `depth` after the validation above.
+        # A seed with no neighbour still yields a row (the OPTIONAL MATCH
+        # leaves ``oid`` null), which is how an isolated seed is kept.
         if depth == 0:
-            reachable = list(seed_ids)
+            min_depth = dict.fromkeys(seed_ids, 0)
         else:
             seed_where = node_where.replace("n.", "seed.")
             other_where = node_where.replace("n.", "other.")
@@ -1989,24 +1991,34 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             OPTIONAL MATCH (seed)-[rels:EDGE*1..{depth}]-(other:Node)
             WHERE all(e IN rels WHERE {rels_temporal} {rels_filter})
               AND (other IS NULL OR {other_where})
-            WITH collect(DISTINCT seed.node_id) AS seed_ids,
-                 collect(DISTINCT other.node_id) AS other_ids
-            RETURN [id IN seed_ids + other_ids WHERE id IS NOT NULL] AS ids
+            RETURN seed.node_id AS sid, other.node_id AS oid,
+                   min(size(rels)) AS dist
             """
             params: dict[str, Any] = {
                 "seed_ids": seed_ids,
                 **edge_type_params,
                 **temporal_params,
             }
-            record = self._run_read_single(reach_cypher, **params)
-            raw_ids = record["ids"] if record else []
-            reachable = list({i for i in raw_ids if i is not None})
+            min_depth = {}
+            for record in self._run_read_list(reach_cypher, **params):
+                min_depth[record["sid"]] = 0
+                if record["oid"] is not None:
+                    min_depth[record["oid"]] = min(
+                        min_depth.get(record["oid"], record["dist"]), record["dist"]
+                    )
 
-        if not reachable:
+        if not min_depth:
             return {"nodes": [], "edges": []}
+        # ``(depth, node_id)``, the order SQLite and Postgres return: the
+        # graph axis keeps the first ``limit`` rows of an over-limit
+        # neighbourhood, so an order that varies run to run varies the pack.
+        reachable = sorted(min_depth, key=lambda node_id: (min_depth[node_id], node_id))
 
-        # Step 2 — fetch full node payloads
-        nodes = self.get_nodes_bulk(reachable, as_of=as_of)
+        # Step 2 — fetch full node payloads, back into that order
+        nodes = sorted(
+            self.get_nodes_bulk(reachable, as_of=as_of),
+            key=lambda node: (min_depth[node["node_id"]], node["node_id"]),
+        )
 
         # Step 3 — fetch edges between reachable nodes (directed match
         # so each edge appears once).

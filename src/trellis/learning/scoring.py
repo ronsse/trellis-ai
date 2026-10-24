@@ -37,7 +37,11 @@ from trellis.learning.evidence_gate import (
     CitationEvidence,
     screen_noise_candidates,
 )
-from trellis.schemas.classification import LIFECYCLE_KEY, ContentTags
+from trellis.schemas.classification import (
+    LIFECYCLE_KEY,
+    ContentTags,
+    lifecycle_state_of,
+)
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
@@ -1177,22 +1181,12 @@ def build_learning_promotion_payloads(
 def _precedent_lifecycle_state(node: Mapping[str, Any]) -> str:
     """Read a graph node's ``Lifecycle.state``, fail-open to "current".
 
-    Mirrors ``trellis.mutate.handlers._current_lifecycle_state``'s own
-    fail-open convention without importing that module's private helper
-    across a package boundary: absent or malformed ``properties.lifecycle``
-    is not evidence of demotion, so it reads as "current" rather than
-    refusing.
+    Mirrors ``trellis.mutate.handlers._current_lifecycle_state`` through the
+    one shared reader, :func:`~trellis.schemas.classification.lifecycle_state_of`:
+    absent or malformed ``properties.lifecycle`` is not evidence of demotion,
+    so it reads as "current" rather than refusing.
     """
-    from trellis.mutate.retention import CURRENT_STATE  # noqa: PLC0415
-
-    properties = node.get("properties")
-    if not isinstance(properties, Mapping):
-        return CURRENT_STATE
-    record = properties.get(LIFECYCLE_KEY)
-    if not isinstance(record, Mapping):
-        return CURRENT_STATE
-    state = record.get("state")
-    return state if isinstance(state, str) and state else CURRENT_STATE
+    return lifecycle_state_of(node.get("properties"))
 
 
 #: Per-state remedy named in a refused re-approval's message, for the two

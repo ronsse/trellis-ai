@@ -90,6 +90,7 @@ from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
     GRAPH_CALLER_SEED_IDS_KEY,
     GRAPH_SEED_IDS_KEY,
+    GRAPH_SLICE_PRIORITISED_KEY,
     GRAPH_STRATEGY_NAME,
     RECENCY_CLOCK_METADATA_KEY,
     EmbedderResolveFailure,
@@ -591,6 +592,18 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
       deployment no vector row carries either key today, so in practice
       they mark the ``graph`` and ``observation`` axes.
 
+    * ``graph_slice_prioritised`` — ``True`` on a graph item whose seeded
+      neighbourhood overflowed ``limit`` and whose kept slice the
+      seeds-then-precedents rule changed
+      (:data:`~trellis.retrieve.strategies.GRAPH_SLICE_PRIORITISED_KEY`).
+      The one non-string key copied here, and only as the literal ``True``:
+      an allowlist of one, so a stray ``False``, string or object in a
+      metadata bag never reaches the event. Absence means the rule did not
+      touch the item, as it does on the metadata (never ``False``). Without
+      it a prioritised slice and a plain one were indistinguishable in
+      ``PACK_ASSEMBLED`` (#958), whatever ``graph_selection`` said about who
+      chose the seeds.
+
     **On disclosure.** ``domain`` is open-vocabulary and reveals subject
     matter, which is why :mod:`trellis.classify.shadow` deliberately keeps it
     *off* ``MEMORY_OP_JUDGED``. The rule differs here because the payloads
@@ -627,6 +640,8 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
     domain = [d.strip() for d in facet_values(tags.get("domain")) if d.strip()]
     if domain:
         attribution["domain"] = domain
+    if meta.get(GRAPH_SLICE_PRIORITISED_KEY) is True:
+        attribution[GRAPH_SLICE_PRIORITISED_KEY] = True
     return attribution
 
 

@@ -11,6 +11,7 @@ applies AFTER the filter.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -175,6 +176,37 @@ class TestGraphStoreExcludesDemoted:
 
         result = list_precedents(event_log, graph_store=graph_store)
         assert result == []
+
+    @pytest.mark.parametrize(
+        "record",
+        [{"state": "zombie"}, {"state": ""}, {"state": 5}, {}, "garbled", ["demoted"]],
+        ids=["unknown", "empty", "non_str", "no_state", "string_record", "list_record"],
+    )
+    def test_a_malformed_stamp_is_included(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        record: Any,
+    ) -> None:
+        """A bad lifecycle record is a reason to keep serving, never to hide.
+
+        Defective subject: read ``lifecycle.get("state")`` off the raw record
+        and the string and list records raise instead of being served.
+        """
+        graph_store.upsert_node(
+            node_id="prec-1",
+            node_type="precedent",
+            properties={"name": "Refund flow", LIFECYCLE_KEY: record},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert [row["entity_id"] for row in result] == ["prec-1"]
 
     def test_non_demoted_precedent_is_included(
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
