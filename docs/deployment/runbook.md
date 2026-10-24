@@ -249,10 +249,15 @@ QUERY advisories are keyed on words from the pack intent. Function words
 rule off; skipped on a window too small for it to admit any word) are
 withheld, and active QUERY rows the generator would no longer write are
 **suppressed**, never deleted, with an `ADVISORY_SUPPRESSED` event naming the
-rule. Relaxing the rule (a higher `--max-keyword-df`) puts the row back on the
-next run; `AdvisoryStore.restore` also does, but the next run retires it again
-while the word is still excluded (there is no restore CLI). The JSON report
-counts each rule under `query_keywords_withheld` and `query_rows_retired`.
+rule; the row records which rule (and, for frequency, which ceiling) in its
+metadata. A frequency-retired row comes back only on a night that enforces the
+ceiling, and only when the ceiling is higher than the one that retired it or
+the word's share has fallen to 80% of the ceiling, so a share hovering at the
+bar, or a window too short to enforce it, does not flip the row nightly. A
+stop-list retirement comes back once the word leaves the list. `AdvisoryStore.restore`
+also restores a row (and clears its retirement), but the next run retires it
+again while the word is still excluded (there is no restore CLI). The JSON
+report counts each rule under `query_keywords_withheld` and `query_rows_retired`.
 
 REST equivalent:
 

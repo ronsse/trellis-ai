@@ -24,6 +24,19 @@ from trellis.core.ids import generate_ulid
 RETIRED_BY_KEY = "retired_by"
 #: The only value :data:`RETIRED_BY_KEY` takes today.
 RETIRED_BY_QUERY_FILTER = "advisory_generator.query_filter"
+#: Which of the generator's rules retired the row (``stop_list``,
+#: ``document_frequency`` or ``unnormalised_keyword``). The generator needs it
+#: to tell a retirement a code change can relax (the first and third) from one
+#: that tracks a nightly measurement (the second), which must not be undone by
+#: the next night's noise.
+RETIRED_RULE_KEY = "retired_rule"
+#: The document-frequency ceiling in force when the row was retired, stored only
+#: for that rule. A later ceiling above it is the operator relaxing the rule, as
+#: opposed to the word's share drifting under the same bar.
+RETIRED_CEILING_KEY = "retired_ceiling"
+#: Every metadata key a retirement writes; :meth:`AdvisoryStore.restore` clears
+#: them together so a later suppression cannot inherit a retirement.
+RETIREMENT_KEYS = (RETIRED_BY_KEY, RETIRED_RULE_KEY, RETIRED_CEILING_KEY)
 
 
 class AdvisoryCategory(StrEnum):

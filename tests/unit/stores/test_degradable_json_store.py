@@ -136,6 +136,7 @@ CASES = [
             "put": lambda: store.put(_advisory()),
             "put_many": lambda: store.put_many([_advisory()]),
             "suppress": lambda: store.suppress(seeded, reason="x"),
+            "suppress_many": lambda: store.suppress_many({seeded: ("x", None)}),
             "restore": lambda: store.restore(seeded),
             "remove": lambda: store.remove(seeded),
             "clear": store.clear,

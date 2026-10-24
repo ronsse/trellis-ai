@@ -29,6 +29,9 @@ from trellis.retrieve.formatters import format_advisories_as_markdown
 from trellis.schemas.advisory import (
     RETIRED_BY_KEY,
     RETIRED_BY_QUERY_FILTER,
+    RETIRED_CEILING_KEY,
+    RETIRED_RULE_KEY,
+    RETIREMENT_KEYS,
     Advisory,
     AdvisoryCategory,
     AdvisoryEvidence,
@@ -1853,6 +1856,257 @@ class TestQueryRowRetirement:
         assert report.query_rows_unretired == 0  # type: ignore[attr-defined]
 
 
+class TestDocumentFrequencyRetirementIsStable:
+    """Review of #965 — a frequency retirement must not flap on a noisy share.
+
+    The document-frequency rule judges a nightly measurement of the task mix,
+    so a row it retires comes back only on a clear signal: the ceiling was
+    enforced tonight and either raised, or the word's share fell to
+    :data:`_DF_UNRETIRE_FRACTION` of it. A night too short to enforce the
+    ceiling is no signal at all. Every night below emits the word, so under
+    "emitted means un-retire" each would have flipped the row.
+    """
+
+    ID = AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "rollout")
+
+    @staticmethod
+    def _night(
+        store: AdvisoryStore, carriers: int, others: int, **kwargs: object
+    ) -> tuple[object, MagicMock]:
+        packs, feedback = _intent_corpus(carriers, others, carrier_intent="rollout")
+        return TestQueryRowRetirement._generate(store, packs, feedback, **kwargs)
+
+    def _retired(
+        self, tmp_path: Path, carriers: int = 12, others: int = 18
+    ) -> AdvisoryStore:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(_query_row("rollout"))
+        self._night(store, carriers, others)  # over the 0.25 ceiling
+        row = store.get(self.ID)
+        assert row is not None
+        assert row.retired_by == RETIRED_BY_QUERY_FILTER
+        return store
+
+    def _assert_still_retired(self, store: AdvisoryStore, report: object) -> None:
+        row = store.get(self.ID)
+        assert row is not None
+        assert row.status == AdvisoryStatus.SUPPRESSED
+        assert row.retired_by == RETIRED_BY_QUERY_FILTER
+        # The marker is carried across the regenerated row, not dropped by it.
+        assert row.metadata[RETIRED_RULE_KEY] == "document_frequency"
+        assert row.metadata[RETIRED_CEILING_KEY] == DEFAULT_MAX_KEYWORD_DOC_FREQ
+        assert report.query_rows_unretired == 0  # type: ignore[attr-defined]
+
+    def test_a_retirement_records_its_rule_and_the_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        store = TestQueryRowRetirement()._seeded(tmp_path)
+        packs, feedback = TestQueryRowRetirement()._corpus()
+        TestQueryRowRetirement._generate(store, packs, feedback)
+
+        def meta(keyword: str) -> dict[str, object]:
+            row = store.get(
+                AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, keyword)
+            )
+            assert row is not None
+            return {k: row.metadata[k] for k in RETIREMENT_KEYS if k in row.metadata}
+
+        base = {RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER}
+        assert meta("for") == {**base, RETIRED_RULE_KEY: "stop_list"}
+        assert meta("widget,") == {**base, RETIRED_RULE_KEY: "unnormalised_keyword"}
+        assert meta("rollout") == {
+            **base,
+            RETIRED_RULE_KEY: "document_frequency",
+            RETIRED_CEILING_KEY: DEFAULT_MAX_KEYWORD_DOC_FREQ,
+        }
+
+    def test_a_short_night_does_not_un_retire(self, tmp_path: Path) -> None:
+        """30 packs at 40%, then 12 at 50%: the ceiling stands down on the 12."""
+        store = self._retired(tmp_path)
+
+        for _ in range(3):
+            short_report, short_log = self._night(store, 6, 6)
+            assert short_report.advisories_generated == 1  # type: ignore[attr-defined]
+            assert short_report.query_keyword_df_ceiling is None  # type: ignore[attr-defined]
+            self._assert_still_retired(store, short_report)
+            assert not short_log.emit.called
+
+            long_report, long_log = self._night(store, 12, 18)
+            self._assert_still_retired(store, long_report)
+            assert not long_log.emit.called
+
+    def test_a_raised_ceiling_waits_for_a_night_that_can_enforce_it(
+        self, tmp_path: Path
+    ) -> None:
+        """12 packs at a 0.3 ceiling cannot admit a word: no measurement, no restore.
+
+        The share test alone never holds a row on a short night, because a word
+        that earned a row has at least ``min_sample_size`` carriers and so a
+        share above the ceiling there. The one way a short night could restore
+        is the raised-ceiling clause, which the stand-down guard must veto.
+        """
+        store = self._retired(tmp_path)
+
+        report, event_log = self._night(store, 6, 6, max_keyword_doc_freq=0.3)
+
+        assert report.query_keyword_df_ceiling is None  # type: ignore[attr-defined]
+        assert report.advisories_generated == 1  # type: ignore[attr-defined]
+        row = store.get(self.ID)
+        assert row is not None
+        assert row.retired_by == RETIRED_BY_QUERY_FILTER
+        assert not event_log.emit.called
+
+        report, _ = self._night(store, 12, 18, max_keyword_doc_freq=0.5)  # full night
+
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+
+    def test_a_share_hovering_at_the_ceiling_does_not_flap(
+        self, tmp_path: Path
+    ) -> None:
+        """23% and 27% against a 0.25 ceiling: retired once, then left alone."""
+        store = self._retired(tmp_path, carriers=8, others=22)  # 26.7%
+
+        for _ in range(3):
+            under_report, under_log = self._night(store, 7, 23)  # 23.3%
+            assert under_report.advisories_generated == 1  # type: ignore[attr-defined]
+            self._assert_still_retired(store, under_report)
+            assert not under_log.emit.called
+
+            over_report, over_log = self._night(store, 8, 22)
+            self._assert_still_retired(store, over_report)
+            assert not over_log.emit.called
+
+    def test_a_share_well_under_the_ceiling_un_retires(self, tmp_path: Path) -> None:
+        store = self._retired(tmp_path)
+
+        report, event_log = self._night(store, 6, 34)  # 15% of 40
+
+        row = store.get(self.ID)
+        assert row is not None
+        assert row.status == AdvisoryStatus.ACTIVE
+        assert row.suppression_reason is None
+        assert not any(k in row.metadata for k in RETIREMENT_KEYS)
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+        restored = [
+            c
+            for c in event_log.emit.call_args_list
+            if c.args[0] == EventType.ADVISORY_RESTORED
+        ]
+        assert [c.kwargs["entity_id"] for c in restored] == [self.ID]
+
+    def test_the_bar_is_at_or_below_eighty_percent_of_the_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        """6 of 30 is exactly 0.8 * 0.25; 7 of 30 is not."""
+        store = self._retired(tmp_path)
+        self._night(store, 7, 23)
+        assert store.get(self.ID).status == AdvisoryStatus.SUPPRESSED  # type: ignore[union-attr]
+
+        report, _ = self._night(store, 6, 24)
+
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+
+    def test_an_un_retired_row_is_not_retired_again_inside_the_band(
+        self, tmp_path: Path
+    ) -> None:
+        """Back at 23% after the 15% night: under the ceiling, so it stays active."""
+        store = self._retired(tmp_path)
+        self._night(store, 6, 34)
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+
+        report, event_log = self._night(store, 7, 23)
+
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert not event_log.emit.called
+        assert sum(report.query_rows_retired.values()) == 0  # type: ignore[attr-defined]
+
+    def test_a_raised_ceiling_restores_even_inside_the_band(
+        self, tmp_path: Path
+    ) -> None:
+        """26.7% is over 0.8 * 0.3, so only the raised ceiling can restore it."""
+        store = self._retired(tmp_path, carriers=8, others=22)
+
+        report, _ = self._night(store, 8, 22, max_keyword_doc_freq=0.3)
+
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+
+    def test_a_row_with_no_recorded_rule_gets_the_strict_test(
+        self, tmp_path: Path
+    ) -> None:
+        """A retirement stored before the rule was recorded: no flapping."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(_query_row("rollout"))
+        store.suppress(
+            self.ID,
+            reason="query keyword excluded by document_frequency: 'rollout'",
+            metadata={RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER},
+        )
+
+        for carriers, others in ((6, 6), (7, 23)):  # short night, then in-band
+            report, event_log = self._night(store, carriers, others)
+            row = store.get(self.ID)
+            assert row is not None
+            assert row.retired_by == RETIRED_BY_QUERY_FILTER
+            assert report.query_rows_unretired == 0  # type: ignore[attr-defined]
+            assert not event_log.emit.called
+
+        report, _ = self._night(store, 6, 34)
+
+        assert store.get(self.ID).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+
+    def test_a_relaxed_stop_list_restores_without_the_frequency_margin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stop-list retirements keep "emitted again means the rule is gone"."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        word_id = AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "rollout")
+        store.put(_query_row("rollout"))
+        monkeypatch.setattr(
+            "trellis.retrieve.advisory_generator.QUERY_STOP_WORDS",
+            frozenset({"rollout"}),
+        )
+        self._night(store, 7, 23)
+        row = store.get(word_id)
+        assert row is not None
+        assert row.metadata[RETIRED_RULE_KEY] == "stop_list"
+        assert RETIRED_CEILING_KEY not in row.metadata
+
+        monkeypatch.setattr(
+            "trellis.retrieve.advisory_generator.QUERY_STOP_WORDS", frozenset()
+        )
+        report, _ = self._night(store, 7, 23)  # 23%: inside the frequency band
+
+        assert store.get(word_id).status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+
+    def test_the_first_night_retires_in_one_write_and_emits_per_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retirement is batched; every retired row still gets its audit event."""
+        store = TestQueryRowRetirement()._seeded(tmp_path)
+        packs, feedback = TestQueryRowRetirement()._corpus()
+        calls: list[int] = []
+        real = store.suppress_many
+        monkeypatch.setattr(
+            store,
+            "suppress_many",
+            lambda items: (calls.append(len(items)), real(items))[1],
+        )
+
+        _, event_log = TestQueryRowRetirement._generate(store, packs, feedback)
+
+        assert calls == [3]  # for, widget, rollout: one call
+        suppressed = [
+            c.kwargs["entity_id"]
+            for c in event_log.emit.call_args_list
+            if c.args[0] == EventType.ADVISORY_SUPPRESSED
+        ]
+        assert len(suppressed) == 3
+
+
 class TestFitnessLoopLeavesRetiredRowsAlone:
     """#960 — a retirement must survive the fitness loop that follows it.
 
@@ -1910,7 +2164,7 @@ class TestFitnessLoopLeavesRetiredRowsAlone:
         assert report.advisories_restored == [row.advisory_id]
 
     def test_an_operator_restored_row_is_scored_again(self, tmp_path: Path) -> None:
-        """The marker outlives ``restore``; ``retired_by`` must not."""
+        """``restore`` clears the retirement, so the loop owns the row again."""
         store = AdvisoryStore(tmp_path / "adv.json")
         row = store.put(_query_row("for", confidence=0.6))
         store.suppress(
@@ -1921,9 +2175,40 @@ class TestFitnessLoopLeavesRetiredRowsAlone:
         restored = store.restore(row.advisory_id)
 
         assert restored is not None
-        assert restored.metadata[RETIRED_BY_KEY] == RETIRED_BY_QUERY_FILTER
+        assert RETIRED_BY_KEY not in restored.metadata
         assert restored.retired_by is None
         run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
         after = store.get(row.advisory_id)
         assert after is not None
         assert after.fitness_scored_at is not None
+
+    def test_a_fitness_suppression_after_a_restore_is_not_a_retirement(
+        self, tmp_path: Path
+    ) -> None:
+        """Retire, restore, then a *fitness* suppression: the loop still owns it.
+
+        The marker used to survive ``restore``, so the later ``suppress`` kept
+        it, ``retired_by`` read the fitness suppression as a retirement, and
+        the loop skipped the row for good (and the generator un-retired it).
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        row = store.put(_query_row("widget", confidence=0.6))
+        store.suppress(
+            row.advisory_id,
+            reason="query keyword excluded by document_frequency: 'widget'",
+            metadata={
+                RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER,
+                RETIRED_RULE_KEY: "document_frequency",
+                RETIRED_CEILING_KEY: 0.25,
+            },
+        )
+        store.restore(row.advisory_id)
+        store.suppress(row.advisory_id, reason="fitness: weak")
+
+        suppressed = store.get(row.advisory_id)
+        assert suppressed is not None
+        assert suppressed.status == AdvisoryStatus.SUPPRESSED
+        assert suppressed.retired_by is None
+        assert not any(k in suppressed.metadata for k in RETIREMENT_KEYS)
+        report = run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
+        assert report.advisories_restored == [row.advisory_id]

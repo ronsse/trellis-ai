@@ -81,6 +81,9 @@ from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
     RETIRED_BY_KEY,
     RETIRED_BY_QUERY_FILTER,
+    RETIRED_CEILING_KEY,
+    RETIRED_RULE_KEY,
+    RETIREMENT_KEYS,
     Advisory,
     AdvisoryCategory,
     AdvisoryEvidence,
@@ -145,6 +148,13 @@ _RULE_DOC_FREQ = "document_frequency"
 #: produce from it (edge punctuation, e.g. ``"deploy,"``). The generator emits
 #: the cleaned word under its own id, so the old row would sit beside it.
 _RULE_UNNORMALISED = "unnormalised_keyword"
+#: A row the document-frequency rule retired comes back on frequency alone only
+#: once its word's share is at or below this fraction of the ceiling. The share
+#: is a nightly measurement of a changing task mix, so a word hovering at the
+#: bar would otherwise be retired and restored on alternate nights, an audit
+#: event each time. Re-retirement needs the share *over* the ceiling, which
+#: leaves the band between this fraction and the ceiling as a dead zone.
+_DF_UNRETIRE_FRACTION = 0.8
 _RETIREMENT_SOURCE = "retrieve.advisory_generator.query_filter"
 _EDGE_PUNCTUATION = re.compile(r"^\W+|\W+$")
 
@@ -411,6 +421,9 @@ class AdvisoryGenerator:
         self._query_withheld: Counter[str] = Counter()
         self._df_excluded: set[str] = set()
         self._df_ceiling_applied = False
+        #: Tonight's share of analysed packs for every keyword that became an
+        #: advisory: what :meth:`_may_unretire` compares against the ceiling.
+        self._query_shares: dict[str, float] = {}
         self._unretired: list[str] = []
 
     def generate(self, *, days: int = 30) -> AdvisoryReport:
@@ -461,6 +474,7 @@ class AdvisoryGenerator:
         self._query_withheld = Counter()
         self._df_excluded = set()
         self._df_ceiling_applied = False
+        self._query_shares = {}
         self._unretired = []
 
         # Capped reads go through scan_events so a window with more than
@@ -898,6 +912,7 @@ class AdvisoryGenerator:
             if effect < self._min_effect_size:
                 continue
 
+            self._query_shares[word] = outcomes.presentations / len(packs)
             advisories.append(
                 Advisory(
                     advisory_id=self._stable_id(AdvisoryCategory.QUERY, word),
@@ -955,6 +970,8 @@ class AdvisoryGenerator:
         absent from this run's window is never retired on frequency.
         """
         retired: Counter[str] = Counter()
+        suppressions: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+        events: list[tuple[str, dict[str, Any]]] = []
         for advisory in self._advisory_store.list():
             if advisory.category != AdvisoryCategory.QUERY:
                 continue
@@ -965,17 +982,28 @@ class AdvisoryGenerator:
             if rule is None:
                 continue
             reason = f"query keyword excluded by {rule}: {keyword!r}"
-            self._advisory_store.suppress(
-                advisory.advisory_id,
-                reason=reason,
-                metadata={RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER},
-            )
-            self._emit_query_filter_event(
-                EventType.ADVISORY_SUPPRESSED,
-                advisory.advisory_id,
-                {"reason": reason, "rule": rule, "keyword": keyword},
+            marker: dict[str, Any] = {
+                RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER,
+                RETIRED_RULE_KEY: rule,
+            }
+            if rule == _RULE_DOC_FREQ:
+                marker[RETIRED_CEILING_KEY] = self._max_keyword_doc_freq
+            suppressions[advisory.advisory_id] = (reason, marker)
+            events.append(
+                (
+                    advisory.advisory_id,
+                    {"reason": reason, "rule": rule, "keyword": keyword},
+                )
             )
             retired[rule] += 1
+        # One write for the whole set (the first night after a rule change
+        # retires about a hundred rows), and events only for rows it landed.
+        if suppressions:
+            self._advisory_store.suppress_many(suppressions)
+            for advisory_id, payload in events:
+                self._emit_query_filter_event(
+                    EventType.ADVISORY_SUPPRESSED, advisory_id, payload
+                )
         return retired
 
     def _retirement_rule(self, keyword: str) -> str | None:
@@ -1214,12 +1242,16 @@ class AdvisoryGenerator:
         if prior is None:
             return advisory
         # A row *this generator* retired is the one suppression it owns, so
-        # it is the one it may undo: the finding is being emitted again,
-        # which means the rule that retired it no longer holds (ceiling
-        # raised, the word's share fell). Carrying SUPPRESSED here would pin
-        # it off forever, since the fitness loop is barred from restoring it.
-        # Fresh ``metadata`` drops the marker.
-        unretire = prior.retired_by == RETIRED_BY_QUERY_FILTER
+        # it is the one it may undo, but only when the rule that retired it
+        # has actually been relaxed (:meth:`_may_unretire`): being emitted
+        # again is not enough, since a document-frequency retirement tracks a
+        # nightly measurement that a quiet night or a drifting share would
+        # otherwise reverse. Carrying SUPPRESSED forever instead would pin a
+        # relaxed rule's row off, since the fitness loop is barred from
+        # restoring it. Fresh ``metadata`` drops the marker, so a row that
+        # stays retired has to have it carried across.
+        retired = prior.retired_by == RETIRED_BY_QUERY_FILTER
+        unretire = retired and self._may_unretire(prior, advisory)
         if unretire:
             self._unretired.append(advisory.advisory_id)
         carried: dict[str, Any] = {
@@ -1233,11 +1265,58 @@ class AdvisoryGenerator:
                 suppressed_at=prior.suppressed_at,
                 suppression_reason=prior.suppression_reason,
             )
+            if retired:
+                carried["metadata"] = {
+                    **advisory.metadata,
+                    **{
+                        k: prior.metadata[k]
+                        for k in RETIREMENT_KEYS
+                        if k in prior.metadata
+                    },
+                }
         if prior.fitness_scored_at is not None or (
             prior.status == AdvisoryStatus.SUPPRESSED and not unretire
         ):
             carried["confidence"] = prior.confidence
         return advisory.model_copy(update=carried)
+
+    def _may_unretire(self, prior: Advisory, regenerated: Advisory) -> bool:
+        """Whether tonight's evidence relaxes the rule that retired ``prior``.
+
+        Called for a row this generator retired whose finding was emitted
+        again tonight.
+
+        * ``stop_list`` and ``unnormalised_keyword``: a property of the code,
+          not of the night. The word is being emitted, so the rule no longer
+          excludes it; un-retire.
+        * ``document_frequency``: a property of tonight's pack mix, so being
+          emitted proves little. Un-retire only when the ceiling was enforced
+          tonight *and* either the ceiling is above the one that retired the
+          row (the operator relaxed it) or the word's share is at or below
+          :data:`_DF_UNRETIRE_FRACTION` of it. On a night with too few packs
+          the ceiling stands down, so every word is emitted: that is the
+          absence of a measurement, not a measurement, and the row stays
+          retired.
+        * **No recorded rule** (a row retired by a build that did not store
+          one) or an unrecognised one is held to the strictest, the
+          document-frequency test with no known retiring ceiling. That is the
+          only rule whose condition changes nightly; if the row was in fact a
+          static-rule retirement it stays suppressed until its share is
+          comfortably low, a reversible outcome, where the other guess could
+          flap.
+        """
+        rule = prior.metadata.get(RETIRED_RULE_KEY)
+        if rule in (_RULE_STOP_LIST, _RULE_UNNORMALISED):
+            return True
+        if not self._df_ceiling_applied:
+            return False
+        ceiling = self._max_keyword_doc_freq
+        retired_ceiling = prior.metadata.get(RETIRED_CEILING_KEY)
+        if isinstance(retired_ceiling, int | float) and ceiling > retired_ceiling:
+            return True
+        keyword = regenerated.metadata.get("keyword")
+        share = self._query_shares.get(keyword) if isinstance(keyword, str) else None
+        return share is not None and share <= _DF_UNRETIRE_FRACTION * ceiling
 
     @staticmethod
     def _compute_confidence(sample_size: int, effect_size: float) -> float:
