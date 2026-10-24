@@ -1053,6 +1053,29 @@ class GraphStoreContractTests:
             sg = store.get_subgraph(["s2", "s1"], depth=2)
             assert [n["node_id"] for n in sg["nodes"]] == expected
 
+    @pytest.mark.parametrize("seeds", [["s1", "s2"], ["s2", "s1"]])
+    def test_subgraph_depth_is_the_minimum_across_seeds(
+        self, store: GraphStore, seeds: list[str]
+    ) -> None:
+        """A node reached from two seeds sorts at the nearer one's depth.
+
+        ``n_m`` is two hops from ``s1`` and one from ``s2``; ``s2`` is one hop
+        from ``s1`` but stays at depth 0 because it is a seed. A store that
+        keeps whichever seed's distance it read last, or lets a seed inherit
+        another seed's distance, moves ``n_m`` or ``s2`` out of place. Both
+        seed orders run because such a defect shows only for one of them.
+        """
+        for node_id in ["p", "s2", "a_two", "n_m", "s1"]:
+            store.upsert_node(node_id, "service", {})
+        store.upsert_edge("s1", "s2", "depends_on")
+        store.upsert_edge("s1", "p", "depends_on")
+        store.upsert_edge("p", "n_m", "depends_on")
+        store.upsert_edge("p", "a_two", "depends_on")
+        store.upsert_edge("s2", "n_m", "depends_on")
+
+        sg = store.get_subgraph(seeds, depth=2)
+        assert [n["node_id"] for n in sg["nodes"]] == ["s1", "s2", "n_m", "p", "a_two"]
+
     def test_subgraph_orders_seeds_by_node_id_at_depth_zero(
         self, store: GraphStore
     ) -> None:
