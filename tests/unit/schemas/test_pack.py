@@ -278,6 +278,36 @@ class TestRejectedItem:
         assert r.strategy_source == "keyword"
 
 
+class TestRejectedItemPrice:
+    """``estimated_tokens`` is additive and optional (#970)."""
+
+    def test_an_event_row_written_before_the_field_reads_as_unpriced(self) -> None:
+        row = {
+            "item_id": "d1",
+            "item_type": "document",
+            "relevance_score": 0.5,
+            "reason": "max_items",
+            "strategy_source": "keyword",
+        }
+        assert RejectedItem(**row).estimated_tokens is None
+
+    def test_from_pack_item_is_unpriced_unless_a_charge_is_passed(self) -> None:
+        # The item's own stamp is not the walk's charge: it is absent until
+        # selection and differs in index mode, so it is never read off.
+        item = PackItem(
+            item_id="d1", item_type="document", excerpt="b", estimated_tokens=999
+        )
+        assert RejectedItem.from_pack_item(item, "max_items").estimated_tokens is None
+        priced = RejectedItem.from_pack_item(item, "max_items", estimated_tokens=7)
+        assert priced.estimated_tokens == 7
+
+    def test_the_price_round_trips_through_the_payload_dump(self) -> None:
+        r = RejectedItem(
+            item_id="d1", item_type="doc", reason="token_budget", estimated_tokens=12
+        )
+        assert RejectedItem(**r.model_dump()).estimated_tokens == 12
+
+
 class TestBudgetStep:
     def test_basic(self) -> None:
         b = BudgetStep(

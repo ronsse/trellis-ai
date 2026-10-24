@@ -815,7 +815,7 @@ def _gs_pack_event(
     cut_by_items: list[dict[str, Any]] | None = None,
     max_items: int | None = None,
     price_cut_rows: bool = True,
-    max_tokens: int = 10_000,
+    max_tokens: float = 10_000,
     with_trace: bool = True,
     holdout: bool = False,
 ) -> Event:
@@ -1208,7 +1208,7 @@ def test_a_pack_with_no_budget_trace_keeps_its_counts_but_not_a_refill() -> None
     assert report.tokens_freed == 100
     assert report.refilled_packs == 0
     assert report.unmodelled_packs == 1
-    assert any("could not have their token walk re-run" in n for n in report.notes)
+    assert any("could not have their two-stage budget" in n for n in report.notes)
 
 
 def test_a_walk_that_does_not_reproduce_the_record_is_not_trusted() -> None:
@@ -1320,7 +1320,7 @@ def test_a_real_builder_pack_reproduces_and_refills(tmp_path: Path) -> None:
 
 def _cut_log(
     *,
-    max_tokens: int = 10_000,
+    max_tokens: float = 10_000,
     cut_tokens: int = 100,
     price_cut_rows: bool = True,
     max_items: int | None = 3,
@@ -1390,6 +1390,12 @@ def test_a_cut_that_cannot_be_re_run_is_unmodelled_not_zero(
     assert report.unmodelled_packs == 1
     assert report.replacement_servings == 0
     assert any(reason in note for note in report.notes)
+    # The walk itself was fine; it is the item cut that cannot be re-run, so
+    # the caveat must not say the token walk could not be.
+    assert not any("token walk could not" in note for note in report.notes)
+    assert any(
+        "two-stage budget (item cut, then token walk)" in n for n in report.notes
+    )
 
 
 def _with_trace(trace: list[Any]) -> _FakeEventLog:
@@ -1452,17 +1458,15 @@ def _served(payload: dict[str, Any]) -> list[str]:
     return [row["item_id"] for row in payload.get("injected_items") or []]
 
 
-def test_a_real_max_items_bound_pack_matches_the_builder_without_the_graph_rows(
+def _max_items_bound_log(
     tmp_path: Path,
-) -> None:
-    """The refill against the real builder when ``max_items`` is the binding cut.
+) -> tuple[SQLiteEventLog, str, dict[str, Any], set[str], dict[str, int]]:
+    """A real pack where ``max_items`` is the binding cut, and the builder's answer.
 
-    The counterfactual is the builder's own answer: the same candidates
-    without the recency-window rows. Today the builder records no
-    ``estimated_tokens`` on a ``max_items`` rejection, so the event as written
-    is refused rather than priced; once a row carries its cost, the replay has
-    to agree with the builder, so the second half hands it those costs
-    (taken from the counterfactual build's own serving) and compares.
+    Returns the log holding the pack and its feedback, the pack id and
+    payload, the items the builder serves once the recency-window rows are
+    gone but did not serve before (the counterfactual), and each of those
+    items' cost as the counterfactual build charged it.
     """
     graph = _axis_strategy(
         "graph", [_graph_item("g1", 0.95, _RW), _graph_item("g2", 0.94, _RW)]
@@ -1480,50 +1484,71 @@ def test_a_real_max_items_bound_pack_matches_the_builder_without_the_graph_rows(
     pack_id, payload = _build_logged(log, [graph, semantic], budget)
     assert _served(payload) == ["g1", "g2", "s1"]
     assert [r["reason"] for r in payload["rejected_items"]] == ["max_items"] * 2
-    feedback = _gs_feedback(pack_id, helpful=["g1"], unhelpful=["g2"])
-    log.append(feedback)
+    log.append(_gs_feedback(pack_id, helpful=["g1"], unhelpful=["g2"]))
     _, cf_payload = _build_logged(
         SQLiteEventLog(tmp_path / "cf.db"), [semantic], budget
     )
     expected = set(_served(cf_payload)) - set(_served(payload))
     assert expected == {"s2", "s3"}
-
-    as_written = replay_graph_selection(log, graph_selection=_RW)
-
-    assert as_written.matched_servings == 2
-    assert as_written.refilled_packs == 0
-    assert as_written.unmodelled_packs == 1
-    assert as_written.replacement_servings == 0
-
     cost = {
         row["item_id"]: row["estimated_tokens"] for row in cf_payload["injected_items"]
     }
-    priced = {
-        **payload,
-        "rejected_items": [
-            {**row, "estimated_tokens": cost[row["item_id"]]}
-            for row in payload["rejected_items"]
-        ],
-    }
-    priced_log = SQLiteEventLog(tmp_path / "priced.db")
-    priced_log.append(
-        Event(
-            event_type=EventType.PACK_ASSEMBLED,
-            source="pack_builder",
-            entity_id=pack_id,
-            entity_type="pack",
-            payload=priced,
-        )
-    )
-    priced_log.append(feedback)
+    return log, pack_id, payload, expected, cost
 
-    report = replay_graph_selection(priced_log, graph_selection=_RW)
 
+def test_a_real_max_items_bound_pack_replays_as_modelled_not_unpriced(
+    tmp_path: Path,
+) -> None:
+    """The refill against the real builder when ``max_items`` is the binding cut.
+
+    Until the builder priced its ``max_items`` rejections (#970) every such
+    pack was refused as ``max_items_unpriced``, so the refill figure covered
+    only token-bound packs. The counterfactual is the builder's own answer:
+    the same candidates without the recency-window rows, and the replay, run
+    over the event exactly as the builder wrote it, has to agree with it.
+    """
+    log, _, _, expected, cost = _max_items_bound_log(tmp_path)
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.matched_servings == 2
     assert report.refilled_packs == 1
     assert report.unmodelled_packs == 0
     assert report.replacement_servings == len(expected)
     assert report.replacement_tokens == sum(cost[i] for i in expected)
     assert report.replacement_by_strategy == {"semantic": len(expected)}
+    assert not any("could not have their two-stage budget" in n for n in report.notes)
+
+
+def test_an_event_written_before_the_builder_priced_the_cut_stays_unpriced(
+    tmp_path: Path,
+) -> None:
+    """The same pack with the field absent, as every older event reads."""
+    _, pack_id, payload, _, _ = _max_items_bound_log(tmp_path)
+    old_rows = [
+        {k: v for k, v in row.items() if k != "estimated_tokens"}
+        for row in payload["rejected_items"]
+    ]
+    assert all("estimated_tokens" in row for row in payload["rejected_items"])
+    old_log = SQLiteEventLog(tmp_path / "old.db")
+    old_log.append(
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="pack_builder",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={**payload, "rejected_items": old_rows},
+        )
+    )
+    old_log.append(_gs_feedback(pack_id, helpful=["g1"], unhelpful=["g2"]))
+
+    report = replay_graph_selection(old_log, graph_selection=_RW)
+
+    assert report.matched_servings == 2
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert report.replacement_servings == 0
+    assert any("max_items cut whose token cost" in note for note in report.notes)
 
 
 def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
@@ -1576,3 +1601,112 @@ def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
     assert report.refilled_packs == 1
     assert report.unmodelled_packs == 0
     assert report.replacement_servings == len(expected) == 0
+
+
+# -- one budget for every arm, and what counts as a recorded one -----------------
+
+
+def _arms_log(
+    *, nominal: float, effective: float | None, recorded_effective: bool = True
+) -> _FakeEventLog:
+    """One pack, three rows served at 100 tokens each and two turned away.
+
+    Against a 300-token walk the pack serves exactly the first three, so a
+    replay that walks any bigger budget admits the turned-away rows too.
+    """
+    event = _gs_pack_event(
+        "pack-0",
+        [
+            _gs_row("rw", stamp=_RW),
+            _gs_row("sem-1", axis="semantic"),
+            _gs_row("sem-2", axis="semantic"),
+        ],
+        turned_away=[
+            _gs_row("away-1", axis="semantic"),
+            _gs_row("away-2", axis="semantic"),
+        ],
+        max_tokens=nominal,
+    )
+    if recorded_effective:
+        event.payload["token_budget_effective"] = effective
+    log = _FakeEventLog()
+    log.append(event)
+    log.append(_gs_feedback("pack-0", helpful=["sem-1"]))
+    return log
+
+
+@pytest.mark.parametrize(
+    ("nominal", "effective", "recorded_effective"),
+    [
+        # A safety margin: the walk ran against 300 of a nominal 10,000.
+        (10_000, 300, True),
+        # An event from before ``token_budget_effective``: the nominal budget
+        # is the only one on record, and it is the walk's.
+        (300, None, False),
+    ],
+    ids=["effective_budget", "nominal_fallback"],
+)
+def test_both_replay_arms_walk_the_same_budget(
+    nominal: float, effective: float | None, recorded_effective: bool
+) -> None:
+    """``replay_pack_value`` used to read ``budget_max_tokens`` alone.
+
+    Under a margin that is 10,000 against a walk of 300, so its refill
+    admitted both turned-away rows while ``replay_graph_selection`` admitted
+    one: two arms of one replay disagreeing about what the pack could spend.
+    """
+    log = _arms_log(
+        nominal=nominal, effective=effective, recorded_effective=recorded_effective
+    )
+
+    value = replay_pack_value(log, policy=ReplayPolicy())
+    selection = replay_graph_selection(log, graph_selection=_RW)
+
+    # Served as 3, and a no-op policy re-admits exactly those 3.
+    assert value.baseline.items == 3
+    assert value.counterfactual.items == 3
+    assert value.admitted_ungraded_items == 0
+    # ``rw`` frees 100 of the 300, which readmits one row and not two.
+    assert selection.refilled_packs == 1
+    assert selection.replacement_servings == 1
+
+
+@pytest.mark.parametrize("budget", [10_000.0, 10_000], ids=["integral_float", "int"])
+def test_an_integral_float_budget_is_a_recorded_budget(budget: float) -> None:
+    report = replay_graph_selection(_cut_log(max_tokens=budget), graph_selection=_RW)
+
+    assert report.refilled_packs == 1
+    assert report.unmodelled_packs == 0
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [10_000.5, float("nan"), float("inf")],
+    ids=["fractional", "nan", "inf"],
+)
+def test_a_budget_that_is_not_a_whole_number_is_refused_not_truncated(
+    budget: float,
+) -> None:
+    """``int()`` would have replayed ``10_000.5`` as 10,000 and raised on ``inf``."""
+    report = replay_graph_selection(_cut_log(max_tokens=budget), graph_selection=_RW)
+
+    assert report.matched_servings == 1
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert any("recorded no token budget" in note for note in report.notes)
+
+
+def test_a_corrupt_effective_budget_does_not_fall_back_to_the_nominal_one() -> None:
+    """The fallback is for an *absent* effective budget, not an unreadable one.
+
+    The nominal budget is the larger of the two whenever a margin applies, so
+    falling back from a corrupt effective value would silently walk a budget
+    the pack never had.
+    """
+    log = _arms_log(nominal=10_000, effective=300.5)
+
+    report = replay_graph_selection(log, graph_selection=_RW)
+
+    assert report.refilled_packs == 0
+    assert report.unmodelled_packs == 1
+    assert any("recorded no token budget" in note for note in report.notes)

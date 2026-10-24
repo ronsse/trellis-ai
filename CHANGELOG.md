@@ -6,6 +6,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`RejectedItem.estimated_tokens`: a `max_items` rejection is priced, so
+  the graph-selection replay can refill it (#970).** The builder records the
+  budget walk's charge on the two budget cuts, `max_items` (which never
+  reaches `budget_trace`) and `token_budget`; every other reason, and every
+  event written before the field, stays `null` and reads as unpriced. A
+  `max_items` row is priced at what the walk would have charged, the
+  excerpt or the index line in index mode, not at a disclosure pointer,
+  because disclosure runs after the cut. Before this every real
+  `max_items`-bound pack reported `max_items_unpriced` and the refill figure
+  covered only token-bound packs. `docs/api/v1.yaml` does not expose
+  `RejectedItem`, so the spec is unchanged. Two replay fixes ride with it:
+  the policy replay (`analyze replay --body-items` and its siblings, the
+  older `_price` arm) budgets against `token_budget_effective` with the
+  refill's fallback, so both arms agree under a safety margin; and a
+  fractional, `nan` or `inf` budget or cost is refused rather than
+  truncated (an integral float such as `8000.0` still reads), with the
+  unmodelled-pack note no longer saying the token walk failed when it was
+  the item cut.
 - **`analyze value` splits citations by `graph_selection`; `analyze replay
   --graph-selection` prices withholding one value (#961, part).** `value`
   gains a `by_graph_selection` block (JSON and a text table) counting

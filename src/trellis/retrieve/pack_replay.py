@@ -52,6 +52,7 @@ cannot drift from the one that command prints.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -440,8 +441,9 @@ def replay_pack_value(
         baseline_served.extend(
             (c, c.served_tokens, False) for c in candidates if c.included
         )
-        raw_budget = payload.get("budget_max_tokens")
-        max_tokens = int(raw_budget) if isinstance(raw_budget, int | float) else 0
+        # No recorded budget walks as 0, as this arm always has; the refill
+        # arm refuses such a pack instead (``no_token_budget``).
+        max_tokens = _walk_budget(payload) or 0
         served, ungraded = _price(candidates, max_tokens=max_tokens, policy=policy)
         counter_served.extend(served)
         admitted_ungraded += ungraded
@@ -919,7 +921,7 @@ _UNMODELLED_REASONS = {
     ),
     "max_items_unpriced": (
         "lost candidates at the max_items cut whose token cost the event "
-        "does not record"
+        "does not record (written before the builder priced the cut)"
     ),
 }
 
@@ -981,8 +983,9 @@ def _graph_selection_notes(
         )
         notes.append(
             f"{sum(unmodelled_reasons.values())} affected pack(s) could not "
-            f"have their token walk re-run ({why}). Their withheld servings "
-            "are counted; their freed budget is not."
+            f"have their two-stage budget (item cut, then token walk) re-run "
+            f"({why}). Their withheld servings are counted; their freed "
+            "budget is not."
         )
     if unclassified:
         notes.append(
@@ -1072,10 +1075,38 @@ def _unmodelled(tally: _GraphSelectionTally, reason: str) -> None:
 
 
 def _int_or_none(raw: object) -> int | None:
-    """``raw`` as an ``int`` when it is a real number, else ``None``."""
+    """``raw`` as an ``int`` when it is a whole number, else ``None``.
+
+    A float is accepted only when it is integral (``8000.0``, which some JSON
+    writers emit for an int). A fractional one is refused rather than
+    truncated: no token count or budget the builder writes is fractional, so
+    ``7999.5`` is a corrupted field, and quietly replaying it as ``7999``
+    would model a budget the pack never had. ``nan`` and ``inf`` are refused
+    too (``int()`` of either raises, which would abort the whole replay).
+    """
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
+    if isinstance(raw, float) and not (math.isfinite(raw) and raw.is_integer()):
+        return None
     return int(raw)
+
+
+def _walk_budget(payload: Mapping[str, Any]) -> int | None:
+    """The token budget the pack's walk ran against, or ``None`` if unrecorded.
+
+    The builder walks ``_effective_token_budget`` (the safety margin applied),
+    which it records as ``token_budget_effective`` beside the nominal
+    ``budget_max_tokens``. Events from before that key fall back to the
+    nominal budget, but only when the key is *absent*: an effective budget
+    that is present and unreadable is refused, because the nominal one is the
+    larger whenever a margin applied and would walk a budget the pack never
+    had. **Every replay arm reads its budget here**, so two arms of one
+    replay cannot disagree about what a pack was allowed to spend.
+    """
+    raw = payload.get("token_budget_effective")
+    if raw is None:
+        raw = payload.get("budget_max_tokens")
+    return _int_or_none(raw)
 
 
 def _max_items_cut(
@@ -1086,8 +1117,9 @@ def _max_items_cut(
     ``[]`` when it turned none away; otherwise the ``_UNMODELLED_REASONS``
     tag when the cut cannot be re-run: no ``budget_max_items`` to re-apply, or
     a row with no ``estimated_tokens``. The cut runs before the token walk, so
-    ``budget_trace`` never lists these items and their cost is recorded
-    nowhere else in the event.
+    ``budget_trace`` never lists these items and the row's own
+    ``estimated_tokens`` (written by the builder since #970) is the only
+    record of their cost; an older event has none and stays unpriced.
     """
     cut_rows = [r for r in rejected_rows if r.get("reason") == "max_items"]
     if not cut_rows:
@@ -1139,11 +1171,7 @@ def _plan_refill(
     candidates = _candidates(payload, verdicts)
     if candidates is None:
         return "no_budget_trace"
-    # The builder walks against ``_effective_token_budget`` (the safety
-    # margin applied), which it records beside the nominal ``max_tokens``.
-    budget = _int_or_none(payload.get("token_budget_effective"))
-    if budget is None:
-        budget = _int_or_none(payload.get("budget_max_tokens"))
+    budget = _walk_budget(payload)
     if budget is None:
         return "no_token_budget"
     max_items = _int_or_none(payload.get("budget_max_items"))

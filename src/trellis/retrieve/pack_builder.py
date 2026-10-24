@@ -1249,8 +1249,19 @@ class PackBuilder:
         deduped.sort(key=lambda x: x.relevance_score, reverse=True)
 
         # Apply budget: max_items first
+        # A row cut here never reaches the token walk, so it is priced now
+        # at what the walk would have charged (``_item_budget_tokens``): the
+        # replay re-spends freed budget on it and has no other source.
         if len(deduped) > budget.max_items:
-            rejected.extend(self._reject(deduped[budget.max_items :], "max_items"))
+            rejected.extend(
+                self._reject(
+                    deduped[budget.max_items :],
+                    "max_items",
+                    price=lambda item: self._item_budget_tokens(
+                        item, index_mode=index_mode
+                    ),
+                )
+            )
         selected = deduped[: budget.max_items]
 
         # Apply budget: max_tokens (estimate ~4 chars per token). In index
@@ -2348,6 +2359,7 @@ class PackBuilder:
                         "relevance_score": r.relevance_score,
                         "reason": r.reason,
                         "strategy_source": r.strategy_source,
+                        "estimated_tokens": r.estimated_tokens,
                     }
                     for r in report.rejected_items
                 ],
@@ -3215,6 +3227,7 @@ class PackBuilder:
         reason: str,
         *,
         strategy_source: str | None = None,
+        price: Callable[[PackItem], int] | None = None,
     ) -> list[RejectedItem]:
         """Record ``items`` as rejected under ``reason``.
 
@@ -3225,9 +3238,19 @@ class PackBuilder:
         ``self._reject(deduped[budget.max_items :], "max_items")`` *is* the
         gate; the gates that reject one item at a time inside a loop call
         ``from_pack_item`` directly instead of wrapping it in a list.
+
+        ``price`` maps an item to the tokens the budget walk charges it. Pass
+        it only for a budget cut, where the row records that cost
+        (:attr:`RejectedItem.estimated_tokens`); every other gate leaves the
+        row unpriced.
         """
         return [
-            RejectedItem.from_pack_item(item, reason, strategy_source=strategy_source)
+            RejectedItem.from_pack_item(
+                item,
+                reason,
+                strategy_source=strategy_source,
+                estimated_tokens=price(item) if price is not None else None,
+            )
             for item in items
         ]
 
@@ -3501,7 +3524,11 @@ class PackBuilder:
                         included=False,
                     )
                 )
-                rejected.append(RejectedItem.from_pack_item(item, "token_budget"))
+                rejected.append(
+                    RejectedItem.from_pack_item(
+                        item, "token_budget", estimated_tokens=item_tokens
+                    )
+                )
 
         return result, rejected, budget_trace
 

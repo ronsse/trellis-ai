@@ -54,6 +54,18 @@ class RejectedItem(VersionedModel):
     relevance_score: float = 0.0
     reason: str  # dedup, structural_filter, max_items, token_budget, content_floor
     strategy_source: str | None = None
+    #: Tokens the budget walk charges (or would have charged) this item, set
+    #: only on the two reasons that are budget cuts: ``max_items`` and
+    #: ``token_budget``. A ``max_items`` row never reaches the walk, so
+    #: ``budget_trace`` lists it nowhere and this is the only record of its
+    #: cost; ``trellis analyze replay`` needs it to re-spend freed budget on
+    #: it. Priced as the walk would have charged it, which is the excerpt's
+    #: tokens (an index line's in index mode), *not* a graduated-disclosure
+    #: pointer: disclosure runs after the cut on the items the walk kept, so
+    #: a rejected item is never offered at that price. ``None`` is "not
+    #: priced" -- every other reason, and any event written before the field
+    #: existed -- never zero.
+    estimated_tokens: int | None = None
 
     @classmethod
     def from_pack_item(
@@ -62,6 +74,7 @@ class RejectedItem(VersionedModel):
         reason: str,
         *,
         strategy_source: str | None = None,
+        estimated_tokens: int | None = None,
     ) -> RejectedItem:
         """Build the row for ``item`` being rejected under ``reason``.
 
@@ -93,6 +106,12 @@ class RejectedItem(VersionedModel):
         ``strategy_source`` defaults to the item's own. Pass it only for a
         gate that runs before ``_promote_strategy_source`` has stamped the
         item, where the caller knows the axis and the item does not.
+
+        ``estimated_tokens`` is the budget walk's charge, for the two gates
+        that are budget cuts (see the field). The caller passes it rather
+        than this reading ``item.estimated_tokens``: that stamp is absent
+        until an item is selected, and in index mode the walk charges
+        something else.
         """
         return cls(
             item_id=item.item_id,
@@ -100,6 +119,7 @@ class RejectedItem(VersionedModel):
             relevance_score=item.relevance_score,
             reason=reason,
             strategy_source=strategy_source or item.strategy_source,
+            estimated_tokens=estimated_tokens,
         )
 
 
