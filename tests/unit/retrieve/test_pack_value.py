@@ -16,12 +16,20 @@ from typing import Any
 import pytest
 
 from trellis.retrieve.pack_value import (
+    GRAPH_SELECTION_NOT_GRAPH,
+    GRAPH_SELECTION_UNSTAMPED,
     MIN_ATTRIBUTED_PACKS,
     NO_NAMESPACE,
     SUPPRESSED_NO_JUDGED_TOKENS,
     SUPPRESSED_THIN_SAMPLE,
+    graph_selection_bucket,
     item_namespace,
     summarize_pack_value,
+)
+from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_CALLER_SEEDED,
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
 )
 from trellis.stores.base.event_log import Event, EventLog, EventType
 
@@ -1111,3 +1119,250 @@ def test_notes_state_the_interval_and_disclaim_the_conditional() -> None:
     assert "[10.0%, 70.0%]" in notes
     assert "missing at random" in notes
     assert "NOT a corrected" in notes
+
+
+# ---------------------------------------------------------------------------
+# by_graph_selection (#961): citations per serving, split by how the graph
+# axis chose the candidate
+# ---------------------------------------------------------------------------
+
+
+def _row(
+    item_id: str,
+    *,
+    strategy: str,
+    selection: str | None = None,
+    tokens: int = 100,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "item_id": item_id,
+        "estimated_tokens": tokens,
+        "strategy_source": strategy,
+        "item_type": "entity" if strategy == "graph" else "document",
+    }
+    if selection is not None:
+        row["graph_selection"] = selection
+    return row
+
+
+def _emit_rows(
+    log: _FakeEventLog,
+    pack_id: str,
+    rows: list[dict[str, Any]],
+    **extra: Any,
+) -> None:
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="test",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload={
+            "injected_item_ids": [r["item_id"] for r in rows],
+            "injected_items": rows,
+            **extra,
+        },
+    )
+
+
+def _selection_window() -> _FakeEventLog:
+    """Six attributed packs; every bucket reachable, one thin on purpose.
+
+    Per pack ``pN``: a recency-window entity (helpful in p0, unhelpful in
+    p1-p3, ungraded in p4-p5), a seeded entity (helpful in all six), a
+    semantic document (never graded). ``caller_seeded`` appears in p0 and
+    p1 only (two packs, below the minimum), and one unstamped graph entity
+    in p5.
+    """
+    log = _FakeEventLog()
+    for n in range(6):
+        p = f"p{n}"
+        rows = [
+            _row(f"{p}_rw", strategy="graph", selection=GRAPH_SELECTION_RECENCY_WINDOW),
+            _row(f"{p}_sd", strategy="graph", selection=GRAPH_SELECTION_SEEDED),
+            _row(f"{p}_doc", strategy="semantic"),
+        ]
+        helpful = [f"{p}_sd"]
+        unhelpful: list[str] = []
+        if n == 0:
+            helpful.append(f"{p}_rw")
+        elif n <= 3:
+            unhelpful.append(f"{p}_rw")
+        if n <= 1:
+            rows.append(
+                _row(
+                    f"{p}_cs", strategy="graph", selection=GRAPH_SELECTION_CALLER_SEEDED
+                )
+            )
+            (helpful if n == 0 else unhelpful).append(f"{p}_cs")
+        if n == 5:
+            rows.append(_row(f"{p}_old", strategy="graph"))
+        _emit_rows(log, p, rows)
+        _emit_feedback(log, p, helpful=helpful, unhelpful=unhelpful)
+    return log
+
+
+def test_graph_selection_splits_servings_into_helpful_unhelpful_unjudged() -> None:
+    report = summarize_pack_value(_selection_window(), days=30)
+    cells = {c.key: c for c in report.by_graph_selection}
+
+    recency = cells[GRAPH_SELECTION_RECENCY_WINDOW]
+    assert (recency.servings, recency.attributed_packs) == (6, 6)
+    assert (
+        recency.helpful_servings,
+        recency.unhelpful_servings,
+        recency.unjudged_servings,
+    ) == (1, 3, 2)
+    assert recency.helpful_per_serving == 0.1667
+    assert recency.unhelpful_per_serving == 0.5
+    assert recency.unjudged_per_serving == 0.3333
+
+    seeded = cells[GRAPH_SELECTION_SEEDED]
+    assert (seeded.servings, seeded.helpful_servings) == (6, 6)
+    assert seeded.helpful_per_serving == 1.0
+    assert seeded.unhelpful_per_serving == 0.0
+
+    # The non-graph bucket takes the semantic documents and nothing else.
+    other = cells[GRAPH_SELECTION_NOT_GRAPH]
+    assert (other.servings, other.unjudged_servings) == (6, 6)
+
+
+def test_graph_selection_buckets_reconcile_to_the_total() -> None:
+    report = summarize_pack_value(_selection_window(), days=30)
+    cells = report.by_graph_selection
+
+    # 6 recency + 6 seeded + 2 caller_seeded + 1 unstamped + 6 non-graph.
+    assert report.attributed_servings == 21
+    assert sum(c.servings for c in cells) == report.attributed_servings
+    for cell in cells:
+        assert (
+            cell.helpful_servings + cell.unhelpful_servings + cell.unjudged_servings
+            == cell.servings
+        )
+    # The same population the headline reads: 21 servings of 100 tokens.
+    assert report.injected_tokens == 100 * report.attributed_servings
+
+
+def test_graph_selection_buckets_have_a_fixed_order_and_an_empty_one_is_zero() -> None:
+    report = summarize_pack_value(_FakeEventLog(), days=30)
+
+    assert [c.key for c in report.by_graph_selection] == [
+        GRAPH_SELECTION_RECENCY_WINDOW,
+        GRAPH_SELECTION_SEEDED,
+        GRAPH_SELECTION_CALLER_SEEDED,
+        GRAPH_SELECTION_UNSTAMPED,
+        GRAPH_SELECTION_NOT_GRAPH,
+    ]
+    assert report.attributed_servings == 0
+    assert all(
+        c.servings == 0 and c.helpful_per_serving is None
+        for c in report.by_graph_selection
+    )
+
+
+def test_thin_graph_selection_bucket_keeps_counts_and_refuses_rates() -> None:
+    report = summarize_pack_value(_selection_window(), days=30)
+    cells = {c.key: c for c in report.by_graph_selection}
+
+    caller = cells[GRAPH_SELECTION_CALLER_SEEDED]
+    assert (caller.servings, caller.attributed_packs) == (2, 2)
+    assert (caller.helpful_servings, caller.unhelpful_servings) == (1, 1)
+    assert caller.suppressed is True
+    assert caller.suppressed_reason == SUPPRESSED_THIN_SAMPLE
+    assert caller.helpful_per_serving is None
+    assert caller.unhelpful_per_serving is None
+
+    # The headline and a well-populated bucket are stated regardless.
+    assert report.suppressed is False
+    assert cells[GRAPH_SELECTION_RECENCY_WINDOW].suppressed is False
+
+
+def test_graph_item_without_a_stamp_is_its_own_bucket_not_the_window() -> None:
+    report = summarize_pack_value(_selection_window(), days=30)
+    cells = {c.key: c for c in report.by_graph_selection}
+
+    assert cells[GRAPH_SELECTION_UNSTAMPED].servings == 1
+    # Absence of the stamp must not inflate the recency window's n.
+    assert cells[GRAPH_SELECTION_RECENCY_WINDOW].servings == 6
+    assert any(GRAPH_SELECTION_UNSTAMPED in note for note in report.notes)
+
+
+def test_holdout_pack_is_dropped_from_graph_selection() -> None:
+    """A withheld pack's would-be servings and their feedback count for nothing."""
+    log = _selection_window()
+    _emit_rows(
+        log,
+        "held",
+        [_row("held_rw", strategy="graph", selection=GRAPH_SELECTION_RECENCY_WINDOW)],
+        holdout=True,
+        holdout_rate=0.5,
+    )
+    _emit_feedback(log, "held", unhelpful=["held_rw"])
+
+    report = summarize_pack_value(log, days=30)
+    recency = {c.key: c for c in report.by_graph_selection}[
+        GRAPH_SELECTION_RECENCY_WINDOW
+    ]
+
+    assert recency.servings == 6
+    assert recency.unhelpful_servings == 3
+    assert report.attributed_servings == 21
+    assert report.attributed_packs == 6
+
+
+def test_uncited_pack_contributes_no_graph_selection_servings() -> None:
+    """An ungraded pack is no evidence either way, as for every other axis."""
+    log = _selection_window()
+    _emit_rows(
+        log,
+        "silent",
+        [_row("silent_rw", strategy="graph", selection=GRAPH_SELECTION_RECENCY_WINDOW)],
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.attributed_servings == 21
+
+
+def test_unrecognised_stamp_gets_its_own_bucket_after_the_known_ones() -> None:
+    log = _selection_window()
+    _emit_rows(
+        log,
+        "future",
+        [
+            _row("future_x", strategy="graph", selection="a_later_mode"),
+            _row("future_h", strategy="semantic"),
+        ],
+    )
+    _emit_feedback(log, "future", helpful=["future_h"])
+    report = summarize_pack_value(log, days=30)
+
+    assert report.by_graph_selection[-1].key == "a_later_mode"
+    assert report.by_graph_selection[-1].servings == 1
+    assert sum(c.servings for c in report.by_graph_selection) == (
+        report.attributed_servings
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "bucket"),
+    [
+        (
+            {"graph_selection": "seeded", "strategy_source": "graph"},
+            "seeded",
+        ),
+        # The stamp is the sharper signal: an id a document axis won on
+        # still reads as the graph selection that stamped it.
+        (
+            {"graph_selection": "recency_window", "strategy_source": "semantic"},
+            "recency_window",
+        ),
+        (
+            {"graph_selection": "  ", "strategy_source": "graph"},
+            GRAPH_SELECTION_UNSTAMPED,
+        ),
+        ({"strategy_source": "graph"}, GRAPH_SELECTION_UNSTAMPED),
+        ({"strategy_source": "keyword"}, GRAPH_SELECTION_NOT_GRAPH),
+        ({}, GRAPH_SELECTION_NOT_GRAPH),
+    ],
+)
+def test_graph_selection_bucket(row: dict[str, Any], bucket: str) -> None:
+    assert graph_selection_bucket(row) == bucket
