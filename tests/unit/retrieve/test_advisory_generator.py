@@ -15,16 +15,25 @@ if TYPE_CHECKING:
 
 from tests.recovery_command import expected_recovery
 from trellis.retrieve.advisory_generator import (
+    DEFAULT_MAX_KEYWORD_DOC_FREQ,
     MIN_EFFECT_SIZE_ENV,
     MIN_EFFECT_SIZE_SETTING,
     MIN_SAMPLE_SIZE_ENV,
     MIN_SAMPLE_SIZE_SETTING,
+    QUERY_STOP_WORDS,
     AdvisoryGenerator,
     resolve_advisory_thresholds,
 )
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
 from trellis.retrieve.formatters import format_advisories_as_markdown
-from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
+from trellis.schemas.advisory import (
+    RETIRED_BY_KEY,
+    RETIRED_BY_QUERY_FILTER,
+    Advisory,
+    AdvisoryCategory,
+    AdvisoryEvidence,
+    AdvisoryStatus,
+)
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -566,7 +575,11 @@ class TestQueryImprovement:
         event_log.get_events.side_effect = [packs, feedback]
 
         store = AdvisoryStore(tmp_path / "adv.json")
-        gen = AdvisoryGenerator(event_log, store, min_sample_size=3)
+        # "deployment" is in half the intents here; this test is about the
+        # correlation, so the document-frequency ceiling is switched off.
+        gen = AdvisoryGenerator(
+            event_log, store, min_sample_size=3, max_keyword_doc_freq=1.0
+        )
         gen.generate(days=30)
 
         query_advs = [a for a in store.list() if a.category == AdvisoryCategory.QUERY]
@@ -796,11 +809,14 @@ class TestRefusalIsReported:
     def test_refused_findings_are_counted_on_the_report(self, tmp_path: Path) -> None:
         """Refusals are counted, not just silently dropped.
 
-        Seven: the ``ubiquitous`` and ``narrow`` strategies, plus the five
-        words of the shared intent, every one of which is on all 20 packs.
-        It is the number that distinguishes "the analysis found nothing"
-        from "the analysis found things it could not attribute" — and on
-        this corpus almost everything is the latter.
+        Two: the ``ubiquitous`` and ``narrow`` strategies. The five words of
+        the shared intent used to make it seven, each being on all 20 packs;
+        the QUERY filter now takes them out before they are priced (two are
+        function words, three are over the document-frequency ceiling), so
+        they are neither refused nor withheld rows: none could have been
+        written, there being no comparison arm. The count still separates
+        "the analysis found nothing" from "found things it could not
+        attribute" for what the filter lets through.
         """
         packs, feedback = _two_arm_corpus()
         event_log = MagicMock(spec=EventLog)
@@ -810,7 +826,11 @@ class TestRefusalIsReported:
         report = gen.generate(days=30)
 
         assert report.advisories_generated == 1
-        assert report.findings_refused_no_comparison_arm == 7
+        assert report.findings_refused_no_comparison_arm == 2
+        assert report.query_keywords_withheld == {
+            "stop_list": 0,
+            "document_frequency": 0,
+        }
 
     def test_no_refusals_when_every_finding_has_an_arm(self, tmp_path: Path) -> None:
         packs: list[MagicMock] = []
@@ -1407,3 +1427,503 @@ class TestMessagesCarryTheirOwnEvidence:
                 f"{index}. `{advisory.advisory_id}`"
                 f" **[{advisory.category.value}]** {advisory.message}"
             )
+
+
+def _intent_corpus(
+    carriers: int,
+    others: int,
+    *,
+    carrier_intent: str,
+    other_intent: str = "gadget review",
+) -> tuple[list[MagicMock], list[MagicMock]]:
+    """``carriers`` successful packs with ``carrier_intent``, ``others`` mostly not.
+
+    Exactly one of the ``others`` succeeds, so every word peculiar to the
+    carriers' intent shows a large positive effect against a real comparison
+    arm: whether it becomes an advisory is then decided by the QUERY filter
+    alone, not by the sample or effect floors.
+    """
+    packs: list[MagicMock] = []
+    feedback: list[MagicMock] = []
+    for i in range(carriers):
+        packs.append(_pack_event(f"c{i}", [f"ci{i}"], intent=carrier_intent))
+        feedback.append(_feedback_event(f"c{i}", success=True))
+    for i in range(others):
+        packs.append(_pack_event(f"o{i}", [f"oi{i}"], intent=other_intent))
+        feedback.append(_feedback_event(f"o{i}", success=i == 0))
+    return packs, feedback
+
+
+def _keywords(store: AdvisoryStore) -> set[str]:
+    return {
+        a.metadata["keyword"]
+        for a in store.list(include_suppressed=True)
+        if a.category == AdvisoryCategory.QUERY
+    }
+
+
+def _query_row(
+    keyword: str, *, confidence: float = 0.6, status: AdvisoryStatus | None = None
+) -> Advisory:
+    """A QUERY row as an earlier run would have stored it."""
+    return Advisory(
+        advisory_id=AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, keyword),
+        category=AdvisoryCategory.QUERY,
+        confidence=confidence,
+        message=f"Including '{keyword}' in your context query correlates (n=7).",
+        evidence=AdvisoryEvidence(
+            sample_size=7,
+            success_rate_with=0.8,
+            success_rate_without=0.2,
+            effect_size=0.6,
+        ),
+        scope="global",
+        metadata={"keyword": keyword},
+        **({"status": status} if status is not None else {}),
+    )
+
+
+class TestQueryKeywordStopList:
+    """#960 — a function word cannot be a query choice."""
+
+    def test_function_words_do_not_key_an_advisory(self, tmp_path: Path) -> None:
+        packs, feedback = _intent_corpus(
+            6, 24, carrier_intent="widget for the rollout with care"
+        )
+        store, _ = _run(tmp_path, packs, feedback)
+
+        keywords = _keywords(store)
+        assert {"widget", "rollout", "care"} <= keywords
+        assert not keywords & {"for", "the", "with"}
+
+    def test_the_report_counts_the_rows_the_stop_list_withheld(
+        self, tmp_path: Path
+    ) -> None:
+        packs, feedback = _intent_corpus(6, 24, carrier_intent="widget for the rollout")
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        store = AdvisoryStore(tmp_path / "adv.json")
+
+        report = AdvisoryGenerator(event_log, store).generate(days=30)
+
+        assert report.query_keywords_withheld == {
+            "stop_list": 2,
+            "document_frequency": 0,
+        }
+
+    def test_withheld_words_are_not_counted_as_refusals(self, tmp_path: Path) -> None:
+        """Pricing an excluded word must not look like refusing a live one."""
+        refusals = []
+        for name, intent in (
+            ("bare", "widget rollout"),
+            ("stop", "widget for rollout"),
+        ):
+            packs, feedback = _intent_corpus(6, 24, carrier_intent=intent)
+            event_log = MagicMock(spec=EventLog)
+            event_log.get_events.side_effect = [packs, feedback]
+            gen = AdvisoryGenerator(event_log, AdvisoryStore(tmp_path / f"{name}.json"))
+            gen.generate(days=30)
+            refusals.append(dict(gen._refusals))
+
+        assert refusals[0] == refusals[1]
+
+    def test_a_hand_read_of_the_stop_list(self) -> None:
+        """The list is function words only, and long enough to matter."""
+        assert {
+            "for",
+            "that",
+            "with",
+            "and",
+            "from",
+            "before",
+            "after",
+            "are",
+            "one",
+        } <= (QUERY_STOP_WORDS)
+        assert all(len(w) >= 3 for w in QUERY_STOP_WORDS)  # shorter never reach it
+        # Domain verbs and nouns are the ceiling's business, not the list's.
+        assert not QUERY_STOP_WORDS & {
+            "fix",
+            "add",
+            "test",
+            "deploy",
+            "pack",
+            "context",
+        }
+
+
+class TestQueryKeywordPunctuation:
+    """#960 — the split left edge punctuation on the keyword."""
+
+    def test_edge_punctuation_is_stripped(self, tmp_path: Path) -> None:
+        packs, feedback = _intent_corpus(
+            6, 24, carrier_intent='widget, "rollout". (care)'
+        )
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert _keywords(store) == {"widget", "rollout", "care"}
+
+    def test_punctuated_and_bare_forms_share_one_advisory(self, tmp_path: Path) -> None:
+        """Before: ``widget,`` and ``widget`` were two ids with half the packs."""
+        packs, feedback = _intent_corpus(6, 24, carrier_intent="widget rollout")
+        for pack in packs[:3]:
+            pack.payload["intent"] = "widget, rollout."
+        store, _ = _run(tmp_path, packs, feedback)
+
+        widget = [a for a in store.list() if a.metadata["keyword"] == "widget"]
+        assert len(widget) == 1
+        assert widget[0].evidence.sample_size == 6
+
+
+class TestQueryKeywordDocumentFrequency:
+    """#960 — a word in a large share of intents cannot discriminate."""
+
+    def test_a_word_over_the_ceiling_is_withheld(self, tmp_path: Path) -> None:
+        # 12 of 30 packs: share 0.40 against the 0.25 default.
+        packs, feedback = _intent_corpus(12, 18, carrier_intent="widget rollout")
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        store = AdvisoryStore(tmp_path / "adv.json")
+
+        report = AdvisoryGenerator(event_log, store).generate(days=30)
+
+        assert _keywords(store) == set()
+        assert report.query_keywords_withheld == {
+            "stop_list": 0,
+            "document_frequency": 2,
+        }
+        assert report.query_keyword_df_ceiling == DEFAULT_MAX_KEYWORD_DOC_FREQ
+
+    def test_the_same_word_under_the_ceiling_is_kept(self, tmp_path: Path) -> None:
+        # 6 of 30: share 0.20.
+        packs, feedback = _intent_corpus(6, 24, carrier_intent="widget rollout")
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert _keywords(store) == {"widget", "rollout"}
+
+    def test_the_ceiling_is_a_constructor_parameter(self, tmp_path: Path) -> None:
+        packs, feedback = _intent_corpus(12, 18, carrier_intent="widget rollout")
+        store, _ = _run(tmp_path, packs, feedback, max_keyword_doc_freq=0.5)
+
+        assert _keywords(store) == {"widget", "rollout"}
+
+    def test_a_ceiling_of_one_turns_the_rule_off(self, tmp_path: Path) -> None:
+        packs, feedback = _intent_corpus(12, 18, carrier_intent="widget rollout")
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        store = AdvisoryStore(tmp_path / "adv.json")
+
+        report = AdvisoryGenerator(event_log, store, max_keyword_doc_freq=1.0).generate(
+            days=30
+        )
+
+        assert _keywords(store) == {"widget", "rollout"}
+        assert report.query_keywords_withheld["document_frequency"] == 0
+
+    def test_the_ceiling_is_skipped_when_it_could_never_admit_a_word(
+        self, tmp_path: Path
+    ) -> None:
+        """12 packs x 0.25 = 3 carriers, under the sample floor of 5.
+
+        Enforced anyway it would withhold every word the floor admits, turning
+        QUERY analysis off without saying so; the report says it stood down.
+        """
+        packs, feedback = _intent_corpus(6, 6, carrier_intent="widget rollout")
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        store = AdvisoryStore(tmp_path / "adv.json")
+
+        report = AdvisoryGenerator(event_log, store).generate(days=30)
+
+        assert _keywords(store) == {"widget", "rollout"}
+        assert report.query_keyword_df_ceiling is None
+
+    def test_the_stop_list_still_applies_when_the_ceiling_stands_down(
+        self, tmp_path: Path
+    ) -> None:
+        packs, feedback = _intent_corpus(6, 6, carrier_intent="widget for rollout")
+        store, _ = _run(tmp_path, packs, feedback)
+
+        assert _keywords(store) == {"widget", "rollout"}
+
+    def test_a_bad_ceiling_is_refused(self) -> None:
+        import pytest
+
+        for bad in (0.0, -0.1, 1.5, float("nan")):
+            with pytest.raises(ValueError, match="max_keyword_doc_freq"):
+                AdvisoryGenerator(
+                    MagicMock(spec=EventLog), MagicMock(), max_keyword_doc_freq=bad
+                )
+
+
+class TestQueryRowRetirement:
+    """#960 — rows the generator would no longer write are suppressed, auditably."""
+
+    @staticmethod
+    def _generate(
+        store: AdvisoryStore,
+        packs: list[MagicMock],
+        feedback: list[MagicMock],
+        **kwargs: object,
+    ) -> tuple[object, MagicMock]:
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        report = AdvisoryGenerator(event_log, store, **kwargs).generate(days=30)  # type: ignore[arg-type]
+        return report, event_log
+
+    def _seeded(self, tmp_path: Path) -> AdvisoryStore:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put_many(
+            [
+                _query_row("for"),
+                _query_row("widget,"),
+                _query_row("rollout"),
+                _query_row("care"),
+            ]
+        )
+        return store
+
+    def _corpus(self) -> tuple[list[MagicMock], list[MagicMock]]:
+        # "rollout" is in 12 of 30 intents (over the ceiling); "care" in 6.
+        packs, feedback = _intent_corpus(12, 18, carrier_intent="rollout")
+        extra_p, extra_f = _intent_corpus(6, 0, carrier_intent="care gadget review")
+        for p in extra_p:
+            p.entity_id = "x" + p.entity_id
+        for f in extra_f:
+            f.entity_id = "x" + f.entity_id
+            f.payload["pack_id"] = "x" + f.payload["pack_id"]
+        return packs + extra_p, feedback + extra_f
+
+    def test_each_rule_retires_its_rows_and_only_those(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+
+        report, _ = self._generate(store, packs, feedback)
+
+        by_keyword = {
+            a.metadata["keyword"]: a for a in store.list(include_suppressed=True)
+        }
+        assert by_keyword["for"].status == AdvisoryStatus.SUPPRESSED
+        assert by_keyword["widget,"].status == AdvisoryStatus.SUPPRESSED
+        assert by_keyword["rollout"].status == AdvisoryStatus.SUPPRESSED
+        assert by_keyword["care"].status == AdvisoryStatus.ACTIVE
+        assert report.query_rows_retired == {  # type: ignore[attr-defined]
+            "stop_list": 1,
+            "document_frequency": 1,
+            "unnormalised_keyword": 1,
+        }
+
+    def test_a_retirement_is_a_suppression_not_a_deletion(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+        self._generate(store, packs, feedback)
+
+        row = store.get(AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "for"))
+        assert row is not None
+        assert row.status == AdvisoryStatus.SUPPRESSED
+        assert row.suppressed_at is not None
+        assert "stop_list" in (row.suppression_reason or "")
+        assert row.retired_by == RETIRED_BY_QUERY_FILTER
+        # Reversible with the store's own restore.
+        restored = store.restore(row.advisory_id)
+        assert restored is not None
+        assert restored.status == AdvisoryStatus.ACTIVE
+        assert restored.retired_by is None
+
+    def test_every_retirement_emits_an_audit_event(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+
+        _, event_log = self._generate(store, packs, feedback)
+
+        emitted = [
+            c
+            for c in event_log.emit.call_args_list
+            if c.args[0] == EventType.ADVISORY_SUPPRESSED
+        ]
+        assert len(emitted) == 3
+        by_rule = {c.kwargs["payload"]["rule"]: c.kwargs["payload"] for c in emitted}
+        assert set(by_rule) == {
+            "stop_list",
+            "document_frequency",
+            "unnormalised_keyword",
+        }
+        assert by_rule["stop_list"]["keyword"] == "for"
+        assert all(c.kwargs["entity_type"] == "advisory" for c in emitted)
+        # The dashboard averages ``new_confidence`` over fitness events.
+        assert all("new_confidence" not in c.kwargs["payload"] for c in emitted)
+
+    def test_a_failing_event_log_does_not_fail_the_run(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+        event_log = MagicMock(spec=EventLog)
+        event_log.get_events.side_effect = [packs, feedback]
+        event_log.emit.side_effect = RuntimeError("log down")
+
+        AdvisoryGenerator(event_log, store).generate(days=30)
+
+        row = store.get(AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "for"))
+        assert row is not None
+        assert row.status == AdvisoryStatus.SUPPRESSED
+
+    def test_a_second_run_retires_nothing_more(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+        self._generate(store, packs, feedback)
+
+        report, event_log = self._generate(store, packs, feedback)
+
+        assert sum(report.query_rows_retired.values()) == 0  # type: ignore[attr-defined]
+        assert not event_log.emit.called
+
+    def test_other_categories_and_fitness_suppressions_are_left_alone(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        entity = _query_row("for").model_copy(
+            update={"category": AdvisoryCategory.ENTITY, "advisory_id": "ent-1"}
+        )
+        fitness_suppressed = _query_row("with")
+        store.put_many([entity, fitness_suppressed])
+        store.suppress(fitness_suppressed.advisory_id, reason="fitness: weak")
+        packs, feedback = self._corpus()
+
+        _, event_log = self._generate(store, packs, feedback)
+
+        assert store.get("ent-1").status == AdvisoryStatus.ACTIVE  # type: ignore[union-attr]
+        kept = store.get(fitness_suppressed.advisory_id)
+        assert kept is not None
+        assert kept.suppression_reason == "fitness: weak"
+        assert kept.retired_by is None
+        assert not event_log.emit.called
+
+    def test_a_row_absent_from_the_window_is_not_retired_on_frequency(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(_query_row("elsewhere"))
+        packs, feedback = self._corpus()
+
+        self._generate(store, packs, feedback)
+
+        row = store.get(
+            AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "elsewhere")
+        )
+        assert row is not None
+        assert row.status == AdvisoryStatus.ACTIVE
+
+    def test_raising_the_ceiling_puts_a_retired_row_back(self, tmp_path: Path) -> None:
+        store = self._seeded(tmp_path)
+        packs, feedback = self._corpus()
+        self._generate(store, packs, feedback)
+        rollout = AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "rollout")
+        assert store.get(rollout).status == AdvisoryStatus.SUPPRESSED  # type: ignore[union-attr]
+
+        report, event_log = self._generate(
+            store, packs, feedback, max_keyword_doc_freq=0.5
+        )
+
+        row = store.get(rollout)
+        assert row is not None
+        assert row.status == AdvisoryStatus.ACTIVE
+        assert row.suppression_reason is None
+        assert row.retired_by is None
+        assert RETIRED_BY_KEY not in row.metadata
+        assert report.query_rows_unretired == 1  # type: ignore[attr-defined]
+        restored = [
+            c
+            for c in event_log.emit.call_args_list
+            if c.args[0] == EventType.ADVISORY_RESTORED
+        ]
+        assert [c.kwargs["entity_id"] for c in restored] == [rollout]
+
+    def test_a_fitness_suppression_is_still_carried_forward(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a row this filter retired is un-retired on re-emission."""
+        packs, feedback = _intent_corpus(6, 24, carrier_intent="widget")
+        store = AdvisoryStore(tmp_path / "adv.json")
+        self._generate(store, packs, feedback)
+        widget = AdvisoryGenerator._stable_id(AdvisoryCategory.QUERY, "widget")
+        store.suppress(widget, reason="fitness: weak")
+
+        report, _ = self._generate(store, packs, feedback)
+
+        assert store.get(widget).status == AdvisoryStatus.SUPPRESSED  # type: ignore[union-attr]
+        assert report.query_rows_unretired == 0  # type: ignore[attr-defined]
+
+
+class TestFitnessLoopLeavesRetiredRowsAlone:
+    """#960 — a retirement must survive the fitness loop that follows it.
+
+    Nightly curation runs generate then the loop. Without the guard the loop
+    scores the retired row (it was served, and it is healthy), blends its
+    confidence to well over the restore bar, and revives it that same night.
+    """
+
+    @staticmethod
+    def _log(advisory_id: str) -> MagicMock:
+        packs = []
+        feedback = []
+        for i in range(4):
+            packs.append(
+                _event(
+                    EventType.PACK_ASSEMBLED,
+                    f"p{i}",
+                    {
+                        "injected_item_ids": [],
+                        "injected_items": [],
+                        "domain": None,
+                        "intent": "",
+                        "advisory_ids": [advisory_id],
+                    },
+                )
+            )
+            feedback.append(_feedback_event(f"p{i}", success=True))
+        return TestDemotionRemainsReachable._event_log(packs, feedback)
+
+    def test_a_retired_row_is_not_restored(self, tmp_path: Path) -> None:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        row = store.put(_query_row("for", confidence=0.6))
+        store.suppress(
+            row.advisory_id,
+            reason="query keyword excluded by stop_list: 'for'",
+            metadata={RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER},
+        )
+
+        report = run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
+
+        after = store.get(row.advisory_id)
+        assert after is not None
+        assert after.status == AdvisoryStatus.SUPPRESSED
+        assert report.advisories_restored == []
+        assert after.confidence == 0.6  # not even re-scored
+
+    def test_a_fitness_suppressed_row_is_still_restored(self, tmp_path: Path) -> None:
+        """The control: the guard is specific to retirement."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        row = store.put(_query_row("widget", confidence=0.6))
+        store.suppress(row.advisory_id, reason="fitness: weak")
+
+        report = run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
+
+        assert report.advisories_restored == [row.advisory_id]
+
+    def test_an_operator_restored_row_is_scored_again(self, tmp_path: Path) -> None:
+        """The marker outlives ``restore``; ``retired_by`` must not."""
+        store = AdvisoryStore(tmp_path / "adv.json")
+        row = store.put(_query_row("for", confidence=0.6))
+        store.suppress(
+            row.advisory_id,
+            reason="r",
+            metadata={RETIRED_BY_KEY: RETIRED_BY_QUERY_FILTER},
+        )
+        restored = store.restore(row.advisory_id)
+
+        assert restored is not None
+        assert restored.metadata[RETIRED_BY_KEY] == RETIRED_BY_QUERY_FILTER
+        assert restored.retired_by is None
+        run_advisory_fitness_loop(self._log(row.advisory_id), store, days=30)
+        after = store.get(row.advisory_id)
+        assert after is not None
+        assert after.fitness_scored_at is not None

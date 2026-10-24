@@ -243,6 +243,17 @@ trellis analyze generate-advisories \
   --days 30 --min-sample 5 --min-effect 0.15 --format json
 ```
 
+QUERY advisories are keyed on words from the pack intent. Function words
+(a stop-list in `advisory_generator.py`) and any word in more than
+`--max-keyword-df` of the analysed packs (default `0.25`; `1.0` turns the
+rule off; skipped on a window too small for it to admit any word) are
+withheld, and active QUERY rows the generator would no longer write are
+**suppressed**, never deleted, with an `ADVISORY_SUPPRESSED` event naming the
+rule. Relaxing the rule (a higher `--max-keyword-df`) puts the row back on the
+next run; `AdvisoryStore.restore` also does, but the next run retires it again
+while the word is still excluded (there is no restore CLI). The JSON report
+counts each rule under `query_keywords_withheld` and `query_rows_retired`.
+
 REST equivalent:
 
 ```bash

@@ -500,6 +500,12 @@ class CurateCycleResult:
     advisories_refused: int = 0
     advisories_suppressed: int = 0
     advisories_boosted: int = 0
+    #: QUERY rows the generator suppressed this cycle because it no longer
+    #: emits their keyword (function word, over the document-frequency
+    #: ceiling, edge punctuation). Not in ``advisories_suppressed``, which is
+    #: the fitness loop's verdict on outcomes; per-rule counts are on
+    #: ``AdvisoryReport.query_rows_retired``.
+    advisory_query_rows_retired: int = 0
     learning_observations: int = 0
     learning_candidates: int = 0
     candidates_path: str | None = None
@@ -578,6 +584,7 @@ class CurateCycleResult:
             "advisories_refused": self.advisories_refused,
             "advisories_suppressed": self.advisories_suppressed,
             "advisories_boosted": self.advisories_boosted,
+            "advisory_query_rows_retired": self.advisory_query_rows_retired,
             "advisory_store_degraded": self.advisory_store_degraded,
             "advisory_store_stale": self.advisory_store_stale,
             "learning_observations": self.learning_observations,
@@ -694,6 +701,7 @@ def run_curation_cycle(
         advisories_refused=advisory["advisories_refused"],
         advisories_suppressed=advisory["advisories_suppressed"],
         advisories_boosted=advisory["advisories_boosted"],
+        advisory_query_rows_retired=advisory["advisory_query_rows_retired"],
         advisory_store_degraded=advisory["store_degradation"],
         advisory_store_stale=advisory["store_stale"],
         learning_observations=learning["learning_observations"],
@@ -967,11 +975,12 @@ def _curate_stage_advisories(
             "advisories_refused": 0,
             "advisories_suppressed": 0,
             "advisories_boosted": 0,
+            "advisory_query_rows_retired": 0,
             "store_degradation": degradation.to_dict() if degradation else None,
             "store_stale": None,
         }
 
-    generated = refused = suppressed = boosted = 0
+    generated = refused = suppressed = boosted = query_retired = 0
     stale: dict[str, Any] | None = None
     try:
         with wrap_cli_meta_analysis(
@@ -992,6 +1001,7 @@ def _curate_stage_advisories(
             ).generate(days=days)
             generated = gen.advisories_generated
             refused = gen.findings_refused_no_comparison_arm
+            query_retired = sum(gen.query_rows_retired.values())
             fitness = run_advisory_fitness_loop(event_log, advisory_store, days=days)
             suppressed = len(fitness.advisories_suppressed)
             boosted = len(fitness.advisories_boosted)
@@ -1044,6 +1054,7 @@ def _curate_stage_advisories(
         "advisories_refused": refused,
         "advisories_suppressed": suppressed,
         "advisories_boosted": boosted,
+        "advisory_query_rows_retired": query_retired,
         "store_degradation": None,
         "store_stale": stale,
     }
@@ -1154,7 +1165,8 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
         f"advisories generated: {result.advisories_generated}  "
         f"refused (no comparison arm): {result.advisories_refused}  "
         f"suppressed: {result.advisories_suppressed}  "
-        f"boosted: {result.advisories_boosted}"
+        f"boosted: {result.advisories_boosted}  "
+        f"query rows retired: {result.advisory_query_rows_retired}"
     )
     console.print(
         f"  learning observations: {result.learning_observations}  "

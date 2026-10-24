@@ -243,8 +243,14 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
         advisory_id: str,
         *,
         reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Advisory | None:
         """Soft-suppress an advisory: flip status, stamp metadata, persist.
+
+        ``metadata`` is merged into the row's own ``metadata`` in the same
+        write, for a caller that has to mark *who* suppressed it (the
+        generator's rule retirement, :attr:`Advisory.retired_by`). Ignored
+        on the idempotent branch, like ``reason``.
 
         Returns the updated advisory, or ``None`` if the id is unknown.
         Idempotent — suppressing an already-suppressed advisory is a
@@ -279,6 +285,7 @@ class AdvisoryStore(DegradableJsonStore[Advisory]):
                 "suppressed_at": datetime.now(UTC),
                 "suppression_reason": reason,
                 "updated_at": datetime.now(UTC),
+                **({"metadata": {**advisory.metadata, **metadata}} if metadata else {}),
             }
         )
         self._rows[advisory_id] = updated

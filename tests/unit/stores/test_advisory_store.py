@@ -181,6 +181,35 @@ class TestAdvisorySuppressionLifecycle:
         assert second.suppressed_at == first.suppressed_at
         assert second.suppression_reason == "r1"
 
+    def test_suppress_merges_metadata_in_the_same_write(self, tmp_path: Path) -> None:
+        """#960 — a retirement marker lands with the status, not after it."""
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory(metadata={"keyword": "widget"}))
+
+        updated = store.suppress(
+            adv.advisory_id, reason="r", metadata={"retired_by": "some.rule"}
+        )
+
+        assert updated is not None
+        assert updated.metadata == {"keyword": "widget", "retired_by": "some.rule"}
+        reread = AdvisoryStore(tmp_path / "a.json").get(adv.advisory_id)
+        assert reread is not None
+        assert reread.metadata == updated.metadata
+
+    def test_suppress_metadata_is_ignored_on_the_idempotent_branch(
+        self, tmp_path: Path
+    ) -> None:
+        store = AdvisoryStore(tmp_path / "a.json")
+        adv = store.put(_advisory())
+        store.suppress(adv.advisory_id, reason="r1")
+
+        again = store.suppress(
+            adv.advisory_id, reason="r2", metadata={"retired_by": "some.rule"}
+        )
+
+        assert again is not None
+        assert "retired_by" not in again.metadata
+
     def test_list_excludes_suppressed_by_default(self, tmp_path: Path) -> None:
         store = AdvisoryStore(tmp_path / "a.json")
         keep = store.put(_advisory(scope="keep"))
