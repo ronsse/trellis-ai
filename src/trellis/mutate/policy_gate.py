@@ -134,6 +134,26 @@ class DefaultPolicyGate:
 
         return True, "", warnings
 
+    def scopes_by_target_type(self, operation: str) -> bool:
+        """Whether a policy could answer differently for another target type.
+
+        A command that reaches entities beyond its own target (see
+        ``MutationExecutor._check_policy``) is put to the gate once per entity,
+        with its operation and metadata unchanged and only the target type
+        swapped. Of the four scope levels, only ``entity_type`` reads the
+        target type, so with no such policy holding a rule for ``operation``
+        every one of those extra checks would repeat the first answer and its
+        warnings. An empty gate returns ``False``: it stays transparent.
+        """
+        return any(
+            policy.scope.level == "entity_type"
+            and any(
+                rule.action != "allow" and self._rule_matches_operation(rule, operation)
+                for rule in policy.rules
+            )
+            for policy in self._policies
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
