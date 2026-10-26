@@ -11,6 +11,7 @@ from trellis.learning.scoring import (
     promotion_landed,
     promotion_verdict,
     settle_promotion,
+    unnamed_approved_count,
 )
 
 LANDED: dict[str, Any] = {
@@ -96,3 +97,44 @@ class TestVerdict:
         run = [LANDED, REFUSED, EDGE_REJECTED]
         settled = [settle_promotion(dict(o)) for o in run]
         assert promotion_verdict(run) == promotion_verdict(settled) == "failed"
+
+
+class TestUnnamedApprovedRows:
+    """An approved row naming no candidate has no outcome but refuses the run."""
+
+    def test_the_count_is_what_was_marked_less_what_was_named(self) -> None:
+        assert unnamed_approved_count({"approved_count": 4, "named_count": 1}) == 3
+        assert unnamed_approved_count({"approved_count": 2, "named_count": 2}) == 0
+
+    def test_a_count_below_zero_is_none_not_a_credit(self) -> None:
+        assert unnamed_approved_count({"approved_count": 0, "named_count": 1}) == 0
+
+    def test_a_blank_id_alone_is_refused_not_ok(self) -> None:
+        assert promotion_verdict([], unnamed_count=1) == "refused"
+
+    def test_none_unnamed_changes_nothing(self) -> None:
+        assert promotion_verdict([], unnamed_count=0) == "ok"
+        assert promotion_verdict([LANDED], unnamed_count=0) == "ok"
+
+    def test_a_blank_id_beside_landed_rows_refuses_the_run(self) -> None:
+        assert promotion_verdict([LANDED, LANDED], unnamed_count=1) == "refused"
+
+    @pytest.mark.parametrize("refusal", [REFUSED, MISSING, NON_PROMOTABLE])
+    def test_a_blank_id_beside_a_refusal_is_still_refused(
+        self, refusal: dict[str, Any]
+    ) -> None:
+        assert promotion_verdict([refusal], unnamed_count=2) == "refused"
+
+    @pytest.mark.parametrize(
+        "outcomes",
+        [
+            [ENTITY_FAILED],
+            [LANDED, EDGE_REJECTED],
+            [REFUSED, EVENT_FAILED],
+            [EVENT_FAILED, REFUSED],
+        ],
+    )
+    def test_failed_outranks_a_blank_id_refusal(
+        self, outcomes: list[dict[str, Any]]
+    ) -> None:
+        assert promotion_verdict(outcomes, unnamed_count=1) == "failed"

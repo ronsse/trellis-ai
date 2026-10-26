@@ -4,8 +4,9 @@ The per-candidate statuses were always right. The command-level ``status`` and
 the exit code ignored them, so a script reading either took a refused or
 half-written promotion as done. Both now come from one reading of the
 outcomes, shared with ``review-ready --approve``: ``0`` / ``ok`` when every
-approved row landed, ``2`` / ``refused`` when any was refused and none
-failed, ``5`` / ``failed`` when a write did not land, in either format.
+approved row landed, ``2`` / ``refused`` when any was refused (or an approved
+row names no ``candidate_id``) and none failed, ``5`` / ``failed`` when a write
+did not land, in either format.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from tests.cli_output import plain
 from trellis.learning.scoring import (
     precedent_entity_id_for_candidate,
     prepare_learning_promotions,
+    unnamed_approved_count,
 )
 from trellis_cli import curate as curate_cli
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
@@ -230,6 +232,35 @@ _SCENARIOS: dict[str, tuple[Any, ...]] = {
         "ok",
         1,
     ),
+    # An approved row naming no candidate is an error, not a skip: the run is
+    # refused. Rows that promoted still landed, so the count keeps them.
+    "only_a_blank_id": ([_OK], [("", True)], [], EXIT_VALIDATION, "refused", 0),
+    "blank_id_beside_landed": (
+        [_OK],
+        [("ok", True), ("   ", True)],
+        [],
+        EXIT_VALIDATION,
+        "refused",
+        1,
+    ),
+    # A write that did not land still outranks the blank-id refusal.
+    "blank_id_beside_failed": (
+        [_INCOMPLETE],
+        [("incomplete", True), ("", True)],
+        [],
+        EXIT_STORE,
+        "failed",
+        0,
+    ),
+    # An unapproved blank row is a row nobody asked for.
+    "unapproved_blank_id_beside_landed": (
+        [_OK],
+        [("ok", True), ("", False)],
+        [],
+        EXIT_OK,
+        "ok",
+        1,
+    ),
 }
 
 
@@ -363,9 +394,15 @@ class TestDryRunPreview:
             ("approved_id_names_no_candidate", EXIT_VALIDATION, "refused"),
             ("approved_candidate_not_promotable", EXIT_VALIDATION, "refused"),
             ("unapproved_row_beside_landed", EXIT_OK, "ok"),
+            ("only_a_blank_id", EXIT_VALIDATION, "refused"),
+            ("blank_id_beside_landed", EXIT_VALIDATION, "refused"),
+            ("unapproved_blank_id_beside_landed", EXIT_OK, "ok"),
             # A dangling edge target is rejected by the graph during the write,
             # so no read can foresee it: the preview stops at what it can see.
             ("half_landed_is_a_failure", EXIT_OK, "ok"),
+            # The same blind spot beside a blank id: the preview reads the
+            # refusal it can see, and the real run's failure outranks it.
+            ("blank_id_beside_failed", EXIT_VALIDATION, "refused"),
         ],
     )
     def test_the_preview_names_the_verdict_a_real_run_reaches(
@@ -392,7 +429,7 @@ class TestDryRunPreview:
                 f"Would-be verdict: {would_status} (a real run would exit "
                 f"{would_exit}; this dry run exits 0)" in out
             )
-        if scenario != "half_landed_is_a_failure":
+        if scenario not in {"half_landed_is_a_failure", "blank_id_beside_failed"}:
             # Where the preview can see everything, it equals the real run.
             assert (would_exit, would_status) == (real_exit, real_status)
 
@@ -453,12 +490,13 @@ _BLANK_ID_ROWS: list[tuple[str, bool]] = [
 
 
 class TestApprovedRowsWithoutAnId:
-    """``approved_count`` is what was marked; ``named_count`` is what could run.
+    """An approved row with a blank ``candidate_id`` refuses the run.
 
-    An approved row with a blank ``candidate_id`` never becomes a result, so
-    it is neither refused nor promoted. Counting it as submitted overstated
-    the run, and ``approved_count`` stays as it was for the readers that
-    parse it.
+    The planner still skips it and emits no result for it, so
+    ``approved_count`` is what was marked and ``named_count`` is what could
+    run, as before. What changed is the verdict: the row is a request that
+    named nothing, so it is ``refused`` (``EXIT_VALIDATION``) in both formats
+    rather than a silent skip that exits ``0``. Rows that promoted still landed.
     """
 
     @pytest.mark.parametrize("dry_run", [False, True])
@@ -491,6 +529,7 @@ class TestApprovedRowsWithoutAnId:
         )
         assert (plan["approved_count"], plan["named_count"]) == (3, 1)
         assert len(plan["results"]) == plan["named_count"]
+        assert unnamed_approved_count(plan) == 2
 
     @pytest.mark.parametrize("dry_run", [False, True])
     def test_text_says_how_many_approved_rows_were_skipped(
@@ -502,17 +541,80 @@ class TestApprovedRowsWithoutAnId:
         assert "2 approved row(s) name no candidate_id and were skipped." in out
 
     @pytest.mark.parametrize("fmt", ["json", "text"])
-    def test_only_blank_ids_is_still_a_no_op_that_says_what_it_skipped(
+    def test_only_blank_ids_is_refused_and_says_what_it_skipped(
         self, fmt: str, tmp_path: Path
     ) -> None:
+        before = _store_counts()
         code, data, out = _promote(tmp_path, [_OK], [("", True), ("  ", True)], fmt=fmt)
-        assert code == EXIT_OK, out
+        assert code == EXIT_VALIDATION, out
+        # Refusing wrote nothing: there was nothing to write.
+        assert _store_counts() == before
         if data is not None:
+            assert data["status"] == "refused"
             assert (data["approved_count"], data["named_count"]) == (2, 0)
+            assert data["promoted_count"] == 0
             assert data["results"] == []
         else:
             assert "2 approved row(s) name no candidate_id" in out
             assert "No approved promotions found" not in out
+            assert f"Verdict: refused (exit {EXIT_VALIDATION})" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_blank_id_beside_a_landed_row_refuses_the_run_but_keeps_the_write(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        code, data, out = _promote(tmp_path, [_OK], [("ok", True), ("", True)], fmt=fmt)
+        assert code == EXIT_VALIDATION, out
+        # The write landed and stays: refusing the run does not undo it.
+        registry = curate_cli._get_registry()
+        try:
+            node = registry.knowledge.graph_store.get_node(
+                precedent_entity_id_for_candidate("ok")
+            )
+        finally:
+            registry.close()
+        assert node is not None
+        if data is not None:
+            assert data["status"] == "refused"
+            assert data["promoted_count"] == 1
+            assert (data["approved_count"], data["named_count"]) == (2, 1)
+            assert [r["status"] for r in data["results"]] == ["promoted"]
+        else:
+            # Promoted against skipped, both on the page, beside the verdict.
+            assert "1/2 approved candidates promoted" in out
+            assert "1 approved row(s) name no candidate_id and were skipped." in out
+            assert f"Verdict: refused (exit {EXIT_VALIDATION})" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_failed_write_outranks_a_blank_id_refusal(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        code, data, out = _promote(
+            tmp_path, [_INCOMPLETE], [("incomplete", True), ("", True)], fmt=fmt
+        )
+        assert code == EXIT_STORE, out
+        if data is not None:
+            assert data["status"] == "failed"
+        else:
+            assert f"Verdict: failed (exit {EXIT_STORE})" in out
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_dry_run_of_only_blank_ids_exits_zero_and_previews_a_refusal(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        before = _store_counts()
+        code, data, out = _promote(tmp_path, [_OK], [("", True)], fmt=fmt, dry_run=True)
+        assert code == EXIT_OK, out
+        assert _store_counts() == before
+        if data is not None:
+            assert data["status"] == "ok"
+            assert (data["would_verdict"], data["would_exit_code"]) == (
+                "refused",
+                EXIT_VALIDATION,
+            )
+        else:
+            assert "Would-be verdict: refused" in out
+            assert not any(line.startswith("Verdict:") for line in out.splitlines())
 
     def test_a_run_with_no_blank_ids_prints_no_note(self, tmp_path: Path) -> None:
         _, _, out = _promote(tmp_path, [_OK], [("ok", True)], fmt="text")
@@ -624,6 +726,28 @@ class TestPromotionVerdict:
             for status in statuses
         ]
         assert curate_cli._promotion_verdict(outcomes) == expected
+
+    @pytest.mark.parametrize(
+        ("statuses", "unnamed", "expected"),
+        [
+            ([], 0, (EXIT_OK, "ok")),
+            ([], 1, (EXIT_VALIDATION, "refused")),
+            (["landed"], 2, (EXIT_VALIDATION, "refused")),
+            (["refused_demoted"], 1, (EXIT_VALIDATION, "refused")),
+            # A write that did not land outranks the blank-id refusal.
+            (["entity_failed"], 1, (EXIT_STORE, "failed")),
+            (["landed", "promoted_incomplete"], 3, (EXIT_STORE, "failed")),
+        ],
+    )
+    def test_blank_ids_refuse_unless_a_write_failed(
+        self, statuses: list[str], unnamed: int, expected: tuple[int, str]
+    ) -> None:
+        outcomes = [
+            self._landed() if status == "landed" else {"status": status}
+            for status in statuses
+        ]
+        got = curate_cli._promotion_verdict(outcomes, unnamed_count=unnamed)
+        assert got == expected
 
     def test_a_promoted_status_that_did_not_fully_land_is_a_failure(self) -> None:
         # Whatever the label says: the edge or the event did not land.
