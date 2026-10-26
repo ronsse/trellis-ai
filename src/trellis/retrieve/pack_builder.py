@@ -96,6 +96,7 @@ from trellis.retrieve.strategies import (
     EmbedderResolveFailure,
     GraphSearch,
     SearchStrategy,
+    resolve_graph_axis_state,
 )
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
@@ -1111,7 +1112,7 @@ class PackBuilder:
         # the recency window), for ``PACK_ASSEMBLED.seed_entity_ids``.
         graph_seed_ids: dict[str, None] = {}
         # Set when the graph axis ran and was withheld for want of a seed.
-        graph_axis_state: str | None = None
+        graph_axis_withheld: str | None = None
         # One cache for the whole build: shared across every strategy's
         # pass over the collect gates below, so a parent shared by chunks
         # from two axes (or by several chunks on one axis) costs one
@@ -1125,7 +1126,7 @@ class PackBuilder:
                     limit=limit_per_strategy,
                     filters=(dict(merged_filters) if merged_filters else None),
                 )
-                graph_axis_state = axis_state or graph_axis_state
+                graph_axis_withheld = axis_state or graph_axis_withheld
                 items, gate_rejected = self._apply_collect_gates(
                     strip_non_servable(found),
                     signal_quality_spec=signal_quality_spec,
@@ -1331,7 +1332,7 @@ class PackBuilder:
             items_selected=len(selected),
             duration_ms=round((time.perf_counter() - start_time) * 1000),
             strategies_used=strategies_used,
-            graph_axis=graph_axis_state,
+            graph_axis=graph_axis_withheld,
             rejected_items=rejected,
             budget_trace=budget_trace,
         )
@@ -1420,6 +1421,9 @@ class PackBuilder:
                 pack,
                 strategy_failures=strategy_failures,
                 seed_entity_ids=list(graph_seed_ids),
+                graph_axis_state=resolve_graph_axis_state(
+                    self.strategy_names, strategies_used, graph_axis_withheld
+                ),
                 index_mode=index_mode,
                 retrieval_phase=retrieval_phase,
                 refresh=refresh,
@@ -1510,7 +1514,7 @@ class PackBuilder:
             merged_filters[GRAPH_CALLER_SEED_IDS_KEY] = caller_entity_ids
 
         class_prior_config = self._effective_class_prior_config()
-        graph_axis_state: str | None = None
+        graph_axis_withheld: str | None = None
         # One cache for the whole build — see the matching note in
         # :meth:`build`.
         parent_verdict_cache = ParentVerdictCache(self._document_store)
@@ -1522,7 +1526,7 @@ class PackBuilder:
                     limit=limit_per_strategy,
                     filters=(dict(merged_filters) if merged_filters else None),
                 )
-                graph_axis_state = axis_state or graph_axis_state
+                graph_axis_withheld = axis_state or graph_axis_withheld
                 items, gate_rejected = self._apply_collect_gates(
                     strip_non_servable(found),
                     signal_quality_spec=signal_quality_spec,
@@ -1745,7 +1749,7 @@ class PackBuilder:
                 items_selected=len(annotated),
                 duration_ms=section_duration_ms,
                 strategies_used=strategies_used,
-                graph_axis=graph_axis_state,
+                graph_axis=graph_axis_withheld,
                 rejected_items=[
                     floor_rejections[item.item_id]
                     for item in floor_dropped
@@ -1834,6 +1838,9 @@ class PackBuilder:
             self._emit_sectioned_telemetry(
                 sectioned_pack,
                 strategy_failures=strategy_failures,
+                graph_axis_state=resolve_graph_axis_state(
+                    self.strategy_names, strategies_used, graph_axis_withheld
+                ),
                 retrieval_phase=retrieval_phase,
                 refresh=refresh,
                 withheld_from=withheld_from,
@@ -1959,6 +1966,7 @@ class PackBuilder:
         pack: SectionedPack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        graph_axis_state: str,
         meta_filtered_count: int = 0,
         semantic_dedup_rejected_count: int = 0,
         content_floor: dict[str, Any] | None = None,
@@ -1979,6 +1987,12 @@ class PackBuilder:
         holdout branch unchanged (the same posture ``index_mode`` takes on
         the flat path) — see ``retrieval_phase`` / ``refresh`` in
         :meth:`_emit_telemetry` for the full rationale.
+
+        ``graph_axis_state`` (#961) mirrors the flat path's key of the same
+        name and rides the same way: ``"ran"``, ``"failed"`` or
+        ``"unseeded_fallback_off"``, one value for the whole pack because all
+        sections share one build. It reads from the build, not from a section's
+        report, so it is present even when the request named no section.
 
         ``holdout`` / ``holdout_rate`` and, on a withheld pack's row,
         ``holdout_sections`` / ``holdout_advisory_ids`` follow the flat
@@ -2056,6 +2070,7 @@ class PackBuilder:
                 "intent_family": pack.intent_family,
                 "project": self._project,
                 "section_count": len(pack.sections),
+                "graph_axis_state": graph_axis_state,
                 "total_items": pack.total_items,
                 # All sections share one build, so one timing: see
                 # ``_emit_telemetry``'s ``duration_ms`` note for what it
@@ -2191,6 +2206,7 @@ class PackBuilder:
         *,
         strategy_failures: list[StrategyFailure] | None = None,
         seed_entity_ids: list[str] | None = None,
+        graph_axis_state: str,
         meta_filtered_count: int = 0,
         content_floor: dict[str, Any] | None = None,
         disclosure: dict[str, Any] | None = None,
@@ -2319,6 +2335,16 @@ class PackBuilder:
         the visible record that the parent-scoped archived/noise check
         could not run for at least one parent.
 
+        ``graph_axis_state`` (#961) is ``"ran"``, ``"failed"`` or
+        ``"unseeded_fallback_off"``: the same value the response's
+        ``axes["graph"]`` carries, from the same
+        :func:`~trellis.retrieve.strategies.resolve_graph_axis_state`, because
+        an empty ``injected_items`` cannot tell a graph axis withheld for want
+        of a seed from one that found nothing. A required kwarg, outside the
+        swappable ``telemetry`` dict like ``retrieval_phase``, so a withheld
+        (holdout) row carries it unchanged: the state describes the build,
+        not the pack the caller received. Additive; readers ``.get`` it.
+
         ``seed_entity_ids`` is the graph axis's resolved seed set for this
         build, read off the graph items that passed the collect gates and
         recorded whether or not one of them survived the budget into the
@@ -2383,6 +2409,7 @@ class PackBuilder:
                 },
                 "injected_items": self._injected_item_rows(pack.items),
                 "seed_entity_ids": list(seed_entity_ids or []),
+                "graph_axis_state": graph_axis_state,
                 "strategies_used": report.strategies_used,
                 "candidates_found": report.candidates_found,
                 "duration_ms": report.duration_ms,

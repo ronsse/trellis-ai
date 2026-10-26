@@ -41,10 +41,9 @@ from trellis.retrieve.pack_builder import (
 )
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import (
-    GRAPH_AXIS_UNSEEDED_FALLBACK_OFF,
-    GRAPH_STRATEGY_NAME,
     NamespaceSeedExtractor,
     build_strategies,
+    resolve_graph_axis_state,
 )
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.settings_store import load_settings_values
@@ -310,10 +309,11 @@ def _graph_seeding_enabled(settings: dict[str, Any] | None = None) -> bool:
     ``settings`` is the already-loaded ``name -> value`` mapping (e.g. from
     :func:`trellis.stores.settings_store.load_settings_values`); ``None``
     (the default, for any caller with no settings access) keeps the
-    env-only behaviour this had before settings existed. Unset/unrecognised
-    in the environment falls through to :data:`GRAPH_SEEDING_SETTING`;
-    unset or non-bool there means on — the same default either knob
-    shipped with.
+    env-only behaviour this had before settings existed. An *unset* env var
+    falls through to :data:`GRAPH_SEEDING_SETTING`; unset or non-bool there
+    means on — the same default either knob shipped with. An *unrecognised*
+    value does not fall through: it warns and reads as on, whatever the
+    stored setting says.
 
     Read per build rather than at import, so a long-lived process picks up
     an operator's change between runs — the same posture
@@ -341,7 +341,10 @@ def _graph_recency_fallback_enabled(settings: Mapping[str, Any] | None = None) -
     Mirrors :func:`_graph_seeding_enabled` with the opposite default: unset
     is **off**, and a value in neither spelling set warns and also reads as
     off, since an opt-in that a typo silently enables would defeat the
-    default. A non-bool stored value is ignored, like there.
+    default. A non-bool stored value is ignored, like there. An unrecognised
+    env value does not fall through to settings either: a stored ``true`` is
+    ignored and it reads off, so the typo cannot be read as an opt-in from
+    either side.
     """
     raw = os.environ.get(GRAPH_RECENCY_FALLBACK_ENV, "").strip().lower()
     if not raw:
@@ -429,11 +432,7 @@ def describe_axes(
     embedder_error_type: str | None = None
     embedder_setting: str | None = None
     semantic_state = "ran"
-    graph_state = "ran"
-    if GRAPH_STRATEGY_NAME in failed:
-        graph_state = "failed"
-    elif graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
-        graph_state = graph_axis
+    graph_state = resolve_graph_axis_state(available, ran, graph_axis)
     if SEMANTIC_AXIS not in available:
         if embedder_resolve_failure is not None:
             semantic_state = "embedder_failed"

@@ -235,6 +235,36 @@ GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
 #: graph.
 GRAPH_AXIS_UNSEEDED_FALLBACK_OFF = "unseeded_fallback_off"
 
+#: The other two states of the graph axis, beside
+#: :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`: it ran, or it raised during this
+#: build. Together the three are the vocabulary of ``axes["graph"]`` and of
+#: ``PACK_ASSEMBLED.graph_axis_state``; :func:`resolve_graph_axis_state` is the one
+#: place that chooses between them.
+GRAPH_AXIS_RAN = "ran"
+GRAPH_AXIS_FAILED = "failed"
+
+
+def resolve_graph_axis_state(
+    available: Collection[str],
+    ran: Collection[str],
+    graph_axis: str | None,
+) -> str:
+    """The graph axis's state for one build: ran, failed or withheld.
+
+    ``available`` names the axes the builder has, ``ran`` the ones that ran
+    this build, ``graph_axis`` is ``RetrievalReport.graph_axis``. The pack's
+    ``axes["graph"]`` and the ``PACK_ASSEMBLED.graph_axis_state`` key both come
+    from here, so the response and the event cannot disagree about a pack.
+    A builder with no graph axis at all reads ``ran``, as ``axes`` always has:
+    the absence of an axis is not a failure of it.
+    """
+    if GRAPH_STRATEGY_NAME in set(available) - set(ran):
+        return GRAPH_AXIS_FAILED
+    if graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
+        return GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+    return GRAPH_AXIS_RAN
+
+
 #: Filter key carrying the entity ids the caller named, as seeds for the
 #: graph axis. ``PackBuilder.build_sectioned`` fills it from the union of
 #: its sections' ``entity_ids``; it is a control addressed to the graph axis
@@ -692,7 +722,8 @@ class NamespaceSeedExtractor:
     (51/85 at every n), while tripling the candidate count.
 
     Never raises, per :class:`GraphSeedExtractor`: a store failure
-    returns ``[]`` and the axis falls back to its recency window.
+    returns ``[]`` and the search is left unseeded, which serves the axis's
+    recency window only when that is opted in (#961) and nothing otherwise.
     """
 
     def __init__(
@@ -724,8 +755,9 @@ class NamespaceSeedExtractor:
         """Return live node ids the intent names, best first.
 
         ``[]`` means "this intent anchors on no entity I can name" and is
-        a valid answer — :class:`GraphSearch` reads it as *run the recency
-        window*, never as *serve nothing*.
+        a valid answer — :class:`GraphSearch` reads it as *unseeded*, which
+        serves the recency window only when that is opted in (#961) and
+        nothing otherwise. It is never an error.
         """
         keys = self._keys(intent)
         if not keys:
@@ -822,8 +854,9 @@ class NamespaceSeedExtractor:
         try:
             subgraph = self._store.get_subgraph(candidates, depth=0)
         # GRACEFUL-DEGRADATION: seeding is additive. A confirm failure
-        # yields no seeds and the axis serves its recency window, which is
-        # exactly what it served before this extractor existed.
+        # yields no seeds and the search is unseeded: exactly what it was
+        # before this extractor existed (the recency window if opted in,
+        # #961, otherwise nothing).
         except Exception:
             logger.warning("namespace_seed_confirm_failed", exc_info=True)
             return {}
@@ -1894,8 +1927,9 @@ class GraphSearch(SearchStrategy):
         """Ask the injected extractor for seeds; never let it break a pack.
 
         Returns ``[]`` when no extractor is configured, when the extractor
-        declines, or when it raises. The caller reads an empty list as "run
-        the recency window" — the seeding path is additive by contract.
+        declines, or when it raises. The caller reads an empty list as
+        "unseeded" — the recency window if ``recency_fallback`` is on, nothing
+        otherwise (#961) — and the seeding path is additive by contract.
         """
         if self._seed_extractor is None:
             return []
@@ -2525,7 +2559,8 @@ def build_strategies(
       **0 seeds on 37/37 intents** and changed the returned item set on
       **0/37**. The extractor filters vector hits to entity-summary
       documents and the corpus holds none, so it costs one embed per pack
-      and returns the recency window regardless. Wiring it by default
+      and left the axis on its recency window regardless (the window was
+      the unseeded default then; since #961 it is opt-in). Wiring it by default
       would have shipped a change that reports success and does nothing —
       exactly the failure shape `docs/design/swarm-handoff.md` §8 is about.
     * Auto-wiring on ``embedding_fn`` would also couple the graph axis to

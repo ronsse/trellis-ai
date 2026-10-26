@@ -20,11 +20,16 @@ What each class pins:
   precedence between them.
 * ``TestSeededPathsUnchanged``: seeding is not touched by the knob.
 * ``TestAxesBlock``: the reason is reported, not absorbed.
+* ``TestPackAssembledRecordsTheAxis``: the event carries the same state as the
+  response's ``axes["graph"]``, on flat, sectioned and held-out packs, so a
+  withheld axis is measurable from the event stream and not only by the
+  absence of graph items.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 from structlog.testing import capture_logs
@@ -44,8 +49,10 @@ from trellis.retrieve.strategies import (
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
     GraphSearch,
+    SearchStrategy,
 )
-from trellis.schemas.pack import SectionRequest
+from trellis.schemas.pack import PackItem, SectionRequest
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore
 
@@ -273,6 +280,38 @@ class TestOptIn:
             assert _graph_recency_fallback_enabled() is False
         assert [e["event"] for e in logs] == ["graph_recency_fallback_env_unrecognised"]
 
+    def test_a_typo_does_not_fall_through_to_a_stored_opt_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised env value reads off even with ``true`` stored.
+
+        It does not fall through to settings: only an *unset* variable does.
+        Pinned as the behaviour, not argued for: either way the typo is never
+        read as an opt-in on its own.
+        """
+        monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "enabled")
+        with capture_logs() as logs:
+            assert (
+                _graph_recency_fallback_enabled({"graph_recency_fallback": True})
+                is False
+            )
+        assert [e["event"] for e in logs] == ["graph_recency_fallback_env_unrecognised"]
+
+    def test_a_typo_beats_a_stored_opt_in_in_a_built_pack(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_payroll(registry)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "graph_recency_fallback", True
+        )
+        monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "enabled")
+
+        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+
+        assert _graph_items(pack.items) == []
+        assert pack.retrieval_report.graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+
     def test_a_non_bool_setting_is_ignored(self) -> None:
         assert _graph_recency_fallback_enabled({"graph_recency_fallback": "yes"}) is (
             False
@@ -358,3 +397,183 @@ class TestAxesBlock:
         axes = self._axes(registry, GRAPH_AXIS_UNSEEDED_FALLBACK_OFF, ["keyword"])
         assert axes["graph"] == "failed"
         assert axes["failed"] == ["graph"]
+
+
+HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
+
+
+def _assembled(registry: StoreRegistry, pack_id: str) -> dict[str, Any]:
+    """The one ``PACK_ASSEMBLED`` payload the build emitted for ``pack_id``."""
+    events = registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=10
+    )
+    assert len(events) == 1
+    return dict(events[0].payload)
+
+
+def _axes_graph(builder: PackBuilder, report: Any) -> str:
+    """``axes["graph"]`` as the response of any surface would carry it."""
+    return describe_axes(
+        builder,
+        report.strategies_used,
+        embedder_configured=False,
+        graph_axis=report.graph_axis,
+    )["graph"]
+
+
+class TestPackAssembledRecordsTheAxis:
+    """``PACK_ASSEMBLED.graph_axis_state`` is ``axes["graph"]``, on every shape.
+
+    Without it the event cannot tell a withheld graph axis from a graph with
+    nothing in it, so what the withholding costs could be read back only by the
+    absence of graph items.
+    """
+
+    def test_flat_unseeded_records_the_withheld_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        _seed_payroll(registry)
+        builder = build_pack_builder(registry, surface="test")
+
+        pack = builder.build(BLIND_INTENT)
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["graph_axis_state"] == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+        assert row["graph_axis_state"] == _axes_graph(builder, pack.retrieval_report)
+        # Withheld is not failed: the axis ran, and no failure was recorded.
+        assert "graph" in row["strategies_used"]
+        assert row["strategy_failures"] == []
+
+    def test_flat_seeded_records_ran(self, registry: StoreRegistry) -> None:
+        _seed_payroll(registry)
+        builder = build_pack_builder(registry, surface="test")
+
+        pack = builder.build(NAMED_INTENT)
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["graph_axis_state"] == "ran"
+        assert row["graph_axis_state"] == _axes_graph(builder, pack.retrieval_report)
+
+    def test_flat_opt_in_window_records_ran(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_payroll(registry)
+        monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "1")
+
+        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+
+        assert _assembled(registry, pack.pack_id)["graph_axis_state"] == "ran"
+
+    def test_sectioned_unseeded_records_the_withheld_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        _seed_payroll(registry)
+        builder = build_pack_builder(registry, surface="test")
+
+        pack = builder.build_sectioned(
+            BLIND_INTENT, sections=[SectionRequest(name="a"), SectionRequest(name="b")]
+        )
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["graph_axis_state"] == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+        assert row["graph_axis_state"] == _axes_graph(
+            builder, pack.sections[0].retrieval_report
+        )
+
+    def test_sectioned_caller_seeded_records_ran(self, registry: StoreRegistry) -> None:
+        _seed_payroll(registry)
+
+        pack = build_pack_builder(registry, surface="test").build_sectioned(
+            BLIND_INTENT,
+            sections=[SectionRequest(name="a", entity_ids=["domain:payroll"])],
+        )
+
+        assert _assembled(registry, pack.pack_id)["graph_axis_state"] == "ran"
+
+    def test_sectioned_with_no_section_still_records_the_state(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The state reads from the build, not from a section's report."""
+        _seed_payroll(registry)
+
+        pack = build_pack_builder(registry, surface="test").build_sectioned(
+            BLIND_INTENT, sections=[]
+        )
+
+        assert pack.sections == []
+        assert (
+            _assembled(registry, pack.pack_id)["graph_axis_state"]
+            == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+        )
+
+    def test_a_held_out_flat_row_carries_the_same_state(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_payroll(registry)
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
+
+        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["holdout"] is True
+        assert row["graph_axis_state"] == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+
+    def test_a_held_out_sectioned_row_carries_the_same_state(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_payroll(registry)
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
+
+        pack = build_pack_builder(registry, surface="test").build_sectioned(
+            BLIND_INTENT, sections=[SectionRequest(name="a")]
+        )
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["holdout"] is True
+        assert row["graph_axis_state"] == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+
+    def test_a_held_out_seeded_row_reads_ran_not_withheld(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A held-out pack's emptiness is the holdout's, not the axis's."""
+        _seed_payroll(registry)
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
+
+        pack = build_pack_builder(registry, surface="test").build(NAMED_INTENT)
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["holdout"] is True
+        assert row["injected_item_ids"] == []
+        assert row["graph_axis_state"] == "ran"
+
+    @pytest.mark.parametrize("sectioned", [False, True])
+    def test_a_graph_axis_that_raised_records_failed(
+        self, registry: StoreRegistry, sectioned: bool
+    ) -> None:
+        keyword = MagicMock(spec=SearchStrategy)
+        keyword.name = "keyword"
+        keyword.search.return_value = [
+            PackItem(
+                item_id="doc-1",
+                item_type="document",
+                excerpt="payroll notes",
+                relevance_score=0.5,
+            )
+        ]
+        graph = MagicMock(spec=SearchStrategy)
+        graph.name = "graph"
+        graph.search.side_effect = RuntimeError("graph backend down")
+        builder = PackBuilder(
+            strategies=[keyword, graph], event_log=registry.operational.event_log
+        )
+
+        if sectioned:
+            pack = builder.build_sectioned(
+                BLIND_INTENT, sections=[SectionRequest(name="a")]
+            )
+        else:
+            pack = builder.build(BLIND_INTENT)
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["graph_axis_state"] == "failed"
+        assert [f["strategy"] for f in row["strategy_failures"]] == ["graph"]

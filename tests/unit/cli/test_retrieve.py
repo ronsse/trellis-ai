@@ -277,6 +277,55 @@ class TestRetrievePack:
         assert text.exit_code == 0
         assert "Semantic axis unavailable" in _plain(text.stdout)
 
+    def test_pack_says_the_graph_axis_was_withheld_when_nothing_is_seeded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unseeded graph axis is off by default (#961), and the JSON says so.
+
+        The intent names no entity, so no seed resolves and the recency window
+        is the only thing that could have served graph items. Off, the axis
+        ran, served nothing and is not failed: ``axes.graph`` is the one place
+        that tells it from a graph with nothing in it. The event the command
+        wrote says the same, as ``graph_axis_state``, so what this prints and
+        what the event stream records cannot disagree.
+        """
+        from trellis_cli.stores import get_event_log
+
+        monkeypatch.delenv("TRELLIS_GRAPH_RECENCY_FALLBACK")
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["axes"]["graph"] == "unseeded_fallback_off"
+        assert "graph" in data["axes"]["ran"]
+        assert data["axes"]["failed"] == []
+        assert data["retrieval_report"]["graph_axis"] == "unseeded_fallback_off"
+        assert {i["item_type"] for i in data["items"]} == {"document"}
+
+        (event,) = get_event_log().get_events(
+            event_type=EventType.PACK_ASSEMBLED, entity_id=data["pack_id"]
+        )
+        assert event.payload["graph_axis_state"] == "unseeded_fallback_off"
+
+    def test_pack_reports_the_graph_axis_as_ran_when_the_window_is_on(self) -> None:
+        """The other arm: opted in, the same intent serves the window.
+
+        Without it ``axes.graph`` could be the constant ``unseeded_fallback_off``
+        and the test above would still pass.
+        """
+        from trellis_cli.stores import get_event_log
+
+        self._seed_two_axes()
+        data = self._json("retrieve", "pack", "--intent", "canary rollout")
+
+        assert data["axes"]["graph"] == "ran"
+        assert data["retrieval_report"]["graph_axis"] is None
+        assert "entity" in {i["item_type"] for i in data["items"]}
+
+        (event,) = get_event_log().get_events(
+            event_type=EventType.PACK_ASSEMBLED, entity_id=data["pack_id"]
+        )
+        assert event.payload["graph_axis_state"] == "ran"
+
     def test_pack_runs_the_semantic_axis_when_an_embedder_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
