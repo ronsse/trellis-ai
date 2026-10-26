@@ -330,6 +330,13 @@ async def _knowledge_run(reg: StoreRegistry, *, declare: bool) -> KnowledgeRun:
     )
 
 
+@pytest.fixture(autouse=True)
+def _graph_recency_fallback_opted_in(monkeypatch):
+    """The knowledge-save controls ride the unseeded recency window, opt-in
+    since #961."""
+    monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", "1")
+
+
 async def test_control_save_knowledge_serves_both_versions(temp_registry):
     reg = temp_registry
     run = await _knowledge_run(reg, declare=False)

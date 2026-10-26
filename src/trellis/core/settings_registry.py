@@ -27,7 +27,9 @@ Scope, stated once rather than per entry
 -----------------------------------------
 Registered: the 12 :class:`~trellis.core.write_config.WriteBehaviourConfig`
 fields; ``graph_seeding``
-(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
+(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`),
+``graph_recency_fallback``
+(:data:`trellis.retrieve.builder_factory.GRAPH_RECENCY_FALLBACK_ENV`) and
 ``filter_legacy_advisories``
 (:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
 catalog entries outside ``WriteBehaviourConfig``; ``class_prior_mode``
@@ -582,12 +584,11 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="bool",
         default=True,
         description=(
-            "Seeds the graph retrieval axis from a pack's intent, "
-            "rather than falling back to a plain recency window that "
-            "ignores what the request is about. On by default. "
-            "Turning this off makes graph results an intent-blind "
-            "recency window, which generally returns less relevant "
-            "graph context. Governs only seeds inferred from the "
+            "Seeds the graph retrieval axis from a pack's intent. "
+            "On by default. Turning this off leaves the axis unseeded "
+            "unless the caller names entities, and an unseeded axis "
+            "serves nothing unless graph_recency_fallback is on. "
+            "Governs only seeds inferred from the "
             "intent: entity ids a caller names explicitly still seed "
             "the graph axis when this is off."
         ),
@@ -601,6 +602,34 @@ _SPECS: tuple[SettingSpec, ...] = (
         group="retrieval",
         settings_live=True,
         env_var="TRELLIS_GRAPH_SEEDING",
+    ),
+    SettingSpec(
+        name="graph_recency_fallback",
+        label="Graph recency fallback",
+        type="bool",
+        default=False,
+        description=(
+            "When nothing seeds the graph retrieval axis, neither the "
+            "intent nor an entity id the caller named, serve the most "
+            "recently created graph nodes regardless of what was asked. "
+            "Off by default: an unseeded axis serves nothing, and the "
+            "pack's axes block reports graph as unseeded_fallback_off. "
+            "Measured on the live store over 30 days, this fallback was "
+            "846 of 890 graph-axis servings and drew 0.025 helpful "
+            "against 0.264 unhelpful citations per serving, where "
+            "non-graph items drew 0.083 against 0.160. Turning it on "
+            "restores the old behaviour; seeded searches are the same "
+            "either way."
+        ),
+        # Kept out of write_config.py/WriteBehaviourConfig for the same
+        # reason as graph_seeding: it governs what retrieval serves,
+        # not how a write behaves.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="low",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_GRAPH_RECENCY_FALLBACK",
     ),
     SettingSpec(
         name="filter_legacy_advisories",

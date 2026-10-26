@@ -139,6 +139,7 @@ def pack(
         pack_result.retrieval_report.strategies_used,
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
+        graph_axis=pack_result.retrieval_report.graph_axis,
     )
     # SEMANTIC_AXIS_NOTES has no "embedder_failed" entry: that state's
     # note is dynamic (names the actual error type and setting), unlike

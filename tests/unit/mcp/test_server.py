@@ -2556,6 +2556,11 @@ class TestOneRetrievalPath:
     PackBuilder — pack_id in output, rich PACK_ASSEMBLED, no fixed 0.5/0.3
     heuristic scores, aliases delegating to the shared path (#262)."""
 
+    @pytest.fixture(autouse=True)
+    def _graph_recency_fallback_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """These tests rely on the unseeded recency window, opt-in since #961."""
+        monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", "1")
+
     def test_hand_rolled_axis_merging_is_gone(self) -> None:
         """The hand-rolled flat-path helpers were deleted, not left dormant.
 
@@ -3092,6 +3097,11 @@ class TestStructuredErrorContract:
     * ``MUTATION_FAILED`` — governed mutation returned non-success.
     * ``INTERNAL_ERROR`` — unexpected sub-system failure with cause chain.
     """
+
+    @pytest.fixture(autouse=True)
+    def _graph_recency_fallback_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """These tests rely on the unseeded recency window, opt-in since #961."""
+        monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", "1")
 
     def test_get_context_single_axis_outage_degrades_gracefully(
         self,

@@ -2111,9 +2111,13 @@ flag), so this is additive, not a breaking change to `describe()`'s shape.
 **`settings_live` tells you whether an override does anything yet.** The
 registry catalogs every tunable `write_config.py` knows about plus
 retrieval-side knobs resolved outside it (`graph_seeding`,
-`filter_legacy_advisories`, `class_prior_mode`); `graph_seeding` gates only
+`graph_recency_fallback`, `filter_legacy_advisories`, `class_prior_mode`);
+`graph_seeding` gates only
 seeds *inferred* from the intent, never a sectioned pack's `entity_ids` or an
-explicit `seed_ids`, which are instructions; it
+explicit `seed_ids`, which are instructions; `graph_recency_fallback`
+(`TRELLIS_GRAPH_RECENCY_FALLBACK`, default **off**, #961) is the opposite
+default and gates only the graph axis's *unseeded* branch — see "The graph
+axis's unseeded window" below; it
 is not a claim that each one has a settings-aware enforcement site, only
 that this one does. Every registered knob now resolves env > settings >
 default at its real enforcement site — each per-knob reader
@@ -2121,7 +2125,7 @@ default at its real enforcement site — each per-knob reader
 `extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
 `mcp/reconcile.py`, `mcp/server.py`) delegates to
 `write_config.resolve_write_behaviour()`, `graph_seeding` /
-`filter_legacy_advisories` each carry their own settings-aware read in
+`graph_recency_fallback` / `filter_legacy_advisories` each carry their own settings-aware read in
 `builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
 resolves the same way through
 `trellis.retrieve.class_prior.resolve_class_prior_config`, wired in by
@@ -2673,6 +2677,16 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 
 Text output prints a sentence for every state but `ran`.
 
+**The graph axis's unseeded window is off by default** (#961). When nothing seeds the graph axis, neither an entity the intent names nor a section's `entity_ids`, it used to serve the newest ~80 nodes whatever the intent was (`metadata["graph_selection"] == "recency_window"`). It now serves nothing unless `TRELLIS_GRAPH_RECENCY_FALLBACK` is truthy (`1`/`true`/`yes`/`on`) or the `graph_recency_fallback` setting is `true`; env > settings > default off, and an unrecognised env value warns and reads as off. Seeded and caller-seeded searches are unchanged. The reason is in the pack's `axes` block, on every surface that returns one (`POST /api/v1/packs`, `/packs/sectioned`, `trellis retrieve pack --format json`, MCP `axes`):
+
+| `axes.graph` | Meaning |
+|---|---|
+| `ran` | The axis ran (it may still have found nothing) |
+| `unseeded_fallback_off` | The axis ran and served nothing because no seed resolved and the recency window is off. It is also in `axes.ran`: it did not fail |
+| `failed` | The axis raised during this build |
+
+There is no markdown note for `unseeded_fallback_off`: it follows from what the intent named, not from a deployment fault, and a line on every such pack would be one that always prints. A held-out pack carries the same value, so it stays indistinguishable from a served one. Historical `PACK_ASSEMBLED` events keep their `graph_selection` stamps, so `trellis analyze replay --graph-selection recency_window` and `analyze value`'s `by_graph_selection` still read them; the event does not record the withheld state, so a withheld pack shows only by the absence of graph items.
+
 **Example:**
 
 ```bash
@@ -2707,13 +2721,13 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
   "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
   "budget": {"max_items": 10, "max_tokens": 8000},
   "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5, "class_prior_detail": []},
-  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "embedder_error_type": null, "embedder_setting": null}
+  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "graph": "ran", "embedder_error_type": null, "embedder_setting": null}
 }
 ```
 
 `withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget. `class_prior_detail` breaks the `class_prior` row in `by_reason` (when present) down by document form and retrieval axis — `[{"form": "conversation", "axis": "keyword", "count": 2}]` — and is always present (empty list when the gate withheld nothing, or on a pack it never ran against); the rendered note (`format_withholding_note`) uses it to name the form and axis instead of printing the bare reason code.
 
-**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
+**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, graph, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
 
 **MCP renders a markdown line, not a JSON block.** `get_context`, `search`, and — since #789 — `get_context(sections=...)`, `get_objective_context`, `get_task_context` and `get_sectioned_context` all add one line naming any axis in `axes.failed`, to both a populated and an empty reply:
 

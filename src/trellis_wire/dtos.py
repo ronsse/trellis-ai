@@ -174,6 +174,12 @@ class AxisReportResponse(WireModel):
     ran: list[str]
     failed: list[str]
     semantic: str
+    #: ``"ran"``, ``"failed"``, or ``"unseeded_fallback_off"``: the graph axis
+    #: ran and served nothing because no seed resolved and the server's
+    #: ``TRELLIS_GRAPH_RECENCY_FALLBACK`` is off. Defaults to ``"ran"`` so a
+    #: client parsing an older server's block, which has no such state, reads
+    #: what that server did.
+    graph: str = "ran"
     embedder_error_type: str | None = None
     embedder_setting: str | None = None
 

@@ -85,6 +85,11 @@ class TestRetrievePack:
     value from a hard-coded one.
     """
 
+    @pytest.fixture(autouse=True)
+    def _graph_recency_fallback_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """These tests rely on the unseeded recency window, opt-in since #961."""
+        monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", "1")
+
     @staticmethod
     def _seed_two_axes() -> tuple[list[str], list[str]]:
         """Seed documents *and* graph entities matching one intent.

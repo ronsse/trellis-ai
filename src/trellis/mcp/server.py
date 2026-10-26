@@ -1226,6 +1226,7 @@ def _flat_context(
         pack.retrieval_report.strategies_used,
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
+        graph_axis=pack.retrieval_report.graph_axis,
     )
     axis_note = _axis_note(axes)
 
@@ -1392,6 +1393,7 @@ def _sectioned_context(
                 sectioned_pack.sections[0].retrieval_report.strategies_used,
                 embedder_configured=builder.embedder_configured,
                 embedder_resolve_failure=builder.embedder_resolve_failure,
+                graph_axis=sectioned_pack.sections[0].retrieval_report.graph_axis,
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(

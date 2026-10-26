@@ -27,6 +27,7 @@ from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.builder_factory import (
     BODY_ITEMS_ENV,
     EXCERPT_MAX_CHARS_ENV,
+    GRAPH_RECENCY_FALLBACK_ENV,
     GRAPH_SEEDING_ENV,
     SEMANTIC_AXIS_NOTES,
     build_pack_builder,
@@ -107,6 +108,7 @@ class TestDescribeAxes:
             "ran": ["keyword", "graph", "semantic"],
             "failed": [],
             "semantic": "ran",
+            "graph": "ran",
             "embedder_error_type": None,
             "embedder_setting": None,
         }
@@ -470,10 +472,13 @@ class TestGraphSeedingWiring:
             GRAPH_SELECTION_SEEDED
         }
 
-    def test_an_intent_naming_nothing_still_gets_the_recency_window(
-        self, tmp_path: Path
+    def test_an_intent_naming_nothing_gets_the_recency_window_when_opted_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Seeding is additive: a miss costs the caller nothing it had."""
+        """With ``TRELLIS_GRAPH_RECENCY_FALLBACK`` on, a miss costs the caller
+        nothing it had (#375); off is the default since #961 and is pinned in
+        ``test_graph_recency_fallback.py``."""
+        monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "1")
         registry = self._registry(tmp_path)
         registry.knowledge.graph_store.upsert_node(
             "act:1", "activity", {"name": "some unrelated activity", "desc": "y" * 60}

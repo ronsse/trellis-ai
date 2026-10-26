@@ -94,6 +94,7 @@ from trellis.retrieve.strategies import (
     GRAPH_STRATEGY_NAME,
     RECENCY_CLOCK_METADATA_KEY,
     EmbedderResolveFailure,
+    GraphSearch,
     SearchStrategy,
 )
 from trellis.retrieve.tier_mapping import TierMapper
@@ -465,6 +466,27 @@ def _strip_graph_seeds(items: Iterable[PackItem]) -> list[PackItem]:
     return out
 
 
+def _search_strategy(
+    strategy: SearchStrategy,
+    intent: str,
+    *,
+    limit: int,
+    filters: dict[str, Any] | None,
+) -> tuple[list[PackItem], str | None]:
+    """One strategy's candidates and, for the graph axis, its withheld state.
+
+    The graph axis alone can answer "nothing, and here is why" (see
+    :class:`~trellis.retrieve.strategies.GraphAnswer`); every other strategy,
+    and any test double, goes through :meth:`SearchStrategy.search` and has no
+    state to report. Both loops call this, so the two cannot disagree about
+    which strategies are asked for it.
+    """
+    if isinstance(strategy, GraphSearch):
+        answer = strategy.search_answer(intent, limit=limit, filters=filters)
+        return answer.items, answer.axis_state
+    return strategy.search(intent, limit=limit, filters=filters), None
+
+
 def _lift_graph_seeds(items: list[PackItem], into: dict[str, None]) -> list[PackItem]:
     """Record ``items``' seeds into ``into``, then return them unstamped.
 
@@ -524,7 +546,8 @@ def _item_attribution(item: PackItem) -> dict[str, Any]:
       explicit ``seed_ids``), ``"caller_seeded"`` (the caller named an
       entity, through a section's ``entity_ids``, and the store held it) or
       ``"recency_window"`` (neither happened — the axis returned the
-      newest rows and never consulted the query, #371).
+      newest rows and never consulted the query, #371; opt-in since #961,
+      otherwise the axis serves nothing and carries no stamp).
       Only graph items carry it. Without it, whether a served entity was
       query-relevant at all is not a property of the record — it has to be
       inferred from which wiring was deployed that week, which §1.2 of
@@ -1087,6 +1110,8 @@ class PackBuilder:
         # Seeds the graph axis expanded from this build (``[]`` when it ran
         # the recency window), for ``PACK_ASSEMBLED.seed_entity_ids``.
         graph_seed_ids: dict[str, None] = {}
+        # Set when the graph axis ran and was withheld for want of a seed.
+        graph_axis_state: str | None = None
         # One cache for the whole build: shared across every strategy's
         # pass over the collect gates below, so a parent shared by chunks
         # from two axes (or by several chunks on one axis) costs one
@@ -1094,14 +1119,15 @@ class PackBuilder:
         parent_verdict_cache = ParentVerdictCache(self._document_store)
         for strategy in self._strategies:
             try:
+                found, axis_state = _search_strategy(
+                    strategy,
+                    intent,
+                    limit=limit_per_strategy,
+                    filters=(dict(merged_filters) if merged_filters else None),
+                )
+                graph_axis_state = axis_state or graph_axis_state
                 items, gate_rejected = self._apply_collect_gates(
-                    strip_non_servable(
-                        strategy.search(
-                            intent,
-                            limit=limit_per_strategy,
-                            filters=(dict(merged_filters) if merged_filters else None),
-                        )
-                    ),
+                    strip_non_servable(found),
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                     parent_verdict_cache=parent_verdict_cache,
@@ -1305,6 +1331,7 @@ class PackBuilder:
             items_selected=len(selected),
             duration_ms=round((time.perf_counter() - start_time) * 1000),
             strategies_used=strategies_used,
+            graph_axis=graph_axis_state,
             rejected_items=rejected,
             budget_trace=budget_trace,
         )
@@ -1483,19 +1510,21 @@ class PackBuilder:
             merged_filters[GRAPH_CALLER_SEED_IDS_KEY] = caller_entity_ids
 
         class_prior_config = self._effective_class_prior_config()
+        graph_axis_state: str | None = None
         # One cache for the whole build — see the matching note in
         # :meth:`build`.
         parent_verdict_cache = ParentVerdictCache(self._document_store)
         for strategy in self._strategies:
             try:
+                found, axis_state = _search_strategy(
+                    strategy,
+                    intent,
+                    limit=limit_per_strategy,
+                    filters=(dict(merged_filters) if merged_filters else None),
+                )
+                graph_axis_state = axis_state or graph_axis_state
                 items, gate_rejected = self._apply_collect_gates(
-                    strip_non_servable(
-                        strategy.search(
-                            intent,
-                            limit=limit_per_strategy,
-                            filters=(dict(merged_filters) if merged_filters else None),
-                        )
-                    ),
+                    strip_non_servable(found),
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                     parent_verdict_cache=parent_verdict_cache,
@@ -1716,6 +1745,7 @@ class PackBuilder:
                 items_selected=len(annotated),
                 duration_ms=section_duration_ms,
                 strategies_used=strategies_used,
+                graph_axis=graph_axis_state,
                 rejected_items=[
                     floor_rejections[item.item_id]
                     for item in floor_dropped
@@ -1830,6 +1860,7 @@ class PackBuilder:
                     queries_run=report.queries_run,
                     duration_ms=report.duration_ms,
                     strategies_used=list(report.strategies_used),
+                    graph_axis=report.graph_axis,
                 ),
                 "metadata": {"withholding": summarize_withheld([], []).as_telemetry()},
             }
@@ -1853,6 +1884,7 @@ class PackBuilder:
                             strategies_used=list(
                                 section.retrieval_report.strategies_used
                             ),
+                            graph_axis=section.retrieval_report.graph_axis,
                         ),
                         budget=section.budget,
                     )
@@ -2293,10 +2325,11 @@ class PackBuilder:
         pack: the learning loop attaches a promoted precedent to *the
         entities the pack was seeded from*, and an item served from another
         axis (a document) is exactly the case where no graph item need have
-        made the cut. ``[]`` — always present — means the axis ran the recency window
-        or no graph strategy ran; no seed is ever invented. Only the flat
-        payload carries it: the sectioned payload has no per-item rows for
-        the learning join to read, so a seed there would be inert.
+        made the cut. ``[]`` — always present — means the axis ran the recency
+        window, was withheld unseeded (#961) or no graph strategy ran; no seed
+        is ever invented. Only the flat payload carries it: the sectioned
+        payload has no per-item rows for the learning join to read, so a seed
+        there would be inert.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(

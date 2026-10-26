@@ -40,7 +40,12 @@ from trellis.retrieve.pack_builder import (
     _filter_legacy_advisories_enabled,
 )
 from trellis.retrieve.rerankers import build_reranker
-from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
+from trellis.retrieve.strategies import (
+    GRAPH_AXIS_UNSEEDED_FALLBACK_OFF,
+    GRAPH_STRATEGY_NAME,
+    NamespaceSeedExtractor,
+    build_strategies,
+)
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.settings_store import load_settings_values
 from trellis_wire.axes import (
@@ -96,6 +101,28 @@ GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
 #: Deliberately the same spelling as the setting name so a reader never has
 #: to map between the two.
 GRAPH_SEEDING_SETTING = "graph_seeding"
+
+#: Opt-in for the graph axis's unseeded recency window (#961). Unset means
+#: **off**, the opposite default to :data:`GRAPH_SEEDING_ENV`.
+#:
+#: When nothing seeds the axis, neither the intent nor the caller, the axis
+#: used to serve the newest ``limit * overfetch`` nodes whatever was asked.
+#: Measured on the reference deployment over 30 days, that was 846 of 890
+#: graph-axis servings, and it drew 0.025 helpful against 0.264 unhelpful
+#: citations per serving where non-graph items drew 0.083 against 0.160.
+#: Off, an unseeded search serves nothing and the pack's ``axes`` block says
+#: so (``axes["graph"] == "unseeded_fallback_off"``); seeded and
+#: caller-seeded searches are unchanged. A read-side knob, so it lives here
+#: beside :data:`GRAPH_SEEDING_ENV` and not in
+#: :mod:`trellis.core.write_config`. ``trellis analyze replay
+#: --graph-selection recency_window`` still prices the old behaviour from
+#: events that carry the stamp.
+GRAPH_RECENCY_FALLBACK_ENV = "TRELLIS_GRAPH_RECENCY_FALLBACK"
+
+#: Settings-store key for :data:`GRAPH_RECENCY_FALLBACK_ENV` — see
+#: ``SettingSpec(name="graph_recency_fallback")`` in
+#: :mod:`trellis.core.settings_registry`.
+GRAPH_RECENCY_FALLBACK_SETTING = "graph_recency_fallback"
 
 #: Accepted spellings, matching :mod:`trellis.stores.registry`. A value in
 #: neither set is a typo, and a typo'd kill switch that silently keeps the
@@ -167,13 +194,15 @@ class AxisReport(TypedDict):
     ``embedder_error_type``/``embedder_setting`` are always present (never
     omitted) but only non-``None`` when ``semantic == "embedder_failed"`` —
     the one state whose note is dynamic rather than a fixed string from
-    :data:`SEMANTIC_AXIS_NOTES` (Q5-A).
+    :data:`SEMANTIC_AXIS_NOTES` (Q5-A). ``graph`` is ``"ran"``, ``"failed"``
+    or ``"unseeded_fallback_off"`` (:func:`describe_axes`).
     """
 
     available: list[str]
     ran: list[str]
     failed: list[str]
     semantic: str
+    graph: str
     embedder_error_type: str | None
     embedder_setting: str | None
 
@@ -202,6 +231,7 @@ def build_pack_builder(
         parameter_registry=param_registry,
         graph_seed_extractor=_build_seed_extractor(registry, settings=settings),
         excerpt_max_chars=_resolve_excerpt_max_chars(settings),
+        graph_recency_fallback=_graph_recency_fallback_enabled(settings),
     )
     return PackBuilder(
         strategies=strategies_result.strategies,
@@ -305,12 +335,37 @@ def _graph_seeding_enabled(settings: dict[str, Any] | None = None) -> bool:
     return True
 
 
+def _graph_recency_fallback_enabled(settings: Mapping[str, Any] | None = None) -> bool:
+    """Read :data:`GRAPH_RECENCY_FALLBACK_ENV`, env > settings > default off.
+
+    Mirrors :func:`_graph_seeding_enabled` with the opposite default: unset
+    is **off**, and a value in neither spelling set warns and also reads as
+    off, since an opt-in that a typo silently enables would defeat the
+    default. A non-bool stored value is ignored, like there.
+    """
+    raw = os.environ.get(GRAPH_RECENCY_FALLBACK_ENV, "").strip().lower()
+    if not raw:
+        value = (settings or {}).get(GRAPH_RECENCY_FALLBACK_SETTING)
+        return value if isinstance(value, bool) else False
+    if raw in _TRUTHY:
+        return True
+    if raw not in _FALSEY:
+        logger.warning(
+            "graph_recency_fallback_env_unrecognised",
+            var=GRAPH_RECENCY_FALLBACK_ENV,
+            value=raw,
+            effective=False,
+        )
+    return False
+
+
 def describe_axes(
     builder: PackBuilder,
     strategies_used: list[str],
     *,
     embedder_configured: bool,
     embedder_resolve_failure: EmbedderResolveFailure | None = None,
+    graph_axis: str | None = None,
 ) -> AxisReport:
     """Say which axes this deployment has, which ran, and which did not.
 
@@ -341,6 +396,15 @@ def describe_axes(
     * **available but did not run** — the strategy raised during *this*
       build; ``PACK_ASSEMBLED.strategy_failures`` carries the exception.
 
+    The graph axis has one more outcome of its own, ``graph``: it ran and
+    served nothing because no seed resolved and the recency window is off
+    (``"unseeded_fallback_off"``, #961). It is in ``ran`` — the axis did
+    not fail — so without this field a pack with no graph items cannot
+    tell a withheld axis from an empty graph. It is not rendered as a
+    markdown note: it follows from what the intent named, not from a fault
+    in the deployment, so a line on every such pack would be one that
+    always prints and always gets skipped (see :data:`SEMANTIC_AXIS_NOTES`).
+
     Args:
         builder: The :class:`PackBuilder` this pack was assembled from.
         strategies_used: Names of the axes that actually ran this build
@@ -353,6 +417,8 @@ def describe_axes(
             ``None`` for a builder this never applies to (e.g. a test
             double). ``None`` is also the correct value whenever
             ``embedder_configured`` is accurate on its own.
+        graph_axis: The pack's ``retrieval_report.graph_axis``. Every
+            caller passes it; ``None`` means the axis was not withheld.
 
     Returns a mapping, not prose: the caller renders it (or serialises it
     verbatim into ``--format json``).
@@ -363,6 +429,11 @@ def describe_axes(
     embedder_error_type: str | None = None
     embedder_setting: str | None = None
     semantic_state = "ran"
+    graph_state = "ran"
+    if GRAPH_STRATEGY_NAME in failed:
+        graph_state = "failed"
+    elif graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
+        graph_state = graph_axis
     if SEMANTIC_AXIS not in available:
         if embedder_resolve_failure is not None:
             semantic_state = "embedder_failed"
@@ -379,6 +450,7 @@ def describe_axes(
         "ran": ran,
         "failed": failed,
         "semantic": semantic_state,
+        "graph": graph_state,
         "embedder_error_type": embedder_error_type,
         "embedder_setting": embedder_setting,
     }
@@ -421,6 +493,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
 
 
 __all__ = [
+    "GRAPH_RECENCY_FALLBACK_ENV",
     "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",
     "SEMANTIC_AXIS_NOTES",
