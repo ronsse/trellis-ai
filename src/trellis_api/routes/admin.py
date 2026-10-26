@@ -46,6 +46,7 @@ from trellis.learning.scoring import (
     promotion_verdict,
     settle_promotion,
     submit_learning_promotion,
+    unnamed_approved_count,
 )
 from trellis.learning.tuners import (
     PromotionPolicy,
@@ -1449,7 +1450,9 @@ def promote_learning_candidates(
 
     The response's ``status`` is the verdict ``promote-learning`` states,
     from the same function (:func:`promotion_verdict`), and the status code
-    stays 200 for every verdict.
+    stays 200 for every verdict. An approved row with a blank
+    ``candidate_id`` is skipped but makes the verdict ``refused``; rows that
+    promoted still landed.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
@@ -1512,7 +1515,9 @@ def promote_learning_candidates(
         )
 
     promoted_count = sum(1 for o in outcomes if promotion_landed(o))
-    status = promotion_verdict(outcomes)
+    # An approved row with a blank id has no outcome but refuses the run, as it
+    # does for the CLI: both hand the verdict the planner's own count.
+    status = promotion_verdict(outcomes, unnamed_count=unnamed_approved_count(plan))
     _emit_review_decision(
         registry.operational.event_log,
         surface="learning_promotion",

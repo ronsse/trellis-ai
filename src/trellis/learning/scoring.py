@@ -832,7 +832,8 @@ def prepare_learning_promotions(
         if not candidate_id or not bool(decision.get("approved")):
             continue
         # An approved row with no id is skipped above and never becomes a
-        # result, so it is in ``approved_count`` and not in ``named_count``.
+        # result, so it is in ``approved_count`` and not in ``named_count``;
+        # ``unnamed_approved_count`` is the gap, and it refuses the run.
         named_count += 1
 
         candidate = candidate_lookup.get(candidate_id)
@@ -1396,7 +1397,8 @@ def submit_learning_promotion(
 
 #: A promotion run's verdict. ``ok``: every approved row landed (or none was
 #: approved). ``refused``: at least one row was declined before anything was
-#: written and no write failed. ``failed``: a write did not land.
+#: written, or an approved row named no candidate, and no write failed.
+#: ``failed``: a write did not land.
 PromotionVerdict = Literal["ok", "refused", "failed"]
 
 #: Planner answers for an approved row that never reached the executor: the
@@ -1443,7 +1445,21 @@ def settle_promotion(outcome: dict[str, Any]) -> dict[str, Any]:
     return outcome
 
 
-def promotion_verdict(outcomes: Sequence[Mapping[str, Any]]) -> PromotionVerdict:
+def unnamed_approved_count(plan: Mapping[str, Any]) -> int:
+    """Approved rows the planner skipped for want of a ``candidate_id``.
+
+    ``approved_count`` less ``named_count`` from
+    :func:`prepare_learning_promotions`: the rows an operator marked approved
+    that name nothing to promote, so they have no outcome of their own.
+    :func:`promotion_verdict` reads this count, so each surface hands it the
+    planner's own figures and none re-derives a rule.
+    """
+    return max(0, int(plan["approved_count"]) - int(plan["named_count"]))
+
+
+def promotion_verdict(
+    outcomes: Sequence[Mapping[str, Any]], *, unnamed_count: int = 0
+) -> PromotionVerdict:
     """The verdict for a promotion run, from one reading of its outcomes.
 
     One rule for every surface that runs a reviewed promotion (CLI
@@ -1454,17 +1470,24 @@ def promotion_verdict(outcomes: Sequence[Mapping[str, Any]]) -> PromotionVerdict
     refusal when a run has both. No outcomes is ``ok``: a row the operator
     did not approve never becomes an outcome.
 
+    An approved row with a blank ``candidate_id`` has no outcome either, but
+    it is not a row the operator left alone: they asked for a promotion that
+    names nothing. ``unnamed_count`` (see :func:`unnamed_approved_count`)
+    counts them, and any makes a run that would be ``ok`` ``refused``. Rows
+    that did promote still landed; the verdict says the request was not met,
+    it does not undo a write. A write that did not land still outranks it.
+
     Each outcome is the dict :func:`submit_learning_promotion` returned (or a
     planner row that never reached it), read by :func:`promotion_landed` and
     :func:`promotion_is_refusal`, so pass it before :func:`settle_promotion`
     or after: the answer is the same.
     """
     unlanded = [o for o in outcomes if not promotion_landed(o)]
-    if not unlanded:
-        return "ok"
     if any(not promotion_is_refusal(o) for o in unlanded):
         return "failed"
-    return "refused"
+    if unlanded or unnamed_count > 0:
+        return "refused"
+    return "ok"
 
 
 #: Recommendation values that flow through ``prepare_learning_promotions``
@@ -1652,5 +1675,6 @@ __all__ = [
     "settle_promotion",
     "strip_source_excerpt",
     "submit_learning_promotion",
+    "unnamed_approved_count",
     "write_learning_review_artifacts",
 ]

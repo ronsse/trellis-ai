@@ -57,6 +57,7 @@ from trellis.learning.scoring import (
     promotion_landed,
     promotion_verdict,
     settle_promotion,
+    unnamed_approved_count,
 )
 from trellis.mutate import (
     Command,
@@ -796,13 +797,15 @@ def promote_learning(
     The exit code and the payload's ``status`` read the per-candidate
     outcomes, in either format: ``0`` / ``ok`` when every approved row
     landed (or none was approved), ``2`` / ``refused`` when any was refused
-    and no write failed, ``5`` / ``failed`` when a write did not land.
+    or an approved row names no ``candidate_id`` (and no write failed),
+    ``5`` / ``failed`` when a write did not land. A skipped blank-id row
+    refuses the run even when other rows promoted; those writes still stand.
 
     ``--dry-run`` writes nothing and always exits ``0``, reporting ``ok``.
     It adds ``would_verdict`` and ``would_exit_code``: the verdict a real run
     would reach if every ready write landed. It sees a refusal the planner or
-    an existing precedent's lifecycle state decides, and cannot see a policy
-    refusal or a failed write.
+    an existing precedent's lifecycle state decides, and a blank-id row, and
+    cannot see a policy refusal or a failed write.
     """
     candidates_payload = json.loads(candidates.read_text(encoding="utf-8"))
     decisions_payload = json.loads(decisions.read_text(encoding="utf-8"))
@@ -817,6 +820,10 @@ def promote_learning(
     )
 
     ready = [r for r in plan["results"] if r["status"] == "ready"]
+    # Approved rows the planner skipped for want of an id: no outcome of their
+    # own, but the verdict counts them (a refusal), so a run of only blank ids
+    # no longer reads as a no-op.
+    unnamed = unnamed_approved_count(plan)
 
     if dry_run:
         # Read-only, and never an exit code: the preview is named
@@ -826,7 +833,9 @@ def promote_learning(
             _preview_promotion(entry, registry.knowledge.graph_store)
             for entry in plan["results"]
         ]
-        would_exit, would_status = _would_promotion_verdict(previews)
+        would_exit, would_status = _would_promotion_verdict(
+            previews, unnamed_count=unnamed
+        )
         if output_format == "json":
             print(
                 json.dumps(
@@ -865,32 +874,12 @@ def promote_learning(
         return
 
     if not plan["results"]:
-        # Nothing was approved: a no-op, so ``0`` / ``ok`` in both formats.
-        if output_format == "json":
-            print(
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "dry_run": False,
-                        "approved_count": plan["approved_count"],
-                        "named_count": plan["named_count"],
-                        "ready_count": 0,
-                        "promoted_count": 0,
-                        "results": [],
-                    }
-                )
-            )
-            return
-        if plan["approved_count"]:
-            # Approved rows exist and none names a candidate; "no approved
-            # promotions" would contradict the note.
-            _print_unnamed_note(plan)
-            return
-        console.print(
-            "[yellow]No approved promotions found.[/yellow] Edit the "
-            "decisions file and set ``approved: true`` on the rows you "
-            "want to promote."
+        exit_code = _report_run_without_results(
+            plan, output_format, unnamed_count=unnamed
         )
+        # Below the format branch, so both formats exit alike.
+        if exit_code != EXIT_OK:
+            raise typer.Exit(code=exit_code)
         return
 
     # Only a ready entry reaches the executor; an approved row the planner
@@ -924,7 +913,7 @@ def promote_learning(
     # One reading of the outcomes, taken before either format renders, so the
     # exit code and the payload's ``status`` cannot depend on ``--format``
     # (tests/unit/test_format_exit_parity_rule.py).
-    exit_code, status = _promotion_verdict(submission_results)
+    exit_code, status = _promotion_verdict(submission_results, unnamed_count=unnamed)
 
     if output_format == "json":
         print(
@@ -998,7 +987,9 @@ _EXIT_BY_VERDICT: dict[PromotionVerdict, int] = {
 }
 
 
-def _promotion_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
+def _promotion_verdict(
+    outcomes: list[dict[str, Any]], *, unnamed_count: int = 0
+) -> tuple[int, str]:
     """``(exit_code, status)`` for a promotion run, from one reading of the outcomes.
 
     Shared by ``promote-learning`` and ``review-ready --approve``. The status
@@ -1006,9 +997,12 @@ def _promotion_verdict(outcomes: list[dict[str, Any]]) -> tuple[int, str]:
     REST route states, so no surface has its own rule; this only maps it to an
     exit code. The exit code and the payload's ``status`` are derived together,
     before either format renders, so neither can depend on ``--format``
-    (``tests/unit/test_format_exit_parity_rule.py``).
+    (``tests/unit/test_format_exit_parity_rule.py``). ``unnamed_count`` is the
+    planner's count of approved rows with a blank id, which only
+    ``promote-learning`` can have; ``review-ready`` names its ids on the
+    command line.
     """
-    status = promotion_verdict(outcomes)
+    status = promotion_verdict(outcomes, unnamed_count=unnamed_count)
     return _EXIT_BY_VERDICT[status], status
 
 
@@ -1023,14 +1017,56 @@ def _print_unnamed_note(plan: dict[str, Any]) -> None:
 
     ``approved_count`` is what the operator marked; ``named_count`` is what
     the planner could act on. The difference is a row with a blank
-    ``candidate_id``, which has no outcome and so no effect on the verdict.
+    ``candidate_id``: it has no outcome, but it refuses the run, and the rows
+    that did promote stay promoted.
     """
-    unnamed = plan["approved_count"] - plan["named_count"]
+    unnamed = unnamed_approved_count(plan)
     if unnamed:
         console.print(
             f"[yellow]{unnamed} approved row(s) name no candidate_id and "
-            "were skipped.[/yellow]"
+            "were skipped. A skipped row makes the run refused; any row that "
+            "promoted stays promoted.[/yellow]"
         )
+
+
+def _report_run_without_results(
+    plan: dict[str, Any], output_format: str, *, unnamed_count: int
+) -> int:
+    """Report a run the planner left with no result rows; return its exit code.
+
+    Nothing was approved, or every approved row named no candidate. The first
+    is a no-op (``0`` / ``ok``); the second is a refusal, because an approved
+    row that names nothing is an error and not a skip. One reading either way,
+    taken before the format branch, so the exit code the caller raises cannot
+    depend on ``--format``.
+    """
+    exit_code, status = _promotion_verdict([], unnamed_count=unnamed_count)
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "status": status,
+                    "dry_run": False,
+                    "approved_count": plan["approved_count"],
+                    "named_count": plan["named_count"],
+                    "ready_count": 0,
+                    "promoted_count": 0,
+                    "results": [],
+                }
+            )
+        )
+    elif plan["approved_count"]:
+        # Approved rows exist and none names a candidate; "no approved
+        # promotions" would contradict the note.
+        _print_unnamed_note(plan)
+        _print_verdict(status, exit_code)
+    else:
+        console.print(
+            "[yellow]No approved promotions found.[/yellow] Edit the "
+            "decisions file and set ``approved: true`` on the rows you "
+            "want to promote."
+        )
+    return exit_code
 
 
 def _preview_promotion(entry: dict[str, Any], graph_store: Any) -> str:
@@ -1048,14 +1084,20 @@ def _preview_promotion(entry: dict[str, Any], graph_store: Any) -> str:
     return "promoted" if refusal is None else str(refusal["status"])
 
 
-def _would_promotion_verdict(previews: list[str]) -> tuple[int, str]:
+def _would_promotion_verdict(
+    previews: list[str], *, unnamed_count: int = 0
+) -> tuple[int, str]:
     """``(exit_code, status)`` a real run would reach, for ``--dry-run``'s preview.
 
     The same :func:`_promotion_verdict` a real run takes, over the rows the
-    preview does not expect to land, so the two cannot drift. The caller
-    reports it as ``would_*`` and never exits with it.
+    preview does not expect to land and the planner's blank-id count, so the
+    two cannot drift. The caller reports it as ``would_*`` and never exits
+    with it.
     """
-    return _promotion_verdict([{"status": p} for p in previews if p != "promoted"])
+    return _promotion_verdict(
+        [{"status": p} for p in previews if p != "promoted"],
+        unnamed_count=unnamed_count,
+    )
 
 
 def _approve_candidates(

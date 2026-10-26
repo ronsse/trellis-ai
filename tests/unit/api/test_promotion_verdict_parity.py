@@ -55,7 +55,7 @@ REFUSED: dict[str, Any] = {"status": "refused_demoted", "message": "demoted"}
 #: Planner answers for approved rows that never reach the executor.
 GHOST = "ghost"  # names no candidate -> ``missing_candidate``
 NOISE = "noise"  # not a promotion -> ``skipped_non_promotable``
-BLANK = ""  # an approved row naming nothing: never an outcome
+BLANK = ""  # an approved row naming nothing: no outcome, but it refuses the run
 _PLANNER_ROWS = {
     GHOST: {"status": "missing_candidate"},
     NOISE: {"status": "skipped_non_promotable"},
@@ -79,9 +79,16 @@ _SCENARIOS: dict[str, list[Any]] = {
     "failed_then_refused": [ENTITY_FAILED, REFUSED],
     "failed_ghost_and_landed": [LANDED, GHOST, EDGE_REJECTED],
     "refused_ghost_and_landed": [LANDED, GHOST, REFUSED],
-    "blank_id_is_no_outcome": [BLANK, LANDED],
+    "blank_id_beside_landed": [BLANK, LANDED],
     "blank_id_alone": [BLANK],
+    "blank_id_beside_refused": [REFUSED, BLANK],
+    # A write that did not land outranks the blank-id refusal, on both surfaces.
+    "blank_id_beside_failed": [BLANK, ENTITY_FAILED],
+    "blank_id_beside_edge_rejected_and_landed": [LANDED, BLANK, EDGE_REJECTED],
 }
+
+#: The exit code ``promote-learning`` maps each verdict to; REST answers 200.
+_EXIT_BY_STATUS = {"ok": 0, "refused": 2, "failed": 5}
 
 
 def _candidate(candidate_id: str, recommendation_type: str) -> dict[str, Any]:
@@ -120,6 +127,13 @@ def _plan(steps: list[Any]) -> tuple[list[dict[str, Any]], list[str], dict[str, 
 def _expected_outcomes(steps: list[Any]) -> list[dict[str, Any]]:
     """What the verdict reads: scripted answers plus the planner's own rows."""
     return [_PLANNER_ROWS[s] if isinstance(s, str) else s for s in steps if s != BLANK]
+
+
+def _expected_verdict(steps: list[Any]) -> str:
+    """The shared rule over the same inputs: outcomes, and the blank-id rows."""
+    return promotion_verdict(
+        _expected_outcomes(steps), unnamed_count=steps.count(BLANK)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +180,7 @@ def _run_both(
     rest_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     cli_runner: IsolatedCliRunner,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], int]:
     candidates, ids, scripted = _plan(steps)
     monkeypatch.setattr(curate_cli, "submit_learning_promotion", _stub(scripted))
     monkeypatch.setattr(admin, "submit_learning_promotion", _stub(scripted))
@@ -202,7 +216,7 @@ def _run_both(
         "/api/v1/learning/promotions", json={"decisions": decisions}
     )
     assert resp.status_code == 200
-    return cli_payload, resp.json()
+    return cli_payload, resp.json(), cli.exit_code
 
 
 @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
@@ -214,10 +228,14 @@ def test_the_cli_and_the_rest_route_state_the_same_verdict(
     cli_runner: IsolatedCliRunner,
 ) -> None:
     steps = _SCENARIOS[scenario]
-    cli, rest = _run_both(steps, tmp_path, rest_client, monkeypatch, cli_runner)
+    cli, rest, cli_exit = _run_both(
+        steps, tmp_path, rest_client, monkeypatch, cli_runner
+    )
 
-    shared = promotion_verdict(_expected_outcomes(steps))
+    shared = _expected_verdict(steps)
     assert cli["status"] == rest["status"] == shared
+    # One verdict, two encodings: the CLI's exit code and REST's body status.
+    assert cli_exit == _EXIT_BY_STATUS[shared]
     assert cli["promoted_count"] == rest["promoted_count"]
     assert cli["approved_count"] == rest["approved_count"]
     assert cli["named_count"] == rest["named_count"]
@@ -234,5 +252,23 @@ def test_the_cli_and_the_rest_route_state_the_same_verdict(
 
 
 def test_the_scenarios_reach_every_verdict() -> None:
-    verdicts = {promotion_verdict(_expected_outcomes(s)) for s in _SCENARIOS.values()}
+    verdicts = {_expected_verdict(s) for s in _SCENARIOS.values()}
     assert verdicts == {"ok", "refused", "failed"}
+
+
+@pytest.mark.parametrize(
+    "scenario", sorted(n for n, s in _SCENARIOS.items() if BLANK in s)
+)
+def test_a_blank_id_row_is_never_ok_on_either_surface(
+    scenario: str,
+    tmp_path: Path,
+    rest_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: IsolatedCliRunner,
+) -> None:
+    cli, rest, cli_exit = _run_both(
+        _SCENARIOS[scenario], tmp_path, rest_client, monkeypatch, cli_runner
+    )
+    assert cli["status"] == rest["status"] != "ok"
+    assert cli_exit != 0
+    assert rest["approved_count"] > rest["named_count"]

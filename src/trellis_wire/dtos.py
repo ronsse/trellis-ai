@@ -895,8 +895,10 @@ class LearningPromotionResponse(WireModel):
     ``status`` is the run's verdict, the one ``trellis curate
     promote-learning`` states: ``"ok"`` when every approved row landed (or
     none was approved), ``"refused"`` when a row was declined before
-    anything was written and no write failed, ``"failed"`` when a write did
-    not land. The HTTP status is 200 whatever the verdict.
+    anything was written, or an approved row named no candidate
+    (``approved_count`` above ``named_count``), and no write failed,
+    ``"failed"`` when a write did not land. Rows that promoted still landed
+    in a ``"refused"`` run. The HTTP status is 200 whatever the verdict.
 
     ``approved_count`` is the rows marked approved, blank ids included;
     ``named_count`` is the approved rows that name a candidate, the ones the

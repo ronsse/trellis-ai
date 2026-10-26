@@ -1585,8 +1585,8 @@ trellis curate promote-learning --candidates PATH --decisions PATH \
 ```
 
 Only rows with `approved: true` are acted on; a row left unapproved is not
-an outcome and never affects the verdict. Each approved row gets one entry
-in `results`:
+an outcome and never affects the verdict. Each approved row that names a
+candidate gets one entry in `results`:
 
 | Entry `status` | Class | Meaning |
 |---|---|---|
@@ -1606,15 +1606,24 @@ way and prints the same line.
 | Exit | `status` | When |
 |---|---|---|
 | `0` | `ok` | every approved row landed, or none was approved |
-| `2` | `refused` | at least one row was refused and no write failed |
+| `2` | `refused` | at least one row was refused, or an approved row has a blank `candidate_id`, and no write failed |
 | `5` | `failed` | at least one write did not land, whether or not another row was refused |
 
 `promoted_count` counts the rows that fully landed. `approved_count` counts
 the rows marked `approved: true`, including a row with a blank
 `candidate_id`; such a row names nothing to promote, so it is skipped without
-a result and without effect on the verdict. `named_count` counts the approved
-rows that do name a candidate, which is exactly the rows `results` answers,
-and the text form says how many approved rows were skipped for want of an id.
+a result, **and it refuses the run**: an approved row that names nothing is an
+error, not a no-op, so a decisions file whose only approved rows are blank
+exits `2` / `refused` in both formats. `named_count` counts the approved rows
+that do name a candidate, which is exactly the rows `results` answers; the
+rows skipped for want of an id are `approved_count - named_count`, and the
+text form says how many. A run where some rows promoted and some approved rows
+were blank is `refused` too: the rows that promoted still landed and stay
+(`promoted_count` counts them; nothing is undone), and a write that did not
+land still outranks the refusal (`failed`, exit `5`). A blank row that is not
+approved is ignored. `POST /learning/promotions` states the same `status`
+(HTTP stays 200); `review-ready --approve` is unchanged, since a blank id
+there is already refused as `refused_not_ready`.
 
 `--dry-run` submits nothing, so it has no outcome to read: it **always exits
 `0`** and reports `ok`, whatever it previews. It adds a preview of the verdict
@@ -1622,7 +1631,7 @@ a real run would reach, named so it cannot be read as one:
 
 | Field | Meaning |
 |---|---|
-| `would_verdict`, `would_exit_code` | the `status` and exit code a real run would give if every ready write landed (text form: a `Would-be verdict:` line, never `Verdict:`) |
+| `would_verdict`, `would_exit_code` | the `status` and exit code a real run would give if every ready write landed, a blank-id approved row included (text form: a `Would-be verdict:` line, never `Verdict:`) |
 | `results[].would_status` | the status a real run would give that row: `promoted`, or its refusal |
 
 The preview reads, and never writes. It sees a refusal the planner decides
@@ -3666,7 +3675,7 @@ decide which surfaces are human-gated are described in
 | POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
 | POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
 | GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (`status: "error"` + `code` + a `hint` naming the path when there is none to read) |
-| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function), `named_count` the approved rows that name a candidate, and `promoted_count` the rows that fully landed; the HTTP status is 200 for every verdict |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows that fully landed; the HTTP status is 200 for every verdict |
 | GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
 | POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
 | GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |
