@@ -1066,8 +1066,10 @@ def replay(
     combined with the width options above.
 
     ``--graph-selection`` is a third kind: it withholds the servings the
-    graph axis chose one way (``recency_window`` ignores the intent;
-    ``seeded`` and ``caller_seeded`` expand a seed set) and re-runs each
+    graph axis chose one way (``recency_window`` ignores the intent and is
+    opt-in since #961, so it matches only events recorded before that or on a
+    deployment that opted in; ``seeded`` and ``caller_seeded`` expand a seed
+    set) and re-runs each
     affected pack's token walk to say what the freed budget would admit; see
     ``trellis.retrieve.pack_replay.replay_graph_selection``. It cannot be
     combined with ``--class-prior`` or the width options.

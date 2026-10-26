@@ -2125,9 +2125,13 @@ flag), so this is additive, not a breaking change to `describe()`'s shape.
 **`settings_live` tells you whether an override does anything yet.** The
 registry catalogs every tunable `write_config.py` knows about plus
 retrieval-side knobs resolved outside it (`graph_seeding`,
-`filter_legacy_advisories`, `class_prior_mode`); `graph_seeding` gates only
+`graph_recency_fallback`, `filter_legacy_advisories`, `class_prior_mode`);
+`graph_seeding` gates only
 seeds *inferred* from the intent, never a sectioned pack's `entity_ids` or an
-explicit `seed_ids`, which are instructions; it
+explicit `seed_ids`, which are instructions; `graph_recency_fallback`
+(`TRELLIS_GRAPH_RECENCY_FALLBACK`, default **off**, #961) is the opposite
+default and gates only the graph axis's *unseeded* branch — see "The graph
+axis's unseeded window" below; it
 is not a claim that each one has a settings-aware enforcement site, only
 that this one does. Every registered knob now resolves env > settings >
 default at its real enforcement site — each per-knob reader
@@ -2135,7 +2139,7 @@ default at its real enforcement site — each per-knob reader
 `extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
 `mcp/reconcile.py`, `mcp/server.py`) delegates to
 `write_config.resolve_write_behaviour()`, `graph_seeding` /
-`filter_legacy_advisories` each carry their own settings-aware read in
+`graph_recency_fallback` / `filter_legacy_advisories` each carry their own settings-aware read in
 `builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
 resolves the same way through
 `trellis.retrieve.class_prior.resolve_class_prior_config`, wired in by
@@ -2687,6 +2691,16 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 
 Text output prints a sentence for every state but `ran`.
 
+**The graph axis's unseeded window is off by default** (#961). When nothing seeds the graph axis, neither an entity the intent names nor a section's `entity_ids`, it used to serve the newest ~80 nodes whatever the intent was (`metadata["graph_selection"] == "recency_window"`). It now serves nothing unless `TRELLIS_GRAPH_RECENCY_FALLBACK` is truthy (`1`/`true`/`yes`/`on`) or the `graph_recency_fallback` setting is `true`; env > settings > default off, and an unrecognised env value warns and reads as off, whatever the setting says. Seeded and caller-seeded searches are unchanged. The reason is in the pack's `axes` block, on every surface that returns one (`POST /api/v1/packs`, `/packs/sectioned`, `trellis retrieve pack --format json`). MCP returns markdown only, so it has no `axes` block and renders no line for this state; an MCP caller sees a withheld graph axis only as the absence of graph items:
+
+| `axes.graph` | Meaning |
+|---|---|
+| `ran` | The axis ran (it may still have found nothing) |
+| `unseeded_fallback_off` | The axis ran and served nothing because no seed resolved and the recency window is off. It is also in `axes.ran`: it did not fail |
+| `failed` | The axis raised during this build |
+
+There is no markdown note for `unseeded_fallback_off`: it follows from what the intent named, not from a deployment fault, and a line on every such pack would be one that always prints. A held-out pack carries the same value, so it stays indistinguishable from a served one. Historical `PACK_ASSEMBLED` events keep their `graph_selection` stamps, so `trellis analyze replay --graph-selection recency_window` and `analyze value`'s `by_graph_selection` still read them. The event records the state too, as `graph_axis_state` (same value, same `trellis.retrieve.strategies.resolve_graph_axis_state`), on flat, sectioned and held-out rows; an event from before that key shipped has none, and a withheld pack in one shows only by the absence of graph items.
+
 **Example:**
 
 ```bash
@@ -2721,13 +2735,13 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
   "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
   "budget": {"max_items": 10, "max_tokens": 8000},
   "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5, "class_prior_detail": []},
-  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "embedder_error_type": null, "embedder_setting": null}
+  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "graph": "ran", "embedder_error_type": null, "embedder_setting": null}
 }
 ```
 
 `withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget. `class_prior_detail` breaks the `class_prior` row in `by_reason` (when present) down by document form and retrieval axis — `[{"form": "conversation", "axis": "keyword", "count": 2}]` — and is always present (empty list when the gate withheld nothing, or on a pack it never ran against); the rendered note (`format_withholding_note`) uses it to name the form and axis instead of printing the bare reason code.
 
-**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
+**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, graph, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
 
 **MCP renders a markdown line, not a JSON block.** `get_context`, `search`, and — since #789 — `get_context(sections=...)`, `get_objective_context`, `get_task_context` and `get_sectioned_context` all add one line naming any axis in `axes.failed`, to both a populated and an empty reply:
 
@@ -2796,6 +2810,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. `item_tokens` is whichever cost was *paid*: the item's excerpt normally, its rendered index line when `index_mode` is `true`, and a one-line pointer for a row graduated disclosure demoted (disclosure runs after the walk and the builder re-prices the served steps to what the pack carries). `walk_tokens` is the charge the **walk** made, written only on a pack where disclosure demoted something (on every included step of it); when the key is absent, `item_tokens` is the walk's charge, which is also how every event written before the field reads. `trellis analyze replay` re-runs the walk over the walk's charges: a `max_items`-cut row (`rejected_items[].estimated_tokens`) is priced at the walk's charge, never a pointer's, so summing pointer prices against it would free more budget than the pack ever paid. The graph-selection replay refuses an older event whose `disclosure.pointer_item_ids` names an included step with no `walk_tokens` (counted unmodelled as `disclosure_repriced`), and refuses a step whose `item_tokens` or `walk_tokens` is missing, fractional, `nan` or `inf` (`trace_unreadable`). |
 | `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. `token_total_estimated` sums the same charge `budget_trace[].item_tokens` records, so on an `index_mode` pack it is index-line tokens, not excerpt tokens — averaging it across a mixed corpus mixes two units. The per-item excerpt read cost stays on `injected_items[].estimated_tokens` in both modes. |
 | `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. Each row's `message` is sanitized, bounded, and never a raw `str(exc)` that could echo a DSN or credential into this stored event — but the exact derivation differs by caller: most rows (a strategy's own init or search raising) are `summarize_exception(exc)["message"]`, computed by the `_audit_message` helper, which falls back to the suppression marker if summarizing itself raises; the one in-tree exception is the embedder-resolve row (`EmbedderResolveFailure`, #838), whose `message` is `<ErrorType>[: <setting>]` — a type name and a config key, never driver text. |
+| `graph_axis_state` | `ran`, `failed` or `unseeded_fallback_off` (#961): the same value as the response's `axes.graph`, on both pack shapes and on a held-out row, which carries the build's state, not the empty pack the caller received. `unseeded_fallback_off` means the graph axis ran and served nothing because no seed resolved and `TRELLIS_GRAPH_RECENCY_FALLBACK` is off, so a pack with no graph items can be told from a graph with nothing in it. Additive; absent on events from before it shipped, so read it with `.get`. |
 | `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. **Not a count of meta-Activities suppressed.** Since #375/#436 the recorder mints them `node_role="structural"` and `GraphSearch` drops them *inside the strategy*, before the candidate slice, so they never become candidates and this field reads `0` while suppression happens on every pack. It counts only what reached `PackBuilder`: pre-#436 `semantic` rows, and any meta-Activity reached by a non-graph axis. |
 | `holdout` / `holdout_rate` | The pack holdout (`TRELLIS_PACK_HOLDOUT_RATE`, default `0`): whether this pack was withheld from its caller, and the rate in force when it was drawn. On every build of both pack kinds, flag off included, so a served row (`false`) is told apart from one an older build wrote (key absent). Read it as `payload.get("holdout") is True`. See [the exception to stated withholding](#withholding-is-stated-not-implied-404). |
 | `holdout_items[]` / `holdout_sections[]` / `holdout_advisory_ids` | Only on a withheld pack: the would-be pack, its items in the `injected_items[]` row shape (sectioned: `holdout_sections[]` in the `sections[]` shape), and its advisory ids. Every other key describes the empty pack the caller received, so `injected_items`, `injected_item_ids` and `advisory_ids` are empty and no reader counts a withheld item as served. |
@@ -3418,7 +3433,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 
 **Promotion-ready digest (#845).** Both `--format json`'s `learning_promotion_ready` field and the `intent_learning_candidates.json` artifact's `promotion_ready` key carry a surfacing-only summary — `count` of `promote_guidance` candidates with `helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (currently `1`) and `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate` desc, then `times_served` desc). Text output prints `"N candidate(s) promotion-ready — review with trellis curate promote-learning or the Review tab"` when `N > 0` (singular at `N == 1`). Nothing here promotes anything; it only tells a reader that candidates are waiting. A candidate's `precedent_name` also gets a readable fallback name (first non-empty line of its document, frontmatter and heading markers stripped) when it has no `title` and its item resolves — kept as a bare item id only when the item can't be resolved.
 
-**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack that ran the recency window records no seeds, so its candidate gets no edges and a flat pack can reach that precedent only while it is among the newest nodes.
+**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes.
 
 ### `trellis worker enrich`
 

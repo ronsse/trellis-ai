@@ -350,6 +350,10 @@ components:
             type: string
           title: Failed
           type: array
+        graph:
+          default: ran
+          title: Graph
+          type: string
         ran:
           items:
             type: string

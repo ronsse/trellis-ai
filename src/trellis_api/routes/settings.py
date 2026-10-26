@@ -49,6 +49,7 @@ from trellis.mutate import Command, CommandStatus, Operation, build_settings_exe
 from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis.ops.capture_health import resolve_capture_thresholds
 from trellis.retrieve.builder_factory import (
+    _graph_recency_fallback_enabled,
     _graph_seeding_enabled,
     _resolve_body_items,
     _resolve_excerpt_max_chars,
@@ -195,6 +196,7 @@ def _effective_values(
     ).as_dict()
     for name, env_fn in (
         ("graph_seeding", _graph_seeding_enabled),
+        ("graph_recency_fallback", _graph_recency_fallback_enabled),
         ("filter_legacy_advisories", _filter_legacy_advisories_enabled),
     ):
         effective[name] = resolve_env_pinned_bool_setting(name, env_fn, settings_values)

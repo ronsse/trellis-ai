@@ -1140,6 +1140,40 @@ def test_assemble_pack_reports_no_failed_axes_when_none_raise(
     assert axes["semantic"] == semantic
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "body"),
+    [
+        ("/api/v1/packs", {"intent": "zzzz qqqq"}),
+        (
+            "/api/v1/packs/sectioned",
+            {"intent": "zzzz qqqq", "sections": [{"name": "all"}]},
+        ),
+    ],
+    ids=["flat", "sectioned"],
+)
+@pytest.mark.parametrize(
+    ("env", "graph"), [(None, "unseeded_fallback_off"), ("1", "ran")]
+)
+def test_pack_axes_say_why_an_unseeded_graph_axis_served_nothing(
+    client, monkeypatch, endpoint: str, body: dict, env: str | None, graph: str
+) -> None:
+    """#961: the unseeded recency window is opt-in, and the axes block says
+    when the graph axis ran but was withheld for want of a seed, so an empty
+    graph and a withheld one do not read alike."""
+    if env is None:
+        monkeypatch.delenv("TRELLIS_GRAPH_RECENCY_FALLBACK", raising=False)
+    else:
+        monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", env)
+
+    response = client.post(endpoint, json=body)
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["graph"] == graph
+    assert "graph" in axes["ran"]
+    assert axes["failed"] == []
+
+
 def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
     client, monkeypatch
 ) -> None:

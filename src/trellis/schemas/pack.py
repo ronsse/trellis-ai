@@ -151,6 +151,12 @@ class RetrievalReport(VersionedModel):
     items_selected: int = 0
     duration_ms: int = 0
     strategies_used: list[str] = Field(default_factory=list)
+    #: ``"unseeded_fallback_off"`` when the graph axis ran and served nothing
+    #: because no seed resolved and the recency window is off
+    #: (``TRELLIS_GRAPH_RECENCY_FALLBACK``); ``None`` otherwise. The axis is
+    #: in ``strategies_used`` either way, so this is what tells a withheld
+    #: axis from an empty one; ``describe_axes`` reports it as ``axes.graph``.
+    graph_axis: str | None = None
     rejected_items: list[RejectedItem] = Field(default_factory=list)
     budget_trace: list[BudgetStep] = Field(default_factory=list)
 

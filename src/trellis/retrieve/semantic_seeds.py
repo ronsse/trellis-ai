@@ -37,9 +37,10 @@ candidates by ``item_id`` so the union pays no double-counting cost.
    ``ingest conversations``, session capture) writes it. On a corpus
    without entity-summary documents the extractor embeds the intent,
    queries the store, discards every hit, and returns ``[]``.
-   :class:`~trellis.retrieve.strategies.GraphSearch` then falls back to
-   its recency window, so the net effect is one embed call per pack and
-   no change to what is served.
+   :class:`~trellis.retrieve.strategies.GraphSearch` is then unseeded: it
+   serves its recency window only when ``TRELLIS_GRAPH_RECENCY_FALLBACK``
+   opts in (#961) and nothing otherwise, so the net effect is one embed
+   call per pack and no change to what is served.
 
    That is not hypothetical. Replayed over all 37 real intents in the
    reference deployment's 30-day pack history, against its own pgvector

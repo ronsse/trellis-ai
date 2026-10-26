@@ -225,6 +225,46 @@ GRAPH_SELECTION_SEEDED = "seeded"
 #: under :data:`GRAPH_SLICE_PRIORITISED_KEY`, not here.
 GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
 
+#: The graph axis's state when it ran and served nothing because no seed
+#: resolved and the recency window is off (:class:`GraphSearch`'s
+#: ``recency_fallback``, ``TRELLIS_GRAPH_RECENCY_FALLBACK``). Not a
+#: ``graph_selection`` value: an item records how it was chosen and this
+#: state has no item. It is reported on the pack's ``axes`` block
+#: (:func:`~trellis.retrieve.builder_factory.describe_axes`) so an agent, or
+#: a reader of the JSON, can tell an axis that was *withheld* from an empty
+#: graph.
+GRAPH_AXIS_UNSEEDED_FALLBACK_OFF = "unseeded_fallback_off"
+
+#: The other two states of the graph axis, beside
+#: :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`: it ran, or it raised during this
+#: build. Together the three are the vocabulary of ``axes["graph"]`` and of
+#: ``PACK_ASSEMBLED.graph_axis_state``; :func:`resolve_graph_axis_state` is the one
+#: place that chooses between them.
+GRAPH_AXIS_RAN = "ran"
+GRAPH_AXIS_FAILED = "failed"
+
+
+def resolve_graph_axis_state(
+    available: Collection[str],
+    ran: Collection[str],
+    graph_axis: str | None,
+) -> str:
+    """The graph axis's state for one build: ran, failed or withheld.
+
+    ``available`` names the axes the builder has, ``ran`` the ones that ran
+    this build, ``graph_axis`` is ``RetrievalReport.graph_axis``. The pack's
+    ``axes["graph"]`` and the ``PACK_ASSEMBLED.graph_axis_state`` key both come
+    from here, so the response and the event cannot disagree about a pack.
+    A builder with no graph axis at all reads ``ran``, as ``axes`` always has:
+    the absence of an axis is not a failure of it.
+    """
+    if GRAPH_STRATEGY_NAME in set(available) - set(ran):
+        return GRAPH_AXIS_FAILED
+    if graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
+        return GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
+    return GRAPH_AXIS_RAN
+
+
 #: Filter key carrying the entity ids the caller named, as seeds for the
 #: graph axis. ``PackBuilder.build_sectioned`` fills it from the union of
 #: its sections' ``entity_ids``; it is a control addressed to the graph axis
@@ -682,7 +722,8 @@ class NamespaceSeedExtractor:
     (51/85 at every n), while tripling the candidate count.
 
     Never raises, per :class:`GraphSeedExtractor`: a store failure
-    returns ``[]`` and the axis falls back to its recency window.
+    returns ``[]`` and the search is left unseeded, which serves the axis's
+    recency window only when that is opted in (#961) and nothing otherwise.
     """
 
     def __init__(
@@ -714,8 +755,9 @@ class NamespaceSeedExtractor:
         """Return live node ids the intent names, best first.
 
         ``[]`` means "this intent anchors on no entity I can name" and is
-        a valid answer — :class:`GraphSearch` reads it as *run the recency
-        window*, never as *serve nothing*.
+        a valid answer — :class:`GraphSearch` reads it as *unseeded*, which
+        serves the recency window only when that is opted in (#961) and
+        nothing otherwise. It is never an error.
         """
         keys = self._keys(intent)
         if not keys:
@@ -812,8 +854,9 @@ class NamespaceSeedExtractor:
         try:
             subgraph = self._store.get_subgraph(candidates, depth=0)
         # GRACEFUL-DEGRADATION: seeding is additive. A confirm failure
-        # yields no seeds and the axis serves its recency window, which is
-        # exactly what it served before this extractor existed.
+        # yields no seeds and the search is unseeded: exactly what it was
+        # before this extractor existed (the recency window if opted in,
+        # #961, otherwise nothing).
         except Exception:
             logger.warning("namespace_seed_confirm_failed", exc_info=True)
             return {}
@@ -1536,6 +1579,20 @@ class SemanticSearch(SearchStrategy):
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
 
 
+@dataclass(frozen=True)
+class GraphAnswer:
+    """What :meth:`GraphSearch.search_answer` returns: the items and a state.
+
+    ``axis_state`` is :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF` when the axis
+    ran and served nothing because it was unseeded with the recency window
+    off, and ``None`` otherwise — including a seeded search that happened to
+    find nothing, which is an empty graph neighbourhood, not a withheld axis.
+    """
+
+    items: list[PackItem]
+    axis_state: str | None = None
+
+
 class GraphSearch(SearchStrategy):
     """Graph traversal search via GraphStore.
 
@@ -1547,13 +1604,29 @@ class GraphSearch(SearchStrategy):
       :class:`GraphSeedExtractor` was injected and produced ids. The
       strategy expands ``get_subgraph(seeds, depth=...)``. The seeds are
       where query relevance enters; everything downstream is scoring.
-    * **Recency window** — no seeds. The strategy calls
-      ``GraphStore.query``, which is ``ORDER BY created_at DESC LIMIT n``
-      on every shipped backend (`stores/sqlite/graph.py`,
-      `stores/postgres/graph.py`, `stores/bolt_opencypher/graph.py`). It
-      takes no query argument, and there is no text index behind it. The
-      axis therefore returns **the most recently created nodes**, filtered
-      structurally and scored — without consulting what was asked.
+    * **Recency window** — no seeds, and ``recency_fallback`` is on. The
+      strategy calls ``GraphStore.query``, which is
+      ``ORDER BY created_at DESC LIMIT n`` on every shipped backend
+      (`stores/sqlite/graph.py`, `stores/postgres/graph.py`,
+      `stores/bolt_opencypher/graph.py`). It takes no query argument, and
+      there is no text index behind it. The axis therefore returns **the
+      most recently created nodes**, filtered structurally and scored —
+      without consulting what was asked.
+
+    **The recency window is off in production (#961).** Measured on the
+    reference deployment over 30 days, it was 846 of 890 graph-axis
+    servings and drew 0.025 helpful against 0.264 unhelpful citations per
+    serving, where non-graph items drew 0.083 against 0.160. With
+    ``recency_fallback=False`` an unseeded search serves **nothing** and
+    says so: :meth:`search_answer` returns
+    :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`, which the pack's ``axes``
+    block reports. Seeded and caller-seeded searches are unchanged.
+    :func:`~trellis.retrieve.builder_factory.build_pack_builder` resolves
+    ``TRELLIS_GRAPH_RECENCY_FALLBACK`` (off unless set) into the argument.
+    The constructor's own default stays ``True``, as ``build_strategies``'
+    ``graph_seed_extractor`` stays ``None``: the factory is the one
+    production construction and the one place a product default is
+    decided, and a caller building the axis by hand keeps what it had.
 
     **Since #375 the first branch has a production producer**, and that
     is the one change worth reading carefully if you knew this class
@@ -1578,13 +1651,14 @@ class GraphSearch(SearchStrategy):
     to that entity was unreachable once enough newer nodes existed. Items
     reached that way carry ``graph_selection ==``
     :data:`GRAPH_SELECTION_CALLER_SEEDED`. Ids the graph does not hold are
-    dropped; if that leaves no seed at all the axis serves its recency
-    window, so naming an unknown entity costs nothing.
+    dropped; if that leaves no seed at all the axis is unseeded, and serves
+    its recency window only when ``recency_fallback`` is on, so naming an
+    unknown entity costs exactly what naming nothing does.
 
-    **The recency window is still the branch that runs when the intent
-    names nothing resolvable**, which on the reference deployment is 34 of
-    85 real intents. Everything below therefore remains live for those
-    packs, and is stated where a reader meets it rather than in the issue
+    **With ``recency_fallback`` on, the recency window is the branch that
+    runs when the intent names nothing resolvable**, which on the reference
+    deployment was 34 of 85 real intents. Everything below is true of that
+    branch, and is stated where a reader meets it rather than in the issue
     that measured it:
 
     * The reachable set is a **fixed row count**
@@ -1664,6 +1738,7 @@ class GraphSearch(SearchStrategy):
         registry: ParameterRegistry | None = None,
         seed_extractor: GraphSeedExtractor | None = None,
         excerpt_max_chars: int = EXCERPT_MAX_CHARS,
+        recency_fallback: bool = True,
     ) -> None:
         """Build the graph axis.
 
@@ -1681,11 +1756,17 @@ class GraphSearch(SearchStrategy):
                 ``None`` is the query-independent recency window** described
                 in the class docstring. Supply one to make the axis a
                 function of the intent. An extractor that returns ``[]`` or
-                raises falls back to the recency window — seeding is
-                additive, and a seeding miss must never cost the caller an
-                axis it would otherwise have had.
+                raises leaves the search unseeded — seeding is additive, and
+                a seeding miss must not raise out of the pack path.
             excerpt_max_chars: Character cap applied to each item's excerpt
                 via :func:`truncate_excerpt`.
+            recency_fallback: Whether an unseeded search serves the recency
+                window. ``False`` serves nothing (#961, see the class
+                docstring) and :meth:`search_answer` says why. An extractor
+                that returns ``[]`` or raises is unseeded in this sense too.
+                Defaults to ``True``, the behaviour before #961;
+                ``build_pack_builder`` passes ``False`` unless
+                ``TRELLIS_GRAPH_RECENCY_FALLBACK`` is set.
         """
         self._store = graph_store
         self._curated_boost = curated_boost
@@ -1693,6 +1774,7 @@ class GraphSearch(SearchStrategy):
         self._registry = registry
         self._seed_extractor = seed_extractor
         self._excerpt_max_chars = excerpt_max_chars
+        self._recency_fallback = recency_fallback
 
     @property
     def name(self) -> str:
@@ -1845,8 +1927,9 @@ class GraphSearch(SearchStrategy):
         """Ask the injected extractor for seeds; never let it break a pack.
 
         Returns ``[]`` when no extractor is configured, when the extractor
-        declines, or when it raises. The caller reads an empty list as "run
-        the recency window" — the seeding path is additive by contract.
+        declines, or when it raises. The caller reads an empty list as
+        "unseeded" — the recency window if ``recency_fallback`` is on, nothing
+        otherwise (#961) — and the seeding path is additive by contract.
         """
         if self._seed_extractor is None:
             return []
@@ -1968,6 +2051,9 @@ class GraphSearch(SearchStrategy):
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, list[str]]:
         """Fetch the candidates: ``(nodes, edges, graph_selection, resolved_seeds)``.
 
+        ``graph_selection`` is :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`, with
+        no nodes, when the search is unseeded and the recency window is off.
+
         ``edges`` are the edges between the returned nodes, read only by
         :func:`_select_for_scoring`; the recency window has none.
         ``resolved_seeds`` are the seeds whose node the store returned,
@@ -1979,10 +2065,13 @@ class GraphSearch(SearchStrategy):
 
         When the caller named entities this graph does not hold and the
         extractor found none (its seeds are confirmed live, so any would
-        have resolved), the axis serves the recency window it served before
-        rather than an empty one — an id that names nothing must cost the
-        caller no more than not naming it did. The explicit ``seed_ids``
-        path is untouched: that caller asked for exactly that set.
+        have resolved), the search is unseeded, exactly as if the caller had
+        named nothing: an id that names nothing must cost the caller no more
+        than not naming it did. An unseeded search serves the recency window
+        when ``recency_fallback`` is on, and otherwise nothing, with
+        :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF` in the place of a
+        ``graph_selection``. The explicit ``seed_ids`` path is untouched:
+        that caller asked for exactly that set.
         """
         if seed_ids:
             nodes, edges = self._expand_seeds(seed_ids, filters=filters)
@@ -1995,6 +2084,9 @@ class GraphSearch(SearchStrategy):
                     else GRAPH_SELECTION_SEEDED
                 )
                 return nodes, edges, selection, resolved
+        if not self._recency_fallback:
+            logger.debug("graph_search_unseeded_fallback_off")
+            return [], [], GRAPH_AXIS_UNSEEDED_FALLBACK_OFF, []
         return (
             self._recency_window_nodes(filters=filters, limit=limit),
             [],
@@ -2009,6 +2101,21 @@ class GraphSearch(SearchStrategy):
         limit: int = 20,
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
+        return self.search_answer(query, limit=limit, filters=filters).items
+
+    def search_answer(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> GraphAnswer:
+        """:meth:`search`, plus the one fact an empty item list cannot carry.
+
+        :class:`~trellis.retrieve.pack_builder.PackBuilder` calls this so a
+        search withheld for want of a seed reaches the pack's ``axes`` block
+        rather than reading as a graph with nothing in it.
+        """
         filters = dict(filters) if filters else {}
         seed_ids, caller_seeds = self._resolve_seeds(query, filters)
 
@@ -2021,6 +2128,8 @@ class GraphSearch(SearchStrategy):
         nodes, edges, selection, resolved_seeds = self._select_nodes(
             seed_ids, caller_seeds, filters=filters, limit=limit
         )
+        if selection == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
+            return GraphAnswer(items=[], axis_state=selection)
 
         # Filter structural nodes client-side unless explicitly requested.
         #
@@ -2260,7 +2369,9 @@ class GraphSearch(SearchStrategy):
                     },
                 )
             )
-        return sorted(items, key=lambda x: x.relevance_score, reverse=True)
+        return GraphAnswer(
+            items=sorted(items, key=lambda x: x.relevance_score, reverse=True)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2418,14 +2529,17 @@ def build_strategies(
     parameter_registry: ParameterRegistry | None = None,
     graph_seed_extractor: GraphSeedExtractor | None = None,
     excerpt_max_chars: int = EXCERPT_MAX_CHARS,
+    graph_recency_fallback: bool = True,
 ) -> BuildStrategiesResult:
     """Build the standard strategy list from a registry.
 
     Always includes KeywordSearch and GraphSearch.  Adds SemanticSearch when
     both a VectorStore and an ``embedding_fn`` callable are available.
 
-    **The graph axis is query-independent unless you pass
-    ``graph_seed_extractor``**, and the default here is deliberately
+    **The graph axis is seeded only if you pass ``graph_seed_extractor``**
+    (or the search names ids), and unseeded it serves nothing once
+    ``graph_recency_fallback`` is off, as ``build_pack_builder`` leaves it.
+    The extractor default here is deliberately
     ``None`` even though production now seeds. The seeding wiring lives
     one layer up in
     :func:`~trellis.retrieve.builder_factory.build_pack_builder`, which
@@ -2445,7 +2559,8 @@ def build_strategies(
       **0 seeds on 37/37 intents** and changed the returned item set on
       **0/37**. The extractor filters vector hits to entity-summary
       documents and the corpus holds none, so it costs one embed per pack
-      and returns the recency window regardless. Wiring it by default
+      and left the axis on its recency window regardless (the window was
+      the unseeded default then; since #961 it is opt-in). Wiring it by default
       would have shipped a change that reports success and does nothing —
       exactly the failure shape `docs/design/swarm-handoff.md` §8 is about.
     * Auto-wiring on ``embedding_fn`` would also couple the graph axis to
@@ -2478,11 +2593,18 @@ def build_strategies(
             scoring overrides.  When ``None`` the module-level defaults
             apply unchanged.
         graph_seed_extractor: Optional :class:`GraphSeedExtractor` handed
-            to :class:`GraphSearch`.  ``None`` (the default) keeps the
-            recency-window behaviour; ``build_pack_builder`` supplies a
+            to :class:`GraphSearch`.  ``None`` (the default) leaves every
+            search unseeded unless the caller names ids;
+            ``build_pack_builder`` supplies a
             :class:`NamespaceSeedExtractor`, and it is the only in-repo
             caller that supplies one.  Never derived from ``embedding_fn``
             — see above.
+        graph_recency_fallback: Handed to :class:`GraphSearch` as
+            ``recency_fallback``. Defaults to ``True``, like the extractor
+            default above, and for the same reason: the product default is
+            decided in ``build_pack_builder``, which resolves
+            ``TRELLIS_GRAPH_RECENCY_FALLBACK`` (off unless set, #961) into
+            it. With ``False`` an unseeded graph search serves nothing.
 
     Returns:
         A :class:`BuildStrategiesResult` — never a bare list. Always
@@ -2500,6 +2622,7 @@ def build_strategies(
             registry=parameter_registry,
             seed_extractor=graph_seed_extractor,
             excerpt_max_chars=excerpt_max_chars,
+            recency_fallback=graph_recency_fallback,
         ),
     ]
 

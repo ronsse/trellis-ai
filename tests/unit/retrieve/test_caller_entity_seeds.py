@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from trellis.retrieve.builder_factory import GRAPH_SEEDING_ENV, build_pack_builder
+from trellis.retrieve.builder_factory import (
+    GRAPH_RECENCY_FALLBACK_ENV,
+    GRAPH_SEEDING_ENV,
+    build_pack_builder,
+)
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     DEFAULT_MAX_SEEDS,
@@ -66,6 +70,10 @@ LATE_PRECEDENT = "precedent:zz-late-rule"
 @pytest.fixture(autouse=True)
 def _seeding_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(GRAPH_SEEDING_ENV, raising=False)
+    # The control arm of this module is the unseeded recency window, which
+    # is opt-in since #961. Every seeded assertion here is independent of
+    # the knob; ``test_graph_recency_fallback.py`` pins the default-off arm.
+    monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "1")
 
 
 @pytest.fixture
