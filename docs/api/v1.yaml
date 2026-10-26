@@ -1892,9 +1892,13 @@ components:
 
         none was approved), ``"refused"`` when a row was declined before
 
-        anything was written and no write failed, ``"failed"`` when a write did
+        anything was written, or an approved row named no candidate
 
-        not land. The HTTP status is 200 whatever the verdict.
+        (``approved_count`` above ``named_count``), and no write failed,
+
+        ``"failed"`` when a write did not land. Rows that promoted still landed
+
+        in a ``"refused"`` run. The HTTP status is 200 whatever the verdict.
 
 
         ``approved_count`` is the rows marked approved, blank ids included;
@@ -5008,7 +5012,11 @@ paths:
 
         from the same function (:func:`promotion_verdict`), and the status code
 
-        stays 200 for every verdict.'
+        stays 200 for every verdict. An approved row with a blank
+
+        ``candidate_id`` is skipped but makes the verdict ``refused``; rows that
+
+        promoted still landed.'
       operationId: promote_learning_candidates_api_v1_learning_promotions_post
       requestBody:
         content:

@@ -696,9 +696,43 @@ class TestLearningPromotionVerdict:
         assert body["approved_count"] == 3
         assert body["named_count"] == 1
         assert body["named_count"] < body["approved_count"]
-        # The blank rows never run, so they cannot be a shortfall.
+        # The blank rows never run, so they cannot be a shortfall...
         assert body["promoted_count"] == body["named_count"] == 1
-        assert body["status"] == "ok"
+        # ...but they are approved rows that named nothing, so the run is
+        # refused. HTTP stays 200 and the promotion that landed stands.
+        assert body["status"] == "refused"
+
+    def test_only_blank_id_approved_rows_are_refused_with_http_200(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        self._candidates(tmp_path, monkeypatch, "c-ok")
+        resp = _post_promotions(
+            client,
+            [
+                {"candidate_id": "", "approved": True},
+                {"candidate_id": "   ", "approved": True},
+            ],
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "refused"
+        assert (body["approved_count"], body["named_count"]) == (2, 0)
+        assert body["promoted_count"] == 0
+        assert body["results"] == []
+
+    def test_an_unapproved_blank_id_row_is_not_a_refusal(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        _seed_candidate_target(registry)
+        (cand,) = self._candidates(tmp_path, monkeypatch, "c-ok")
+        resp = _post_promotions(
+            client,
+            [
+                {"candidate_id": "", "approved": False},
+                {"candidate_id": cand["candidate_id"], "approved": True},
+            ],
+        )
+        assert resp.json()["status"] == "ok"
 
     def test_named_count_is_in_the_audit_detail(
         self, client, registry, tmp_path, monkeypatch

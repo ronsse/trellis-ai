@@ -544,25 +544,41 @@ needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 def test_a_run_where_every_approved_row_is_blank_says_they_were_skipped(
     tmp_path: Path,
 ) -> None:
+    # The route answers ``refused`` for a blank-id row, so the toast is an
+    # error that names the skip and the verdict, not a bare success.
     msg, ok = _toast_for(
-        {"status": "ok", "approved_count": 2, "named_count": 0, "promoted_count": 0},
+        {
+            "status": "refused",
+            "approved_count": 2,
+            "named_count": 0,
+            "promoted_count": 0,
+        },
         tmp_path,
     )
 
     assert msg.startswith("Promoted 0/0 approved candidate(s).")
     assert "2 approved row(s) name no candidate_id and were skipped." in msg
-    assert ok is True
+    assert msg.endswith(" Run refused.")
+    assert ok is False
 
 
 @needs_node
 def test_a_partly_blank_run_counts_only_the_blank_rows(tmp_path: Path) -> None:
-    msg, _ = _toast_for(
-        {"status": "ok", "approved_count": 5, "named_count": 3, "promoted_count": 3},
+    # What promoted still landed, so the count says so; the run is refused.
+    msg, ok = _toast_for(
+        {
+            "status": "refused",
+            "approved_count": 5,
+            "named_count": 3,
+            "promoted_count": 3,
+        },
         tmp_path,
     )
 
     assert msg.startswith("Promoted 3/3 approved candidate(s).")
     assert "2 approved row(s) name no candidate_id and were skipped." in msg
+    assert msg.endswith(" Run refused.")
+    assert ok is False
 
 
 @needs_node
