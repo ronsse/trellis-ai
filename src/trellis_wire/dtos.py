@@ -385,7 +385,11 @@ class CommandResponse(WireModel):
     created_id: str | None = None
     # Non-blocking policy verdicts (``Enforcement.WARN``, or an
     # ``action="warn"`` rule) carried forward from
-    # ``CommandResult.warnings``. Always present, unlike the event
+    # ``CommandResult.warnings``, plus at most one
+    # ``policy_scope_unevaluated:`` entry, which is not a verdict: it says a
+    # warn-only gate could not read the policy scope, so per-target verdicts
+    # were not computed. The event's ``policy_scope_unevaluated`` key is the
+    # field to filter on. Always present, unlike the event
     # payload's conditional ``policy_warnings`` key -- an audit event
     # keeps that key absent so a zero-policy deployment emits a
     # byte-identical payload to the pre-gate world, but for a response a

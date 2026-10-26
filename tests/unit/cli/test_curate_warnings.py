@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.errors import StoreError
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -247,3 +250,66 @@ def test_each_warning_gets_its_own_line(stores_dir: Path) -> None:
         f"Warning: {WARNING_TEXT}",
         "Warning: Policy warning (pol-warn): second look",
     ]
+
+
+SCOPE_TEXT = (
+    "policy_scope_unevaluated: per-target policy warnings were not evaluated "
+    "because the policy scope could not be read (StoreError). The command was "
+    "let through because no policy could have refused it."
+)
+
+
+@pytest.fixture
+def unreadable_precedent_set(stores_dir: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A warn-only ``precedent`` policy, and a graph whose first node read fails.
+
+    The first read is the executor's policy-scope read; the scrub's own read,
+    inside the handler, is the second and is left working, so the redaction
+    goes through. Returns the id of the entity to redact.
+    """
+    target = _seed("scoped")
+    policy = Policy(
+        policy_id="pol-precedent-warn",
+        policy_type=PolicyType.MUTATION,
+        scope=PolicyScope(level="entity_type", value="precedent"),
+        rules=[PolicyRule(operation="*", condition="scoped write", action="warn")],
+        enforcement=Enforcement.ENFORCE,
+    )
+    (stores_dir / POLICY_FILENAME).write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}), encoding="utf-8"
+    )
+    real_search = SQLiteGraphStore.search_nodes
+    reads: list[int] = []
+
+    def unreadable_once(self: SQLiteGraphStore, **kwargs: Any) -> Any:
+        reads.append(1)
+        if len(reads) == 1:
+            msg = "graph unavailable"
+            raise StoreError(msg, store="graph")
+        return real_search(self, **kwargs)
+
+    monkeypatch.setattr(SQLiteGraphStore, "search_nodes", unreadable_once)
+    return target
+
+
+class TestUnevaluatedScope:
+    """A warn-only gate that could not read its scope says so on the CLI.
+
+    The structlog line that records it is below the CLI's default level, so
+    the command's own output is the only place a caller can learn that the
+    per-precedent warnings were skipped.
+    """
+
+    def test_json_carries_the_warning(self, unreadable_precedent_set: str) -> None:
+        argv = ["curate", "redact", unreadable_precedent_set, "--reason", "r", "--yes"]
+        data = json.loads(_run(argv, "--format", "json").strip())
+
+        assert data["warnings"] == [SCOPE_TEXT]
+        assert "graph unavailable" not in json.dumps(data)
+
+    def test_text_prints_the_warning(self, unreadable_precedent_set: str) -> None:
+        argv = ["curate", "redact", unreadable_precedent_set, "--reason", "r", "--yes"]
+        output = plain(_run(argv))
+
+        assert f"Warning: {SCOPE_TEXT}" in output
+        assert "graph unavailable" not in output

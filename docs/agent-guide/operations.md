@@ -1332,8 +1332,13 @@ Scope boundaries, stated plainly:
   exit `5`). If it could only warn, the command proceeds, the event payload
   carries `policy_scope_unevaluated: "warn_only"` (key absent otherwise) to say
   the per-precedent warnings were not evaluated, and a `policy_scope_unevaluated`
-  warning is logged. A precedent promoted from the target
-  between that check and the scrub is scrubbed without having been gated.
+  warning is logged. The result says it too: `CommandResult.warnings` (the CLI's
+  `warnings` JSON key and its `Warning:` lines, and the REST response's
+  `warnings`) gains one entry, after any gate warnings, that starts with
+  `policy_scope_unevaluated:` and names the exception's type, never its message.
+  The event's `policy_warnings` carries the same entry. A precedent promoted
+  from the target between that check and the scrub is scrubbed without having
+  been gated.
 - **A scrubbed precedent reads as new.** The scrub purges and re-creates the
   node, and the graph API cannot set `valid_from`, so a recency window ranks it
   as just written. Its vector row is re-embedded from the scrubbed text when
