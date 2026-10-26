@@ -1108,6 +1108,10 @@ class TestPolicyScope:
             if event.payload["operation"] == "redaction.apply"
         )
         assert executed.payload["policy_scope_unevaluated"] == "warn_only"
+        (warning,) = result.warnings
+        assert warning.startswith("policy_scope_unevaluated: ")
+        assert "(StoreError)" in warning
+        assert "graph unavailable" not in warning
 
     def test_an_empty_gate_neither_walks_the_set_twice_nor_refuses(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

@@ -57,6 +57,17 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 #: ``MutationExecutor._check_policy``.
 _SCOPE_UNEVALUATED_WARN_ONLY = "warn_only"
 
+#: The warning a result carries for that outcome. It leads with the event key's
+#: name, as :data:`_AUDIT_EMIT_FAILED_TEMPLATE` leads with its marker, so a
+#: caller can match it. ``{error_type}`` is the exception's class name, never
+#: its message: a store's text can carry query text and values, and REST, MCP
+#: and the CLI hand this to the caller.
+_SCOPE_UNEVALUATED_TEMPLATE = (
+    "policy_scope_unevaluated: per-target policy warnings were not evaluated "
+    "because the policy scope could not be read ({error_type}). The command "
+    "ran because no policy could have refused it."
+)
+
 # Exception classes the executor treats as "unexpected handler panic".
 # The catch is intentionally enumerated rather than bare ``Exception``
 # so the silent-fallback audit (``scripts/audit_silent_fallbacks.py``)
@@ -197,7 +208,8 @@ class PolicyGate(Protocol):
     # ``could_deny_by_target_type(operation) -> bool``. A gate that answers
     # ``False`` says the extra checks could only add warnings, so a command
     # whose scope cannot be resolved proceeds, marked
-    # ``policy_scope_unevaluated`` on its event, instead of being refused.
+    # ``policy_scope_unevaluated`` on its event and warned of on its result,
+    # instead of being refused.
     # A gate without it is treated as one that could deny.
 
 
@@ -597,8 +609,10 @@ class MutationExecutor:
         warn reads the scope all the same, but a failed read lets the command
         through with ``unevaluated`` set to ``"warn_only"``: refusing would
         block a command the gate could never have blocked, and the missing
-        per-entity warnings are recorded instead. ``unevaluated`` is ``None``
-        on every other path.
+        per-entity warnings are stated instead: ``unevaluated`` is the event
+        key's value, and the returned warnings gain one line naming the
+        exception's type, so the result says it too. ``unevaluated`` is
+        ``None`` on every other path.
         """
         assert self._policy_gate is not None
         allowed, message, warnings = self._policy_gate.check(command)
@@ -626,10 +640,18 @@ class MutationExecutor:
                     reason=_SCOPE_UNEVALUATED_WARN_ONLY,
                     error_type=type(exc).__name__,
                 )
+                # Joins the gate's own warnings, so it reaches the result and
+                # the event at every outcome that carries them. The key above
+                # is still what a reader filters the event log on.
                 return (
                     True,
                     message,
-                    warnings,
+                    [
+                        *warnings,
+                        _SCOPE_UNEVALUATED_TEMPLATE.format(
+                            error_type=type(exc).__name__
+                        ),
+                    ],
                     "policy_violation",
                     _SCOPE_UNEVALUATED_WARN_ONLY,
                 )
