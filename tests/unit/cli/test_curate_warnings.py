@@ -254,8 +254,8 @@ def test_each_warning_gets_its_own_line(stores_dir: Path) -> None:
 
 SCOPE_TEXT = (
     "policy_scope_unevaluated: per-target policy warnings were not evaluated "
-    "because the policy scope could not be read (StoreError). The command ran "
-    "because no policy could have refused it."
+    "because the policy scope could not be read (StoreError). The command was "
+    "let through because no policy could have refused it."
 )
 
 

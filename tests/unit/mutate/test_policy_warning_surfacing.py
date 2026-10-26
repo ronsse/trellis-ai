@@ -49,8 +49,8 @@ WARNING_TEXT = "Policy warning (pol-warn): unusual write"
 #: verbatim for the same reason: the class name is the only detail it carries.
 SCOPE_TEXT = (
     "policy_scope_unevaluated: per-target policy warnings were not evaluated "
-    "because the policy scope could not be read (StoreError). The command ran "
-    "because no policy could have refused it."
+    "because the policy scope could not be read (StoreError). The command was "
+    "let through because no policy could have refused it."
 )
 
 
