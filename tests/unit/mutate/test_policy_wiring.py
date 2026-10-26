@@ -1582,6 +1582,8 @@ class TestPolicyScopeHook:
         assert result.status == CommandStatus.REJECTED
         assert result.metadata["rejection_reason"] == "policy_scope_unresolved"
         assert "precedent set unreadable" not in result.message
+        # A refusal says so in its message; it was not "unevaluated".
+        assert result.warnings == []
         (event,) = log.events
         assert event["payload"]["reason"] == "policy_scope_unresolved"
         assert "policy_scope_unevaluated" not in event["payload"]
@@ -1623,8 +1625,15 @@ class TestPolicyScopeHook:
 
         assert handler.asked == 1
         assert result.status == CommandStatus.SUCCESS
+        # The caller is told too: the log line is all a CLI or REST caller
+        # would otherwise have, and the CLI hides it below ``-v``.
+        (warning,) = result.warnings
+        assert warning.startswith("policy_scope_unevaluated: ")
+        assert "(StoreError)" in warning
+        assert "precedent set unreadable" not in warning
         (event,) = log.events
         assert event["payload"]["policy_scope_unevaluated"] == "warn_only"
+        assert event["payload"]["policy_warnings"] == [warning]
         (line,) = (e for e in logs if e["event"] == "policy_scope_unevaluated")
         assert line["log_level"] == "warning"
         assert line["error_type"] == "StoreError"
@@ -1645,6 +1654,7 @@ class TestPolicyScopeHook:
 
         assert result.status == CommandStatus.SUCCESS
         assert [w for w in result.warnings if policy.policy_id in w]
+        assert not [w for w in result.warnings if "unevaluated" in w]
         (event,) = log.events
         assert "policy_warnings" in event["payload"]
         assert "policy_scope_unevaluated" not in event["payload"]

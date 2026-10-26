@@ -45,6 +45,14 @@ from trellis.stores.base.event_log import EventType
 #: verbatim so a test cannot pass against a constant or a truncated message.
 WARNING_TEXT = "Policy warning (pol-warn): unusual write"
 
+#: What a result says when a warn-only gate could not read its scope. Pinned
+#: verbatim for the same reason: the class name is the only detail it carries.
+SCOPE_TEXT = (
+    "policy_scope_unevaluated: per-target policy warnings were not evaluated "
+    "because the policy scope could not be read (StoreError). The command was "
+    "let through because no policy could have refused it."
+)
+
 
 class _RecordingEventLog:
     """EventLog capturing emitted events, with a settable idempotency answer.
@@ -91,12 +99,22 @@ class _Handler:
         return "created-1", "ok"
 
 
+#: The text of the scope read's failure. It must never reach a result.
+SCOPE_ERROR_TEXT = "scope read failed"
+
+
 class _ScopeFailingHandler(_Handler):
     """A handler whose policy scope cannot be read, as a redaction's can fail."""
 
     def policy_scope_commands(self, command: Command) -> list[Command]:
-        msg = "scope read failed"
-        raise StoreError(msg, store="graph")
+        raise StoreError(SCOPE_ERROR_TEXT, store="graph")
+
+
+class _ScopeReadableHandler(_Handler):
+    """A handler whose scope reads and names nothing beyond the command."""
+
+    def policy_scope_commands(self, command: Command) -> list[Command]:
+        return []
 
 
 def _warn_only_entity_type_policy() -> Policy:
@@ -160,7 +178,11 @@ OUTCOMES: list[tuple[str, CommandStatus, bool]] = [
 
 
 def _run(
-    outcome: str, *, gate: DefaultPolicyGate | None, scope_fails: bool = False
+    outcome: str,
+    *,
+    gate: DefaultPolicyGate | None,
+    scope_fails: bool = False,
+    scope_reads: bool = False,
 ) -> tuple[Any, list[dict]]:
     """Drive ``execute`` to one named outcome; return its result and events."""
     log = _RecordingEventLog(
@@ -178,7 +200,11 @@ def _run(
         "handler_store_error": StoreError("backend down", store="graph"),
         "handler_unexpected_error": RuntimeError("handler panic"),
     }.get(outcome)
-    handler_cls = _ScopeFailingHandler if scope_fails else _Handler
+    handler_cls: type[_Handler] = _Handler
+    if scope_fails:
+        handler_cls = _ScopeFailingHandler
+    elif scope_reads:
+        handler_cls = _ScopeReadableHandler
     handlers = (
         {}
         if outcome == "no_handler"
@@ -241,20 +267,27 @@ class TestEveryPostGateOutcomeCarriesWarnings:
         assert payload["policy_warnings"] == [WARNING_TEXT]
 
 
+#: The outcomes a warn-only gate's unreadable scope can accompany.
+SCOPE_READING_OUTCOMES = [
+    o for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")
+]
+
+
 class TestEveryPostGateOutcomeCarriesTheUnevaluatedScopeMarker:
     """``policy_scope_unevaluated`` rides every outcome, like the warnings.
 
     A warn-only gate lets a command through when its scope cannot be read,
     and the marker is the only record that per-target warnings were skipped.
     It is threaded through as many emit sites as the warnings are, so it is
-    enumerated the same way. ``policy_deny`` cannot arise under a warn-only
-    gate, and ``no_handler`` has no handler to read a scope from.
+    enumerated the same way, and the result says it as well: the CLI and REST
+    have no other way to. ``policy_deny`` cannot arise under a warn-only gate,
+    and ``no_handler`` has no handler to read a scope from.
     """
 
     @pytest.mark.parametrize(
         ("outcome", "status", "emits"),
-        [o for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
-        ids=[o[0] for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+        SCOPE_READING_OUTCOMES,
+        ids=[o[0] for o in SCOPE_READING_OUTCOMES],
     )
     def test_event_carries_the_marker(
         self, outcome: str, status: CommandStatus, emits: bool
@@ -268,16 +301,65 @@ class TestEveryPostGateOutcomeCarriesTheUnevaluatedScopeMarker:
 
     @pytest.mark.parametrize(
         ("outcome", "status", "emits"),
-        [o for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
-        ids=[o[0] for o in OUTCOMES if o[0] not in ("policy_deny", "no_handler")],
+        SCOPE_READING_OUTCOMES,
+        ids=[o[0] for o in SCOPE_READING_OUTCOMES],
+    )
+    def test_result_says_the_scope_was_not_evaluated(
+        self, outcome: str, status: CommandStatus, emits: bool
+    ) -> None:
+        """The event key and the result's warning appear together, or not at all."""
+        gate = DefaultPolicyGate([_warn_only_entity_type_policy()])
+        result, events = _run(outcome, gate=gate, scope_fails=True)
+
+        assert result.status == status
+        assert result.warnings == [SCOPE_TEXT]
+        # The exception's type, never what it said.
+        assert SCOPE_ERROR_TEXT not in " ".join(result.warnings)
+        payload = events[-1]["payload"]
+        assert payload["policy_warnings"] == [SCOPE_TEXT]
+        assert SCOPE_ERROR_TEXT not in repr(payload)
+
+    @pytest.mark.parametrize(
+        ("outcome", "status", "emits"),
+        SCOPE_READING_OUTCOMES,
+        ids=[o[0] for o in SCOPE_READING_OUTCOMES],
     )
     def test_a_readable_scope_carries_no_marker(
         self, outcome: str, status: CommandStatus, emits: bool
     ) -> None:
         gate = DefaultPolicyGate([_warn_only_entity_type_policy()])
-        _, events = _run(outcome, gate=gate)
+        result, events = _run(outcome, gate=gate, scope_reads=True)
 
         assert "policy_scope_unevaluated" not in events[-1]["payload"]
+        assert "policy_warnings" not in events[-1]["payload"]
+        assert result.warnings == []
+
+    @pytest.mark.parametrize(
+        ("outcome", "status", "emits"),
+        SCOPE_READING_OUTCOMES,
+        ids=[o[0] for o in SCOPE_READING_OUTCOMES],
+    )
+    def test_no_entity_type_rule_means_the_scope_is_never_asked(
+        self, outcome: str, status: CommandStatus, emits: bool
+    ) -> None:
+        """A global warning is the gate's whole answer, so the read never runs.
+
+        The handler would fail if it were asked, so a warning or a marker here
+        would mean the executor read a scope the gate cannot use.
+        """
+        gate = DefaultPolicyGate([_policy(deny=False)])
+        result, events = _run(outcome, gate=gate, scope_fails=True)
+
+        assert result.status == status
+        assert result.warnings == [WARNING_TEXT]
+        assert "policy_scope_unevaluated" not in events[-1]["payload"]
+
+    @pytest.mark.parametrize("outcome", ["success", "handler_store_error"])
+    def test_a_gate_warning_comes_first(self, outcome: str) -> None:
+        gate = DefaultPolicyGate([_policy(deny=False), _warn_only_entity_type_policy()])
+        result, _ = _run(outcome, gate=gate, scope_fails=True)
+
+        assert result.warnings == [WARNING_TEXT, SCOPE_TEXT]
 
 
 class TestStage1IsTheOneException:
@@ -328,3 +410,20 @@ class TestTransparencyIsPreserved:
         assert result.warnings == []
         for event in events:
             assert "policy_warnings" not in event["payload"]
+
+    @pytest.mark.parametrize("gate", [None, "empty"], ids=["no_gate", "empty_gate"])
+    def test_a_failing_scope_says_nothing_without_policies(
+        self, gate: str | None
+    ) -> None:
+        """No policy, no scope read, so nothing to be unable to evaluate."""
+        result, events = _run(
+            "success",
+            gate=DefaultPolicyGate([]) if gate == "empty" else None,
+            scope_fails=True,
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert result.warnings == []
+        payload = events[-1]["payload"]
+        assert "policy_warnings" not in payload
+        assert "policy_scope_unevaluated" not in payload

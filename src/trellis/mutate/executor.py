@@ -57,6 +57,19 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 #: ``MutationExecutor._check_policy``.
 _SCOPE_UNEVALUATED_WARN_ONLY = "warn_only"
 
+#: The warning a result carries for that outcome. It holds on every outcome
+#: that carries it, a duplicate or a refused write included, so it says the
+#: command was let through rather than that it ran. It leads with the event
+#: key's name, as :data:`_AUDIT_EMIT_FAILED_TEMPLATE` leads with its marker, so
+#: a caller can match it. ``{error_type}`` is the exception's class name, never
+#: its message: a store's text can carry query text and values, and REST, MCP
+#: and the CLI hand this to the caller.
+_SCOPE_UNEVALUATED_TEMPLATE = (
+    "policy_scope_unevaluated: per-target policy warnings were not evaluated "
+    "because the policy scope could not be read ({error_type}). The command "
+    "was let through because no policy could have refused it."
+)
+
 # Exception classes the executor treats as "unexpected handler panic".
 # The catch is intentionally enumerated rather than bare ``Exception``
 # so the silent-fallback audit (``scripts/audit_silent_fallbacks.py``)
@@ -197,7 +210,8 @@ class PolicyGate(Protocol):
     # ``could_deny_by_target_type(operation) -> bool``. A gate that answers
     # ``False`` says the extra checks could only add warnings, so a command
     # whose scope cannot be resolved proceeds, marked
-    # ``policy_scope_unevaluated`` on its event, instead of being refused.
+    # ``policy_scope_unevaluated`` on its event and warned of on its result,
+    # instead of being refused.
     # A gate without it is treated as one that could deny.
 
 
@@ -308,7 +322,11 @@ class MutationExecutor:
         # callers — a policy could fire on every write and nothing
         # downstream could tell. An empty gate yields ``[]``, which is
         # ``CommandResult.warnings``' own default, so the transparency of
-        # the default posture is unaffected.
+        # the default posture is unaffected. The list is not only verdicts:
+        # when a warn-only gate could not read a handler's policy scope it
+        # also carries one ``policy_scope_unevaluated:`` entry, which says a
+        # verdict was not computed. The event's ``policy_scope_unevaluated``
+        # key is the field to filter on.
         #
         # The rule from here down is uniform and deliberately has no
         # exceptions: **every outcome reachable after this point carries
@@ -597,8 +615,10 @@ class MutationExecutor:
         warn reads the scope all the same, but a failed read lets the command
         through with ``unevaluated`` set to ``"warn_only"``: refusing would
         block a command the gate could never have blocked, and the missing
-        per-entity warnings are recorded instead. ``unevaluated`` is ``None``
-        on every other path.
+        per-entity warnings are stated instead: ``unevaluated`` is the event
+        key's value, and the returned warnings gain one line naming the
+        exception's type, so the result says it too. ``unevaluated`` is
+        ``None`` on every other path.
         """
         assert self._policy_gate is not None
         allowed, message, warnings = self._policy_gate.check(command)
@@ -626,10 +646,18 @@ class MutationExecutor:
                     reason=_SCOPE_UNEVALUATED_WARN_ONLY,
                     error_type=type(exc).__name__,
                 )
+                # Joins the gate's own warnings, so it reaches the result and
+                # the event at every outcome that carries them. The key above
+                # is still what a reader filters the event log on.
                 return (
                     True,
                     message,
-                    warnings,
+                    [
+                        *warnings,
+                        _SCOPE_UNEVALUATED_TEMPLATE.format(
+                            error_type=type(exc).__name__
+                        ),
+                    ],
                     "policy_violation",
                     _SCOPE_UNEVALUATED_WARN_ONLY,
                 )
@@ -1043,13 +1071,19 @@ class MutationExecutor:
         # ``policy_violation`` rejection path. Keeping the key absent
         # otherwise means a deployment with no policies emits a
         # byte-identical payload to the pre-gate world, which is what
-        # makes the default posture verifiably transparent.
+        # makes the default posture verifiably transparent. The list is not
+        # only verdicts: on the warn-only path it can also end with one
+        # ``policy_scope_unevaluated:`` entry (see ``_check_policy``), which
+        # says a verdict was not computed. Filter on the
+        # ``policy_scope_unevaluated`` key below, not on the list.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
         # Added only when Stage 2 let a command through without evaluating
         # the policies scoped to the entities it reaches (see
         # ``_check_policy``), so a reader can tell "no policy warned" from
-        # "none was asked". Absent otherwise, like ``policy_warnings``.
+        # "none was asked". Absent otherwise, like ``policy_warnings``. This
+        # key is the field to filter on: the same fact also rides
+        # ``policy_warnings`` as prose for the caller's benefit.
         if policy_scope_unevaluated is not None:
             payload["policy_scope_unevaluated"] = policy_scope_unevaluated
         # Scrubbed on the copy handed to ``emit`` only; see _scrub_jsonb_unsafe.
