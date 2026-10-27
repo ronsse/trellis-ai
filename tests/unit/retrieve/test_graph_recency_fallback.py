@@ -43,6 +43,7 @@ from trellis.retrieve.builder_factory import (
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
+    GRAPH_AXIS_ABSENT,
     GRAPH_AXIS_UNSEEDED_FALLBACK_OFF,
     GRAPH_CALLER_SEED_IDS_KEY,
     GRAPH_SELECTION_CALLER_SEEDED,
@@ -50,6 +51,7 @@ from trellis.retrieve.strategies import (
     GRAPH_SELECTION_SEEDED,
     GraphSearch,
     SearchStrategy,
+    resolve_graph_axis_state,
 )
 from trellis.schemas.pack import PackItem, SectionRequest
 from trellis.stores.base.event_log import EventType
@@ -398,6 +400,65 @@ class TestAxesBlock:
         assert axes["graph"] == "failed"
         assert axes["failed"] == ["graph"]
 
+    def test_a_builder_with_no_graph_strategy_reads_absent(self) -> None:
+        """Not ``ran`` (#985): it never existed, so it cannot have run.
+
+        ``ran`` here read as "the graph found nothing" for a deployment that
+        never configured the axis. ``absent`` is neither ``ran`` nor
+        ``failed``, and ``axes.failed`` lists only axes the builder has.
+        """
+        axes = describe_axes(
+            _keyword_only_builder(),
+            ["keyword"],
+            embedder_configured=False,
+            graph_axis=None,
+        )
+
+        assert axes["graph"] == GRAPH_AXIS_ABSENT == "absent"
+        assert "graph" not in axes["available"]
+        assert "graph" not in axes["ran"]
+        assert axes["failed"] == []
+
+    @pytest.mark.parametrize(
+        ("available", "ran", "graph_axis", "expected"),
+        [
+            (["keyword"], ["keyword"], None, "absent"),
+            ([], [], None, "absent"),
+            (["keyword", "graph"], ["keyword", "graph"], None, "ran"),
+            (
+                ["keyword", "graph"],
+                ["keyword", "graph"],
+                GRAPH_AXIS_UNSEEDED_FALLBACK_OFF,
+                GRAPH_AXIS_UNSEEDED_FALLBACK_OFF,
+            ),
+            (["keyword", "graph"], ["keyword"], None, "failed"),
+        ],
+        ids=["absent", "no_axes", "ran", "withheld", "failed"],
+    )
+    def test_the_four_states_resolve_apart(
+        self,
+        available: list[str],
+        ran: list[str],
+        graph_axis: str | None,
+        expected: str,
+    ) -> None:
+        assert resolve_graph_axis_state(available, ran, graph_axis) == expected
+
+
+def _keyword_only_builder(event_log: Any = None) -> PackBuilder:
+    """A hand-assembled builder with no graph strategy; no surface builds one."""
+    keyword = MagicMock(spec=SearchStrategy)
+    keyword.name = "keyword"
+    keyword.search.return_value = [
+        PackItem(
+            item_id="doc-1",
+            item_type="document",
+            excerpt="payroll notes",
+            relevance_score=0.5,
+        )
+    ]
+    return PackBuilder(strategies=[keyword], event_log=event_log)
+
 
 HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 
@@ -577,3 +638,24 @@ class TestPackAssembledRecordsTheAxis:
         row = _assembled(registry, pack.pack_id)
         assert row["graph_axis_state"] == "failed"
         assert [f["strategy"] for f in row["strategy_failures"]] == ["graph"]
+
+    @pytest.mark.parametrize("sectioned", [False, True])
+    def test_a_builder_with_no_graph_strategy_records_absent(
+        self, registry: StoreRegistry, sectioned: bool
+    ) -> None:
+        """The event and the response agree that the axis was never there (#985)."""
+        builder = _keyword_only_builder(registry.operational.event_log)
+
+        if sectioned:
+            pack = builder.build_sectioned(
+                BLIND_INTENT, sections=[SectionRequest(name="a")]
+            )
+            report = pack.sections[0].retrieval_report
+        else:
+            pack = builder.build(BLIND_INTENT)
+            report = pack.retrieval_report
+
+        row = _assembled(registry, pack.pack_id)
+        assert row["graph_axis_state"] == "absent"
+        assert row["graph_axis_state"] == _axes_graph(builder, report)
+        assert row["strategy_failures"] == []
