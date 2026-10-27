@@ -130,7 +130,7 @@ _PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
 #: (``pre_treatment_hook_feedback_seen``) so that failure is visible, not
 #: silent, which is how a future change to the harness's wording would show.
 HOOK_FEEDBACK_PATTERN = re.compile(
-    r"(?:Stop|SubagentStop)\s+hook\s+(?:feedback|error)\b", re.IGNORECASE
+    r"(?:Stop|SubagentStop)\s+hook\s+feedback\b", re.IGNORECASE
 )
 
 

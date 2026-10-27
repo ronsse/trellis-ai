@@ -215,14 +215,16 @@ class HoldoutRows(TrellisModel):
 class HoldoutFunnel(TrellisModel):
     """Every captured session, from scanned join to analysed unit.
 
-    Each stage counts the sessions it removes, in order, so the counts
-    from ``main_sessions`` to ``unfinished`` plus ``eligible`` sum to
-    ``sessions``, and ``eligible`` minus ``cut_offs_excluded`` and
-    ``outcome_missing`` is ``analysed``. ``pre_treatment_excluded`` is the
-    last stage before ``eligible``: tasks whose first retrieval followed a
-    stop hook's feedback. ``eligible_with_unparsed_pack_ids`` is not a stage:
-    it counts the eligible tasks whose join reports a pack id the capture
-    could not parse, so their first parsed pack may not be their first call.
+    Each stage counts the sessions it removes, in order, so the stage
+    counts from ``main_sessions`` to ``pre_treatment_excluded`` plus
+    ``eligible`` sum to ``sessions`` (the ``no_retrieval_*`` fields split
+    ``no_retrieval`` and are not stages), and ``eligible`` minus
+    ``cut_offs_excluded`` and ``outcome_missing`` is ``analysed``.
+    ``pre_treatment_excluded`` is the last stage before ``eligible``: tasks
+    whose first retrieval followed a stop hook's feedback.
+    ``eligible_with_unparsed_pack_ids`` is not a stage: it counts the
+    eligible tasks whose join reports a pack id the capture could not parse,
+    so their first parsed pack may not be their first call.
 
     ``no_retrieval`` is the total of four sub-counts, by why the join holds
     no pack: ``never_called`` (no retrieval result in the transcript),

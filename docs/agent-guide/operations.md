@@ -3338,7 +3338,11 @@ counts those as `pre_treatment_excluded`. A join written before capture
 recorded the timing is undecidable: it stays in, `pre_treatment_unknown` counts
 it, and the exclusion reads "partially applied" until none are left (a join is
 rewritten with the timing only when its session is parsed again, so a
-watermark reset back-fills old ones). `pre_treatment_hook_feedback_seen`
+watermark reset back-fills old ones; a back-fill also re-dates each rewritten
+join, so the main-session rollup, which windows on the join's `occurred_at`,
+pulls those old sessions into the current window). The rule is per session:
+an earlier stop's feedback in a multi-prompt session also excludes a later
+task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
 sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`
 no longer matches the harness's wording. The rule's other half, a first

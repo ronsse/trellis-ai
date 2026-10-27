@@ -706,6 +706,21 @@ class TestExclusions:
         assert "commit" in pre.note
         assert not any("HOOK_FEEDBACK_PATTERN" in note for note in report.notes)
 
+    def test_every_decided_task_excluded_still_reads_applied(
+        self, log: HoldoutLog
+    ) -> None:
+        # Nothing decided is left in eligible, so the decided count must come
+        # from the exclusion stage too, or the report says "not applied".
+        self._seed_timed(log, after=3, before=0, unknown=2)
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_excluded == 3
+        assert report.funnel.eligible == 2
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is True
+        assert pre.excluded == 3
+
     def test_the_excluded_tasks_leave_every_arm_count(self, log: HoldoutLog) -> None:
         # Arms alternate by task index, so the four excluded tasks (the first
         # four) are two served and two withheld.

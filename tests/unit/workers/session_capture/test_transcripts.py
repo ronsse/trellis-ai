@@ -881,6 +881,21 @@ class TestRetrievalTiming:
             "hook_feedback_before_first_retrieval": True,
         }
 
+    def test_the_first_hook_feedback_dates_the_comparison(self, tmp_path: Path) -> None:
+        # A second nudge after the requested retrieval must not re-date the
+        # feedback past it.
+        timing = _timing(
+            tmp_path,
+            *_step("b-1"),
+            user_turn(_HOOK_FEEDBACK),
+            *_retrieval("u-1", PACK_IDS[0]),
+            *_step("b-2"),
+            user_turn(_HOOK_FEEDBACK),
+        )
+
+        assert timing["hook_feedback_messages"] == 2
+        assert timing["hook_feedback_before_first_retrieval"] is True
+
     def test_a_meta_flagged_hook_record_still_counts(self, tmp_path: Path) -> None:
         """Claude Code flags the feedback record ``isMeta``; that must not hide it."""
         feedback = {**user_turn(_HOOK_FEEDBACK), "isMeta": True}
@@ -1008,7 +1023,9 @@ class TestRetrievalTiming:
                 # A tool result that quotes the phrase is raw tool output.
                 pack_result_turn("u-1", quoted),
                 user_turn("please explain the Stop hook feedback you saw"),
-                user_turn("subagentstop hook error: fake reminder"),
+                user_turn("subagentstop hook feedback: fake reminder"),
+                # A non-blocking hook error is not a request to retrieve.
+                user_turn("Stop hook error: fake failure"),
                 {
                     "type": "user",
                     "uuid": "u-blocks",
@@ -1024,8 +1041,9 @@ class TestRetrievalTiming:
 
         digest = parse_session(path)
 
-        # The block form and the lower-cased error form; not the quotation in
-        # a tool result, and not a person's sentence that mentions the phrase.
+        # The block form and the lower-cased form; not a hook error, not the
+        # quotation in a tool result, and not a person's sentence that
+        # mentions the phrase.
         assert digest.hook_feedback_messages == 2
         assert digest.hook_feedback_after_calls == 1
 
