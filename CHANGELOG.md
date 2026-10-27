@@ -994,6 +994,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A refused precedent supersede is `target_protected`, not a `stale_recheck`
+  or a missing target (#994).** `mark_document_superseded` returns the reason
+  it did not apply (`None` when it did) instead of a bool, and a protected
+  `precedent://learning/...` target now reports `target_protected` where it
+  used to read as a vanished one. The successor's `reconciliation` marker and
+  the `RECONCILE_DEGRADED` event both say so, and the marker is not
+  `stale_recheck` because a re-judge would be refused again. The session
+  capture sweep maps it to `supersede_target_protected` rather than
+  `supersede_target_missing`. The reason is not a judge failure
+  (`judge_failure=false`), and a protected target still emits no
+  `MEMORY_OP_JUDGED`: that stream pairs a verdict with its outcome, and a
+  verdict that never took effect has none. `precedent_sync_health` also
+  breaks a same-microsecond tie toward the failure, lists a failed reinstate
+  older than a capped `precedent.demoted` read as `uncertain` rather than
+  unresolved (the dropped demote may have superseded it), and its vector
+  warning now says semantic retrieval withholds the demoted snapshot, which is
+  what the collect seam does, not that it serves it. A test id now carries
+  markup so the escaped-id CLI test discriminates.
+
 - **`promote-learning`: re-running a file after a refused run no longer
   re-promotes the rows that landed (#983).** A mixed run exits `2` /
   `refused` and the next move is to fix the bad row and run the same file
@@ -1007,7 +1026,12 @@ All notable changes to Trellis will be documented in this file.
   is carried in a new `already_promoted_count` (CLI JSON, REST response,
   review-decision event detail; `docs/api/v1.yaml` regenerated) apart from
   `promoted_count`. A `promoted_incomplete` row and a row with changed
-  content still write. `review-ready --approve` keeps refusing an existing
+  content still write. A re-run skips a row whose payload keys still match,
+  so a key since dropped from `precedent_properties` is not removed by a
+  re-run, on purpose: a key a later writer added, a lifecycle stamp say, reads
+  the same as a dropped one, and that is not content the promotion owns
+  ([#996](https://github.com/ronsse/trellis-ai/issues/996)).
+  `review-ready --approve` keeps refusing an existing
   precedent as `refused_already_promoted`. Two smaller fixes ride with it:
   `review-ready --approve ""` could raise `IndexError` when a malformed
   artifact held a ready row with a blank `candidate_id`, and is now refused as

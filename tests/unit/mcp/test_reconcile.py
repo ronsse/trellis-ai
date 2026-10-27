@@ -345,6 +345,12 @@ class TestSupersedeNeverStampsAPrecedentRow:
         Defective subject: drop the ``is_promoted_precedent_document`` branch in
         ``mark_document_superseded`` and the row comes back with a
         ``superseded`` lifecycle and the result reads ``(supersedes ...)``.
+
+        The refusal is also *named*: the successor's marker and the
+        ``RECONCILE_DEGRADED`` event both say ``target_protected``, not the
+        ``stale_recheck`` of a lock race (#994), and the event is not a judge
+        failure, because the judge answered. Defective subject for that half:
+        return ``STALE_RECHECK`` from the precedent branch.
         """
         before = self._seed_precedent_row(temp_registry)
         _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
@@ -362,8 +368,14 @@ class TestSupersedeNeverStampsAPrecedentRow:
         # judged event pointing at a row that was never stamped.
         new_meta = docs.get(new_id)["metadata"]
         assert "supersedes_doc_id" not in new_meta
-        assert new_meta["reconciliation"] == "stale_recheck"
+        assert new_meta["reconciliation"] == "target_protected"
         assert _judged_events(temp_registry) == []
+        # Counted as what it was: a real verdict the seam refused, not a race
+        # and not a failed judge.
+        (degraded,) = _degraded_events(temp_registry)
+        assert degraded.payload["reason"] == ReconcileFallbackReason.TARGET_PROTECTED
+        assert degraded.payload["judge_failure"] is False
+        assert degraded.payload["subject_ref_id"] == new_id
 
     def test_the_stamp_seam_refuses_a_precedent_row_and_says_so(
         self, temp_registry: StoreRegistry
@@ -397,7 +409,7 @@ class TestSupersedeNeverStampsAPrecedentRow:
         finally:
             structlog.configure(**prior)
 
-        assert applied is False
+        assert applied is ReconcileFallbackReason.TARGET_PROTECTED
         assert docs.get(_PRECEDENT_ID) == before
         refused = [
             e for e in logs if e["event"] == "supersede_target_is_promoted_precedent"
@@ -676,11 +688,14 @@ class TestReverifyUnderLock:
         def supersede_candidate() -> None:
             # A concurrent writer wins its own SUPERSEDE against the
             # candidate while our model is thinking — content unchanged.
-            mark_document_superseded(
-                docs,
-                old_doc_id=base_id,
-                new_doc_id="someone-elses-successor",
-                vector_store=None,
+            assert (
+                mark_document_superseded(
+                    docs,
+                    old_doc_id=base_id,
+                    new_doc_id="someone-elses-successor",
+                    vector_store=None,
+                )
+                is None
             )
 
         _enable(
@@ -1076,7 +1091,13 @@ class TestDegradedEmission:
         )
 
     def test_judge_failure_reasons_is_derived_not_hand_listed(self) -> None:
-        """Exactly one reason is excluded, and the set is computed.
+        """Exactly two reasons are excluded, and the set is computed.
+
+        Both excluded reasons are a usable verdict that was not applied: a
+        lock race, and a SUPERSEDE refused because its target is a promoted
+        precedent's row (#994). Counting the second as a broken judge would
+        put a correctly refused verdict in the number that answers *how often
+        does the judge fail*.
 
         Written as a complement so that adding a reason to the enum enrolls it
         as a judge failure by default — the safe direction. A hand-kept roster
@@ -1084,11 +1105,12 @@ class TestDegradedEmission:
         sites), and here that rot is silent: a reason missing from the set
         would simply stop being counted as a failure.
         """
-        assert ReconcileFallbackReason.STALE_RECHECK not in JUDGE_FAILURE_REASONS
-        expected = set(ReconcileFallbackReason) - {
-            ReconcileFallbackReason.STALE_RECHECK
+        not_failures = {
+            ReconcileFallbackReason.STALE_RECHECK,
+            ReconcileFallbackReason.TARGET_PROTECTED,
         }
-        assert expected == JUDGE_FAILURE_REASONS
+        assert not not_failures & JUDGE_FAILURE_REASONS
+        assert set(ReconcileFallbackReason) - not_failures == JUDGE_FAILURE_REASONS
 
 
 # ---------------------------------------------------------------------------
@@ -1189,8 +1211,11 @@ class TestSupersedePreservesRecency:
         # A year passes; the successor lands and supersedes the old note.
         clock["now"] = now
         docs.put("new-doc", "The current note about widget calibration.", {})
-        assert mark_document_superseded(
-            docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
+        assert (
+            mark_document_superseded(
+                docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
+            )
+            is None
         )
 
         superseded = docs.get("old-doc")
@@ -1238,8 +1263,11 @@ class TestSupersedePreservesRecency:
 
         clock["now"] = now
         docs.put("new-doc", body, {})
-        assert mark_document_superseded(
-            docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
+        assert (
+            mark_document_superseded(
+                docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
+            )
+            is None
         )
 
         # Half-life pinned at the call site rather than inherited from
@@ -1295,7 +1323,7 @@ class TestSupersedePreservesRecency:
 
 
 class TestSupersedeTargetVanished:
-    """``mark_document_superseded`` returning ``False`` is a real outcome.
+    """``mark_document_superseded`` refusing is a real outcome.
 
     ``_reverify_candidate`` treats a missing candidate row as stale and
     downgrades before the commit, so within one process this branch is
@@ -1307,7 +1335,10 @@ class TestSupersedeTargetVanished:
     """
 
     @staticmethod
-    def _fail_supersede(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+    def _fail_supersede(
+        monkeypatch: pytest.MonkeyPatch,
+        reason: ReconcileFallbackReason = ReconcileFallbackReason.STALE_RECHECK,
+    ) -> list[dict[str, str]]:
         calls: list[dict[str, str]] = []
 
         def _fake(
@@ -1316,9 +1347,9 @@ class TestSupersedeTargetVanished:
             old_doc_id: str,
             new_doc_id: str,
             vector_store: Any = None,
-        ) -> bool:
+        ) -> ReconcileFallbackReason:
             calls.append({"old_doc_id": old_doc_id, "new_doc_id": new_doc_id})
-            return False
+            return reason
 
         monkeypatch.setattr(server_mod, "mark_document_superseded", _fake)
         return calls
@@ -1350,6 +1381,34 @@ class TestSupersedeTargetVanished:
         assert new_meta["reconciliation"] == "stale_recheck"
         assert "supersedes_doc_id" not in new_meta
         # 3. No judged event about a subject that is not there.
+        assert _judged_events(temp_registry) == []
+        # 4. The degradation names the reason the seam returned, and a vanished
+        #    target is the race, not a judge failure.
+        (degraded,) = _degraded_events(temp_registry)
+        assert degraded.payload["reason"] == ReconcileFallbackReason.STALE_RECHECK
+        assert degraded.payload["judge_failure"] is False
+
+    def test_the_seams_reason_is_what_the_marker_and_event_carry(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The caller forwards the reason; it does not pick one of its own.
+
+        The end-to-end precedent test pins the one real producer of
+        ``target_protected``. This pins the caller's half on its own, with the
+        reason supplied from outside, so a caller that hard-coded
+        ``stale_recheck`` again would fail here even if the seam changed.
+        """
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
+        self._fail_supersede(monkeypatch, ReconcileFallbackReason.TARGET_PROTECTED)
+
+        new_id = _doc_id(save_memory(_NEAR))
+
+        new_meta = temp_registry.knowledge.document_store.get(new_id)["metadata"]
+        assert new_meta["reconciliation"] == "target_protected"
+        assert "supersedes_doc_id" not in new_meta
+        (degraded,) = _degraded_events(temp_registry)
+        assert degraded.payload["reason"] == ReconcileFallbackReason.TARGET_PROTECTED
         assert _judged_events(temp_registry) == []
 
     def test_the_successor_write_is_not_re_stamped(
@@ -1426,7 +1485,7 @@ class TestSupersedeTargetVanished:
                         new_doc_id="new-doc",
                         vector_store=None,
                     )
-                    is False
+                    is ReconcileFallbackReason.STALE_RECHECK
                 )
         finally:
             structlog.configure(**prior)

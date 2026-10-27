@@ -387,6 +387,48 @@ class TestApplySupersessions:
         assert row["metadata"]["reconciliation"] == "stale_recheck"
         assert row["updated_at"] == row["created_at"]
 
+    def test_a_protected_target_is_reported_as_protected_not_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """A promoted precedent's row is refused, and the sweep says so (#994).
+
+        Unreachable from a live sweep today: ``_load_existing`` reads only the
+        capture id prefix, so a precedent is never a candidate's target. The
+        test drives ``apply_supersessions`` directly, which is the contract a
+        wider loader would meet. Un-fixed, the refusal read as
+        ``supersede_target_missing`` and the successor was filed under
+        ``stale_recheck``, the queue a later sweep re-judges.
+        """
+        from trellis.stores.sqlite.document import SQLiteDocumentStore
+
+        precedent_id = "precedent://learning/fixture-gateway"
+        docs = SQLiteDocumentStore(tmp_path / "docs.db")
+        docs.put(precedent_id, "a promoted precedent", {"document_form": "precedent"})
+        docs.put("new-doc", "successor", {"supersedes_doc_id": precedent_id})
+        before = docs.get(precedent_id)
+        report = CaptureReport(transcripts_root="/nowhere")
+
+        reconcile_pass.apply_supersessions(
+            docs,
+            [_candidate("new-doc", supersedes=precedent_id)],
+            report,
+            vector_store=None,
+        )
+
+        assert report.supersessions_failed == 1
+        assert report.warnings == [
+            {
+                "kind": "supersede_target_protected",
+                "old_doc_id": precedent_id,
+                "new_doc_id": "new-doc",
+            }
+        ]
+        # The precedent row is untouched, and the successor stops claiming it.
+        assert docs.get(precedent_id) == before
+        row = docs.get("new-doc")
+        assert "supersedes_doc_id" not in row["metadata"]
+        assert row["metadata"]["reconciliation"] == "target_protected"
+
     def test_missing_successor_does_not_stale_mark_anything(
         self, tmp_path: Path
     ) -> None:

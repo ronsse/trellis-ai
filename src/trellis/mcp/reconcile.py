@@ -113,6 +113,13 @@ MARKER_SKIPPED = "skipped"
 #: downgraded to a plain ADD under the lock (re-verify-under-lock race).
 MARKER_STALE = "stale_recheck"
 
+#: Marker: the model's SUPERSEDE verdict named a promoted precedent's row, which
+#: reconcile never stamps (#957), so the successor was kept as a plain ADD. Not
+#: :data:`MARKER_STALE`: that marker queues the memory for a later re-judge, and
+#: re-judging cannot change the answer, because the refusal is of the target and
+#: not of the verdict.
+MARKER_TARGET_PROTECTED = "target_protected"
+
 
 class ReconcileDecision(StrEnum):
     """The four verdicts a reconciliation call can produce.
@@ -160,15 +167,45 @@ class ReconcileFallbackReason(StrEnum):
     #: reporting a correctly-handled race as a degradation — the
     #: ``sessions_skipped_empty`` split (#332), one layer over.
     STALE_RECHECK = "stale_recheck"
+    #: **Not a judge failure either, and not a race.** The judge answered
+    #: SUPERSEDE and the answer was usable; the target is a promoted
+    #: precedent's row, which this seam refuses to stamp
+    #: (:func:`mark_document_superseded`). Kept apart from
+    #: :attr:`STALE_RECHECK` because folding them made a refused verdict read
+    #: as "a correctly handled race" (#994), and the two want different
+    #: follow-ups: a race is re-judged by a later sweep, a protected target is
+    #: not. The reason implies the verdict (``supersede``); the event's
+    #: ``decision`` is still the fallback ADD.
+    TARGET_PROTECTED = "target_protected"
 
 
 #: The reasons that mean *the judge did not answer usably*. The complement is
 #: deliberate and is the whole reason this set is written down rather than
-#: derived as "every reason": see
-#: :attr:`ReconcileFallbackReason.STALE_RECHECK`.
+#: derived as "every reason": see :attr:`ReconcileFallbackReason.STALE_RECHECK`
+#: and :attr:`ReconcileFallbackReason.TARGET_PROTECTED`, both of which are a
+#: usable verdict that was not applied.
 JUDGE_FAILURE_REASONS: frozenset[ReconcileFallbackReason] = frozenset(
     ReconcileFallbackReason
-) - {ReconcileFallbackReason.STALE_RECHECK}
+) - {
+    ReconcileFallbackReason.STALE_RECHECK,
+    ReconcileFallbackReason.TARGET_PROTECTED,
+}
+
+
+def marker_for_fallback(reason: ReconcileFallbackReason | None) -> str:
+    """The ``reconciliation`` metadata marker a fallback reason is stored under.
+
+    One mapping for every writer of the marker, so the stored document and the
+    ``RECONCILE_DEGRADED`` event cannot name different things: the MCP commit,
+    and the session-capture sweep's withdrawal of an unapplied supersession.
+    Every reason without a marker of its own is :data:`MARKER_SKIPPED` — the
+    judge did not produce a verdict, so the memory waits for a later sweep.
+    """
+    if reason is ReconcileFallbackReason.STALE_RECHECK:
+        return MARKER_STALE
+    if reason is ReconcileFallbackReason.TARGET_PROTECTED:
+        return MARKER_TARGET_PROTECTED
+    return MARKER_SKIPPED
 
 
 class ReconcileCandidate(TrellisModel):
@@ -386,29 +423,37 @@ def mark_document_superseded(
     old_doc_id: str,
     new_doc_id: str,
     vector_store: VectorStore | None,
-) -> bool:
+) -> ReconcileFallbackReason | None:
     """SCD-2 stale-mark the superseded doc — never delete it.
 
     Sets the old document's :class:`Lifecycle` to ``state="superseded"`` with
     ``superseded_by`` pointing at the successor, preserving content and audit.
 
-    Returns ``True`` when the stale-mark was applied and ``False`` when it was
-    not: the old doc has vanished, or it is a promoted precedent's row.
-    **Both callers read it, and the ``False`` path is logged here** so no caller
-    can drop it silently (#407):
+    Returns ``None`` when the stale-mark was applied, and otherwise the
+    :class:`ReconcileFallbackReason` it was not: ``STALE_RECHECK`` when the old
+    doc has vanished, ``TARGET_PROTECTED`` when it is a promoted precedent's
+    row. **Test the return with** ``is None`` **and never for truthiness**: a
+    reason is a non-empty string, so ``if mark_document_superseded(...)`` would
+    read a refusal as success. It used to be a ``bool``, which could not say
+    which of the two it was, and the refused-precedent case was recorded as a
+    lock race (#994). **Every caller reads it, and the not-applied path is
+    logged here** so no caller can drop it silently (#407):
 
     * ``mcp.server._commit_reconcile_verdict`` downgrades the just-stored
-      memory to a ``stale_recheck`` ADD, so neither the tool result nor the
-      ``MEMORY_OP_JUDGED`` event asserts a supersession that did not happen.
-      It is additionally preceded, inside the same ``_save_memory_lock`` hold,
-      by ``_reverify_candidate`` → ``_candidate_is_stale``, which treats a
-      missing row as stale; that guard is process-local, so a cross-process
-      delete is precisely what reaches the ``False`` here.
+      memory to a plain ADD carrying the returned reason, so neither the tool
+      result nor the ``MEMORY_OP_JUDGED`` event asserts a supersession that
+      did not happen, and the ``RECONCILE_DEGRADED`` event and the stored
+      marker both name why. It is additionally preceded, inside the same
+      ``_save_memory_lock`` hold, by ``_reverify_candidate`` →
+      ``_candidate_is_stale``, which treats a missing row as stale; that guard
+      is process-local, so a cross-process delete is precisely what reaches
+      the ``STALE_RECHECK`` here.
     * ``session_capture.capture.run_capture`` calls this **after**
-      ``_write_records``, never during adjudication, and counts a ``False`` on
-      ``CaptureReport.supersessions_failed``. The ordering is the fix and the
-      counter is only the residue: a sweep's own candidates reach the store
-      when the write seam runs, so stale-marking from inside ``adjudicate``
+      ``_write_records``, never during adjudication, and counts a refusal on
+      ``CaptureReport.supersessions_failed``, naming the kind of each. The
+      ordering is the fix and the counter is only the residue: a sweep's own
+      candidates reach the store when the write seam runs, so stale-marking
+      from inside ``adjudicate``
       asked this function for a row that structurally could not exist yet
       whenever one candidate of a session superseded an earlier one — and
       pointed ``superseded_by`` at a successor that had not been written
@@ -422,9 +467,13 @@ def mark_document_superseded(
     pieces of text is not that. The refusal reads the id and nothing else
     (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`)
     and is made here, at the one seam every supersession goes through, so a
-    caller added later cannot reopen it. It answers ``False``, so both callers
-    take their existing not-applied path: the successor is kept, without the
-    claim, as a plain ADD.
+    caller added later cannot reopen it. It answers ``TARGET_PROTECTED``, so
+    both callers take their not-applied path: the successor is kept, without
+    the claim, as a plain ADD, and no ``MEMORY_OP_JUDGED`` is emitted for it,
+    for the reason a vanished target emits none: that stream is the
+    verdict-to-outcome training pair, and a verdict whose effect never
+    happened has no outcome to pair with. The ``RECONCILE_DEGRADED`` event,
+    with ``judge_failure=false``, is where the refused verdict is counted.
 
     ``preserve_updated_at`` is load-bearing, not hygiene (#397). A supersession
     stamp is a metadata-only write by definition — the content passed back in is
@@ -486,7 +535,7 @@ def mark_document_superseded(
             old_doc_id=old_doc_id,
             new_doc_id=new_doc_id,
         )
-        return False
+        return ReconcileFallbackReason.TARGET_PROTECTED
     doc = document_store.get(old_doc_id)
     if doc is None:
         logger.warning(
@@ -494,7 +543,7 @@ def mark_document_superseded(
             old_doc_id=old_doc_id,
             new_doc_id=new_doc_id,
         )
-        return False
+        return ReconcileFallbackReason.STALE_RECHECK
     metadata = dict(doc.get("metadata") or {})
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id
@@ -507,7 +556,7 @@ def mark_document_superseded(
         metadata,
         preserve_updated_at=True,
     )
-    return True
+    return None
 
 
 # ---------------------------------------------------------------------------
