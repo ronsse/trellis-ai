@@ -105,7 +105,7 @@ def unlogged_promotions(root: Path | None = None) -> list[str]:
 
 
 def bare_references(root: Path | None = None) -> list[str]:
-    """Every use of the function's name that is not the target of a call.
+    """Every use of a name that reaches the function, other than as a call's target.
 
     :func:`~tests.ast_rules.construction_names` follows an alias, a rebinding
     and a same-module subclass, but not ``functools.partial(f, ...)``, whose
@@ -114,16 +114,20 @@ def bare_references(root: Path | None = None) -> list[str]:
     ``Attribute`` that is not a call's ``func``. An import (an ``alias``, not a
     ``Name``), the definition and the ``__all__`` string are none of those, so
     the honest population is empty, and this is what closes the shapes the
-    shared roster calls residue for this subject.
+    shared roster calls residue for this subject. It matches every name
+    ``construction_names`` resolves, so ``partial(_alias, ...)`` after an
+    aliased import is caught too. A ``getattr(mod, "submit_learning_promotion")``
+    string is beyond any AST rule and stays residue.
     """
     found: list[str] = []
     for py_file, tree in iter_modules(_src_root() if root is None else root):
         call_targets = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        names = construction_names(_SUBJECT, tree)
         found.extend(
             f"{py_file.name}:{node.lineno}: {_snippet(node)}"
             for node in ast.walk(tree)
             if isinstance(node, (ast.Name, ast.Attribute))
-            and name_of(node) == _SUBJECT
+            and name_of(node) in names
             and id(node) not in call_targets
         )
     return found
@@ -224,6 +228,8 @@ def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
 #: This rule's own judgement, hand-read. A line ending ``# FLAG`` must be
 #: reported and every other call line must not.
 _CORPUS = """
+import functools
+
 from trellis import learning
 from trellis.learning import submit_learning_promotion
 from trellis.learning import submit_learning_promotion as _submit
@@ -267,6 +273,9 @@ def ok_bound_name(ex, p, e, g, log):
 
 def not_a_call():
     return [submit_learning_promotion]  # REF
+
+
+bound = functools.partial(_submit, graph_store=None)  # REF
 """
 
 
