@@ -57,6 +57,7 @@ from trellis.retrieve.noise import (
     _facet_value,
     passes_signal_quality,
 )
+from trellis.schemas.document_metadata import document_form_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -141,6 +142,25 @@ class ParentVerdictCache:
         return resolved
 
 
+def parent_document_form(item: PackItem, cache: ParentVerdictCache) -> str | None:
+    """The ``document_form`` of the document ``item`` is a chunk of, or ``None``.
+
+    Rides :meth:`ParentVerdictCache.resolve`, so it is the *same* lookup the
+    archived and noise gates make and obeys the same guard: only an item whose
+    own id is a chunk id (``<parent>#chunk-N``) inherits through a parent, and
+    a non-chunk item cannot borrow a form via a caller-set ``parent_doc_id``.
+    The parent id is read as the concentration measure reads it — the item's
+    ``parent_doc_id``, else the chunk id's own prefix for a vector snapshot
+    embedded before that key existed. A parent the build's cache already
+    fetched costs no document-store read. A non-chunk item, a parent the store
+    lacks, a store error and a parent that carries no form all read as
+    ``None``: no verdict, serve the item. This is
+    :func:`trellis.retrieve.class_prior.effective_form`'s injected resolver
+    under ``scope="parents_and_chunks"``.
+    """
+    return document_form_of(cache.resolve(item))
+
+
 def partition_by_parent_archived(
     items: Iterable[PackItem],
     cache: ParentVerdictCache,
@@ -196,6 +216,7 @@ def partition_by_parent_signal_quality(
 
 __all__ = [
     "ParentVerdictCache",
+    "parent_document_form",
     "partition_by_parent_archived",
     "partition_by_parent_signal_quality",
 ]

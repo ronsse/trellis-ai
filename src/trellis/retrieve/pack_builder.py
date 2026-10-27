@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, TypeVar
 
 import structlog
@@ -48,9 +49,12 @@ from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.class_prior import (
     CLASS_PRIOR_REJECTION_REASON,
+    PARENTS_AND_CHUNKS_SCOPE,
     ClassPriorConfig,
+    ParentFormResolver,
     apply_class_prior,
     class_prior_telemetry,
+    effective_form,
     resolve_class_prior_config,
 )
 from trellis.retrieve.concentration import measure_parent_concentration
@@ -82,6 +86,7 @@ from trellis.retrieve.noise import (
 )
 from trellis.retrieve.parent_verdicts import (
     ParentVerdictCache,
+    parent_document_form,
     partition_by_parent_archived,
     partition_by_parent_signal_quality,
 )
@@ -1200,7 +1205,11 @@ class PackBuilder:
         # stays rejected as superseded, and the successor is rejected as
         # class_prior — neither one reaches the pack.
         all_items, class_prior_rejected, class_prior_forms = (
-            self._apply_class_prior_pool(all_items, config=class_prior_config)
+            self._apply_class_prior_pool(
+                all_items,
+                config=class_prior_config,
+                parent_verdict_cache=parent_verdict_cache,
+            )
         )
         rejected.extend(class_prior_rejected)
 
@@ -1581,7 +1590,11 @@ class PackBuilder:
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected, class_prior_forms = (
-            self._apply_class_prior_pool(all_items, config=class_prior_config)
+            self._apply_class_prior_pool(
+                all_items,
+                config=class_prior_config,
+                parent_verdict_cache=parent_verdict_cache,
+            )
         )
         rejected.extend(class_prior_rejected)
 
@@ -3126,6 +3139,7 @@ class PackBuilder:
         items: list[PackItem],
         *,
         config: ClassPriorConfig,
+        parent_verdict_cache: ParentVerdictCache | None = None,
     ) -> tuple[list[PackItem], list[RejectedItem], dict[str, str]]:
         """Apply the class-level serving prior over the merged, de-superseded pool.
 
@@ -3167,9 +3181,25 @@ class PackBuilder:
         excluded from ``summarize_withheld``'s own attribution (served
         anyway, or claimed by an earlier reason) — an unused entry is
         simply never read.
+
+        ``parent_verdict_cache`` is the build's own cache. It backs the
+        parent-form resolver ``apply_class_prior`` is handed, and only when
+        ``config.scope`` is ``"parents_and_chunks"`` — under the default
+        scope no resolver exists and the parents-only path is unchanged. The
+        archived and noise gates have already put every chunk parent in the
+        pool into that cache, so the chunk scope adds no document-store read
+        for a chunk. Without a cache (a caller that has none), chunks have no
+        resolvable parent and are served.
         """
         if config.mode == "off":
             return items, [], {}
+        parent_form_of: ParentFormResolver | None = None
+        if (
+            config.scope == PARENTS_AND_CHUNKS_SCOPE
+            and parent_verdict_cache is not None
+        ):
+            parent_form_of = partial(parent_document_form, cache=parent_verdict_cache)
+
         # ``order`` is the one ``id()`` key left, and is safe: it lives only
         # inside this call, ``items`` keeps every keyed object alive for all
         # of it, and ``apply_class_prior`` returns the objects it was given.
@@ -3182,7 +3212,10 @@ class PackBuilder:
         class_prior_forms: dict[str, str] = {}
         for name, group in groups.items():
             group_kept, group_rejected = apply_class_prior(
-                group, config=config, strategy_name=name
+                group,
+                config=config,
+                strategy_name=name,
+                parent_form_of=parent_form_of,
             )
             kept.extend(group_kept)
             rejected.extend(group_rejected)
@@ -3194,7 +3227,9 @@ class PackBuilder:
                     source = by_id.get(rejected_item.item_id)
                     if source is None:
                         continue
-                    form = document_form_of(source.metadata)
+                    form = effective_form(
+                        source, config=config, parent_form_of=parent_form_of
+                    )
                     if form is not None:
                         class_prior_forms[rejected_item.item_id] = form
         kept.sort(key=lambda it: order[id(it)])

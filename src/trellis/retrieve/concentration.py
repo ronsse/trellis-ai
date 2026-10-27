@@ -54,13 +54,17 @@ from __future__ import annotations
 
 import collections
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trellis.schemas.pack import PackItem
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = [
     "ParentConcentration",
     "measure_parent_concentration",
+    "parent_id_of",
     "resolve_parent_id",
 ]
 
@@ -69,8 +73,8 @@ __all__ = [
 _MIN_GROUP_SIZE = 2
 
 
-def resolve_parent_id(item: PackItem) -> str:
-    """The source document *item* is a serving of.
+def parent_id_of(item_id: str, metadata: Mapping[str, Any] | None) -> str:
+    """The source document a row with this id and metadata is a serving of.
 
     ``metadata["parent_doc_id"]`` is authoritative: every chunk row is
     written with it (:func:`trellis.ingest_corpus.sync._write_chunks`), and
@@ -83,9 +87,12 @@ def resolve_parent_id(item: PackItem) -> str:
     it, and reading the id is then the only signal left. An item that is
     neither a chunk nor carries the key is its own parent, so a pack of
     unrelated items reports zero concentration rather than one giant group.
+
+    Takes the two fields rather than a :class:`~trellis.schemas.pack.PackItem`
+    so a caller holding a stored document row (the class-prior replay) reads
+    a parent exactly as serving does.
     """
-    metadata = item.metadata or {}
-    parent = metadata.get("parent_doc_id")
+    parent = (metadata or {}).get("parent_doc_id")
     if isinstance(parent, str) and parent:
         return parent
     # Deferred: ``trellis.ingest_corpus.__init__`` pulls ``sync``, which
@@ -94,9 +101,14 @@ def resolve_parent_id(item: PackItem) -> str:
     # cycle ``retrieve.file_context`` documents at its own deferred import.
     from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR  # noqa: PLC0415
 
-    if CHUNK_ID_SEPARATOR in item.item_id:
-        return item.item_id.split(CHUNK_ID_SEPARATOR)[0]
-    return item.item_id
+    if CHUNK_ID_SEPARATOR in item_id:
+        return item_id.split(CHUNK_ID_SEPARATOR, maxsplit=1)[0]
+    return item_id
+
+
+def resolve_parent_id(item: PackItem) -> str:
+    """The source document *item* is a serving of (see :func:`parent_id_of`)."""
+    return parent_id_of(item.item_id, item.metadata)
 
 
 @dataclass(frozen=True)

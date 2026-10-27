@@ -67,13 +67,20 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.pack_observations import join_pack_feedback
-from trellis.retrieve.class_prior import ClassPriorConfig
+from trellis.retrieve.class_prior import (
+    DEFAULT_SCOPE,
+    PARENTS_AND_CHUNKS_SCOPE,
+    ClassPriorConfig,
+)
+from trellis.retrieve.concentration import parent_id_of
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
 from trellis.retrieve.strategies import GRAPH_STRATEGY_NAME
+from trellis.schemas.document_metadata import document_form_of
 
 if TYPE_CHECKING:
+    from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
@@ -681,8 +688,102 @@ class ClassPriorReplayReport(TrellisModel):
     #: copy can still miss the cut, so this count is an upper bound on
     #: survivals, not a tally of them.
     still_served_by_other_axis: int = 0
+    #: How many ``matched_servings`` matched only through their *parent's*
+    #: form (``scope="parents_and_chunks"``): the chunk's own row carried no
+    #: ``document_form``. Zero under the default scope.
+    matched_via_parent: int = 0
+    #: Servings on a configured axis with no ``document_form`` of their own
+    #: whose id is a chunk id, looked up in the document store to find a
+    #: parent form — every serving the chunk scope had to resolve. A
+    #: non-chunk id is never looked up (serving does not resolve one through
+    #: a parent either). Zero under the default scope, which never looks
+    #: anything up.
+    parent_lookups: int = 0
+    #: Lookups that reached a parent carrying a ``document_form`` (any form,
+    #: whether or not it is in ``config.forms``).
+    parent_form_resolved: int = 0
+    #: Lookups that could not be answered: the served item's row, or its
+    #: parent's, is no longer in the store, the store raised, or no store was
+    #: supplied. Not matched; ``matched_servings`` is a floor by this much.
+    #: The remainder of ``parent_lookups`` reached a parent with no form.
+    parent_form_unresolved: int = 0
 
     notes: list[str] = Field(default_factory=list)
+
+
+def _is_chunk_id(item_id: str) -> bool:
+    """Whether ``item_id`` is a ``<parent>#chunk-N`` row id.
+
+    Deferred import, as in
+    :func:`trellis.retrieve.concentration.parent_id_of`: ``trellis.ingest_corpus``
+    imports back into ``trellis.retrieve``.
+    """
+    from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+    return is_chunk_doc_id(item_id)
+
+
+class _ParentFormLookup:
+    """Resolve a served chunk's parent form through the document store.
+
+    ``PACK_ASSEMBLED.injected_items[]`` rows carry the item's own
+    ``document_form`` but never its parent's, so a historical chunk serving
+    has to be looked up: the stored row's parent id, then that parent row's
+    ``document_form``. The parent id is read as serving reads it
+    (:func:`trellis.retrieve.concentration.parent_id_of`, behind
+    :func:`trellis.retrieve.parent_verdicts.parent_document_form`): the row's
+    ``parent_doc_id``, else the chunk id's own prefix. The caller looks up
+    only chunk ids, the same guard serving's cache applies. One ``get`` per
+    distinct item and one per distinct parent, memoized, so a chunk served in
+    forty packs costs the same as one served once. A store that raises is
+    caught whole, as the serve-time cache does: one unreadable row must not
+    abort a measurement, and the miss is counted as unresolved rather than
+    hidden.
+    """
+
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    NO_FORM = "no_form"
+
+    def __init__(self, document_store: DocumentStore | None) -> None:
+        self._store = document_store
+        self._by_item: dict[str, tuple[str, str | None]] = {}
+        self._parent_form: dict[str, str | None] = {}
+
+    def lookup(self, item_id: str) -> tuple[str, str | None]:
+        """``(outcome, parent_form)`` for one served chunk id."""
+        if self._store is None:
+            return self.UNRESOLVED, None
+        if item_id not in self._by_item:
+            try:
+                self._by_item[item_id] = self._resolve(self._store, item_id)
+            except Exception:
+                logger.warning("class_prior_replay_parent_lookup_failed")
+                self._by_item[item_id] = (self.UNRESOLVED, None)
+        return self._by_item[item_id]
+
+    def _resolve(self, store: DocumentStore, item_id: str) -> tuple[str, str | None]:
+        doc = store.get(item_id)
+        if doc is None:
+            return self.UNRESOLVED, None
+        metadata = doc.get("metadata")
+        parent_id = parent_id_of(
+            item_id, metadata if isinstance(metadata, dict) else None
+        )
+        if parent_id == item_id:
+            return self.NO_FORM, None
+        if parent_id not in self._parent_form:
+            parent = store.get(parent_id)
+            if parent is None:
+                return self.UNRESOLVED, None
+            parent_meta = parent.get("metadata")
+            self._parent_form[parent_id] = document_form_of(
+                parent_meta if isinstance(parent_meta, dict) else None
+            )
+        form = self._parent_form[parent_id]
+        if form is None:
+            return self.NO_FORM, None
+        return self.RESOLVED, form
 
 
 def _class_prior_notes(
@@ -691,6 +792,12 @@ def _class_prior_notes(
     mode_is_off: bool,
     saw_document_form: bool,
     still_served_by_other_axis: int,
+    chunk_scope: bool = False,
+    has_document_store: bool = True,
+    matched_via_parent: int = 0,
+    parent_lookups: int = 0,
+    parent_form_resolved: int = 0,
+    parent_form_unresolved: int = 0,
 ) -> list[str]:
     """Caveats that travel with the class-prior counts."""
     if mode_is_off:
@@ -737,6 +844,32 @@ def _class_prior_notes(
             "count is an upper bound on survivals, not a tally of them. "
             "See still_served_by_other_axis."
         )
+    if chunk_scope:
+        if not has_document_store:
+            notes.append(
+                'scope is "parents_and_chunks" but no document store was '
+                "supplied, so no chunk's parent could be looked up: "
+                f"{parent_form_unresolved} chunk serving(s) with no form of "
+                "their own were left unresolved and counted as not matched. "
+                "The counts above are parents only."
+            )
+        else:
+            notes.append(
+                'scope is "parents_and_chunks". Historical PACK_ASSEMBLED '
+                "rows carry no chunk form, so each chunk-id serving on a "
+                "configured axis with no document_form of its own was "
+                "resolved through the document store: the stored row's "
+                "parent_doc_id (else the chunk id's own prefix, as serving "
+                "reads it), then that parent's document_form. This reads the "
+                "store as it is now, not as it was at serving time. "
+                f"{parent_lookups} serving(s) were looked up; "
+                f"{parent_form_resolved} reached a parent with a form and "
+                f"{parent_form_unresolved} could not be resolved (row or "
+                "parent no longer stored, or a store error), counted as not "
+                f"matched; {matched_via_parent} of the matched servings "
+                "matched only through their parent. The rest of the lookups "
+                "reached a parent with no form."
+            )
     return notes
 
 
@@ -766,12 +899,84 @@ def _dedup_copy_outside_axes(
     )
 
 
+@dataclass
+class _ClassPriorTally:
+    """Running counts for one :func:`replay_class_prior` pass."""
+
+    matched_servings: int = 0
+    helpful_lost: int = 0
+    unhelpful_removed: int = 0
+    tokens_freed: int = 0
+    still_served_by_other_axis: int = 0
+    matched_via_parent: int = 0
+    parent_lookups: int = 0
+    parent_form_resolved: int = 0
+    parent_form_unresolved: int = 0
+    saw_document_form: bool = False
+
+
+def _tally_class_prior_pack(
+    rows: list[Mapping[str, Any]],
+    *,
+    rejected_rows: list[Mapping[str, Any]],
+    helpful: set[str],
+    unhelpful: set[str],
+    config: ClassPriorConfig,
+    lookup: _ParentFormLookup,
+    tally: _ClassPriorTally,
+) -> None:
+    """Fold one attributed pack's served rows into ``tally``.
+
+    A row is judged under its own ``document_form``; only when it has none,
+    ``config.scope`` is ``"parents_and_chunks"``, the row is on a configured
+    axis and its id is a chunk id is its parent's form looked up (see
+    :class:`_ParentFormLookup`). The default scope never reaches ``lookup``.
+    """
+    chunk_scope = config.scope == PARENTS_AND_CHUNKS_SCOPE
+    for row in rows:
+        item_id = row["item_id"]
+        form = row.get("document_form")
+        axis = row.get("strategy_source")
+        on_axis = isinstance(axis, str) and axis in config.axes
+        via_parent = False
+        if isinstance(form, str):
+            tally.saw_document_form = True
+        elif chunk_scope and on_axis and _is_chunk_id(item_id):
+            # Only a chunk id resolves through a parent, whatever axis or
+            # item_type served it (the semantic axis writes "vector" rows):
+            # serving's rule, so replay prices what serving would withhold.
+            tally.parent_lookups += 1
+            outcome, parent_form = lookup.lookup(item_id)
+            if outcome == _ParentFormLookup.RESOLVED:
+                tally.parent_form_resolved += 1
+                tally.saw_document_form = True
+                form, via_parent = parent_form, True
+            elif outcome == _ParentFormLookup.UNRESOLVED:
+                tally.parent_form_unresolved += 1
+        if not (on_axis and isinstance(form, str) and form in config.forms):
+            continue
+        tally.matched_servings += 1
+        if via_parent:
+            tally.matched_via_parent += 1
+        if _dedup_copy_outside_axes(item_id, rejected_rows, config.axes):
+            tally.still_served_by_other_axis += 1
+            continue
+        raw_tokens = row.get("estimated_tokens")
+        if isinstance(raw_tokens, int | float):
+            tally.tokens_freed += int(raw_tokens)
+        if item_id in helpful:
+            tally.helpful_lost += 1
+        elif item_id in unhelpful:
+            tally.unhelpful_removed += 1
+
+
 def replay_class_prior(
     event_log: EventLog,
     *,
     config: ClassPriorConfig,
     days: int = 30,
     limit: int = _DEFAULT_EVENT_LIMIT,
+    document_store: DocumentStore | None = None,
 ) -> ClassPriorReplayReport:
     """Price :mod:`trellis.retrieve.class_prior` over a window already served.
 
@@ -784,15 +989,23 @@ def replay_class_prior(
             result, so the arm matches whatever the gate would actually do.
         days: Look-back window, matching ``trellis analyze value``.
         limit: Per-event-type scan limit.
+        document_store: Read only under ``config.scope ==
+            "parents_and_chunks"``, to find the parent form of a served
+            item whose row carries none (historical events record no chunk
+            form). Without one, those servings are counted as unresolved.
 
     Returns:
         A :class:`ClassPriorReplayReport`. See its docstring and ``notes``
         for what this arm cannot measure.
     """
     mode_is_off = config.mode == "off" or not config.forms or not config.axes
+    chunk_scope = config.scope == PARENTS_AND_CHUNKS_SCOPE
     applied_config = (
         f"mode={config.mode} forms={sorted(config.forms)} axes={sorted(config.axes)}"
     )
+    if config.scope != DEFAULT_SCOPE:
+        applied_config += f" scope={config.scope}"
+    parent_lookup = _ParentFormLookup(document_store)
     since = datetime.now(tz=UTC) - timedelta(days=days)
     feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
@@ -807,13 +1020,7 @@ def replay_class_prior(
     unhelpful_by_pack = verdicts["unhelpful"]
     attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
 
-    matched_servings = 0
-    helpful_lost = 0
-    unhelpful_removed = 0
-    tokens_freed = 0
-    still_served_by_other_axis = 0
-    saw_document_form = False
-
+    tally = _ClassPriorTally()
     if not mode_is_off:
         for pack_id in attributed:
             payload = flat_packs[pack_id]
@@ -824,69 +1031,44 @@ def replay_class_prior(
             ]
             if not rows:
                 continue
-            helpful = helpful_by_pack.get(pack_id, set())
-            unhelpful = unhelpful_by_pack.get(pack_id, set())
-            rejected_rows = [
-                r
-                for r in (payload.get("rejected_items") or [])
-                if isinstance(r, Mapping)
-            ]
-
-            def _matched(row: Mapping[str, Any]) -> bool:
-                form = row.get("document_form")
-                axis = row.get("strategy_source")
-                return (
-                    isinstance(form, str)
-                    and form in config.forms
-                    and isinstance(axis, str)
-                    and axis in config.axes
-                )
-
-            def _served_by_other_axis(
-                item_id: str,
-                *,
-                rejected_rows: list[Mapping[str, Any]] = rejected_rows,
-            ) -> bool:
-                """See :func:`_dedup_copy_outside_axes`.
-
-                ``rejected_rows`` is bound as a default argument, not read
-                from the enclosing loop, so this closure cannot drift onto
-                a later pack's rows (ruff B023).
-                """
-                return _dedup_copy_outside_axes(item_id, rejected_rows, config.axes)
-
-            for row in rows:
-                if isinstance(row.get("document_form"), str):
-                    saw_document_form = True
-                if not _matched(row):
-                    continue
-                item_id = row["item_id"]
-                matched_servings += 1
-                if _served_by_other_axis(item_id):
-                    still_served_by_other_axis += 1
-                    continue
-                raw_tokens = row.get("estimated_tokens")
-                if isinstance(raw_tokens, int | float):
-                    tokens_freed += int(raw_tokens)
-                if item_id in helpful:
-                    helpful_lost += 1
-                elif item_id in unhelpful:
-                    unhelpful_removed += 1
+            _tally_class_prior_pack(
+                rows,
+                rejected_rows=[
+                    r
+                    for r in (payload.get("rejected_items") or [])
+                    if isinstance(r, Mapping)
+                ],
+                helpful=helpful_by_pack.get(pack_id, set()),
+                unhelpful=unhelpful_by_pack.get(pack_id, set()),
+                config=config,
+                lookup=parent_lookup,
+                tally=tally,
+            )
 
     report = ClassPriorReplayReport(
         window_days=days,
         applied_config=applied_config,
         attributed_packs=len(attributed),
-        matched_servings=matched_servings,
-        helpful_lost=helpful_lost,
-        unhelpful_removed=unhelpful_removed,
-        tokens_freed=tokens_freed,
-        still_served_by_other_axis=still_served_by_other_axis,
+        matched_servings=tally.matched_servings,
+        helpful_lost=tally.helpful_lost,
+        unhelpful_removed=tally.unhelpful_removed,
+        tokens_freed=tally.tokens_freed,
+        still_served_by_other_axis=tally.still_served_by_other_axis,
+        matched_via_parent=tally.matched_via_parent,
+        parent_lookups=tally.parent_lookups,
+        parent_form_resolved=tally.parent_form_resolved,
+        parent_form_unresolved=tally.parent_form_unresolved,
         notes=_class_prior_notes(
-            matched_servings=matched_servings,
+            matched_servings=tally.matched_servings,
             mode_is_off=mode_is_off,
-            still_served_by_other_axis=still_served_by_other_axis,
-            saw_document_form=saw_document_form,
+            still_served_by_other_axis=tally.still_served_by_other_axis,
+            saw_document_form=tally.saw_document_form,
+            chunk_scope=chunk_scope,
+            has_document_store=document_store is not None,
+            matched_via_parent=tally.matched_via_parent,
+            parent_lookups=tally.parent_lookups,
+            parent_form_resolved=tally.parent_form_resolved,
+            parent_form_unresolved=tally.parent_form_unresolved,
         ),
     )
     logger.debug(
@@ -894,7 +1076,7 @@ def replay_class_prior(
         window_days=days,
         applied_config=applied_config,
         attributed_packs=report.attributed_packs,
-        matched_servings=matched_servings,
+        matched_servings=tally.matched_servings,
     )
     return report
 
