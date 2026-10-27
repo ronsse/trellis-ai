@@ -994,6 +994,61 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Class-prior chunk scope and replay: a caller-named `#chunk-` id is no
+  chunk, a chunk whose row is gone still resolves, and a pointer replays at
+  its recorded charge (#1001).** `is_chunk_doc_id` was a substring test, so a
+  document a caller named `notes#chunk-intro` read as a chunk of `notes` and
+  the `parents_and_chunks` scope withheld it by `notes`'s form. It now matches
+  the shape ingest mints (`chunk_doc_id`: `<parent>#chunk-<digits>`, split at
+  the last separator), and a new `chunk_parent_id` gives the parent for the
+  same shape, so `parent_id_of`'s id-prefix fallback agrees with the
+  predicate. The store-level `LIKE '%#chunk-%'` exclusion is unchanged (SQL
+  cannot test digits), so a caller-named `notes#chunk-intro` is still hidden
+  by the SQL surfaces (API search and explore, `count(include_chunks=False)`,
+  the MCP fuzzy-dedup seed) while file-context `docs_by_path` now lists it and
+  `sync --prune` now considers it. The judged-outcomes join, which split on
+  the first separator, now uses `chunk_parent_id`, so it and serving read
+  `notes#chunk-intro` and `x#chunk-5#chunk-0` alike, and redacting a
+  caller-named target cascades to its own minted chunks. `analyze replay --class-prior` resolved a chunk whose own row had
+  been deleted as `unresolved` without trying its parent; serving never needed
+  that row, only the parent's, so replay now falls back to the id prefix the
+  same way and counts it resolved when the parent carries a form (a chunk
+  whose parent is also gone stays unresolved). `analyze replay` also priced a
+  row the pack served as a disclosure pointer from the character estimate,
+  which runs about two tokens over the charge the pack paid, so a policy
+  matching the served disclosure read as a small saving (`token_delta`
+  0.007 to 0.035 on a disclosed pack); a row served as a pointer is now
+  replayed at its recorded tokens, and only a row the policy newly demotes is
+  estimated. A null `ReplayPolicy` still prices every row as a body at the
+  walk charge, as before. #1001's scope-stamp box was already satisfied by
+  #990: the resolved scope, whether from config or `TRELLIS_CLASS_PRIOR_SCOPE`,
+  is appended to the replay's `applied_config` whenever it is not the default.
+
+- **A promoted precedent's document row is no longer rewritten by
+  `worker enrich`, and `retention.restore` will not un-archive a redaction's
+  blank row (#957).** `worker enrich` selected a precedent's row like any
+  other document, so its LLM pass could merge facets into it or overwrite the
+  `decision` `content_type` the promotion stamped; the candidate selection now
+  skips every id in `precedent://learning/` (the same id predicate the noise
+  pass and classify refresh use), with or without `--reenrich`. Separately,
+  `redaction.apply` blanks a document row and then purges its node, and
+  `retention.restore` read the document store first, so it re-stamped that
+  empty archived row `current`, either beside a deleted node (a redacted
+  precedent) or beside a live one (a redaction whose purge failed, which is
+  re-runnable). Two refusals now ride the existing `refused` path, so each is
+  named in `refused_items`, the `RETENTION_RESTORED` event and
+  `CommandResult.warnings`, and the rest of the batch still restores:
+  `retention_restore_precedent_node_missing` (a namespace row archived with no
+  node) and `retention_restore_redaction_tombstone` (an archived row whose
+  `deprecation_reason` is `redacted` *and* whose content is empty, in or out of
+  the namespace; the reason alone is caller-chosen text and does not qualify).
+  A batch restoring nothing rejects with the one refusal code present, or
+  `retention_restore_nothing_restored` when the codes differ; the summary line
+  now names the codes in place of "refused (history unavailable)". The
+  `classify.shadow`, `domain_normalization` and `tag_evolution` loops were
+  audited and left alone: shadow overlays only `content_tags_shadow`, which is
+  never served, and the other two write events, not documents.
+
 - **A refused precedent supersede is `target_protected`, not a `stale_recheck`
   or a missing target (#994).** `mark_document_superseded` returns the reason
   it did not apply (`None` when it did) instead of a bool, and a protected

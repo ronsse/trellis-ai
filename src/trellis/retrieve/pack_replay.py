@@ -260,6 +260,9 @@ def _pointer_chars(title: str | None) -> int:
     characters). Assuming a full label there is therefore accurate rather
     than merely conservative, and where it is not, it over-states the
     pointer's cost and under-states the saving.
+
+    Only for a row the pack did not serve as a pointer: one it did is priced
+    at its recorded charge (:attr:`_Candidate.served_as_pointer`).
     """
     label = (
         min(len(title.strip()), POINTER_LABEL_MAX_CHARS)
@@ -283,6 +286,9 @@ class _Candidate:
     included: bool
     verdict: str
     title: str | None
+    #: The pack served this row as a graduated-disclosure pointer, so
+    #: ``served_tokens`` is the pointer's exact cost rather than a body's.
+    served_as_pointer: bool = False
 
 
 def _candidates(
@@ -301,6 +307,7 @@ def _candidates(
     if not isinstance(trace, list) or not trace:
         return "no_budget_trace"
     helpful, unhelpful = verdicts
+    pointer_ids = _served_pointer_ids(payload)
     meta = {
         raw["item_id"]: raw
         for raw in (payload.get("injected_items") or [])
@@ -336,6 +343,9 @@ def _candidates(
                     else "unjudged"
                 ),
                 title=title if isinstance(title, str) else None,
+                served_as_pointer=(
+                    item_id in pointer_ids and bool(step.get("included"))
+                ),
             )
         )
     return out
@@ -391,7 +401,19 @@ def _price(
             served.append((candidate, tokens, True))
             continue
         if policy.body_items is not None and index >= policy.body_items:
-            pointer = _tokens_from_chars(_pointer_chars(candidate.title))
+            # A row the pack itself served as a pointer is priced at what it
+            # paid: the replay has no excerpt to rebuild the label from, and
+            # the estimate runs about two tokens over, which would make a
+            # policy the pack was served with read as a saving. Only a row the
+            # policy newly demotes is estimated, and so is a pointer whose
+            # record shows no saving (charged at its body price, as a pack
+            # that carries no ``walk_tokens`` or a hand-built one does).
+            pointer = (
+                candidate.served_tokens
+                if candidate.served_as_pointer
+                and candidate.served_tokens < candidate.walk_tokens
+                else _tokens_from_chars(_pointer_chars(candidate.title))
+            )
             if pointer < tokens:
                 served.append((candidate, pointer, True))
                 continue
@@ -702,9 +724,10 @@ class ClassPriorReplayReport(TrellisModel):
     #: Lookups that reached a parent carrying a ``document_form`` (any form,
     #: whether or not it is in ``config.forms``).
     parent_form_resolved: int = 0
-    #: Lookups that could not be answered: the served item's row, or its
-    #: parent's, is no longer in the store, the store raised, or no store was
-    #: supplied. Not matched; ``matched_servings`` is a floor by this much.
+    #: Lookups that could not be answered: the parent's row is no longer in
+    #: the store (a chunk whose own row is gone is still looked up through
+    #: its id's prefix), the store raised, or no store was supplied. Not
+    #: matched; ``matched_servings`` is a floor by this much.
     #: The remainder of ``parent_lookups`` reached a parent with no form.
     parent_form_unresolved: int = 0
 
@@ -732,7 +755,8 @@ class _ParentFormLookup:
     ``document_form``. The parent id is read as serving reads it
     (:func:`trellis.retrieve.concentration.parent_id_of`, behind
     :func:`trellis.retrieve.parent_verdicts.parent_document_form`): the row's
-    ``parent_doc_id``, else the chunk id's own prefix. The caller looks up
+    ``parent_doc_id``, else the chunk id's own prefix, which is also all a
+    chunk whose own row is gone has left. The caller looks up
     only chunk ids, the same guard serving's cache applies. One ``get`` per
     distinct item and one per distinct parent, memoized, so a chunk served in
     forty packs costs the same as one served once. A store that raises is
@@ -764,14 +788,15 @@ class _ParentFormLookup:
 
     def _resolve(self, store: DocumentStore, item_id: str) -> tuple[str, str | None]:
         doc = store.get(item_id)
-        if doc is None:
-            return self.UNRESOLVED, None
-        metadata = doc.get("metadata")
+        # A chunk row since deleted still names its parent through its id, the
+        # fallback serving takes for a row with no ``parent_doc_id``: serving
+        # never needed the chunk's own row, only the parent's.
+        metadata = doc.get("metadata") if doc is not None else None
         parent_id = parent_id_of(
             item_id, metadata if isinstance(metadata, dict) else None
         )
         if parent_id == item_id:
-            return self.NO_FORM, None
+            return (self.UNRESOLVED if doc is None else self.NO_FORM), None
         if parent_id not in self._parent_form:
             parent = store.get(parent_id)
             if parent is None:
@@ -864,8 +889,8 @@ def _class_prior_notes(
                 "store as it is now, not as it was at serving time. "
                 f"{parent_lookups} serving(s) were looked up; "
                 f"{parent_form_resolved} reached a parent with a form and "
-                f"{parent_form_unresolved} could not be resolved (row or "
-                "parent no longer stored, or a store error), counted as not "
+                f"{parent_form_unresolved} could not be resolved (parent "
+                "no longer stored, or a store error), counted as not "
                 f"matched; {matched_via_parent} of the matched servings "
                 "matched only through their parent. The rest of the lookups "
                 "reached a parent with no form."

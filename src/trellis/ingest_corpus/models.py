@@ -61,7 +61,9 @@ from typing import Any, Literal, TypeAlias
 #:
 #: Code that reads the marker directly rather than through the store flag
 #: uses :func:`is_chunk_doc_id` (or, to roll a chunk id up to its parent
-#: instead of dropping it, splits on the constant). ``grep`` finds those;
+#: instead of dropping it, :func:`chunk_parent_id`). Both match the exact
+#: shape :func:`chunk_doc_id` mints, ``<parent>#chunk-<digits>``, not the
+#: substring the SQL ``LIKE`` above can only spell. ``grep`` finds those;
 #: this comment deliberately no longer tries to.
 CHUNK_ID_SEPARATOR = "#chunk-"
 
@@ -92,9 +94,27 @@ def chunk_doc_id(parent_doc_id: str, index: int) -> str:
     return f"{parent_doc_id}{CHUNK_ID_SEPARATOR}{index}"
 
 
+def chunk_parent_id(doc_id: str) -> str | None:
+    """Parent doc id of *doc_id*, or ``None`` if it is not a minted chunk id.
+
+    Matches exactly the shape :func:`chunk_doc_id` mints,
+    ``<parent><CHUNK_ID_SEPARATOR><digits>``, split at the *last* separator so
+    a parent that itself contains ``#chunk-`` rolls up whole. A substring test
+    took any caller-named id such as ``notes#chunk-intro`` for a chunk of
+    ``notes``; a reader that acts on that (the class prior's chunk scope
+    withholds by the parent's form) would act on a document that is no
+    chunk's child. An id that is exactly ``<x>#chunk-<digits>`` is still read
+    as a chunk: nothing in the id tells it from a minted one.
+    """
+    parent, separator, index = doc_id.rpartition(CHUNK_ID_SEPARATOR)
+    if parent and separator and index.isascii() and index.isdigit():
+        return parent
+    return None
+
+
 def is_chunk_doc_id(doc_id: str) -> bool:
-    """``True`` iff *doc_id* names a chunk document."""
-    return CHUNK_ID_SEPARATOR in doc_id
+    """``True`` iff *doc_id* has the shape of a chunk id :func:`chunk_doc_id` mints."""
+    return chunk_parent_id(doc_id) is not None
 
 
 @dataclass

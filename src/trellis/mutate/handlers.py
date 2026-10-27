@@ -493,6 +493,28 @@ def _rewrite_precedent_document(
     return content, metadata
 
 
+# The ``deprecation_reason`` a redaction's blanked document row carries.
+# ``retention.restore`` reads it back to recognise the tombstone
+# (:func:`_is_redaction_tombstone`).
+REDACTION_TOMBSTONE_REASON = "redacted"
+
+
+def _is_redaction_tombstone(doc: dict[str, Any]) -> bool:
+    """Whether a document row is the blank archived row a redaction leaves.
+
+    Both halves are required. The reason alone is a free-text field that
+    ``retention.archive`` and ``retention.prune`` take from the caller, so an
+    ordinary archived note whose reason reads "redacted" must stay
+    restorable; a tombstone is also empty (:func:`_tombstone_document`).
+    """
+    record = (doc.get("metadata") or {}).get(LIFECYCLE_KEY)
+    return (
+        isinstance(record, dict)
+        and record.get("deprecation_reason") == REDACTION_TOMBSTONE_REASON
+        and not doc.get("content")
+    )
+
+
 def _tombstone_document(
     registry: StoreRegistry, doc_id: str, *, vector_gone: set[str]
 ) -> bool:
@@ -524,7 +546,7 @@ def _tombstone_document(
     lifecycle = Lifecycle(
         state="archived",
         valid_until=datetime.now(UTC),
-        deprecation_reason="redacted",
+        deprecation_reason=REDACTION_TOMBSTONE_REASON,
     ).model_dump(mode="json")
     metadata: dict[str, Any] = {LIFECYCLE_KEY: lifecycle}
     if isinstance(old.get("document_form"), str):
@@ -4211,8 +4233,18 @@ class RetentionRestoreHandler:
     into a reported success. The rejection message names every skipped id
     alongside every refused one, not only the refused half, so an operator
     reading the rejection sees the whole batch rather than just the part
-    that failed loudly. A genuinely unexpected exception (not this history
-    refusal) still aborts the remainder of the batch, as before.
+    that failed loudly. A genuinely unexpected exception (not a refusal)
+    still aborts the remainder of the batch, as before.
+
+    Two more refusals cover a document row that holds nothing servable
+    (:meth:`_refuse_unrestorable_row`): a promoted precedent's row archived
+    while its node no longer exists
+    (``retention_restore_precedent_node_missing``), and the blank row a
+    redaction leaves, including one whose purge failed so its node is still
+    live (``retention_restore_redaction_tombstone``). They ride the same
+    path, so each is named in ``refused_items`` and the warnings, and neither
+    can be un-archived into a ``current`` row with no content or no node
+    (#957).
 
     ``RETENTION_RESTORED`` is emitted unconditionally, including for a
     batch that restored nothing at all (all refused, all skipped, or a
@@ -4247,7 +4279,8 @@ class RetentionRestoreHandler:
         if skipped:
             message += f", {len(skipped)} not archived (skipped)"
         if refused:
-            message += f", {len(refused)} refused (history unavailable)"
+            codes = ", ".join(sorted({r["code"] for r in refused}))
+            message += f", {len(refused)} refused ({codes})"
             command.metadata.setdefault("handler_warnings", []).extend(
                 f"retention.restore: {r['item_id']} refused ({r['code']}): "
                 f"{r['message']}"
@@ -4305,6 +4338,49 @@ class RetentionRestoreHandler:
             unfinished = exc
         return restored, skipped, refused, unfinished
 
+    def _refuse_unrestorable_row(self, item_id: str, doc: dict[str, Any]) -> None:
+        """Refuse to un-archive a row that holds nothing servable (#957).
+
+        Two refusals, each through the ordinary ``refused`` path. Refused
+        rather than skipped: the row *is* archived, and reporting it "not
+        archived" would tell the operator the wrong thing.
+
+        * ``retention_restore_precedent_node_missing``: a promoted
+          precedent's row whose graph node no longer exists. Only a row in the
+          ``precedent://learning/`` namespace is paired with a node.
+        * ``retention_restore_redaction_tombstone``: the blank row a
+          redaction leaves, whatever the state of its node. It covers a
+          redaction whose purge failed after the row was blanked
+          (:func:`_tombstone_redacted_documents` runs first), where the node
+          is still live and a restore would serve empty text as ``current``,
+          and it covers a document outside the namespace.
+
+        The node check runs first, so a redacted precedent reports the
+        missing node.
+        """
+        if (
+            is_promoted_precedent_document(item_id)
+            and self._registry.knowledge.graph_store.get_node(item_id) is None
+        ):
+            msg = (
+                f"retention.restore will not un-archive {item_id}: it is a "
+                "promoted precedent's document row and its graph node no "
+                "longer exists, so a current row would have no node behind it"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="retention_restore_precedent_node_missing"
+            )
+        if _is_redaction_tombstone(doc):
+            msg = (
+                f"retention.restore will not un-archive {item_id}: it is the "
+                "blank row a redaction left, so there is no content to "
+                "restore. If its graph node still exists the redaction did "
+                "not finish; re-run redaction.apply on it"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="retention_restore_redaction_tombstone"
+            )
+
     def _restore(self, item_id: str, command: Command) -> bool:
         """Un-archive one item. Returns False if it was not archived."""
         current = Lifecycle(state="current").model_dump(mode="json")
@@ -4316,6 +4392,7 @@ class RetentionRestoreHandler:
             record = metadata.get(LIFECYCLE_KEY)
             if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
                 return False
+            self._refuse_unrestorable_row(item_id, doc)
             metadata[LIFECYCLE_KEY] = current
             # Metadata-only, and unmasked (#406). Restore exists to make the
             # item servable again, so unlike the archive it undoes there is

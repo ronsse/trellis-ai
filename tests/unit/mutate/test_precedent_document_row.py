@@ -808,6 +808,247 @@ class TestRetentionSparesPromotedPrecedents:
         assert lifecycle["state"] == "archived"
 
 
+def _refusal_text(registry: StoreRegistry) -> str:
+    """The refused item's message, as the ``RETENTION_RESTORED`` event records it."""
+    (event,) = registry.operational.event_log.get_events(
+        event_type=EventType.RETENTION_RESTORED
+    )
+    (item,) = event.payload["refused_items"]
+    return str(item["message"])
+
+
+class TestRestoreRefusesAnOrphanedPrecedentRow:
+    """``retention.restore`` will not un-archive a self-redacted precedent's row (#957).
+
+    Redacting a precedent purges its node and leaves its document row as an empty
+    archived tombstone. Restore read the document store first, found the archived
+    row and re-stamped it ``current`` while the node stayed deleted.
+
+    Defective subject: drop ``_refuse_unrestorable_row`` from
+    ``RetentionRestoreHandler._restore`` and the tombstone is restored.
+    """
+
+    def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
+        return build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": item_ids, "reason": "corrective"},
+            )
+        )
+
+    def _redact_the_precedent(self, registry: StoreRegistry) -> dict[str, Any]:
+        _promote(registry)
+        RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is None
+        tombstone = _document(registry)
+        assert tombstone["content"] == ""
+        assert tombstone["metadata"][LIFECYCLE_KEY]["state"] == "archived"
+        return tombstone
+
+    def test_the_tombstone_stays_archived_and_the_refusal_says_why(
+        self, registry: StoreRegistry
+    ) -> None:
+        tombstone = self._redact_the_precedent(registry)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_precedent_node_missing"
+        )
+        assert _document(registry) == tombstone
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is None
+        for axis in ("keyword", "semantic"):
+            assert not _served(registry, axis, NODE_ID)
+
+    def test_one_orphan_does_not_cost_the_rest_of_the_batch_its_restore(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._redact_the_precedent(registry)
+        archived = {LIFECYCLE_KEY: {"state": "archived"}}
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", archived)
+
+        result = self._restore(registry, [NODE_ID, "plain-doc"])
+
+        assert result.status == CommandStatus.SUCCESS
+        assert "retention_restore_precedent_node_missing" in result.message
+        assert any(NODE_ID in w for w in result.warnings)
+        plain = _document(registry, "plain-doc")
+        assert plain["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "archived"
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert event.payload["refused_ids"] == [NODE_ID]
+        assert event.payload["restored_ids"] == ["plain-doc"]
+
+    def test_an_archived_row_beside_a_live_node_is_still_restored(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Only an orphan is refused: with its node present the row restores."""
+        _promote(registry)
+        document_store = registry.knowledge.document_store
+        row = _document(registry)
+        metadata = {**row["metadata"], LIFECYCLE_KEY: {"state": "archived"}}
+        put_document(
+            document_store,
+            registry.knowledge.vector_store,
+            NODE_ID,
+            row["content"],
+            metadata,
+            preserve_updated_at=True,
+        )
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.SUCCESS
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+    def test_the_refusal_is_true_when_the_row_keeps_its_content(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A node gone without a blanking (a failed scrub re-create) reads true.
+
+        The row is archived with its real text and no node: nothing was
+        redacted from it, so the message must not call it a tombstone.
+        """
+        _promote(registry)
+        row = _document(registry)
+        metadata = {**row["metadata"], LIFECYCLE_KEY: {"state": "archived"}}
+        put_document(
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+            NODE_ID,
+            row["content"],
+            metadata,
+            preserve_updated_at=True,
+        )
+        assert registry.knowledge.graph_store.delete_node(NODE_ID)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_precedent_node_missing"
+        )
+        text = _refusal_text(registry)
+        assert "no longer exists" in text
+        for untrue in ("blank", "tombstone", "redacted"):
+            assert untrue not in text
+        assert _document(registry)["content"] == row["content"]
+
+
+class TestRestoreRefusesARedactionTombstone:
+    """``retention.restore`` will not un-archive the blank row a redaction left.
+
+    ``redaction.apply`` blanks the row first and purges the node second. When
+    the purge fails the row is already a blank archived tombstone beside a
+    live node, and restore marked it ``current``.
+
+    Defective subject: drop the ``_is_redaction_tombstone`` branch of
+    ``RetentionRestoreHandler._refuse_unrestorable_row``.
+    """
+
+    def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
+        return build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": item_ids, "reason": "corrective"},
+            )
+        )
+
+    def _redact_with_a_failing_purge(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> dict[str, Any]:
+        graph = registry.knowledge.graph_store
+
+        def _boom(_node_id: str) -> bool:
+            msg = "purge failed"
+            raise StoreError(msg, store="graph")
+
+        monkeypatch.setattr(graph, "delete_node", _boom)
+        with pytest.raises(StoreError, match="purge failed"):
+            RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        monkeypatch.undo()
+        assert graph.get_node(NODE_ID) is not None
+        tombstone = _document(registry)
+        assert tombstone["content"] == ""
+        return tombstone
+
+    def test_a_purge_that_failed_leaves_a_tombstone_that_restore_refuses(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _promote(registry)
+        tombstone = self._redact_with_a_failing_purge(registry, monkeypatch)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_redaction_tombstone"
+        )
+        assert "redaction.apply" in _refusal_text(registry)
+        assert _document(registry) == tombstone
+        for axis in ("keyword", "semantic"):
+            assert not _served(registry, axis, NODE_ID)
+
+    def test_a_document_outside_the_namespace_is_refused_the_same_way(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        graph.upsert_node("plain-doc", "document", {"name": "plain"})
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", {})
+        RedactionApplyHandler(registry).handle(_redact_command("plain-doc"))
+        tombstone = _document(registry, "plain-doc")
+        assert tombstone["content"] == ""
+
+        result = self._restore(registry, ["plain-doc"])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_redaction_tombstone"
+        )
+        assert _document(registry, "plain-doc") == tombstone
+
+    def test_an_archived_note_whose_reason_reads_redacted_still_restores(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The reason is caller-chosen text: only a *blank* row is a tombstone."""
+        archived = {
+            LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"}
+        }
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", archived)
+
+        result = self._restore(registry, ["plain-doc"])
+
+        assert result.status == CommandStatus.SUCCESS
+        plain = _document(registry, "plain-doc")
+        assert plain["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert plain["content"] == "an ordinary note"
+
+    def test_two_different_refusals_reject_under_the_mixed_code(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        registry.knowledge.graph_store.upsert_node("plain-doc", "document", {})
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", {})
+        RedactionApplyHandler(registry).handle(_redact_command("plain-doc"))
+
+        result = self._restore(registry, [NODE_ID, "plain-doc"])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"] == "retention_restore_nothing_restored"
+        )
+        assert "retention_restore_precedent_node_missing" in result.message
+        assert "retention_restore_redaction_tombstone" in result.message
+
+
 class _FixedClassifier:
     name = "fixed"
 
@@ -863,6 +1104,51 @@ class TestClassifyRefreshSparesPromotedPrecedents:
         assert _document(registry)["metadata"]["content_tags"]["content_type"] == (
             "decision"
         )
+
+
+class TestShadowPassOnlyAddsItsOwnKeyToAPromotedPrecedent:
+    """The shadow pass is harmless to a precedent row, and this pins why (#957).
+
+    ``shadow_classify_item`` overlays ``content_tags_shadow`` and nothing else,
+    keeps the row's clock, and the serving boundary strips that key. So unlike
+    ``worker enrich`` it needs no namespace skip: no served field of the row
+    changes. ``tag_evolution`` and ``domain_normalization`` never write a
+    document at all; they read shadow tags and emit candidate events.
+    """
+
+    def test_a_shadow_pass_leaves_every_served_field_alone(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.classify.shadow import shadow_classify_item
+        from trellis.retrieve.servable import strip_non_servable
+        from trellis.schemas.classification import SHADOW_TAGS_KEY
+
+        _promote(registry)
+        before = _document(registry)
+
+        outcome = shadow_classify_item(
+            NODE_ID,
+            classifier=_FixedClassifier(),
+            document_store=registry.knowledge.document_store,
+            vector_store=registry.knowledge.vector_store,
+        )
+
+        assert outcome.written is True
+        after = _document(registry)
+        assert SHADOW_TAGS_KEY in after["metadata"]
+        assert {k: v for k, v in after["metadata"].items() if k != SHADOW_TAGS_KEY} == (
+            before["metadata"]
+        )
+        assert after["content"] == before["content"]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["metadata"]["content_tags"]["content_type"] == "decision"
+
+        pack = PackBuilder(strategies=[_axis(registry, "keyword")]).build(
+            TITLE, limit_per_strategy=10
+        )
+        served = [i for i in strip_non_servable(pack.items) if i.item_id == NODE_ID]
+        assert served
+        assert SHADOW_TAGS_KEY not in served[0].metadata
 
 
 class TestReinstateRepairsAStrandedRow:

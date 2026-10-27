@@ -17,6 +17,7 @@ Three families, in the order they matter:
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.feedback.attribution import lookup_pack_bodied_item_ids
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.class_prior import OFF, ClassPriorConfig
 from trellis.retrieve.disclosure import DISCLOSURE_OFF, DisclosureConfig
 from trellis.retrieve.excerpts import ContentFloorConfig
@@ -944,6 +946,91 @@ def test_a_chunk_row_without_a_parent_key_resolves_through_its_id(
     assert report.matched_via_parent == 1
 
 
+def test_a_caller_named_id_holding_the_marker_is_not_looked_up_as_a_chunk(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """``conv#chunk-intro`` is a document its caller named, not a chunk of ``conv``.
+
+    Serving classifies by the id shape ingest mints (#1001), so replay must
+    not price it through ``conv``'s form, whatever its own row says.
+    """
+    chunk_store.put("conv#chunk-intro", "named by a caller", {})
+    chunk_store.put("memo#chunk-intro", "named by a caller", {"parent_doc_id": "conv"})
+    chunk_store.put(chunk_doc_id("conv", 3), "minted", {"parent_doc_id": "conv"})
+    spy = _CountingStore(chunk_store)
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                _chunk_row("conv#chunk-intro", 40),
+                _chunk_row("memo#chunk-intro", 40),
+                _chunk_row(chunk_doc_id("conv", 3), 40),
+            ],
+        )
+    )
+    log.append(
+        _graded(
+            "pack-0",
+            helpful=[],
+            unhelpful=["conv#chunk-intro", "memo#chunk-intro", chunk_doc_id("conv", 3)],
+        )
+    )
+
+    report = replay_class_prior(
+        log,
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=spy,
+    )
+
+    # Only the minted id is looked up and matched; neither caller-named id is read.
+    assert report.parent_lookups == 1
+    assert report.matched_servings == 1
+    assert report.matched_via_parent == 1
+    assert "conv#chunk-intro" not in spy.get_calls
+    assert "memo#chunk-intro" not in spy.get_calls
+
+
+def test_a_chunk_whose_own_row_is_gone_resolves_through_its_parent_prefix(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """Serving never needed the chunk's own row, only its parent's (#1001).
+
+    ``conv#chunk-0009`` has no stored row, but its id names ``conv``, which
+    carries a form: the live gate resolves it from there, so replay does too
+    rather than counting it unresolved.
+    """
+    assert chunk_store.get("conv#chunk-0009") is None
+
+    report = replay_class_prior(
+        _single_serving("conv#chunk-0009"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_lookups == 1
+    assert report.parent_form_resolved == 1
+    assert report.parent_form_unresolved == 0
+    assert report.matched_servings == 1
+    assert report.matched_via_parent == 1
+    assert report.unhelpful_removed == 1
+
+
+def test_a_chunk_whose_row_and_parent_are_both_gone_is_still_unresolved(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """The fallback reaches the parent; it does not invent a form for it."""
+    report = replay_class_prior(
+        _single_serving("gone#chunk-0000"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_lookups == 1
+    assert report.parent_form_unresolved == 1
+    assert report.matched_servings == 0
+
+
 def test_a_plain_item_naming_a_parent_is_neither_looked_up_nor_matched(
     chunk_store: SQLiteDocumentStore,
 ) -> None:
@@ -1198,6 +1285,74 @@ def test_chunk_scope_replay_prices_what_serving_withholds_on_the_semantic_axis(
     assert report.matched_servings == len(withheld)
     assert report.unhelpful_removed == len(withheld)
     assert report.matched_via_parent == 2
+    doc_store.close()
+    vector_store.close()
+
+
+def test_chunk_scope_replay_agrees_with_serving_on_caller_ids_and_missing_rows(
+    tmp_path: Path,
+) -> None:
+    """Serve through the real builder, then replay: the two classify alike (#1001).
+
+    Three semantic-axis rows under a parent whose form is gated. A minted chunk
+    is withheld through its parent. A caller-named id holding the chunk marker
+    is a document of its own, so it is served. A chunk whose own row is gone
+    (vector only) is still withheld, because its id names a parent that
+    carries the form.
+    """
+    intent = "distinctive narwhal content"
+    embed = lambda _text: [1.0, 0.0, 0.0]  # noqa: E731
+    doc_store = SQLiteDocumentStore(tmp_path / "documents.db")
+    vector_store = SQLiteVectorStore(tmp_path / "vectors.db")
+    doc_store.put("conv", f"{intent} parent", {"document_form": "conversation"})
+    minted = chunk_doc_id("conv", 0)
+    named = "conv#chunk-intro"
+    row_gone = chunk_doc_id("conv", 9)
+    for doc_id in (minted, named):
+        # Text the keyword axis cannot match: only the semantic axis serves them.
+        doc_store.put(doc_id, "unrelated filler", {})
+    for doc_id in (minted, named, row_gone):
+        vector_store.upsert(doc_id, embed(""), {"content": doc_id})
+    axes = frozenset({"keyword", "semantic"})
+    strategies = [
+        KeywordSearch(doc_store),
+        SemanticSearch(vector_store, embedding_fn=embed),
+    ]
+    budget = PackBudget(max_items=25, max_tokens=100_000)
+    log = SQLiteEventLog(tmp_path / "events.db")
+
+    off_pack = PackBuilder(
+        strategies=strategies,
+        document_store=doc_store,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+        class_prior_config=ClassPriorConfig(mode="off", axes=axes),
+    ).build(intent, budget=budget)
+    served = {i.item_id for i in off_pack.items}
+    assert served == {"conv", minted, named, row_gone}
+    for item_id in served:
+        _cite_unhelpful(log, off_pack.pack_id, item_id)
+
+    config = ClassPriorConfig(mode="withhold", axes=axes, scope=CHUNKS)
+    withheld = {
+        r.item_id
+        for r in PackBuilder(
+            strategies=strategies,
+            document_store=doc_store,
+            content_floor=ContentFloorConfig(mode="off"),
+            class_prior_config=config,
+        )
+        .build(intent, budget=budget)
+        .retrieval_report.rejected_items
+        if r.reason == "class_prior"
+    }
+    report = replay_class_prior(log, config=config, document_store=doc_store)
+
+    assert withheld == {"conv", minted, row_gone}
+    assert report.matched_servings == len(withheld)
+    assert report.unhelpful_removed == len(withheld)
+    assert report.matched_via_parent == 2
+    assert report.parent_form_unresolved == 0
     doc_store.close()
     vector_store.close()
 
@@ -2406,6 +2561,96 @@ def test_replaying_a_disclosed_pack_under_its_own_policy_withholds_nothing(
     assert report.helpful_items_dropped == 0
     assert report.helpful_bodies_served == 1
     assert report.helpful_items_total == 2
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [None, 5, 1],
+    ids=["default_cut", "body_items_5", "body_items_1"],
+)
+def test_a_policy_matching_the_served_disclosure_prices_the_pack_as_recorded(
+    tmp_path: Path, cut: int | None
+) -> None:
+    """The pointer estimate ran about two tokens over each recorded pointer (#1001).
+
+    Replaying a disclosed pack under the cut it was served with moved
+    ``token_delta`` off zero (0.007 on the default cut, 0.035 on a cut of one)
+    because every pointer was re-priced from an estimate rather than at what
+    the pack paid. A row the pack served as a pointer, and the policy keeps as
+    one, is priced at its recorded charge, so the two arms agree exactly.
+    """
+    log, payload, pointers = _disclosed_pack(
+        tmp_path, disclosure=DisclosureConfig(body_items=cut) if cut else None
+    )
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=cut or 12))
+
+    assert len(pointers) > 0
+    assert report.baseline.injected_tokens == sum(
+        r["estimated_tokens"] for r in payload["injected_items"]
+    )
+    assert report.counterfactual.injected_tokens == report.baseline.injected_tokens
+    assert report.token_delta == 0.0
+    assert report.counterfactual.pointer_items_served == len(pointers)
+    assert report.counterfactual.body_items_served == report.baseline.body_items_served
+
+
+def test_a_row_the_policy_newly_demotes_is_still_priced_from_the_estimate(
+    tmp_path: Path,
+) -> None:
+    """Only a row the pack served as a pointer is priced at its recorded charge.
+
+    The pack served ``s12`` and ``s13`` as pointers; a cut of eight demotes
+    ``s8``..``s11`` too, which have no recorded pointer price. They keep the
+    estimate, and still cost less than the bodies they replace.
+    """
+    log, _, pointers = _disclosed_pack(tmp_path)
+    assert pointers == ["s12", "s13"]
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=8))
+
+    assert report.counterfactual.pointer_items_served == 6
+    assert report.token_delta is not None
+    assert report.token_delta < 0
+
+
+def test_a_pointer_recorded_at_its_body_price_still_replays_as_a_pointer(
+    tmp_path: Path,
+) -> None:
+    """A pack whose pointers show no saving keeps the estimate (#1001).
+
+    A pack that predates ``walk_tokens``, or a hand-built one, charges a
+    pointer row at its body price. Taking that charge as the pointer's price
+    would leave no saving and replay the pointer as a body under the cut the
+    pack was served with, so the baseline and the counterfactual would
+    disagree on what the pack served.
+    """
+    served_log, payload, pointers = _disclosed_pack(tmp_path)
+    [served] = served_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
+    pack_id = served.entity_id
+    flat = copy.deepcopy(payload)
+    for step in flat["budget_trace"]:
+        walk = step.pop("walk_tokens", None)
+        if step["item_id"] in pointers:
+            assert walk is not None
+            step["item_tokens"] = walk
+    log = _FakeEventLog()
+    log.append(
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload=flat,
+        )
+    )
+    log.append(_gs_feedback(pack_id, helpful=["s0", pointers[-1]]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=12))
+
+    assert report.baseline.pointer_items_served == len(pointers)
+    assert report.counterfactual.pointer_items_served == len(pointers)
+    assert report.counterfactual.body_items_served == report.baseline.body_items_served
 
 
 def test_a_body_the_policy_demotes_is_withheld_a_pointer_it_keeps_is_not(
