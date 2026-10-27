@@ -1537,6 +1537,18 @@ After a successful reinstate every reader serves the precedent again:
 `get_lessons`, `GET /precedents`, `GET /precedents/domains`,
 `trellis retrieve precedents`, and a flat pack at the collect seam.
 
+The document and vector re-stamps are fail-soft once the node is current: a
+store outage leaves the reinstatement standing and writes
+`document_sync_failed` / `vector_sync_failed` on the `PRECEDENT_REINSTATED`
+event (and a warning on the result). `trellis analyze health` reads those
+events into `precedent_sync` and warns, naming the precedents, until the
+latest lifecycle event for each is no longer a failed reinstatement: a later
+clean reinstate repairs it (re-issuing this command re-stamps a withheld
+document row and re-syncs the vector row too), and a later demotion
+supersedes it. The window bounds the read, so an unrepaired failure stops
+warning when its event ages out. A vector-only failure is refused on re-issue
+as `target_not_demoted`, so the warning names no repair for it.
+
 Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/
 over-long reason, a missing target, a non-precedent target, a
 non-graph-backed precedent id, a non-`"demoted"` lifecycle state, or the

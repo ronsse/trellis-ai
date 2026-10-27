@@ -303,6 +303,113 @@ class TestVerdictMatrix:
 
 
 # ---------------------------------------------------------------------------
+# SUPERSEDE never stamps a promoted precedent's row (#957)
+# ---------------------------------------------------------------------------
+
+#: A promoted precedent's id: graph node and document row alike.
+_PRECEDENT_ID = "precedent://learning/gateway-port"
+
+
+class TestSupersedeNeverStampsAPrecedentRow:
+    """A precedent's row lifecycle belongs to the precedent handlers alone.
+
+    The noise pass, retention and the classify refresh all skip a row in the
+    ``precedent://learning/`` namespace for that reason. A ``superseded`` stamp
+    from the reconcile tier would be a writer none of them know about, and the
+    one the exemption was written to keep out.
+    """
+
+    def _seed_precedent_row(self, registry: StoreRegistry) -> dict[str, Any]:
+        from trellis.core.document_write import put_document
+
+        docs = registry.knowledge.document_store
+        put_document(
+            docs,
+            None,
+            _PRECEDENT_ID,
+            _BASE,
+            {"document_form": "precedent"},
+            preserve_updated_at=False,
+        )
+        # The near-duplicate scan finds the row only if its index holds it.
+        server_mod._get_minhash_index(registry).add(_PRECEDENT_ID, _BASE)
+        row = docs.get(_PRECEDENT_ID)
+        assert row is not None
+        return row
+
+    def test_a_supersede_verdict_is_not_applied_to_a_precedent_row(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the model says supersede, the precedent row is untouched.
+
+        Defective subject: drop the ``is_promoted_precedent_document`` branch in
+        ``mark_document_superseded`` and the row comes back with a
+        ``superseded`` lifecycle and the result reads ``(supersedes ...)``.
+        """
+        before = self._seed_precedent_row(temp_registry)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("supersede")))
+
+        result = save_memory(_NEAR)
+        new_id = _doc_id(result)
+
+        docs = temp_registry.knowledge.document_store
+        # The memory is stored; the supersession it asked for is not applied.
+        assert result == f"Memory saved: {new_id}"
+        assert docs.get(new_id) is not None
+        assert docs.get(_PRECEDENT_ID) == before
+        assert "lifecycle" not in docs.get(_PRECEDENT_ID)["metadata"]
+        # Not a supersession either way: no claim on the successor, and no
+        # judged event pointing at a row that was never stamped.
+        new_meta = docs.get(new_id)["metadata"]
+        assert "supersedes_doc_id" not in new_meta
+        assert new_meta["reconciliation"] == "stale_recheck"
+        assert _judged_events(temp_registry) == []
+
+    def test_the_stamp_seam_refuses_a_precedent_row_and_says_so(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The refusal lives at the seam, so a caller added later inherits it."""
+        import logging
+
+        import structlog
+
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        before = self._seed_precedent_row(temp_registry)
+        docs = temp_registry.knowledge.document_store
+        docs.put("successor", "The current note about the gateway port.", {})
+
+        # This package's autouse ``_suppress_structlog`` filters below
+        # CRITICAL; lift it, as ``test_missing_target_is_logged_at_warning``
+        # does, and assert the level as well as the name.
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with structlog.testing.capture_logs() as logs:
+                applied = mark_document_superseded(
+                    docs,
+                    old_doc_id=_PRECEDENT_ID,
+                    new_doc_id="successor",
+                    vector_store=None,
+                )
+        finally:
+            structlog.configure(**prior)
+
+        assert applied is False
+        assert docs.get(_PRECEDENT_ID) == before
+        refused = [
+            e for e in logs if e["event"] == "supersede_target_is_promoted_precedent"
+        ]
+        assert [(e["log_level"], e["old_doc_id"]) for e in refused] == [
+            ("warning", _PRECEDENT_ID)
+        ]
+        # Not mislabelled as the other reason the seam answers False.
+        assert not [e for e in logs if e["event"] == "supersede_target_missing"]
+
+
+# ---------------------------------------------------------------------------
 # Lock discipline — the model call must not hold _save_memory_lock
 # ---------------------------------------------------------------------------
 
