@@ -967,6 +967,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`analyze replay`: the as-served baseline counts a disclosure pointer as a
+  pointer (#978).** `replay_pack_value` marked every included row of the
+  baseline arm a body, so a pack that graduated disclosure had demoted
+  reported `pointer_items_served=0` with all of its rows under
+  `body_items_served`, and a cited-helpful row served only as a pointer added
+  its pointer tokens to `helpful_tokens`, against the arm's own rule that a
+  pointer delivers an id, not substance. The baseline now reads
+  `disclosure.pointer_item_ids`, which every flat build has written since
+  #359, so the two arms agree on what a pointer is. On a window that cites
+  pointers as helpful the baseline's `useful_token_fraction` is lower than it
+  read, so `fraction_delta` reads higher against it. An absent, empty or
+  non-list block reads as no pointers, as before. Not changed:
+  `helpful_items_total` and `helpful_bodies_withheld` still count a helpful
+  row the baseline served as a pointer, and a window spanning #976's deploy
+  still mixes the two disclosed-pack pricings (see the `walk_tokens` entry).
 - **`axes.graph` / `PACK_ASSEMBLED.graph_axis_state` read `absent` when the
   builder has no graph strategy (#985).** `resolve_graph_axis_state` returned
   `ran` for a builder that never had the axis, so a reader could not tell
