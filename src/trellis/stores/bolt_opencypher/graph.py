@@ -159,7 +159,10 @@ write's transaction rolls back whole), so re-running it is safe. The bulk
 re-run probes only the endpoints of the row that was refused. Every attempt
 stamps its own ``valid_from`` and ``valid_to`` (``now``), read inside the
 write's transaction function: a version another writer committed since a
-refused attempt must not be closed with that attempt's earlier time.
+refused attempt must not be closed with that attempt's earlier time. The
+alias writers (:meth:`upsert_alias`, :meth:`bind_alias_if_absent`) read
+``now`` the same way, inside the transaction function
+:meth:`_execute_alias_write` re-runs.
 
 Per-backend subclasses override the **seams**:
 
@@ -1357,10 +1360,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         match_confidence: float = 1.0,
         is_primary: bool = False,
     ) -> str:
-        now = _iso(utc_now())
         claim_key = _alias_claim_key(source_system, raw_id)
 
         def _tx(tx: ManagedTransaction) -> str:
+            # Read per attempt, not per call: ``_execute_alias_write``
+            # re-runs this function after a lost claim race, and the
+            # winner may have committed a newer version of this alias in
+            # between. Closing that version with the first attempt's
+            # ``now`` would give it a ``valid_to`` before its own
+            # ``valid_from`` (#1005, as #1002 for edges).
+            now = _iso(utc_now())
             record = tx.run(
                 """
                 MATCH (a:Alias {source_system: $src, raw_id: $rid})
@@ -1432,11 +1441,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
         """Atomically claim or repair an alias through ``AliasClaim``."""
-        now = _iso(utc_now())
         candidate_alias_id = generate_ulid()
         claim_key = _alias_claim_key(source_system, raw_id)
 
         def _tx(tx: ManagedTransaction) -> AliasBindResult:
+            # Per attempt, as in ``upsert_alias`` (#1005): the repair path
+            # closes the current alias with ``now``, and a re-run can
+            # follow another writer's commit of a newer one.
+            now = _iso(utc_now())
             current_record = tx.run(
                 """
                 MATCH (a:Alias {source_system: $src, raw_id: $rid})
