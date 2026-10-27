@@ -2,8 +2,11 @@
 
 ``scope="parents"`` (the default) withholds a document form's parents only.
 ``scope="parents_and_chunks"`` also withholds a chunk whose *parent* carries a
-configured form, resolved through the chunk's own ``metadata["parent_doc_id"]``
-and the build's parent cache — never through an id prefix or ``#chunk-``.
+configured form. Only a chunk id (``<parent>#chunk-N``) resolves through a
+parent, by the same lookup the archived and noise gates make: the item's
+``metadata["parent_doc_id"]``, else the id's own prefix (a vector snapshot
+embedded before that key existed), read through the build's parent cache. A
+plain item that merely names a parent is not a chunk and borrows nothing.
 
 Pure matching lives in the first classes; the later ones drive a real
 ``SQLiteDocumentStore`` through ``PackBuilder`` so the document-store read
@@ -30,11 +33,12 @@ from trellis.retrieve.class_prior import (
     resolve_class_prior_config,
 )
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.strategies import KeywordSearch
+from trellis.retrieve.strategies import KeywordSearch, SemanticSearch
 from trellis.schemas.pack import PackBudget, PackItem, SectionRequest
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -410,22 +414,46 @@ class TestPackBuilderChunkScope:
         assert event.payload["parent_verdict_degraded"] is True
         event_log.close()
 
-    def test_the_link_is_parent_doc_id_not_the_id_shape(
+    def test_a_plain_item_naming_a_parent_is_not_withheld(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
-        """No id prefix and no ``#chunk-`` separator is read to find a form."""
+        """Only a chunk id resolves through a parent. A plain memory whose
+        ``parent_doc_id`` points at a conversation is not a chunk of it, and
+        ``ParentVerdictCache.resolve`` already refuses it a borrowed verdict;
+        the chunk scope must not take the one the archived gate would not."""
         _put_parent(doc_store, "conv", form="conversation")
-        # Linked by data, with an id that has no chunk separator in it.
         doc_store.put("linked-by-data", INTENT, {"parent_doc_id": "conv"})
-        # Chunk-shaped id, but it carries no parent link at all.
+
+        pack = _build(_builder(doc_store, _withhold(CHUNKS)))
+
+        assert "linked-by-data" in _served(pack)
+        assert "linked-by-data" not in _reasons(pack)
+
+    def test_a_plain_item_naming_a_parent_adds_no_document_store_read(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        _put_parent(doc_store, "elsewhere", form="conversation")
+        doc_store.put("linked-by-data", INTENT, {"parent_doc_id": "elsewhere"})
+        spy = _CountingDocumentStore(doc_store)
+
+        _build(_builder(doc_store, _withhold(CHUNKS), store=spy))
+
+        assert "elsewhere" not in spy.get_calls
+
+    def test_a_chunk_id_with_no_parent_key_resolves_through_its_prefix(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """The fallback every other parent-aware reader takes
+        (``concentration.parent_id_of``): a chunk row lacking ``parent_doc_id``
+        is still a chunk of the document its id names."""
+        _put_parent(doc_store, "conv", form="conversation")
         shaped = chunk_doc_id("conv", 7)
         doc_store.put(shaped, INTENT, {})
 
         pack = _build(_builder(doc_store, _withhold(CHUNKS)))
 
-        assert "linked-by-data" not in _served(pack)
-        assert _reasons(pack)["linked-by-data"] == CLASS_PRIOR_REJECTION_REASON
-        assert shaped in _served(pack)
+        assert shaped not in _served(pack)
+        assert _reasons(pack)[shaped] == CLASS_PRIOR_REJECTION_REASON
 
     def test_the_default_scope_ignores_a_data_linked_item(
         self, doc_store: SQLiteDocumentStore
@@ -472,3 +500,78 @@ class TestPackBuilderChunkScope:
         withholding = pack.metadata["withholding"]
         assert withholding["by_reason"][CLASS_PRIOR_REJECTION_REASON] == 1 + len(chunks)
         assert withholding["class_prior_detail"][0]["form"] == "conversation"
+
+
+class TestSemanticAxisChunkScope:
+    """The semantic axis serves ``item_type="vector"`` rows whose metadata is an
+    embed-time snapshot, so its chunks can lack a key a keyword row carries."""
+
+    AXES = frozenset({"keyword", "semantic"})
+
+    @pytest.fixture
+    def vector_store(self, tmp_path: Path) -> SQLiteVectorStore:
+        store = SQLiteVectorStore(tmp_path / "vectors.db")
+        yield store
+        store.close()
+
+    @staticmethod
+    def _embed(_text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+    def _embed_row(
+        self,
+        vector_store: SQLiteVectorStore,
+        item_id: str,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        vector_store.upsert(
+            item_id,
+            self._embed(""),
+            {"content": f"{INTENT} {item_id}", **(snapshot or {})},
+        )
+
+    def _semantic_pack(
+        self, doc_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> Any:
+        builder = PackBuilder(
+            strategies=[SemanticSearch(vector_store, embedding_fn=self._embed)],
+            document_store=doc_store,
+            class_prior_config=_withhold(CHUNKS, axes=self.AXES),
+        )
+        return _build(builder)
+
+    def test_a_vector_chunk_is_withheld_through_its_parent(
+        self, doc_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        _put_parent(doc_store, "conv", form="conversation")
+        cid = chunk_doc_id("conv", 0)
+        self._embed_row(vector_store, cid, {"parent_doc_id": "conv"})
+
+        pack = self._semantic_pack(doc_store, vector_store)
+
+        assert _served(pack) == set()
+        assert _reasons(pack) == {cid: CLASS_PRIOR_REJECTION_REASON}
+
+    def test_an_old_snapshot_without_parent_doc_id_is_withheld_through_its_id(
+        self, doc_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        """A vector row embedded before ``parent_doc_id`` existed carries no
+        link; serving must not wave it through while replay prices it."""
+        _put_parent(doc_store, "conv", form="conversation")
+        cid = chunk_doc_id("conv", 1)
+        self._embed_row(vector_store, cid)
+
+        pack = self._semantic_pack(doc_store, vector_store)
+
+        assert _served(pack) == set()
+        assert _reasons(pack) == {cid: CLASS_PRIOR_REJECTION_REASON}
+
+    def test_a_vector_row_that_is_not_a_chunk_is_served(
+        self, doc_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        _put_parent(doc_store, "conv", form="conversation")
+        self._embed_row(vector_store, "plain-memory", {"parent_doc_id": "conv"})
+
+        pack = self._semantic_pack(doc_store, vector_store)
+
+        assert _served(pack) == {"plain-memory"}

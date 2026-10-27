@@ -68,6 +68,7 @@ from trellis.retrieve.class_prior import (
     PARENTS_AND_CHUNKS_SCOPE,
     ClassPriorConfig,
 )
+from trellis.retrieve.concentration import parent_id_of
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
@@ -642,9 +643,11 @@ class ClassPriorReplayReport(TrellisModel):
     #: ``document_form``. Zero under the default scope.
     matched_via_parent: int = 0
     #: Servings on a configured axis with no ``document_form`` of their own
-    #: that were looked up in the document store to find a parent form —
-    #: every serving the chunk scope had to resolve. Zero under the default
-    #: scope, which never looks anything up.
+    #: whose id is a chunk id, looked up in the document store to find a
+    #: parent form — every serving the chunk scope had to resolve. A
+    #: non-chunk id is never looked up (serving does not resolve one through
+    #: a parent either). Zero under the default scope, which never looks
+    #: anything up.
     parent_lookups: int = 0
     #: Lookups that reached a parent carrying a ``document_form`` (any form,
     #: whether or not it is in ``config.forms``).
@@ -652,32 +655,45 @@ class ClassPriorReplayReport(TrellisModel):
     #: Lookups that could not be answered: the served item's row, or its
     #: parent's, is no longer in the store, the store raised, or no store was
     #: supplied. Not matched; ``matched_servings`` is a floor by this much.
-    #: The remainder of ``parent_lookups`` found a row that is not a chunk, or
-    #: a parent with no form.
+    #: The remainder of ``parent_lookups`` reached a parent with no form.
     parent_form_unresolved: int = 0
 
     notes: list[str] = Field(default_factory=list)
 
 
+def _is_chunk_id(item_id: str) -> bool:
+    """Whether ``item_id`` is a ``<parent>#chunk-N`` row id.
+
+    Deferred import, as in
+    :func:`trellis.retrieve.concentration.parent_id_of`: ``trellis.ingest_corpus``
+    imports back into ``trellis.retrieve``.
+    """
+    from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+    return is_chunk_doc_id(item_id)
+
+
 class _ParentFormLookup:
-    """Resolve a served item's parent form through the document store.
+    """Resolve a served chunk's parent form through the document store.
 
     ``PACK_ASSEMBLED.injected_items[]`` rows carry the item's own
     ``document_form`` but never its parent's, so a historical chunk serving
-    has to be looked up: the stored row's ``metadata["parent_doc_id"]``, then
-    that parent row's ``document_form`` — the same two reads the serve-time
-    resolver makes
-    (:func:`trellis.retrieve.parent_verdicts.parent_document_form`), and no id
-    shape is read. One ``get`` per distinct item and one per distinct parent,
-    memoized, so a chunk served in forty packs costs the same as one served
-    once. A store that raises is caught whole, as the serve-time cache does:
-    one unreadable row must not abort a measurement, and the miss is counted
-    as unresolved rather than hidden.
+    has to be looked up: the stored row's parent id, then that parent row's
+    ``document_form``. The parent id is read as serving reads it
+    (:func:`trellis.retrieve.concentration.parent_id_of`, behind
+    :func:`trellis.retrieve.parent_verdicts.parent_document_form`): the row's
+    ``parent_doc_id``, else the chunk id's own prefix. The caller looks up
+    only chunk ids, the same guard serving's cache applies. One ``get`` per
+    distinct item and one per distinct parent, memoized, so a chunk served in
+    forty packs costs the same as one served once. A store that raises is
+    caught whole, as the serve-time cache does: one unreadable row must not
+    abort a measurement, and the miss is counted as unresolved rather than
+    hidden.
     """
 
     RESOLVED = "resolved"
     UNRESOLVED = "unresolved"
-    NOT_A_CHUNK = "not_a_chunk"
+    NO_FORM = "no_form"
 
     def __init__(self, document_store: DocumentStore | None) -> None:
         self._store = document_store
@@ -685,7 +701,7 @@ class _ParentFormLookup:
         self._parent_form: dict[str, str | None] = {}
 
     def lookup(self, item_id: str) -> tuple[str, str | None]:
-        """``(outcome, parent_form)`` for one served item id."""
+        """``(outcome, parent_form)`` for one served chunk id."""
         if self._store is None:
             return self.UNRESOLVED, None
         if item_id not in self._by_item:
@@ -701,11 +717,11 @@ class _ParentFormLookup:
         if doc is None:
             return self.UNRESOLVED, None
         metadata = doc.get("metadata")
-        parent_id = (
-            metadata.get("parent_doc_id") if isinstance(metadata, dict) else None
+        parent_id = parent_id_of(
+            item_id, metadata if isinstance(metadata, dict) else None
         )
-        if not isinstance(parent_id, str) or not parent_id or parent_id == item_id:
-            return self.NOT_A_CHUNK, None
+        if parent_id == item_id:
+            return self.NO_FORM, None
         if parent_id not in self._parent_form:
             parent = store.get(parent_id)
             if parent is None:
@@ -716,7 +732,7 @@ class _ParentFormLookup:
             )
         form = self._parent_form[parent_id]
         if form is None:
-            return self.NOT_A_CHUNK, None
+            return self.NO_FORM, None
         return self.RESOLVED, form
 
 
@@ -783,25 +799,26 @@ def _class_prior_notes(
             notes.append(
                 'scope is "parents_and_chunks" but no document store was '
                 "supplied, so no chunk's parent could be looked up: "
-                f"{parent_form_unresolved} serving(s) with no form of their "
-                "own were left unresolved and counted as not matched. The "
-                "counts above are parents only."
+                f"{parent_form_unresolved} chunk serving(s) with no form of "
+                "their own were left unresolved and counted as not matched. "
+                "The counts above are parents only."
             )
         else:
             notes.append(
                 'scope is "parents_and_chunks". Historical PACK_ASSEMBLED '
-                "rows carry no chunk form, so each serving on a configured "
-                "axis with no document_form of its own was resolved through "
-                "the document store: the served item's stored parent_doc_id, "
-                "then that parent's document_form. This reads the store as "
-                "it is now, not as it was at serving time. "
+                "rows carry no chunk form, so each chunk-id serving on a "
+                "configured axis with no document_form of its own was "
+                "resolved through the document store: the stored row's "
+                "parent_doc_id (else the chunk id's own prefix, as serving "
+                "reads it), then that parent's document_form. This reads the "
+                "store as it is now, not as it was at serving time. "
                 f"{parent_lookups} serving(s) were looked up; "
                 f"{parent_form_resolved} reached a parent with a form and "
                 f"{parent_form_unresolved} could not be resolved (row or "
                 "parent no longer stored, or a store error), counted as not "
                 f"matched; {matched_via_parent} of the matched servings "
                 "matched only through their parent. The rest of the lookups "
-                "found a row that is not a chunk, or a parent with no form."
+                "reached a parent with no form."
             )
     return notes
 
@@ -861,8 +878,8 @@ def _tally_class_prior_pack(
     """Fold one attributed pack's served rows into ``tally``.
 
     A row is judged under its own ``document_form``; only when it has none,
-    ``config.scope`` is ``"parents_and_chunks"`` and the row is on a
-    configured axis is its parent's form looked up (see
+    ``config.scope`` is ``"parents_and_chunks"``, the row is on a configured
+    axis and its id is a chunk id is its parent's form looked up (see
     :class:`_ParentFormLookup`). The default scope never reaches ``lookup``.
     """
     chunk_scope = config.scope == PARENTS_AND_CHUNKS_SCOPE
@@ -874,8 +891,10 @@ def _tally_class_prior_pack(
         via_parent = False
         if isinstance(form, str):
             tally.saw_document_form = True
-        elif chunk_scope and on_axis and row.get("item_type", "document") == "document":
-            # Only a document row can be a chunk; an entity is never looked up.
+        elif chunk_scope and on_axis and _is_chunk_id(item_id):
+            # Only a chunk id resolves through a parent, whatever axis or
+            # item_type served it (the semantic axis writes "vector" rows):
+            # serving's rule, so replay prices what serving would withhold.
             tally.parent_lookups += 1
             outcome, parent_form = lookup.lookup(item_id)
             if outcome == _ParentFormLookup.RESOLVED:

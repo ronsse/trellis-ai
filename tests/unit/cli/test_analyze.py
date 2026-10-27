@@ -457,7 +457,7 @@ class TestReplay:
             "doc_conv", "parent", {"document_form": "conversation"}
         )
         registry.knowledge.document_store.put(
-            "doc_conv_part", "part", {"parent_doc_id": "doc_conv"}
+            "doc_conv#chunk-0000", "part", {"parent_doc_id": "doc_conv"}
         )
         event_log = registry.operational.event_log
         event_log.emit(
@@ -469,7 +469,7 @@ class TestReplay:
                 "pack_id": "kpack_0",
                 "injected_items": [
                     {
-                        "item_id": "doc_conv_part",
+                        "item_id": "doc_conv#chunk-0000",
                         "item_type": "document",
                         "rank": 1,
                         "estimated_tokens": 60,
@@ -487,7 +487,7 @@ class TestReplay:
             payload={
                 "pack_id": "kpack_0",
                 "helpful_item_ids": [],
-                "unhelpful_item_ids": ["doc_conv_part"],
+                "unhelpful_item_ids": ["doc_conv#chunk-0000"],
                 "rating": 0.0,
                 "success": False,
             },

@@ -73,13 +73,20 @@ for a chunk, so chunks were the stronger half.
 
 ``scope="parents_and_chunks"`` (#986) also withholds a chunk whose
 *parent* carries a configured form. The chunk's form is read, not
-stamped: a chunk carries ``metadata["parent_doc_id"]`` (written by
-``sync.py`` on every chunk), and the parent's own ``document_form`` is
-looked up through the build's
-:class:`~trellis.retrieve.parent_verdicts.ParentVerdictCache`. That cache
-has already fetched every distinct chunk parent in the pool for the
-archived and noise gates, so the lookup adds no document-store read for a
-chunk (``tests/unit/retrieve/test_class_prior_chunks.py`` counts them). The
+stamped: the parent's own ``document_form`` is looked up through the
+build's :class:`~trellis.retrieve.parent_verdicts.ParentVerdictCache`, by
+the very call (:meth:`~trellis.retrieve.parent_verdicts.ParentVerdictCache.resolve`)
+the archived and noise gates make. So the two rules agree on what a chunk
+is: only an item whose own id is a chunk id (``<parent>#chunk-N``)
+inherits through a parent, and a plain item that merely names one in
+``metadata["parent_doc_id"]`` borrows nothing. The parent id is the item's
+``parent_doc_id`` (written by ``sync.py`` on every chunk), else the chunk
+id's own prefix, because a semantic-axis item is built from an embed-time
+vector snapshot that may predate that key
+(:func:`~trellis.retrieve.concentration.parent_id_of`). That cache has
+already fetched every distinct chunk parent in the pool for the archived and
+noise gates, so the lookup adds no document-store read for a chunk
+(``tests/unit/retrieve/test_class_prior_chunks.py`` counts them). The
 resolver is *injected* (``parent_form_of``), so :func:`apply_class_prior`
 stays pure over :class:`~trellis.schemas.pack.PackItem`. The item's own
 form wins: the parent is consulted only for an item that carries none.
@@ -94,10 +101,9 @@ because this gate matches an item's own form. A form-derived stamp under a
 second key avoids that, but still leaves unstamped history. Reading the
 parent works for those chunks today and cannot disagree with the parent.
 
-An unresolvable parent (no ``parent_doc_id``, a parent row the store no
-longer has, a store error) is no verdict: the chunk is served, the same
-default-pass posture the archived and noise gates take. No id prefix or
-``#chunk-`` separator is read anywhere on this path.
+An unresolvable parent (a non-chunk item, a parent row the store no
+longer has, a parent with no form, a store error) is no verdict: the item
+is served, the same default-pass posture the archived and noise gates take.
 
 **Modes.**
 

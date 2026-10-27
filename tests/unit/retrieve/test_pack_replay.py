@@ -39,12 +39,15 @@ from trellis.retrieve.strategies import (
     GRAPH_SELECTION_CALLER_SEEDED,
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
+    KeywordSearch,
     SearchStrategy,
+    SemanticSearch,
 )
 from trellis.schemas.pack import PackBudget, PackItem
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 
 
 class _FakeEventLog(EventLog):
@@ -354,7 +357,9 @@ def _class_prior_pack_event(
     ``document_form`` field :func:`replay_class_prior` reads. Each row:
     ``item_id``, ``form``, ``axis``, ``tokens``, ``score``, ``rank`` — the
     unused ``score``/``rank`` keys are dead data callers may still pass,
-    kept only so existing fixtures need no trimming.
+    kept only so existing fixtures need no trimming — plus an optional
+    ``item_type`` (default ``"document"``; the semantic axis writes
+    ``"vector"``, the graph axis ``"entity"``).
 
     ``rejected`` mirrors the pack's own ``rejected_items[]`` (each row:
     ``item_id``, ``reason``, ``axis``) for scenarios where a losing
@@ -370,7 +375,7 @@ def _class_prior_pack_event(
             "injected_items": [
                 {
                     "item_id": row["item_id"],
-                    "item_type": "document",
+                    "item_type": row.get("item_type", "document"),
                     "rank": row["rank"],
                     "estimated_tokens": row["tokens"],
                     "strategy_source": row["axis"],
@@ -669,9 +674,14 @@ def _graded(pack_id: str, *, helpful: list[str], unhelpful: list[str]) -> Event:
 
 
 def _chunk_row(item_id: str, tokens: int, *, axis: str = "keyword") -> dict[str, Any]:
-    """A served row that, like every historical one, records no chunk form."""
+    """A served row that, like every historical one, records no chunk form.
+
+    ``item_type`` is what the axis really writes: the semantic axis emits
+    ``"vector"`` rows, not ``"document"`` ones (``SemanticSearch.search``).
+    """
     return {
         "item_id": item_id,
+        "item_type": {"semantic": "vector", "graph": "entity"}.get(axis, "document"),
         "form": None,
         "axis": axis,
         "tokens": tokens,
@@ -686,9 +696,14 @@ def chunk_store(tmp_path: Path) -> Any:
     store.put("conv", "parent", {"document_form": "conversation"})
     store.put("conv#chunk-0000", "a", {"parent_doc_id": "conv"})
     store.put("conv#chunk-0001", "b", {"parent_doc_id": "conv"})
+    store.put("conv#chunk-0002", "older row, no parent_doc_id key", {})
     store.put("note", "parent", {"document_form": "capture"})
-    store.put("note-part", "c", {"parent_doc_id": "note"})
+    store.put("note#chunk-0000", "c", {"parent_doc_id": "note"})
     store.put("formless", "no form", {})
+    # A chunk whose parent row was never stored (or has since been deleted).
+    store.put("orphan#chunk-0000", "d", {"parent_doc_id": "orphan"})
+    # Not a chunk by id, yet it names a conversation as its parent.
+    store.put("memo", "a plain memory", {"parent_doc_id": "conv"})
     yield store
     store.close()
 
@@ -701,9 +716,12 @@ def _chunk_log() -> _FakeEventLog:
             [
                 _chunk_row("conv#chunk-0000", 50),
                 _chunk_row("conv#chunk-0001", 80),
-                _chunk_row("note-part", 30),
+                _chunk_row("conv#chunk-0002", 11),
+                _chunk_row("note#chunk-0000", 30),
                 _chunk_row("formless", 20),
-                _chunk_row("gone", 10),
+                _chunk_row("gone#chunk-0000", 10),
+                _chunk_row("orphan#chunk-0000", 7),
+                _chunk_row("memo", 9),
             ],
         )
     )
@@ -720,17 +738,20 @@ def test_chunk_scope_prices_chunks_through_their_stored_parent_form(
 
     report = replay_class_prior(_chunk_log(), config=config, document_store=chunk_store)
 
-    assert report.matched_servings == 2
-    assert report.matched_via_parent == 2
+    # Three conversation chunks match, the third through the chunk id alone
+    # because its older stored row carries no ``parent_doc_id``.
+    assert report.matched_servings == 3
+    assert report.matched_via_parent == 3
     assert report.helpful_lost == 1
     assert report.unhelpful_removed == 1
-    assert report.tokens_freed == 130
-    # Five formless rows were looked up: two reached the conversation parent,
-    # one a capture parent (a form outside config.forms), one a row that is
-    # not a chunk, one whose row is gone.
-    assert report.parent_lookups == 5
-    assert report.parent_form_resolved == 3
-    assert report.parent_form_unresolved == 1
+    assert report.tokens_freed == 141
+    # Six chunk-shaped rows were looked up (``formless`` and ``memo`` are not
+    # chunk ids and cost nothing): four reached a parent with a form, three
+    # in ``config.forms`` and one a capture parent outside it; two could not
+    # be answered, one whose own row is gone and one whose parent is.
+    assert report.parent_lookups == 6
+    assert report.parent_form_resolved == 4
+    assert report.parent_form_unresolved == 2
     assert report.applied_config.endswith(f"scope={CHUNKS}")
     assert any("not as it was at serving time" in note for note in report.notes)
 
@@ -764,7 +785,8 @@ def test_chunk_scope_reads_each_item_and_parent_once(
         log, config=ClassPriorConfig(mode="withhold", scope=CHUNKS), document_store=spy
     )
 
-    assert report.matched_servings == 5
+    # Three conversation chunks in the first pack, one more in each of three.
+    assert report.matched_servings == 6
     assert spy.get_calls.count("conv#chunk-0000") == 1
     assert spy.get_calls.count("conv") == 1
 
@@ -775,8 +797,8 @@ def test_chunk_scope_without_a_store_counts_unresolved_and_says_so() -> None:
     )
 
     assert report.matched_servings == 0
-    assert report.parent_lookups == 5
-    assert report.parent_form_unresolved == 5
+    assert report.parent_lookups == 6
+    assert report.parent_form_unresolved == 6
     assert any("no document store was supplied" in note for note in report.notes)
 
 
@@ -788,7 +810,7 @@ def test_chunk_scope_survives_a_store_that_raises() -> None:
     )
 
     assert report.matched_servings == 0
-    assert report.parent_form_unresolved == 5
+    assert report.parent_form_unresolved == 6
 
 
 def test_a_row_with_its_own_form_is_never_looked_up(
@@ -808,18 +830,22 @@ def test_a_row_with_its_own_form_is_never_looked_up(
     assert report.matched_servings == 0
 
 
-def test_chunk_scope_looks_up_only_configured_axes_and_documents(
+def test_chunk_scope_looks_up_only_configured_axes_and_chunk_ids(
     chunk_store: SQLiteDocumentStore,
 ) -> None:
     spy = _CountingStore(chunk_store)
     log = _FakeEventLog()
-    entity = {**_chunk_row("conv#chunk-0001", 5), "axis": "keyword"}
-    event = _class_prior_pack_event(
-        "pack-0",
-        [_chunk_row("conv#chunk-0000", 40, axis="semantic"), entity],
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                # A chunk, but on an axis outside the default ``{keyword}``.
+                _chunk_row("conv#chunk-0000", 40, axis="semantic"),
+                # On a configured axis, but not a chunk id.
+                _chunk_row("formless", 5),
+            ],
+        )
     )
-    event.payload["injected_items"][1]["item_type"] = "entity"
-    log.append(event)
     log.append(_graded("pack-0", helpful=[], unhelpful=["conv#chunk-0000"]))
 
     report = replay_class_prior(
@@ -852,6 +878,105 @@ def test_chunk_scope_on_all_axes_matches_the_semantic_chunk(
     assert report.matched_servings == 1
     assert report.unhelpful_removed == 1
     assert report.tokens_freed == 40
+
+
+def _single_serving(item_id: str, *, axis: str = "keyword") -> _FakeEventLog:
+    log = _FakeEventLog()
+    log.append(_class_prior_pack_event("pack-0", [_chunk_row(item_id, 40, axis=axis)]))
+    log.append(_graded("pack-0", helpful=[], unhelpful=[item_id]))
+    return log
+
+
+def test_a_semantic_vector_row_is_priced_like_a_document_row(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """``SemanticSearch`` writes ``item_type="vector"``; serving gates it, so
+    replay must price it. A ``== "document"`` guard dropped every such row."""
+    log = _single_serving("conv#chunk-0000", axis="semantic")
+    [row] = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[0].payload[
+        "injected_items"
+    ]
+    assert row["item_type"] == "vector"
+
+    report = replay_class_prior(
+        log,
+        config=ClassPriorConfig(
+            mode="withhold", scope=CHUNKS, axes=frozenset({"semantic"})
+        ),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_lookups == 1
+    assert report.matched_servings == 1
+    assert report.matched_via_parent == 1
+
+
+def test_a_chunk_whose_parent_row_is_gone_counts_as_unresolved(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """A missing parent is "could not answer", not "not a chunk": the first is
+    why ``matched_servings`` is a floor, the second would hide that."""
+    report = replay_class_prior(
+        _single_serving("orphan#chunk-0000"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_lookups == 1
+    assert report.parent_form_unresolved == 1
+    assert report.parent_form_resolved == 0
+    assert report.matched_servings == 0
+
+
+def test_a_chunk_row_without_a_parent_key_resolves_through_its_id(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """The same fallback serving takes for an older snapshot (#986)."""
+    report = replay_class_prior(
+        _single_serving("conv#chunk-0002"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_form_resolved == 1
+    assert report.matched_servings == 1
+    assert report.matched_via_parent == 1
+
+
+def test_a_plain_item_naming_a_parent_is_neither_looked_up_nor_matched(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """Only a chunk id resolves through a parent; serving's rule, replay's too."""
+    spy = _CountingStore(chunk_store)
+
+    report = replay_class_prior(
+        _single_serving("memo"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=spy,
+    )
+
+    assert spy.get_calls == []
+    assert report.parent_lookups == 0
+    assert report.matched_servings == 0
+
+
+def test_resolved_parent_forms_mean_the_window_has_history(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    """A window of chunks whose parents carry a form (here one outside
+    ``config.forms``) found nothing *eligible*; it must not claim there is no
+    document_form history at all."""
+    report = replay_class_prior(
+        _single_serving("note#chunk-0000"),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=chunk_store,
+    )
+
+    assert report.parent_form_resolved == 1
+    assert report.matched_servings == 0
+    notes = " ".join(report.notes)
+    assert "nothing was eligible" in notes
+    assert "carries a document_form at all" not in notes
 
 
 # --------------------------------------------------------------------------
@@ -1001,6 +1126,79 @@ def test_builder_noise_rejected_other_axis_copy_does_not_block_removal(
 
     assert report.unhelpful_removed == 1
     assert report.still_served_by_other_axis == 0
+
+
+def test_chunk_scope_replay_prices_what_serving_withholds_on_the_semantic_axis(
+    tmp_path: Path,
+) -> None:
+    """Serve through the real builder and strategies, then replay the event.
+
+    A hand-built row cannot catch replay disagreeing with serving about which
+    rows are chunks: the semantic axis writes ``item_type="vector"`` rows, and
+    a vector snapshot embedded before ``parent_doc_id`` existed carries no
+    link at all. Serving withholds both chunks, so replay must price both.
+    """
+    intent = "distinctive narwhal content"
+    embed = lambda _text: [1.0, 0.0, 0.0]  # noqa: E731
+    doc_store = SQLiteDocumentStore(tmp_path / "documents.db")
+    vector_store = SQLiteVectorStore(tmp_path / "vectors.db")
+    doc_store.put("conv", f"{intent} parent", {"document_form": "conversation"})
+    fresh, old = "conv#chunk-0000", "conv#chunk-0001"
+    for chunk_id in (fresh, old):
+        # Text the keyword axis cannot match: only the semantic axis serves them.
+        doc_store.put(chunk_id, "unrelated filler", {"parent_doc_id": "conv"})
+    vector_store.upsert(fresh, embed(""), {"content": "a", "parent_doc_id": "conv"})
+    vector_store.upsert(old, embed(""), {"content": "b"})
+    axes = frozenset({"keyword", "semantic"})
+    strategies = [
+        KeywordSearch(doc_store),
+        SemanticSearch(vector_store, embedding_fn=embed),
+    ]
+    budget = PackBudget(max_items=25, max_tokens=100_000)
+    log = SQLiteEventLog(tmp_path / "events.db")
+
+    off_pack = PackBuilder(
+        strategies=strategies,
+        document_store=doc_store,
+        event_log=log,
+        content_floor=ContentFloorConfig(mode="off"),
+        class_prior_config=ClassPriorConfig(mode="off", axes=axes),
+    ).build(intent, budget=budget)
+    served_by_axis = {i.item_id: i.strategy_source for i in off_pack.items}
+    assert served_by_axis == {"conv": "keyword", fresh: "semantic", old: "semantic"}
+    [row] = [
+        r
+        for r in log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[
+            0
+        ].payload["injected_items"]
+        if r["item_id"] == fresh
+    ]
+    assert row["item_type"] == "vector"
+    pack_id = off_pack.pack_id
+    for item_id in served_by_axis:
+        _cite_unhelpful(log, pack_id, item_id)
+
+    config = ClassPriorConfig(mode="withhold", axes=axes, scope=CHUNKS)
+    withheld = {
+        r.item_id
+        for r in PackBuilder(
+            strategies=strategies,
+            document_store=doc_store,
+            content_floor=ContentFloorConfig(mode="off"),
+            class_prior_config=config,
+        )
+        .build(intent, budget=budget)
+        .retrieval_report.rejected_items
+        if r.reason == "class_prior"
+    }
+    report = replay_class_prior(log, config=config, document_store=doc_store)
+
+    assert withheld == {"conv", fresh, old}
+    assert report.matched_servings == len(withheld)
+    assert report.unhelpful_removed == len(withheld)
+    assert report.matched_via_parent == 2
+    doc_store.close()
+    vector_store.close()
 
 
 # --------------------------------------------------------------------------
