@@ -994,6 +994,31 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A promoted precedent's document row is no longer rewritten by
+  `worker enrich`, and `retention.restore` will not un-archive a redaction's
+  blank row (#957).** `worker enrich` selected a precedent's row like any
+  other document, so its LLM pass could merge facets into it or overwrite the
+  `decision` `content_type` the promotion stamped; the candidate selection now
+  skips every id in `precedent://learning/` (the same id predicate the noise
+  pass and classify refresh use), with or without `--reenrich`. Separately,
+  `redaction.apply` blanks a document row and then purges its node, and
+  `retention.restore` read the document store first, so it re-stamped that
+  empty archived row `current`, either beside a deleted node (a redacted
+  precedent) or beside a live one (a redaction whose purge failed, which is
+  re-runnable). Two refusals now ride the existing `refused` path, so each is
+  named in `refused_items`, the `RETENTION_RESTORED` event and
+  `CommandResult.warnings`, and the rest of the batch still restores:
+  `retention_restore_precedent_node_missing` (a namespace row archived with no
+  node) and `retention_restore_redaction_tombstone` (an archived row whose
+  `deprecation_reason` is `redacted` *and* whose content is empty, in or out of
+  the namespace; the reason alone is caller-chosen text and does not qualify).
+  A batch restoring nothing rejects with the one refusal code present, or
+  `retention_restore_nothing_restored` when the codes differ; the summary line
+  now names the codes in place of "refused (history unavailable)". The
+  `classify.shadow`, `domain_normalization` and `tag_evolution` loops were
+  audited and left alone: shadow overlays only `content_tags_shadow`, which is
+  never served, and the other two write events, not documents.
+
 - **`promote-learning`: re-running a file after a refused run no longer
   re-promotes the rows that landed (#983).** A mixed run exits `2` /
   `refused` and the next move is to fix the bad row and run the same file

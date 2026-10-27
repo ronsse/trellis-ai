@@ -808,6 +808,15 @@ class TestRetentionSparesPromotedPrecedents:
         assert lifecycle["state"] == "archived"
 
 
+def _refusal_text(registry: StoreRegistry) -> str:
+    """The refused item's message, as the ``RETENTION_RESTORED`` event records it."""
+    (event,) = registry.operational.event_log.get_events(
+        event_type=EventType.RETENTION_RESTORED
+    )
+    (item,) = event.payload["refused_items"]
+    return str(item["message"])
+
+
 class TestRestoreRefusesAnOrphanedPrecedentRow:
     """``retention.restore`` will not un-archive a self-redacted precedent's row (#957).
 
@@ -815,7 +824,7 @@ class TestRestoreRefusesAnOrphanedPrecedentRow:
     archived tombstone. Restore read the document store first, found the archived
     row and re-stamped it ``current`` while the node stayed deleted.
 
-    Defective subject: drop ``_refuse_orphaned_precedent_row`` from
+    Defective subject: drop ``_refuse_unrestorable_row`` from
     ``RetentionRestoreHandler._restore`` and the tombstone is restored.
     """
 
@@ -895,6 +904,149 @@ class TestRestoreRefusesAnOrphanedPrecedentRow:
 
         assert result.status == CommandStatus.SUCCESS
         assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+    def test_the_refusal_is_true_when_the_row_keeps_its_content(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A node gone without a blanking (a failed scrub re-create) reads true.
+
+        The row is archived with its real text and no node: nothing was
+        redacted from it, so the message must not call it a tombstone.
+        """
+        _promote(registry)
+        row = _document(registry)
+        metadata = {**row["metadata"], LIFECYCLE_KEY: {"state": "archived"}}
+        put_document(
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+            NODE_ID,
+            row["content"],
+            metadata,
+            preserve_updated_at=True,
+        )
+        assert registry.knowledge.graph_store.delete_node(NODE_ID)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_precedent_node_missing"
+        )
+        text = _refusal_text(registry)
+        assert "no longer exists" in text
+        for untrue in ("blank", "tombstone", "redacted"):
+            assert untrue not in text
+        assert _document(registry)["content"] == row["content"]
+
+
+class TestRestoreRefusesARedactionTombstone:
+    """``retention.restore`` will not un-archive the blank row a redaction left.
+
+    ``redaction.apply`` blanks the row first and purges the node second. When
+    the purge fails the row is already a blank archived tombstone beside a
+    live node, and restore marked it ``current``.
+
+    Defective subject: drop the ``_is_redaction_tombstone`` branch of
+    ``RetentionRestoreHandler._refuse_unrestorable_row``.
+    """
+
+    def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
+        return build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": item_ids, "reason": "corrective"},
+            )
+        )
+
+    def _redact_with_a_failing_purge(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> dict[str, Any]:
+        graph = registry.knowledge.graph_store
+
+        def _boom(_node_id: str) -> bool:
+            msg = "purge failed"
+            raise StoreError(msg, store="graph")
+
+        monkeypatch.setattr(graph, "delete_node", _boom)
+        with pytest.raises(StoreError, match="purge failed"):
+            RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        monkeypatch.undo()
+        assert graph.get_node(NODE_ID) is not None
+        tombstone = _document(registry)
+        assert tombstone["content"] == ""
+        return tombstone
+
+    def test_a_purge_that_failed_leaves_a_tombstone_that_restore_refuses(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _promote(registry)
+        tombstone = self._redact_with_a_failing_purge(registry, monkeypatch)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_redaction_tombstone"
+        )
+        assert "redaction.apply" in _refusal_text(registry)
+        assert _document(registry) == tombstone
+        for axis in ("keyword", "semantic"):
+            assert not _served(registry, axis, NODE_ID)
+
+    def test_a_document_outside_the_namespace_is_refused_the_same_way(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        graph.upsert_node("plain-doc", "document", {"name": "plain"})
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", {})
+        RedactionApplyHandler(registry).handle(_redact_command("plain-doc"))
+        tombstone = _document(registry, "plain-doc")
+        assert tombstone["content"] == ""
+
+        result = self._restore(registry, ["plain-doc"])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_redaction_tombstone"
+        )
+        assert _document(registry, "plain-doc") == tombstone
+
+    def test_an_archived_note_whose_reason_reads_redacted_still_restores(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The reason is caller-chosen text: only a *blank* row is a tombstone."""
+        archived = {
+            LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"}
+        }
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", archived)
+
+        result = self._restore(registry, ["plain-doc"])
+
+        assert result.status == CommandStatus.SUCCESS
+        plain = _document(registry, "plain-doc")
+        assert plain["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert plain["content"] == "an ordinary note"
+
+    def test_two_different_refusals_reject_under_the_mixed_code(
+        self, registry: StoreRegistry
+    ) -> None:
+        _promote(registry)
+        RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        registry.knowledge.graph_store.upsert_node("plain-doc", "document", {})
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", {})
+        RedactionApplyHandler(registry).handle(_redact_command("plain-doc"))
+
+        result = self._restore(registry, [NODE_ID, "plain-doc"])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"] == "retention_restore_nothing_restored"
+        )
+        assert "retention_restore_precedent_node_missing" in result.message
+        assert "retention_restore_redaction_tombstone" in result.message
 
 
 class _FixedClassifier:
