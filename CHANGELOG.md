@@ -1421,6 +1421,13 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **`save_experience`'s tool description says a step's `result` is an object.**
+  `trellis analyze health` reported the same boundary rejection recurring
+  (`type` at `steps[].result`, 14 times in 7 days): agents wrote a bare string
+  where `TraceStep.result` takes a dict. The skill that teaches the trace shape
+  already said so; the MCP tool description, the only guide an agent without
+  that skill sees, did not. The schema is unchanged.
+
 - **BREAKING: `trellis admin quickstart` no longer writes Claude Code settings
   files; it prints the `claude mcp add` command that registers `trellis-mcp`.**
   Claude Code never read the `mcpServers` entry it wrote there, so entries
