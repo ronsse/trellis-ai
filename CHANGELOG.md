@@ -967,6 +967,28 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`promote-learning`: re-running a file after a refused run no longer
+  re-promotes the rows that landed (#983).** A mixed run exits `2` /
+  `refused` and the next move is to fix the bad row and run the same file
+  again, but `submit_learning_promotion` refused re-approval only for a
+  precedent that was not current, so the second run wrote each landed row a
+  second time: a new SCD-2 version at the same id and a second
+  `PRECEDENT_PROMOTED` event. A row whose precedent is current, complete and
+  unchanged is now reported `already_promoted` and writes nothing, in
+  `promote-learning`, `POST /learning/promotions` and `auto-promote-candidates`.
+  It counts as satisfied for the verdict, so a corrected file exits `0`, and
+  is carried in a new `already_promoted_count` (CLI JSON, REST response,
+  review-decision event detail; `docs/api/v1.yaml` regenerated) apart from
+  `promoted_count`. A `promoted_incomplete` row and a row with changed
+  content still write. `review-ready --approve` keeps refusing an existing
+  precedent as `refused_already_promoted`. Two smaller fixes ride with it:
+  `review-ready --approve ""` could raise `IndexError` when a malformed
+  artifact held a ready row with a blank `candidate_id`, and is now refused as
+  `refused_not_ready`; and the `--dry-run` note no longer says a row "was
+  skipped" or that a skipped row "makes the run refused" about a run that
+  did not happen, while the text header divides by `named_count` (the Review
+  toast's denominator) and not `approved_count`.
+
 - **`POST /api/v1/learning/promotions` states the verdict `promote-learning`
   states.** `LearningPromotionResponse.status` was always the default `"ok"`,
   even when every ready row was refused or failed to land, and the response

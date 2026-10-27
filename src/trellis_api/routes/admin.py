@@ -42,6 +42,7 @@ from trellis.learning.artifacts import (
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
     prepare_learning_promotions,
+    promotion_already_promoted,
     promotion_landed,
     promotion_verdict,
     settle_promotion,
@@ -1452,7 +1453,10 @@ def promote_learning_candidates(
     from the same function (:func:`promotion_verdict`), and the status code
     stays 200 for every verdict. An approved row with a blank
     ``candidate_id`` is skipped but makes the verdict ``refused``; rows that
-    promoted still landed.
+    promoted still landed. A row whose precedent is already current, complete
+    and unchanged comes back ``already_promoted`` and is written not at all,
+    so re-submitting a decision (or a whole file) adds no version and no
+    second ``PRECEDENT_PROMOTED`` event.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
@@ -1501,6 +1505,7 @@ def promote_learning_candidates(
                 entry["edge_payloads"],
                 requested_by="api:review.promote-learning",
                 graph_store=registry.knowledge.graph_store,
+                event_log=registry.operational.event_log,
             )
         )
         outcomes.append({"candidate_id": entry["candidate_id"], **outcome})
@@ -1515,6 +1520,7 @@ def promote_learning_candidates(
         )
 
     promoted_count = sum(1 for o in outcomes if promotion_landed(o))
+    already_promoted_count = sum(1 for o in outcomes if promotion_already_promoted(o))
     # An approved row with a blank id has no outcome but refuses the run, as it
     # does for the CLI: both hand the verdict the planner's own count.
     status = promotion_verdict(outcomes, unnamed_count=unnamed_approved_count(plan))
@@ -1529,6 +1535,7 @@ def promote_learning_candidates(
             "named_count": plan["named_count"],
             "ready_count": len(ready),
             "promoted_count": promoted_count,
+            "already_promoted_count": already_promoted_count,
             "candidate_ids": [r.candidate_id for r in rows],
         },
     )
@@ -1541,6 +1548,7 @@ def promote_learning_candidates(
         named_count=plan["named_count"],
         ready_count=len(ready),
         promoted_count=promoted_count,
+        already_promoted_count=already_promoted_count,
         results=rows,
     )
 

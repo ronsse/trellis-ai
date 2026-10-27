@@ -1614,7 +1614,14 @@ way and prints the same line.
 | `2` | `refused` | at least one row was refused, or an approved row has a blank `candidate_id`, and no write failed |
 | `5` | `failed` | at least one write did not land, whether or not another row was refused |
 
-`promoted_count` counts the rows that fully landed. `approved_count` counts
+`promoted_count` counts the rows this run fully wrote. A row whose precedent
+is already current, complete and unchanged (same values bar `approved_at`,
+every named edge, a non-miner `PRECEDENT_PROMOTED` event) is reported
+`already_promoted`, writes no new version and no second event, counts as
+satisfied for the verdict, and is carried in `already_promoted_count`
+instead; this is what makes re-running a refused file after fixing its bad
+row safe. A half-landed (`promoted_incomplete`) row is not skipped, so the
+same re-run repairs it. `approved_count` counts
 the rows marked `approved: true`, including a row with a blank
 `candidate_id`; such a row names nothing to promote, so it is skipped without
 a result, **and it refuses the run**: an approved row that names nothing is an
@@ -1626,9 +1633,12 @@ text form says how many. A run where some rows promoted and some approved rows
 were blank is `refused` too: the rows that promoted still landed and stay
 (`promoted_count` counts them; nothing is undone), and a write that did not
 land still outranks the refusal (`failed`, exit `5`). A blank row that is not
-approved is ignored. `POST /learning/promotions` states the same `status`
-(HTTP stays 200); `review-ready --approve` is unchanged, since a blank id
-there is already refused as `refused_not_ready`.
+approved is ignored. The text header reads `promoted/named_count` (the rows
+that could run, as the REST response and the Review toast count them), plus
+`, N already promoted` when any were skipped. `POST /learning/promotions`
+states the same `status` (HTTP stays 200) and `already_promoted_count`;
+`review-ready --approve` refuses a blank id as `refused_not_ready`, and a
+precedent that already exists as `refused_already_promoted`, not as a skip.
 
 `--dry-run` submits nothing, so it has no outcome to read: it **always exits
 `0`** and reports `ok`, whatever it previews. It adds a preview of the verdict
@@ -3695,7 +3705,7 @@ decide which surfaces are human-gated are described in
 | POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
 | POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
 | GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (`status: "error"` + `code` + a `hint` naming the path when there is none to read) |
-| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows that fully landed; the HTTP status is 200 for every verdict |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows this run fully wrote, `already_promoted_count` the rows whose precedent already held the promotion and were written not at all (re-submitting is safe; the row reads `already_promoted`); the HTTP status is 200 for every verdict |
 | GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
 | POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
 | GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from trellis.mutate import MutationExecutor
     from trellis.ops.registry import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
@@ -1251,18 +1252,132 @@ def _precedent_reapproval_refusal(
     }
 
 
-def preview_learning_promotion_refusal(
-    entity_id: str, *, graph_store: GraphStore
-) -> dict[str, Any] | None:
-    """The refusal :func:`submit_learning_promotion` would answer, or ``None``.
+#: Status of a row whose precedent is already current, complete and carries
+#: exactly what the submission would write. Nothing is written for it. It is
+#: not a refusal and not a failure: the operator's request is already met.
+ALREADY_PROMOTED = "already_promoted"
 
-    Read-only: one graph read and the same
-    :func:`_precedent_reapproval_refusal` the submission runs before its
-    first write, so a dry run and a real run cannot disagree about it. It
+#: Entity properties a re-submission is expected to change on its own, so they
+#: do not count as a difference in content. ``approved_at`` is stamped from the
+#: clock each time the payload is built.
+_VOLATILE_PROMOTION_PROPERTIES = frozenset({"approved_at"})
+
+
+def _promotion_content_unchanged(
+    existing_node: Mapping[str, Any], entity_payload: Mapping[str, Any]
+) -> bool:
+    """Whether the node already holds every value ``entity_payload`` would write.
+
+    A key the node has and the payload lacks does not count: a later writer
+    (a lifecycle stamp, a redaction note) is not content this promotion owns.
+    A missing key reads as ``None`` so a backend that drops null properties
+    still matches. Anything uncertain compares unequal, and an unequal row is
+    written as before, never skipped.
+    """
+    properties = existing_node.get("properties")
+    if not isinstance(properties, Mapping):
+        return False
+    if properties.get("name") != entity_payload["name"]:
+        return False
+    return all(
+        properties.get(key) == value
+        for key, value in entity_payload["properties"].items()
+        if key not in _VOLATILE_PROMOTION_PROPERTIES
+    )
+
+
+def _promotion_is_complete(
+    entity_id: str,
+    edge_payloads: Sequence[Mapping[str, Any]],
+    *,
+    graph_store: GraphStore,
+    event_log: EventLog,
+) -> bool:
+    """Whether every edge and the ``PRECEDENT_PROMOTED`` event are in place.
+
+    A promotion whose edge or event did not land is ``promoted_incomplete``,
+    and running it again is how it is mended; skipping it as "already there"
+    would leave it half-written for good. The event is the one
+    ``get_lessons`` reads, and a miner's candidate row is not a promotion
+    (:func:`~trellis.retrieve.precedents.is_miner_candidate_event`).
+    """
+    from trellis.retrieve.precedents import is_miner_candidate_event  # noqa: PLC0415
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    present = {
+        (edge.get("target_id"), edge.get("edge_type"))
+        for edge in graph_store.get_edges(entity_id, direction="outgoing")
+    }
+    if any(
+        (edge["target_id"], edge["edge_kind"]) not in present for edge in edge_payloads
+    ):
+        return False
+    events = event_log.get_events(
+        event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+    )
+    return any(not is_miner_candidate_event(event) for event in events)
+
+
+def _pre_write_outcome(
+    entity_payload: Mapping[str, Any],
+    edge_payloads: Sequence[Mapping[str, Any]],
+    *,
+    graph_store: GraphStore,
+    event_log: EventLog | None,
+) -> dict[str, Any] | None:
+    """The outcome a submission answers before its first write, or ``None``.
+
+    Two answers exist, both reached from one graph read: a refusal
+    (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
+    second needs a current precedent that holds what the payload would write,
+    has every edge it names and has its promotion event. Without an
+    ``event_log`` the event cannot be checked, so nothing is skipped and the
+    write goes ahead.
+
+    One function for the submission and its preview, so a dry run and a real
+    run cannot disagree about a row.
+    """
+    entity_id = entity_payload["entity_id"]
+    existing_node = graph_store.get_node(entity_id)
+    refusal = _precedent_reapproval_refusal(existing_node, entity_id)
+    if refusal is not None:
+        return refusal
+    if (
+        event_log is None
+        or existing_node is None
+        or existing_node.get("node_type") != "precedent"
+        or not _promotion_content_unchanged(existing_node, entity_payload)
+        or not _promotion_is_complete(
+            entity_id, edge_payloads, graph_store=graph_store, event_log=event_log
+        )
+    ):
+        return None
+    return {
+        "status": ALREADY_PROMOTED,
+        "entity_id": entity_id,
+        "message": (
+            f"{entity_id} is already promoted with this content; nothing was written"
+        ),
+    }
+
+
+def preview_learning_promotion(
+    entity_payload: Mapping[str, Any],
+    edge_payloads: Sequence[Mapping[str, Any]],
+    *,
+    graph_store: GraphStore,
+    event_log: EventLog | None,
+) -> dict[str, Any] | None:
+    """The refusal or ``already_promoted`` outcome a submission would answer.
+
+    Read-only: it runs the same :func:`_pre_write_outcome` the submission runs
+    before its first write. ``None`` means the submission would write. It
     cannot foresee a policy-gate refusal or a write that fails; those exist
     only once the executor runs.
     """
-    return _precedent_reapproval_refusal(graph_store.get_node(entity_id), entity_id)
+    return _pre_write_outcome(
+        entity_payload, edge_payloads, graph_store=graph_store, event_log=event_log
+    )
 
 
 def submit_learning_promotion(
@@ -1272,6 +1387,7 @@ def submit_learning_promotion(
     *,
     requested_by: str,
     graph_store: GraphStore,
+    event_log: EventLog | None = None,
 ) -> dict[str, Any]:
     """Submit one approved promotion through the governed pipeline.
 
@@ -1301,6 +1417,16 @@ def submit_learning_promotion(
     nor a silent no-op: a distinct ``"refused_<state>"`` (or
     ``"refused_not_current"``) status with a message an operator reads.
 
+    **A precedent that already holds this promotion is skipped.** When the
+    node is current, carries every value the payload would write (bar
+    ``approved_at``), has each edge named and has its ``PRECEDENT_PROMOTED``
+    event, the answer is ``"already_promoted"`` and nothing is written: no new
+    SCD-2 version, no second event. This is what makes running a decisions
+    file again safe after a run that landed some rows and refused others. A
+    changed payload, a missing edge or a missing event still writes, which is
+    also how a ``promoted_incomplete`` row is mended. Pass ``event_log`` for
+    this: without one the event cannot be checked and nothing is skipped.
+
     After the entity + edges land, a governed ``PRECEDENT_PROMOTE`` is
     submitted so the promotion emits a ``PRECEDENT_PROMOTED`` event and
     becomes visible to ``get_lessons`` / ``list_precedents``. Without it
@@ -1309,11 +1435,11 @@ def submit_learning_promotion(
     """
     from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
 
-    target_entity_id = entity_payload["entity_id"]
-    existing_node = graph_store.get_node(target_entity_id)
-    refusal = _precedent_reapproval_refusal(existing_node, target_entity_id)
-    if refusal is not None:
-        return refusal
+    early = _pre_write_outcome(
+        entity_payload, edge_payloads, graph_store=graph_store, event_log=event_log
+    )
+    if early is not None:
+        return early
 
     entity_cmd = Command(
         operation=Operation.ENTITY_CREATE,
@@ -1426,6 +1552,16 @@ def promotion_landed(outcome: Mapping[str, Any]) -> bool:
     )
 
 
+def promotion_already_promoted(outcome: Mapping[str, Any]) -> bool:
+    """Whether an outcome is a row that was already promoted and left alone.
+
+    Not :func:`promotion_landed`: this run wrote nothing for it, so it is not
+    counted in ``promoted_count``. It does meet the request, so
+    :func:`promotion_verdict` counts it as satisfied.
+    """
+    return outcome.get("status") == ALREADY_PROMOTED
+
+
 def promotion_is_refusal(outcome: Mapping[str, Any]) -> bool:
     """Whether an outcome is a refusal: declined before anything was written."""
     status = str(outcome.get("status", ""))
@@ -1468,7 +1604,9 @@ def promotion_verdict(
     A refusal is the operator's to fix; a write that did not land,
     including ``promoted_incomplete``, is the deployment's, and outranks a
     refusal when a run has both. No outcomes is ``ok``: a row the operator
-    did not approve never becomes an outcome.
+    did not approve never becomes an outcome. An ``already_promoted`` row met
+    the request in an earlier run, so it counts as satisfied: a decisions file
+    run again after its refused row was fixed ends ``ok``.
 
     An approved row with a blank ``candidate_id`` has no outcome either, but
     it is not a row the operator left alone: they asked for a promotion that
@@ -1482,7 +1620,11 @@ def promotion_verdict(
     :func:`promotion_is_refusal`, so pass it before :func:`settle_promotion`
     or after: the answer is the same.
     """
-    unlanded = [o for o in outcomes if not promotion_landed(o)]
+    unlanded = [
+        o
+        for o in outcomes
+        if not (promotion_landed(o) or promotion_already_promoted(o))
+    ]
     if any(not promotion_is_refusal(o) for o in unlanded):
         return "failed"
     if unlanded or unnamed_count > 0:
@@ -1641,6 +1783,7 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "ALREADY_PROMOTED",
     "LEARNING_NOISE_RETRY_KEY",
     "LEARNING_NOISE_SUCCESS_KEY",
     "LEARNING_PROMOTE_RETRY_KEY",
@@ -1666,7 +1809,8 @@ __all__ = [
     "precedent_document_metadata",
     "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
-    "preview_learning_promotion_refusal",
+    "preview_learning_promotion",
+    "promotion_already_promoted",
     "promotion_is_refusal",
     "promotion_landed",
     "promotion_ready_sort_key",

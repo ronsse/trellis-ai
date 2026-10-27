@@ -1016,6 +1016,7 @@ def run_candidate_auto_promotion(
             promotion["edge_payloads"],
             requested_by=requested_by,
             graph_store=graph_store,
+            event_log=event_log,
         )
         if submission.get("status") == "promoted":
             promotions_committed += 1
