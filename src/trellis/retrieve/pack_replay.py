@@ -38,7 +38,8 @@ Four limits, none of them hideable:
    the id was served, the substance was not. That makes the replayed
    fraction a lower bound on the policy, and it makes
    :attr:`ReplayReport.helpful_bodies_withheld` the number to read against
-   the saving: it is the recall the policy costs.
+   the saving: it is the recall the policy costs, counted against the
+   baseline, so a body the pack never served is not a body the policy took.
 4. **Rank order is held fixed.** A width policy changes what the content
    floor measures and could in principle reorder a pack. The replay does
    not model that; it re-prices and re-admits, it does not re-rank.
@@ -174,7 +175,9 @@ class ReplayReport(TrellisModel):
 
     Read :attr:`counterfactual` only next to :attr:`helpful_bodies_withheld`
     and :attr:`helpful_items_dropped`. A policy can always raise the
-    fraction by serving less; those two say what serving less lost.
+    fraction by serving less; those two say what serving less lost. Both are
+    deltas against :attr:`baseline`: replaying a pack under the policy it was
+    served with reads zero for each.
     """
 
     window_days: int
@@ -196,14 +199,25 @@ class ReplayReport(TrellisModel):
     fraction_delta: float | None = None
 
     # -- what the change cost ------------------------------------------
-    #: Cited-helpful *servings* whose body the policy replaced with a
-    #: pointer. The id stayed addressable; the substance did not arrive
-    #: unfetched.
+    #: Cited-helpful *servings* the as-served pack delivered as a body and
+    #: the policy replaced with a pointer. A **delta against the baseline**:
+    #: a serving the baseline already carried as a pointer (graduated
+    #: disclosure, or an index-mode pack) had no body to lose and is not
+    #: counted, so replaying a disclosed pack under the policy it was served
+    #: with reads zero. The id stayed addressable; the substance did not
+    #: arrive unfetched. Read it against :attr:`helpful_bodies_served`.
     helpful_bodies_withheld: int = 0
-    #: Cited-helpful servings the policy removed from their pack entirely.
+    #: Cited-helpful servings the as-served pack carried (body or pointer)
+    #: and the policy removed from their pack entirely. A pointer counts: a
+    #: dropped pointer is an id that is no longer addressable.
     helpful_items_dropped: int = 0
-    #: Cited-helpful ``(pack, item)`` servings in the window — the
-    #: denominator for both counts above.
+    #: Cited-helpful servings the as-served pack delivered as a body — the
+    #: denominator for :attr:`helpful_bodies_withheld`. Smaller than
+    #: :attr:`helpful_items_total` by the helpful servings the baseline
+    #: already carried as pointers.
+    helpful_bodies_served: int = 0
+    #: Cited-helpful ``(pack, item)`` servings in the window, as a body or a
+    #: pointer — the denominator for :attr:`helpful_items_dropped`.
     #:
     #: **Servings, not distinct items**, deliberately. One memory can be
     #: cited helpful in two packs and sit at rank 4 in one and rank 16 in
@@ -322,11 +336,15 @@ def _price(
     *,
     max_tokens: int,
     policy: ReplayPolicy,
+    index_pack: bool = False,
 ) -> tuple[list[tuple[_Candidate, int, bool]], int]:
     """Re-run the walk under ``policy``.
 
     Returns ``(served, admitted_ungraded)`` where each served entry is
-    ``(candidate, tokens_charged, is_pointer)``.
+    ``(candidate, tokens_charged, is_pointer)``. An ``index_pack`` is all
+    pointers by construction and exempt from graduation, as the builder
+    exempts it: every admitted row stays a pointer at its recorded charge, so
+    the counterfactual and the baseline agree on what the pack served.
     """
     pool = candidates
     if policy.max_items is not None:
@@ -358,6 +376,9 @@ def _price(
     served: list[tuple[_Candidate, int, bool]] = []
     for index, candidate in enumerate(admitted):
         tokens = body_tokens(candidate)
+        if index_pack:
+            served.append((candidate, tokens, True))
+            continue
         if policy.body_items is not None and index >= policy.body_items:
             pointer = _tokens_from_chars(_pointer_chars(candidate.title))
             if pointer < tokens:
@@ -439,6 +460,9 @@ def replay_pack_value(
     no_trace = 0
     # Keyed by ``(pack_id, item_id)`` — see ``helpful_items_total``.
     helpful_servings: set[tuple[str, str]] = set()
+    # The subset the as-served pack delivered as a body: what a policy can
+    # withhold. A pointer the baseline already carried has no body to lose.
+    helpful_body_servings: set[tuple[str, str]] = set()
     counter_body_servings: set[tuple[str, str]] = set()
     counter_served_servings: set[tuple[str, str]] = set()
 
@@ -467,11 +491,25 @@ def replay_pack_value(
         }
         # What was served as a pointer delivered an id, not substance, so the
         # baseline marks it the way ``_price`` marks the counterfactual's.
-        demoted = _served_pointer_ids(payload)
-        baseline_served.extend(
-            (c, c.served_tokens, c.item_id in demoted) for c in candidates if c.included
+        index_pack = _is_index_pack(payload)
+        as_pointer = (
+            frozenset(c.item_id for c in candidates if c.included)
+            if index_pack
+            else _served_pointer_ids(payload)
         )
-        served, ungraded = _price(candidates, max_tokens=max_tokens or 0, policy=policy)
+        baseline_served.extend(
+            (c, c.served_tokens, c.item_id in as_pointer)
+            for c in candidates
+            if c.included
+        )
+        helpful_body_servings |= {
+            (pack_id, c.item_id)
+            for c in candidates
+            if c.included and c.verdict == "helpful" and c.item_id not in as_pointer
+        }
+        served, ungraded = _price(
+            candidates, max_tokens=max_tokens or 0, policy=policy, index_pack=index_pack
+        )
         counter_served.extend(served)
         admitted_ungraded += ungraded
         counter_served_servings |= {(pack_id, c.item_id) for c, _, _ in served}
@@ -487,7 +525,9 @@ def replay_pack_value(
         baseline.useful_token_fraction = None
         counterfactual.useful_token_fraction = None
 
-    withheld = len((helpful_servings & counter_served_servings) - counter_body_servings)
+    withheld = len(
+        (helpful_body_servings & counter_served_servings) - counter_body_servings
+    )
     dropped = len(helpful_servings - counter_served_servings)
 
     report = ReplayReport(
@@ -514,6 +554,7 @@ def replay_pack_value(
         ),
         helpful_bodies_withheld=withheld,
         helpful_items_dropped=dropped,
+        helpful_bodies_served=len(helpful_body_servings),
         helpful_items_total=len(helpful_servings),
         admitted_ungraded_items=admitted_ungraded,
         packs_without_budget_trace=no_trace,
@@ -568,10 +609,11 @@ def _notes(
         )
     if withheld:
         notes.append(
-            f"{withheld} cited-helpful serving(s) were a pointer "
-            "rather than a body. Their id stayed addressable via get_items; "
-            "their substance did not arrive unfetched, and they contribute "
-            "zero helpful tokens here."
+            f"{withheld} cited-helpful serving(s) were served as a body and "
+            "would be a pointer under this policy. Their id stays "
+            "addressable via get_items; their substance would not arrive "
+            "unfetched, and they contribute zero helpful tokens in the "
+            "counterfactual."
         )
     if dropped:
         notes.append(
@@ -1141,6 +1183,18 @@ def _walk_budget(payload: Mapping[str, Any]) -> int | None:
     if raw is None:
         raw = payload.get("budget_max_tokens")
     return _int_or_none(raw)
+
+
+def _is_index_pack(payload: Mapping[str, Any]) -> bool:
+    """True for an index-mode pack, by the rule ``feedback.attribution`` reads.
+
+    Such a pack is all pointers by construction and exempt from graduation, so
+    its ``disclosure`` block reads ``mode='off'`` with no ``pointer_item_ids``
+    and :func:`_served_pointer_ids` alone would count every row a body. The
+    strict ``is True`` matches ``lookup_pack_bodied_item_ids``, so the replay
+    and attribution cannot disagree on what an index pack served.
+    """
+    return payload.get("index_mode") is True
 
 
 def _served_pointer_ids(payload: Mapping[str, Any]) -> frozenset[str]:

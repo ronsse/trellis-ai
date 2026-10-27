@@ -983,6 +983,36 @@ All notable changes to Trellis will be documented in this file.
   row the baseline served as a pointer, and a window spanning #976's deploy
   still mixes the two disclosed-pack pricings (see the `walk_tokens` entry).
 
+- **`analyze replay`: "What the policy cost" is a delta against the baseline
+  it prints above it, and index-mode packs read as pointers (#993).**
+  `helpful_bodies_withheld` counted every cited-helpful serving the
+  counterfactual carried as a pointer, so replaying a disclosed pack under the
+  policy it was served with (`--body-items 12` on a 14-row pack whose last two
+  rows were pointers, one cited helpful) printed `body withheld 1/2` beneath two
+  arms that read the same. It now counts a helpful serving only when the
+  as-served pack delivered it as a body and the policy turns it into a pointer,
+  as its docstring always said, so that replay reads `0`. This supersedes the
+  "not changed" sentence of the #978 entry above. The new
+  `helpful_bodies_served` (additive, in `--format json`) is the denominator the
+  CLI line now prints, the helpful servings the baseline delivered as a body;
+  `helpful_items_total` keeps counting every cited-helpful serving, body or
+  pointer, because `helpful_items_dropped` is measured against it and a dropped
+  pointer is an id that is no longer addressable. The `notes` text for a
+  withheld body now says the same. An index-mode pack records `disclosure`
+  `mode='off'` with no `pointer_item_ids`, so the baseline read every row as a
+  body while `feedback.attribution` reads the pack as all pointers; the replay
+  now takes attribution's rule (`index_mode` is `true` on the event), and the
+  counterfactual leaves such a pack all pointers and exempt from graduation, as
+  the builder does, so a null policy still changes nothing. On a window with
+  index packs the baseline's `useful_token_fraction` drops by their helpful
+  tokens, which were counted as bodies. Pointer exclusion from
+  `unhelpful_tokens`, introduced with #978 and unchanged here, is now pinned by
+  a test: a pointer cited unhelpful moves from `unhelpful_tokens` to
+  `unjudged_tokens`, because the caller never saw its excerpt. A window
+  fixture with a non-default `DisclosureConfig(body_items=...)` and one whose
+  pointers are not the trailing ranks now pin that the baseline reads pointer
+  ids from the event rather than assuming the default cut at rank 12.
+
 - **`POST /api/v1/learning/promotions` states the verdict `promote-learning`
   states.** `LearningPromotionResponse.status` was always the default `"ok"`,
   even when every ready row was refused or failed to land, and the response
