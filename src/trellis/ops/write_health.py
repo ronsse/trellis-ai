@@ -57,6 +57,10 @@ from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
 )
+from trellis.ops.memory_extraction_health import (
+    MemoryExtractionHealthReport,
+    summarize_memory_extraction,
+)
 from trellis.ops.precedent_sync_health import (
     PrecedentSyncReport,
     precedent_sync_reasons,
@@ -842,6 +846,14 @@ class BackendHealthReport(TrellisModel):
     #: absent capture section and one reporting ``state="unobserved"`` say
     #: different things, and only the second is a measurement.
     capture: CaptureCoverageReport
+    #: Whether ``save_memory`` extraction is running when its flag is on
+    #: (#987). Defaulted, unlike ``capture``: ``unobserved`` is the honest
+    #: reading of a log with no state event, and a deployment with the flag
+    #: off is in that state by design. See
+    #: :mod:`trellis.ops.memory_extraction_health`.
+    memory_extraction: MemoryExtractionHealthReport = Field(
+        default_factory=MemoryExtractionHealthReport
+    )
     #: Reinstated precedents whose document or vector re-stamp did not land,
     #: read from the ``PRECEDENT_REINSTATED`` events the handler already
     #: writes. See :mod:`trellis.ops.precedent_sync_health`.
@@ -1117,9 +1129,12 @@ def summarize_backend_health(
     write = summarize_write_health(event_log, days=days, limit=limit)
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
+    extraction = summarize_memory_extraction(event_log, days=days, limit=limit)
     precedent_sync = summarize_precedent_sync(event_log, days=days, limit=limit)
 
-    scan = merge_coverage(write.scan, serve.scan, capture.scan, precedent_sync.scan)
+    scan = merge_coverage(
+        write.scan, serve.scan, capture.scan, extraction.scan, precedent_sync.scan
+    )
 
     # The write section states its own truncation so it reads correctly
     # standalone; here that is superseded by the merged note, which covers
@@ -1194,6 +1209,20 @@ def summarize_backend_health(
             "session capture has stopped, so coverage is unmeasured, not zero"
         )
 
+    if extraction.state == "unavailable":
+        # The flag is on and the newest report says extraction is dead. Unlike
+        # capture's "unobserved", this is a defect in *this* deployment. It is
+        # worded as a report, not a fact about every save: several processes
+        # share one event log (see ``memory_extraction_health``), and the row
+        # names none of them.
+        since = f"{extraction.since:%Y-%m-%d %H:%M} UTC" if extraction.since else "?"
+        reasons.append(
+            "memory extraction: the most recent extraction-state report says "
+            f"unavailable ({extraction.reason or 'unknown'}), reported since "
+            f"{since}; saves on that process are stored without entity/edge "
+            "extraction"
+        )
+
     reasons.extend(precedent_sync_reasons(precedent_sync))
 
     return BackendHealthReport(
@@ -1201,6 +1230,7 @@ def summarize_backend_health(
         write=write,
         serve=serve,
         capture=capture,
+        memory_extraction=extraction,
         precedent_sync=precedent_sync,
         scan=scan,
         status="warn" if reasons else "ok",

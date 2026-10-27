@@ -885,6 +885,11 @@ def health(
 
     _print_serving_builds(serve.serving_builds)
     _print_capture_coverage(report.capture)
+    extraction = report.memory_extraction
+    if extraction.state != "unobserved":
+        since = f"{extraction.since:%Y-%m-%d %H:%M} UTC" if extraction.since else "?"
+        detail = f" ({escape(extraction.reason)})" if extraction.reason else ""
+        console.print(f"  Memory extraction: {extraction.state}{detail} since {since}")
     _print_precedent_sync(report.precedent_sync)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")

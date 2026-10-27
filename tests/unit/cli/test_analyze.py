@@ -2618,6 +2618,65 @@ class TestAnalyzeHealthFailedStrategySection:
         assert "RuntimeError" not in dumped
 
 
+class TestAnalyzeHealthMemoryExtraction:
+    """A flag-on, extractor-less deployment is named by ``analyze health`` (#987)."""
+
+    def _seed(
+        self, registry: StoreRegistry, state: str, reason: str | None = None
+    ) -> None:
+        registry.operational.event_log.emit(
+            EventType.MEMORY_EXTRACTION_STATE,
+            source="mcp:memory_extraction",
+            payload={"state": state, "reason": reason, "error_type": None},
+        )
+
+    def test_text_warns_that_extraction_is_enabled_but_unavailable(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "WARN" in out
+        assert "Memory extraction: unavailable (no_llm_client) since" in out
+        assert "the most recent extraction-state report says unavailable" in out
+        assert "saves on that process are stored without entity/edge extraction" in out
+
+    def test_json_carries_the_state_and_the_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "warn"
+        assert payload["memory_extraction"]["state"] == "unavailable"
+        assert payload["memory_extraction"]["reason"] == "no_llm_client"
+        assert any("memory extraction" in r for r in payload["reasons"])
+
+    def test_a_deployment_that_never_enabled_it_prints_nothing_about_it(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "Memory extraction" not in plain(result.stdout)
+
+    def test_recovery_clears_the_warning(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+        self._seed(temp_stores, "available")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        payload = json.loads(result.stdout)
+        assert payload["memory_extraction"]["state"] == "available"
+        assert not any("memory extraction" in r for r in payload["reasons"])
+
+
 class TestAnalyzeHealthServingBuilds:
     """``analyze health`` names the builds that served packs, and warns on a mix."""
 
