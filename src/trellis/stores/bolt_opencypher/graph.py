@@ -156,7 +156,10 @@ same way, in its pre-check and its ``UNWIND``, and gets the same re-run
 (:meth:`_rerun_on_unreadable_endpoints`, one helper for both), around the
 whole pre-check-then-write attempt: a refused attempt wrote nothing (the
 write's transaction rolls back whole), so re-running it is safe. The bulk
-re-run probes only the endpoints of the row that was refused.
+re-run probes only the endpoints of the row that was refused. Every attempt
+stamps its own ``valid_from`` and ``valid_to`` (``now``), read inside the
+write's transaction function: a version another writer committed since a
+refused attempt must not be closed with that attempt's earlier time.
 
 Per-backend subclasses override the **seams**:
 
@@ -1682,7 +1685,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # Neo4j and links two new empty vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
         # from any current version, so the write stays one round trip.
-        now = _iso(utc_now())
+        # ``valid_from`` is stamped per attempt, in ``_tx``.
         candidate_edge_id = generate_ulid()
         base_props = {
             "version_id": generate_ulid(),
@@ -1690,7 +1693,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "target_id": target_id,
             "edge_type": edge_type,
             "properties_json": json.dumps(properties or {}, allow_nan=False),
-            "valid_from": now,
             "valid_to": None,
             "source_trace_id": source_trace_id,
             "agent_id": agent_id,
@@ -1779,6 +1781,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # ever observed) but a fresh value per attempt keeps the
             # claim row's content distinguishable call to call for
             # debugging.
+            #
+            # ``now`` is read per attempt for a stronger reason: a re-run
+            # (the claim race, a driver retry, an endpoint that read as
+            # absent) can follow another writer's commit of a newer version
+            # of this edge, and closing that version with the first
+            # attempt's ``now`` would give it a ``valid_to`` before its own
+            # ``valid_from`` (#1002).
+            now = _iso(utc_now())
             return tx.run(
                 cypher,
                 source_id=source_id,
@@ -1788,7 +1798,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 edge_type=edge_type,
                 now=now,
                 candidate_edge_id=candidate_edge_id,
-                base_props=base_props,
+                base_props={**base_props, "valid_from": now},
                 edge_claim_key=edge_claim_key,
                 edge_claim_token=generate_ulid(),
             ).single()
@@ -1848,7 +1858,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # between the prior edge_id (carry forward) and ours (new edge).
         # ``row_index`` lets us reorder the returned rows back into input
         # order — the UNWIND doesn't promise stable iteration.
-        now = _iso(utc_now())
+        # ``valid_from`` is stamped per attempt, in ``_tx``.
         rows: list[dict[str, Any]] = [
             {
                 "row_index": i,
@@ -1864,7 +1874,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     "properties_json": json.dumps(
                         spec.get("properties") or {}, allow_nan=False
                     ),
-                    "valid_from": now,
                     "valid_to": None,
                     **per_row_provenance[i],
                 },
@@ -1961,7 +1970,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             """
 
             def _tx(tx: ManagedTransaction) -> list[Any]:
-                records = list(tx.run(cypher, rows=rows, lock_ids=lock_ids))
+                # Stamped per attempt, as in ``upsert_edge``: a re-run
+                # must not close a version a racing writer committed since
+                # the refused attempt with a ``valid_to`` before its own
+                # ``valid_from`` (#1002).
+                now = _iso(utc_now())
+                stamped = [
+                    {**row, "props": {**row["props"], "valid_from": now}}
+                    for row in rows
+                ]
+                records = list(tx.run(cypher, rows=stamped, lock_ids=lock_ids))
                 # Compare row indices, not counts: one UNWIND row yields
                 # exactly one RETURN row (the FOREACH above collapses
                 # every matched old edge into one close), but comparing
