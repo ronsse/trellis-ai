@@ -161,9 +161,10 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: every row including a withheld one), and ``parent_verdict_degraded``
 #: (whether a chunk's parent lookup at the collect seam raised during this
 #: build — see ``trellis.retrieve.parent_verdicts``), and
-#: ``graph_axis_state`` (#961: ``ran`` / ``failed`` / ``unseeded_fallback_off``,
-#: the same value as the response's ``axes["graph"]``, also passed outside the
-#: swappable telemetry dict so a withheld row carries it too).
+#: ``graph_axis_state`` (#961: ``ran`` / ``failed`` / ``unseeded_fallback_off``
+#: / ``absent``, the same value as the response's ``axes["graph"]``, also
+#: passed outside the swappable telemetry dict so a withheld row carries it
+#: too).
 #: ``_BASE_*_KEYS`` stays an honest historical snapshot of 58be23d4 rather than
 #: being backfilled, so a *later* addition extends this set, not the base one.
 _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
