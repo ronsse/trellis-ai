@@ -92,9 +92,11 @@ ambiguity, and one that needs the level does not.
 
 Two structural exclusions, both stated rather than silent:
 
-* **Sectioned packs.** ``PackBuilder.build_sectioned`` emits ``sections``
-  and no ``injected_items[]``, so a sectioned pack contributes zero
-  per-item rows however carefully an agent cites it. They are counted in
+* **Sectioned packs without rows.** Since #958 ``build_sectioned`` emits
+  ``injected_items[]`` (each row names its ``section``), and those packs
+  count like any other. A sectioned pack assembled before that, or one
+  withheld as a holdout, has none, so it contributes zero per-item rows
+  however carefully an agent cites it. Those are counted in
   :attr:`PackValueReport.sectioned_packs_excluded` and excluded from
   every ratio.
 * **Pack-targeted feedback that cites nothing.** Zero cited items is an
@@ -123,6 +125,7 @@ from trellis.feedback.attribution import (
     NO_NAMESPACE,
     STRAY_PREFIX_ADDED,
     STRAY_PREFIX_DROPPED,
+    is_sectioned_payload,
     item_namespace,
     payload_pack_id,
     served_item_ids,
@@ -303,10 +306,12 @@ class PackValueReport(TrellisModel):
     # -- Coverage: what the ratio was computed over --------------------
     #: All ``PACK_ASSEMBLED`` events in the window.
     packs: int = 0
-    #: Packs emitting ``sections`` and no ``injected_items[]``. Excluded
-    #: from every ratio — they carry no per-item rows to attribute.
+    #: Packs emitting ``sections`` and no ``injected_items[]`` (assembled
+    #: before #958, or withheld). Excluded from every ratio — they carry no
+    #: per-item rows to attribute.
     sectioned_packs_excluded: int = 0
-    #: Packs carrying ``injected_items[]`` — the attributable population.
+    #: Packs carrying ``injected_items[]`` — the attributable population,
+    #: flat and (since #958) sectioned alike. The name is historical.
     flat_packs: int = 0
     feedback_events: int = 0
     #: Feedback naming a ``pack_id`` — where citation is possible at all.
@@ -521,14 +526,18 @@ def summarize_pack_value(
         join_pack_feedback_with_coverage(event_log, since=since, limit=limit)
     )
 
-    # Sectioned packs carry no per-item rows; separate them before any
-    # ratio touches them, and say how many were set aside.
+    # A pack with no per-item rows (a sectioned pack from before #958, or a
+    # withheld one) is separated before any ratio touches it; say how many.
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
         if payload.get("injected_items")
     }
-    sectioned = len(pack_payloads) - len(flat_packs)
+    sectioned = sum(
+        1
+        for payload in pack_payloads.values()
+        if is_sectioned_payload(payload) and not payload.get("injected_items")
+    )
 
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -696,8 +705,8 @@ def collect_pack_verdicts(
         if helpful or unhelpful:
             targeted_attributed += 1
         if pack_id not in flat_packs:
-            # Either unknown in this window, or sectioned. Both are
-            # unattributable; neither is the grader's fault.
+            # Either unknown in this window, or a pack with no per-item
+            # rows. Both are unattributable; neither is the grader's fault.
             targeted_unjoined += 1
             continue
         if not (helpful or unhelpful):
@@ -1054,8 +1063,9 @@ def _build_notes(
             )
     if sectioned:
         notes.append(
-            f"{sectioned} sectioned pack(s) excluded: build_sectioned emits "
-            "no injected_items[], so they carry no per-item rows to attribute."
+            f"{sectioned} sectioned pack(s) excluded: they carry no "
+            "injected_items[] (assembled before #958, or withheld), so there "
+            "are no per-item rows to attribute."
         )
     if cited_not_served:
         near = cited_not_served_shapes.get(

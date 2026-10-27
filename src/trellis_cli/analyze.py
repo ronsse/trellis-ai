@@ -1477,7 +1477,7 @@ def value(
     if report.sectioned_packs_excluded:
         console.print(
             f"    [dim]{report.sectioned_packs_excluded} sectioned pack(s) "
-            "excluded — build_sectioned emits no injected_items[].[/dim]"
+            "excluded — no injected_items[] (assembled before #958, or withheld).[/dim]"
         )
 
     console.print()

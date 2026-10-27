@@ -1841,12 +1841,13 @@ def evaluate_precedent_demotion(
     in the current lifecycle state, is reported ``already_demoted`` or
     ``ineligible:<reason>`` without being judged.
 
-    Only a precedent served through a flat ``get_context`` pack can
-    accumulate evidence this way: ``get_lessons`` and sectioned packs emit
-    no per-item attribution, so a precedent reachable only through those
-    surfaces always refuses for want of evidence, regardless of how useful
-    it actually is. See ``attribution_caveat`` in this command's own
-    output (every format) for the same statement.
+    Only a precedent served through a ``get_context`` or sectioned pack
+    can accumulate evidence this way: ``get_lessons`` emits no per-item
+    attribution (nor does a sectioned pack assembled before #958), so a
+    precedent reachable only through those surfaces always refuses for want
+    of evidence, regardless of how useful it actually is. See
+    ``attribution_caveat`` in this command's own output (every format) for
+    the same statement.
 
     ``learning.precedent_auto_demote.mode`` only commits once
     ``learning.precedent_auto_demote.enabled`` is also true

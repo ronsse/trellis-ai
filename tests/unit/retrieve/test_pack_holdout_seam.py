@@ -183,6 +183,10 @@ _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
 #: no seeds either).
 _FLAT_KEYS_ADDED_SINCE_BASE = _KEYS_ADDED_SINCE_BASE | {"seed_entity_ids"}
 
+#: ``injected_items`` (#958): a sectioned payload carries the per-item rows
+#: too, though not ``seed_entity_ids`` or ``injected_item_ids``.
+_SECTIONED_KEYS_ADDED_SINCE_BASE = _KEYS_ADDED_SINCE_BASE | {"injected_items"}
+
 
 def _items() -> list[PackItem]:
     return [
@@ -536,7 +540,7 @@ class TestSectionedWithheld:
             "rotate keys", sections=_SECTIONS
         )
         row = _payload(event_log, pack.pack_id)
-        assert set(row) - _BASE_SECTIONED_KEYS == _KEYS_ADDED_SINCE_BASE
+        assert set(row) - _BASE_SECTIONED_KEYS == _SECTIONED_KEYS_ADDED_SINCE_BASE
         assert set(row) >= _BASE_SECTIONED_KEYS
         assert row["holdout"] is False
         assert row["holdout_rate"] == 0.0

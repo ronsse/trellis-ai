@@ -66,6 +66,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.attribution import is_sectioned_payload
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.retrieve.class_prior import (
     DEFAULT_SCOPE,
@@ -458,7 +459,7 @@ def replay_pack_value(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items")
+        if payload.get("injected_items") and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -1013,7 +1014,7 @@ def replay_class_prior(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items")
+        if payload.get("injected_items") and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -1638,7 +1639,7 @@ def replay_graph_selection(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items")
+        if payload.get("injected_items") and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]

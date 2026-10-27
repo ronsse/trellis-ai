@@ -64,6 +64,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.attribution import is_sectioned_payload
 from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.retrieve.pack_value import collect_pack_verdicts
@@ -342,8 +343,8 @@ def summarize_judged_outcomes(
         evidence_start = max(since, _as_utc(datetime.fromisoformat(scan.covered_since)))
     effective_days = max((now - evidence_start).total_seconds(), 0.0) / _DAY_SECONDS
 
-    # Sectioned packs carry no per-item rows, so their servings are invisible
-    # to this join exactly as they are to analyze value.
+    # A pack with no per-item rows (a sectioned pack from before #958) is
+    # invisible to this join exactly as it is to analyze value.
     flat_packs = {
         pack_id: event
         for pack_id, event in pack_events.items()
@@ -390,7 +391,12 @@ def summarize_judged_outcomes(
         unhelpful_by_pack,
         subjects={row.ref_id for row in rows},
     )
-    sectioned = len(pack_events) - len(flat_packs)
+    sectioned = sum(
+        1
+        for event in pack_events.values()
+        if is_sectioned_payload(event.payload or {})
+        and not (event.payload or {}).get("injected_items")
+    )
     attributed_packs = len(set(helpful_by_pack) | set(unhelpful_by_pack))
 
     report = JudgedOutcomesReport(
@@ -657,9 +663,9 @@ def _build_notes(
         )
     if sectioned:
         notes.append(
-            f"{sectioned} sectioned pack(s) excluded — build_sectioned emits no "
-            "injected_items[], so a subject served only in sectioned packs reads "
-            "as never_served."
+            f"{sectioned} sectioned pack(s) excluded — they carry no "
+            "injected_items[] (assembled before #958, or withheld), so a "
+            "subject served only in those reads as never_served."
         )
     if malformed:
         notes.append(

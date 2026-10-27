@@ -2075,11 +2075,6 @@ class PackBuilder:
                 "agent_id": pack.agent_id,
                 "session_id": pack.session_id,
                 # Symmetric with the flat payload (see _emit_telemetry).
-                # Known gap: this payload carries no ``injected_items``, so
-                # ``pack_observations._join_one`` yields zero per-item rows
-                # for a sectioned pack and these two fields stay inert until
-                # that is fixed. Emitted now so the sectioned path does not
-                # need a second change once it is.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
                 "project": self._project,
@@ -2103,6 +2098,13 @@ class PackBuilder:
                     for item in section.items
                 },
                 "sections": self._section_rows(pack.sections),
+                # The per-item rows the learning join reads (#958), one per
+                # served item across every section: see
+                # :meth:`_sectioned_injected_item_rows` for the order, the
+                # section-local ``rank`` and the ``section`` key. No
+                # ``injected_item_ids`` rides beside it, deliberately (that
+                # list gates ``analyze_effectiveness``'s noise pass).
+                "injected_items": self._sectioned_injected_item_rows(pack.sections),
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "advisories_matched": (
                     len(pack.advisories)
@@ -2513,6 +2515,32 @@ class PackBuilder:
                 **_item_attribution(item),
             }
             for item in items
+        ]
+
+    @classmethod
+    def _sectioned_injected_item_rows(
+        cls, sections: Iterable[PackSection]
+    ) -> list[dict[str, Any]]:
+        """``injected_items[]`` for a sectioned pack: the flat row plus ``section``.
+
+        Each row is exactly what :meth:`_injected_item_rows` builds, so every
+        reader of the flat list reads this one unchanged, and carries the name
+        of the section that served it under ``section``.
+
+        **Order:** sections in the order the request named them, and within a
+        section the order the section served its items. **Rank:** ``rank``
+        is the item's 1-based position *within its section*, because each
+        section is ranked and budgeted on its own (a pack with three sections
+        has three rank-1 rows). Read it with ``section``; it is not a
+        pack-wide position and nothing here invents one. **Identity:**
+        cross-section dedup leaves an item in one section only, so
+        ``item_id`` is unique across the pack and ``(pack_id, item_id)``
+        keys a serving exactly as it does on a flat pack.
+        """
+        return [
+            {**row, "section": section.name}
+            for section in sections
+            for row in cls._injected_item_rows(section.items)
         ]
 
     def _build_token_budget_payload(

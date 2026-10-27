@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.learning.scoring import precedent_document_metadata
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.strategies import GraphSearch
+from trellis.retrieve.strategies import GraphSearch, SearchStrategy
 from trellis.retrieve.tier_mapping import TierMapper
 from trellis.schemas.pack import PackItem, SectionRequest
 from trellis.stores.sqlite.graph import SQLiteGraphStore
@@ -249,3 +251,53 @@ class TestSectionedPackEndToEnd:
         assert all_ids.count("prec-1") == 1
         assert "prec-1" in by_section["domain"]
         assert by_section["reference"] == ["concept-1"]
+
+
+def _precedent_copy(item_id: str, source: str = "keyword", **extra: object) -> PackItem:
+    """The document row a promoted precedent leaves behind, as a search emits it.
+
+    Its metadata is what ``precedent_document_metadata`` writes: a
+    ``decision`` content type and no ``scope``, which the ``domain_knowledge``
+    heuristic (it needs both) reads as no match.
+    """
+    metadata = precedent_document_metadata({"name": "drain before deploy"})
+    return PackItem(
+        item_id=item_id,
+        item_type="document",
+        excerpt=_BODY,
+        relevance_score=0.5,
+        metadata={"source_strategy": source, **metadata, **extra},
+    )
+
+
+class TestPromotedPrecedentDocumentRoutesByIdNamespace:
+    """#957: a precedent copy served only by keyword/semantic reached no tier."""
+
+    @pytest.mark.parametrize("source", ["keyword", "semantic"])
+    def test_a_precedent_copy_matches_domain_knowledge(self, source: str) -> None:
+        item = _precedent_copy("precedent://learning/abc", source)
+        assert TierMapper().matches_section(item, _DOMAIN) is True
+
+    def test_the_same_tags_under_an_ordinary_id_still_match_nothing(self) -> None:
+        item = _precedent_copy("doc-ordinary")
+        assert TierMapper().matches_section(item, _DOMAIN) is False
+
+    def test_metadata_a_caller_can_write_does_not_stand_in_for_the_id(self) -> None:
+        """Only the reserved id namespace says a row is a promoted precedent."""
+        item = _precedent_copy("doc-ordinary", node_type="precedent")
+        assert TierMapper().matches_section(item, _DOMAIN) is False
+
+    def test_a_built_sectioned_pack_serves_it_in_the_domain_section(self) -> None:
+        precedent = _precedent_copy("precedent://learning/abc")
+        ordinary = _precedent_copy("doc-ordinary")
+        strategy = MagicMock(spec=SearchStrategy)
+        strategy.name = "keyword"
+        strategy.search.return_value = [precedent, ordinary]
+
+        pack = PackBuilder(strategies=[strategy]).build_sectioned(
+            "drain the queue", sections=[_DOMAIN]
+        )
+
+        assert [i.item_id for i in pack.sections[0].items] == [
+            "precedent://learning/abc"
+        ]
