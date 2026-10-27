@@ -1865,7 +1865,8 @@ def test_the_baseline_counts_a_disclosed_pack_s_pointers_as_pointers(
     assert report.baseline.items == len(payload["injected_items"]) == 14
     assert report.baseline.pointer_items_served == len(pointers) == 2
     assert report.baseline.body_items_served == 12
-    # The arms agree on what a pointer is, so an empty policy keeps the split.
+    # An empty policy disables graduation, so the counterfactual serves
+    # every row as a body; only the baseline reflects the served split.
     assert report.counterfactual.pointer_items_served == 0
     assert report.counterfactual.body_items_served == 14
 

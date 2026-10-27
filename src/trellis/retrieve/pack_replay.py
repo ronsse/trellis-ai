@@ -161,8 +161,9 @@ class ReplayArm(TrellisModel):
     unhelpful_tokens: int = 0
     unjudged_tokens: int = 0
     useful_token_fraction: float | None = None
-    #: Items served with a full excerpt (equals ``items`` on the baseline
-    #: arm and whenever graduation is off).
+    #: Items served with a full excerpt (equals ``items`` whenever
+    #: graduation is off; on the baseline arm, ``items`` less the rows the
+    #: event recorded in ``disclosure.pointer_item_ids``).
     body_items_served: int = 0
     #: Items served as a one-line pointer instead of an excerpt.
     pointer_items_served: int = 0
