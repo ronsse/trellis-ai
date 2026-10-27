@@ -152,7 +152,11 @@ to ``len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)`` times, but only while
 both endpoints still have a row of some version
 (:meth:`_endpoints_have_a_version_row`); a node with no row at all is
 refused at once, as before. ``upsert_edges_bulk`` reads its endpoints the
-same way, in its pre-check and its ``UNWIND``, and is not retried.
+same way, in its pre-check and its ``UNWIND``, and gets the same re-run
+(:meth:`_rerun_on_unreadable_endpoints`, one helper for both), around the
+whole pre-check-then-write attempt: a refused attempt wrote nothing (the
+write's transaction rolls back whole), so re-running it is safe. The bulk
+re-run probes only the endpoints of the row that was refused.
 
 Per-backend subclasses override the **seams**:
 
@@ -176,8 +180,9 @@ import json
 import operator
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import structlog
 
@@ -693,6 +698,28 @@ class _MissingEdgeRowError(Exception):
     def __init__(self, row_index: int) -> None:
         super().__init__(row_index)
         self.row_index = row_index
+
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class _EndpointMiss:
+    """An edge write that found no current row for an endpoint.
+
+    ``node_ids`` are the endpoints the row probe asks about before the write
+    is re-run (:meth:`BoltOpenCypherGraphStore._rerun_on_unreadable_endpoints`).
+    ``upsert_edges_bulk`` also records which row was refused and what it
+    found, so that, once the re-runs are spent, it can raise the error it
+    always raised: ``end`` and ``node_id`` name the endpoint round trip 1
+    found missing, and are ``None`` when the write dropped the row instead.
+    """
+
+    node_ids: tuple[str, ...]
+    row_index: int = 0
+    end: str | None = None
+    node_id: str | None = None
+    cause: _MissingEdgeRowError | None = None
 
 
 class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
@@ -1279,6 +1306,44 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             )
         return {r["node_id"] for r in records} >= set(node_ids)
 
+    def _rerun_on_unreadable_endpoints(
+        self,
+        attempt: Callable[[], _T | _EndpointMiss],
+        **log_fields: Any,
+    ) -> _T | _EndpointMiss:
+        """Run ``attempt``, re-running it while an endpoint it missed has a row.
+
+        ``attempt`` returns an :class:`_EndpointMiss` instead of a result when
+        it found no current row for an endpoint, and must have written
+        nothing when it does. An endpoint with a row of some version but no
+        readable current one is a concurrent re-version caught mid-commit
+        (module docstring): wait it out and re-run, at most
+        ``len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)`` times. An endpoint
+        with no row at all is a missing node and the miss is returned at
+        once. The last outcome is returned, so the caller decides what a
+        spent bound means.
+        """
+        outcome = attempt()
+        rereads = 0
+        for backoff in _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS:
+            if not isinstance(
+                outcome, _EndpointMiss
+            ) or not self._endpoints_have_a_version_row(*outcome.node_ids):
+                break
+            rereads += 1
+            time.sleep(backoff)
+            outcome = attempt()
+        if rereads:
+            # A warning, not debug: no shipped configuration prints debug,
+            # and whether this window is the one CI hit (#969) is unproven.
+            logger.warning(
+                "edge_endpoint_reread",
+                rereads=rereads,
+                recovered=not isinstance(outcome, _EndpointMiss),
+                **log_fields,
+            )
+        return outcome
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -1728,36 +1793,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 edge_claim_token=generate_ulid(),
             ).single()
 
-        record = self._execute_edge_claim_write(_tx)
-        rereads = 0
-        for backoff in _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS:
-            # An endpoint with a row but no readable current one is a
-            # concurrent re-version caught mid-commit (module docstring):
-            # wait it out and re-read. One with no row is a missing node.
-            if record is not None or not self._endpoints_have_a_version_row(
-                source_id, target_id
-            ):
-                break
-            rereads += 1
-            time.sleep(backoff)
+        def _attempt() -> Any:
             record = self._execute_edge_claim_write(_tx)
-        if rereads:
-            # A warning, not debug: no shipped configuration prints debug,
-            # and whether this window is the one CI hit (#969) is unproven.
-            logger.warning(
-                "edge_endpoint_reread",
-                source_id=source_id,
-                target_id=target_id,
-                rereads=rereads,
-                recovered=record is not None,
-            )
-        if record is None:
-            msg = (
-                f"Cannot upsert edge: source {source_id!r} or target "
-                f"{target_id!r} has no current version"
-            )
-            raise ValueError(msg)
-        return str(record["edge_id"])
+            if record is None:
+                return _EndpointMiss((source_id, target_id))
+            return record
+
+        outcome = self._rerun_on_unreadable_endpoints(
+            _attempt, source_id=source_id, target_id=target_id
+        )
+        if not isinstance(outcome, _EndpointMiss):
+            return str(outcome["edge_id"])
+        msg = (
+            f"Cannot upsert edge: source {source_id!r} or target "
+            f"{target_id!r} has no current version"
+        )
+        raise ValueError(msg)
 
     def upsert_edges_bulk(
         self,
@@ -1843,17 +1894,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
             )
-            valid_endpoints = self._fetch_current_node_id_set(session, endpoint_ids)
-            for i, spec in enumerate(edges):
-                if spec["source_id"] not in valid_endpoints:
-                    raise ValueError(
-                        _missing_endpoint_message(i, "source", spec["source_id"])
-                    )
-                if spec["target_id"] not in valid_endpoints:
-                    raise ValueError(
-                        _missing_endpoint_message(i, "target", spec["target_id"])
-                    )
-
             # Round trip 2 — close any existing current edges and create
             # new versions in a single UNWIND. Each row's endpoints are
             # narrowed to the rows they show, as in ``upsert_edge``;
@@ -1932,29 +1972,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         raise _MissingEdgeRowError(i)
                 return records
 
-            try:
-                records = session.execute_write(_tx)
-            except _MissingEdgeRowError as exc:
-                # Re-read the row's endpoints after the rollback, not inside
-                # the transaction: there, on ArcadeDB, the read can raise a
-                # raw driver ``DatabaseError`` once another writer has
-                # re-created the endpoint.
-                i = exc.row_index
-                spec = edges[i]
-                ids = [spec["source_id"], spec["target_id"]]
-                current = self._fetch_current_node_id_set(session, ids)
-                for end, node_id in zip(("source", "target"), ids, strict=True):
-                    if node_id not in current:
-                        raise ValueError(
-                            _missing_endpoint_message(i, end, node_id)
-                        ) from exc
-                # Both endpoints read as current now: the one the write's
-                # MATCH missed has been made current again since.
-                msg = (
-                    f"upsert_edges_bulk[{i}]: source {ids[0]!r} or target "
-                    f"{ids[1]!r} was not current when the write ran"
-                )
-                raise ValueError(msg) from exc
+            def _attempt() -> list[Any] | _EndpointMiss:
+                # Round trip 1 and the write as one attempt: a miss at either
+                # wrote nothing, so the whole attempt can run again.
+                valid_endpoints = self._fetch_current_node_id_set(session, endpoint_ids)
+                for i, spec in enumerate(edges):
+                    ids = (spec["source_id"], spec["target_id"])
+                    for end, node_id in zip(("source", "target"), ids, strict=True):
+                        if node_id not in valid_endpoints:
+                            return _EndpointMiss(ids, i, end, node_id)
+                try:
+                    return session.execute_write(_tx)
+                except _MissingEdgeRowError as exc:
+                    spec = edges[exc.row_index]
+                    return _EndpointMiss(
+                        (spec["source_id"], spec["target_id"]),
+                        exc.row_index,
+                        cause=exc,
+                    )
+
+            outcome = self._rerun_on_unreadable_endpoints(_attempt, edges=len(edges))
+            if isinstance(outcome, _EndpointMiss):
+                raise self._bulk_endpoint_refusal(session, outcome)
+            records = outcome
 
         # UNWIND iteration order isn't guaranteed; reorder by
         # ``row_index`` so the returned IDs line up with the input list.
@@ -1962,6 +2002,32 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         for r in records:
             edge_ids[int(r["row_index"])] = str(r["edge_id"])
         return edge_ids
+
+    def _bulk_endpoint_refusal(self, session: Any, miss: _EndpointMiss) -> ValueError:
+        """The ``upsert_edges_bulk`` error for the row ``miss`` refused."""
+        i = miss.row_index
+        if miss.end is not None and miss.node_id is not None:
+            # Round trip 1 found it missing.
+            return ValueError(_missing_endpoint_message(i, miss.end, miss.node_id))
+        # The write dropped the row. Re-read its endpoints after the
+        # rollback, not inside the transaction: there, on ArcadeDB, the read
+        # can raise a raw driver ``DatabaseError`` once another writer has
+        # re-created the endpoint.
+        current = self._fetch_current_node_id_set(session, list(miss.node_ids))
+        for end, node_id in zip(("source", "target"), miss.node_ids, strict=True):
+            if node_id not in current:
+                err = ValueError(_missing_endpoint_message(i, end, node_id))
+                err.__cause__ = miss.cause
+                return err
+        # Both endpoints read as current now: the one the write's MATCH
+        # missed has been made current again since.
+        msg = (
+            f"upsert_edges_bulk[{i}]: source {miss.node_ids[0]!r} or target "
+            f"{miss.node_ids[1]!r} was not current when the write ran"
+        )
+        err = ValueError(msg)
+        err.__cause__ = miss.cause
+        return err
 
     @staticmethod
     def _fetch_current_node_id_set(session: Any, node_ids: list[str]) -> set[str]:

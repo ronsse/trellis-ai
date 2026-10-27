@@ -17,18 +17,22 @@ guarantee here is that the branching picks the right shape.
 ``TestUpsertEdgesBulkDroppedRow`` checks the message for a row the write
 dropped though both its endpoints read as current afterwards.
 ``TestUpsertEdgesBulkTransactionRunsOnce`` pins, for the same scenario,
-that nothing retries the write: not a loop around ``session.execute_write``,
-not a second statement inside the transaction function, and not the
-driver's managed-transaction loop.
+where the write is and is not re-run: only by the bounded loop around
+``session.execute_write`` (#975), never by a second statement inside the
+transaction function or by the driver's managed-transaction loop, and not at
+all when an endpoint has no row of any version.
 """
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("neo4j")
+
+from trellis.stores.bolt_opencypher import graph as bolt_graph
 
 
 def _build_store_with_mock_driver(
@@ -238,6 +242,7 @@ class TestUpsertEdgesBulkDroppedRow:
         read after the rollback finds row 0's endpoints current, as when one
         was re-created in between: the refusal names row 0 and both of its
         endpoints rather than blaming one."""
+        monkeypatch.setattr(bolt_graph.time, "sleep", lambda _s: None)
         store, session = _build_store_with_mock_driver(monkeypatch)
         current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
         session.execute_read.return_value = current
@@ -258,41 +263,80 @@ class TestUpsertEdgesBulkDroppedRow:
 
 
 class TestUpsertEdgesBulkTransactionRunsOnce:
+    @staticmethod
+    def _store_whose_write_drops_row_zero(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[Any, MagicMock, MagicMock]:
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        tx = MagicMock(name="tx")
+        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        return store, session, tx
+
+    @staticmethod
+    def _rows(*node_ids: str) -> list[dict[str, str]]:
+        return [{"node_id": node_id} for node_id in node_ids]
+
+    @staticmethod
+    def _two_edges() -> list[dict[str, Any]]:
+        return [
+            {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+            {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+        ]
+
     def test_execute_write_is_called_exactly_once_when_a_row_vanishes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The vanished-endpoint ``ValueError`` comes from a single write
-        attempt. #754's gate: the no-retry claim rested on driver source and
-        one probe's event order rather than on a test. The mock's
-        ``execute_write`` runs the transaction function once per call with
-        one shared ``tx``, so a retry around ``session.execute_write(_tx)``
-        raises ``execute_write.call_count`` and a retry inside ``_tx`` raises
-        ``tx.run.call_count``; the ``ValueError`` looks the same either way.
-        The mock replaces the driver's managed-transaction loop, which
-        retries only a retryable ``DriverError`` or ``Neo4jError``, so the
-        last assertion pins that the sentinel ``_tx`` raises is neither."""
+        """An endpoint with no row of any version is refused after a single
+        write attempt, without sleeping. #754's gate: the no-retry claim
+        rested on driver source and one probe's event order rather than on a
+        test. The mock's ``execute_write`` runs the transaction function once
+        per call with one shared ``tx``, so a retry around
+        ``session.execute_write(_tx)`` raises ``execute_write.call_count`` and
+        a retry inside ``_tx`` raises ``tx.run.call_count``; the
+        ``ValueError`` looks the same either way. The mock replaces the
+        driver's managed-transaction loop, which retries only a retryable
+        ``DriverError`` or ``Neo4jError``, so the last assertion pins that
+        the sentinel ``_tx`` raises is neither."""
         from neo4j.exceptions import DriverError, Neo4jError
 
         from trellis.stores.bolt_opencypher.graph import _MissingEdgeRowError
 
-        store, session = _build_store_with_mock_driver(monkeypatch)
-        current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
-        session.execute_read.return_value = current
-        tx = MagicMock(name="tx")
-        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
-        session.execute_write.side_effect = lambda fn: fn(tx)
+        slept: list[float] = []
+        monkeypatch.setattr(bolt_graph.time, "sleep", slept.append)
+        store, session, tx = self._store_whose_write_drops_row_zero(monkeypatch)
+        session.execute_read.side_effect = [
+            self._rows("a", "b", "c", "d"),  # round trip 1
+            self._rows("c", "d"),  # the row probe: "a" and "b" have no row
+            self._rows("c", "d"),  # the read after the rollback
+        ]
 
-        with pytest.raises(ValueError):
-            store.upsert_edges_bulk(  # type: ignore[attr-defined]
-                [
-                    {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
-                    {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
-                ]
-            )
+        with pytest.raises(ValueError, match="source 'a' has no current version"):
+            store.upsert_edges_bulk(self._two_edges())
 
         assert session.execute_write.call_count == 1
         assert tx.run.call_count == 1
+        assert slept == []
         assert not issubclass(_MissingEdgeRowError, (DriverError, Neo4jError))
+
+    def test_a_row_dropped_while_its_endpoints_have_rows_is_re_run_by_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """What #975 changed in the test above: the same drop, with both
+        endpoints still having a row, re-runs the write once per backoff from
+        the loop around ``session.execute_write``, one ``tx.run`` per write."""
+        slept: list[float] = []
+        monkeypatch.setattr(bolt_graph.time, "sleep", slept.append)
+        store, session, tx = self._store_whose_write_drops_row_zero(monkeypatch)
+        session.execute_read.return_value = self._rows("a", "b", "c", "d")
+        writes = 1 + len(bolt_graph._EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+
+        with pytest.raises(ValueError, match="was not current when the write ran"):
+            store.upsert_edges_bulk(self._two_edges())
+
+        assert session.execute_write.call_count == writes
+        assert tx.run.call_count == writes
+        assert slept == list(bolt_graph._EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
 
 
 class TestUpsertEdgesBulkMissingEndpointMessageIsShared:
@@ -322,6 +366,7 @@ class TestUpsertEdgesBulkMissingEndpointMessageIsShared:
         store2, session2 = _build_store_with_mock_driver(monkeypatch)
         session2.execute_read.side_effect = [
             [{"node_id": "a"}, {"node_id": "b"}],
+            [{"node_id": "b"}],  # the row probe: "a" has no row at all
             [{"node_id": "b"}],
         ]
         tx = MagicMock(name="tx")
