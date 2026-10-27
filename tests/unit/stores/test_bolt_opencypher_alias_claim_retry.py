@@ -317,14 +317,17 @@ class _AttemptTx:
 
 
 def _lose_the_first_attempt(
-    store: BoltOpenCypherGraphStore, answers: Callable[[str], Any]
+    store: BoltOpenCypherGraphStore,
+    answers: Callable[[str], Any],
+    error: Exception | None = None,
 ) -> list[_AttemptTx]:
     """Run the real transaction function; the first attempt fails at commit.
 
     ArcadeDB detects an ``AliasClaim`` violation at commit, after every
     statement was sent, so the refused attempt has already stamped its
-    time when the re-run begins. Returns one :class:`_AttemptTx` per
-    attempt, in order.
+    time when the re-run begins. ``error`` is what the first attempt
+    raises (claim contention by default). Returns one :class:`_AttemptTx`
+    per attempt, in order.
     """
     attempts: list[_AttemptTx] = []
 
@@ -333,7 +336,7 @@ def _lose_the_first_attempt(
         attempts.append(tx)
         result = tx_function(tx)
         if len(attempts) == 1:
-            raise _contention()
+            raise error if error is not None else _contention()
         return result
 
     session = MagicMock()
@@ -460,6 +463,41 @@ class TestAliasWritersStampEachAttempt:
                 assert closes == []
                 assert created["created_at"] == created["valid_from"]
             stamped.append(datetime.fromisoformat(created["valid_from"]))
+        refused, rerun = stamped
+        assert rerun > refused
+
+    def test_update_node_if_current_re_run_sends_a_later_timestamp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The third caller of ``_execute_alias_write`` (#1005).
+
+        It touches no claim, so only ArcadeDB re-runs it, on the generic
+        engine code a compare-and-set that lost to a concurrent write
+        fails with. That is the refusal driven here.
+        """
+        _ticking_clock(monkeypatch)
+        store = _make_arcadedb_store()
+        attempts = _lose_the_first_attempt(
+            store, lambda _cypher: {"node_id": "node_01"}, error=_stale_record()
+        )
+
+        assert store.update_node_if_current(
+            "node_01",
+            _PRIOR_CREATED_AT,
+            "concept",
+            {},
+            node_role="semantic",
+        )
+
+        assert len(attempts) == 2
+        stamped = []
+        for tx in attempts:
+            (sent,) = tx.sent("SET c.valid_to = $now")
+            # The version closed, the ``created_at`` fallback and the
+            # version created all read the one ``now`` of the attempt.
+            assert sent["new_props"]["updated_at"] == sent["now"]
+            assert sent["new_props"]["valid_from"] == sent["now"]
+            stamped.append(datetime.fromisoformat(sent["now"]))
         refused, rerun = stamped
         assert rerun > refused
 
