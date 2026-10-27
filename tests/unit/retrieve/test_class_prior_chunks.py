@@ -455,6 +455,30 @@ class TestPackBuilderChunkScope:
         assert shaped not in _served(pack)
         assert _reasons(pack)[shaped] == CLASS_PRIOR_REJECTION_REASON
 
+    def test_a_caller_named_id_holding_the_marker_is_not_withheld_as_a_chunk(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """Only the id shape ingest mints is a chunk (#1001).
+
+        ``notes#chunk-intro`` is a document its caller named, not a chunk of
+        ``notes``, even when its own metadata also names ``notes`` as a
+        parent. The minted ``notes#chunk-3`` is withheld through the same
+        parent's form.
+        """
+        _put_parent(doc_store, "notes", form="conversation")
+        minted = chunk_doc_id("notes", 3)
+        doc_store.put(minted, INTENT, {"parent_doc_id": "notes"})
+        doc_store.put("notes#chunk-intro", INTENT, {})
+        doc_store.put("memo#chunk-intro", INTENT, {"parent_doc_id": "notes"})
+
+        pack = _build(_builder(doc_store, _withhold(CHUNKS)))
+
+        assert {"notes#chunk-intro", "memo#chunk-intro"} <= _served(pack)
+        assert minted not in _served(pack)
+        assert _reasons(pack) == dict.fromkeys(
+            ["notes", minted], CLASS_PRIOR_REJECTION_REASON
+        )
+
     def test_the_default_scope_ignores_a_data_linked_item(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
