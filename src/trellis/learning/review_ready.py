@@ -189,8 +189,13 @@ def approval_refusal(
     ready set. Checked in the order a reviewer should hear them: not ready,
     already promoted, cross-family contradicted. ``force_contradicted``
     lifts only the last.
+
+    A blank id is not ready whatever ``row`` holds. A malformed artifact can
+    carry a ready row whose ``candidate_id`` is blank, and ``--approve ""``
+    then finds it; the planner strips the id and skips the row, so there is
+    nothing to submit. It is refused here, before that.
     """
-    if row is None:
+    if row is None or not candidate_id.strip():
         return {
             "candidate_id": candidate_id,
             "status": REFUSED_NOT_READY,

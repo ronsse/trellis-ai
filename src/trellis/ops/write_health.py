@@ -61,6 +61,11 @@ from trellis.ops.memory_extraction_health import (
     MemoryExtractionHealthReport,
     summarize_memory_extraction,
 )
+from trellis.ops.precedent_sync_health import (
+    PrecedentSyncReport,
+    precedent_sync_reasons,
+    summarize_precedent_sync,
+)
 from trellis.ops.serving_builds import (
     ServingBuildsReport,
     mixed_builds_reason,
@@ -849,6 +854,10 @@ class BackendHealthReport(TrellisModel):
     memory_extraction: MemoryExtractionHealthReport = Field(
         default_factory=MemoryExtractionHealthReport
     )
+    #: Reinstated precedents whose document or vector re-stamp did not land,
+    #: read from the ``PRECEDENT_REINSTATED`` events the handler already
+    #: writes. See :mod:`trellis.ops.precedent_sync_health`.
+    precedent_sync: PrecedentSyncReport
     #: The merged coverage of every EventLog read behind this report. When
     #: ``truncated`` is set, ``status`` is ``warn`` and ``reasons`` names
     #: it: a health verdict computed over a silently shortened window is
@@ -1121,8 +1130,11 @@ def summarize_backend_health(
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
     extraction = summarize_memory_extraction(event_log, days=days, limit=limit)
+    precedent_sync = summarize_precedent_sync(event_log, days=days, limit=limit)
 
-    scan = merge_coverage(write.scan, serve.scan, capture.scan, extraction.scan)
+    scan = merge_coverage(
+        write.scan, serve.scan, capture.scan, extraction.scan, precedent_sync.scan
+    )
 
     # The write section states its own truncation so it reads correctly
     # standalone; here that is superseded by the merged note, which covers
@@ -1211,12 +1223,15 @@ def summarize_backend_health(
             "extraction"
         )
 
+    reasons.extend(precedent_sync_reasons(precedent_sync))
+
     return BackendHealthReport(
         window_days=days,
         write=write,
         serve=serve,
         capture=capture,
         memory_extraction=extraction,
+        precedent_sync=precedent_sync,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

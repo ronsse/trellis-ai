@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.feedback.attribution import lookup_pack_bodied_item_ids
 from trellis.retrieve.class_prior import OFF, ClassPriorConfig
 from trellis.retrieve.disclosure import DISCLOSURE_OFF, DisclosureConfig
 from trellis.retrieve.excerpts import ContentFloorConfig
@@ -1501,6 +1502,8 @@ def _build_logged(
     log: SQLiteEventLog,
     strategies: list[SearchStrategy],
     budget: PackBudget,
+    *,
+    index_mode: bool = False,
     **builder_kwargs: Any,
 ) -> tuple[str, dict[str, Any]]:
     """Build one pack through the real ``PackBuilder``; return its id and payload."""
@@ -1509,7 +1512,7 @@ def _build_logged(
         event_log=log,
         content_floor=ContentFloorConfig(mode="off"),
         **builder_kwargs,
-    ).build("q", budget=budget)
+    ).build("q", budget=budget, index_mode=index_mode)
     event = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[0]
     return event.payload.get("pack_id") or event.entity_id, event.payload
 
@@ -1821,6 +1824,381 @@ def test_the_policy_replay_prices_a_disclosed_pack_at_the_walk_charge(
         r["estimated_tokens"] for r in payload["injected_items"]
     )
     assert report.baseline.injected_tokens < report.counterfactual.injected_tokens
+
+
+def _disclosed_pack(
+    tmp_path: Path,
+    *,
+    helpful: list[str] | None = None,
+    unhelpful: list[str] | None = None,
+    disclosure: DisclosureConfig | None = None,
+) -> tuple[SQLiteEventLog, dict[str, Any], list[str]]:
+    """A real flat pack whose tail graduated disclosure demoted (#978).
+
+    Fourteen rows against the default of twelve bodies, so the last two are
+    pointers; a ``disclosure`` config moves that cut. Returns the log (the
+    pack and one feedback event naming ``helpful`` and ``unhelpful``, default
+    the first body and the last pointer helpful), the payload and the ids
+    served as pointers.
+    """
+    strategies = [
+        _axis_strategy(
+            "semantic",
+            [_sized_item(f"s{i}", 0.9 - i * 0.01, "semantic", 6) for i in range(14)],
+        )
+    ]
+    log = SQLiteEventLog(tmp_path / "events.db")
+    pack_id, payload = _build_logged(
+        log,
+        strategies,
+        PackBudget(max_items=50, max_tokens=1_000_000),
+        **({"disclosure": disclosure} if disclosure else {}),
+    )
+    pointers = payload["disclosure"]["pointer_item_ids"]
+    if disclosure is None:
+        assert pointers == ["s12", "s13"]
+    log.append(
+        _gs_feedback(
+            pack_id,
+            helpful=helpful or ["s0", pointers[-1]],
+            unhelpful=unhelpful,
+        )
+    )
+    return log, payload, pointers
+
+
+def test_the_baseline_counts_a_disclosed_pack_s_pointers_as_pointers(
+    tmp_path: Path,
+) -> None:
+    """The as-served arm marked every row a body (#978).
+
+    A pack that served two rows as graduated-disclosure pointers reported
+    ``pointer_items_served=0`` and all fourteen under ``body_items_served``,
+    while the counterfactual arm of the same replay counted pointers as
+    pointers. ``disclosure.pointer_item_ids`` is the event's record of which.
+    """
+    log, payload, pointers = _disclosed_pack(tmp_path)
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.items == len(payload["injected_items"]) == 14
+    assert report.baseline.pointer_items_served == len(pointers) == 2
+    assert report.baseline.body_items_served == 12
+    # An empty policy disables graduation, so the counterfactual serves
+    # every row as a body; only the baseline reflects the served split.
+    assert report.counterfactual.pointer_items_served == 0
+    assert report.counterfactual.body_items_served == 14
+
+
+def test_a_helpful_item_served_only_as_a_pointer_adds_no_baseline_helpful_tokens(
+    tmp_path: Path,
+) -> None:
+    """A pointer delivers an id, not substance (the arm's own rule, #978).
+
+    ``s0`` carries a body and ``s13`` a pointer, and both are cited helpful.
+    Only the body's tokens are helpful tokens; the pointer's tokens stay in
+    the injected total and fall to unjudged-or-unhelpful, never helpful.
+    """
+    log, payload, _ = _disclosed_pack(tmp_path)
+    paid = {r["item_id"]: r["estimated_tokens"] for r in payload["injected_items"]}
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.helpful_tokens == paid["s0"]
+    assert report.baseline.helpful_tokens < paid["s0"] + paid["s13"]
+    assert report.baseline.injected_tokens == sum(paid.values())
+    assert report.baseline.unjudged_tokens == sum(paid.values()) - paid["s0"]
+
+
+def test_a_pointer_only_helpful_pack_has_zero_baseline_helpful_tokens(
+    tmp_path: Path,
+) -> None:
+    log, _, pointers = _disclosed_pack(tmp_path, helpful=["s12", "s13"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.helpful_tokens == 0
+    assert report.baseline.unjudged_tokens == report.baseline.injected_tokens
+    assert report.baseline.pointer_items_served == len(pointers)
+
+
+@pytest.mark.parametrize(
+    "disclosure",
+    [None, {}, {"mode": "graduated", "pointer_item_ids": 3}],
+    ids=["absent", "empty", "malformed"],
+)
+def test_a_pack_with_no_readable_pointer_list_keeps_an_all_body_baseline(
+    disclosure: object,
+) -> None:
+    """No record of a demotion is read as none, as the baseline always read it."""
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(3)])
+    if disclosure is not None:
+        pack.payload["disclosure"] = disclosure
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i2"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.pointer_items_served == 0
+    assert report.baseline.body_items_served == 3
+    assert report.baseline.helpful_tokens == 100
+
+
+def test_a_pointer_cited_unhelpful_is_unjudged_not_unhelpful_tokens(
+    tmp_path: Path,
+) -> None:
+    """A pointer is an id, not substance, in either direction (#993).
+
+    ``s1`` carries a body and ``s12`` a pointer, and both are cited
+    unhelpful. Only the body's tokens are unhelpful tokens; the pointer's
+    move to unjudged, so a citation of a row whose excerpt the caller never
+    saw is not read as a verdict on its content.
+    """
+    log, payload, _ = _disclosed_pack(tmp_path, helpful=["s0"], unhelpful=["s1", "s12"])
+    paid = {r["item_id"]: r["estimated_tokens"] for r in payload["injected_items"]}
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.unhelpful_tokens == paid["s1"]
+    assert report.baseline.helpful_tokens == paid["s0"]
+    assert report.baseline.unjudged_tokens == (
+        sum(paid.values()) - paid["s0"] - paid["s1"]
+    )
+
+
+def test_replaying_a_disclosed_pack_under_its_own_policy_withholds_nothing(
+    tmp_path: Path,
+) -> None:
+    """``helpful_bodies_withheld`` is a delta against the baseline (#993).
+
+    The pack served ``s0`` as a body and ``s13`` as a pointer, both cited
+    helpful. ``body_items=12`` is the policy it was served with: both arms
+    read twelve bodies and two pointers, so nothing was withheld. The count
+    used to read one, because the counterfactual's pointer was compared with
+    nothing and ``s13`` read as a body the policy had taken.
+    """
+    log, _, _ = _disclosed_pack(tmp_path)
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=12))
+
+    assert report.baseline.body_items_served == 12
+    assert report.baseline.pointer_items_served == 2
+    assert report.counterfactual.body_items_served == 12
+    assert report.counterfactual.pointer_items_served == 2
+    assert report.counterfactual.helpful_tokens == report.baseline.helpful_tokens
+    assert report.helpful_bodies_withheld == 0
+    assert report.helpful_items_dropped == 0
+    assert report.helpful_bodies_served == 1
+    assert report.helpful_items_total == 2
+
+
+def test_a_body_the_policy_demotes_is_withheld_a_pointer_it_keeps_is_not(
+    tmp_path: Path,
+) -> None:
+    """Only a body the baseline served can be withheld by the policy (#993).
+
+    ``s0`` stays a body, ``s6`` is a body the cut demotes, and ``s13`` is a
+    pointer in both arms. One body was withheld, out of the two the baseline
+    delivered; the denominator is not the three helpful servings.
+    """
+    log, _, _ = _disclosed_pack(tmp_path, helpful=["s0", "s6", "s13"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=4))
+
+    assert report.helpful_bodies_withheld == 1
+    assert report.helpful_bodies_served == 2
+    assert report.helpful_items_total == 3
+    assert report.helpful_items_dropped == 0
+
+
+def test_a_dropped_pointer_is_a_drop_but_not_a_withheld_body(
+    tmp_path: Path,
+) -> None:
+    """A removed pointer is an id no longer addressable, and never had a body (#993)."""
+    log, _, _ = _disclosed_pack(tmp_path, helpful=["s0", "s13"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy(max_items=10))
+
+    assert report.helpful_items_dropped == 1
+    assert report.helpful_bodies_withheld == 0
+    assert report.helpful_bodies_served == 1
+    assert report.helpful_items_total == 2
+
+
+def test_the_withheld_note_names_the_delta_it_counts(tmp_path: Path) -> None:
+    log, _, _ = _disclosed_pack(tmp_path, helpful=["s0", "s6"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=4))
+
+    assert report.helpful_bodies_withheld == 1
+    assert any(
+        "served as a body and would be a pointer" in note for note in report.notes
+    )
+
+
+def test_the_baseline_reads_pointer_ids_from_the_event_not_a_rank_cut(
+    tmp_path: Path,
+) -> None:
+    """A non-default ``body_items`` moves the cut off rank twelve (#993).
+
+    Five bodies and nine pointers. A baseline that assumed the default cut,
+    twelve bodies then pointers, would read two pointers here. ``s5`` is a
+    pointer at rank six but a body at the default cut, and it is cited
+    helpful, so its tokens must stay out of ``helpful_tokens``.
+    """
+    log, payload, pointers = _disclosed_pack(
+        tmp_path,
+        helpful=["s0", "s5"],
+        disclosure=DisclosureConfig(body_items=5),
+    )
+    assert pointers == [f"s{i}" for i in range(5, 14)]
+    paid = {r["item_id"]: r["estimated_tokens"] for r in payload["injected_items"]}
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.body_items_served == 5
+    assert report.baseline.pointer_items_served == 9
+    assert report.baseline.helpful_tokens == paid["s0"]
+    assert report.helpful_bodies_served == 1
+    assert report.helpful_items_total == 2
+
+
+def test_the_baseline_reads_pointer_ids_that_are_not_the_trailing_ranks() -> None:
+    """The event names the pointers; their position is not inferred (#993).
+
+    ``i1`` and ``i4`` are pointers amid bodies, a shape the builder never
+    writes but the reader must not need: a baseline that cut at a rank
+    would read none of them, and ``i4`` is cited helpful.
+    """
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(6)])
+    pack.payload["disclosure"] = {
+        "mode": "graduated",
+        "body_items": 4,
+        "pointer_item_ids": ["i1", "i4"],
+    }
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i0", "i4"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.pointer_items_served == 2
+    assert report.baseline.body_items_served == 4
+    assert report.baseline.helpful_tokens == 100
+    assert report.helpful_bodies_served == 1
+    assert report.helpful_items_total == 2
+
+
+def _index_pack(
+    tmp_path: Path, *, helpful: list[str]
+) -> tuple[SQLiteEventLog, str, dict[str, Any]]:
+    """A real index-mode pack of five rows and one feedback event (#993)."""
+    strategies = [
+        _axis_strategy(
+            "semantic",
+            [_sized_item(f"s{i}", 0.9 - i * 0.01, "semantic", 6) for i in range(5)],
+        )
+    ]
+    log = SQLiteEventLog(tmp_path / "events.db")
+    pack_id, payload = _build_logged(
+        log,
+        strategies,
+        PackBudget(max_items=50, max_tokens=1_000_000),
+        index_mode=True,
+    )
+    log.append(_gs_feedback(pack_id, helpful=helpful))
+    return log, pack_id, payload
+
+
+def test_the_baseline_counts_an_index_pack_as_pointers_as_attribution_does(
+    tmp_path: Path,
+) -> None:
+    """An index pack records ``disclosure.mode='off'`` and no pointer ids (#993).
+
+    So the disclosure block alone reads every row as a body, while
+    :func:`lookup_pack_bodied_item_ids` reads none: the pack is all pointers
+    by construction. The replay now takes the same rule, from the same key,
+    and the counterfactual follows so a null policy still changes nothing.
+    """
+    log, pack_id, payload = _index_pack(tmp_path, helpful=["s0"])
+    assert payload["index_mode"] is True
+    assert payload["disclosure"]["pointer_item_ids"] == []
+    assert lookup_pack_bodied_item_ids(log, pack_id) == []
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.items == 5
+    assert report.baseline.pointer_items_served == 5
+    assert report.baseline.body_items_served == 0
+    assert report.baseline.helpful_tokens == 0
+    assert report.counterfactual.pointer_items_served == 5
+    assert report.counterfactual.body_items_served == 0
+    assert report.counterfactual.helpful_tokens == 0
+    assert report.token_delta == 0.0
+    # Nothing was served as a body, so there is none to withhold.
+    assert report.helpful_bodies_served == 0
+    assert report.helpful_bodies_withheld == 0
+    assert report.helpful_items_total == 1
+
+
+def test_an_index_pack_stays_all_pointers_under_a_graduation_policy(
+    tmp_path: Path,
+) -> None:
+    """The builder exempts an index pack from graduation, so the replay does (#993)."""
+    log, _, _ = _index_pack(tmp_path, helpful=["s0"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy(body_items=2))
+
+    assert report.counterfactual.body_items_served == 0
+    assert report.counterfactual.pointer_items_served == 5
+    assert report.counterfactual.injected_tokens == report.baseline.injected_tokens
+    assert report.helpful_bodies_withheld == 0
+
+
+@pytest.mark.parametrize("refill", [False, True])
+def test_an_excerpt_cap_leaves_an_index_pack_priced_as_recorded(
+    tmp_path: Path, refill: bool
+) -> None:
+    """An index line has no excerpt, so a width cap cannot shrink it (#997)."""
+    log, _, _ = _index_pack(tmp_path, helpful=["s0"])
+
+    report = replay_pack_value(
+        log, policy=ReplayPolicy(excerpt_max_chars=10, refill=refill)
+    )
+
+    assert report.counterfactual.items == report.baseline.items
+    assert report.counterfactual.injected_tokens == report.baseline.injected_tokens
+    assert report.token_delta == 0.0
+
+
+def test_a_truthy_non_boolean_index_mode_is_not_an_index_pack() -> None:
+    """The check is ``is True``, as attribution's is, never truthiness (#993)."""
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(3)])
+    pack.payload["index_mode"] = "true"
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i0"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.body_items_served == 3
+    assert report.baseline.pointer_items_served == 0
+
+
+def test_a_flat_pack_is_not_read_as_an_index_pack(tmp_path: Path) -> None:
+    """``index_mode=False`` on the event keeps the all-body reading (#993)."""
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(3)])
+    pack.payload["index_mode"] = False
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i0"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.body_items_served == 3
+    assert report.baseline.pointer_items_served == 0
+    assert report.baseline.helpful_tokens == 100
 
 
 def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
