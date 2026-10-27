@@ -980,7 +980,12 @@ All notable changes to Trellis will be documented in this file.
   is carried in a new `already_promoted_count` (CLI JSON, REST response,
   review-decision event detail; `docs/api/v1.yaml` regenerated) apart from
   `promoted_count`. A `promoted_incomplete` row and a row with changed
-  content still write. `review-ready --approve` keeps refusing an existing
+  content still write. A re-run skips a row whose payload keys still match,
+  so a key since dropped from `precedent_properties` is not removed by a
+  re-run, on purpose: a key a later writer added, a lifecycle stamp say, reads
+  the same as a dropped one, and that is not content the promotion owns
+  ([#996](https://github.com/ronsse/trellis-ai/issues/996)).
+  `review-ready --approve` keeps refusing an existing
   precedent as `refused_already_promoted`. Two smaller fixes ride with it:
   `review-ready --approve ""` could raise `IndexError` when a malformed
   artifact held a ready row with a blank `candidate_id`, and is now refused as
