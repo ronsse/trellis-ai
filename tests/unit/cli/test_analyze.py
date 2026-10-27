@@ -288,8 +288,18 @@ class TestReplay:
     """``trellis analyze replay`` — the same window under a different policy."""
 
     @staticmethod
-    def _seed(registry: StoreRegistry, count: int, *, items: int = 12) -> None:
-        """Packs with a fat, uncited tail and a full budget_trace."""
+    def _seed(
+        registry: StoreRegistry,
+        count: int,
+        *,
+        items: int = 12,
+        pointers: int = 0,
+    ) -> None:
+        """Packs with a fat, uncited tail and a full budget_trace.
+
+        ``pointers`` marks that many trailing rows as served by graduated
+        disclosure, and cites the last of them helpful beside the first row.
+        """
         event_log = registry.operational.event_log
         for index in range(count):
             pack_id = f"rpack_{index}"
@@ -304,6 +314,17 @@ class TestReplay:
                     "intent_family": "general_context",
                     "budget_max_tokens": 2000,
                     "injected_item_ids": ids,
+                    **(
+                        {
+                            "disclosure": {
+                                "mode": "graduated",
+                                "body_items": items - pointers,
+                                "pointer_item_ids": ids[items - pointers :],
+                            }
+                        }
+                        if pointers
+                        else {}
+                    ),
                     "injected_items": [
                         {
                             "item_id": item_id,
@@ -332,8 +353,8 @@ class TestReplay:
                 entity_id=pack_id,
                 payload={
                     "pack_id": pack_id,
-                    "helpful_item_ids": [ids[0]],
-                    "unhelpful_item_ids": [ids[-1]],
+                    "helpful_item_ids": [ids[0], ids[-1]] if pointers else [ids[0]],
+                    "unhelpful_item_ids": [] if pointers else [ids[-1]],
                     "intent_family": "general_context",
                     "rating": 0.5,
                     "success": True,
@@ -383,6 +404,42 @@ class TestReplay:
         assert "What the policy cost" in result.stdout
         assert "body withheld" in result.stdout
         assert "dropped" in result.stdout
+
+    def test_a_disclosed_pack_replayed_under_its_own_policy_costs_nothing(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """The cost line is a delta against the arms printed above it (#993).
+
+        Six packs of fourteen rows, the last two served as pointers and the
+        last cited helpful. ``--body-items 12`` is the policy they were served
+        with: both arms read twelve bodies and two pointers, and the line
+        beneath them must read zero withheld, out of the one helpful body per
+        pack, rather than one of two as it did while a helpful pointer counted.
+        """
+        self._seed(temp_stores, 6, items=14, pointers=2)
+        args = ["analyze", "replay", "--body-items", "12"]
+
+        data = json.loads(
+            runner.invoke(app, [*args, "--format", "json"]).stdout.strip()
+        )
+        assert data["baseline"]["body_items_served"] == 72
+        assert data["baseline"]["pointer_items_served"] == 12
+        assert data["counterfactual"]["body_items_served"] == 72
+        assert data["counterfactual"]["pointer_items_served"] == 12
+        assert data["helpful_bodies_withheld"] == 0
+        assert data["helpful_bodies_served"] == 6
+        assert data["helpful_items_total"] == 12
+
+        text = runner.invoke(app, args)
+        assert text.exit_code == 0
+        withheld = next(
+            line for line in plain(text.stdout).splitlines() if "body withheld" in line
+        )
+        assert withheld.split()[-1] == "0/6"
+        dropped = next(
+            line for line in plain(text.stdout).splitlines() if "dropped" in line
+        )
+        assert dropped.split()[-1] == "0/12"
 
     def test_degenerate_policy_exits_two(self) -> None:
         result = runner.invoke(app, ["analyze", "replay", "--body-items", "0"])
@@ -2473,6 +2530,65 @@ class TestAnalyzeHealthFailedStrategySection:
         dumped = result.stdout
         assert "synthetic/secret/path.db" not in dumped
         assert "RuntimeError" not in dumped
+
+
+class TestAnalyzeHealthMemoryExtraction:
+    """A flag-on, extractor-less deployment is named by ``analyze health`` (#987)."""
+
+    def _seed(
+        self, registry: StoreRegistry, state: str, reason: str | None = None
+    ) -> None:
+        registry.operational.event_log.emit(
+            EventType.MEMORY_EXTRACTION_STATE,
+            source="mcp:memory_extraction",
+            payload={"state": state, "reason": reason, "error_type": None},
+        )
+
+    def test_text_warns_that_extraction_is_enabled_but_unavailable(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "WARN" in out
+        assert "Memory extraction: unavailable (no_llm_client) since" in out
+        assert "the most recent extraction-state report says unavailable" in out
+        assert "saves on that process are stored without entity/edge extraction" in out
+
+    def test_json_carries_the_state_and_the_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "warn"
+        assert payload["memory_extraction"]["state"] == "unavailable"
+        assert payload["memory_extraction"]["reason"] == "no_llm_client"
+        assert any("memory extraction" in r for r in payload["reasons"])
+
+    def test_a_deployment_that_never_enabled_it_prints_nothing_about_it(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "Memory extraction" not in plain(result.stdout)
+
+    def test_recovery_clears_the_warning(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores, "unavailable", "no_llm_client")
+        self._seed(temp_stores, "available")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        payload = json.loads(result.stdout)
+        assert payload["memory_extraction"]["state"] == "available"
+        assert not any("memory extraction" in r for r in payload["reasons"])
 
 
 class TestAnalyzeHealthServingBuilds:

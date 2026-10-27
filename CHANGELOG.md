@@ -6,6 +6,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`MEMORY_EXTRACTION_STATE`: a dead memory extractor is a health event, and
+  a failed LLM-client resolution is retried (#987).** With
+  `TRELLIS_ENABLE_MEMORY_EXTRACTION` on, `_get_memory_extractor` cached `None`
+  for the life of the process when no LLM client could be built on first use,
+  so one transient outage at startup turned extraction off until a restart and
+  left only an `info` log line, which the default CLI never prints. A
+  "no client" outcome is now retried at most once per 60 s (one float
+  comparison per save in between), and stops when the flag goes off. A
+  construction failure (the client or the extractor raising, an `McpError`
+  included) no longer raises at a save: it is logged with its traceback,
+  reported as `unavailable` / `build_failed`, and retried on the same
+  interval, so a save that has stored its document still embeds and never
+  settles extraction off. The new event
+  (`source="mcp:memory_extraction"`, payload `state` / `reason` /
+  `error_type`) is written when the `(state, reason)` pair changes, never per
+  save: `unavailable` (`no_llm_client` or `build_failed`, refreshed daily by
+  the first save after the interval, with no background timer, so it
+  outlives the 7-day window while saves keep arriving) and `available`
+  (first successful build per process, and on recovery). `trellis analyze
+  health` prints `Memory extraction: ...` with the onset and warns while the
+  most recent event says `unavailable`; a window with no event reads
+  `unobserved`, not healthy. The emit is wrapped whole, so it can never fail
+  a save. The stale `capture_health.py` comment claiming
+  `save_memory`'s only `MUTATION_EXECUTED` comes from extraction is corrected.
+  The CLI bulk-ingest hook (`extract/memory_ingest_hook.py`) does not cache
+  and is unchanged. It still logs the missing client at `info` and emits no
+  event.
 - **`RejectedItem.estimated_tokens`: a `max_items` rejection is priced, so
   the graph-selection replay can refill it (#970).** The builder records the
   budget walk's charge on the two budget cuts, `max_items` (which never
@@ -1005,10 +1032,43 @@ All notable changes to Trellis will be documented in this file.
   #359, so the two arms agree on what a pointer is. On a window that cites
   pointers as helpful the baseline's `useful_token_fraction` is lower than it
   read, so `fraction_delta` reads higher against it. An absent, empty or
-  non-list block reads as no pointers, as before. Not changed:
-  `helpful_items_total` and `helpful_bodies_withheld` still count a helpful
-  row the baseline served as a pointer, and a window spanning #976's deploy
-  still mixes the two disclosed-pack pricings (see the `walk_tokens` entry).
+  non-list block reads as no pointers, as before. Not changed: a window
+  spanning #976's deploy still mixes the two disclosed-pack pricings (see the
+  `walk_tokens` entry).
+
+- **`analyze replay`: "What the policy cost" is a delta against the baseline
+  it prints above it, and index-mode packs read as pointers (#993).**
+  `helpful_bodies_withheld` counted every cited-helpful serving the
+  counterfactual carried as a pointer, so replaying a disclosed pack under the
+  policy it was served with (`--body-items 12` on a 14-row pack whose last two
+  rows were pointers, one cited helpful) printed `body withheld 1/2` beneath two
+  arms that read the same. It now counts a helpful serving only when the
+  as-served pack delivered it as a body and the policy turns it into a pointer,
+  as its docstring always said, so that replay reads `0`. The new
+  `helpful_bodies_served` (additive, in `--format json`) is the denominator the
+  CLI line now prints, the helpful servings the baseline delivered as a body;
+  `helpful_items_total` keeps counting every cited-helpful serving, body or
+  pointer, because `helpful_items_dropped` is measured against it and a dropped
+  pointer is an id that is no longer addressable. The `notes` text for a
+  withheld body now says the same. An index-mode pack records `disclosure`
+  `mode='off'` with no `pointer_item_ids`, so the baseline read every row as a
+  body while `feedback.attribution` reads the pack as all pointers; the replay
+  now takes attribution's rule (`index_mode` is `true` on the event), and the
+  counterfactual leaves such a pack all pointers and exempt from graduation, as
+  the builder does, so a null policy still changes nothing. On a window with
+  index packs the baseline's `useful_token_fraction` drops by their helpful
+  tokens, which were counted as bodies. The replay baseline therefore no longer
+  matches `analyze value` on the same window: both judge the same servings, but
+  `analyze value` still credits a cited pointer at its pointer cost.
+  `--excerpt-max-chars` no longer re-prices an index pack's rows, because an
+  index line carries no excerpt to cut; before, a cap below the line width
+  reported a saving the builder would not make. Pointer exclusion from
+  `unhelpful_tokens`, introduced with #978 and unchanged here, is now pinned by
+  a test: a pointer cited unhelpful moves from `unhelpful_tokens` to
+  `unjudged_tokens`, because the caller never saw its excerpt. A window
+  fixture with a non-default `DisclosureConfig(body_items=...)` and one whose
+  pointers are not the trailing ranks now pin that the baseline reads pointer
+  ids from the event rather than assuming the default cut at rank 12.
 
 - **`axes.graph` / `PACK_ASSEMBLED.graph_axis_state` read `absent` when the
   builder has no graph strategy (#985).** `resolve_graph_axis_state` returned

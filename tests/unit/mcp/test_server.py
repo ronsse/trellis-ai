@@ -1449,14 +1449,20 @@ class TestSaveMemoryEmbedOnIngest:
 # ---------------------------------------------------------------------------
 
 
+def _reset_memory_extractor_state() -> None:
+    server_mod._memory_extractor = None
+    server_mod._memory_extractor_attempted = False
+    server_mod._memory_extractor_retry_at = None
+    server_mod._memory_extractor_reported = None
+    server_mod._memory_extractor_reported_at = 0.0
+
+
 @pytest.fixture
 def _reset_memory_extractor_cache():
     """Reset the module-level memory-extractor cache between tests."""
-    server_mod._memory_extractor = None
-    server_mod._memory_extractor_attempted = False
+    _reset_memory_extractor_state()
     yield
-    server_mod._memory_extractor = None
-    server_mod._memory_extractor_attempted = False
+    _reset_memory_extractor_state()
 
 
 @pytest.mark.usefixtures("_reset_memory_extractor_cache")

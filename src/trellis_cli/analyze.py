@@ -885,6 +885,11 @@ def health(
 
     _print_serving_builds(serve.serving_builds)
     _print_capture_coverage(report.capture)
+    extraction = report.memory_extraction
+    if extraction.state != "unobserved":
+        since = f"{extraction.since:%Y-%m-%d %H:%M} UTC" if extraction.since else "?"
+        detail = f" ({escape(extraction.reason)})" if extraction.reason else ""
+        console.print(f"  Memory extraction: {extraction.state}{detail} since {since}")
     _print_precedent_sync(report.precedent_sync)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
@@ -1335,19 +1340,21 @@ def _render_replay(report: Any) -> None:
     console.print()
     console.print("  [bold]What the policy cost[/bold]")
     withheld_style = "yellow" if report.helpful_bodies_withheld else "green"
+    # Both counts are deltas against the "as served" arm above, each over the
+    # servings that arm delivered in the form the policy takes away.
     console.print(
-        f"    cited-helpful servings, body withheld (id fetchable): "
+        f"    cited-helpful bodies served, now body withheld (id fetchable): "
         f"[{withheld_style}]{report.helpful_bodies_withheld}[/{withheld_style}]"
-        f"/{report.helpful_items_total}"
+        f"/{report.helpful_bodies_served}"
     )
     dropped_style = "red" if report.helpful_items_dropped else "green"
     console.print(
-        f"    cited-helpful servings dropped (unreachable):       "
+        f"    cited-helpful servings dropped (unreachable):                  "
         f"[{dropped_style}]{report.helpful_items_dropped}[/{dropped_style}]"
         f"/{report.helpful_items_total}"
     )
     console.print(
-        f"    items admitted that nobody graded:                  "
+        f"    items admitted that nobody graded:                             "
         f"{report.admitted_ungraded_items}"
     )
 
