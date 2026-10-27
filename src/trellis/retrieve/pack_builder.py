@@ -2002,10 +2002,11 @@ class PackBuilder:
         :meth:`_emit_telemetry` for the full rationale.
 
         ``graph_axis_state`` (#961) mirrors the flat path's key of the same
-        name and rides the same way: ``"ran"``, ``"failed"`` or
-        ``"unseeded_fallback_off"``, one value for the whole pack because all
-        sections share one build. It reads from the build, not from a section's
-        report, so it is present even when the request named no section.
+        name and rides the same way: ``"ran"``, ``"failed"``,
+        ``"unseeded_fallback_off"`` or ``"absent"``, one value for the whole
+        pack because all sections share one build. It reads from the build,
+        not from a section's report, so it is present even when the request
+        named no section.
 
         ``holdout`` / ``holdout_rate`` and, on a withheld pack's row,
         ``holdout_sections`` / ``holdout_advisory_ids`` follow the flat
@@ -2348,9 +2349,9 @@ class PackBuilder:
         the visible record that the parent-scoped archived/noise check
         could not run for at least one parent.
 
-        ``graph_axis_state`` (#961) is ``"ran"``, ``"failed"`` or
-        ``"unseeded_fallback_off"``: the same value the response's
-        ``axes["graph"]`` carries, from the same
+        ``graph_axis_state`` (#961) is ``"ran"``, ``"failed"``,
+        ``"unseeded_fallback_off"`` or ``"absent"`` (#985): the same value the
+        response's ``axes["graph"]`` carries, from the same
         :func:`~trellis.retrieve.strategies.resolve_graph_axis_state`, because
         an empty ``injected_items`` cannot tell a graph axis withheld for want
         of a seed from one that found nothing. A required kwarg, outside the

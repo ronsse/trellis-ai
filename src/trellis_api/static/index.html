@@ -4063,7 +4063,10 @@
                 // The rows that were approved but named nothing are the difference;
                 // say so, as the CLI does, or an all-blank run reads as a bare 0/0.
                 const skipped = r.approved_count - r.named_count;
+                // A row already promoted with this content is left alone and counted
+                // apart, so a re-submitted approval does not read as a failed one.
                 toastReview(`Promoted ${r.promoted_count}/${r.named_count} approved candidate(s).` +
+                    (r.already_promoted_count > 0 ? ` ${r.already_promoted_count} already promoted; nothing written for them.` : '') +
                     (skipped > 0 ? ` ${skipped} approved row(s) name no candidate_id and were skipped.` : '') +
                     (r.status === 'ok' ? '' : ` Run ${r.status}.`), r.status === 'ok');
             } catch (err) {

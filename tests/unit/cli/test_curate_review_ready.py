@@ -437,6 +437,30 @@ class TestApprove:
         for cid in ("fam_a:u", "fam_a:z", "fam_a:p"):
             assert _node(_entity(cid)) is None
 
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_id_is_refused_even_when_a_malformed_artifact_holds_one(
+        self, blank: str, tmp_path: Path
+    ) -> None:
+        """A ready row with a blank ``candidate_id`` is findable by ``--approve ""``.
+
+        The planner strips the id and skips the row, so there used to be no
+        outcome to read and the command raised ``IndexError``. It is refused
+        as not ready, like any id that is not in the set, and nothing is written.
+        """
+        path = _write(tmp_path, _candidate(blank, item_id="doc:blank"))
+        _, listing, _ = _review(path)
+        assert listing is not None
+        assert listing["ready_count"] == 1  # the artifact really does hold the row
+
+        code, data, _ = _review(path, "--approve", blank)
+
+        assert code == EXIT_VALIDATION
+        assert data is not None
+        assert data["status"] == "refused"
+        assert [r["status"] for r in data["results"]] == ["refused_not_ready"]
+        assert data["promoted_count"] == 0
+        assert _promote_events() == []
+
     def test_an_already_promoted_id_is_refused_and_promotes_once(
         self, tmp_path: Path
     ) -> None:

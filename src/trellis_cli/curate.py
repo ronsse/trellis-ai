@@ -53,7 +53,8 @@ from trellis.learning.review_ready import (
 )
 from trellis.learning.scoring import (
     PromotionVerdict,
-    preview_learning_promotion_refusal,
+    preview_learning_promotion,
+    promotion_already_promoted,
     promotion_landed,
     promotion_verdict,
     settle_promotion,
@@ -801,11 +802,18 @@ def promote_learning(
     ``5`` / ``failed`` when a write did not land. A skipped blank-id row
     refuses the run even when other rows promoted; those writes still stand.
 
+    A row whose precedent is already current, complete and unchanged is
+    reported ``already_promoted`` and written not at all, so a decisions file
+    can be run again after its refused row is fixed. It counts as satisfied
+    for the verdict and is not in ``promoted_count``; ``already_promoted_count``
+    carries it.
+
     ``--dry-run`` writes nothing and always exits ``0``, reporting ``ok``.
     It adds ``would_verdict`` and ``would_exit_code``: the verdict a real run
     would reach if every ready write landed. It sees a refusal the planner or
-    an existing precedent's lifecycle state decides, and a blank-id row, and
-    cannot see a policy refusal or a failed write.
+    an existing precedent's lifecycle state decides, a row that is
+    ``already_promoted``, and a blank-id row, and cannot see a policy refusal
+    or a failed write.
     """
     candidates_payload = json.loads(candidates.read_text(encoding="utf-8"))
     decisions_payload = json.loads(decisions.read_text(encoding="utf-8"))
@@ -830,7 +838,9 @@ def promote_learning(
         # ``would_*`` so it cannot be read as an outcome, and this command
         # returns ``0`` whatever it previews.
         previews = [
-            _preview_promotion(entry, registry.knowledge.graph_store)
+            _preview_promotion(
+                entry, registry.knowledge.graph_store, registry.operational.event_log
+            )
             for entry in plan["results"]
         ]
         would_exit, would_status = _would_promotion_verdict(
@@ -861,7 +871,7 @@ def promote_learning(
             f"[bold]Dry run[/bold] — {plan['approved_count']} approved, "
             f"{len(ready)} ready to promote"
         )
-        _print_unnamed_note(plan)
+        _print_unnamed_note(plan, dry_run=True)
         for entry, would in zip(plan["results"], previews, strict=True):
             note = "" if would == entry["status"] else f" (would be {escape(would)})"
             console.print(
@@ -898,6 +908,7 @@ def promote_learning(
             entry["edge_payloads"],
             requested_by="cli:promote-learning",
             graph_store=registry.knowledge.graph_store,
+            event_log=registry.operational.event_log,
         )
         submission_results.append(
             settle_promotion(
@@ -910,6 +921,9 @@ def promote_learning(
         )
 
     promoted_count = sum(1 for r in submission_results if promotion_landed(r))
+    already_promoted_count = sum(
+        1 for r in submission_results if promotion_already_promoted(r)
+    )
     # One reading of the outcomes, taken before either format renders, so the
     # exit code and the payload's ``status`` cannot depend on ``--format``
     # (tests/unit/test_format_exit_parity_rule.py).
@@ -925,14 +939,24 @@ def promote_learning(
                     "named_count": plan["named_count"],
                     "ready_count": len(ready),
                     "promoted_count": promoted_count,
+                    "already_promoted_count": already_promoted_count,
                     "results": submission_results,
                 }
             )
         )
     else:
+        # Over the rows that named a candidate, as the Review queue and the REST
+        # response count them: a blank-id row never runs, and the note below
+        # says it was skipped, so dividing by it read as a promotion that fell
+        # short.
         console.print(
             f"[bold]Promote Learning[/bold] — {promoted_count}/"
-            f"{plan['approved_count']} approved candidates promoted"
+            f"{plan['named_count']} approved candidates promoted"
+            + (
+                f", {already_promoted_count} already promoted"
+                if already_promoted_count
+                else ""
+            )
         )
         _print_unnamed_note(plan)
         table = Table(title="Promotion Results")
@@ -1012,21 +1036,30 @@ def _print_verdict(status: str, exit_code: int) -> None:
     console.print(f"Verdict: [{style}]{status}[/{style}] (exit {exit_code})")
 
 
-def _print_unnamed_note(plan: dict[str, Any]) -> None:
+def _print_unnamed_note(plan: dict[str, Any], *, dry_run: bool = False) -> None:
     """Say so when approved rows named no candidate and so were never run.
 
     ``approved_count`` is what the operator marked; ``named_count`` is what
     the planner could act on. The difference is a row with a blank
     ``candidate_id``: it has no outcome, but it refuses the run, and the rows
-    that did promote stay promoted.
+    that did promote stay promoted. A dry run has run nothing, so its note is
+    in the conditional and says what a real run would do.
     """
     unnamed = unnamed_approved_count(plan)
-    if unnamed:
+    if not unnamed:
+        return
+    if dry_run:
         console.print(
             f"[yellow]{unnamed} approved row(s) name no candidate_id and "
-            "were skipped. A skipped row makes the run refused; any row that "
-            "promoted stays promoted.[/yellow]"
+            "would be skipped. A real run would be refused for it; any row "
+            "that promoted would stay promoted.[/yellow]"
         )
+        return
+    console.print(
+        f"[yellow]{unnamed} approved row(s) name no candidate_id and "
+        "were skipped. A skipped row makes the run refused; any row that "
+        "promoted stays promoted.[/yellow]"
+    )
 
 
 def _report_run_without_results(
@@ -1051,6 +1084,7 @@ def _report_run_without_results(
                     "named_count": plan["named_count"],
                     "ready_count": 0,
                     "promoted_count": 0,
+                    "already_promoted_count": 0,
                     "results": [],
                 }
             )
@@ -1069,19 +1103,24 @@ def _report_run_without_results(
     return exit_code
 
 
-def _preview_promotion(entry: dict[str, Any], graph_store: Any) -> str:
+def _preview_promotion(entry: dict[str, Any], graph_store: Any, event_log: Any) -> str:
     """The status a real run would give a planned row, if its writes landed.
 
     Read-only. A row the planner could not ready keeps its own status; a
-    ready row is ``promoted`` unless an existing precedent's lifecycle state
-    would refuse it, the one refusal that is known before any write.
+    ready row is ``promoted`` unless the submission would answer before its
+    first write: an existing precedent's lifecycle state would refuse it, or
+    it is ``already_promoted``. Those are the two answers known before any
+    write, and they come from the function the submission runs.
     """
     if entry["status"] != "ready":
         return str(entry["status"])
-    refusal = preview_learning_promotion_refusal(
-        entry["entity_payload"]["entity_id"], graph_store=graph_store
+    early = preview_learning_promotion(
+        entry["entity_payload"],
+        entry["edge_payloads"],
+        graph_store=graph_store,
+        event_log=event_log,
     )
-    return "promoted" if refusal is None else str(refusal["status"])
+    return "promoted" if early is None else str(early["status"])
 
 
 def _would_promotion_verdict(
@@ -1145,6 +1184,7 @@ def _approve_candidates(
             entry["edge_payloads"],
             requested_by=REVIEW_READY_REQUESTED_BY,
             graph_store=registry.knowledge.graph_store,
+            event_log=registry.operational.event_log,
         )
         outcomes.append(
             settle_promotion(

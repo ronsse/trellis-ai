@@ -967,6 +967,89 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`promote-learning`: re-running a file after a refused run no longer
+  re-promotes the rows that landed (#983).** A mixed run exits `2` /
+  `refused` and the next move is to fix the bad row and run the same file
+  again, but `submit_learning_promotion` refused re-approval only for a
+  precedent that was not current, so the second run wrote each landed row a
+  second time: a new SCD-2 version at the same id and a second
+  `PRECEDENT_PROMOTED` event. A row whose precedent is current, complete and
+  unchanged is now reported `already_promoted` and writes nothing, in
+  `promote-learning`, `POST /learning/promotions` and `auto-promote-candidates`.
+  It counts as satisfied for the verdict, so a corrected file exits `0`, and
+  is carried in a new `already_promoted_count` (CLI JSON, REST response,
+  review-decision event detail; `docs/api/v1.yaml` regenerated) apart from
+  `promoted_count`. A `promoted_incomplete` row and a row with changed
+  content still write. `review-ready --approve` keeps refusing an existing
+  precedent as `refused_already_promoted`. Two smaller fixes ride with it:
+  `review-ready --approve ""` could raise `IndexError` when a malformed
+  artifact held a ready row with a blank `candidate_id`, and is now refused as
+  `refused_not_ready`; and the `--dry-run` note no longer says a row "was
+  skipped" or that a skipped row "makes the run refused" about a run that
+  did not happen, while the text header divides by `named_count` (the Review
+  toast's denominator) and not `approved_count`.
+
+- **`analyze replay`: the as-served baseline counts a disclosure pointer as a
+  pointer (#978).** `replay_pack_value` marked every included row of the
+  baseline arm a body, so a pack that graduated disclosure had demoted
+  reported `pointer_items_served=0` with all of its rows under
+  `body_items_served`, and a cited-helpful row served only as a pointer added
+  its pointer tokens to `helpful_tokens`, against the arm's own rule that a
+  pointer delivers an id, not substance. The baseline now reads
+  `disclosure.pointer_item_ids`, which every flat build has written since
+  #359, so the two arms agree on what a pointer is. On a window that cites
+  pointers as helpful the baseline's `useful_token_fraction` is lower than it
+  read, so `fraction_delta` reads higher against it. An absent, empty or
+  non-list block reads as no pointers, as before. Not changed: a window
+  spanning #976's deploy still mixes the two disclosed-pack pricings (see the
+  `walk_tokens` entry).
+
+- **`analyze replay`: "What the policy cost" is a delta against the baseline
+  it prints above it, and index-mode packs read as pointers (#993).**
+  `helpful_bodies_withheld` counted every cited-helpful serving the
+  counterfactual carried as a pointer, so replaying a disclosed pack under the
+  policy it was served with (`--body-items 12` on a 14-row pack whose last two
+  rows were pointers, one cited helpful) printed `body withheld 1/2` beneath two
+  arms that read the same. It now counts a helpful serving only when the
+  as-served pack delivered it as a body and the policy turns it into a pointer,
+  as its docstring always said, so that replay reads `0`. The new
+  `helpful_bodies_served` (additive, in `--format json`) is the denominator the
+  CLI line now prints, the helpful servings the baseline delivered as a body;
+  `helpful_items_total` keeps counting every cited-helpful serving, body or
+  pointer, because `helpful_items_dropped` is measured against it and a dropped
+  pointer is an id that is no longer addressable. The `notes` text for a
+  withheld body now says the same. An index-mode pack records `disclosure`
+  `mode='off'` with no `pointer_item_ids`, so the baseline read every row as a
+  body while `feedback.attribution` reads the pack as all pointers; the replay
+  now takes attribution's rule (`index_mode` is `true` on the event), and the
+  counterfactual leaves such a pack all pointers and exempt from graduation, as
+  the builder does, so a null policy still changes nothing. On a window with
+  index packs the baseline's `useful_token_fraction` drops by their helpful
+  tokens, which were counted as bodies. The replay baseline therefore no longer
+  matches `analyze value` on the same window: both judge the same servings, but
+  `analyze value` still credits a cited pointer at its pointer cost.
+  `--excerpt-max-chars` no longer re-prices an index pack's rows, because an
+  index line carries no excerpt to cut; before, a cap below the line width
+  reported a saving the builder would not make. Pointer exclusion from
+  `unhelpful_tokens`, introduced with #978 and unchanged here, is now pinned by
+  a test: a pointer cited unhelpful moves from `unhelpful_tokens` to
+  `unjudged_tokens`, because the caller never saw its excerpt. A window
+  fixture with a non-default `DisclosureConfig(body_items=...)` and one whose
+  pointers are not the trailing ranks now pin that the baseline reads pointer
+  ids from the event rather than assuming the default cut at rank 12.
+
+- **`axes.graph` / `PACK_ASSEMBLED.graph_axis_state` read `absent` when the
+  builder has no graph strategy (#985).** `resolve_graph_axis_state` returned
+  `ran` for a builder that never had the axis, so a reader could not tell
+  "ran and found nothing" from "never configured". The vocabulary is now
+  `ran`, `failed`, `unseeded_fallback_off` and `absent`; an absent axis is in
+  neither `axes.ran` nor `axes.failed`. No shipped surface is affected: every
+  one builds through `builder_factory`, which always includes the graph
+  strategy, so no stored row reads differently. `AxisReportResponse.graph`
+  stays a free string (default `ran` for an older server's block), the
+  REST and CLI JSON forward the value unchanged, and no reader switches on
+  the old three-value set, so `docs/api/v1.yaml` is unchanged.
+
 - **`POST /api/v1/learning/promotions` states the verdict `promote-learning`
   states.** `LearningPromotionResponse.status` was always the default `"ok"`,
   even when every ready row was refused or failed to land, and the response

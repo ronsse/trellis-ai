@@ -288,8 +288,18 @@ class TestReplay:
     """``trellis analyze replay`` — the same window under a different policy."""
 
     @staticmethod
-    def _seed(registry: StoreRegistry, count: int, *, items: int = 12) -> None:
-        """Packs with a fat, uncited tail and a full budget_trace."""
+    def _seed(
+        registry: StoreRegistry,
+        count: int,
+        *,
+        items: int = 12,
+        pointers: int = 0,
+    ) -> None:
+        """Packs with a fat, uncited tail and a full budget_trace.
+
+        ``pointers`` marks that many trailing rows as served by graduated
+        disclosure, and cites the last of them helpful beside the first row.
+        """
         event_log = registry.operational.event_log
         for index in range(count):
             pack_id = f"rpack_{index}"
@@ -304,6 +314,17 @@ class TestReplay:
                     "intent_family": "general_context",
                     "budget_max_tokens": 2000,
                     "injected_item_ids": ids,
+                    **(
+                        {
+                            "disclosure": {
+                                "mode": "graduated",
+                                "body_items": items - pointers,
+                                "pointer_item_ids": ids[items - pointers :],
+                            }
+                        }
+                        if pointers
+                        else {}
+                    ),
                     "injected_items": [
                         {
                             "item_id": item_id,
@@ -332,8 +353,8 @@ class TestReplay:
                 entity_id=pack_id,
                 payload={
                     "pack_id": pack_id,
-                    "helpful_item_ids": [ids[0]],
-                    "unhelpful_item_ids": [ids[-1]],
+                    "helpful_item_ids": [ids[0], ids[-1]] if pointers else [ids[0]],
+                    "unhelpful_item_ids": [] if pointers else [ids[-1]],
                     "intent_family": "general_context",
                     "rating": 0.5,
                     "success": True,
@@ -383,6 +404,42 @@ class TestReplay:
         assert "What the policy cost" in result.stdout
         assert "body withheld" in result.stdout
         assert "dropped" in result.stdout
+
+    def test_a_disclosed_pack_replayed_under_its_own_policy_costs_nothing(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """The cost line is a delta against the arms printed above it (#993).
+
+        Six packs of fourteen rows, the last two served as pointers and the
+        last cited helpful. ``--body-items 12`` is the policy they were served
+        with: both arms read twelve bodies and two pointers, and the line
+        beneath them must read zero withheld, out of the one helpful body per
+        pack, rather than one of two as it did while a helpful pointer counted.
+        """
+        self._seed(temp_stores, 6, items=14, pointers=2)
+        args = ["analyze", "replay", "--body-items", "12"]
+
+        data = json.loads(
+            runner.invoke(app, [*args, "--format", "json"]).stdout.strip()
+        )
+        assert data["baseline"]["body_items_served"] == 72
+        assert data["baseline"]["pointer_items_served"] == 12
+        assert data["counterfactual"]["body_items_served"] == 72
+        assert data["counterfactual"]["pointer_items_served"] == 12
+        assert data["helpful_bodies_withheld"] == 0
+        assert data["helpful_bodies_served"] == 6
+        assert data["helpful_items_total"] == 12
+
+        text = runner.invoke(app, args)
+        assert text.exit_code == 0
+        withheld = next(
+            line for line in plain(text.stdout).splitlines() if "body withheld" in line
+        )
+        assert withheld.split()[-1] == "0/6"
+        dropped = next(
+            line for line in plain(text.stdout).splitlines() if "dropped" in line
+        )
+        assert dropped.split()[-1] == "0/12"
 
     def test_degenerate_policy_exits_two(self) -> None:
         result = runner.invoke(app, ["analyze", "replay", "--body-items", "0"])
@@ -2726,6 +2783,72 @@ class TestAnalyzeHealthServingBuilds:
         assert result.exit_code == 0, result.output
         out = " ".join(plain(result.stdout).split())
         assert "stale stamp, the commit is what the install metadata said" in out
+
+
+class TestAnalyzeHealthPrecedentSync:
+    """``analyze health`` reports reinstatements whose re-stamp did not land."""
+
+    _ID = "precedent://learning/fixture-alpha"
+
+    def _reinstate(self, registry: StoreRegistry, **flags: bool) -> None:
+        registry.operational.event_log.emit(
+            EventType.PRECEDENT_REINSTATED,
+            source="mutation_executor",
+            entity_id=self._ID,
+            entity_type="precedent",
+            payload={"target_id": self._ID, "reason": "fixture", **flags},
+        )
+
+    def test_json_carries_the_section_and_the_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, document_sync_failed=True)
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        sync = payload["precedent_sync"]
+        assert sync["reinstatements"] == 1
+        assert sync["failed_reinstatements"] == 1
+        assert sync["document_unresolved"] == [self._ID]
+        assert sync["vector_unresolved"] == []
+        assert payload["status"] == "warn"
+        assert any("document_sync_failed" in r for r in payload["reasons"])
+
+    def test_text_prints_the_counts_and_the_escaped_id(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, vector_sync_failed=True)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert (
+            "Precedent re-stamps: 1/1 reinstatement(s) reported a failed "
+            "re-stamp, 0 document / 1 vector still unresolved"
+        ) in out
+        assert "vector_sync_failed" in out
+        assert self._ID in out
+
+    def test_the_exit_code_does_not_depend_on_the_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, document_sync_failed=True)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code
+
+    def test_a_window_with_no_reinstatement_prints_no_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "Precedent re-stamps" not in plain(result.stdout)
 
 
 class TestAnalyzeHealthWriteSurfaceTable:

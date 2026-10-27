@@ -1537,6 +1537,18 @@ After a successful reinstate every reader serves the precedent again:
 `get_lessons`, `GET /precedents`, `GET /precedents/domains`,
 `trellis retrieve precedents`, and a flat pack at the collect seam.
 
+The document and vector re-stamps are fail-soft once the node is current: a
+store outage leaves the reinstatement standing and writes
+`document_sync_failed` / `vector_sync_failed` on the `PRECEDENT_REINSTATED`
+event (and a warning on the result). `trellis analyze health` reads those
+events into `precedent_sync` and warns, naming the precedents, until the
+latest lifecycle event for each is no longer a failed reinstatement: a later
+clean reinstate repairs it (re-issuing this command re-stamps a withheld
+document row and re-syncs the vector row too), and a later demotion
+supersedes it. The window bounds the read, so an unrepaired failure stops
+warning when its event ages out. A vector-only failure is refused on re-issue
+as `target_not_demoted`, so the warning names no repair for it.
+
 Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/
 over-long reason, a missing target, a non-precedent target, a
 non-graph-backed precedent id, a non-`"demoted"` lifecycle state, or the
@@ -1614,7 +1626,14 @@ way and prints the same line.
 | `2` | `refused` | at least one row was refused, or an approved row has a blank `candidate_id`, and no write failed |
 | `5` | `failed` | at least one write did not land, whether or not another row was refused |
 
-`promoted_count` counts the rows that fully landed. `approved_count` counts
+`promoted_count` counts the rows this run fully wrote. A row whose precedent
+is already current, complete and unchanged (same values bar `approved_at`,
+every named edge, a non-miner `PRECEDENT_PROMOTED` event) is reported
+`already_promoted`, writes no new version and no second event, counts as
+satisfied for the verdict, and is carried in `already_promoted_count`
+instead; this is what makes re-running a refused file after fixing its bad
+row safe. A half-landed (`promoted_incomplete`) row is not skipped, so the
+same re-run repairs it. `approved_count` counts
 the rows marked `approved: true`, including a row with a blank
 `candidate_id`; such a row names nothing to promote, so it is skipped without
 a result, **and it refuses the run**: an approved row that names nothing is an
@@ -1626,9 +1645,12 @@ text form says how many. A run where some rows promoted and some approved rows
 were blank is `refused` too: the rows that promoted still landed and stay
 (`promoted_count` counts them; nothing is undone), and a write that did not
 land still outranks the refusal (`failed`, exit `5`). A blank row that is not
-approved is ignored. `POST /learning/promotions` states the same `status`
-(HTTP stays 200); `review-ready --approve` is unchanged, since a blank id
-there is already refused as `refused_not_ready`.
+approved is ignored. The text header reads `promoted/named_count` (the rows
+that could run, as the REST response and the Review toast count them), plus
+`, N already promoted` when any were skipped. `POST /learning/promotions`
+states the same `status` (HTTP stays 200) and `already_promoted_count`;
+`review-ready --approve` refuses a blank id as `refused_not_ready`, and a
+precedent that already exists as `refused_already_promoted`, not as a skip.
 
 `--dry-run` submits nothing, so it has no outcome to read: it **always exits
 `0`** and reports `ok`, whatever it previews. It adds a preview of the verdict
@@ -2698,6 +2720,7 @@ Text output prints a sentence for every state but `ran`.
 | `ran` | The axis ran (it may still have found nothing) |
 | `unseeded_fallback_off` | The axis ran and served nothing because no seed resolved and the recency window is off. It is also in `axes.ran`: it did not fail |
 | `failed` | The axis raised during this build |
+| `absent` | The builder has no graph strategy at all (#985), so a pack with no graph items cannot be read as an empty graph. It is in neither `axes.ran` nor `axes.failed`. No shipped surface builds one, since every surface goes through `builder_factory`, which always includes the graph strategy |
 
 There is no markdown note for `unseeded_fallback_off`: it follows from what the intent named, not from a deployment fault, and a line on every such pack would be one that always prints. A held-out pack carries the same value, so it stays indistinguishable from a served one. Historical `PACK_ASSEMBLED` events keep their `graph_selection` stamps, so `trellis analyze replay --graph-selection recency_window` and `analyze value`'s `by_graph_selection` still read them. The event records the state too, as `graph_axis_state` (same value, same `trellis.retrieve.strategies.resolve_graph_axis_state`), on flat, sectioned and held-out rows; an event from before that key shipped has none, and a withheld pack in one shows only by the absence of graph items.
 
@@ -2810,7 +2833,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `budget_trace[]` | One `{item_id, item_tokens, running_total, included}` row per candidate the token stage weighed, against the `budget_max_items` / `budget_max_tokens` alongside it. `item_tokens` is whichever cost was *paid*: the item's excerpt normally, its rendered index line when `index_mode` is `true`, and a one-line pointer for a row graduated disclosure demoted (disclosure runs after the walk and the builder re-prices the served steps to what the pack carries). `walk_tokens` is the charge the **walk** made, written only on a pack where disclosure demoted something (on every included step of it); when the key is absent, `item_tokens` is the walk's charge, which is also how every event written before the field reads. `trellis analyze replay` re-runs the walk over the walk's charges: a `max_items`-cut row (`rejected_items[].estimated_tokens`) is priced at the walk's charge, never a pointer's, so summing pointer prices against it would free more budget than the pack ever paid. The graph-selection replay refuses an older event whose `disclosure.pointer_item_ids` names an included step with no `walk_tokens` (counted unmodelled as `disclosure_repriced`), and refuses a step whose `item_tokens` or `walk_tokens` is missing, fractional, `nan` or `inf` (`trace_unreadable`). |
 | `token_*` | `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated` always. `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` **only when a `token_budget_validator` is configured** — check before reading. `token_total_estimated` sums the same charge `budget_trace[].item_tokens` records, so on an `index_mode` pack it is index-line tokens, not excerpt tokens — averaging it across a mixed corpus mixes two units. The per-item excerpt read cost stays on `injected_items[].estimated_tokens` in both modes. |
 | `strategy_failures[]` | Strategies that raised but did not block the build (a sibling succeeded). Empty on a clean build. Each row's `message` is sanitized, bounded, and never a raw `str(exc)` that could echo a DSN or credential into this stored event — but the exact derivation differs by caller: most rows (a strategy's own init or search raising) are `summarize_exception(exc)["message"]`, computed by the `_audit_message` helper, which falls back to the suppression marker if summarizing itself raises; the one in-tree exception is the embedder-resolve row (`EmbedderResolveFailure`, #838), whose `message` is `<ErrorType>[: <setting>]` — a type name and a config key, never driver text. |
-| `graph_axis_state` | `ran`, `failed` or `unseeded_fallback_off` (#961): the same value as the response's `axes.graph`, on both pack shapes and on a held-out row, which carries the build's state, not the empty pack the caller received. `unseeded_fallback_off` means the graph axis ran and served nothing because no seed resolved and `TRELLIS_GRAPH_RECENCY_FALLBACK` is off, so a pack with no graph items can be told from a graph with nothing in it. Additive; absent on events from before it shipped, so read it with `.get`. |
+| `graph_axis_state` | `ran`, `failed`, `unseeded_fallback_off` (#961) or `absent` (#985): the same value as the response's `axes.graph`, on both pack shapes and on a held-out row, which carries the build's state, not the empty pack the caller received. `unseeded_fallback_off` means the graph axis ran and served nothing because no seed resolved and `TRELLIS_GRAPH_RECENCY_FALLBACK` is off, so a pack with no graph items can be told from a graph with nothing in it. `absent` means the builder had no graph strategy at all, which no shipped surface builds. Additive; the key is missing from events written before it shipped, so read it with `.get`. |
 | `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. **Not a count of meta-Activities suppressed.** Since #375/#436 the recorder mints them `node_role="structural"` and `GraphSearch` drops them *inside the strategy*, before the candidate slice, so they never become candidates and this field reads `0` while suppression happens on every pack. It counts only what reached `PackBuilder`: pre-#436 `semantic` rows, and any meta-Activity reached by a non-graph axis. |
 | `holdout` / `holdout_rate` | The pack holdout (`TRELLIS_PACK_HOLDOUT_RATE`, default `0`): whether this pack was withheld from its caller, and the rate in force when it was drawn. On every build of both pack kinds, flag off included, so a served row (`false`) is told apart from one an older build wrote (key absent). Read it as `payload.get("holdout") is True`. See [the exception to stated withholding](#withholding-is-stated-not-implied-404). |
 | `holdout_items[]` / `holdout_sections[]` / `holdout_advisory_ids` | Only on a withheld pack: the would-be pack, its items in the `injected_items[]` row shape (sectioned: `holdout_sections[]` in the `sections[]` shape), and its advisory ids. Every other key describes the empty pack the caller received, so `injected_items`, `injected_item_ids` and `advisory_ids` are empty and no reader counts a withheld item as served. |
@@ -3695,7 +3718,7 @@ decide which surfaces are human-gated are described in
 | POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
 | POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
 | GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (`status: "error"` + `code` + a `hint` naming the path when there is none to read) |
-| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows that fully landed; the HTTP status is 200 for every verdict |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows this run fully wrote, `already_promoted_count` the rows whose precedent already held the promotion and were written not at all (re-submitting is safe; the row reads `already_promoted`); the HTTP status is 200 for every verdict |
 | GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
 | POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
 | GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |

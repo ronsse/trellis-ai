@@ -1016,6 +1016,7 @@ def run_candidate_auto_promotion(
             promotion["edge_payloads"],
             requested_by=requested_by,
             graph_store=graph_store,
+            event_log=event_log,
         )
         if submission.get("status") == "promoted":
             promotions_committed += 1
@@ -1023,6 +1024,19 @@ def run_candidate_auto_promotion(
                 CandidateAutoPromoteOutcome(
                     candidate_id=candidate_id,
                     disposition="promoted",
+                    reason=reason,
+                    entity_id=promotion.get("entity_id"),
+                    holdout_arm=holdout_arm,
+                )
+            )
+        elif submission.get("status") == "already_promoted":
+            # The pre-scan reads a bounded window of promote events, so a
+            # precedent it missed reaches the submission, which skips a row
+            # that already landed intact. That is satisfied, not a failure.
+            outcomes.append(
+                CandidateAutoPromoteOutcome(
+                    candidate_id=candidate_id,
+                    disposition="already_promoted",
                     reason=reason,
                     entity_id=promotion.get("entity_id"),
                     holdout_arm=holdout_arm,
