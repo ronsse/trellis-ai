@@ -1982,7 +1982,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         if node_id not in valid_endpoints:
                             return _EndpointMiss(ids, i, end, node_id)
                 try:
-                    return session.execute_write(_tx)
+                    records: list[Any] = session.execute_write(_tx)
                 except _MissingEdgeRowError as exc:
                     spec = edges[exc.row_index]
                     return _EndpointMiss(
@@ -1990,6 +1990,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         exc.row_index,
                         cause=exc,
                     )
+                return records
 
             outcome = self._rerun_on_unreadable_endpoints(_attempt, edges=len(edges))
             if isinstance(outcome, _EndpointMiss):
