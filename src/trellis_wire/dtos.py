@@ -174,11 +174,12 @@ class AxisReportResponse(WireModel):
     ran: list[str]
     failed: list[str]
     semantic: str
-    #: ``"ran"``, ``"failed"``, or ``"unseeded_fallback_off"``: the graph axis
-    #: ran and served nothing because no seed resolved and the server's
-    #: ``TRELLIS_GRAPH_RECENCY_FALLBACK`` is off. Defaults to ``"ran"`` so a
-    #: client parsing an older server's block, which has no such state, reads
-    #: what that server did.
+    #: ``"ran"``, ``"failed"``, ``"unseeded_fallback_off"`` or ``"absent"``.
+    #: ``unseeded_fallback_off``: the graph axis ran and served nothing because
+    #: no seed resolved and the server's ``TRELLIS_GRAPH_RECENCY_FALLBACK`` is
+    #: off. ``absent``: the builder has no graph axis at all. Defaults to
+    #: ``"ran"`` so a client parsing an older server's block, which has no such
+    #: state, reads what that server did.
     graph: str = "ran"
     embedder_error_type: str | None = None
     embedder_setting: str | None = None
@@ -916,6 +917,12 @@ class LearningPromotionResponse(WireModel):
     ``promoted_count`` counts rows whose entity, edges and precedent event
     all landed; a row that wrote its entity but not the rest reads
     ``promoted_incomplete``.
+
+    A row whose precedent is already current, complete and unchanged reads
+    ``already_promoted`` and writes nothing: no new version, no second
+    ``PRECEDENT_PROMOTED`` event. It meets the request, so it does not make
+    the run ``refused`` or ``failed``, and it is in ``already_promoted_count``
+    and not in ``promoted_count``.
     """
 
     status: Literal["ok", "refused", "failed"] = "ok"
@@ -923,6 +930,7 @@ class LearningPromotionResponse(WireModel):
     named_count: int = 0
     ready_count: int = 0
     promoted_count: int = 0
+    already_promoted_count: int = 0
     results: list[LearningPromotionResultRow] = Field(default_factory=list)
 
 

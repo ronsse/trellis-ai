@@ -51,6 +51,9 @@ EDGE_REJECTED: dict[str, Any] = {
 EVENT_FAILED: dict[str, Any] = {**LANDED, "precedent_event_status": "failed"}
 ENTITY_FAILED: dict[str, Any] = {"status": "entity_failed", "message": "boom"}
 REFUSED: dict[str, Any] = {"status": "refused_demoted", "message": "demoted"}
+#: A row whose precedent already holds the promotion: written not at all, and
+#: not a reason to refuse the run (#983).
+ALREADY: dict[str, Any] = {"status": "already_promoted", "message": "nothing written"}
 
 #: Planner answers for approved rows that never reach the executor.
 GHOST = "ghost"  # names no candidate -> ``missing_candidate``
@@ -85,6 +88,13 @@ _SCENARIOS: dict[str, list[Any]] = {
     # A write that did not land outranks the blank-id refusal, on both surfaces.
     "blank_id_beside_failed": [BLANK, ENTITY_FAILED],
     "blank_id_beside_edge_rejected_and_landed": [LANDED, BLANK, EDGE_REJECTED],
+    # A re-run of a file whose earlier rows landed: the skipped rows satisfy the
+    # request, so only the rows beside them decide the verdict.
+    "already_promoted_alone": [ALREADY],
+    "already_promoted_beside_landed": [ALREADY, LANDED],
+    "already_promoted_beside_ghost": [ALREADY, GHOST],
+    "already_promoted_beside_failed": [ALREADY, ENTITY_FAILED],
+    "already_promoted_beside_blank_id": [ALREADY, BLANK],
 }
 
 #: The exit code ``promote-learning`` maps each verdict to; REST answers 200.
@@ -237,6 +247,7 @@ def test_the_cli_and_the_rest_route_state_the_same_verdict(
     # One verdict, two encodings: the CLI's exit code and REST's body status.
     assert cli_exit == _EXIT_BY_STATUS[shared]
     assert cli["promoted_count"] == rest["promoted_count"]
+    assert cli["already_promoted_count"] == rest["already_promoted_count"]
     assert cli["approved_count"] == rest["approved_count"]
     assert cli["named_count"] == rest["named_count"]
     # Approved rows are what was asked; named ones are what ran.
@@ -248,6 +259,10 @@ def test_the_cli_and_the_rest_route_state_the_same_verdict(
     # ``promoted_count`` is what landed, by the shared reading.
     assert rest["promoted_count"] == sum(
         1 for o in _expected_outcomes(steps) if promotion_landed(o)
+    )
+    # A skipped row is counted apart, never as a promotion this run wrote.
+    assert rest["already_promoted_count"] == sum(
+        1 for o in _expected_outcomes(steps) if o is ALREADY
     )
 
 

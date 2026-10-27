@@ -46,6 +46,7 @@ from trellis.learning import (
 )
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
+from trellis.ops.precedent_sync_health import PrecedentSyncReport
 from trellis.ops.serving_builds import ServingBuildsReport
 from trellis.retrieve.advisory_generator import (
     DEFAULT_MAX_KEYWORD_DOC_FREQ,
@@ -654,6 +655,23 @@ def _print_capture_coverage(capture: CaptureCoverageReport) -> None:
         console.print(f"    [dim]{note}[/dim]")
 
 
+def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
+    """Render the precedent re-stamp line of ``analyze health``.
+
+    Counts only. The ids of the precedents still withheld or stale ride in
+    ``reasons``, which the caller escapes, so no identifier reaches Rich here.
+    Silent when no precedent was reinstated: most windows have none.
+    """
+    if sync.reinstatements == 0:
+        return
+    console.print(
+        f"  Precedent re-stamps: {sync.failed_reinstatements}/"
+        f"{sync.reinstatements} reinstatement(s) reported a failed re-stamp, "
+        f"{len(sync.document_unresolved)} document / "
+        f"{len(sync.vector_unresolved)} vector still unresolved"
+    )
+
+
 def _print_tool_table(
     by_tool: dict[str, ToolWriteStats], bypass_surfaces: frozenset[str]
 ) -> None:
@@ -867,6 +885,7 @@ def health(
 
     _print_serving_builds(serve.serving_builds)
     _print_capture_coverage(report.capture)
+    _print_precedent_sync(report.precedent_sync)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
@@ -1316,19 +1335,21 @@ def _render_replay(report: Any) -> None:
     console.print()
     console.print("  [bold]What the policy cost[/bold]")
     withheld_style = "yellow" if report.helpful_bodies_withheld else "green"
+    # Both counts are deltas against the "as served" arm above, each over the
+    # servings that arm delivered in the form the policy takes away.
     console.print(
-        f"    cited-helpful servings, body withheld (id fetchable): "
+        f"    cited-helpful bodies served, now body withheld (id fetchable): "
         f"[{withheld_style}]{report.helpful_bodies_withheld}[/{withheld_style}]"
-        f"/{report.helpful_items_total}"
+        f"/{report.helpful_bodies_served}"
     )
     dropped_style = "red" if report.helpful_items_dropped else "green"
     console.print(
-        f"    cited-helpful servings dropped (unreachable):       "
+        f"    cited-helpful servings dropped (unreachable):                  "
         f"[{dropped_style}]{report.helpful_items_dropped}[/{dropped_style}]"
         f"/{report.helpful_items_total}"
     )
     console.print(
-        f"    items admitted that nobody graded:                  "
+        f"    items admitted that nobody graded:                             "
         f"{report.admitted_ungraded_items}"
     )
 
