@@ -4428,9 +4428,9 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     handle it at call time (semantic search → keyword/graph, an embedder
     that failed to resolve degrades to keyword + graph with
     `semantic: embedder_failed` in the axes block, embed-on-ingest is
-    fail-soft, memory extraction is feature-flagged). Forcing them to
-    succeed would make each one a hard http boot dependency the stdio
-    path never had.
+    fail-soft, memory extraction records its own failure as an event
+    and retries). Forcing them to succeed would make each one a hard
+    http boot dependency the stdio path never had.
     """
     for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)
@@ -4464,7 +4464,10 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             #     catches the init failure and degrades retrieval to
             #     keyword + graph, with `semantic: misconfigured` in the
             #     pack's axes block — it does not raise.
-            #   - memory_extractor: feature-flagged; see the docstring above.
+            #   - memory_extractor: never reaches this branch, because
+            #     _get_memory_extractor never raises (#987). A failed
+            #     resolution is a MEMORY_EXTRACTION_STATE event, retried
+            #     by a later save_memory.
             # run_embed_on_ingest is fail-soft for either resolve failure:
             # an embedder or a vector_store that raises here logs
             # embed_on_ingest_resolve_failed once per (component, cause)
