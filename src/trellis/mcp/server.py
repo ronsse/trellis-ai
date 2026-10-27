@@ -95,8 +95,6 @@ from trellis.mcp.auth import (
 )
 from trellis.mcp.knowledge_links import link_knowledge_node
 from trellis.mcp.reconcile import (
-    MARKER_SKIPPED,
-    MARKER_STALE,
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
     UPDATES_DOC_KEY,
@@ -109,6 +107,7 @@ from trellis.mcp.reconcile import (
     emit_reconcile_verdict,
     judge_reconcile,
     mark_document_superseded,
+    marker_for_fallback,
     reconcile_on_write_enabled,
     reconcile_timeout_seconds,
 )
@@ -2694,18 +2693,17 @@ def _commit_reconcile_verdict(
     SCD-2: a new doc plus Lifecycle stale-marking of the old, never a delete.
 
     The outcome comes back because it can be *downgraded* here: a SUPERSEDE
-    whose target vanished did not supersede anything, and the caller renders
-    the tool result and decides whether to emit ``MEMORY_OP_JUDGED`` from it.
-    Returning the input outcome unchanged would put the caller back in the
-    position #407 describes — asserting an effect it never checked.
+    whose target vanished, or whose target is a promoted precedent's row,
+    did not supersede anything, and the caller renders the tool result and
+    decides whether to emit ``MEMORY_OP_JUDGED`` from it. Returning the input
+    outcome unchanged would put the caller back in the position #407
+    describes — asserting an effect it never checked.
     """
     if outcome.fallback:
-        marker = (
-            MARKER_STALE
-            if outcome.fallback_reason is ReconcileFallbackReason.STALE_RECHECK
-            else MARKER_SKIPPED
-        )
-        meta = {**metadata, RECONCILIATION_KEY: marker}
+        meta = {
+            **metadata,
+            RECONCILIATION_KEY: marker_for_fallback(outcome.fallback_reason),
+        }
         stored = _store_new_memory(
             registry, executor, document_store, doc_id, content, meta
         )
@@ -2734,21 +2732,26 @@ def _commit_reconcile_verdict(
             registry, executor, document_store, doc_id, content, meta
         )
         vector_store = resolve_vector_store(registry)
-        if mark_document_superseded(
+        refusal = mark_document_superseded(
             document_store,
             old_doc_id=candidate.doc_id,
             new_doc_id=stored_id,
             vector_store=vector_store,
-        ):
+        )
+        if refusal is None:
             return stored_id, stored_meta, outcome
-        # The target vanished between the under-lock re-verify and this write
-        # (``_save_memory_lock`` is process-local, so another process can
-        # delete it). The memory is stored; the supersession is not — so strip
-        # the claim from what was just written and hand the caller a
-        # stale-downgraded outcome. The write is metadata-only, hence
-        # ``preserve_updated_at`` (#397).
+        # The supersession was not applied, for one of two reasons the return
+        # names. ``STALE_RECHECK``: the target vanished between the under-lock
+        # re-verify and this write (``_save_memory_lock`` is process-local, so
+        # another process can delete it). ``TARGET_PROTECTED``: the target is
+        # a promoted precedent's row, which reconcile never stamps. Either
+        # way the memory is stored and the supersession is not — so strip the
+        # claim from what was just written, mark it with the reason, and hand
+        # the caller an outcome downgraded to that same reason, so the marker
+        # and the ``RECONCILE_DEGRADED`` event agree. The write is
+        # metadata-only, hence ``preserve_updated_at`` (#397).
         meta = {k: v for k, v in stored_meta.items() if k != SUPERSEDES_DOC_KEY}
-        meta[RECONCILIATION_KEY] = MARKER_STALE
+        meta[RECONCILIATION_KEY] = marker_for_fallback(refusal)
         put_document(
             document_store,
             vector_store,
@@ -2757,7 +2760,7 @@ def _commit_reconcile_verdict(
             meta,
             preserve_updated_at=True,
         )
-        return stored_id, meta, _downgraded_to_stale(outcome)
+        return stored_id, meta, _downgraded_unapplied(outcome, refusal)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
     stored = _store_new_memory(
@@ -2766,20 +2769,24 @@ def _commit_reconcile_verdict(
     return stored[0], stored[1], outcome
 
 
-def _downgraded_to_stale(outcome: ReconcileOutcome) -> ReconcileOutcome:
-    """Mark a verdict as not applied: a fallback ADD, ``stale_recheck``.
+def _downgraded_unapplied(
+    outcome: ReconcileOutcome, reason: ReconcileFallbackReason
+) -> ReconcileOutcome:
+    """Mark a verdict as not applied: a fallback ADD carrying *reason*.
 
     ``fallback=True`` is what suppresses the ``MEMORY_OP_JUDGED`` emit and
     makes :func:`_reconcile_result_message` render a plain save, which is the
     whole point — the model judged, but nothing was superseded, so the join
-    key would point at a document that no longer exists.
+    key would point at a document that was never stamped, or no longer exists.
+    *reason* is what ``mark_document_superseded`` refused with, so the
+    ``RECONCILE_DEGRADED`` event says which of the two it was.
     """
     return ReconcileOutcome(
         decision=ReconcileDecision.ADD,
         confidence=outcome.confidence,
         model_id=outcome.model_id,
         fallback=True,
-        fallback_reason=ReconcileFallbackReason.STALE_RECHECK,
+        fallback_reason=reason,
     )
 
 
@@ -2892,7 +2899,7 @@ def _save_memory_reconciled(
         )
 
     # -- Emit + enrich outside the lock --------------------------------------
-    # A genuine model verdict (not a fallback / stale downgrade) is a training
+    # A genuine model verdict (not a fallback / unapplied downgrade) is a training
     # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so they are
     # kept out of that stream — and emit RECONCILE_DEGRADED instead, so the
     # fallback leaves a countable trace rather than a log line nothing reads

@@ -342,6 +342,200 @@ class TestEndpointThatIsMomentarilyUnreadable:
         assert store._endpoints_have_a_version_row("src", "tgt") is False
 
 
+class TestBulkEndpointThatIsMomentarilyUnreadable:
+    """``upsert_edges_bulk`` re-runs a refusal the way ``upsert_edge`` does (#975).
+
+    Its round trip 1 and its ``UNWIND`` read the endpoints as ``upsert_edge``
+    does, so a concurrent ``upsert_node`` caught mid-commit can make either
+    one refuse a node that never lacked a current row. A refused attempt
+    writes nothing, so the whole attempt (round trip 1, then the write) is
+    re-run, while the refused row's endpoints still have a row of some
+    version. Driven with a fake session, not a timing race: the interleaving
+    is the order of the scripted reads and writes.
+    """
+
+    EDGES = (
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+    )
+
+    @staticmethod
+    def _rows(*node_ids: str) -> list[dict[str, str]]:
+        return [{"node_id": node_id} for node_id in node_ids]
+
+    @staticmethod
+    def _store(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        reads: list[Any],
+        writes: list[Any],
+        has_rows: bool | list[bool],
+    ) -> tuple[BoltOpenCypherGraphStore, MagicMock, MagicMock, list[float]]:
+        """A store whose session answers ``reads`` and ``writes`` in order.
+
+        A write is a list of records the transaction function's one
+        ``tx.run`` returns, so the real function runs, ``_MissingEdgeRowError``
+        included. ``has_rows`` is what the row probe answers (a list: one
+        answer per probe).
+        """
+        sleeps: list[float] = []
+        monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+        store = _make_store()
+        probe = MagicMock(
+            side_effect=has_rows if isinstance(has_rows, list) else None,
+            return_value=has_rows,
+        )
+        store._endpoints_have_a_version_row = probe  # type: ignore[method-assign]
+        tx = MagicMock()
+        tx.run.side_effect = writes
+        session = MagicMock()
+        session.execute_read.side_effect = reads
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+        return store, session, probe, sleeps
+
+    def test_a_row_the_write_dropped_is_re_run_and_its_edge_ids_returned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        both_rows = [
+            {"row_index": 0, "edge_id": "e0"},
+            {"row_index": 1, "edge_id": "e1"},
+        ]
+        store, session, probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "b", "c", "d")] * 2,
+            writes=[[{"row_index": 1, "edge_id": "e1"}], both_rows],
+            has_rows=True,
+        )
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        assert result == ["e0", "e1"]
+        assert session.execute_write.call_count == 2
+        # Only the refused row's endpoints are probed.
+        probe.assert_called_once_with("a", "b")
+        assert sleeps == [_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[0]]
+        assert [e for e in logs if e["event"] == "edge_endpoint_reread"] == [
+            {
+                "event": "edge_endpoint_reread",
+                "log_level": "warning",
+                "rereads": 1,
+                "recovered": True,
+                "edges": 2,
+            }
+        ]
+
+    def test_round_trip_1_reading_an_endpoint_as_absent_is_re_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-check is a read too, so it has the window as well."""
+        store, session, probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("b", "c", "d"), self._rows("a", "b", "c", "d")],
+            writes=[
+                [{"row_index": 0, "edge_id": "e0"}, {"row_index": 1, "edge_id": "e1"}]
+            ],
+            has_rows=True,
+        )
+
+        assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0", "e1"]
+
+        # The first attempt never reached the write.
+        assert session.execute_write.call_count == 1
+        probe.assert_called_once_with("a", "b")
+        assert sleeps == [_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[0]]
+
+    def test_a_row_that_stays_dropped_raises_after_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        attempts = 1 + len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+        store, session, _probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "b", "c", "d")] * (attempts + 1),
+            writes=[[{"row_index": 1, "edge_id": "e1"}]] * attempts,
+            has_rows=True,
+        )
+
+        with (
+            capture_logs() as logs,
+            pytest.raises(
+                ValueError,
+                match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' was not cur",
+            ),
+        ):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        assert session.execute_write.call_count == attempts
+        assert sleeps == list(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+        rereads = [e for e in logs if e["event"] == "edge_endpoint_reread"]
+        assert [(e["rereads"], e["recovered"]) for e in rereads] == [
+            (len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS), False)
+        ]
+
+    def test_an_endpoint_read_as_absent_by_round_trip_1_raises_after_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A node whose rows are all closed is refused, not waited on forever,
+        and the write never runs."""
+        attempts = 1 + len(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+        store, session, _probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "c", "d")] * attempts,
+            writes=[],
+            has_rows=True,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"upsert_edges_bulk\[0\]: target 'b' has no current version",
+        ):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        session.execute_write.assert_not_called()
+        assert session.execute_read.call_count == attempts
+        assert sleeps == list(_EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS)
+
+    def test_an_endpoint_with_no_row_at_all_is_refused_without_sleeping(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dangling edge in a batch must not pay the re-run's latency."""
+        store, session, probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "c", "d")],
+            writes=[],
+            has_rows=False,
+        )
+
+        with pytest.raises(ValueError, match="target 'b' has no current version"):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        probe.assert_called_once_with("a", "b")
+        session.execute_write.assert_not_called()
+        assert session.execute_read.call_count == 1
+        assert sleeps == []
+
+    def test_a_clean_first_attempt_is_not_re_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store, session, probe, sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "b", "c", "d")],
+            writes=[
+                [{"row_index": 0, "edge_id": "e0"}, {"row_index": 1, "edge_id": "e1"}]
+            ],
+            has_rows=True,
+        )
+
+        with capture_logs() as logs:
+            assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0", "e1"]
+
+        assert session.execute_write.call_count == 1
+        probe.assert_not_called()
+        assert sleeps == []
+        assert [e for e in logs if e["event"] == "edge_endpoint_reread"] == []
+
+
 class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
     """The per-backend seam, kept narrow and logged.
 
