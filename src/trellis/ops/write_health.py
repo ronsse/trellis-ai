@@ -57,6 +57,10 @@ from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
 )
+from trellis.ops.memory_extraction_health import (
+    MemoryExtractionHealthReport,
+    summarize_memory_extraction,
+)
 from trellis.ops.serving_builds import (
     ServingBuildsReport,
     mixed_builds_reason,
@@ -837,6 +841,14 @@ class BackendHealthReport(TrellisModel):
     #: absent capture section and one reporting ``state="unobserved"`` say
     #: different things, and only the second is a measurement.
     capture: CaptureCoverageReport
+    #: Whether ``save_memory`` extraction is running when its flag is on
+    #: (#987). Defaulted, unlike ``capture``: ``unobserved`` is the honest
+    #: reading of a log with no state event, and a deployment with the flag
+    #: off is in that state by design. See
+    #: :mod:`trellis.ops.memory_extraction_health`.
+    memory_extraction: MemoryExtractionHealthReport = Field(
+        default_factory=MemoryExtractionHealthReport
+    )
     #: The merged coverage of every EventLog read behind this report. When
     #: ``truncated`` is set, ``status`` is ``warn`` and ``reasons`` names
     #: it: a health verdict computed over a silently shortened window is
@@ -1108,8 +1120,9 @@ def summarize_backend_health(
     write = summarize_write_health(event_log, days=days, limit=limit)
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
+    extraction = summarize_memory_extraction(event_log, days=days, limit=limit)
 
-    scan = merge_coverage(write.scan, serve.scan, capture.scan)
+    scan = merge_coverage(write.scan, serve.scan, capture.scan, extraction.scan)
 
     # The write section states its own truncation so it reads correctly
     # standalone; here that is superseded by the merged note, which covers
@@ -1184,11 +1197,23 @@ def summarize_backend_health(
             "session capture has stopped, so coverage is unmeasured, not zero"
         )
 
+    if extraction.state == "unavailable":
+        # The flag is on and extraction is dead. Unlike capture's
+        # "unobserved", this is a defect in *this* deployment: the operator
+        # asked for the feature and every save since ``since`` went without it.
+        since = f"{extraction.since:%Y-%m-%d %H:%M} UTC" if extraction.since else "?"
+        reasons.append(
+            "memory extraction is enabled but no extractor is available "
+            f"({extraction.reason or 'unknown'}) since {since} — saves are "
+            "stored without entity/edge extraction"
+        )
+
     return BackendHealthReport(
         window_days=days,
         write=write,
         serve=serve,
         capture=capture,
+        memory_extraction=extraction,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

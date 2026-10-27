@@ -6,6 +6,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`MEMORY_EXTRACTION_STATE`: a dead memory extractor is a health event, and
+  a failed LLM-client resolution is retried (#987).** With
+  `TRELLIS_ENABLE_MEMORY_EXTRACTION` on, `_get_memory_extractor` cached `None`
+  for the life of the process when no LLM client could be built on first use,
+  so one transient outage at startup turned extraction off until a restart and
+  left only an `info` log line, which the default CLI never prints. A
+  "no client" outcome is now retried at most once per 60 s (one float
+  comparison per save in between), and stops when the flag goes off. A
+  construction failure still raises once and settles. The new event
+  (`source="mcp:memory_extraction"`, payload `state` / `reason` /
+  `error_type`) is written on a state change, never per save: `unavailable`
+  (`no_llm_client` or `build_failed`, refreshed daily so it outlives the
+  7-day window) and `available` (first successful build per process, and on
+  recovery). `trellis analyze health` prints `Memory extraction: ...` with the
+  onset and warns while the newest event says `unavailable`; a window with no
+  event reads `unobserved`, not healthy. The emit is wrapped whole, so it can
+  never fail a save. The stale `capture_health.py` comment claiming
+  `save_memory`'s only `MUTATION_EXECUTED` comes from extraction is corrected.
+  The CLI bulk-ingest hook (`extract/memory_ingest_hook.py`) does not cache
+  and is unchanged. It still logs the missing client at `info` and emits no
+  event.
 - **`RejectedItem.estimated_tokens`: a `max_items` rejection is priced, so
   the graph-selection replay can refill it (#970).** The builder records the
   budget walk's charge on the two budget cuts, `max_items` (which never
