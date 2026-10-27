@@ -1487,16 +1487,22 @@ class TestSubmitPromotion:
 
     def test_reapprove_current_identical_payload_promotes(self, tmp_path: Path) -> None:
         """End to end against real stores (gate-876b R1): re-approving a
-        learning candidate whose precedent is already *current* -- the
-        exact shape of re-running ``trellis curate promote-learning``
-        with the same decisions file, or re-clicking Approve on an
-        already-promoted Review row -- must come back ``"promoted"``,
-        add one version and one ``PRECEDENT_PROMOTED`` event, same as a
-        fresh first approval. ``_precedent_reapproval_refusal`` already
-        lets a current precedent's re-approval through before
-        ``ENTITY_CREATE`` is issued; it is ``EntityCreateHandler``'s own
-        guard that must not then refuse the write a second time just
-        because the id already names a precedent.
+        learning candidate whose precedent is already *current* must
+        reach the write and come back ``"promoted"``, adding one version
+        and one ``PRECEDENT_PROMOTED`` event, same as a fresh first
+        approval. ``_precedent_reapproval_refusal`` already lets a current
+        precedent's re-approval through before ``ENTITY_CREATE`` is issued;
+        it is ``EntityCreateHandler``'s own guard that must not then refuse
+        the write a second time just because the id already names a
+        precedent.
+
+        This call passes no ``event_log``, so the submission cannot tell
+        whether the promotion event landed and writes, as it always did.
+        With one, an identical re-submission is ``already_promoted`` and
+        writes nothing (#983;
+        ``tests/unit/learning/test_submit_promotion_rerun.py``): the CLI
+        and REST surfaces all pass it, so what they do on a re-run is pinned
+        there and not here.
 
         Defective subject: an ``EntityCreateHandler`` guard that refuses
         ``entity.create`` over *any* existing precedent regardless of

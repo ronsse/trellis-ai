@@ -2699,6 +2699,72 @@ class TestAnalyzeHealthServingBuilds:
         assert "stale stamp, the commit is what the install metadata said" in out
 
 
+class TestAnalyzeHealthPrecedentSync:
+    """``analyze health`` reports reinstatements whose re-stamp did not land."""
+
+    _ID = "precedent://learning/fixture-alpha"
+
+    def _reinstate(self, registry: StoreRegistry, **flags: bool) -> None:
+        registry.operational.event_log.emit(
+            EventType.PRECEDENT_REINSTATED,
+            source="mutation_executor",
+            entity_id=self._ID,
+            entity_type="precedent",
+            payload={"target_id": self._ID, "reason": "fixture", **flags},
+        )
+
+    def test_json_carries_the_section_and_the_warning(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, document_sync_failed=True)
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        sync = payload["precedent_sync"]
+        assert sync["reinstatements"] == 1
+        assert sync["failed_reinstatements"] == 1
+        assert sync["document_unresolved"] == [self._ID]
+        assert sync["vector_unresolved"] == []
+        assert payload["status"] == "warn"
+        assert any("document_sync_failed" in r for r in payload["reasons"])
+
+    def test_text_prints_the_counts_and_the_escaped_id(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, vector_sync_failed=True)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert (
+            "Precedent re-stamps: 1/1 reinstatement(s) reported a failed "
+            "re-stamp, 0 document / 1 vector still unresolved"
+        ) in out
+        assert "vector_sync_failed" in out
+        assert self._ID in out
+
+    def test_the_exit_code_does_not_depend_on_the_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reinstate(temp_stores, document_sync_failed=True)
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code
+
+    def test_a_window_with_no_reinstatement_prints_no_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "Precedent re-stamps" not in plain(result.stdout)
+
+
 class TestAnalyzeHealthWriteSurfaceTable:
     """Per-surface accept/reject table: operation breakdown + bypass note."""
 

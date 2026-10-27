@@ -1003,6 +1003,36 @@ class TestRunCandidateAutoPromotionCommit:
         finally:
             registry.close()
 
+    def test_a_submission_that_skips_a_landed_row_reads_already_promoted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-scan reads a bounded window of promote events, so a
+        precedent it missed reaches :func:`submit_learning_promotion`, which
+        answers ``already_promoted`` for a row that landed intact (#983).
+        That is a satisfied candidate, never a failed submission."""
+        import trellis.learning.candidate_auto_promote as auto_promote
+
+        def _skipped(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"status": "already_promoted"}
+
+        monkeypatch.setattr(auto_promote, "submit_learning_promotion", _skipped)
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            report = run_candidate_auto_promotion(
+                candidates=[_candidate("cand-landed")],
+                policy=_force_commit_policy(enabled=True),
+                event_log=registry.operational.event_log,
+                executor=build_curate_executor(registry),
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            assert report.outcomes[0].disposition == "already_promoted"
+            assert report.already_promoted_count == 1
+            assert report.submission_failed_count == 0
+            assert report_to_dict(report)["status"] == "ok"
+        finally:
+            registry.close()
+
     def test_status_is_failed_when_every_attempted_submission_fails(
         self, tmp_path: Path
     ) -> None:

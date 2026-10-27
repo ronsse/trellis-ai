@@ -917,6 +917,12 @@ class LearningPromotionResponse(WireModel):
     ``promoted_count`` counts rows whose entity, edges and precedent event
     all landed; a row that wrote its entity but not the rest reads
     ``promoted_incomplete``.
+
+    A row whose precedent is already current, complete and unchanged reads
+    ``already_promoted`` and writes nothing: no new version, no second
+    ``PRECEDENT_PROMOTED`` event. It meets the request, so it does not make
+    the run ``refused`` or ``failed``, and it is in ``already_promoted_count``
+    and not in ``promoted_count``.
     """
 
     status: Literal["ok", "refused", "failed"] = "ok"
@@ -924,6 +930,7 @@ class LearningPromotionResponse(WireModel):
     named_count: int = 0
     ready_count: int = 0
     promoted_count: int = 0
+    already_promoted_count: int = 0
     results: list[LearningPromotionResultRow] = Field(default_factory=list)
 
 
