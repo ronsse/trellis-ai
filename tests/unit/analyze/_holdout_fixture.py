@@ -64,6 +64,24 @@ def outcome_payload(
     }
 
 
+def timing_payload(
+    *, hook_before: bool | None, hook_messages: int | None = None
+) -> dict[str, Any]:
+    """A ``SessionDigest.retrieval_timing_payload()`` dict.
+
+    ``hook_before`` is ``hook_feedback_before_first_retrieval``. The count
+    defaults to one message when feedback came first and none otherwise.
+    """
+    if hook_messages is None:
+        hook_messages = 1 if hook_before else 0
+    return {
+        "first_retrieval_ordinal": 3,
+        "tool_call_count": 10,
+        "hook_feedback_messages": hook_messages,
+        "hook_feedback_before_first_retrieval": hook_before,
+    }
+
+
 class HoldoutLog:
     """Appends synthetic experiment rows to one event log."""
 
@@ -176,25 +194,31 @@ class HoldoutLog:
         parent: str | None,
         outcome: dict[str, Any] | None,
         retrieval_results: int | None = None,
+        retrieval_errors: int = 0,
         pack_ids_unparsed: int = 0,
         source_system: str = SOURCE_SYSTEM,
+        timing: dict[str, Any] | None = None,
     ) -> None:
         """Append one ``CAPTURE_SESSION_PACKS`` join for ``task_id``.
 
-        ``retrieval_results`` defaults to one result per pack id.
+        ``retrieval_results`` defaults to one result per pack id. ``timing``
+        is the join's ``retrieval_timing``; left ``None`` the join is one
+        from before capture recorded it.
         """
         payload: dict[str, Any] = {
             "pack_ids": list(pack_ids),
             "retrieval_results": (
                 len(pack_ids) if retrieval_results is None else retrieval_results
             ),
-            "retrieval_errors": 0,
+            "retrieval_errors": retrieval_errors,
             "pack_ids_unparsed": pack_ids_unparsed,
             "parent_session_id": parent,
             "source_system": source_system,
         }
         if outcome is not None:
             payload["outcome"] = outcome
+        if timing is not None:
+            payload["retrieval_timing"] = timing
         self.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SESSION_PACKS,
@@ -225,6 +249,7 @@ class HoldoutLog:
         tool_errors: int = 0,
         sectioned: bool = False,
         with_outcome: bool = True,
+        timing: dict[str, Any] | None = None,
     ) -> str:
         """One task: a pack per entry of ``arms``, a minute apart, then its join.
 
@@ -263,6 +288,7 @@ class HoldoutLog:
             pack_ids=pack_ids,
             parent=parent,
             outcome=outcome,
+            timing=timing,
         )
         return task_id
 

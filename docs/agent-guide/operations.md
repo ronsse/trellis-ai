@@ -3330,10 +3330,23 @@ reads "no withheld arm". The funnel also counts eligible tasks whose capture
 reported a pack id it could not parse (`eligible_with_unparsed_pack_ids`),
 because their first parsed pack may not be their first call. The non-ephemeral
 rule is listed as applied upstream, because capture writes no join for a
-session in an ephemeral project. Three pre-registered items need fields capture
-does not record, so the report says so instead of guessing: the pre-treatment
-exclusion (a first retrieval after a commit or a stop-hook nudge) is not
-applied, the post-hoc share is `null`, and a note says the
+session in an ephemeral project. The pre-treatment exclusion drops a task whose
+first retrieval came after a stop hook's feedback, read from the join's
+`retrieval_timing` (the first retrieval's ordinal among the session's tool
+calls, the tool-call count, and whether hook feedback preceded it); the funnel
+counts those as `pre_treatment_excluded`. A join written before capture
+recorded the timing is undecidable: it stays in, `pre_treatment_unknown` counts
+it, and the exclusion reads "partially applied" until none are left (a join is
+rewritten with the timing only when its session is parsed again, so a
+watermark reset back-fills old ones). `pre_treatment_hook_feedback_seen`
+counts the decided tasks whose session held any hook feedback; zero across
+sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`,
+an unverified default, matches nothing in them. The rule's other half, a first
+retrieval after a commit, is still not applied. `no_retrieval` is split into
+`never_called`, `errored`, `unparsed` and `empty_answer`, so a transport-failed
+`get_context` no longer reads as never called. Two pre-registered items still
+need fields capture does not record, so the report says so instead of
+guessing: the post-hoc share is `null`, and a note says the
 covariate-residualised permutation is not applied. The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
 p-value or verdict: PRs created and any commit (each left out when it is the

@@ -6,6 +6,36 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The holdout's `pre_treatment` exclusion is applicable: capture records
+  where the first retrieval sat, and `trellis analyze holdout` drops a task
+  whose first retrieval followed a stop hook's feedback.** The pre-registration
+  counts a task as treated only if its first retrieval came before the work,
+  but session capture recorded nothing that could decide it, so the rule was
+  reported "not applied" while an operator's Stop/SubagentStop hook, which asks
+  for a `get_context` at the end of a session that skipped one, produced
+  afterthought retrievals that counted as treatment. Each
+  `CAPTURE_SESSION_PACKS` join now carries `retrieval_timing`:
+  `first_retrieval_ordinal` (the first tool call whose result served a pack),
+  `tool_call_count`, `hook_feedback_messages` and
+  `hook_feedback_before_first_retrieval`, counts and a flag only, never the
+  message. Hook feedback is a user-record text block that opens like one,
+  matched by `HOOK_FEEDBACK_PATTERN` in `transcripts.py`; **that pattern is a
+  documented, unverified default**, because no transcript or fixture in the
+  repo shows the record shape such feedback takes, and the funnel's
+  `pre_treatment_hook_feedback_seen` makes a pattern that matches nothing
+  visible instead of silent. The holdout excludes a task whose join says
+  hook feedback came first (`pre_treatment_excluded`, a funnel stage before
+  `eligible`), keeps one whose join predates the field (`pre_treatment_unknown`)
+  so the analysis can be read both ways, and reports the exclusion as "not
+  applied", "partially applied" or "applied". `no_retrieval` keeps its total
+  and gains `never_called`, `errored` (the join's `retrieval_errors`, which
+  nothing read before), `unparsed` and `empty_answer`, so a transport-failed
+  `get_context` is no longer counted as never called. A session parsed again
+  after this change gets one extra join (its payload now differs); the holdout
+  reads each session's latest join only, so it counts once, and a session
+  whose file never changes keeps its legacy join until a watermark reset parses
+  it. The half of the rule about a first retrieval after a commit, and the
+  post-hoc share, are still not recorded.
 - **`MEMORY_EXTRACTION_STATE`: a dead memory extractor is a health event, and
   a failed LLM-client resolution is retried (#987).** With
   `TRELLIS_ENABLE_MEMORY_EXTRACTION` on, `_get_memory_extractor` cached `None`

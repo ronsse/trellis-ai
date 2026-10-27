@@ -24,6 +24,7 @@ from tests.unit.analyze._holdout_fixture import (
     HoldoutLog,
     outcome_payload,
     seed_experiment,
+    timing_payload,
 )
 from trellis.analyze.holdout import (
     DETECTED_VERDICT,
@@ -500,6 +501,54 @@ class TestUnitsAndArms:
         assert funnel.eligible == 1
         assert report.inference.mean_served == pytest.approx(math.log1p(50))
 
+    def test_a_join_without_a_pack_is_split_by_why(self, log: HoldoutLog) -> None:
+        cases = {
+            # No retrieval result in the transcript at all.
+            "never": {"retrieval_results": 0},
+            # Every result was an error: a transport failure.
+            "errored": {"retrieval_results": 2, "retrieval_errors": 2},
+            # A result named a pack the capture could not read.
+            "unparsed": {"retrieval_results": 1, "pack_ids_unparsed": 1},
+            # A result came back with no pack, as an empty answer does.
+            "empty": {"retrieval_results": 1},
+        }
+        for index, (name, counters) in enumerate(cases.items()):
+            log.join(
+                f"task-{name}",
+                at=MONDAY + timedelta(hours=index),
+                pack_ids=[],
+                parent="parent-a",
+                outcome=outcome_payload(turns=5),
+                **counters,  # type: ignore[arg-type]
+            )
+        # An errored retry beside a good answer: not "errored" (no pack was
+        # parsed, but one result did come back).
+        log.join(
+            "task-mixed",
+            at=MONDAY + timedelta(hours=9),
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=5),
+            retrieval_results=2,
+            retrieval_errors=1,
+        )
+        log.sweep()
+
+        funnel = _analyze(log).funnel
+
+        assert funnel.no_retrieval == 5
+        assert funnel.no_retrieval_never_called == 1
+        assert funnel.no_retrieval_errored == 1
+        assert funnel.no_retrieval_unparsed == 1
+        assert funnel.no_retrieval_empty_answer == 2
+        assert (
+            funnel.no_retrieval_never_called
+            + funnel.no_retrieval_errored
+            + funnel.no_retrieval_unparsed
+            + funnel.no_retrieval_empty_answer
+            == funnel.no_retrieval
+        )
+
 
 class TestFinished:
     def test_tasks_not_yet_settled_by_a_later_sweep_are_unfinished(
@@ -597,9 +646,223 @@ class TestExclusions:
         pre = next(e for e in report.exclusions if e.name == "pre_treatment")
         assert pre.applied is False
         assert pre.excluded is None
+        # Every join here predates the timing, so every unit is undecidable.
+        assert pre.unknown == report.funnel.eligible == 10
+        assert report.funnel.pre_treatment_unknown == 10
+        assert report.funnel.pre_treatment_excluded == 0
         assert "first retrieval" in pre.note
+        assert pre.note.startswith("Not applied")
         assert report.descriptive.post_hoc_share is None
         assert report.descriptive.post_hoc_note
+
+    @staticmethod
+    def _seed_timed(
+        log: HoldoutLog,
+        *,
+        after: int,
+        before: int,
+        unknown: int,
+        withheld: bool = False,
+    ) -> None:
+        """Tasks by where the first retrieval sat, then one settling sweep.
+
+        ``after`` follow a hook's feedback (excluded), ``before`` precede
+        any, ``unknown`` are joins from before the timing was recorded.
+        """
+        hour = 0
+        for count, timing in (
+            (after, timing_payload(hook_before=True)),
+            (before, timing_payload(hook_before=False)),
+            (unknown, None),
+        ):
+            for _ in range(count):
+                log.task(
+                    start=MONDAY + timedelta(hours=hour),
+                    arms=[withheld if hour % 2 else not withheld],
+                    timing=timing,
+                )
+                hour += 1
+        log.sweep()
+
+    def test_a_first_retrieval_after_hook_feedback_is_excluded_and_counted(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed_timed(log, after=4, before=5, unknown=0)
+
+        report = _analyze(log)
+
+        funnel = report.funnel
+        assert funnel.sessions == 9
+        assert funnel.pre_treatment_excluded == 4
+        assert funnel.eligible == 5
+        assert funnel.pre_treatment_unknown == 0
+        assert funnel.pre_treatment_hook_feedback_seen == 4
+        assert funnel.analysed == 5
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is True
+        assert pre.excluded == 4
+        assert pre.unknown == 0
+        assert pre.note.startswith("Applied")
+        assert "commit" in pre.note
+        assert not any("HOOK_FEEDBACK_PATTERN" in note for note in report.notes)
+
+    def test_the_excluded_tasks_leave_every_arm_count(self, log: HoldoutLog) -> None:
+        # Arms alternate by task index, so the four excluded tasks (the first
+        # four) are two served and two withheld.
+        self._seed_timed(log, after=4, before=4, unknown=0)
+
+        report = _analyze(log)
+
+        assert _arms(report.descriptive.eligible_by_arm) == {
+            "served": 2,
+            "withheld": 2,
+        }
+        assert _arms(report.descriptive.analysed_by_arm) == {
+            "served": 2,
+            "withheld": 2,
+        }
+
+    def test_a_first_retrieval_before_any_hook_feedback_stays_in(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed_timed(log, after=0, before=6, unknown=0)
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_excluded == 0
+        assert report.funnel.eligible == 6
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is True
+        assert pre.excluded == 0
+        # Applied, yet no session held hook feedback: the reader is told the
+        # capture's pattern may match nothing.
+        assert report.funnel.pre_treatment_hook_feedback_seen == 0
+        assert any("HOOK_FEEDBACK_PATTERN" in note for note in report.notes)
+
+    def test_joins_without_the_timing_stay_in_and_the_exclusion_is_partial(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed_timed(log, after=2, before=3, unknown=4)
+
+        report = _analyze(log)
+
+        funnel = report.funnel
+        assert funnel.pre_treatment_excluded == 2
+        assert funnel.pre_treatment_unknown == 4
+        assert funnel.eligible == 7
+        assert funnel.analysed == 7
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is True
+        assert pre.excluded == 2
+        assert pre.unknown == 4
+        assert pre.note.startswith("Partially applied")
+        assert any(
+            "4 eligible tasks have joins that record no usable retrieval timing" in note
+            for note in report.notes
+        )
+
+    def test_a_timing_without_a_boolean_decides_nothing(self, log: HoldoutLog) -> None:
+        for hour, timing in enumerate(
+            [
+                timing_payload(hook_before=None),
+                {"first_retrieval_ordinal": 2},
+                {**timing_payload(hook_before=False), "tool_call_count": None},
+            ]
+        ):
+            log.task(start=MONDAY + timedelta(hours=hour), timing=timing)
+        log.join(
+            "task-bad-type",
+            at=MONDAY + timedelta(hours=9),
+            pack_ids=[
+                log.pack(at=MONDAY + timedelta(hours=8), withheld=False, items=2)
+            ],
+            parent="parent-a",
+            outcome=outcome_payload(turns=5),
+            timing={"hook_feedback_before_first_retrieval": "yes"},
+        )
+        log.sweep()
+
+        report = _analyze(log)
+
+        # Only the third carries a boolean; the null, the missing key and the
+        # string are undecidable, not read as False.
+        assert report.funnel.pre_treatment_unknown == 3
+        assert report.funnel.pre_treatment_excluded == 0
+        assert report.funnel.eligible == 4
+
+    def test_the_exclusion_sits_after_the_unfinished_stage(
+        self, log: HoldoutLog
+    ) -> None:
+        sweep_at = MONDAY + timedelta(hours=8)
+        log.task(start=MONDAY, timing=timing_payload(hook_before=True))
+        log.sweep(at=sweep_at)
+        # Joined an hour before the sweep: unfinished, and also after a hook.
+        log.task(
+            start=sweep_at - timedelta(hours=2),
+            timing=timing_payload(hook_before=True),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.unfinished == 1
+        assert report.funnel.pre_treatment_excluded == 1
+
+    def test_every_session_is_in_exactly_one_stage(self, log: HoldoutLog) -> None:
+        self._seed_timed(log, after=3, before=2, unknown=2)
+        log.task(start=MONDAY + timedelta(days=1), parent=None)  # main session
+
+        report = _analyze(log)
+
+        f = report.funnel
+        removed = (
+            f.main_sessions
+            + f.no_outcome
+            + f.no_retrieval
+            + f.first_pack_not_found
+            + f.outside_window
+            + f.first_pack_old_build
+            + f.other_rate
+            + f.empty_first_pack
+            + f.unfinished
+            + f.pre_treatment_excluded
+        )
+        assert removed + f.eligible == f.sessions == 8
+
+    def test_a_join_rewritten_with_the_timing_counts_once_as_decided(
+        self, log: HoldoutLog
+    ) -> None:
+        """A session re-parsed after the change has two joins; the latest counts."""
+        pack = log.pack(at=MONDAY, withheld=False, items=3)
+        for hour, timing in ((1, None), (2, timing_payload(hook_before=True))):
+            log.join(
+                "task-reparsed",
+                at=MONDAY + timedelta(hours=hour),
+                pack_ids=[pack],
+                parent="parent-a",
+                outcome=outcome_payload(turns=5),
+                timing=timing,
+            )
+        log.sweep()
+
+        report = _analyze(log)
+
+        assert report.funnel.joins_scanned == 2
+        assert report.funnel.sessions == 1
+        assert report.funnel.pre_treatment_unknown == 0
+        assert report.funnel.pre_treatment_excluded == 1
+        assert report.funnel.eligible == 0
+
+    def test_a_task_with_no_unit_reached_reports_the_rule_as_not_applied(
+        self, log: HoldoutLog
+    ) -> None:
+        log.task(start=MONDAY, parent=None)
+        log.sweep()
+
+        report = _analyze(log)
+
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is False
+        assert pre.unknown == 0
 
     def test_rules_applied_upstream_or_not_at_all_are_reported(
         self, log: HoldoutLog

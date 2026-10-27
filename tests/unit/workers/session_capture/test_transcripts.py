@@ -814,6 +814,224 @@ class TestPackIdExtraction:
         assert "Context for" not in repr(digest)
 
 
+_CONTEXT = "mcp__trellis__get_context"
+_HOOK_FEEDBACK = "Stop hook feedback:\n[fake-hook]: retrieve context before you stop."
+
+
+def _step(use_id: str, name: str = "Bash") -> list[dict]:
+    """One call and its result, neither of them a retrieval pack."""
+    return [assistant_tools((name, use_id)), pack_result_turn(use_id, "ok")]
+
+
+def _retrieval(use_id: str, pack_id: str) -> list[dict]:
+    """One ``get_context`` call and the pack it served."""
+    return [
+        assistant_tools((_CONTEXT, use_id)),
+        pack_result_turn(use_id, mcp_envelope(pack_markdown(pack_id))),
+    ]
+
+
+def _timing(tmp_path: Path, *records: dict) -> dict[str, Any]:
+    path = tmp_path / "s.jsonl"
+    write_transcript(
+        path,
+        [user_turn("gather what we know about the widget deploy"), *records],
+    )
+    return parse_session(path).retrieval_timing_payload()
+
+
+class TestRetrievalTiming:
+    """Where the first retrieval sat, against any stop hook's feedback.
+
+    The pack holdout's pre-treatment exclusion reads this: a retrieval made
+    because a hook asked for one at the end is not a treatment. The default
+    :data:`HOOK_FEEDBACK_PATTERN` is unverified against a real transcript, so
+    these fixtures are synthetic records shaped like the pattern.
+    """
+
+    def test_a_first_retrieval_before_any_hook_feedback(self, tmp_path: Path) -> None:
+        timing = _timing(
+            tmp_path,
+            *_step("b-1"),
+            *_retrieval("u-1", PACK_IDS[0]),
+            *_step("b-2"),
+            user_turn(_HOOK_FEEDBACK),
+        )
+
+        assert timing == {
+            "first_retrieval_ordinal": 2,
+            "tool_call_count": 3,
+            "hook_feedback_messages": 1,
+            "hook_feedback_before_first_retrieval": False,
+        }
+
+    def test_a_first_retrieval_after_hook_feedback(self, tmp_path: Path) -> None:
+        timing = _timing(
+            tmp_path,
+            *_step("b-1"),
+            *_step("b-2"),
+            user_turn(_HOOK_FEEDBACK),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing == {
+            "first_retrieval_ordinal": 3,
+            "tool_call_count": 3,
+            "hook_feedback_messages": 1,
+            "hook_feedback_before_first_retrieval": True,
+        }
+
+    def test_a_session_with_no_hook_feedback(self, tmp_path: Path) -> None:
+        timing = _timing(tmp_path, *_step("b-1"), *_retrieval("u-1", PACK_IDS[0]))
+
+        assert timing == {
+            "first_retrieval_ordinal": 2,
+            "tool_call_count": 2,
+            "hook_feedback_messages": 0,
+            "hook_feedback_before_first_retrieval": False,
+        }
+
+    def test_a_retrieval_before_the_first_call_is_ordinal_one(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path,
+            *_retrieval("u-1", PACK_IDS[0]),
+            *_step("b-1"),
+            user_turn(_HOOK_FEEDBACK),
+        )
+
+        assert timing["first_retrieval_ordinal"] == 1
+        assert timing["hook_feedback_before_first_retrieval"] is False
+
+    def test_a_transport_error_is_not_the_first_retrieval(self, tmp_path: Path) -> None:
+        """The errored call served nothing, so the retry after the hook is the
+        first retrieval that did."""
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy"),
+                assistant_tools((_CONTEXT, "u-1")),
+                pack_result_turn("u-1", "connection refused", is_error=True),
+                user_turn(_HOOK_FEEDBACK),
+                *_retrieval("u-2", PACK_IDS[0]),
+            ],
+        )
+
+        digest = parse_session(path)
+
+        assert digest.retrieval_errors == 1
+        assert digest.retrieval_timing_payload() == {
+            "first_retrieval_ordinal": 2,
+            "tool_call_count": 2,
+            "hook_feedback_messages": 1,
+            "hook_feedback_before_first_retrieval": True,
+        }
+
+    def test_a_session_whose_only_retrieval_errored_has_no_first_retrieval(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy"),
+                assistant_tools((_CONTEXT, "u-1")),
+                pack_result_turn("u-1", "connection refused", is_error=True),
+                user_turn(_HOOK_FEEDBACK),
+            ],
+        )
+
+        digest = parse_session(path)
+
+        assert digest.pack_ids == []
+        assert digest.retrieval_results == 1
+        assert digest.retrieval_errors == 1
+        assert digest.retrieval_timing_payload() == {
+            "first_retrieval_ordinal": None,
+            "tool_call_count": 1,
+            "hook_feedback_messages": 1,
+            "hook_feedback_before_first_retrieval": None,
+        }
+
+    def test_the_ordinal_counts_a_parallel_call_in_its_own_position(
+        self, tmp_path: Path
+    ) -> None:
+        pack = mcp_envelope(pack_markdown(PACK_IDS[0]))
+        timing = _timing(
+            tmp_path,
+            assistant_tools(("Bash", "b-1"), (_CONTEXT, "u-1"), ("Bash", "b-2")),
+            pack_result_turn("b-1", "ok"),
+            pack_result_turn("u-1", pack),
+            pack_result_turn("b-2", "ok"),
+            user_turn(_HOOK_FEEDBACK),
+        )
+
+        assert timing["first_retrieval_ordinal"] == 2
+        assert timing["tool_call_count"] == 3
+        assert timing["hook_feedback_before_first_retrieval"] is False
+
+    def test_a_later_pack_does_not_move_the_first_retrieval(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path,
+            *_retrieval("u-1", PACK_IDS[0]),
+            user_turn(_HOOK_FEEDBACK),
+            *_retrieval("u-2", PACK_IDS[1]),
+        )
+
+        assert timing["first_retrieval_ordinal"] == 1
+        assert timing["hook_feedback_before_first_retrieval"] is False
+
+    def test_only_a_user_text_block_that_opens_like_hook_feedback_counts(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        quoted = mcp_envelope(pack_markdown(PACK_IDS[0], title=_HOOK_FEEDBACK))
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy"),
+                assistant_tools((_CONTEXT, "u-1")),
+                # A tool result that quotes the phrase is raw tool output.
+                pack_result_turn("u-1", quoted),
+                user_turn("please explain the Stop hook feedback you saw"),
+                user_turn("subagentstop hook error: fake reminder"),
+                {
+                    "type": "user",
+                    "uuid": "u-blocks",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "  SubagentStop hook feedback: x"}
+                        ],
+                    },
+                },
+            ],
+        )
+
+        digest = parse_session(path)
+
+        # The block form and the lower-cased error form; not the quotation in
+        # a tool result, and not a person's sentence that mentions the phrase.
+        assert digest.hook_feedback_messages == 2
+        assert digest.hook_feedback_after_calls == 1
+
+    def test_the_timing_keeps_counts_and_never_the_message(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path, *_retrieval("u-1", PACK_IDS[0]), user_turn(_HOOK_FEEDBACK)
+        )
+
+        assert "retrieve context" not in repr(timing)
+        assert all(
+            isinstance(value, int | bool) or value is None for value in timing.values()
+        )
+
+
 class TestParentSessionId:
     """A sub-agent transcript names its parent session by where it lives.
 

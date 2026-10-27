@@ -360,14 +360,24 @@ def _record_pack_join(
     each. A sub-agent's transcript has its own join and its own outcome, and
     a parent's outcome holds none of its sub-agents' work.
 
+    The payload's ``retrieval_timing`` is where the first retrieval sat among
+    the session's tool calls (``first_retrieval_ordinal`` of
+    ``tool_call_count``), and whether a Stop or SubagentStop hook's feedback
+    came before it (``hook_feedback_before_first_retrieval``, with the
+    ``hook_feedback_messages`` count). The pack holdout reads it to apply its
+    ``pre_treatment`` exclusion: a retrieval the hook asked for at the end is
+    not a treatment. See :meth:`SessionDigest.retrieval_timing_payload`.
+
     A transcript with no turn and no tool call gets no join: a blank file or
     a workflow journal is not a session, and an empty join there would claim
     one ran without retrieving. Every other parse is compared with the
     session's latest join, outcome included, and writes only on a
     difference, so a judge-outage retry or a watermark reset adds nothing
     while a transcript that grew records its new packs and outcome. A join
-    written before the outcome existed differs from every new parse, so the
-    session's next parse writes it again with one.
+    written before the outcome or the timing existed differs from every new
+    parse, so the session's next parse writes it again with them; a session
+    whose file never changes is not parsed again, and its join keeps reading
+    as ``unknown`` to the holdout until a watermark reset parses it.
 
     Not fail-soft, unlike :func:`_emit_sweep_completed`: this runs inside
     the per-session boundary, so a failed write leaves the session
@@ -386,6 +396,7 @@ def _record_pack_join(
         "parent_session_id": parent,
         "source_system": source_system,
         "outcome": digest.outcome.to_payload(),
+        "retrieval_timing": digest.retrieval_timing_payload(),
     }
     event_log = registry.operational.event_log
     latest = event_log.get_events(
