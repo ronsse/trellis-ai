@@ -531,14 +531,24 @@ class TestApprovedRowsWithoutAnId:
         assert len(plan["results"]) == plan["named_count"]
         assert unnamed_approved_count(plan) == 2
 
-    @pytest.mark.parametrize("dry_run", [False, True])
     def test_text_says_how_many_approved_rows_were_skipped(
-        self, dry_run: bool, tmp_path: Path
+        self, tmp_path: Path
     ) -> None:
-        _, _, out = _promote(
-            tmp_path, [_OK], _BLANK_ID_ROWS, fmt="text", dry_run=dry_run
-        )
-        assert "2 approved row(s) name no candidate_id and were skipped." in out
+        _, _, out = _promote(tmp_path, [_OK], _BLANK_ID_ROWS, fmt="text")
+        flat = " ".join(out.split())  # Rich wraps the note at the console width
+        assert "2 approved row(s) name no candidate_id and were skipped." in flat
+        assert "A skipped row makes the run refused" in flat
+
+    def test_a_dry_run_note_is_in_the_conditional_for_a_run_that_has_not_happened(
+        self, tmp_path: Path
+    ) -> None:
+        """#983: a preview ran nothing, so it cannot say a row "was skipped"."""
+        _, _, out = _promote(tmp_path, [_OK], _BLANK_ID_ROWS, fmt="text", dry_run=True)
+        flat = " ".join(out.split())
+        assert "2 approved row(s) name no candidate_id and would be skipped." in flat
+        assert "A real run would be refused for it" in flat
+        assert "were skipped" not in flat
+        assert "makes the run refused" not in flat
 
     @pytest.mark.parametrize("fmt", ["json", "text"])
     def test_only_blank_ids_is_refused_and_says_what_it_skipped(
@@ -580,8 +590,10 @@ class TestApprovedRowsWithoutAnId:
             assert (data["approved_count"], data["named_count"]) == (2, 1)
             assert [r["status"] for r in data["results"]] == ["promoted"]
         else:
-            # Promoted against skipped, both on the page, beside the verdict.
-            assert "1/2 approved candidates promoted" in out
+            # Promoted against the rows that could run (``named_count``, the
+            # denominator the Review toast uses too), with the skipped rows
+            # named beside it and the verdict (#983).
+            assert "1/1 approved candidates promoted" in out
             assert "1 approved row(s) name no candidate_id and were skipped." in out
             assert f"Verdict: refused (exit {EXIT_VALIDATION})" in out
 

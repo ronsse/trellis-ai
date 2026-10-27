@@ -1915,8 +1915,23 @@ components:
 
         all landed; a row that wrote its entity but not the rest reads
 
-        ``promoted_incomplete``.'
+        ``promoted_incomplete``.
+
+
+        A row whose precedent is already current, complete and unchanged reads
+
+        ``already_promoted`` and writes nothing: no new version, no second
+
+        ``PRECEDENT_PROMOTED`` event. It meets the request, so it does not make
+
+        the run ``refused`` or ``failed``, and it is in ``already_promoted_count``
+
+        and not in ``promoted_count``.'
       properties:
+        already_promoted_count:
+          default: 0
+          title: Already Promoted Count
+          type: integer
         approved_count:
           default: 0
           title: Approved Count
@@ -5020,7 +5035,13 @@ paths:
 
         ``candidate_id`` is skipped but makes the verdict ``refused``; rows that
 
-        promoted still landed.'
+        promoted still landed. A row whose precedent is already current, complete
+
+        and unchanged comes back ``already_promoted`` and is written not at all,
+
+        so re-submitting a decision (or a whole file) adds no version and no
+
+        second ``PRECEDENT_PROMOTED`` event.'
       operationId: promote_learning_candidates_api_v1_learning_promotions_post
       requestBody:
         content:
