@@ -527,10 +527,12 @@ _memory_extractor_attempted: bool = False
 #: ``_memory_extractor_attempted`` is set, so a test that resets that flag
 #: needs nothing else reset for the cache.
 _memory_extractor_retry_at: float | None = None
-#: Last state written to the event log, the time it was written
-#: (monotonic), and the lock that serializes a resolution. A
-#: process-local view: another process keeps its own.
-_memory_extractor_reported: str | None = None
+#: Last ``(state, reason)`` written to the event log, the time it was written
+#: (monotonic), and the lock that serializes a resolution. A process-local
+#: view: another process keeps its own. Keyed on the pair, not the state
+#: alone, so a ``build_failed`` is not hidden behind an earlier
+#: ``no_llm_client`` row (both read ``unavailable``).
+_memory_extractor_reported: tuple[str, str | None] | None = None
 _memory_extractor_reported_at: float = 0.0
 _memory_extractor_lock = threading.Lock()
 
@@ -542,7 +544,9 @@ _memory_extractor_lock = threading.Lock()
 _MEMORY_EXTRACTOR_RETRY_SECONDS = 60.0
 #: A state that persists is written to the event log again after this long,
 #: so an ``unavailable`` older than ``trellis analyze health``'s window does
-#: not drop out of the report while the process is still broken.
+#: not drop out of the report while the process is still broken. The refresh
+#: rides a save that arrives after the retry interval, not a timer: a process
+#: that stops receiving saves stops refreshing.
 _MEMORY_EXTRACTOR_REFRESH_SECONDS = 86400.0
 
 
@@ -555,20 +559,22 @@ def _report_memory_extractor_state(
 ) -> None:
     """Write a ``MEMORY_EXTRACTION_STATE`` row on a state change (#987).
 
-    Called on every resolution, written only when the state differs from the
-    last one this process wrote or a persistent ``unavailable`` is due its
-    daily refresh. Advisory and wrapped whole: it runs on the ``save_memory``
-    write path, where one escaped exception fails the write.
+    Called on every resolution, written only when the ``(state, reason)``
+    pair differs from the last one this process wrote or a persistent
+    ``unavailable`` of either reason is due its daily refresh. Advisory and
+    wrapped whole: it runs on the ``save_memory`` write path, where one
+    escaped exception fails the write.
     """
     global _memory_extractor_reported, _memory_extractor_reported_at  # noqa: PLW0603
     try:
         now = time.monotonic()
+        key = (state, reason)
         if (
-            state == _memory_extractor_reported
+            key == _memory_extractor_reported
             and now - _memory_extractor_reported_at < _MEMORY_EXTRACTOR_REFRESH_SECONDS
         ):
             return
-        if state == STATE_UNAVAILABLE and state != _memory_extractor_reported:
+        if state == STATE_UNAVAILABLE and key != _memory_extractor_reported:
             logger.warning("memory_extractor_unavailable", reason=reason)
         if emit_memory_extraction_state(
             registry.operational.event_log,
@@ -576,7 +582,7 @@ def _report_memory_extractor_state(
             reason=reason,
             error_type=error_type,
         ):
-            _memory_extractor_reported = state
+            _memory_extractor_reported = key
             _memory_extractor_reported_at = now
     except Exception:
         # GRACEFUL-DEGRADATION: the signal is lost, the save is not.
@@ -588,19 +594,22 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
 
     Returns ``None`` when:
       * ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` is not set truthy, OR
-      * No LLM client can be constructed from the environment.
+      * No LLM client can be constructed from the environment, OR
+      * Constructing the client or the extractor raised.
 
-    The first is settled for the process. The second is not (#987): the
-    failure is recorded as a ``MEMORY_EXTRACTION_STATE`` event and
-    resolution is retried by a later call once
+    The first is settled for the process. The other two are not (#987): each
+    is recorded as a ``MEMORY_EXTRACTION_STATE`` event (``no_llm_client`` /
+    ``build_failed``) and resolution is retried by a later call once
     ``_MEMORY_EXTRACTOR_RETRY_SECONDS`` have passed, while the flag stays on.
 
-    Raises ``McpError(INTERNAL_ERROR)`` if the flag is on and the
-    extractor module fails to import / construct — the agent asked
-    for the feature and a build failure is a real problem they should
-    see, not a silently-disabled enhancement. That outcome is settled: a
-    construction defect is not the transient cause the retry is for, and it
-    raises once rather than on every retry.
+    **Never raises.** This runs inside ``save_memory`` after the document is
+    stored, so an exception here would fail a save that already persisted,
+    skip embed-on-ingest, and (before #987) leave extraction off for good. A
+    construction failure is a defect rather than a transient outage, but
+    raising it at a save is the wrong place to surface it: it is logged with
+    its traceback on every attempt and shows up in ``trellis analyze
+    health`` through the event, and the next interval tries again, so a
+    fixed resolver or a restored dependency recovers without a restart.
     """
     global _memory_extractor, _memory_extractor_attempted  # noqa: PLW0603
     global _memory_extractor_retry_at  # noqa: PLW0603
@@ -641,31 +650,23 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
                 alias_resolver=alias_resolver,
                 llm_client=llm_client,
             )
-            logger.info("memory_extractor_enabled")
-            _report_memory_extractor_state(registry, STATE_AVAILABLE)
-        except McpError as exc:
-            # Already structured — let it propagate.
-            _report_memory_extractor_state(
-                registry,
-                STATE_UNAVAILABLE,
-                reason=REASON_BUILD_FAILED,
-                error_type=type(exc).__name__,
-            )
-            raise
         except Exception as exc:
+            # GRACEFUL-DEGRADATION: wrapped whole, McpError included (an
+            # LLM-provider construction failure arrives as one). The save
+            # that triggered this has already stored its document.
             logger.exception("memory_extractor_init_failed")
+            _memory_extractor_retry_at = (
+                time.monotonic() + _MEMORY_EXTRACTOR_RETRY_SECONDS
+            )
             _report_memory_extractor_state(
                 registry,
                 STATE_UNAVAILABLE,
                 reason=REASON_BUILD_FAILED,
                 error_type=type(exc).__name__,
             )
-            detail = _exception_detail(exc)
-            _raise_internal(
-                f"memory extractor construction failed: {detail}",
-                cause=exc,
-                data={"stage": "memory_extractor_init"},
-            )
+            return None
+        logger.info("memory_extractor_enabled")
+        _report_memory_extractor_state(registry, STATE_AVAILABLE)
         return _memory_extractor
 
 

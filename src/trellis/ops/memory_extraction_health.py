@@ -31,9 +31,12 @@ newest event in the window says, and since when. Three limits are deliberate:
 * **A restart with the flag off does not clear an old ``unavailable``.** Such a
   process writes nothing, so the row ages out of the window instead.
 * **A window with no event is ``unobserved``, not healthy.** The writer
-  refreshes a persistent ``unavailable`` once a day
+  refreshes a persistent ``unavailable`` (either reason) once a day
   (``trellis.mcp.server._MEMORY_EXTRACTOR_REFRESH_SECONDS``) so a broken
-  process older than the window does not vanish from the report.
+  process older than the window does not vanish from the report. There is no
+  background timer: the refresh is written by a save that arrives after the
+  retry interval, so a broken process that stops receiving saves stops
+  refreshing and its last row ages out of the window.
 """
 
 from __future__ import annotations
@@ -76,8 +79,9 @@ STATE_UNAVAILABLE: Final = "unavailable"
 
 #: Why an extractor could not be built. Closed, so a group-by is exhaustive.
 #: ``no_llm_client`` is the transient-capable one (a route outage, a config
-#: read race) that the server retries; ``build_failed`` is a construction
-#: error that the server raises once and does not retry.
+#: read race); ``build_failed`` is a construction error (a client or the
+#: extractor raised). The server retries both on the same interval and never
+#: raises either at a save.
 REASON_NO_LLM_CLIENT: Final = "no_llm_client"
 REASON_BUILD_FAILED: Final = "build_failed"
 UNAVAILABLE_REASONS: Final = frozenset({REASON_NO_LLM_CLIENT, REASON_BUILD_FAILED})

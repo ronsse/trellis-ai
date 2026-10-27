@@ -2498,7 +2498,8 @@ class TestAnalyzeHealthMemoryExtraction:
         out = " ".join(plain(result.stdout).split())
         assert "WARN" in out
         assert "Memory extraction: unavailable (no_llm_client) since" in out
-        assert "memory extraction is enabled but no extractor is available" in out
+        assert "the most recent extraction-state report says unavailable" in out
+        assert "saves on that process are stored without entity/edge extraction" in out
 
     def test_json_carries_the_state_and_the_warning(
         self, temp_stores: StoreRegistry

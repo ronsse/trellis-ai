@@ -8,13 +8,17 @@ only an ``info`` log line to show for it.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
+from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.mcp import server as server_mod
-from trellis.mcp.server import McpError, save_memory
+from trellis.mcp.server import save_memory
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -324,7 +328,7 @@ class TestStateEvents:
             "Memory saved:"
         )
 
-    def test_a_construction_failure_raises_once_is_reported_and_settles(
+    def test_a_construction_failure_does_not_raise_and_is_retried(
         self,
         monkeypatch: pytest.MonkeyPatch,
         temp_registry: StoreRegistry,
@@ -340,17 +344,208 @@ class TestStateEvents:
         llm.client = _FakeLLM()
         monkeypatch.setattr(save_memory_mod, "build_save_memory_extractor", broken)
 
-        with pytest.raises(McpError):
-            server_mod._get_memory_extractor(temp_registry)
-        clock.offset = 10 * server_mod._MEMORY_EXTRACTOR_RETRY_SECONDS
-        # Settled: a defect is not the transient cause the retry is for.
+        # The first attempt does not raise either: ``_get_memory_extractor``
+        # runs inside ``save_memory`` after the document is stored.
         assert server_mod._get_memory_extractor(temp_registry) is None
-
         assert llm.builds == 1
+
+        # Inside the interval nothing is rebuilt.
+        assert server_mod._get_memory_extractor(temp_registry) is None
+        assert llm.builds == 1
+
+        # A defect is retried like an outage, not settled: a restored
+        # dependency or a fixed resolver recovers without a restart.
+        clock.offset = server_mod._MEMORY_EXTRACTOR_RETRY_SECONDS + 1
+        assert server_mod._get_memory_extractor(temp_registry) is None
+        assert llm.builds == 2
+
         assert _states(temp_registry) == [
             {
                 "state": "unavailable",
                 "reason": "build_failed",
                 "error_type": "ValueError",
             }
+        ]
+
+    def test_a_provider_failure_arriving_as_mcp_error_does_not_raise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+    ) -> None:
+        # ``_build_llm_client_from_env`` reports a provider construction
+        # failure as an ``McpError``; the resolution wraps whole, not by type.
+        def provider_down(*_args: Any) -> None:
+            server_mod._raise_internal(
+                "provider construction failed", data={"provider": "synthetic"}
+            )
+
+        monkeypatch.setattr(server_mod, "_build_llm_client", provider_down)
+
+        assert server_mod._get_memory_extractor(temp_registry) is None
+        assert _states(temp_registry) == [
+            {
+                "state": "unavailable",
+                "reason": "build_failed",
+                "error_type": "McpError",
+            }
+        ]
+
+    def test_a_construction_failure_is_logged_with_its_traceback_every_attempt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+        llm: _Client,
+        clock: _Clock,
+    ) -> None:
+        # The raise used to be the loud signal (the HTTP prewarm logged it);
+        # the log line carries that now.
+        def broken_resolver(_registry: Any) -> None:
+            msg = "resolver down"
+            raise RuntimeError(msg)
+
+        llm.client = _FakeLLM()
+        monkeypatch.setattr(server_mod, "_build_alias_resolver", broken_resolver)
+
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as logs:
+                clear_cached_logger_proxies()
+                server_mod._get_memory_extractor(temp_registry)
+                clock.offset = server_mod._MEMORY_EXTRACTOR_RETRY_SECONDS + 1
+                server_mod._get_memory_extractor(temp_registry)
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+        failed = [e for e in logs if e["event"] == "memory_extractor_init_failed"]
+        assert len(failed) == 2
+        assert all(e["log_level"] == "error" and e["exc_info"] for e in failed)
+
+    def test_save_survives_a_construction_failure_and_recovers_when_it_clears(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+        llm: _Client,
+        clock: _Clock,
+    ) -> None:
+        """#987 review: extractor resolution must never fail a stored save.
+
+        A retry whose client now builds but whose alias resolver raises used
+        to reach ``_raise_internal`` inside ``_emit_memory_stored_and_enrich``:
+        the save raised after its document was stored, embed-on-ingest was
+        skipped, and the cache settled off for good.
+        """
+        interval = server_mod._MEMORY_EXTRACTOR_RETRY_SECONDS
+        real_resolver = server_mod._build_alias_resolver
+        resolver_down = {"on": True}
+
+        def flaky_resolver(registry: Any) -> Any:
+            if resolver_down["on"]:
+                msg = "resolver down"
+                raise RuntimeError(msg)
+            return real_resolver(registry)
+
+        embedded: list[str] = []
+
+        def record_embed(_registry: Any, doc_id: str, *_args: Any, **_kw: Any) -> None:
+            embedded.append(doc_id)
+
+        monkeypatch.setattr(server_mod, "_build_alias_resolver", flaky_resolver)
+        monkeypatch.setattr(server_mod, "run_embed_on_ingest", record_embed)
+        documents = temp_registry.knowledge.document_store
+
+        # 1. No client: saves proceed without extraction.
+        assert save_memory("first note, no client yet").startswith("Memory saved:")
+
+        # 2. The client is buildable, the resolver raises. The save neither
+        #    raises nor skips the embed hook, and the document is stored.
+        llm.client = _FakeLLM()
+        clock.offset = interval + 1
+        result = save_memory("second note, resolver down")
+        assert result.startswith("Memory saved:")
+        doc_id = result.split(":", 1)[1].strip()
+        assert documents.get(doc_id) is not None
+        assert doc_id in embedded
+        assert [row["reason"] for row in _states(temp_registry)] == [
+            "no_llm_client",
+            "build_failed",
+        ]
+        assert _states(temp_registry)[-1]["error_type"] == "RuntimeError"
+
+        # 3. Resolver fixed: a save after the next interval builds the
+        #    extractor and reports ``available``.
+        resolver_down["on"] = False
+        clock.offset = 2 * interval + 2
+        assert save_memory("third note, resolver back").startswith("Memory saved:")
+        assert server_mod._memory_extractor is not None
+        assert [(row["state"], row["reason"]) for row in _states(temp_registry)] == [
+            ("unavailable", "no_llm_client"),
+            ("unavailable", "build_failed"),
+            ("available", None),
+        ]
+
+
+@pytest.mark.usefixtures("flag_on", "clock")
+class TestStateEventDedupe:
+    def test_build_failed_is_not_hidden_behind_an_earlier_no_llm_client_row(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+        llm: _Client,
+        clock: _Clock,
+    ) -> None:
+        import trellis.extract.save_memory as save_memory_mod
+
+        interval = server_mod._MEMORY_EXTRACTOR_RETRY_SECONDS
+
+        def broken(**kwargs: Any) -> None:
+            msg = "boom"
+            raise ValueError(msg)
+
+        server_mod._get_memory_extractor(temp_registry)  # no_llm_client
+        llm.client = _FakeLLM()
+        monkeypatch.setattr(save_memory_mod, "build_save_memory_extractor", broken)
+
+        for step in range(1, 4):
+            clock.offset = step * (interval + 1)
+            server_mod._get_memory_extractor(temp_registry)
+
+        # One row per (state, reason) change, not one per retry and not one
+        # per state: both rows read ``unavailable``.
+        assert [(row["state"], row["reason"]) for row in _states(temp_registry)] == [
+            ("unavailable", "no_llm_client"),
+            ("unavailable", "build_failed"),
+        ]
+
+    def test_a_persistent_build_failed_is_refreshed_after_a_day(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+        llm: _Client,
+        clock: _Clock,
+    ) -> None:
+        import trellis.extract.save_memory as save_memory_mod
+
+        def broken(**kwargs: Any) -> None:
+            msg = "boom"
+            raise ValueError(msg)
+
+        llm.client = _FakeLLM()
+        monkeypatch.setattr(save_memory_mod, "build_save_memory_extractor", broken)
+
+        server_mod._get_memory_extractor(temp_registry)
+        clock.offset = server_mod._MEMORY_EXTRACTOR_REFRESH_SECONDS - 10
+        server_mod._get_memory_extractor(temp_registry)
+        assert len(_states(temp_registry)) == 1
+
+        # The refresh rides a save after the retry interval; no timer fires it.
+        clock.offset = server_mod._MEMORY_EXTRACTOR_REFRESH_SECONDS + 100
+        server_mod._get_memory_extractor(temp_registry)
+
+        assert [(row["state"], row["reason"]) for row in _states(temp_registry)] == [
+            ("unavailable", "build_failed"),
+            ("unavailable", "build_failed"),
         ]

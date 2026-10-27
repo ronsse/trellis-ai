@@ -1198,14 +1198,17 @@ def summarize_backend_health(
         )
 
     if extraction.state == "unavailable":
-        # The flag is on and extraction is dead. Unlike capture's
-        # "unobserved", this is a defect in *this* deployment: the operator
-        # asked for the feature and every save since ``since`` went without it.
+        # The flag is on and the newest report says extraction is dead. Unlike
+        # capture's "unobserved", this is a defect in *this* deployment. It is
+        # worded as a report, not a fact about every save: several processes
+        # share one event log (see ``memory_extraction_health``), and the row
+        # names none of them.
         since = f"{extraction.since:%Y-%m-%d %H:%M} UTC" if extraction.since else "?"
         reasons.append(
-            "memory extraction is enabled but no extractor is available "
-            f"({extraction.reason or 'unknown'}) since {since} — saves are "
-            "stored without entity/edge extraction"
+            "memory extraction: the most recent extraction-state report says "
+            f"unavailable ({extraction.reason or 'unknown'}), reported since "
+            f"{since}; saves on that process are stored without entity/edge "
+            "extraction"
         )
 
     return BackendHealthReport(

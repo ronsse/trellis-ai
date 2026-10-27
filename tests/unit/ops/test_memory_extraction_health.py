@@ -138,6 +138,11 @@ class TestBackendHealth:
         (reason,) = [r for r in report.reasons if "memory extraction" in r]
         assert "no_llm_client" in reason
         assert f"{since:%Y-%m-%d %H:%M} UTC" in reason
+        # A report about the newest event, scoped to one process: several
+        # processes share the log, so it must not claim every save is bare.
+        assert "most recent extraction-state report" in reason
+        assert "saves on that process" in reason
+        assert "every save" not in reason
 
     def test_available_and_unobserved_do_not_warn(self, tmp_path: Path) -> None:
         log = SQLiteEventLog(tmp_path / "e.db")
