@@ -57,6 +57,7 @@ from trellis.retrieve.noise import (
     _facet_value,
     passes_signal_quality,
 )
+from trellis.schemas.document_metadata import document_form_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -123,6 +124,21 @@ class ParentVerdictCache:
         parent_id = resolve_parent_id(item)
         if parent_id == item.item_id:
             return None
+        return self.parent_metadata(parent_id)
+
+    def parent_metadata(self, parent_id: str) -> dict[str, Any] | None:
+        """The stored metadata of document ``parent_id``, memoized per build.
+
+        The one place this cache touches the document store: one
+        :meth:`~trellis.stores.base.document.DocumentStore.get` per distinct
+        id for the cache's lifetime, a miss and an error both memoized.
+        :meth:`resolve` reaches it after its chunk-id guard; a caller that
+        already holds a parent id from the chunk's own metadata (the class
+        prior's chunk scope) reaches it directly, and a parent the archived
+        and noise gates already fetched costs nothing here.
+        """
+        if self._document_store is None:
+            return None
         if parent_id in self._cache:
             return self._cache[parent_id]
         try:
@@ -139,6 +155,22 @@ class ParentVerdictCache:
         resolved = metadata if isinstance(metadata, dict) else None
         self._cache[parent_id] = resolved
         return resolved
+
+
+def parent_document_form(item: PackItem, cache: ParentVerdictCache) -> str | None:
+    """The ``document_form`` of the document ``item`` is a chunk of, or ``None``.
+
+    The link is the chunk's own ``metadata["parent_doc_id"]`` and nothing
+    else: no id prefix, no ``#chunk-`` separator. An item without that key,
+    one naming itself, a parent the store lacks, a store error and a parent
+    that carries no form all read as ``None`` — no verdict, serve the item.
+    This is :func:`trellis.retrieve.class_prior.effective_form`'s injected
+    resolver under ``scope="parents_and_chunks"``.
+    """
+    parent_id = (item.metadata or {}).get("parent_doc_id")
+    if not isinstance(parent_id, str) or not parent_id or parent_id == item.item_id:
+        return None
+    return document_form_of(cache.parent_metadata(parent_id))
 
 
 def partition_by_parent_archived(
@@ -196,6 +228,7 @@ def partition_by_parent_signal_quality(
 
 __all__ = [
     "ParentVerdictCache",
+    "parent_document_form",
     "partition_by_parent_archived",
     "partition_by_parent_signal_quality",
 ]

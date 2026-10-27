@@ -43,6 +43,7 @@ from trellis.retrieve.strategies import (
 )
 from trellis.schemas.pack import PackBudget, PackItem
 from trellis.stores.base.event_log import Event, EventLog, EventType
+from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
@@ -635,6 +636,222 @@ def test_a_dedup_loss_on_a_configured_axis_does_not_suppress_removal() -> None:
     assert report.still_served_by_other_axis == 0
     assert report.helpful_lost == 1
     assert report.tokens_freed == 50
+
+
+# --- 4a. The chunk scope (#986): a chunk's form is its parent's, looked up ---
+
+
+CHUNKS = "parents_and_chunks"
+
+
+class _CountingStore:
+    """A real store that records every ``get``, by id."""
+
+    def __init__(self, inner: SQLiteDocumentStore) -> None:
+        self._inner = inner
+        self.get_calls: list[str] = []
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        self.get_calls.append(doc_id)
+        return self._inner.get(doc_id)
+
+
+class _RaisingStore:
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        msg = "store unavailable"
+        raise RuntimeError(msg)
+
+
+def _graded(pack_id: str, *, helpful: list[str], unhelpful: list[str]) -> Event:
+    event = _feedback_event(pack_id, helpful)
+    event.payload["unhelpful_item_ids"] = unhelpful
+    return event
+
+
+def _chunk_row(item_id: str, tokens: int, *, axis: str = "keyword") -> dict[str, Any]:
+    """A served row that, like every historical one, records no chunk form."""
+    return {
+        "item_id": item_id,
+        "form": None,
+        "axis": axis,
+        "tokens": tokens,
+        "score": 0.5,
+        "rank": 1,
+    }
+
+
+@pytest.fixture
+def chunk_store(tmp_path: Path) -> Any:
+    store = SQLiteDocumentStore(tmp_path / "documents.db")
+    store.put("conv", "parent", {"document_form": "conversation"})
+    store.put("conv#chunk-0000", "a", {"parent_doc_id": "conv"})
+    store.put("conv#chunk-0001", "b", {"parent_doc_id": "conv"})
+    store.put("note", "parent", {"document_form": "capture"})
+    store.put("note-part", "c", {"parent_doc_id": "note"})
+    store.put("formless", "no form", {})
+    yield store
+    store.close()
+
+
+def _chunk_log() -> _FakeEventLog:
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0",
+            [
+                _chunk_row("conv#chunk-0000", 50),
+                _chunk_row("conv#chunk-0001", 80),
+                _chunk_row("note-part", 30),
+                _chunk_row("formless", 20),
+                _chunk_row("gone", 10),
+            ],
+        )
+    )
+    log.append(
+        _graded("pack-0", helpful=["conv#chunk-0000"], unhelpful=["conv#chunk-0001"])
+    )
+    return log
+
+
+def test_chunk_scope_prices_chunks_through_their_stored_parent_form(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    config = ClassPriorConfig(mode="withhold", scope=CHUNKS)
+
+    report = replay_class_prior(_chunk_log(), config=config, document_store=chunk_store)
+
+    assert report.matched_servings == 2
+    assert report.matched_via_parent == 2
+    assert report.helpful_lost == 1
+    assert report.unhelpful_removed == 1
+    assert report.tokens_freed == 130
+    # Five formless rows were looked up: two reached the conversation parent,
+    # one a capture parent (a form outside config.forms), one a row that is
+    # not a chunk, one whose row is gone.
+    assert report.parent_lookups == 5
+    assert report.parent_form_resolved == 3
+    assert report.parent_form_unresolved == 1
+    assert report.applied_config.endswith(f"scope={CHUNKS}")
+    assert any("not as it was at serving time" in note for note in report.notes)
+
+
+def test_default_scope_never_looks_a_chunk_up(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    spy = _CountingStore(chunk_store)
+
+    report = replay_class_prior(
+        _chunk_log(), config=ClassPriorConfig(mode="withhold"), document_store=spy
+    )
+
+    assert spy.get_calls == []
+    assert report.matched_servings == 0
+    assert report.parent_lookups == 0
+    assert "scope" not in report.applied_config
+
+
+def test_chunk_scope_reads_each_item_and_parent_once(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    spy = _CountingStore(chunk_store)
+    log = _chunk_log()
+    for index in range(1, 4):  # the same chunks, served in three more packs
+        pack_id = f"pack-{index}"
+        log.append(_class_prior_pack_event(pack_id, [_chunk_row("conv#chunk-0000", 5)]))
+        log.append(_graded(pack_id, helpful=[], unhelpful=["conv#chunk-0000"]))
+
+    report = replay_class_prior(
+        log, config=ClassPriorConfig(mode="withhold", scope=CHUNKS), document_store=spy
+    )
+
+    assert report.matched_servings == 5
+    assert spy.get_calls.count("conv#chunk-0000") == 1
+    assert spy.get_calls.count("conv") == 1
+
+
+def test_chunk_scope_without_a_store_counts_unresolved_and_says_so() -> None:
+    report = replay_class_prior(
+        _chunk_log(), config=ClassPriorConfig(mode="withhold", scope=CHUNKS)
+    )
+
+    assert report.matched_servings == 0
+    assert report.parent_lookups == 5
+    assert report.parent_form_unresolved == 5
+    assert any("no document store was supplied" in note for note in report.notes)
+
+
+def test_chunk_scope_survives_a_store_that_raises() -> None:
+    report = replay_class_prior(
+        _chunk_log(),
+        config=ClassPriorConfig(mode="withhold", scope=CHUNKS),
+        document_store=_RaisingStore(),  # type: ignore[arg-type]
+    )
+
+    assert report.matched_servings == 0
+    assert report.parent_form_unresolved == 5
+
+
+def test_a_row_with_its_own_form_is_never_looked_up(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    spy = _CountingStore(chunk_store)
+    log = _FakeEventLog()
+    own = {**_chunk_row("conv#chunk-0000", 40), "form": "capture"}
+    log.append(_class_prior_pack_event("pack-0", [own]))
+    log.append(_graded("pack-0", helpful=[], unhelpful=["conv#chunk-0000"]))
+
+    report = replay_class_prior(
+        log, config=ClassPriorConfig(mode="withhold", scope=CHUNKS), document_store=spy
+    )
+
+    assert spy.get_calls == []
+    assert report.matched_servings == 0
+
+
+def test_chunk_scope_looks_up_only_configured_axes_and_documents(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    spy = _CountingStore(chunk_store)
+    log = _FakeEventLog()
+    entity = {**_chunk_row("conv#chunk-0001", 5), "axis": "keyword"}
+    event = _class_prior_pack_event(
+        "pack-0",
+        [_chunk_row("conv#chunk-0000", 40, axis="semantic"), entity],
+    )
+    event.payload["injected_items"][1]["item_type"] = "entity"
+    log.append(event)
+    log.append(_graded("pack-0", helpful=[], unhelpful=["conv#chunk-0000"]))
+
+    report = replay_class_prior(
+        log, config=ClassPriorConfig(mode="withhold", scope=CHUNKS), document_store=spy
+    )
+
+    assert spy.get_calls == []
+    assert report.parent_lookups == 0
+    assert report.matched_servings == 0
+
+
+def test_chunk_scope_on_all_axes_matches_the_semantic_chunk(
+    chunk_store: SQLiteDocumentStore,
+) -> None:
+    config = ClassPriorConfig(
+        mode="withhold",
+        scope=CHUNKS,
+        axes=frozenset({"keyword", "semantic", "graph"}),
+    )
+    log = _FakeEventLog()
+    log.append(
+        _class_prior_pack_event(
+            "pack-0", [_chunk_row("conv#chunk-0000", 40, axis="semantic")]
+        )
+    )
+    log.append(_graded("pack-0", helpful=[], unhelpful=["conv#chunk-0000"]))
+
+    report = replay_class_prior(log, config=config, document_store=chunk_store)
+
+    assert report.matched_servings == 1
+    assert report.unhelpful_removed == 1
+    assert report.tokens_freed == 40
 
 
 # --------------------------------------------------------------------------
