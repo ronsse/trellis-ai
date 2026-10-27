@@ -57,6 +57,11 @@ from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
 )
+from trellis.ops.precedent_sync_health import (
+    PrecedentSyncReport,
+    precedent_sync_reasons,
+    summarize_precedent_sync,
+)
 from trellis.ops.serving_builds import (
     ServingBuildsReport,
     mixed_builds_reason,
@@ -837,6 +842,10 @@ class BackendHealthReport(TrellisModel):
     #: absent capture section and one reporting ``state="unobserved"`` say
     #: different things, and only the second is a measurement.
     capture: CaptureCoverageReport
+    #: Reinstated precedents whose document or vector re-stamp did not land,
+    #: read from the ``PRECEDENT_REINSTATED`` events the handler already
+    #: writes. See :mod:`trellis.ops.precedent_sync_health`.
+    precedent_sync: PrecedentSyncReport
     #: The merged coverage of every EventLog read behind this report. When
     #: ``truncated`` is set, ``status`` is ``warn`` and ``reasons`` names
     #: it: a health verdict computed over a silently shortened window is
@@ -1108,8 +1117,9 @@ def summarize_backend_health(
     write = summarize_write_health(event_log, days=days, limit=limit)
     serve = summarize_serve_attribution(event_log, days=days, limit=limit)
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
+    precedent_sync = summarize_precedent_sync(event_log, days=days, limit=limit)
 
-    scan = merge_coverage(write.scan, serve.scan, capture.scan)
+    scan = merge_coverage(write.scan, serve.scan, capture.scan, precedent_sync.scan)
 
     # The write section states its own truncation so it reads correctly
     # standalone; here that is superseded by the merged note, which covers
@@ -1184,11 +1194,14 @@ def summarize_backend_health(
             "session capture has stopped, so coverage is unmeasured, not zero"
         )
 
+    reasons.extend(precedent_sync_reasons(precedent_sync))
+
     return BackendHealthReport(
         window_days=days,
         write=write,
         serve=serve,
         capture=capture,
+        precedent_sync=precedent_sync,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

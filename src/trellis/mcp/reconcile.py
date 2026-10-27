@@ -52,6 +52,7 @@ from trellis.core.base import TrellisModel
 from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.write_config import resolve_write_behaviour
 from trellis.llm.json_response import (
     JSONParseOutcome,
@@ -391,9 +392,10 @@ def mark_document_superseded(
     Sets the old document's :class:`Lifecycle` to ``state="superseded"`` with
     ``superseded_by`` pointing at the successor, preserving content and audit.
 
-    Returns ``True`` when the stale-mark was applied and ``False`` when the old
-    doc has vanished. **Both callers read it, and the ``False`` path is logged
-    here** so no caller can drop it silently (#407):
+    Returns ``True`` when the stale-mark was applied and ``False`` when it was
+    not: the old doc has vanished, or it is a promoted precedent's row.
+    **Both callers read it, and the ``False`` path is logged here** so no caller
+    can drop it silently (#407):
 
     * ``mcp.server._commit_reconcile_verdict`` downgrades the just-stored
       memory to a ``stale_recheck`` ADD, so neither the tool result nor the
@@ -411,6 +413,18 @@ def mark_document_superseded(
       whenever one candidate of a session superseded an earlier one — and
       pointed ``superseded_by`` at a successor that had not been written
       either.
+
+    **A promoted precedent's row is never stamped** (#957). Its lifecycle belongs
+    to the precedent handlers alone: the noise pass, retention and the classify
+    refresh all skip it for that reason, and a ``superseded`` stamp written here
+    would be a fourth writer none of them know about. A precedent is retired by
+    ``precedent.demote``, which needs evidence; a judge's verdict about two
+    pieces of text is not that. The refusal reads the id and nothing else
+    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`)
+    and is made here, at the one seam every supersession goes through, so a
+    caller added later cannot reopen it. It answers ``False``, so both callers
+    take their existing not-applied path: the successor is kept, without the
+    claim, as a plain ADD.
 
     ``preserve_updated_at`` is load-bearing, not hygiene (#397). A supersession
     stamp is a metadata-only write by definition — the content passed back in is
@@ -466,6 +480,13 @@ def mark_document_superseded(
     without one, which is the overwhelming majority, and for the other
     column readers named on ``DocumentStore.put``.
     """
+    if is_promoted_precedent_document(old_doc_id):
+        logger.warning(
+            "supersede_target_is_promoted_precedent",
+            old_doc_id=old_doc_id,
+            new_doc_id=new_doc_id,
+        )
+        return False
     doc = document_store.get(old_doc_id)
     if doc is None:
         logger.warning(
