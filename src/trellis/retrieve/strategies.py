@@ -235,13 +235,15 @@ GRAPH_SELECTION_CALLER_SEEDED = "caller_seeded"
 #: graph.
 GRAPH_AXIS_UNSEEDED_FALLBACK_OFF = "unseeded_fallback_off"
 
-#: The other two states of the graph axis, beside
-#: :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`: it ran, or it raised during this
-#: build. Together the three are the vocabulary of ``axes["graph"]`` and of
+#: The other states of the graph axis, beside
+#: :data:`GRAPH_AXIS_UNSEEDED_FALLBACK_OFF`: it ran, it raised during this
+#: build, or the builder has no graph strategy at all (#985). Together the
+#: four are the vocabulary of ``axes["graph"]`` and of
 #: ``PACK_ASSEMBLED.graph_axis_state``; :func:`resolve_graph_axis_state` is the one
 #: place that chooses between them.
 GRAPH_AXIS_RAN = "ran"
 GRAPH_AXIS_FAILED = "failed"
+GRAPH_AXIS_ABSENT = "absent"
 
 
 def resolve_graph_axis_state(
@@ -249,16 +251,23 @@ def resolve_graph_axis_state(
     ran: Collection[str],
     graph_axis: str | None,
 ) -> str:
-    """The graph axis's state for one build: ran, failed or withheld.
+    """The graph axis's state for one build: absent, failed, withheld or ran.
 
     ``available`` names the axes the builder has, ``ran`` the ones that ran
     this build, ``graph_axis`` is ``RetrievalReport.graph_axis``. The pack's
     ``axes["graph"]`` and the ``PACK_ASSEMBLED.graph_axis_state`` key both come
     from here, so the response and the event cannot disagree about a pack.
-    A builder with no graph axis at all reads ``ran``, as ``axes`` always has:
-    the absence of an axis is not a failure of it.
+    A builder with no graph axis at all reads ``absent`` (#985), not ``ran``
+    and not ``failed``: the axis never existed, so it did not run and did not
+    raise, and ``ran`` would let a reader take "never configured" for "ran and
+    found nothing". It is not in ``failed`` either, which lists only axes the
+    builder has. No shipped surface builds one, since ``builder_factory``
+    always includes the graph strategy.
     """
-    if GRAPH_STRATEGY_NAME in set(available) - set(ran):
+    available_names = set(available)
+    if GRAPH_STRATEGY_NAME not in available_names:
+        return GRAPH_AXIS_ABSENT
+    if GRAPH_STRATEGY_NAME in available_names - set(ran):
         return GRAPH_AXIS_FAILED
     if graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF:
         return GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
