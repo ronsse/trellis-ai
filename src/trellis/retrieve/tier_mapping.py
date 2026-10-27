@@ -141,8 +141,14 @@ class TierMapper:
         # semantic axes serve) is not a graph candidate, so ``node_types`` is
         # empty for it by design, and its tags carry a content type but no
         # scope, which the ``domain_knowledge`` rule also requires. Read from
-        # its id, the one thing a caller cannot write (#957).
-        if is_promoted_precedent_document(item.item_id):
+        # its id, which a *document* write cannot mint (#957). The id alone is
+        # not proof for a graph node: ``entity.create`` can mint a node under
+        # that namespace (see :mod:`trellis.core.precedent_document`), so the
+        # check is limited to ``item_type == "document"``; a node reports its
+        # own types through ``_get_node_types`` and is not relabelled here.
+        if item.item_type == "document" and is_promoted_precedent_document(
+            item.item_id
+        ):
             node_types = node_types | {PRECEDENT_NODE_TYPE}
 
         for affinity, rules in self._heuristics.items():

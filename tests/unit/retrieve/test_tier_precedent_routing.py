@@ -287,6 +287,18 @@ class TestPromotedPrecedentDocumentRoutesByIdNamespace:
         item = _precedent_copy("doc-ordinary", node_type="precedent")
         assert TierMapper().matches_section(item, _DOMAIN) is False
 
+    @pytest.mark.parametrize("source", ["keyword", "semantic"])
+    @pytest.mark.parametrize("item_type", ["entity", "trace"])
+    def test_a_graph_node_under_the_namespace_is_not_relabelled(
+        self, source: str, item_type: str
+    ) -> None:
+        """``entity.create`` can mint a node with a ``precedent://learning/``
+        id, so the id proves nothing for a non-document row (#957)."""
+        node = _precedent_copy("precedent://learning/abc", source).model_copy(
+            update={"item_type": item_type}
+        )
+        assert TierMapper().matches_section(node, _DOMAIN) is False
+
     def test_a_built_sectioned_pack_serves_it_in_the_domain_section(self) -> None:
         precedent = _precedent_copy("precedent://learning/abc")
         ordinary = _precedent_copy("doc-ordinary")

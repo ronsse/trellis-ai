@@ -258,9 +258,11 @@ def _build_notes(
     if sectioned_skipped:
         notes.append(
             f"{sectioned_skipped} sectioned pack(s) counted in total_packs "
-            "with their items ignored: build_sectioned records no "
-            "rejected_items or budget_trace, so they cannot enter a yield or "
-            "budget-hit rate and dilute the per-pack rates."
+            "but contributing no injected, rejected or budget figures (packs "
+            "from before #958 recorded no per-item rows, later ones have "
+            "theirs ignored here): build_sectioned records no rejected_items "
+            "or budget_trace, so they cannot enter a yield or budget-hit "
+            "rate and dilute the per-pack rates."
         )
     if total_packs == 0:
         notes.append(
