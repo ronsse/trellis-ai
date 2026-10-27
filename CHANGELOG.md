@@ -982,6 +982,17 @@ All notable changes to Trellis will be documented in this file.
   `helpful_items_total` and `helpful_bodies_withheld` still count a helpful
   row the baseline served as a pointer, and a window spanning #976's deploy
   still mixes the two disclosed-pack pricings (see the `walk_tokens` entry).
+- **`axes.graph` / `PACK_ASSEMBLED.graph_axis_state` read `absent` when the
+  builder has no graph strategy (#985).** `resolve_graph_axis_state` returned
+  `ran` for a builder that never had the axis, so a reader could not tell
+  "ran and found nothing" from "never configured". The vocabulary is now
+  `ran`, `failed`, `unseeded_fallback_off` and `absent`; an absent axis is in
+  neither `axes.ran` nor `axes.failed`. No shipped surface is affected: every
+  one builds through `builder_factory`, which always includes the graph
+  strategy, so no stored row reads differently. `AxisReportResponse.graph`
+  stays a free string (default `ran` for an older server's block), the
+  REST and CLI JSON forward the value unchanged, and no reader switches on
+  the old three-value set, so `docs/api/v1.yaml` is unchanged.
 
 - **`POST /api/v1/learning/promotions` states the verdict `promote-learning`
   states.** `LearningPromotionResponse.status` was always the default `"ok"`,
