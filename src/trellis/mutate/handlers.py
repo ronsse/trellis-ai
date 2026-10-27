@@ -4211,8 +4211,15 @@ class RetentionRestoreHandler:
     into a reported success. The rejection message names every skipped id
     alongside every refused one, not only the refused half, so an operator
     reading the rejection sees the whole batch rather than just the part
-    that failed loudly. A genuinely unexpected exception (not this history
-    refusal) still aborts the remainder of the batch, as before.
+    that failed loudly. A genuinely unexpected exception (not a refusal)
+    still aborts the remainder of the batch, as before.
+
+    The second refusal is a promoted precedent's *document row* that is
+    archived while its node no longer exists
+    (``retention_restore_precedent_node_missing``): the blank tombstone a
+    self-redaction leaves. It is refused through the same path, so it is named
+    in ``refused_items`` and the warnings and cannot be un-archived into a
+    ``current`` row with no node behind it (#957).
 
     ``RETENTION_RESTORED`` is emitted unconditionally, including for a
     batch that restored nothing at all (all refused, all skipped, or a
@@ -4247,7 +4254,8 @@ class RetentionRestoreHandler:
         if skipped:
             message += f", {len(skipped)} not archived (skipped)"
         if refused:
-            message += f", {len(refused)} refused (history unavailable)"
+            codes = ", ".join(sorted({r["code"] for r in refused}))
+            message += f", {len(refused)} refused ({codes})"
             command.metadata.setdefault("handler_warnings", []).extend(
                 f"retention.restore: {r['item_id']} refused ({r['code']}): "
                 f"{r['message']}"
@@ -4305,6 +4313,31 @@ class RetentionRestoreHandler:
             unfinished = exc
         return restored, skipped, refused, unfinished
 
+    def _refuse_orphaned_precedent_row(self, item_id: str) -> None:
+        """Refuse to un-archive a promoted precedent's row whose node is gone.
+
+        The only archived row in the ``precedent://learning/`` namespace is the
+        tombstone redaction leaves (:func:`_tombstone_document`), and redacting a
+        precedent purges its node. Restoring that row would hand the blanked,
+        empty text back to retrieval as ``current`` while the node stays
+        deleted, a row no handler owns and nothing can retire. Refused rather
+        than skipped: the row *is* archived, and reporting it "not archived"
+        would tell the operator the wrong thing. Only a row in the namespace is
+        paired with a node, so any other document is restored as before.
+        """
+        if not is_promoted_precedent_document(item_id):
+            return
+        if self._registry.knowledge.graph_store.get_node(item_id) is not None:
+            return
+        msg = (
+            f"retention.restore will not un-archive {item_id}: it is a promoted "
+            "precedent's document row and its graph node no longer exists "
+            "(redacted), so the row is a blank tombstone with nothing to restore"
+        )
+        raise ValidationError(
+            msg, errors=[msg], code="retention_restore_precedent_node_missing"
+        )
+
     def _restore(self, item_id: str, command: Command) -> bool:
         """Un-archive one item. Returns False if it was not archived."""
         current = Lifecycle(state="current").model_dump(mode="json")
@@ -4316,6 +4349,7 @@ class RetentionRestoreHandler:
             record = metadata.get(LIFECYCLE_KEY)
             if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
                 return False
+            self._refuse_orphaned_precedent_row(item_id)
             metadata[LIFECYCLE_KEY] = current
             # Metadata-only, and unmasked (#406). Restore exists to make the
             # item servable again, so unlike the archive it undoes there is

@@ -808,6 +808,95 @@ class TestRetentionSparesPromotedPrecedents:
         assert lifecycle["state"] == "archived"
 
 
+class TestRestoreRefusesAnOrphanedPrecedentRow:
+    """``retention.restore`` will not un-archive a self-redacted precedent's row (#957).
+
+    Redacting a precedent purges its node and leaves its document row as an empty
+    archived tombstone. Restore read the document store first, found the archived
+    row and re-stamped it ``current`` while the node stayed deleted.
+
+    Defective subject: drop ``_refuse_orphaned_precedent_row`` from
+    ``RetentionRestoreHandler._restore`` and the tombstone is restored.
+    """
+
+    def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
+        return build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": item_ids, "reason": "corrective"},
+            )
+        )
+
+    def _redact_the_precedent(self, registry: StoreRegistry) -> dict[str, Any]:
+        _promote(registry)
+        RedactionApplyHandler(registry).handle(_redact_command(NODE_ID))
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is None
+        tombstone = _document(registry)
+        assert tombstone["content"] == ""
+        assert tombstone["metadata"][LIFECYCLE_KEY]["state"] == "archived"
+        return tombstone
+
+    def test_the_tombstone_stays_archived_and_the_refusal_says_why(
+        self, registry: StoreRegistry
+    ) -> None:
+        tombstone = self._redact_the_precedent(registry)
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_precedent_node_missing"
+        )
+        assert _document(registry) == tombstone
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is None
+        for axis in ("keyword", "semantic"):
+            assert not _served(registry, axis, NODE_ID)
+
+    def test_one_orphan_does_not_cost_the_rest_of_the_batch_its_restore(
+        self, registry: StoreRegistry
+    ) -> None:
+        self._redact_the_precedent(registry)
+        archived = {LIFECYCLE_KEY: {"state": "archived"}}
+        registry.knowledge.document_store.put("plain-doc", "an ordinary note", archived)
+
+        result = self._restore(registry, [NODE_ID, "plain-doc"])
+
+        assert result.status == CommandStatus.SUCCESS
+        assert "retention_restore_precedent_node_missing" in result.message
+        assert any(NODE_ID in w for w in result.warnings)
+        plain = _document(registry, "plain-doc")
+        assert plain["metadata"][LIFECYCLE_KEY]["state"] == "current"
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "archived"
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert event.payload["refused_ids"] == [NODE_ID]
+        assert event.payload["restored_ids"] == ["plain-doc"]
+
+    def test_an_archived_row_beside_a_live_node_is_still_restored(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Only an orphan is refused: with its node present the row restores."""
+        _promote(registry)
+        document_store = registry.knowledge.document_store
+        row = _document(registry)
+        metadata = {**row["metadata"], LIFECYCLE_KEY: {"state": "archived"}}
+        put_document(
+            document_store,
+            registry.knowledge.vector_store,
+            NODE_ID,
+            row["content"],
+            metadata,
+            preserve_updated_at=True,
+        )
+
+        result = self._restore(registry, [NODE_ID])
+
+        assert result.status == CommandStatus.SUCCESS
+        assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "current"
+
+
 class _FixedClassifier:
     name = "fixed"
 
@@ -863,6 +952,51 @@ class TestClassifyRefreshSparesPromotedPrecedents:
         assert _document(registry)["metadata"]["content_tags"]["content_type"] == (
             "decision"
         )
+
+
+class TestShadowPassOnlyAddsItsOwnKeyToAPromotedPrecedent:
+    """The shadow pass is harmless to a precedent row, and this pins why (#957).
+
+    ``shadow_classify_item`` overlays ``content_tags_shadow`` and nothing else,
+    keeps the row's clock, and the serving boundary strips that key. So unlike
+    ``worker enrich`` it needs no namespace skip: no served field of the row
+    changes. ``tag_evolution`` and ``domain_normalization`` never write a
+    document at all; they read shadow tags and emit candidate events.
+    """
+
+    def test_a_shadow_pass_leaves_every_served_field_alone(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.classify.shadow import shadow_classify_item
+        from trellis.retrieve.servable import strip_non_servable
+        from trellis.schemas.classification import SHADOW_TAGS_KEY
+
+        _promote(registry)
+        before = _document(registry)
+
+        outcome = shadow_classify_item(
+            NODE_ID,
+            classifier=_FixedClassifier(),
+            document_store=registry.knowledge.document_store,
+            vector_store=registry.knowledge.vector_store,
+        )
+
+        assert outcome.written is True
+        after = _document(registry)
+        assert SHADOW_TAGS_KEY in after["metadata"]
+        assert {k: v for k, v in after["metadata"].items() if k != SHADOW_TAGS_KEY} == (
+            before["metadata"]
+        )
+        assert after["content"] == before["content"]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["metadata"]["content_tags"]["content_type"] == "decision"
+
+        pack = PackBuilder(strategies=[_axis(registry, "keyword")]).build(
+            TITLE, limit_per_strategy=10
+        )
+        served = [i for i in strip_non_servable(pack.items) if i.item_id == NODE_ID]
+        assert served
+        assert SHADOW_TAGS_KEY not in served[0].metadata
 
 
 class TestReinstateRepairsAStrandedRow:
