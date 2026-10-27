@@ -1029,6 +1029,19 @@ def run_candidate_auto_promotion(
                     holdout_arm=holdout_arm,
                 )
             )
+        elif submission.get("status") == "already_promoted":
+            # The pre-scan reads a bounded window of promote events, so a
+            # precedent it missed reaches the submission, which skips a row
+            # that already landed intact. That is satisfied, not a failure.
+            outcomes.append(
+                CandidateAutoPromoteOutcome(
+                    candidate_id=candidate_id,
+                    disposition="already_promoted",
+                    reason=reason,
+                    entity_id=promotion.get("entity_id"),
+                    holdout_arm=holdout_arm,
+                )
+            )
         else:
             outcomes.append(
                 CandidateAutoPromoteOutcome(
