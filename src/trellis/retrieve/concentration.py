@@ -99,11 +99,9 @@ def parent_id_of(item_id: str, metadata: Mapping[str, Any] | None) -> str:
     # imports back into ``trellis.retrieve`` (the embed hook). At module
     # level this would make the two packages mutually importing — the same
     # cycle ``retrieve.file_context`` documents at its own deferred import.
-    from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR  # noqa: PLC0415
+    from trellis.ingest_corpus.models import chunk_parent_id  # noqa: PLC0415
 
-    if CHUNK_ID_SEPARATOR in item_id:
-        return item_id.split(CHUNK_ID_SEPARATOR, maxsplit=1)[0]
-    return item_id
+    return chunk_parent_id(item_id) or item_id
 
 
 def resolve_parent_id(item: PackItem) -> str:

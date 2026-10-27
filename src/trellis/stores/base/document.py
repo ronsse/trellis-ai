@@ -31,7 +31,11 @@ def chunk_id_like_pattern() -> str:
     four). Every ``#chunk-`` id written by production code is minted by
     :func:`trellis.ingest_corpus.sync.sync_records` (tests mint their own),
     so this is reachable only by a caller naming its own id — but it is
-    reachable, silently.
+    reachable, silently. The SQL pattern cannot test for digits, so it is
+    the wider of the two predicates: the Python readers
+    (:func:`trellis.ingest_corpus.models.is_chunk_doc_id`) match the minted
+    ``<parent>#chunk-<digits>`` shape and read ``notes#chunk-intro`` as a
+    document.
     """
     from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR  # noqa: PLC0415
 
