@@ -1823,6 +1823,109 @@ def test_the_policy_replay_prices_a_disclosed_pack_at_the_walk_charge(
     assert report.baseline.injected_tokens < report.counterfactual.injected_tokens
 
 
+def _disclosed_pack(
+    tmp_path: Path, *, helpful: list[str] | None = None
+) -> tuple[SQLiteEventLog, dict[str, Any], list[str]]:
+    """A real flat pack whose last two rows graduated disclosure demoted (#978).
+
+    Fourteen rows against the default of twelve bodies. Returns the log (the
+    pack and one feedback event naming ``helpful``, default the first body
+    and the last pointer), the payload and the ids served as pointers.
+    """
+    strategies = [
+        _axis_strategy(
+            "semantic",
+            [_sized_item(f"s{i}", 0.9 - i * 0.01, "semantic", 6) for i in range(14)],
+        )
+    ]
+    log = SQLiteEventLog(tmp_path / "events.db")
+    pack_id, payload = _build_logged(
+        log, strategies, PackBudget(max_items=50, max_tokens=1_000_000)
+    )
+    pointers = payload["disclosure"]["pointer_item_ids"]
+    assert pointers == ["s12", "s13"]
+    log.append(_gs_feedback(pack_id, helpful=helpful or ["s0", pointers[-1]]))
+    return log, payload, pointers
+
+
+def test_the_baseline_counts_a_disclosed_pack_s_pointers_as_pointers(
+    tmp_path: Path,
+) -> None:
+    """The as-served arm marked every row a body (#978).
+
+    A pack that served two rows as graduated-disclosure pointers reported
+    ``pointer_items_served=0`` and all fourteen under ``body_items_served``,
+    while the counterfactual arm of the same replay counted pointers as
+    pointers. ``disclosure.pointer_item_ids`` is the event's record of which.
+    """
+    log, payload, pointers = _disclosed_pack(tmp_path)
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.items == len(payload["injected_items"]) == 14
+    assert report.baseline.pointer_items_served == len(pointers) == 2
+    assert report.baseline.body_items_served == 12
+    # An empty policy disables graduation, so the counterfactual serves
+    # every row as a body; only the baseline reflects the served split.
+    assert report.counterfactual.pointer_items_served == 0
+    assert report.counterfactual.body_items_served == 14
+
+
+def test_a_helpful_item_served_only_as_a_pointer_adds_no_baseline_helpful_tokens(
+    tmp_path: Path,
+) -> None:
+    """A pointer delivers an id, not substance (the arm's own rule, #978).
+
+    ``s0`` carries a body and ``s13`` a pointer, and both are cited helpful.
+    Only the body's tokens are helpful tokens; the pointer's tokens stay in
+    the injected total and fall to unjudged-or-unhelpful, never helpful.
+    """
+    log, payload, _ = _disclosed_pack(tmp_path)
+    paid = {r["item_id"]: r["estimated_tokens"] for r in payload["injected_items"]}
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.helpful_tokens == paid["s0"]
+    assert report.baseline.helpful_tokens < paid["s0"] + paid["s13"]
+    assert report.baseline.injected_tokens == sum(paid.values())
+    assert report.baseline.unjudged_tokens == sum(paid.values()) - paid["s0"]
+
+
+def test_a_pointer_only_helpful_pack_has_zero_baseline_helpful_tokens(
+    tmp_path: Path,
+) -> None:
+    log, _, pointers = _disclosed_pack(tmp_path, helpful=["s12", "s13"])
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.helpful_tokens == 0
+    assert report.baseline.unjudged_tokens == report.baseline.injected_tokens
+    assert report.baseline.pointer_items_served == len(pointers)
+
+
+@pytest.mark.parametrize(
+    "disclosure",
+    [None, {}, {"mode": "graduated", "pointer_item_ids": 3}],
+    ids=["absent", "empty", "malformed"],
+)
+def test_a_pack_with_no_readable_pointer_list_keeps_an_all_body_baseline(
+    disclosure: object,
+) -> None:
+    """No record of a demotion is read as none, as the baseline always read it."""
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(3)])
+    if disclosure is not None:
+        pack.payload["disclosure"] = disclosure
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i2"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.pointer_items_served == 0
+    assert report.baseline.body_items_served == 3
+    assert report.baseline.helpful_tokens == 100
+
+
 def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
     tmp_path: Path,
 ) -> None:

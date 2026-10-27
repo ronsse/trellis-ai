@@ -161,8 +161,9 @@ class ReplayArm(TrellisModel):
     unhelpful_tokens: int = 0
     unjudged_tokens: int = 0
     useful_token_fraction: float | None = None
-    #: Items served with a full excerpt (equals ``items`` on the baseline
-    #: arm and whenever graduation is off).
+    #: Items served with a full excerpt (equals ``items`` whenever
+    #: graduation is off; on the baseline arm, ``items`` less the rows the
+    #: event recorded in ``disclosure.pointer_item_ids``).
     body_items_served: int = 0
     #: Items served as a one-line pointer instead of an excerpt.
     pointer_items_served: int = 0
@@ -464,8 +465,11 @@ def replay_pack_value(
             for c in candidates
             if c.included and c.verdict == "helpful"
         }
+        # What was served as a pointer delivered an id, not substance, so the
+        # baseline marks it the way ``_price`` marks the counterfactual's.
+        demoted = _served_pointer_ids(payload)
         baseline_served.extend(
-            (c, c.served_tokens, False) for c in candidates if c.included
+            (c, c.served_tokens, c.item_id in demoted) for c in candidates if c.included
         )
         served, ungraded = _price(candidates, max_tokens=max_tokens or 0, policy=policy)
         counter_served.extend(served)
@@ -1137,6 +1141,24 @@ def _walk_budget(payload: Mapping[str, Any]) -> int | None:
     if raw is None:
         raw = payload.get("budget_max_tokens")
     return _int_or_none(raw)
+
+
+def _served_pointer_ids(payload: Mapping[str, Any]) -> frozenset[str]:
+    """Ids this pack served as one-line pointers, from ``disclosure.pointer_item_ids``.
+
+    The as-served arm is read from the event, not re-run, so the event is its
+    only record of which rows carried a body. An absent or ``{}`` block means
+    graduation never ran; a block whose ``pointer_item_ids`` is not a list is
+    not recognised and reads as no pointers, which is how the baseline was
+    priced before the key was read at all.
+    """
+    disclosure = payload.get("disclosure")
+    raw = (
+        disclosure.get("pointer_item_ids") if isinstance(disclosure, Mapping) else None
+    )
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(p for p in raw if isinstance(p, str) and p)
 
 
 def _disclosure_repriced(payload: Mapping[str, Any]) -> bool:
