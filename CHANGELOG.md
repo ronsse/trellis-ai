@@ -1019,6 +1019,25 @@ All notable changes to Trellis will be documented in this file.
   audited and left alone: shadow overlays only `content_tags_shadow`, which is
   never served, and the other two write events, not documents.
 
+- **A refused precedent supersede is `target_protected`, not a `stale_recheck`
+  or a missing target (#994).** `mark_document_superseded` returns the reason
+  it did not apply (`None` when it did) instead of a bool, and a protected
+  `precedent://learning/...` target now reports `target_protected` where it
+  used to read as a vanished one. The successor's `reconciliation` marker and
+  the `RECONCILE_DEGRADED` event both say so, and the marker is not
+  `stale_recheck` because a re-judge would be refused again. The session
+  capture sweep maps it to `supersede_target_protected` rather than
+  `supersede_target_missing`. The reason is not a judge failure
+  (`judge_failure=false`), and a protected target still emits no
+  `MEMORY_OP_JUDGED`: that stream pairs a verdict with its outcome, and a
+  verdict that never took effect has none. `precedent_sync_health` also
+  breaks a same-microsecond tie toward the failure, lists a failed reinstate
+  older than a capped `precedent.demoted` read as `uncertain` rather than
+  unresolved (the dropped demote may have superseded it), and its vector
+  warning now says semantic retrieval withholds the demoted snapshot, which is
+  what the collect seam does, not that it serves it. A test id now carries
+  markup so the escaped-id CLI test discriminates.
+
 - **`promote-learning`: re-running a file after a refused run no longer
   re-promotes the rows that landed (#983).** A mixed run exits `2` /
   `refused` and the next move is to fix the bad row and run the same file

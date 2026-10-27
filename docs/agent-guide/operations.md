@@ -1545,9 +1545,14 @@ events into `precedent_sync` and warns, naming the precedents, until the
 latest lifecycle event for each is no longer a failed reinstatement: a later
 clean reinstate repairs it (re-issuing this command re-stamps a withheld
 document row and re-syncs the vector row too), and a later demotion
-supersedes it. The window bounds the read, so an unrepaired failure stops
-warning when its event ages out. A vector-only failure is refused on re-issue
-as `target_not_demoted`, so the warning names no repair for it.
+supersedes it. A tie at one microsecond resolves toward the failure. The
+window bounds the read, so an unrepaired failure stops warning when its event
+ages out. When the demote scan hit its cap the oldest demotes are dropped, so
+a failed reinstate older than the oldest one kept is listed as `uncertain`
+(a dropped demotion may have superseded it) rather than as unresolved. A
+vector-only failure leaves the vector row's snapshot at `demoted`, which the
+collect seam withholds, and it is refused on re-issue as `target_not_demoted`,
+so the warning names no repair for it.
 
 Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/
 over-long reason, a missing target, a non-precedent target, a
