@@ -306,13 +306,17 @@ class EventType(StrEnum):
     #: :class:`~trellis.mcp.reconcile.ReconcileFallbackReason` value —
     #: a closed vocabulary, so a group-by over it is exhaustive.
     #: ``judge_failure`` is the boolean an operator actually wants:
-    #: ``reason in JUDGE_FAILURE_REASONS``, i.e. false for the one
-    #: reason that is a *correctly handled* race
-    #: (``stale_recheck``) rather than a degradation — the same split
-    #: ``sessions_skipped_empty`` / ``sessions_sampled_out`` draws for
-    #: capture (#332). ``decision`` is the fallback verdict (always
-    #: ``"add"`` today) and is carried rather than assumed so a later
-    #: fallback policy is visible in the record instead of in the reader.
+    #: ``reason in JUDGE_FAILURE_REASONS``, i.e. false for the two
+    #: reasons that are a usable verdict that was not applied rather
+    #: than a degradation: ``stale_recheck``, a *correctly handled*
+    #: race, and ``target_protected``, a SUPERSEDE verdict refused
+    #: because its target is a promoted precedent's row (#994) — the
+    #: same split ``sessions_skipped_empty`` / ``sessions_sampled_out``
+    #: draws for capture (#332). ``decision`` is the fallback verdict
+    #: (always ``"add"`` today) and is carried rather than assumed so a
+    #: later fallback policy is visible in the record instead of in the
+    #: reader; ``target_protected`` implies the verdict that was
+    #: refused was ``supersede``.
     #: ``subject_ref_*`` point at the memory the reconciliation was
     #: about, matching :attr:`MEMORY_OP_JUDGED`'s join key.
     #:

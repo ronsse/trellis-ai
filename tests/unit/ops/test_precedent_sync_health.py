@@ -63,6 +63,26 @@ def _demote(log: SQLiteEventLog, target: str, *, hours_ago: float) -> None:
     _emit(log, EventType.PRECEDENT_DEMOTED, target, hours_ago=hours_ago)
 
 
+def _emit_at(
+    log: SQLiteEventLog,
+    event_type: EventType,
+    target: str,
+    at: datetime,
+    **flags: Any,
+) -> None:
+    """Like ``_emit`` with an exact stamp, so two events can share a microsecond."""
+    log.append(
+        Event(
+            event_type=event_type,
+            source="mutation_executor",
+            entity_id=target,
+            entity_type="precedent",
+            occurred_at=at,
+            payload={"target_id": target, "reason": "fixture", **flags},
+        )
+    )
+
+
 class TestUnresolvedFailures:
     def test_a_failed_document_restamp_is_listed_and_warns(
         self, log: SQLiteEventLog
@@ -220,6 +240,147 @@ class TestRepairedAndSuperseded:
         assert summarize_precedent_sync(log, days=1).document_unresolved == [ALPHA]
 
 
+class TestSameMicrosecondTies:
+    """Two events at one stamp resolve toward the failure, in either arrival order.
+
+    Un-fixed, the order was whatever the two scans were concatenated in, which
+    put every demote after every reinstate: a tie read as "demoted", an
+    all-clear. The test seeds both arrival orders because the event log's own
+    tie order is not part of the contract being pinned.
+    """
+
+    _TICK = datetime.now(tz=UTC) - timedelta(hours=2)
+
+    def test_a_failed_reinstate_beats_a_demote_at_the_same_stamp(
+        self, log: SQLiteEventLog
+    ) -> None:
+        _emit_at(
+            log,
+            EventType.PRECEDENT_REINSTATED,
+            ALPHA,
+            self._TICK,
+            document_sync_failed=True,
+        )
+        _emit_at(log, EventType.PRECEDENT_DEMOTED, ALPHA, self._TICK)
+        _emit_at(log, EventType.PRECEDENT_DEMOTED, BETA, self._TICK)
+        _emit_at(
+            log,
+            EventType.PRECEDENT_REINSTATED,
+            BETA,
+            self._TICK,
+            document_sync_failed=True,
+        )
+
+        sync = summarize_precedent_sync(log, days=1)
+
+        assert sync.document_unresolved == [ALPHA, BETA]
+
+    def test_a_failed_reinstate_beats_a_clean_one_at_the_same_stamp(
+        self, log: SQLiteEventLog
+    ) -> None:
+        _emit_at(log, EventType.PRECEDENT_REINSTATED, ALPHA, self._TICK)
+        _emit_at(
+            log,
+            EventType.PRECEDENT_REINSTATED,
+            ALPHA,
+            self._TICK,
+            vector_sync_failed=True,
+        )
+        _emit_at(
+            log,
+            EventType.PRECEDENT_REINSTATED,
+            BETA,
+            self._TICK,
+            vector_sync_failed=True,
+        )
+        _emit_at(log, EventType.PRECEDENT_REINSTATED, BETA, self._TICK)
+
+        sync = summarize_precedent_sync(log, days=1)
+
+        assert sync.vector_unresolved == [ALPHA, BETA]
+
+
+class TestCappedDemoteRead:
+    """A truncated demote scan cannot vouch for a failure older than its horizon.
+
+    Reads are newest-first, so the cap drops the oldest demotes. Un-fixed, the
+    failure below read as unresolved although the dropped demote had superseded
+    it, which is the false alarm this guards, and it is the cheaper of the two
+    errors only because the report is ``warn`` on truncation already.
+    """
+
+    def _seed(self, log: SQLiteEventLog) -> None:
+        # ALPHA: failed reinstate, then the demote that supersedes it. That
+        # demote is the oldest of three, so a cap of two drops it.
+        _reinstate(log, ALPHA, hours_ago=10, document_sync_failed=True)
+        _demote(log, ALPHA, hours_ago=9)
+        # Two newer demotes of other precedents fill the cap.
+        _demote(log, BETA, hours_ago=3)
+        _demote(log, "precedent://learning/gamma", hours_ago=2)
+
+    def test_the_failure_is_uncertain_not_unresolved(self, log: SQLiteEventLog) -> None:
+        self._seed(log)
+
+        sync = summarize_precedent_sync(log, days=1, limit=2)
+
+        assert sync.scan.truncated is True
+        assert sync.document_unresolved == []
+        assert sync.uncertain == [ALPHA]
+
+    def test_the_uncertain_precedent_is_named_as_such_in_a_warn_reason(
+        self, log: SQLiteEventLog
+    ) -> None:
+        self._seed(log)
+
+        report = summarize_backend_health(log, days=1, limit=2)
+
+        assert report.status == "warn"
+        assert report.precedent_sync.uncertain == [ALPHA]
+        uncertain = [r for r in report.reasons if "ruled out" in r]
+        assert len(uncertain) == 1
+        assert ALPHA in uncertain[0]
+        # Not claimed as withheld: nothing says the axis is still withholding.
+        assert not any("still withholds" in r for r in report.reasons)
+
+    def test_a_failure_newer_than_the_horizon_is_judged_exactly(
+        self, log: SQLiteEventLog
+    ) -> None:
+        """Every demote since the failure was kept, so there is no doubt."""
+        _demote(log, BETA, hours_ago=8)
+        _demote(log, "precedent://learning/gamma", hours_ago=7)
+        _reinstate(log, ALPHA, hours_ago=2, document_sync_failed=True)
+
+        sync = summarize_precedent_sync(log, days=1, limit=2)
+
+        assert sync.scan.truncated is True
+        assert sync.document_unresolved == [ALPHA]
+        assert sync.uncertain == []
+
+    def test_a_visible_superseding_demote_still_resolves_an_old_failure(
+        self, log: SQLiteEventLog
+    ) -> None:
+        """Truncation only matters for a demote that was dropped."""
+        _reinstate(log, ALPHA, hours_ago=10, document_sync_failed=True)
+        _demote(log, ALPHA, hours_ago=4)
+        _demote(log, BETA, hours_ago=3)
+
+        sync = summarize_precedent_sync(log, days=1, limit=2)
+
+        assert sync.scan.truncated is True
+        assert sync.document_unresolved == []
+        assert sync.uncertain == []
+
+    def test_an_uncapped_read_never_reports_uncertainty(
+        self, log: SQLiteEventLog
+    ) -> None:
+        self._seed(log)
+
+        sync = summarize_precedent_sync(log, days=1)
+
+        assert sync.uncertain == []
+        assert sync.document_unresolved == []
+
+
 class TestWindowAndCoverage:
     def test_an_event_outside_the_window_is_not_read(self, log: SQLiteEventLog) -> None:
         _reinstate(log, ALPHA, hours_ago=72, document_sync_failed=True)
@@ -282,3 +443,64 @@ class TestReasonText:
         assert "(+3 more)" in reason
         assert "fixture-4" in reason
         assert "fixture-5" not in reason
+
+
+class TestVectorReasonWording:
+    """The vector warning says what the collect seam does with the snapshot.
+
+    A vector row whose re-stamp failed still carries ``lifecycle.state ==
+    "demoted"``. ``SemanticSearch`` spreads that snapshot into the item's
+    metadata and ``partition_demoted`` withholds it at the collect seam, so a
+    vector-only failure under-serves the precedent. The first wording said
+    semantic retrieval "still serves the pre-reinstate snapshot", the opposite
+    of that (#994).
+    """
+
+    def test_a_demoted_vector_snapshot_is_withheld_at_the_collect_seam(
+        self, tmp_path: Path
+    ) -> None:
+        """The premise the wording rests on, run rather than read."""
+        from trellis.retrieve.lifecycle import DEMOTED_REJECTION_REASON
+        from trellis.retrieve.pack_builder import PackBuilder
+        from trellis.retrieve.strategies import SemanticSearch
+        from trellis.schemas.pack import PackBudget
+        from trellis.stores.sqlite.vector import SQLiteVectorStore
+
+        def embed(_text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        vectors = SQLiteVectorStore(tmp_path / "vectors.db")
+        try:
+            vectors.upsert(
+                "snapshot-demoted",
+                [1.0, 0.0, 0.0],
+                {"content": "fixture gateway note", "lifecycle": {"state": "demoted"}},
+            )
+            vectors.upsert(
+                "snapshot-current",
+                [1.0, 0.0, 0.0],
+                {"content": "fixture gateway note", "lifecycle": {"state": "current"}},
+            )
+            builder = PackBuilder(
+                strategies=[SemanticSearch(vectors, embedding_fn=embed)]
+            )
+            pack = builder.build(
+                intent="fixture gateway note",
+                budget=PackBudget(max_items=10, max_tokens=100_000),
+            )
+        finally:
+            vectors.close()
+
+        assert [i.item_id for i in pack.items] == ["snapshot-current"]
+        assert [
+            (r.item_id, r.reason) for r in pack.retrieval_report.rejected_items
+        ] == [("snapshot-demoted", DEMOTED_REJECTION_REASON)]
+
+    def test_the_reason_says_withheld_and_not_served(self, log: SQLiteEventLog) -> None:
+        _reinstate(log, ALPHA, hours_ago=2, vector_sync_failed=True)
+
+        (reason,) = precedent_sync_reasons(summarize_precedent_sync(log, days=1))
+
+        assert "still withholds" in reason
+        assert "still serves" not in reason
+        assert "pre-reinstate" not in reason

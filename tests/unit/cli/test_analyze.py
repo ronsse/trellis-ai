@@ -2645,7 +2645,10 @@ class TestAnalyzeHealthServingBuilds:
 class TestAnalyzeHealthPrecedentSync:
     """``analyze health`` reports reinstatements whose re-stamp did not land."""
 
-    _ID = "precedent://learning/fixture-alpha"
+    #: Markup- and emoji-shaped on purpose (#994). Rich deletes ``[x]`` as a
+    #: style tag and rewrites ``:fire:`` to a glyph, so an id without them cannot
+    #: tell an escaped reason line from a raw one.
+    _ID = "precedent://learning/fixture-[x]-:fire:"
 
     def _reinstate(self, registry: StoreRegistry, **flags: bool) -> None:
         registry.operational.event_log.emit(
