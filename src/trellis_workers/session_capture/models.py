@@ -400,8 +400,9 @@ class CaptureReport:
     #: exists to remove.
     candidates_reconciled_supersede: int = 0
     #: SUPERSEDE verdicts whose SCD-2 stale-mark could not be applied after
-    #: the write seam ran — the target doc had vanished, or the successor
-    #: never landed. The bool
+    #: the write seam ran — the target doc had vanished, the target was a
+    #: promoted precedent's row (never stamped, #994), or the successor never
+    #: landed. What
     #: :func:`~trellis.mcp.reconcile.mark_document_superseded` returns used to
     #: be discarded here, so a supersession that did not happen was recorded
     #: as one that did (#407). Applied count is

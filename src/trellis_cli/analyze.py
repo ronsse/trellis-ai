@@ -669,6 +669,7 @@ def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
         f"{sync.reinstatements} reinstatement(s) reported a failed re-stamp, "
         f"{len(sync.document_unresolved)} document / "
         f"{len(sync.vector_unresolved)} vector still unresolved"
+        + (f", {len(sync.uncertain)} uncertain" if sync.uncertain else "")
     )
 
 

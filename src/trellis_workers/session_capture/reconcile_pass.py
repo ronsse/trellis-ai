@@ -53,15 +53,16 @@ from trellis.core.hashing import content_hash
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
-    MARKER_STALE,
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
     ReconcileCandidate,
     ReconcileDecision,
+    ReconcileFallbackReason,
     configured_model_id,
     emit_reconcile_verdict,
     judge_reconcile,
     mark_document_superseded,
+    marker_for_fallback,
     reconcile_timeout_seconds,
 )
 
@@ -241,7 +242,13 @@ def apply_supersessions(
     dropped supersedes nothing) and the target's existence is
     ``mark_document_superseded``'s return, which is *read*, counted on
     ``CaptureReport.supersessions_failed`` and warned about rather than
-    discarded (#407).
+    discarded (#407). The warning's ``kind`` follows the reason returned: a
+    vanished target is ``supersede_target_missing``, and a promoted
+    precedent's row, which the seam refuses to stamp, is
+    ``supersede_target_protected`` (#994). The sweep's own candidates come
+    from :func:`_load_existing`, which reads only the capture id prefix, so
+    the second is not reachable from a sweep today; it is mapped here so a
+    wider loader cannot report a protected target as missing.
     """
     for candidate in written:
         match_id = candidate.supersedes_doc_id
@@ -256,21 +263,29 @@ def apply_supersessions(
                 report, "supersede_successor_missing", match_id, candidate.doc_id
             )
             continue
-        if mark_document_superseded(
+        refusal = mark_document_superseded(
             doc_store,
             old_doc_id=match_id,
             new_doc_id=candidate.doc_id,
             vector_store=vector_store,
-        ):
+        )
+        if refusal is None:
             continue
-        # mark_document_superseded logs the miss; the report is what an
+        # mark_document_superseded logs the refusal; the report is what an
         # operator reading the sweep sees, and the successor must stop
         # claiming a supersession that did not happen.
-        _record_supersede_failure(
-            report, "supersede_target_missing", match_id, candidate.doc_id
+        kind = (
+            "supersede_target_protected"
+            if refusal is ReconcileFallbackReason.TARGET_PROTECTED
+            else "supersede_target_missing"
         )
+        _record_supersede_failure(report, kind, match_id, candidate.doc_id)
         _withdraw_supersede_claim(
-            doc_store, candidate.doc_id, successor, vector_store=vector_store
+            doc_store,
+            candidate.doc_id,
+            successor,
+            reason=refusal,
+            vector_store=vector_store,
         )
 
 
@@ -289,13 +304,17 @@ def _withdraw_supersede_claim(
     doc_id: str,
     stored: dict[str, Any],
     *,
+    reason: ReconcileFallbackReason,
     vector_store: VectorStore | None,
 ) -> None:
     """Strip an unapplied ``supersedes_doc_id`` off a written successor.
 
-    The marker is rewritten to ``stale_recheck`` — the same marker
-    ``mcp.server`` uses for a verdict it declined to apply, and the same
-    queue a later reconciliation sweep reads. Metadata-only, so
+    The marker is rewritten to the one *reason* maps to — ``stale_recheck`` for
+    a vanished target, ``target_protected`` for a precedent's row — through the
+    same :func:`~trellis.mcp.reconcile.marker_for_fallback` ``mcp.server``
+    uses for a verdict it declined to apply. ``stale_recheck`` is also the
+    queue a later reconciliation sweep reads, which is why a protected target
+    is not filed there: re-judging it would be refused again. Metadata-only, so
     ``preserve_updated_at`` (#397): withdrawing a claim is not a modification
     of the memory and must not reset its recency clock.
     """
@@ -304,7 +323,7 @@ def _withdraw_supersede_claim(
         for k, v in (stored.get("metadata") or {}).items()
         if k != SUPERSEDES_DOC_KEY
     }
-    metadata[RECONCILIATION_KEY] = MARKER_STALE
+    metadata[RECONCILIATION_KEY] = marker_for_fallback(reason)
     put_document(
         doc_store,
         vector_store,
