@@ -247,12 +247,16 @@ NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
 #: ``MUTATION_EXECUTED`` is emitted from exactly one place
 #: (``mutate/executor.py``), so a surface whose success path is not a
 #: governed mutation cannot clear under that rule alone. ``mcp:save_memory``
-#: is the case in point: its only ``MUTATION_EXECUTED`` comes from
-#: ``_run_memory_extraction``, gated on ``TRELLIS_ENABLE_MEMORY_EXTRACTION``
-#: which defaults to ``False``, and which returns early emitting nothing when
-#: extraction yields no drafts. Its unconditional success signal is
-#: ``MEMORY_STORED`` — emitted by every ``save_memory`` path that persists a
-#: doc, and described in that emitter as "a hard requirement".
+#: was the case in point (#461): its ``MUTATION_EXECUTED`` then came only from
+#: the extraction stage, gated on ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` which
+#: defaults to ``False``, and which emits nothing when extraction yields no
+#: drafts. That is no longer the whole picture: ``save_memory`` now also
+#: stores each new memory through an ``evidence.ingest`` command, so a save
+#: that persists a document carries a ``MUTATION_EXECUTED`` of its own,
+#: extraction on or off. The entry stays, because ``MEMORY_STORED`` is still
+#: the tool's explicit success signal — emitted by every ``save_memory`` path
+#: that persists a doc, described in that emitter as "a hard requirement", and
+#: independent of the executor's audit emit.
 #:
 #: The event must carry a ``requested_by`` naming the surface, because
 #: ``Event.source`` is too coarse to attribute one: ``MEMORY_STORED`` has

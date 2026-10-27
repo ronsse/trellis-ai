@@ -327,6 +327,30 @@ class EventType(StrEnum):
     #: degraded reconciliation into a failed write.
     RECONCILE_DEGRADED = "reconcile.degraded"
 
+    #: Emitted by the MCP server when memory extraction changes state while
+    #: ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` is on (#987): ``unavailable`` when
+    #: no extractor could be built, ``available`` on the first successful
+    #: build in a process and on recovery. One row per **state change**, never
+    #: per write; a persistent ``unavailable`` is refreshed once a day so it
+    #: outlives the health window. A flag-off process writes nothing.
+    #:
+    #: It is a state event, unlike its siblings
+    #: (:attr:`CLASSIFICATION_DEGRADED`, :attr:`RECONCILE_DEGRADED`, which count
+    #: degraded operations), because the fault is a missing capability and not
+    #: a failed call: no extraction was attempted, so :attr:`EXTRACTION_FAILED`
+    #: has nothing to say, and no write was refused, so :attr:`WRITE_REJECTED`
+    #: would count a rejection the save never had. The old ``info`` log line
+    #: was invisible at the default ``TRELLIS_LOG_LEVEL``.
+    #:
+    #: Payload schema (all keys always present): ``{state, reason,
+    #: error_type}``. ``state`` is ``"available"`` or ``"unavailable"``.
+    #: ``reason`` is ``"no_llm_client"`` or ``"build_failed"`` for
+    #: ``unavailable`` and ``None`` for ``available``. ``error_type`` is an
+    #: exception class name for ``build_failed`` and ``None`` otherwise, never
+    #: a message. Read by :mod:`trellis.ops.memory_extraction_health` and
+    #: surfaced in ``trellis analyze health``.
+    MEMORY_EXTRACTION_STATE = "memory_extraction.state"
+
     # Empirical-observation ingestion — see adr-observation-entity-type.md
     # and Item 1 Phase 1 of plan-self-improvement-program.md. Emitted by
     # the ObservationHandler / MeasurementHandler when a new Observation
