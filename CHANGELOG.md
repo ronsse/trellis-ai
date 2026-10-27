@@ -978,10 +978,9 @@ All notable changes to Trellis will be documented in this file.
   #359, so the two arms agree on what a pointer is. On a window that cites
   pointers as helpful the baseline's `useful_token_fraction` is lower than it
   read, so `fraction_delta` reads higher against it. An absent, empty or
-  non-list block reads as no pointers, as before. Not changed:
-  `helpful_items_total` and `helpful_bodies_withheld` still count a helpful
-  row the baseline served as a pointer, and a window spanning #976's deploy
-  still mixes the two disclosed-pack pricings (see the `walk_tokens` entry).
+  non-list block reads as no pointers, as before. Not changed: a window
+  spanning #976's deploy still mixes the two disclosed-pack pricings (see the
+  `walk_tokens` entry).
 
 - **`analyze replay`: "What the policy cost" is a delta against the baseline
   it prints above it, and index-mode packs read as pointers (#993).**
@@ -991,8 +990,7 @@ All notable changes to Trellis will be documented in this file.
   rows were pointers, one cited helpful) printed `body withheld 1/2` beneath two
   arms that read the same. It now counts a helpful serving only when the
   as-served pack delivered it as a body and the policy turns it into a pointer,
-  as its docstring always said, so that replay reads `0`. This supersedes the
-  "not changed" sentence of the #978 entry above. The new
+  as its docstring always said, so that replay reads `0`. The new
   `helpful_bodies_served` (additive, in `--format json`) is the denominator the
   CLI line now prints, the helpful servings the baseline delivered as a body;
   `helpful_items_total` keeps counting every cited-helpful serving, body or
@@ -1005,7 +1003,12 @@ All notable changes to Trellis will be documented in this file.
   counterfactual leaves such a pack all pointers and exempt from graduation, as
   the builder does, so a null policy still changes nothing. On a window with
   index packs the baseline's `useful_token_fraction` drops by their helpful
-  tokens, which were counted as bodies. Pointer exclusion from
+  tokens, which were counted as bodies. The replay baseline therefore no longer
+  matches `analyze value` on the same window: both judge the same servings, but
+  `analyze value` still credits a cited pointer at its pointer cost.
+  `--excerpt-max-chars` no longer re-prices an index pack's rows, because an
+  index line carries no excerpt to cut; before, a cap below the line width
+  reported a saving the builder would not make. Pointer exclusion from
   `unhelpful_tokens`, introduced with #978 and unchanged here, is now pinned by
   a test: a pointer cited unhelpful moves from `unhelpful_tokens` to
   `unjudged_tokens`, because the caller never saw its excerpt. A window

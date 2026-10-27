@@ -47,8 +47,11 @@ Four limits, none of them hideable:
 The verdict join is :func:`~trellis.retrieve.pack_value.collect_pack_verdicts`
 and the event join is
 :func:`~trellis.learning.pack_observations.join_pack_feedback` — the same
-two functions ``analyze value`` uses, so the baseline this module prints
-cannot drift from the one that command prints.
+two functions ``analyze value`` uses, so both commands judge the same
+servings. They do not price them alike: this baseline counts a disclosure
+pointer, and every row of an index pack, as a pointer that delivers no
+helpful tokens, while ``analyze value`` credits a cited pointer at its
+pointer cost.
 """
 
 from __future__ import annotations
@@ -352,7 +355,8 @@ def _price(
 
     def body_tokens(candidate: _Candidate) -> int:
         chars = _chars_from_tokens(candidate.walk_tokens)
-        if policy.excerpt_max_chars is not None:
+        # An index line carries no excerpt, so a width cap has nothing to cut.
+        if policy.excerpt_max_chars is not None and not index_pack:
             chars = min(chars, policy.excerpt_max_chars)
         return _tokens_from_chars(chars)
 

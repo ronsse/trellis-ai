@@ -2156,6 +2156,36 @@ def test_an_index_pack_stays_all_pointers_under_a_graduation_policy(
     assert report.helpful_bodies_withheld == 0
 
 
+@pytest.mark.parametrize("refill", [False, True])
+def test_an_excerpt_cap_leaves_an_index_pack_priced_as_recorded(
+    tmp_path: Path, refill: bool
+) -> None:
+    """An index line has no excerpt, so a width cap cannot shrink it (#997)."""
+    log, _, _ = _index_pack(tmp_path, helpful=["s0"])
+
+    report = replay_pack_value(
+        log, policy=ReplayPolicy(excerpt_max_chars=10, refill=refill)
+    )
+
+    assert report.counterfactual.items == report.baseline.items
+    assert report.counterfactual.injected_tokens == report.baseline.injected_tokens
+    assert report.token_delta == 0.0
+
+
+def test_a_truthy_non_boolean_index_mode_is_not_an_index_pack() -> None:
+    """The check is ``is True``, as attribution's is, never truthiness (#993)."""
+    log = _FakeEventLog()
+    pack = _pack_event("pack-0", [(f"i{k}", 100) for k in range(3)])
+    pack.payload["index_mode"] = "true"
+    log.append(pack)
+    log.append(_feedback_event("pack-0", ["i0"]))
+
+    report = replay_pack_value(log, policy=ReplayPolicy())
+
+    assert report.baseline.body_items_served == 3
+    assert report.baseline.pointer_items_served == 0
+
+
 def test_a_flat_pack_is_not_read_as_an_index_pack(tmp_path: Path) -> None:
     """``index_mode=False`` on the event keeps the all-body reading (#993)."""
     log = _FakeEventLog()
