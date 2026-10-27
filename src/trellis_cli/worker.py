@@ -52,6 +52,7 @@ from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.vector_metadata import (
     resolve_vector_store,
 )
@@ -1588,7 +1589,9 @@ def enrich_cmd(
     ``metadata.content_tags`` is missing or empty, or when it has never been
     through this path — ``content_tags.classified_mode != "enrichment"``.
     ``--reenrich`` takes the already-enriched too. The newest ``--limit``
-    documents matching the predicate are enriched.
+    documents matching the predicate are enriched. A promoted precedent's
+    document row is never a candidate, whatever its tags say
+    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`).
 
     This used to select on ``content_tags.tag_confidence``, which does not
     work and cannot: that key is not part of ``ContentTags`` and is never
@@ -1733,6 +1736,14 @@ def _select_enrichment_candidates(
     )
     candidates: list[dict[str, Any]] = []
     for doc in scanned:
+        if is_promoted_precedent_document(doc.get("doc_id")):
+            # A promoted precedent's tags belong to its promote handler: this
+            # path would overwrite its ``document_form`` with the model's guess
+            # and merge LLM facets into the ``decision`` tag set that makes the
+            # row retrievable by intent, reopening the exemption the noise pass,
+            # retention and classify refresh already honour. Skipped before
+            # anything is read from the row, and so before any LLM call.
+            continue
         metadata = doc.get("metadata") or {}
         content_tags = metadata.get("content_tags") or {}
         if not content_tags:
