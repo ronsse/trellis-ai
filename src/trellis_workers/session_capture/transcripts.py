@@ -40,10 +40,19 @@ Claude Code writes one JSONL file per session under
   duration and two flags survive. See
   :mod:`~trellis_workers.session_capture.outcome`.
 
+* **Hook feedback** is read for one fact, *when* it arrived: a user-record
+  text block that opens like a Stop or SubagentStop hook's feedback is
+  counted, and the first one is dated by the tool calls made before it. The
+  text is matched and dropped. It is what lets the pack holdout tell a
+  retrieval made before the work from one the hook asked for at the end.
+  Claude Code writes the hook's feedback as a ``user`` record with
+  ``isMeta: true`` and bare-string content opening ``Stop hook feedback:``,
+  which :data:`HOOK_FEEDBACK_PATTERN` matches.
+
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
-flags, the pack ids the session was served, the session's outcome as counts,
-and structural signals.
+flags, the pack ids the session was served, where the first retrieval sat
+among the calls, the session's outcome as counts, and structural signals.
 """
 
 from __future__ import annotations
@@ -107,6 +116,22 @@ _PACK_LABEL = "**pack_id:**"
 #: The whole header line. A pack id is a ULID: 26 characters of Crockford
 #: base32, which has no ``I``, ``L``, ``O`` or ``U``.
 _PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
+
+
+#: What a Stop or SubagentStop hook's feedback message opens with, matched
+#: at the start of a user-record text block. Checked on 2026-10-27 against
+#: the record Claude Code writes: a ``user`` record, ``isMeta: true``, whose
+#: bare-string content opens ``Stop hook feedback:``. The harness also writes
+#: a ``system`` record (``subtype: stop_hook_summary``) that this parser does
+#: not read; the user record is the one the model sees. When the pattern
+#: matches nothing the digest counts zero hook messages and every first
+#: retrieval reads as "before any hook feedback"; the holdout reports how
+#: many units saw any
+#: (``pre_treatment_hook_feedback_seen``) so that failure is visible, not
+#: silent, which is how a future change to the harness's wording would show.
+HOOK_FEEDBACK_PATTERN = re.compile(
+    r"(?:Stop|SubagentStop)\s+hook\s+feedback\b", re.IGNORECASE
+)
 
 
 def discover_sessions(root: Path) -> list[Path]:
@@ -330,10 +355,25 @@ def _collect_pack_ids(digest: SessionDigest, content: Any) -> None:
         text = _result_text(block.get("content"))
         pack_id = _header_pack_id(text) if text is not None else None
         if pack_id is not None:
+            if not digest.pack_ids:
+                # The unit's treatment is its first pack, so its position
+                # is where the first retrieval sat.
+                digest.record_first_retrieval(use_id)
             if pack_id not in digest.pack_ids:
                 digest.pack_ids.append(pack_id)
         elif text is None or _PACK_LABEL in text:
             digest.pack_ids_unparsed += 1
+
+
+def _collect_hook_feedback(digest: SessionDigest, texts: list[str]) -> None:
+    """Count the text blocks in *texts* that open like hook feedback.
+
+    Only ``text`` blocks are offered, so a tool result that quotes the
+    phrase is never counted. Nothing but the count and its position is kept.
+    """
+    for text in texts:
+        if HOOK_FEEDBACK_PATTERN.match(text):
+            digest.record_hook_feedback()
 
 
 def _add_turns(
@@ -395,7 +435,9 @@ def _handle_record(
         for use_id in errored_ids:
             digest.mark_tool_result(use_id, errored=True)
         _collect_pack_ids(digest, content)
-        tally.user(record, content, _extract_text(content))
+        texts = _extract_text(content)
+        _collect_hook_feedback(digest, texts)
+        tally.user(record, content, texts)
     elif record_type == _TYPE_ASSISTANT:
         _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)

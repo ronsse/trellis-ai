@@ -1330,12 +1330,15 @@ def _pack_session(
     write_transcript(path, records)
 
 
-def _joins(registry: MagicMock, *, outcome: bool = False) -> dict[str, list[dict]]:
+def _joins(
+    registry: MagicMock, *, outcome: bool = False, timing: bool = False
+) -> dict[str, list[dict]]:
     """Every join event's payload, per session, oldest first.
 
-    The session outcome rides the same payload. These tests are about pack
-    ids and retrieval counts, so it is left out unless *outcome* asks for
-    it; :class:`TestSessionOutcomeJoin` asserts it.
+    The session outcome and the retrieval timing ride the same payload.
+    These tests are about pack ids and retrieval counts, so each is left out
+    unless *outcome* or *timing* asks for it; :class:`TestSessionOutcomeJoin`
+    and :class:`TestRetrievalTimingJoin` assert them.
     """
     joins: dict[str, list[dict]] = {}
     for event in registry.operational.event_log.get_events(
@@ -1344,6 +1347,8 @@ def _joins(registry: MagicMock, *, outcome: bool = False) -> dict[str, list[dict
         payload = dict(event.payload)
         if not outcome:
             payload.pop("outcome", None)
+        if not timing:
+            payload.pop("retrieval_timing", None)
         joins.setdefault(event.entity_id, []).append(payload)
     return joins
 
@@ -1840,3 +1845,98 @@ class TestSessionOutcomeJoin:
         old, new = _joins(registry, outcome=True)["sess-worked-0001"]
         assert "outcome" not in old
         assert new == {**_join([], results=0), "outcome": WORKED_OUTCOME}
+
+
+class TestRetrievalTimingJoin:
+    """The join carries where the first retrieval sat, for the pack holdout.
+
+    It is part of the payload the "write only on a difference" rule
+    compares, so a join an older build wrote, with no timing, is written
+    again by the session's next parse and by no other.
+    """
+
+    @staticmethod
+    def _hooked_session() -> list[dict]:
+        """One call, a hook's feedback, then the first retrieval."""
+        return [
+            user_turn("summarise the readme", "sess-timed-0001"),
+            assistant_tools(("Bash", "b-1"), session_id="sess-timed-0001"),
+            pack_result_turn("b-1", "ok", session_id="sess-timed-0001"),
+            user_turn(
+                "Stop hook feedback:\n[fake-hook]: retrieve context.",
+                "sess-timed-0001",
+            ),
+            assistant_tools(
+                ("mcp__trellis__get_context", "u-1"), session_id="sess-timed-0001"
+            ),
+            pack_result_turn(
+                "u-1",
+                mcp_envelope(pack_markdown(PACK_IDS[0])),
+                session_id="sess-timed-0001",
+            ),
+        ]
+
+    def test_the_join_carries_the_timing(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        write_transcript(
+            root / "proj" / "sess-timed-0001.jsonl", self._hooked_session()
+        )
+
+        _sweep(registry, root, tmp_path / "wm.json")
+
+        (join,) = _joins(registry, timing=True)["sess-timed-0001"]
+        assert join["retrieval_timing"] == {
+            "first_retrieval_ordinal": 2,
+            "tool_call_count": 2,
+            "hook_feedback_messages": 1,
+            "hook_feedback_before_first_retrieval": True,
+        }
+
+    def test_a_session_that_never_retrieved_records_no_first_retrieval(
+        self, tmp_path: Path
+    ) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        write_transcript(root / "proj" / "sess-worked-0001.jsonl", worked_session())
+
+        _sweep(registry, root, tmp_path / "wm.json")
+
+        (join,) = _joins(registry, timing=True)["sess-worked-0001"]
+        timing = join["retrieval_timing"]
+        assert timing["first_retrieval_ordinal"] is None
+        assert timing["hook_feedback_before_first_retrieval"] is None
+
+    def test_a_join_from_before_the_timing_is_rewritten_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-parsing a session after the timing existed adds one join, and a
+        second re-parse adds none."""
+        root = tmp_path / "projects"
+        write_transcript(
+            root / "proj" / "sess-timed-0001.jsonl", self._hooked_session()
+        )
+        current = _registry(tmp_path / "current")
+        _sweep(current, root, tmp_path / "wm-current.json")
+        (written,) = _joins(current, outcome=True, timing=True)["sess-timed-0001"]
+        legacy = {k: v for k, v in written.items() if k != "retrieval_timing"}
+
+        registry = _registry(tmp_path / "legacy")
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SESSION_PACKS,
+            source="worker:session-capture",
+            entity_id="sess-timed-0001",
+            entity_type="capture_session",
+            payload=legacy,
+        )
+
+        first = _sweep(registry, root, tmp_path / "wm-1.json")
+        second = _sweep(registry, root, tmp_path / "wm-2.json")
+
+        assert first.pack_joins_recorded == 1
+        assert second.pack_joins_recorded == 0
+        assert second.pack_joins_unchanged == 1
+        old, new = _joins(registry, outcome=True, timing=True)["sess-timed-0001"]
+        assert "retrieval_timing" not in old
+        # Only the timing differed: the rewrite is the current parse, whole.
+        assert new == written
