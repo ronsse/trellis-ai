@@ -507,6 +507,92 @@ class TestReplay:
         assert "mode=off" in rendered
 
     @staticmethod
+    def _seed_chunk_serving(registry: StoreRegistry) -> None:
+        """One pack serving a chunk whose own row records no form, over a
+        parent stored as a conversation, and cited unhelpful (#986)."""
+        registry.knowledge.document_store.put(
+            "doc_conv", "parent", {"document_form": "conversation"}
+        )
+        registry.knowledge.document_store.put(
+            "doc_conv#chunk-0000", "part", {"parent_doc_id": "doc_conv"}
+        )
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="kpack_0",
+            entity_type="pack",
+            payload={
+                "pack_id": "kpack_0",
+                "injected_items": [
+                    {
+                        "item_id": "doc_conv#chunk-0000",
+                        "item_type": "document",
+                        "rank": 1,
+                        "estimated_tokens": 60,
+                        "relevance_score": 0.9,
+                        "strategy_source": "keyword",
+                    }
+                ],
+                "budget_trace": [],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id="kpack_0",
+            payload={
+                "pack_id": "kpack_0",
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": ["doc_conv#chunk-0000"],
+                "rating": 0.0,
+                "success": False,
+            },
+        )
+
+    def test_class_prior_chunk_scope_prices_chunks_through_the_document_store(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_chunk_serving(temp_stores)
+        monkeypatch.setenv("TRELLIS_CLASS_PRIOR_MODE", "withhold")
+        monkeypatch.setenv("TRELLIS_CLASS_PRIOR_SCOPE", "parents_and_chunks")
+
+        result = runner.invoke(
+            app, ["analyze", "replay", "--class-prior", "--format", "json"]
+        )
+
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["applied_config"].endswith("scope=parents_and_chunks")
+        assert data["matched_servings"] == 1
+        assert data["matched_via_parent"] == 1
+        assert data["unhelpful_removed"] == 1
+        assert data["tokens_freed"] == 60
+        assert data["parent_lookups"] == 1
+        assert data["parent_form_resolved"] == 1
+
+        text = runner.invoke(app, ["analyze", "replay", "--class-prior"])
+        assert text.exit_code == 0
+        assert "parent lookups:" in plain(text.stdout)
+
+    def test_class_prior_default_scope_prices_no_chunk(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_chunk_serving(temp_stores)
+        monkeypatch.setenv("TRELLIS_CLASS_PRIOR_MODE", "withhold")
+        monkeypatch.delenv("TRELLIS_CLASS_PRIOR_SCOPE", raising=False)
+
+        result = runner.invoke(
+            app, ["analyze", "replay", "--class-prior", "--format", "json"]
+        )
+
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["matched_servings"] == 0
+        assert data["parent_lookups"] == 0
+        assert "scope" not in data["applied_config"]
+
+    @staticmethod
     def _seed_graph_selection(registry: StoreRegistry, count: int) -> None:
         """Packs serving one recency-window graph item (cited unhelpful) and
         one semantic item (cited helpful), with a candidate the 250-token
@@ -2761,7 +2847,10 @@ class TestAnalyzeHealthServingBuilds:
 class TestAnalyzeHealthPrecedentSync:
     """``analyze health`` reports reinstatements whose re-stamp did not land."""
 
-    _ID = "precedent://learning/fixture-alpha"
+    #: Markup- and emoji-shaped on purpose (#994). Rich deletes ``[x]`` as a
+    #: style tag and rewrites ``:fire:`` to a glyph, so an id without them cannot
+    #: tell an escaped reason line from a raw one.
+    _ID = "precedent://learning/fixture-[x]-:fire:"
 
     def _reinstate(self, registry: StoreRegistry, **flags: bool) -> None:
         registry.operational.event_log.emit(

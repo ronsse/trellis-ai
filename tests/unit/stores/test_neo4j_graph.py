@@ -389,28 +389,36 @@ def test_upsert_edges_bulk_refuses_a_dropped_row_beside_a_duplicated_edge(
     assert _raw_counts(graph_store) == (nodes - 1, rels)
 
 
-def test_upsert_edges_bulk_raises_valueerror_when_endpoint_recreated_mid_write(
+def test_upsert_edges_bulk_re_runs_when_endpoint_recreated_mid_write(
     graph_store, monkeypatch
 ):
     """Row 1's target is purged after the endpoint check, so the write
     drops row 1, and another writer re-creates it right after the UNWIND,
-    while the transaction that wrote row 0 is still open. The call raises
-    the documented ``ValueError``, not a raw driver error, and writes no
-    edge."""
+    while the transaction that wrote row 0 is still open. The dropped
+    attempt rolls back whole (row 0's edge is not left behind), the target
+    has a row again, and the re-run writes both edges: no raw driver error,
+    and no ``ValueError`` for a node that is current. (Before #975 this
+    refused the call.)"""
     for node_id in ("a", "b", "c", "d"):
         graph_store.upsert_node(node_id, "s", {})
     _purge_after_endpoint_check(graph_store, monkeypatch, "d")
 
     orig_run = ManagedTransaction.run
+    recreated = False
 
     def recreate_after_unwind(self, query, parameters=None, **kw):
+        nonlocal recreated
         result = orig_run(self, query, parameters, **kw)
         text = str(query)
         if "UNWIND $rows" in text and "CREATE (s)-[new:EDGE]->(t)" in text:
             records = list(result)
-            # Another writer recreates "d" while this transaction is
-            # still open, beside row 0's edge, which this UNWIND wrote.
-            graph_store.upsert_node("d", "s", {})
+            if not recreated:
+                recreated = True
+                # Another writer recreates "d" while this transaction is
+                # still open, beside row 0's edge, which this UNWIND wrote.
+                # Once only: on the re-run "d" is current, and this write
+                # would wait on the lock the open transaction holds on it.
+                graph_store.upsert_node("d", "s", {})
             return records
         return result
 
@@ -421,13 +429,14 @@ def test_upsert_edges_bulk_raises_valueerror_when_endpoint_recreated_mid_write(
         {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
         {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
     ]
-    with pytest.raises(
-        ValueError,
-        match=r"upsert_edges_bulk\[1\]: source 'c' or target 'd' was not current",
-    ):
-        graph_store.upsert_edges_bulk(edges)
-    assert _raw_counts(graph_store) == (nodes, rels)
     assert rels == 0
+    edge_ids = graph_store.upsert_edges_bulk(edges)
+
+    assert recreated
+    assert len(edge_ids) == 2
+    assert _raw_counts(graph_store) == (nodes, 2)
+    assert len(graph_store.get_edges("a", direction="outgoing")) == 1
+    assert len(graph_store.get_edges("c", direction="outgoing")) == 1
 
 
 def test_delete_edge(graph_store):

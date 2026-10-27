@@ -28,6 +28,27 @@ Without the second rule a reinstate whose stamp failed and that was then demoted
 again would warn until its event aged out of the window, for a state that is
 consistent.
 
+**Two events at the same microsecond break toward the failure.** A failed
+reinstate outranks a clean one, which outranks a demote, so a tie leaves the
+failure open. The error costs are not symmetric: calling a tie a repair or a
+demotion reports all-clear for a precedent one axis may still be withholding,
+which nobody hears about, and calling it unresolved costs one look at an id.
+Real ties are not expected, since each handler stamps its own ``occurred_at``;
+the rule is there so the answer does not depend on the order the two scans
+happened to be concatenated in.
+
+**A capped demote read cannot vouch for an older failure.** Reads are newest
+first, so a truncated ``PRECEDENT_DEMOTED`` scan drops the *oldest* demotes. A
+failed reinstate older than the oldest demote the scan kept may have been
+superseded by one it dropped, so it is listed in ``uncertain`` rather than as
+unresolved: neither "still withholding" nor "repaired" is something the read can
+say. A failure at or after that horizon is judged exactly, because every demote
+since it was kept. Only the demote scan matters here. A truncated
+``PRECEDENT_REINSTATED`` scan drops the oldest reinstates, so the latest event
+for a precedent it still shows is never one a newer event hides. The report is
+already ``warn`` on any truncation; ``uncertain`` names which precedents the
+cap actually put in doubt.
+
 **The window is the limit of what this can see.** A failed reinstatement older
 than ``days`` is not read, so an unrepaired one stops warning when its event
 leaves the window while its axis is still withholding it. That is the same bound
@@ -59,7 +80,9 @@ from trellis.stores.base.event_log import (
 DOCUMENT_SYNC_FAILED_KEY = "document_sync_failed"
 
 #: ``PRECEDENT_REINSTATED`` payload key: the vector row was not re-stamped, so
-#: semantic retrieval keeps the pre-reinstate snapshot.
+#: its snapshot still reads ``demoted``, which the retrieval collect seam
+#: withholds (:func:`trellis.retrieve.lifecycle.partition_demoted`, for every
+#: strategy), so semantic retrieval skips the precedent.
 VECTOR_SYNC_FAILED_KEY = "vector_sync_failed"
 
 
@@ -79,6 +102,11 @@ class PrecedentSyncReport(TrellisModel):
     #: Precedents whose latest lifecycle event is a reinstatement that left the
     #: vector row stale. Sorted.
     vector_unresolved: list[str] = Field(default_factory=list)
+    #: Precedents whose latest lifecycle event is a failed reinstatement older
+    #: than the oldest demote a capped ``PRECEDENT_DEMOTED`` read kept, so a
+    #: superseding demote cannot be ruled in or out. Neither unresolved nor
+    #: repaired; always empty when that read was not truncated. Sorted.
+    uncertain: list[str] = Field(default_factory=list)
     #: ``occurred_at`` of the latest failed reinstatement read, or ``None``.
     latest_failure_at: datetime | None = None
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
@@ -93,6 +121,21 @@ def _target_id(event: Event) -> str | None:
 def _flagged(event: Event, key: str) -> bool:
     """Whether the handler set ``key``, which it writes as ``True`` or not at all."""
     return event.payload.get(key) is True
+
+
+def _tie_rank(event: Event) -> int:
+    """Order of two events at the same ``occurred_at``; the higher one wins.
+
+    A failed reinstate (2) outranks a clean one (1), which outranks a demote
+    (0), so a tie is reported as the failure still being open. Why, in the
+    module docstring.
+    """
+    if event.event_type == EventType.PRECEDENT_DEMOTED:
+        return 0
+    failed = _flagged(event, DOCUMENT_SYNC_FAILED_KEY) or _flagged(
+        event, VECTOR_SYNC_FAILED_KEY
+    )
+    return 2 if failed else 1
 
 
 def summarize_precedent_sync(
@@ -134,18 +177,33 @@ def summarize_precedent_sync(
     latest: dict[str, Event] = {}
     for event in sorted(
         [*reinstated.events, *demoted.events],
-        key=lambda e: _as_utc(e.occurred_at),
+        key=lambda e: (_as_utc(e.occurred_at), _tie_rank(e)),
     ):
         target = _target_id(event)
         if target is not None:
             latest[target] = event
 
+    # The oldest demote a capped read kept. Older than this, a demote may exist
+    # that the cap dropped. ``None`` when the read was complete.
+    demote_horizon = (
+        min(_as_utc(e.occurred_at) for e in demoted.events)
+        if demoted.coverage.truncated and demoted.events
+        else None
+    )
+
     for target, event in sorted(latest.items()):
         if event.event_type != EventType.PRECEDENT_REINSTATED:
             continue
-        if _flagged(event, DOCUMENT_SYNC_FAILED_KEY):
+        document_failed = _flagged(event, DOCUMENT_SYNC_FAILED_KEY)
+        vector_failed = _flagged(event, VECTOR_SYNC_FAILED_KEY)
+        if not (document_failed or vector_failed):
+            continue
+        if demote_horizon is not None and _as_utc(event.occurred_at) < demote_horizon:
+            report.uncertain.append(target)
+            continue
+        if document_failed:
             report.document_unresolved.append(target)
-        if _flagged(event, VECTOR_SYNC_FAILED_KEY):
+        if vector_failed:
             report.vector_unresolved.append(target)
     return report
 
@@ -161,13 +219,23 @@ def _named(ids: list[str]) -> str:
 
 
 def precedent_sync_reasons(report: PrecedentSyncReport) -> list[str]:
-    """One ``warn`` reason per axis still withholding or serving a stale precedent.
+    """One ``warn`` reason per axis still withholding a reinstated precedent.
+
+    Both axes *withhold* rather than serve a stale copy. The document row stays
+    ``demoted``, and so does the vector row's snapshot: ``SemanticSearch`` spreads
+    that snapshot into the item's metadata and the collect seam's
+    ``partition_demoted`` withholds it under the reason ``demoted``, whichever
+    strategy produced the item. A vector-only failure therefore under-serves
+    exactly as a document failure does, and the line says so.
 
     The document line names the repair, because it is verified: re-issuing
     ``trellis curate reinstate-precedent`` re-stamps a withheld row. The vector
     line does not, because a vector-only failure is refused on re-issue as
     ``target_not_demoted`` and a repair path this module cannot point at is not
     one it will claim.
+
+    A final line names the precedents a capped demote read left in doubt, which
+    is not a claim that anything is withheld.
     """
     reasons: list[str] = []
     if report.document_unresolved:
@@ -180,9 +248,16 @@ def precedent_sync_reasons(report: PrecedentSyncReport) -> list[str]:
     if report.vector_unresolved:
         reasons.append(
             f"{len(report.vector_unresolved)} precedent reinstatement(s) left "
-            "the vector row stale (vector_sync_failed), so semantic retrieval "
-            "still serves the pre-reinstate snapshot for: "
+            "the vector row's snapshot at demoted (vector_sync_failed), so "
+            "semantic retrieval still withholds it for: "
             f"{_named(report.vector_unresolved)}"
+        )
+    if report.uncertain:
+        reasons.append(
+            f"{len(report.uncertain)} precedent reinstatement(s) reported a "
+            "failed re-stamp older than the capped precedent.demoted read, so "
+            "a later demotion that would have superseded it cannot be ruled "
+            f"out: {_named(report.uncertain)}"
         )
     return reasons
 
