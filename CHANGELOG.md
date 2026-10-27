@@ -1003,8 +1003,13 @@ All notable changes to Trellis will be documented in this file.
   the last separator), and a new `chunk_parent_id` gives the parent for the
   same shape, so `parent_id_of`'s id-prefix fallback agrees with the
   predicate. The store-level `LIKE '%#chunk-%'` exclusion is unchanged (SQL
-  cannot test digits), and `learning/judged_outcomes.py` still splits on the
-  substring. `analyze replay --class-prior` resolved a chunk whose own row had
+  cannot test digits), so a caller-named `notes#chunk-intro` is still hidden
+  by the SQL surfaces (API search and explore, `count(include_chunks=False)`,
+  the MCP fuzzy-dedup seed) while file-context `docs_by_path` now lists it and
+  `sync --prune` now considers it. The judged-outcomes join, which split on
+  the first separator, now uses `chunk_parent_id`, so it and serving read
+  `notes#chunk-intro` and `x#chunk-5#chunk-0` alike, and redacting a
+  caller-named target cascades to its own minted chunks. `analyze replay --class-prior` resolved a chunk whose own row had
   been deleted as `unresolved` without trying its parent; serving never needed
   that row, only the parent's, so replay now falls back to the id prefix the
   same way and counts it resolved when the parent carries a form (a chunk
