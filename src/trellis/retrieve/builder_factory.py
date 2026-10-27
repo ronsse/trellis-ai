@@ -193,8 +193,8 @@ class AxisReport(TypedDict):
     ``embedder_error_type``/``embedder_setting`` are always present (never
     omitted) but only non-``None`` when ``semantic == "embedder_failed"`` —
     the one state whose note is dynamic rather than a fixed string from
-    :data:`SEMANTIC_AXIS_NOTES` (Q5-A). ``graph`` is ``"ran"``, ``"failed"``
-    or ``"unseeded_fallback_off"`` (:func:`describe_axes`).
+    :data:`SEMANTIC_AXIS_NOTES` (Q5-A). ``graph`` is ``"ran"``, ``"failed"``,
+    ``"unseeded_fallback_off"`` or ``"absent"`` (:func:`describe_axes`).
     """
 
     available: list[str]
@@ -407,6 +407,10 @@ def describe_axes(
     markdown note: it follows from what the intent named, not from a fault
     in the deployment, so a line on every such pack would be one that
     always prints and always gets skipped (see :data:`SEMANTIC_AXIS_NOTES`).
+    A builder with no graph strategy at all reads ``"absent"`` (#985): not
+    ``ran``, which would pass "never configured" for "ran and found nothing",
+    and not ``failed``, which names only an axis the builder has. It gets no
+    markdown note either, because no shipped surface builds one.
 
     Args:
         builder: The :class:`PackBuilder` this pack was assembled from.
