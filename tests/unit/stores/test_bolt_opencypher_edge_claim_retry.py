@@ -23,6 +23,7 @@ docstring).
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -120,6 +121,20 @@ def _arm_execute_write(
     driver = store._driver  # type: ignore[attr-defined]
     driver.session.return_value.__enter__.return_value = session
     return session.execute_write
+
+
+def _ticking_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the store's clock a second later on every read.
+
+    Two writes stamped by two reads are told apart, and a stamp reused
+    across attempts shows as two equal ones.
+    """
+    ticks = iter(range(1, 1000))
+    monkeypatch.setattr(
+        bolt_graph,
+        "utc_now",
+        lambda: datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=next(ticks)),
+    )
 
 
 class TestPredicate:
@@ -342,6 +357,49 @@ class TestEndpointThatIsMomentarilyUnreadable:
         assert store._endpoints_have_a_version_row("src", "tgt") is False
 
 
+class TestUpsertEdgeStampsEachAttempt:
+    """A re-run stamps its own time, not the refused attempt's (#1002).
+
+    Another writer can commit a newer version of the edge between a refused
+    attempt and its re-run. The re-run closes that version with ``$now``, so
+    a ``now`` kept from the first attempt would give it a ``valid_to``
+    before its own ``valid_from``: an inverted interval that ``as_of``
+    reads get wrong. Driven with a fake session that runs the real
+    transaction function against a clock that ticks on every read.
+    """
+
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            pytest.param(None, id="endpoint-read-as-absent"),
+            pytest.param(_contention(), id="claim-race-lost"),
+        ],
+    )
+    def test_a_re_run_sends_a_later_timestamp_than_the_refused_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, refusal: Any
+    ) -> None:
+        monkeypatch.setattr(bolt_graph.time, "sleep", lambda _seconds: None)
+        _ticking_clock(monkeypatch)
+        store = _make_store()
+        store._endpoints_have_a_version_row = MagicMock(return_value=True)  # type: ignore[method-assign]
+        tx = MagicMock()
+        tx.run.return_value.single.side_effect = [refusal, {"edge_id": "edge_01"}]
+        session = MagicMock()
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
+
+        sent = [call.kwargs for call in tx.run.call_args_list]
+        assert len(sent) == 2
+        refused, rerun = (datetime.fromisoformat(kw["now"]) for kw in sent)
+        assert rerun > refused
+        # Everything stamped from ``now`` moves with it: the version
+        # created and the version closed share one time per attempt.
+        for kwargs in sent:
+            assert kwargs["base_props"]["valid_from"] == kwargs["now"]
+
+
 class TestBulkEndpointThatIsMomentarilyUnreadable:
     """``upsert_edges_bulk`` re-runs a refusal the way ``upsert_edge`` does (#975).
 
@@ -391,6 +449,8 @@ class TestBulkEndpointThatIsMomentarilyUnreadable:
         session = MagicMock()
         session.execute_read.side_effect = reads
         session.execute_write.side_effect = lambda fn: fn(tx)
+        # So a test can read what each attempt sent.
+        session.tx = tx
         store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
         return store, session, probe, sleeps
 
@@ -425,6 +485,36 @@ class TestBulkEndpointThatIsMomentarilyUnreadable:
                 "edges": 2,
             }
         ]
+
+    def test_a_re_run_stamps_every_row_later_than_the_dropped_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-run closes versions a racing writer committed since the
+        dropped attempt, so it must not carry that attempt's ``valid_from``
+        (#1002)."""
+        _ticking_clock(monkeypatch)
+        both_rows = [
+            {"row_index": 0, "edge_id": "e0"},
+            {"row_index": 1, "edge_id": "e1"},
+        ]
+        store, session, _probe, _sleeps = self._store(
+            monkeypatch,
+            reads=[self._rows("a", "b", "c", "d")] * 2,
+            writes=[[{"row_index": 1, "edge_id": "e1"}], both_rows],
+            has_rows=True,
+        )
+
+        assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0", "e1"]
+
+        sent = [call.kwargs["rows"] for call in session.tx.run.call_args_list]
+        assert len(sent) == 2
+        # One time per attempt, shared by every row it wrote.
+        refused, rerun = (
+            {datetime.fromisoformat(row["props"]["valid_from"]) for row in rows}
+            for rows in sent
+        )
+        assert len(refused) == len(rerun) == 1
+        assert min(rerun) > max(refused)
 
     def test_round_trip_1_reading_an_endpoint_as_absent_is_re_run(
         self, monkeypatch: pytest.MonkeyPatch
