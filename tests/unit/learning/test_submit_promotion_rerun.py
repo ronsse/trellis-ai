@@ -20,7 +20,7 @@ from trellis.learning.scoring import (
     promotion_verdict,
     submit_learning_promotion,
 )
-from trellis.mutate import Command, Operation, build_curate_executor
+from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -173,6 +173,113 @@ def test_a_changed_name_still_writes(stores: _Stores) -> None:
     payload["name"] = "Renamed precedent"
 
     assert stores.submit(payload)["status"] == "promoted"
+
+
+def test_a_demoted_then_reinstated_precedent_resubmitted_is_already_promoted(
+    stores: _Stores,
+) -> None:
+    """Demote and reinstate each rewrite the node and add a ``lifecycle`` stamp.
+
+    The stamp is a key the payload does not carry, so it must not read as a
+    difference once the state is current again, and the promote event is still
+    in place. While demoted the same submission is a refusal, not a skip.
+    """
+    assert stores.submit()["status"] == "promoted"
+    demoted = stores.executor.execute(
+        Command(
+            operation=Operation.PRECEDENT_DEMOTE,
+            args={"target_id": ENTITY_ID, "reason": "unhelpful in review"},
+            target_id=ENTITY_ID,
+            target_type="precedent",
+            requested_by="test",
+        )
+    )
+    assert demoted.status == CommandStatus.SUCCESS, demoted.message
+    assert stores.submit()["status"] == "refused_demoted"
+
+    reinstated = stores.executor.execute(
+        Command(
+            operation=Operation.PRECEDENT_REINSTATE,
+            args={"target_id": ENTITY_ID, "reason": "re-reviewed and still useful"},
+            target_id=ENTITY_ID,
+            target_type="precedent",
+            requested_by="test",
+        )
+    )
+    assert reinstated.status == CommandStatus.SUCCESS, reinstated.message
+    node = stores.graph.get_node(ENTITY_ID)
+    assert node is not None
+    assert node["properties"]["lifecycle"]["state"] == "current"
+    before = stores.writes()
+
+    second = stores.submit()
+
+    assert second["status"] == ALREADY_PROMOTED
+    assert stores.writes() == before
+    preview = preview_learning_promotion(
+        _entity_payload(),
+        _edge_payloads(),
+        graph_store=stores.graph,
+        event_log=stores.events,
+    )
+    assert preview is not None
+    assert preview["status"] == ALREADY_PROMOTED
+
+
+def test_a_float_and_a_list_property_round_trip_so_a_rerun_skips_them(
+    stores: _Stores,
+) -> None:
+    """A value the store hands back changed would make every re-run write again.
+
+    ``0.1 + 0.2`` is the float whose repr is not short, and the list is not
+    sorted, so a backend that rounded or reordered would show here. SQLite
+    stores properties as JSON and keeps both exactly; this is the contract the
+    skip rests on, pinned for the one backend CI runs.
+    """
+    properties = {"score": 0.1 + 0.2, "tags": ["b", "a", "c"], "nested": [[2, 1]]}
+    assert stores.submit(_entity_payload(**properties))["status"] == "promoted"
+    node = stores.graph.get_node(ENTITY_ID)
+    assert node is not None
+    for key, value in properties.items():
+        assert node["properties"][key] == value
+    before = stores.writes()
+
+    second = stores.submit(_entity_payload(**properties))
+
+    assert second["status"] == ALREADY_PROMOTED
+    assert stores.writes() == before
+
+
+def test_a_reordered_list_is_a_change_and_writes(stores: _Stores) -> None:
+    """List order is content: the comparison is plain equality, not set-like."""
+    assert stores.submit(_entity_payload(tags=["a", "b"]))["status"] == "promoted"
+
+    second = stores.submit(_entity_payload(tags=["b", "a"]))
+
+    assert second["status"] == "promoted"
+    node = stores.graph.get_node(ENTITY_ID)
+    assert node is not None
+    assert node["properties"]["tags"] == ["b", "a"]
+
+
+def test_a_key_since_dropped_from_the_payload_is_not_removed_by_a_rerun(
+    stores: _Stores,
+) -> None:
+    """Deliberate (#996): the comparison reads only keys the payload carries.
+
+    ``ENTITY_CREATE`` replaces the whole properties dict, so before #983 a
+    re-run removed a key that had left ``precedent_properties``. It is now
+    skipped and the stale key stays: a later writer's key is not content this
+    promotion owns, and that cannot be told apart from a dropped one.
+    """
+    assert stores.submit(_entity_payload(legacy="kept"))["status"] == "promoted"
+
+    second = stores.submit()
+
+    assert second["status"] == ALREADY_PROMOTED
+    node = stores.graph.get_node(ENTITY_ID)
+    assert node is not None
+    assert node["properties"]["legacy"] == "kept"
 
 
 def test_a_missing_promote_event_is_mended_by_running_it_again(
