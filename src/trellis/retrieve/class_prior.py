@@ -61,15 +61,49 @@ never runs the metadata promotion and a directly-constructed ``PackItem``
 a side table keyed on ``id(item)``: that outlives the object it names, and
 the pool is rebuilt from copies between collection and this gate.
 
-**Parents only, by design.** The gate matches ``metadata["document_form"]``,
-which :mod:`trellis.ingest_corpus.conversations` stamps only on the parent
-document it writes, never on the chunks derived from it — and this module
-does not resolve a chunk's form through ``parent_doc_id`` either. Withholds
-conversation parent documents; their chunks carry no document form and are
-never touched. The reason is measured, not assumed: the comment beside the
-chunk metadata dict in ``sync.py`` records a stamped parent cited helpful
-at 0.005 against 0.082 for a chunk, so parents are the weak half and chunks
-are exactly what this gate must leave alone.
+**Parents by default; chunks only by opt-in.** The gate matches the
+item's own ``metadata["document_form"]``, which
+:mod:`trellis.ingest_corpus.conversations` stamps only on the parent
+document it writes, never on the chunks derived from it. So by default
+(``scope="parents"``, :data:`CLASS_PRIOR_SCOPE_ENV`) it withholds
+conversation parent documents and never touches their chunks. That was
+measured, not assumed: the comment beside the chunk metadata dict in
+``sync.py`` records a stamped parent cited helpful at 0.005 against 0.082
+for a chunk, so chunks were the stronger half.
+
+``scope="parents_and_chunks"`` (#986) also withholds a chunk whose
+*parent* carries a configured form. The chunk's form is read, not
+stamped: the parent's own ``document_form`` is looked up through the
+build's :class:`~trellis.retrieve.parent_verdicts.ParentVerdictCache`, by
+the very call (:meth:`~trellis.retrieve.parent_verdicts.ParentVerdictCache.resolve`)
+the archived and noise gates make. So the two rules agree on what a chunk
+is: only an item whose own id is a chunk id (``<parent>#chunk-N``)
+inherits through a parent, and a plain item that merely names one in
+``metadata["parent_doc_id"]`` borrows nothing. The parent id is the item's
+``parent_doc_id`` (written by ``sync.py`` on every chunk), else the chunk
+id's own prefix, because a semantic-axis item is built from an embed-time
+vector snapshot that may predate that key
+(:func:`~trellis.retrieve.concentration.parent_id_of`). That cache has
+already fetched every distinct chunk parent in the pool for the archived and
+noise gates, so the lookup adds no document-store read for a chunk
+(``tests/unit/retrieve/test_class_prior_chunks.py`` counts them). The
+resolver is *injected* (``parent_form_of``), so :func:`apply_class_prior`
+stays pure over :class:`~trellis.schemas.pack.PackItem`. The item's own
+form wins: the parent is consulted only for an item that carries none.
+
+Stamping the form onto each chunk at write time was the other honest
+design and was refused. It would not reach a chunk already in a store
+without a backfill, and the vector row's metadata snapshot is frozen at
+embed time, so it would need a mirror key and a re-sync first. Worse,
+stamping the existing ``document_form`` key would silently turn the
+*parents-only* default into parents-and-chunks for every re-synced chunk,
+because this gate matches an item's own form. A form-derived stamp under a
+second key avoids that, but still leaves unstamped history. Reading the
+parent works for those chunks today and cannot disagree with the parent.
+
+An unresolvable parent (a non-chunk item, a parent row the store no
+longer has, a parent with no form, a store error) is no verdict: the item
+is served, the same default-pass posture the archived and noise gates take.
 
 **Modes.**
 
@@ -105,6 +139,7 @@ for the same purpose.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -117,6 +152,13 @@ from trellis.schemas.pack import PackItem, RejectedItem
 logger = structlog.get_logger(__name__)
 
 ClassPriorMode = Literal["off", "withhold"]
+ClassPriorScope = Literal["parents", "parents_and_chunks"]
+
+#: Resolves the document form of an item's *parent* — ``None`` when the item
+#: has no resolvable parent or the parent carries no form. Injected into
+#: :func:`apply_class_prior` so this module stays pure over ``PackItem`` objects;
+#: the pack builder supplies one backed by its per-build parent cache.
+ParentFormResolver = Callable[[PackItem], str | None]
 
 #: Distinct from every other collect-seam reason
 #: (``noise``/``archived``/``demoted``/``superseded``/``dedup``/...) so the
@@ -144,12 +186,20 @@ CLASS_PRIOR_FORMS_ENV = "TRELLIS_CLASS_PRIOR_FORMS"
 #: warning (not a refusal — the strategy set is open) when a normalised
 #: name is outside :data:`KNOWN_AXES`.
 CLASS_PRIOR_AXES_ENV = "TRELLIS_CLASS_PRIOR_AXES"
+#: ``parents`` (the default) or ``parents_and_chunks``. Env-only like the two
+#: knobs above, and case-insensitive. An unrecognised value degrades to
+#: ``parents`` with a warning — the shipped behaviour, never the wider one.
+CLASS_PRIOR_SCOPE_ENV = "TRELLIS_CLASS_PRIOR_SCOPE"
 
 #: Settings-store key for the one scalar knob (env > settings > default,
 #: same precedence every other ``settings_live=True`` entry uses).
 CLASS_PRIOR_MODE_SETTING = "class_prior_mode"
 
 _VALID_MODES: frozenset[str] = frozenset({"off", "withhold"})
+PARENTS_SCOPE: ClassPriorScope = "parents"
+PARENTS_AND_CHUNKS_SCOPE: ClassPriorScope = "parents_and_chunks"
+_VALID_SCOPES: frozenset[str] = frozenset({PARENTS_SCOPE, PARENTS_AND_CHUNKS_SCOPE})
+DEFAULT_SCOPE: ClassPriorScope = PARENTS_SCOPE
 DEFAULT_FORMS: frozenset[str] = frozenset({CONVERSATION_DOCUMENT_FORM})
 DEFAULT_AXES: frozenset[str] = frozenset({"keyword"})
 
@@ -177,16 +227,22 @@ class ClassPriorConfig:
     ``forms``/``axes`` default to exactly the slice the measurement in the
     module docstring covers: imported conversation documents, keyword axis
     only. Widening either is a scope decision for whoever enables this,
-    not something this module does on its own.
+    not something this module does on its own. ``scope`` defaults to
+    ``"parents"``: chunks are withheld only when it is set to
+    ``"parents_and_chunks"`` (see the module docstring).
     """
 
     mode: ClassPriorMode = "off"
     forms: frozenset[str] = field(default_factory=lambda: DEFAULT_FORMS)
     axes: frozenset[str] = field(default_factory=lambda: DEFAULT_AXES)
+    scope: ClassPriorScope = DEFAULT_SCOPE
 
     def __post_init__(self) -> None:
         if self.mode not in _VALID_MODES:
             msg = f"mode must be one of {sorted(_VALID_MODES)}; got {self.mode!r}"
+            raise ValueError(msg)
+        if self.scope not in _VALID_SCOPES:
+            msg = f"scope must be one of {sorted(_VALID_SCOPES)}; got {self.scope!r}"
             raise ValueError(msg)
 
 
@@ -211,8 +267,8 @@ def resolve_class_prior_config(
     ``mode`` is settings-store aware (``settings`` is the already-loaded
     ``name -> value`` mapping, e.g. from
     :func:`trellis.stores.settings_store.load_settings_values`); ``forms``/
-    ``axes`` are env-only (see :data:`CLASS_PRIOR_FORMS_ENV`'s docstring)
-    and fall straight to their defaults when unset.
+    ``axes``/``scope`` are env-only (see :data:`CLASS_PRIOR_FORMS_ENV`'s
+    docstring) and fall straight to their defaults when unset.
 
     An unrecognised env value degrades to the shipped default with a
     logged warning — never a crash, never a silent switch to a *different*
@@ -235,7 +291,22 @@ def resolve_class_prior_config(
     else:
         axes = DEFAULT_AXES
 
-    return ClassPriorConfig(mode=mode, forms=forms, axes=axes)
+    return ClassPriorConfig(mode=mode, forms=forms, axes=axes, scope=_resolve_scope())
+
+
+def _resolve_scope() -> ClassPriorScope:
+    raw = os.environ.get(CLASS_PRIOR_SCOPE_ENV, "").strip().lower()
+    if not raw:
+        return DEFAULT_SCOPE
+    if raw in _VALID_SCOPES:
+        return raw  # type: ignore[return-value]
+    # Name the variable, never the value it held, as the mode knob does.
+    logger.warning(
+        "class_prior_scope_env_unrecognised",
+        var=CLASS_PRIOR_SCOPE_ENV,
+        effective=DEFAULT_SCOPE,
+    )
+    return DEFAULT_SCOPE
 
 
 def _warn_unknown_axes(axes: frozenset[str]) -> None:
@@ -301,11 +372,33 @@ def _resolve_mode(settings: dict[str, Any] | None) -> ClassPriorMode:
     return "off"
 
 
+def effective_form(
+    item: PackItem,
+    *,
+    config: ClassPriorConfig,
+    parent_form_of: ParentFormResolver | None = None,
+) -> str | None:
+    """The document form this gate judges ``item`` under.
+
+    The item's own ``document_form`` when it carries one. Otherwise, and only
+    when ``config.scope`` is ``"parents_and_chunks"`` and a resolver was
+    supplied, its parent's form. With the default scope the resolver is never
+    called, so the parents-only path is untouched.
+    """
+    own = document_form_of(item.metadata)
+    if own is not None:
+        return own
+    if config.scope != PARENTS_AND_CHUNKS_SCOPE or parent_form_of is None:
+        return None
+    return parent_form_of(item)
+
+
 def apply_class_prior(
     items: list[PackItem],
     *,
     config: ClassPriorConfig,
     strategy_name: str,
+    parent_form_of: ParentFormResolver | None = None,
 ) -> tuple[list[PackItem], list[RejectedItem]]:
     """Apply ``config`` to ``items`` collected from ``strategy_name``.
 
@@ -318,6 +411,9 @@ def apply_class_prior(
     returning ``items`` **unchanged** — same list, same item objects — so
     that branch is a true no-op rather than a copy that merely compares
     equal.
+
+    ``parent_form_of`` is consulted only under ``scope="parents_and_chunks"``,
+    for an item that carries no form of its own (see :func:`effective_form`).
     """
     if config.mode == "off" or strategy_name not in config.axes or not config.forms:
         return items, []
@@ -325,7 +421,7 @@ def apply_class_prior(
     kept: list[PackItem] = []
     rejected: list[RejectedItem] = []
     for item in items:
-        form = document_form_of(item.metadata)
+        form = effective_form(item, config=config, parent_form_of=parent_form_of)
         if form is None or form not in config.forms:
             kept.append(item)
             continue
@@ -346,12 +442,20 @@ def class_prior_telemetry(config: ClassPriorConfig) -> dict[str, Any]:
     including when ``mode == "off"``, so a pack event can say whether
     this gate was on without a reader having to re-derive it from env/
     settings state at read time (which may have since changed).
+
+    ``"scope"`` is added only when it is not the default, so a row's
+    absence of the key means ``"parents"`` — which is also what every row
+    written before the knob existed means — and a default-configured
+    deployment's payload is unchanged.
     """
-    return {
+    payload: dict[str, Any] = {
         "mode": config.mode,
         "forms": sorted(config.forms),
         "axes": sorted(config.axes),
     }
+    if config.scope != DEFAULT_SCOPE:
+        payload["scope"] = config.scope
+    return payload
 
 
 __all__ = [
@@ -360,14 +464,21 @@ __all__ = [
     "CLASS_PRIOR_MODE_ENV",
     "CLASS_PRIOR_MODE_SETTING",
     "CLASS_PRIOR_REJECTION_REASON",
+    "CLASS_PRIOR_SCOPE_ENV",
     "CONVERSATION_DOCUMENT_FORM",
     "DEFAULT_AXES",
     "DEFAULT_FORMS",
+    "DEFAULT_SCOPE",
     "KNOWN_AXES",
     "OFF",
+    "PARENTS_AND_CHUNKS_SCOPE",
+    "PARENTS_SCOPE",
     "ClassPriorConfig",
     "ClassPriorMode",
+    "ClassPriorScope",
+    "ParentFormResolver",
     "apply_class_prior",
     "class_prior_telemetry",
+    "effective_form",
     "resolve_class_prior_config",
 ]
