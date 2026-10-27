@@ -744,6 +744,19 @@ def _write_chunks(
         # per-class rates, not an observed loss. Re-open this if the rates
         # converge — a stamped parent at 1 helpful citation in 219 servings is
         # the fact carrying the decision, and it is the one most likely to move.
+        #
+        # Update (#986): that is still the decision; this does not re-open it.
+        # A newer 30-day figure is in a different unit (token share and
+        # judged-useful token fraction, not P(cited helpful | served)), so it
+        # does not say the old rates converged: the conversation item namespace,
+        # almost all chunks, took 9.5% of injected tokens at a 0.0074
+        # judged-useful token fraction against 0.35 overall. That is a case for
+        # *withholding* chunks, not for stamping them, and the class prior now
+        # can (``TRELLIS_CLASS_PRIOR_SCOPE=parents_and_chunks``,
+        # :mod:`trellis.retrieve.class_prior`). It reads the chunk's form from
+        # its parent at serve time through ``parent_doc_id`` rather than
+        # stamping one here, so no chunk written by this function changes and
+        # no backfill or vector-metadata re-sync is needed.
         metadata: dict[str, Any] = {
             **stored,
             **extra_metadata,

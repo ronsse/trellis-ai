@@ -671,8 +671,10 @@ _SPECS: tuple[SettingSpec, ...] = (
             "noise/archived/superseded; if an unconfigured axis also "
             "surfaces the same document, that axis may still serve it, "
             "and the pack's withholding note says so. Withholds "
-            "conversation parent documents; their chunks carry "
-            "no document form and are never touched. Measured on the "
+            "conversation parent documents; their chunks are untouched "
+            "unless TRELLIS_CLASS_PRIOR_SCOPE=parents_and_chunks (env-only) "
+            "also withholds a chunk whose parent carries the form. "
+            "Measured on the "
             "live store: this class took about 11% of pack tokens on "
             "the keyword axis while being marked helpful 0 of 83 times "
             "and unhelpful on 44% of rows there, and only 1.2% of these "
@@ -682,7 +684,8 @@ _SPECS: tuple[SettingSpec, ...] = (
             "store-wide."
         ),
         # Which document forms and axes this reaches is set by
-        # TRELLIS_CLASS_PRIOR_FORMS / TRELLIS_CLASS_PRIOR_AXES — env-only,
+        # TRELLIS_CLASS_PRIOR_FORMS / TRELLIS_CLASS_PRIOR_AXES, and whether it
+        # reaches chunks by TRELLIS_CLASS_PRIOR_SCOPE — all env-only,
         # since SettingSpec has no list-typed field (see the module
         # docstring's "Scope" section) — defaulting to the imported
         # conversation form on the keyword axis only. See

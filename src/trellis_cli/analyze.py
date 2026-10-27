@@ -1046,9 +1046,11 @@ def replay(
         help=(
             "Replay trellis.retrieve.class_prior instead of a width policy: "
             "reports matched servings, helpful lost, unhelpful removed, and "
-            "tokens freed. Resolves mode/forms/axes the same way PackBuilder "
-            "does, so this replays whatever the gate is actually configured "
-            "to do."
+            "tokens freed. Resolves mode/forms/axes/scope the same way "
+            "PackBuilder does, so this replays whatever the gate is "
+            "actually configured to do; TRELLIS_CLASS_PRIOR_SCOPE="
+            "parents_and_chunks prices the chunks of a form too, resolving "
+            "each served chunk's parent through the document store."
         ),
     ),
     graph_selection: str | None = typer.Option(
@@ -1136,6 +1138,7 @@ def replay(
         return
     if class_prior:
         from trellis.retrieve.class_prior import (  # noqa: PLC0415
+            PARENTS_AND_CHUNKS_SCOPE,
             resolve_class_prior_config,
         )
         from trellis.retrieve.pack_replay import replay_class_prior  # noqa: PLC0415
@@ -1148,7 +1151,20 @@ def replay(
             analyzer_name="cli.analyze.replay-class-prior",
             disabled=no_meta_trace,
         ) as _meta_record:
-            prior_report = replay_class_prior(event_log, config=prior_config, days=days)
+            # Only the chunk scope reads the document store (a chunk's form
+            # is its parent's, and historical events record neither), so the
+            # default invocation touches no store it did not before.
+            prior_document_store = (
+                _get_registry().knowledge.document_store
+                if prior_config.scope == PARENTS_AND_CHUNKS_SCOPE
+                else None
+            )
+            prior_report = replay_class_prior(
+                event_log,
+                config=prior_config,
+                days=days,
+                document_store=prior_document_store,
+            )
             if _meta_record.enabled and prior_report.attributed_packs > 0:
                 _meta_record.produced_finding(
                     f"pack-replay-class-prior-report-d{days}",
@@ -1376,6 +1392,13 @@ def _render_class_prior_replay(report: Any) -> None:
     console.print(f"  helpful lost:       {report.helpful_lost}")
     console.print(f"  unhelpful removed:  {report.unhelpful_removed}")
     console.print(f"  tokens freed:       {report.tokens_freed:,}")
+    if report.parent_lookups:
+        console.print(
+            f"  parent lookups:     {report.parent_lookups} "
+            f"({report.parent_form_resolved} resolved, "
+            f"{report.parent_form_unresolved} unresolved, "
+            f"{report.matched_via_parent} matched via parent)"
+        )
 
     if report.notes:
         console.print()
