@@ -3340,8 +3340,8 @@ it, and the exclusion reads "partially applied" until none are left (a join is
 rewritten with the timing only when its session is parsed again, so a
 watermark reset back-fills old ones). `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
-sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`,
-an unverified default, matches nothing in them. The rule's other half, a first
+sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`
+no longer matches the harness's wording. The rule's other half, a first
 retrieval after a commit, is still not applied. `no_retrieval` is split into
 `never_called`, `errored`, `unparsed` and `empty_answer`, so a transport-failed
 `get_context` no longer reads as never called. Two pre-registered items still

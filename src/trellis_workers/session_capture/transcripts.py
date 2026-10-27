@@ -44,9 +44,10 @@ Claude Code writes one JSONL file per session under
   text block that opens like a Stop or SubagentStop hook's feedback is
   counted, and the first one is dated by the tool calls made before it. The
   text is matched and dropped. It is what lets the pack holdout tell a
-  retrieval made before the work from one the hook asked for at the end. The
-  repo holds no transcript showing what such a message looks like, so
-  :data:`HOOK_FEEDBACK_PATTERN` is a documented default, not a verified one.
+  retrieval made before the work from one the hook asked for at the end.
+  Claude Code writes the hook's feedback as a ``user`` record with
+  ``isMeta: true`` and bare-string content opening ``Stop hook feedback:``,
+  which :data:`HOOK_FEEDBACK_PATTERN` matches.
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
@@ -118,14 +119,16 @@ _PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
 
 
 #: What a Stop or SubagentStop hook's feedback message opens with, matched
-#: at the start of a user-record text block. **An unverified default**: no
-#: transcript, fixture or doc in this repo shows the record shape such
-#: feedback takes, so this is the generic wording the hooks' own name
-#: suggests, and nothing operator-specific. When the pattern matches nothing
-#: the digest counts zero hook messages and every first retrieval reads as
-#: "before any hook feedback"; the holdout reports how many units saw any
+#: at the start of a user-record text block. Checked on 2026-10-27 against
+#: the record Claude Code writes: a ``user`` record, ``isMeta: true``, whose
+#: bare-string content opens ``Stop hook feedback:``. The harness also writes
+#: a ``system`` record (``subtype: stop_hook_summary``) that this parser does
+#: not read; the user record is the one the model sees. When the pattern
+#: matches nothing the digest counts zero hook messages and every first
+#: retrieval reads as "before any hook feedback"; the holdout reports how
+#: many units saw any
 #: (``pre_treatment_hook_feedback_seen``) so that failure is visible, not
-#: silent. Narrow or replace it once a real record has been inspected.
+#: silent, which is how a future change to the harness's wording would show.
 HOOK_FEEDBACK_PATTERN = re.compile(
     r"(?:Stop|SubagentStop)\s+hook\s+(?:feedback|error)\b", re.IGNORECASE
 )

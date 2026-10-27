@@ -845,8 +845,8 @@ class TestRetrievalTiming:
 
     The pack holdout's pre-treatment exclusion reads this: a retrieval made
     because a hook asked for one at the end is not a treatment. The default
-    :data:`HOOK_FEEDBACK_PATTERN` is unverified against a real transcript, so
-    these fixtures are synthetic records shaped like the pattern.
+    The fixtures are synthetic records in the shape Claude Code writes hook
+    feedback: a ``user`` record with bare-string content.
     """
 
     def test_a_first_retrieval_before_any_hook_feedback(self, tmp_path: Path) -> None:
@@ -880,6 +880,16 @@ class TestRetrievalTiming:
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": True,
         }
+
+    def test_a_meta_flagged_hook_record_still_counts(self, tmp_path: Path) -> None:
+        """Claude Code flags the feedback record ``isMeta``; that must not hide it."""
+        feedback = {**user_turn(_HOOK_FEEDBACK), "isMeta": True}
+        timing = _timing(
+            tmp_path, *_step("b-1"), feedback, *_retrieval("u-1", PACK_IDS[0])
+        )
+
+        assert timing["hook_feedback_messages"] == 1
+        assert timing["hook_feedback_before_first_retrieval"] is True
 
     def test_a_session_with_no_hook_feedback(self, tmp_path: Path) -> None:
         timing = _timing(tmp_path, *_step("b-1"), *_retrieval("u-1", PACK_IDS[0]))

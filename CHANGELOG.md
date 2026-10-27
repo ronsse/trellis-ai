@@ -19,9 +19,9 @@ All notable changes to Trellis will be documented in this file.
   `tool_call_count`, `hook_feedback_messages` and
   `hook_feedback_before_first_retrieval`, counts and a flag only, never the
   message. Hook feedback is a user-record text block that opens like one,
-  matched by `HOOK_FEEDBACK_PATTERN` in `transcripts.py`; **that pattern is a
-  documented, unverified default**, because no transcript or fixture in the
-  repo shows the record shape such feedback takes, and the funnel's
+  matched by `HOOK_FEEDBACK_PATTERN` in `transcripts.py` against the shape
+  Claude Code writes (an `isMeta` user record whose string content opens
+  `Stop hook feedback:`), and the funnel's
   `pre_treatment_hook_feedback_seen` makes a pattern that matches nothing
   visible instead of silent. The holdout excludes a task whose join says
   hook feedback came first (`pre_treatment_excluded`, a funnel stage before
