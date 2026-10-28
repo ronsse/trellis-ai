@@ -8,7 +8,7 @@ Trellis memory tools are connected. Use them as a loop, not a lookup.
   a real answer: proceed.
 - After meaningful work, call save_experience with a trace. A step's
   `result` is a JSON object, never a bare string; a failure goes in the
-  step's `error`.
+  step's `error` as a string.
 - Grade the pack: record_feedback(pack_id=..., rating=0.0-1.0,
   helpful_item_ids=[...], unhelpful_item_ids=[...]). Feedback that names no
   item ids does not reach the learning loop. Skip it only if no pack_id was

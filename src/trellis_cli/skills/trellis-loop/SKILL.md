@@ -2,7 +2,6 @@
 name: trellis-loop
 description: Make Trellis retrieval and grading part of every task, including each dispatched subagent's. Call get_context before reading files, grade the pack by item id before finishing.
 version: 1.0.0
-status: stable
 ---
 
 # Trellis Loop

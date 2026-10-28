@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp import server
-from trellis.schemas.enums import OutcomeStatus
+from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import TraceStep
 from trellis_cli.prompts import PROMPT_VARIANTS, load_prompt
 from trellis_wire.dtos import PackFeedbackRequest
@@ -158,6 +158,15 @@ class TestFeedbackFieldsAreTheWireModel:
             params
         )
 
+    def test_every_ids_field_the_request_has_is_a_tool_parameter(self):
+        # The id fields are read from the REST model, so the MCP tool must take
+        # all of them. It also takes ``ignored_item_ids``, which REST would
+        # reject as an extra field; the text omits it on purpose.
+        wire = {n for n in PackFeedbackRequest.model_fields if n.endswith("_ids")}
+        params = set(inspect.signature(unwrap_tool(server.record_feedback)).parameters)
+        assert wire <= params
+        assert {n for n in params if n.endswith("_ids")} - wire == {"ignored_item_ids"}
+
     def test_the_rating_range_the_text_gives_is_the_models(self):
         rating = PackFeedbackRequest.model_fields["rating"]
         bounds = {type(m).__name__: m for m in rating.metadata}
@@ -175,6 +184,16 @@ class TestTheTraceShape:
     def test_the_text_says_so(self):
         for variant in ("system", "claude-md"):
             assert "`result` is a JSON object" in load_prompt(variant)
+
+    def test_a_step_error_must_be_a_string(self):
+        with pytest.raises(ValidationError):
+            TraceStep(step_type="note", name="run", error={"msg": "boom"})  # type: ignore[arg-type]
+        for variant in ("system", "claude-md"):
+            assert "`error` as a string" in load_prompt(variant)
+
+    def test_the_source_the_text_names_is_real(self):
+        assert '"agent"' in load_prompt("system")
+        assert "agent" in {s.value for s in TraceSource}
 
     def test_the_outcome_statuses_listed_are_real(self):
         text = load_prompt("system")

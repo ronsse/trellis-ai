@@ -53,7 +53,7 @@ You have Trellis memory tools. Use them as a loop, not a lookup.
 2. After the work, call save_experience(trace_json=<a JSON string>) with a
    trace: source "agent", intent, context {domain}, 2-6 steps (each has a
    step_type and a name; a step's `result` is a JSON object, never a bare
-   string, and a failure goes in the step's `error`), and an outcome
+   string, and a failure goes in the step's `error` as a string), and an outcome
    {status: success|failure|partial, summary}. Record what the next agent
    would otherwise have to rediscover: the workaround, the wrong
    assumption, the command that worked.
@@ -153,7 +153,7 @@ Trellis memory tools are connected. Use them as a loop, not a lookup.
   a real answer: proceed.
 - After meaningful work, call save_experience with a trace. A step's
   `result` is a JSON object, never a bare string; a failure goes in the
-  step's `error`.
+  step's `error` as a string.
 - Grade the pack: record_feedback(pack_id=..., rating=0.0-1.0,
   helpful_item_ids=[...], unhelpful_item_ids=[...]). Feedback that names no
   item ids does not reach the learning loop. Skip it only if no pack_id was

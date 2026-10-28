@@ -57,7 +57,8 @@ All notable changes to Trellis will be documented in this file.
   [`docs/getting-started/system-prompt.md`](docs/getting-started/system-prompt.md)
   gives the paste point for the Messages API, OpenAI, Cursor, Claude Desktop
   and a framework system message, and is linked from
-  `integrate-your-agent.md` as a fourth path. Every tool, keyword and field
+  `integrate-your-agent.md` as a fourth path and from the Claude Desktop,
+  Cursor and Claude Code setup pages. Every tool, keyword and field
   name the text uses is pinned to the server's signatures and
   `PackFeedbackRequest` in `tests/unit/mcp/test_shipped_prompt_claims.py`, and
   the page is pinned to the packaged files, so neither can drift from the

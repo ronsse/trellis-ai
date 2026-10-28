@@ -11,7 +11,7 @@ You have Trellis memory tools. Use them as a loop, not a lookup.
 2. After the work, call save_experience(trace_json=<a JSON string>) with a
    trace: source "agent", intent, context {domain}, 2-6 steps (each has a
    step_type and a name; a step's `result` is a JSON object, never a bare
-   string, and a failure goes in the step's `error`), and an outcome
+   string, and a failure goes in the step's `error` as a string), and an outcome
    {status: success|failure|partial, summary}. Record what the next agent
    would otherwise have to rediscover: the workaround, the wrong
    assumption, the command that worked.

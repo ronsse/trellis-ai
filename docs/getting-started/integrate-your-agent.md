@@ -63,8 +63,8 @@ every session:
   graph knowledge instead of re-deriving them.
 - **Post-task record** (`record-after-task`): after meaningful work, the agent
   writes a structured trace via `save_experience` and grades the packs it was
-  served with `record_feedback`, citing item ids — this is what makes future
-  retrievals useful.
+  served with `record_feedback`, citing item ids (`helpful_item_ids` /
+  `unhelpful_item_ids`) — this is what makes future retrievals useful.
 - **Evidence linking** (`link-evidence`): when the agent learns a durable fact,
   it stores it with `save_knowledge`, linked to the graph entity the fact is
   about, so the fact resurfaces from any future task that touches the same
