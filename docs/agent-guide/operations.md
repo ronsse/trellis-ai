@@ -145,6 +145,33 @@ flagged `stale` when that age exceeds 36h regardless of its own
 `last_status`, `null` rendered as "Not measured", and a fetch failure
 rendered as a visible error rather than a silent empty list.
 
+### `trellis admin show-prompt`
+
+Print the retrieve, record, grade loop as text for a consumer that reads no skill: a model called with an API key, a framework's system message, or a dispatched subagent.
+
+```bash
+trellis admin show-prompt [--variant system|claude-md|agent-rule] [--format text|json]
+```
+
+| Variant | For |
+|---|---|
+| `system` (default) | the system message of a model that has the Trellis tools |
+| `claude-md` | a section of `CLAUDE.md`, `AGENTS.md` or a Cursor rule |
+| `agent-rule` | one paragraph for every agent definition that gets dispatched |
+
+The text is the packaged file in `trellis_cli/prompts/`, printed byte for byte (no Rich markup, no wrapping), so it can be piped straight into a config file. Where to paste each variant is in [`docs/getting-started/system-prompt.md`](../getting-started/system-prompt.md).
+
+**JSON output** (one variant per call):
+
+```json
+{
+  "variant": "system",
+  "text": "You have Trellis memory tools. ..."
+}
+```
+
+An unknown `--variant` exits `EXIT_VALIDATION` (2) under both formats. `trellis admin install-skills` and `trellis admin quickstart --with-skills` end their text output with the `agent-rule` paragraph and a pointer to this command, and their `--format json` payload carries the same paragraph as an additive `agent_rule` key.
+
 ### `trellis admin serve`
 
 Start the REST API server.

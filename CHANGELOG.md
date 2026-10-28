@@ -6,6 +6,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Trellis ships the loop as text for consumers that read no skill:
+  `trellis admin show-prompt`, a fourth skill `trellis-loop`, and a docs page
+  saying where to paste it.** The skills teach Claude Code the retrieve,
+  record, grade loop, but a model called with an API key, a framework's system
+  message and a dispatched subagent load no skill, and the repo held no
+  system prompt for them. The text now ships in three variants under
+  `trellis_cli/prompts/` (a sibling of `skills/`, so `install-skills` never
+  copies it as a skill): `system` for a model's system message, `claude-md`
+  for `CLAUDE.md` or a Cursor rule, and `agent-rule`, one paragraph for an
+  agent definition. `trellis admin show-prompt [--variant ...] [--format
+  json]` prints one byte for byte (JSON is `{"variant", "text"}`; an unknown
+  variant exits 2 under both formats). `trellis-loop` carries the
+  `agent-rule` paragraph, and `install-skills` and `quickstart --with-skills`
+  end their text output with it plus a pointer to `show-prompt`; their
+  `--format json` gains an additive `agent_rule` key.
+  [`docs/getting-started/system-prompt.md`](docs/getting-started/system-prompt.md)
+  gives the paste point for the Messages API, OpenAI, Cursor, Claude Desktop
+  and a framework system message, and is linked from
+  `integrate-your-agent.md` as a fourth path. Every tool, keyword and field
+  name the text uses is pinned to the server's signatures and
+  `PackFeedbackRequest` in `tests/unit/mcp/test_shipped_prompt_claims.py`, and
+  the page is pinned to the packaged files, so neither can drift from the
+  code.
+
 - **The holdout's `pre_treatment` exclusion is applicable: capture records
   where the first retrieval sat, and `trellis analyze holdout` drops a task
   whose first retrieval followed a stop hook's feedback.** The pre-registration

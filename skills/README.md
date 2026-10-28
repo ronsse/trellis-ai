@@ -13,10 +13,11 @@ Drop-in skill files for Claude Code (and other agent frameworks that follow the 
 | retrieve-before-task | Before non-trivial work, pull a token-budgeted context pack from Trellis — and again after a pivot, after compaction, and in every dispatched subagent. |
 | record-after-task | After meaningful work, write a schema-valid trace, grade the packs that were served by item id, and save any durable environment fact as knowledge. |
 | link-evidence | When the agent learns something durable, store it with `save_knowledge` anchored to the graph entity it is about, and check the reply to confirm the link. |
+| trellis-loop | The retrieve, record, grade loop as one paragraph to add to every agent definition and to `CLAUDE.md`, so dispatched subagents (which read no skill) follow it. `trellis admin show-prompt` prints it, and a system-prompt form for API-key clients. |
 
 ## Installing into Claude Code
 
-The fastest path is one command — it copies all three skills out of the installed package, so it works from a `pip install` as well as a repo checkout.
+The fastest path is one command — it copies all four skills out of the installed package, so it works from a `pip install` as well as a repo checkout.
 
 **User-scoped (works across every project):**
 
@@ -34,7 +35,7 @@ trellis admin install-skills project
 
 Doing a full setup at once? `trellis admin quickstart --with-skills user` initializes the stores **and** installs the skills, then prints the `claude mcp add` command that registers the MCP server. Run that command once.
 
-Restart Claude Code afterward and the skills will be discoverable as `/retrieve-before-task`, `/record-after-task`, `/link-evidence`.
+Restart Claude Code afterward and the skills will be discoverable as `/retrieve-before-task`, `/record-after-task`, `/link-evidence`, `/trellis-loop`.
 
 ### Manual fallback
 
@@ -45,11 +46,12 @@ mkdir -p ~/.claude/skills
 cp -r src/trellis_cli/skills/retrieve-before-task ~/.claude/skills/
 cp -r src/trellis_cli/skills/record-after-task ~/.claude/skills/
 cp -r src/trellis_cli/skills/link-evidence ~/.claude/skills/
+cp -r src/trellis_cli/skills/trellis-loop ~/.claude/skills/
 ```
 
 ## Prerequisites
 
-All three skills assume the Trellis MCP server is running and registered with your agent. See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for setup. This sets up the stores and skills together, then prints the command that registers the MCP server:
+All four skills assume the Trellis MCP server is running and registered with your agent. See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for setup. This sets up the stores and skills together, then prints the command that registers the MCP server:
 
 ```bash
 trellis admin quickstart --with-skills user

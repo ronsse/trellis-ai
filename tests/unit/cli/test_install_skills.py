@@ -10,13 +10,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import plain
+from tests.cli_output import force_colour, plain
 from trellis.schemas.trace import Trace
+from trellis_cli import admin
 from trellis_cli.claude_integration import (
     get_skills_target_dir,
     install_skills,
 )
 from trellis_cli.main import app
+from trellis_cli.prompts import agent_rule_text
 from trellis_cli.skills import SKILL_NAMES
 
 runner = CliRunner()
@@ -28,11 +30,12 @@ runner = CliRunner()
 
 
 class TestPackageData:
-    def test_skill_names_are_three(self):
+    def test_skill_names_are_four(self):
         assert set(SKILL_NAMES) == {
             "retrieve-before-task",
             "record-after-task",
             "link-evidence",
+            "trellis-loop",
         }
 
     @pytest.mark.parametrize("name", SKILL_NAMES)
@@ -158,7 +161,7 @@ class TestInstallSkillsCommand:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
         assert data["scope"] == "user"
-        assert len(data["skills"]) == 3
+        assert len(data["skills"]) == 4
         assert {s["status"] for s in data["skills"]} == {"installed"}
         skills_dir = self.tmp / "home" / ".claude" / "skills"
         assert data["skills_dir"] == str(skills_dir)
@@ -203,6 +206,58 @@ class TestInstallSkillsCommand:
         assert result.exit_code == 0
         assert "Skills install complete" in result.stdout
         assert "link-evidence" in result.stdout
+
+    def test_json_carries_the_agent_rule(self):
+        """An orchestrator splices ``agent_rule`` into a subagent's brief."""
+        result = runner.invoke(
+            app, ["admin", "install-skills", "user", "--format", "json"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout.strip())["agent_rule"] == agent_rule_text()
+
+    @pytest.mark.parametrize("colour", [False, True])
+    def test_text_output_ends_with_the_rule_and_the_pointer(self, monkeypatch, colour):
+        """The paragraph is pasted, so it must arrive as shipped.
+
+        It holds ``[...]`` placeholders that Rich deletes as markup and
+        lines that it folds at the console width; the colour pass proves
+        neither happens when the run is coloured either.
+        """
+        if colour:
+            force_colour(monkeypatch, admin)
+        monkeypatch.setenv("COLUMNS", "40")
+        result = runner.invoke(app, ["admin", "install-skills", "user"])
+        assert result.exit_code == 0
+        assert plain(result.stdout).endswith(
+            agent_rule_text()
+            + "\n\nSystem prompt for API-key and non-Claude-Code clients: "
+            "trellis admin show-prompt\n"
+        )
+
+    def _fail_every_copy(self, monkeypatch):
+        def raiser(_src, _dest):
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr("trellis_cli.claude_integration.shutil.copytree", raiser)
+
+    def test_a_failed_copy_prints_no_rule_in_text(self, monkeypatch):
+        """Text promises the rule only after a clean install."""
+        self._fail_every_copy(monkeypatch)
+        result = runner.invoke(app, ["admin", "install-skills", "user"])
+        assert result.exit_code == 1, result.stdout
+        assert "show-prompt" not in result.stdout
+        assert agent_rule_text() not in plain(result.stdout)
+
+    def test_a_failed_copy_keeps_the_json_key(self, monkeypatch):
+        """JSON keeps its shape, so a consumer never branches on the key."""
+        self._fail_every_copy(monkeypatch)
+        result = runner.invoke(
+            app, ["admin", "install-skills", "user", "--format", "json"]
+        )
+        assert result.exit_code == 1, result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "partial"
+        assert data["agent_rule"] == agent_rule_text()
 
     def test_invalid_scope(self):
         result = runner.invoke(

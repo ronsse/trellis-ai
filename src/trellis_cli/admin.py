@@ -52,6 +52,12 @@ from trellis_cli.config import (
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
+from trellis_cli.prompts import (
+    DEFAULT_VARIANT,
+    PROMPT_VARIANTS,
+    agent_rule_text,
+    load_prompt,
+)
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -1073,6 +1079,26 @@ def _print_skills_summary(
             console.print(f"    [green]{status}[/green] {name}")
 
 
+def _print_agent_rule() -> None:
+    """Print the subagent rule, and where the rest of the prompt text is.
+
+    The rule is a paragraph to paste, so it is printed with markup, emoji and
+    highlighting off and without wrapping: Rich would delete the ``[...]``
+    placeholders in it and fold it at the console width.
+    """
+    console.print(
+        "\n[bold]Agent rule[/bold] (add to every agent definition and CLAUDE.md):"
+    )
+    console.print(agent_rule_text(), markup=False, highlight=False, soft_wrap=True)
+    console.print(
+        "\nSystem prompt for API-key and non-Claude-Code clients: "
+        "trellis admin show-prompt",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
 def _print_quickstart_summary(
     steps: list[str],
     config_path: Path,
@@ -1081,7 +1107,11 @@ def _print_quickstart_summary(
     skills: list[dict[str, str]] | None = None,
     skills_dir: Path | None = None,
 ) -> None:
-    """Print human-readable quickstart summary."""
+    """Print human-readable quickstart summary.
+
+    Ends with the agent rule when skills were installed and none failed, so a
+    user who asked for skills is also told what a dispatched subagent needs.
+    """
     console.print("[green]Quickstart complete![/green]\n")
     if "stores_initialized" in steps:
         console.print(f"  [cyan]Stores initialized:[/cyan] {escape(str(config_path))}")
@@ -1110,6 +1140,8 @@ def _print_quickstart_summary(
         "\n[dim]Tip: Add experience graph usage guidance to your"
         " project's CLAUDE.md.[/dim]"
     )
+    if skills is not None and not any(r["status"] == "failed" for r in skills):
+        _print_agent_rule()
 
 
 def _refuse_option(msg: str, output_format: str) -> NoReturn:
@@ -1196,6 +1228,7 @@ def quickstart(
         if skills_results is not None:
             payload["skills"] = skills_results
             payload["skills_dir"] = str(skills_dir)
+            payload["agent_rule"] = agent_rule_text()
         typer.echo(json.dumps(payload))
     else:
         _print_quickstart_summary(
@@ -1241,6 +1274,7 @@ def install_skills_cmd(
                     "scope": scope,
                     "skills_dir": str(skills_dir),
                     "skills": results,
+                    "agent_rule": agent_rule_text(),
                 }
             )
         )
@@ -1253,8 +1287,42 @@ def install_skills_cmd(
         else:
             console.print("[green]Skills install complete![/green]\n")
         _print_skills_summary(results, skills_dir)
+        if not failed:
+            _print_agent_rule()
     if failed:
         raise typer.Exit(EXIT_INTERNAL)
+
+
+@admin_app.command("show-prompt")
+def show_prompt(
+    variant: str = typer.Option(
+        DEFAULT_VARIANT,
+        "--variant",
+        help=(
+            "system (system prompt for an API-key client), claude-md "
+            "(a section for CLAUDE.md or AGENTS.md) or agent-rule "
+            "(the five-line subagent rule)."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Print the Trellis loop prompt for a client that gets no skills."""
+    if variant not in PROMPT_VARIANTS:
+        _refuse_option(
+            f"--variant must be one of {', '.join(PROMPT_VARIANTS)}, got {variant!r}",
+            output_format,
+        )
+    text = load_prompt(variant)
+    if output_format == "json":
+        emit_json({"variant": variant, "text": text})
+    else:
+        # The text is meant to be copied: it holds ``[...]`` placeholders and
+        # backticks, and runs past any console width, so markup, highlighting
+        # and wrapping are off. ``end=""`` because the file carries its own
+        # final newline.
+        console.print(text, markup=False, highlight=False, soft_wrap=True, end="")
 
 
 def _memory_prompt_available() -> bool:

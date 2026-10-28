@@ -361,6 +361,8 @@ trellis admin migrate-graph \
 
 Retrieval tools accept `max_tokens` (default 2000; `get_items` defaults to 4000, and the three sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `save_knowledge`, `POST /documents`, `POST /evidence`, `trellis ingest corpus` / `conversations` or `trellis ingest dbt-manifest` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
+**System prompt** — a model you call with an API key, a framework agent or a dispatched subagent reads no skill. `trellis admin show-prompt` prints the retrieve, record, grade loop as a system prompt (`--variant claude-md` and `--variant agent-rule` print the shorter forms); [docs/getting-started/system-prompt.md](docs/getting-started/system-prompt.md) says where to paste each.
+
 **Python SDK** — HTTP-only (`import trellis_sdk`): point `base_url` at a running `trellis admin serve`, or use `trellis.testing.in_memory_client` in tests. Against a server running `TRELLIS_AUTH_MODE=required`, pass `api_key=` so the client sends it as `Authorization: Bearer` on every request.
 
 ```python
@@ -475,7 +477,7 @@ The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp`
 ## Examples & skill templates
 
 - [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK in-memory + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
-- [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`. Install with `trellis admin install-skills user` (or `trellis admin quickstart --with-skills user`).
+- [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`, `trellis-loop`. Install with `trellis admin install-skills user` (or `trellis admin quickstart --with-skills user`).
 - [**docs/getting-started/**](https://github.com/ronsse/trellis-ai/tree/main/docs/getting-started) — IDE-specific MCP setup walkthroughs.
 
 ## Development
