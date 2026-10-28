@@ -135,7 +135,7 @@ The Trellis MCP server exposes a small surface of tools an agent calls during a 
 - `get_items(item_ids)` — fetch full bodies for ids a pack listed (or for an index-mode pack).
 - `save_experience(trace_json)` — record a structured trace of the work. Each step's `result` is an object; failures go in `error`.
 - `save_knowledge(...)` — store a durable fact anchored to a graph entity.
-- `record_feedback(pack_id, rating, notes?, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?)` — closes the variation-selection loop. `rating` is 0.0–1.0. Name the item ids you used or ignored: feedback without them does not reach the learning loop.
+- `record_feedback(pack_id, rating, notes?, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?)` — closes the variation-selection loop. `rating` is 0.0–1.0. Name the item ids that helped or were noise (`helpful_item_ids` / `unhelpful_item_ids`): feedback without them does not reach the learning loop.
 - `execute_mutation(...)` — submits a governed mutation (used sparingly by agents; most writes go through extractors).
 
 `get_objective_context` and `get_task_context` are deprecated sectioned-pack tools; prefer `get_context`.

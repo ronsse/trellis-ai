@@ -84,6 +84,9 @@ def test_the_scan_sees_the_pages_it_guards() -> None:
 
 
 def test_every_exemption_is_still_needed() -> None:
+    # Shrink-only: a new exemption is a new non-compliant page, not a pending one.
+    allowed = {"docs/getting-started/integrate-your-agent.md"}
+    assert _PENDING.issubset(allowed), sorted(_PENDING)
     stale = [rel for rel in sorted(_PENDING) if rel not in violations(REPO_ROOT)]
     assert stale == [], f"remove from _PENDING, the page now complies: {stale}"
 
