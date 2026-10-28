@@ -1,13 +1,10 @@
 ---
 name: record-after-task
 description: Save a Trellis trace after meaningful work — a fix, feature, refactor, instructive failure, or non-obvious discovery — so future agents inherit it. Skip trivial edits and conversational turns.
-version: 1.1.0
-status: preview
+version: 1.2.0
 ---
 
 # Record After Task
-
-> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 retrieve-before-task only helps if there is something to retrieve. When the
 work is done: save a trace, grade the packs you were served, and save any

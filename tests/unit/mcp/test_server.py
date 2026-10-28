@@ -62,6 +62,11 @@ from trellis.mcp.server import (
 )
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.retrieve.withholding import (
+    WithheldGroup,
+    WithholdingSummary,
+    format_withholding_note,
+)
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -2123,10 +2128,18 @@ class TestFlatContextRendersAdvisories:
         assert "`adv-flat-anti-pattern`" in result
         assert "**[entity]**" in result
         assert "**[anti_pattern]**" in result
-        # The position ``_sectioned_context`` uses: after the items and the
-        # cite footer.
+        # After the items and *before* the cite footer, so the footer is the
+        # last thing read and the only grading hint is never above an
+        # advisory it should have been able to name.
         assert result.index("## Advisories") > result.index("`doc1`")
-        assert result.index("## Advisories") > result.index("*Cite feedback")
+        assert result.index("## Advisories") < result.index("*Cite feedback")
+        assert result.splitlines()[-1].startswith("*Cite feedback")
+        assert "followed_advisory_ids=[...]" in result.splitlines()[-1]
+        advisory_lines = [
+            line for line in result.splitlines() if line.startswith(("1. ", "2. "))
+        ]
+        assert len(advisory_lines) == 2
+        assert all("`followed_advisory_ids`" in line for line in advisory_lines)
 
     def test_omits_the_section_when_there_are_no_advisories(
         self, temp_registry: StoreRegistry
@@ -2157,6 +2170,11 @@ class TestFlatContextRendersAdvisories:
         assert "No context found" in result
         assert "## Advisories" in result
         assert "`adv-flat-entity`" in result
+        # At the default holdout rate the empty pack still names itself, so
+        # the advisories under it can be cited, and the footer closes it.
+        assert "**pack_id:**" in result
+        assert result.index("## Advisories") < result.index("*Cite feedback")
+        assert result.splitlines()[-1].startswith("*Cite feedback")
 
     def test_index_mode_also_renders_advisories(
         self, temp_registry: StoreRegistry
@@ -2170,6 +2188,8 @@ class TestFlatContextRendersAdvisories:
 
         assert "## Advisories" in result
         assert "`adv-flat-entity`" in result
+        assert result.index("## Advisories") < result.index("*Fetch bodies via")
+        assert result.splitlines()[-1].startswith("*Fetch bodies via")
 
     def test_search_tool_shares_the_fix(self, temp_registry: StoreRegistry) -> None:
         """``search`` renders through the same ``_flat_context`` helper as
@@ -3534,6 +3554,45 @@ class TestServerInstructions:
         """Retrieval is the starved half; it has to come first in the text too."""
         text = server_mod.mcp.instructions or ""
         assert text.index("get_context") < text.index("save_experience")
+
+    def test_leads_with_rating_and_names_the_advisory_field(self) -> None:
+        """The pack footer, the docstring and the instructions teach one call."""
+        text = server_mod.mcp.instructions or ""
+        assert "rating" in text
+        assert "followed_advisory_ids" in text
+
+    def test_warns_that_a_steps_result_is_an_object(self) -> None:
+        """A client decides whether to call a tool before it reads the
+        docstring, so the trap that rejects most writes belongs here too."""
+        text = server_mod.mcp.instructions or ""
+        assert "`result` is an object" in text
+
+    def test_describes_the_pack_the_way_it_renders(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Every claim about the pack's shape is checked against a rendered one.
+
+        The instructions say the header carries the ``pack_id``, that item ids
+        sit in backticks, and that a ``**Withheld:**`` line counts what was
+        not served. Render each and look, rather than trusting the prose.
+        """
+        text = server_mod.mcp.instructions or ""
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely"
+        )
+
+        rendered = get_context("deploy platform")
+        header, _, _ = rendered.partition("\n\n")
+        assert "`pack_id`" in text
+        assert "**pack_id:** `" in header
+        assert "## [document] `doc1`" in rendered
+        assert "backticks" in text
+
+        withheld = format_withholding_note(
+            WithholdingSummary(groups=(WithheldGroup(reason="archived", count=2),))
+        )
+        assert withheld.startswith("**Withheld:**")
+        assert "**Withheld:**" in text
 
     def test_stays_short_enough_to_inject_every_session(self) -> None:
         """It rides in every session on every client — cap the token cost."""

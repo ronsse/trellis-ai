@@ -10,13 +10,16 @@ so no tool can serve around it. What these tests pin is the agent's side:
   ``pack_id``. Nothing in it mentions a holdout.
 * **Joinable.** It carries its ``pack_id`` in the header, where the session
   capture parser (#694) reads it, so the capture join sees withheld packs.
-  The flat tools used to answer an empty pack with one bare line and no
-  ``pack_id``; with the flag on, every empty flat pack, withheld or not,
-  now renders through the formatter, so the two stay indistinguishable.
+  Every empty flat pack, withheld or not, renders through the formatter
+  with its header and footer, so the two stay indistinguishable. (The flat
+  tools used to answer an empty pack with one bare line and no ``pack_id``
+  unless the flag was on, which left an agent at the default rate nothing
+  to grade.)
 * **Recorded.** ``PACK_ASSEMBLED`` says ``holdout: true`` and keeps the
   would-be items and advisories under their own keys, never as served.
-* **Transparent at rate 0.** The flat tools' empty-pack line is unchanged,
-  byte for byte, and no response moves.
+* **Transparent at rate 0.** No pack draws a holdout, no response differs
+  from an unset rate's, and an empty flat pack reads exactly as a withheld
+  one does.
 """
 
 from __future__ import annotations
@@ -260,7 +263,7 @@ class TestAWithheldPackReadsAsAnEmptyPack:
 
 class TestRateZeroIsTransparent:
     @pytest.mark.parametrize(
-        ("name", "legacy"),
+        ("name", "empty_line"),
         [
             ("get_context", f"No context found for: {INTENT}"),
             ("get_context_index", f"No context found for: {INTENT}"),
@@ -268,23 +271,51 @@ class TestRateZeroIsTransparent:
         ],
     )
     @pytest.mark.parametrize("rate", [None, "0"])
-    def test_an_empty_flat_pack_keeps_its_one_line_answer(
+    def test_an_empty_flat_pack_carries_its_pack_id(
         self,
         name: str,
-        legacy: str,
+        empty_line: str,
         rate: str | None,
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """At the default rate nothing is withheld, and the empty pack still
+        names itself: the instructions tell an agent to grade by ``pack_id``."""
         if rate is not None:
             monkeypatch.setenv(RATE_ENV, rate)
-        assert _CALLS[name]() == legacy
+        response = _CALLS[name]()
+
+        pack_id = _pack_id(response)
+        assert empty_line in response.splitlines()
+        assert f'record_feedback(pack_id="{pack_id}"' in response
         (event,) = temp_registry.operational.event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
         )
+        assert event.entity_id == pack_id
         assert (event.payload["holdout"], event.payload["holdout_rate"]) == (
             False,
             0.0,
+        )
+
+    @pytest.mark.parametrize("name", sorted(_FLAT))
+    def test_a_genuinely_empty_pack_reads_as_a_withheld_one(
+        self, name: str, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The look-alike rule that keeps the holdout blind: the rate-0 empty
+        pack and the rate-1 withheld one differ in nothing but the pack id."""
+        _seed_documents(temp_registry)
+        monkeypatch.setenv(RATE_ENV, "1")
+        withheld = _CALLS[name]()
+        monkeypatch.setenv(RATE_ENV, "0")
+        # A corpus that matches nothing: the same documents, a different ask.
+        genuinely_empty = {
+            "get_context": lambda: get_context("zzqx unmatched"),
+            "get_context_index": lambda: get_context("zzqx unmatched", index=True),
+            "search": lambda: search("zzqx unmatched"),
+        }[name]()
+
+        assert _mask(genuinely_empty).replace("zzqx unmatched", INTENT) == _mask(
+            withheld
         )
 
     @pytest.mark.parametrize("name", sorted(_CALLS))
@@ -343,14 +374,15 @@ class TestTheCaptureJoinSeesAWithheldPack:
         assert digest.pack_ids == [pack_id]
         assert digest.pack_ids_unparsed == 0
 
-    def test_at_rate_zero_an_empty_pack_stays_unjoinable_as_before(
+    def test_at_rate_zero_an_empty_pack_joins_on_its_pack_id_too(
         self, temp_registry: StoreRegistry, tmp_path: Path
     ) -> None:
-        """The contrast: the one-line answer names no pack, so the parser
-        records a retrieval and no id — which is why the flag changes how an
-        empty flat pack renders."""
-        digest = self._parse(tmp_path, get_context(INTENT))
+        """No flag needed: an empty pack's response always names its pack, so
+        the parser records the retrieval and the id."""
+        response = get_context(INTENT)
+
+        digest = self._parse(tmp_path, response)
 
         assert digest.retrieval_results == 1
-        assert digest.pack_ids == []
+        assert digest.pack_ids == [_pack_id(response)]
         assert digest.pack_ids_unparsed == 0

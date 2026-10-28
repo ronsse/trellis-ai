@@ -45,7 +45,7 @@ Trellis exposes 16 macro tools. The eleven below return markdown (not raw JSON):
 | `save_memory` | Store a document for later retrieval | `save_memory(content="Rate limiting uses token bucket algorithm")` |
 | `get_lessons` | List precedents (proven patterns) | `get_lessons(domain="backend", max_tokens=1500)` |
 | `get_graph` | Explore entity neighborhood | `get_graph(entity_id="01JRK5N7QF", depth=2)` |
-| `record_feedback` | Record whether a task succeeded | `record_feedback(trace_id="01JRK5N7QF", success=true)` |
+| `record_feedback` | Grade the pack `get_context` served | `record_feedback(pack_id="<pack_id>", rating=0.8, helpful_item_ids=["<item_id>"])` |
 | `search` | Search documents and entities | `search(query="database migration", limit=5)` |
 
 **Sectioned-context tools** (use for richer multi-step or workflow-spanning retrieval)
@@ -76,11 +76,13 @@ After completing meaningful work, save the experience:
 save_experience(trace_json='{"source": "agent", "intent": "what you did", "steps": [...], "outcome": {"status": "success", "summary": "what happened"}, "context": {"domain": "backend"}}')
 ```
 
-Then record feedback:
+Then grade the pack `get_context` served, citing the backticked item ids you used:
 
 ```
-record_feedback(trace_id="<returned_id>", success=true, notes="Clean implementation")
+record_feedback(pack_id="<pack_id>", rating=0.8, helpful_item_ids=["<item_id>"], unhelpful_item_ids=[])
 ```
+
+Feedback without item ids does not reach the learning loop. This applies to every dispatched subagent too; it is part of the task, not extra scope. Only when no pack was served, grade the trace instead: `record_feedback(trace_id="<returned_id>", success=true)`.
 
 ### Link Evidence
 

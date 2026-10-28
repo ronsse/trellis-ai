@@ -38,6 +38,34 @@ _MAX_NEIGHBOR_POINTERS = 3
 _INDEX_RENDER_RESERVE = 10
 
 
+def _record_feedback_hint(pack_id: str) -> str:
+    """The ``record_feedback`` call every pack footer shows, pack id filled in.
+
+    Leads with ``rating`` and names every field the learning loop joins on,
+    so a footer-only reader (an agent that never saw the tool's docstring)
+    is steered to the same call the docstring teaches. ``success`` is
+    accepted by the tool but derived from ``rating``, so it is not offered.
+    """
+    return (
+        'record_feedback(pack_id="' + pack_id + '", rating=..., '
+        "helpful_item_ids=[...], unhelpful_item_ids=[...], "
+        "followed_advisory_ids=[...])"
+    )
+
+
+def _advisories_block(advisories: list[Advisory] | None) -> str:
+    """Rendered advisories as one footer-preceding block, or ``""``.
+
+    Advisories sit **above** the citation footer so the footer stays the
+    last thing an agent reads and can point at ``followed_advisory_ids``
+    while the ids are still in view. They are not charged to any item
+    budget (the item loops never count them) — the same rule the MCP
+    server applied when it appended them after the whole pack.
+    """
+    rendered = format_advisories_as_markdown(advisories or [])
+    return f"\n{rendered.rstrip()}" if rendered else ""
+
+
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate text to fit within token budget.
 
@@ -65,6 +93,7 @@ def format_pack_as_markdown(
     withholding: WithholdingSummary | None = None,
     empty_text: str | None = None,
     axis_note: str = "",
+    advisories: list[Advisory] | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -109,6 +138,9 @@ def format_pack_as_markdown(
             and for the same reason: this is the markdown surface, so a
             caller who never reads ``PACK_ASSEMBLED.strategy_failures`` or
             ``axes.semantic`` still sees the gap.
+        advisories: Advisories to render between the items and the citation
+            footer. Not charged against ``max_tokens`` — they ride outside
+            the item budget.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -169,11 +201,13 @@ def format_pack_as_markdown(
         if remaining > 0:
             lines.append(f"\n*[{remaining} more items omitted]*")
 
+    adv_block = _advisories_block(advisories)
+    if adv_block:
+        lines.append(adv_block)
+
     if pack_id:
         lines.append(
-            "\n---\n"
-            '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '
-            "success=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+            "\n---\n*Cite feedback via `" + _record_feedback_hint(pack_id) + "`.*"
         )
 
     return "\n".join(lines)
@@ -257,6 +291,7 @@ def format_pack_as_index_markdown(
     withholding: WithholdingSummary | None = None,
     empty_text: str | None = None,
     axis_note: str = "",
+    advisories: list[Advisory] | None = None,
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -282,6 +317,7 @@ def format_pack_as_index_markdown(
             demoted vs. withheld entirely — matters here most.
         empty_text: As in :func:`format_pack_as_markdown`.
         axis_note: As in :func:`format_pack_as_markdown`.
+        advisories: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted index within token budget.
@@ -321,13 +357,19 @@ def format_pack_as_index_markdown(
     if omitted > 0:
         lines.append(f"\n*[{omitted} more items omitted]*")
 
+    adv_block = _advisories_block(advisories)
+    if adv_block:
+        lines.append(adv_block)
+
     if pack_id:
         lines.append(
             "\n---\n"
             "*Fetch bodies via `get_items(item_ids=[...], "
-            'pack_id="' + pack_id + '")`. Cite feedback via '
-            '`record_feedback(pack_id="' + pack_id + '", success=..., '
-            "helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+            'pack_id="'
+            + pack_id
+            + '")`. Cite feedback via `'
+            + _record_feedback_hint(pack_id)
+            + "`.*"
         )
 
     return "\n".join(lines)
@@ -729,6 +771,7 @@ def format_sectioned_pack_as_markdown(
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
     axis_note: str = "",
+    advisories: list[Advisory] | None = None,
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -751,6 +794,7 @@ def format_sectioned_pack_as_markdown(
             section, for the reason given in
             :func:`format_pack_as_markdown`.
         axis_note: As in :func:`format_pack_as_markdown`.
+        advisories: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -803,14 +847,23 @@ def format_sectioned_pack_as_markdown(
 
         lines.append("")
 
+    adv_block = _advisories_block(advisories)
+    if adv_block:
+        lines.append(adv_block.lstrip("\n"))
+        lines.append("")
+
     if pack_id:
         lines.append(
-            "---\n"
-            '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '
-            "success=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+            "---\n*Cite feedback via `" + _record_feedback_hint(pack_id) + "`.*"
         )
 
     return "\n".join(lines).rstrip()
+
+
+#: Names the one place an advisory is cited, on every advisory line: the
+#: footer's call hint is far from the advisories and the bare message
+#: ("Consider including it") names no tool call at all.
+_ADVISORY_CITE_SUFFIX = " — cite it in `followed_advisory_ids` if you act on it."
 
 
 def format_advisories_as_markdown(
@@ -857,6 +910,7 @@ def format_advisories_as_markdown(
 
     lines.extend(
         f"{i}. `{adv.advisory_id}` **[{adv.category.value}]** {adv.message}"
+        f"{_ADVISORY_CITE_SUFFIX}"
         for i, adv in enumerate(advisories, start=1)
     )
 

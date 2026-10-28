@@ -4,6 +4,39 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The steering text an MCP client reads now teaches the feedback call the
+  learning loop can join.** The server `instructions`, the pack footer and the
+  per-client setup snippets said "call `record_feedback`" without item ids,
+  and feedback that names no item joins to nothing. Now:
+  - Every empty flat pack (`get_context`, index mode and `search`) carries its
+    `pack_id` header and feedback footer at every holdout rate, including the
+    default `0`; before, an empty pack at rate 0 was a bare one-line answer that
+    could not be graded, and its advisories could not be cited. A withheld pack
+    and a genuinely empty one still take the same path and read alike.
+  - The `instructions` say where the pack id and item ids sit, that a
+    step's `result` is an object, and that feedback names helpful and unhelpful
+    item ids (and `followed_advisory_ids`).
+  - The footer of the flat, index and sectioned packs leads with `rating=` and
+    names `helpful_item_ids`, `unhelpful_item_ids` and `followed_advisory_ids`.
+    Advisories render above the footer, so the footer is the last thing in the
+    response, and each advisory line says to cite it in `followed_advisory_ids`.
+    Advisories remain outside the item budget.
+  - SDK `get_context_for_task` passes the pack's `pack_id` to the formatter,
+    so its markdown carries the footer, and forwards `max_tokens` to
+    `assemble_pack`. Its footer reads `rating=...` rather than `success=...`.
+  - The Claude Desktop, Cursor, Claude Code and OpenClaw snippets name
+    `pack_id`, `rating`, `helpful_item_ids` and `unhelpful_item_ids`;
+    `tests/unit/test_feedback_snippet_rule.py` fails a setup page that mentions
+    `record_feedback` without `helpful_item_ids`.
+  - `quickstart-query-agent.md` leads with `get_context` / `get_items`, lists
+    the sectioned tools as deprecated, and documents HTTP MCP correctly
+    (`TRELLIS_MCP_TRANSPORT=http trellis-mcp`, path `/mcp`, bearer API key)
+    rather than `trellis admin serve`, which mounts no MCP.
+  - The shipped `retrieve-before-task`, `record-after-task` and `link-evidence`
+    skills drop their "preview" status and banner and move to `1.2.0`.
+
 ### Added
 
 - **The holdout's `pre_treatment` exclusion is applicable: capture records

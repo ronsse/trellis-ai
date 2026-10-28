@@ -1439,6 +1439,7 @@ class TestMessagesCarryTheirOwnEvidence:
             assert lines[advisory.advisory_id] == (
                 f"{index}. `{advisory.advisory_id}`"
                 f" **[{advisory.category.value}]** {advisory.message}"
+                " — cite it in `followed_advisory_ids` if you act on it."
             )
 
 

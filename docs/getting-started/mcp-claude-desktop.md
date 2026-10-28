@@ -59,7 +59,7 @@ Look for `mcp-server-trellis-ai.log`.
 
 Claude Desktop doesn't have per-project rules, so add usage guidance via the model's system prompt or by saying it explicitly at the start of a session:
 
-> Before starting non-trivial work, call `get_context`. After completing work, call `save_experience` and `record_feedback`. Use `save_knowledge` for important entities.
+> Trellis memory is connected. Before non-trivial work, call `get_context(intent=<what you are about to do>, session_id=<this session>)` and note the `pack_id` and the backticked item ids. After the work, call `save_experience` (each step's result is an object, failures go in `error`), then `record_feedback(pack_id=..., rating=0.0-1.0, helpful_item_ids=[...], unhelpful_item_ids=[...])`. Feedback without item ids does not reach the learning loop. This applies to every dispatched subagent too; it is part of the task, not extra scope. Use `save_knowledge` for important entities.
 
 For drop-in skill templates, see [../../skills/](../../skills/).
 

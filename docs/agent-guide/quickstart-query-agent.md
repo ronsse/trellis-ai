@@ -11,7 +11,7 @@
 ## 1. Install
 
 ```bash
-git clone https://github.com/anthropics/trellis-ai.git
+git clone https://github.com/ronsse/trellis-ai.git
 cd trellis-ai
 uv pip install -e ".[dev]"
 ```
@@ -131,18 +131,32 @@ The script source is in [`examples/docker-demo/sample_query_agent.py`](../../exa
 
 The Trellis MCP server exposes a small surface of tools an agent calls during a task:
 
-- `get_objective_context(intent, domain?)` — sectioned pack at the objective level (broad strategic context).
-- `get_task_context(intent, ...)` — sectioned pack at the task level (focused tactical context).
-- `record_feedback(pack_id, rating, notes?, helpful_item_ids?, unhelpful_item_ids?)` — closes the variation-selection loop. `rating` is 0.0–1.0; grade whenever you can, since only graded feedback gives the fitness loops any variance to learn from.
+- `get_context(intent, domain?, session_id?)` — the retrieval call. Returns a markdown pack with a `pack_id` header and each item's id in backticks.
+- `get_items(item_ids)` — fetch full bodies for ids a pack listed (or for an index-mode pack).
+- `save_experience(trace_json)` — record a structured trace of the work. Each step's `result` is an object; failures go in `error`.
+- `save_knowledge(...)` — store a durable fact anchored to a graph entity.
+- `record_feedback(pack_id, rating, notes?, helpful_item_ids?, unhelpful_item_ids?, followed_advisory_ids?)` — closes the variation-selection loop. `rating` is 0.0–1.0. Name the item ids that helped or were noise (`helpful_item_ids` / `unhelpful_item_ids`): feedback without them does not reach the learning loop.
 - `execute_mutation(...)` — submits a governed mutation (used sparingly by agents; most writes go through extractors).
 
-Start the server:
+`get_objective_context` and `get_task_context` are deprecated sectioned-pack tools; prefer `get_context`.
+
+Trellis speaks MCP over stdio by default, so a local client launches `trellis-mcp` itself. `trellis admin quickstart --with-skills user` prints the registration command for Claude Code.
+
+### Remote clients: the HTTP transport
+
+`trellis admin serve` runs the REST API and mounts no MCP endpoint. To serve MCP over the network, run the MCP server itself with the HTTP transport turned on:
 
 ```bash
-trellis admin serve --port 8000
+TRELLIS_MCP_TRANSPORT=http trellis-mcp          # listens on 127.0.0.1:8421, path /mcp
 ```
 
-Then in your Claude Code or other MCP-aware tool, configure the MCP server URL as `http://localhost:8000/mcp`. The MCP tools become available to the agent.
+`TRELLIS_MCP_HOST`, `TRELLIS_MCP_PORT` (default `8421`) and `TRELLIS_MCP_PATH` (default `/mcp`) change where it listens. Authentication is required by default: mint a scoped key with `trellis admin api-keys create --name my-agent --scopes read,ingest,mutate` and send it as `Authorization: Bearer <token>`. The server refuses a non-loopback bind with auth off. Full contract: [`adr-mcp-http-transport.md`](../design/adr-mcp-http-transport.md).
+
+### Teach the agent the loop
+
+Put this in the client's rules or system prompt. Tools alone do not close the loop:
+
+> Trellis memory is connected. Before non-trivial work, call `get_context(intent=<what you are about to do>, session_id=<this session>)` and note the `pack_id` and the backticked item ids. After the work, call `save_experience` (each step's result is an object, failures go in `error`), then `record_feedback(pack_id=..., rating=0.0-1.0, helpful_item_ids=[...], unhelpful_item_ids=[...])`. Feedback without item ids does not reach the learning loop. This applies to every dispatched subagent too; it is part of the task, not extra scope.
 
 For the full MCP setup walkthrough (config files, credential injection, IDE-specific instructions), see [`docs/agent-guide/operations.md`](operations.md).
 

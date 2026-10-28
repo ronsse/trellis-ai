@@ -1,13 +1,10 @@
 ---
 name: retrieve-before-task
 description: Pull prior traces and precedents from Trellis before non-trivial work, again after a pivot or compaction, and in every dispatched subagent. Skip greetings and trivial edits.
-version: 1.1.0
-status: preview
+version: 1.2.0
 ---
 
 # Retrieve Before Task
-
-> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 Trellis holds what earlier agents learned. Ask it before re-deriving anything.
 

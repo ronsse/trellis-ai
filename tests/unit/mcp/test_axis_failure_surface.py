@@ -196,7 +196,8 @@ def test_get_context_reports_failed_axis_for_an_empty_pack(
     result = get_context(INTENT)
     lines = result.split("\n")
 
-    assert lines[0] == f"No context found for: {INTENT}"
+    assert lines[0] == f"# Context for: {INTENT}"
+    assert f"No context found for: {INTENT}" in lines
     assert "**Retrieval axis failed:** keyword." in lines
     assert _AXIS_FAILURE_SENTINEL not in result
     assert "Semantic retrieval misconfigured" not in result
@@ -205,8 +206,8 @@ def test_get_context_reports_failed_axis_for_an_empty_pack(
 def test_get_context_reports_failed_axis_for_a_held_out_empty_pack(
     temp_registry: StoreRegistry, monkeypatch
 ) -> None:
-    """With the pack holdout on, an empty pack renders through the
-    formatter instead of the one-liner; the note must survive that path."""
+    """A held-out empty pack renders through the same formatter path as any
+    other empty pack; the note must survive that path."""
 
     def _builder(*_args: object, **_kwargs: object) -> PackBuilder:
         bad = _make_failing_axis_strategy("keyword", _AXIS_FAILURE_SENTINEL)
@@ -247,12 +248,23 @@ def test_get_context_clean_pack_has_no_axis_note(
     assert "Semantic retrieval misconfigured" not in result
 
 
-def test_get_context_clean_empty_pack_is_unchanged(
+def test_get_context_clean_empty_pack_carries_no_axis_note(
     temp_registry: StoreRegistry,
 ) -> None:
     result = get_context(INTENT)
+    lines = result.split("\n")
 
-    assert result == f"No context found for: {INTENT}"
+    # Header, ``pack_id``, then the blank separator and the empty line: no
+    # axis note and no withholding note between them.
+    assert lines[:4] == [
+        f"# Context for: {INTENT}",
+        lines[1],
+        "",
+        f"No context found for: {INTENT}",
+    ]
+    assert lines[1].startswith("**pack_id:**")
+    assert "Retrieval axis failed" not in result
+    assert "Semantic retrieval misconfigured" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -287,17 +299,17 @@ def test_get_context_reports_misconfigured_semantic_for_an_empty_pack(
     result = get_context(INTENT)
     lines = result.split("\n")
 
-    assert lines[0] == f"No context found for: {INTENT}"
+    assert lines[0] == f"# Context for: {INTENT}"
+    assert f"No context found for: {INTENT}" in lines
     assert _MISCONFIGURED_SEMANTIC_LINE in lines
 
 
 def test_get_context_reports_misconfigured_semantic_for_a_held_out_empty_pack(
     temp_registry: StoreRegistry, monkeypatch
 ) -> None:
-    """With the pack holdout on, an empty pack renders through the
-    formatter instead of the one-liner; the misconfigured note must survive
-    that path too (mirrors test_get_context_reports_failed_axis_for_a_held_
-    out_empty_pack for the failed-axis case)."""
+    """A held-out empty pack renders through the same formatter path as any
+    other empty pack; the misconfigured note must survive that path too
+    (mirrors the failed-axis test for a held-out empty pack)."""
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_held_out_empty_without_semantic
     )
