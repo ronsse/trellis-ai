@@ -787,9 +787,9 @@ class ServeAttributionReport(TrellisModel):
     #: Cited ids on feedback that joined to a pack whose served set is
     #: known. The denominator for ``stray_citation_rate`` — *not* every
     #: cited id in the window, because a pack with no recorded membership
-    #: (a sectioned pack, or one outside the scan) cannot contribute a
-    #: stray and must not dilute the rate. Counted per **(feedback event,
-    #: cited id)** pair; ``analyze value``'s ``cited_ids_not_served``
+    #: (a sectioned pack assembled before #958, or one outside the scan)
+    #: cannot contribute a stray and must not dilute the rate. Counted per
+    #: **(feedback event, cited id)** pair; ``analyze value``'s ``cited_ids_not_served``
     #: counts the same strays per (pack, distinct id), so on a pack graded
     #: twice the two can differ.
     cited_ids: int = 0

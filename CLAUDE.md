@@ -154,7 +154,7 @@ The **EventLog is the single authoritative path** for the feedback loop. `trelli
 
 - Both families derive `success` from `rating` with `SUCCESS_RATING_THRESHOLD`, so they cannot disagree about a rating.
 - `attribution_rate` keeps its original denominator (DoD-3 reads it), less feedback naming a held-out pack; `ServeAttributionReport` reports the pack-targeted rates beside it.
-- Promotion reads per-item fields from `PACK_ASSEMBLED.injected_items[]`. Flat packs only: `build_sectioned` emits no `injected_items[]`, so sectioned packs contribute zero per-item rows to the join.
+- Promotion reads per-item fields from `PACK_ASSEMBLED.injected_items[]`; sectioned packs emit rows too (#958, `section` + section-local `rank`), so a flat-only reader skips them with `is_sectioned_payload`, never by missing rows.
 
 ### Test Structure
 

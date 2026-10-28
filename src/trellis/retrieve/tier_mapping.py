@@ -24,8 +24,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.schemas.pack import PackItem, SectionRequest
 from trellis.schemas.well_known import canonicalize_entity_type
+
+#: The node type a promoted precedent's document row stands in for.
+PRECEDENT_NODE_TYPE = "precedent"
 
 # Default affinity → (content_types, scopes, item_types) mapping.
 # Used when an item has no explicit retrieval_affinity tags.
@@ -133,6 +137,19 @@ class TierMapper:
         item_ct = _get_content_type(item)
         item_scope = _get_scope(item)
         node_types = _get_node_types(item)
+        # A promoted precedent's *document row* (the copy the keyword and
+        # semantic axes serve) is not a graph candidate, so ``node_types`` is
+        # empty for it by design, and its tags carry a content type but no
+        # scope, which the ``domain_knowledge`` rule also requires. Read from
+        # its id, which a *document* write cannot mint (#957). The id alone is
+        # not proof for a graph node: ``entity.create`` can mint a node under
+        # that namespace (see :mod:`trellis.core.precedent_document`), so the
+        # check is limited to ``item_type == "document"``; a node reports its
+        # own types through ``_get_node_types`` and is not relabelled here.
+        if item.item_type == "document" and is_promoted_precedent_document(
+            item.item_id
+        ):
+            node_types = node_types | {PRECEDENT_NODE_TYPE}
 
         for affinity, rules in self._heuristics.items():
             # Check item_type match. A graph candidate is always

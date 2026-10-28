@@ -67,8 +67,13 @@ _INDEX_MODE = "index_mode"
 #: ``PackBuilder`` writes it beside ``_INJECTED_ITEM_IDS`` and the two have
 #: never disagreed on any pack this deployment assembled (219 of 219 flat
 #: packs carry both, with identical membership; measured 2026-09-16). A
-#: sectioned pack carries neither.
+#: sectioned pack carries only this one (#958): its membership is recoverable
+#: by :func:`served_item_ids`, but never from ``_INJECTED_ITEM_IDS``.
 _INJECTED_ITEMS = "injected_items"
+
+#: Payload key every sectioned ``PACK_ASSEMBLED`` row carries and no flat one
+#: does. ``injected_items`` cannot tell the two apart since #958.
+_SECTIONS = "sections"
 
 #: Payload keys holding the pack's own learning-scope axes. ``PackBuilder``
 #: derives ``intent_family`` through
@@ -114,6 +119,20 @@ STRAY_PREFIX_DROPPED = "prefix_dropped"
 STRAY_FOREIGN = "foreign"
 
 
+def is_sectioned_payload(pack_payload: Mapping[str, Any]) -> bool:
+    """Whether a ``PACK_ASSEMBLED`` payload came from ``build_sectioned``.
+
+    Keyed on the ``sections`` list, which the sectioned emit writes on every
+    row (even for a request naming no section) and the flat emit never
+    writes. It is **not** keyed on the absence of ``injected_items``: until
+    #958 that was the discriminator, and a sectioned pack now carries them.
+    A reader built for a *flat* walk (a replay that re-ranks one budget, a
+    yield rate over one ``rejected_items`` list) uses this to skip sectioned
+    packs explicitly instead of pricing them on a shape they do not have.
+    """
+    return isinstance(pack_payload.get(_SECTIONS), list)
+
+
 def lookup_pack_item_ids(event_log: EventLog, pack_id: str) -> list[str]:
     """Return the item ids ``pack_id`` served, or ``[]`` when unknown.
 
@@ -123,10 +142,12 @@ def lookup_pack_item_ids(event_log: EventLog, pack_id: str) -> list[str]:
 
     Fails soft in every direction. An unknown ``pack_id``, a pack that
     predates the ``injected_item_ids`` payload, a sectioned pack (which
-    emits no per-item rows at all), or an event-log outage each yield an
-    empty list. Callers must read ``[]`` as *"nothing to offer the caller"*
-    and never as *"the pack served nothing"* — the two are indistinguishable
-    here by design, because acting on the difference would mean guessing.
+    emits ``injected_items`` but no ``injected_item_ids``, so
+    :func:`served_item_ids` knows its membership and this does not), or an
+    event-log outage each yield an empty list. Callers must read ``[]`` as
+    *"nothing to offer the caller"* and never as *"the pack served nothing"*
+    — the two are indistinguishable here by design, because acting on the
+    difference would mean guessing.
 
     Args:
         event_log: Operational event log holding ``PACK_ASSEMBLED``.
@@ -174,11 +195,11 @@ def lookup_pack_bodied_item_ids(event_log: EventLog, pack_id: str) -> list[str]:
 
     Fails soft in the same directions as :func:`lookup_pack_item_ids`,
     and in one more. ``[]`` comes back for an unknown pack, a sectioned
-    pack, an outage — and for an **index-mode** pack, whose items are all
-    pointers, and for a disclosure record whose shape is not the one this
-    reader knows. The bodied set is only ever narrowed by uncertainty,
-    never widened: a caller refused for not judging an item they were
-    never shown is the expensive mistake here.
+    pack (no ``injected_item_ids``), an outage — and for an **index-mode**
+    pack, whose items are all pointers, and for a disclosure record whose
+    shape is not the one this reader knows. The bodied set is only ever
+    narrowed by uncertainty, never widened: a caller refused for not judging
+    an item they were never shown is the expensive mistake here.
 
     A pack carrying **no** disclosure record is not uncertainty — it
     predates #359 (or was built with graduation off), and every item it
@@ -299,11 +320,14 @@ def lookup_pack_items_by_strategy(
 
     Fails soft exactly as :func:`lookup_pack_item_ids` does, and for the same
     reason: an unknown pack, a sectioned pack (which emits no
-    ``injected_items`` at all), a pack older than the payload key, or a store
-    outage each yield ``{}``. A caller must read ``{}`` as *"no per-strategy
+    ``injected_items`` before #958), a pack older than the payload key, or a
+    store outage each yield ``{}``. A caller must read ``{}`` as *"no per-strategy
     breakdown is available"* and never as *"no strategy served anything"* —
     emitting a measured zero off that distinction is the
     :data:`~trellis.schemas.outcome.OutcomeEvent` failure #557 found.
+
+    A sectioned pack answers like a flat one since #958: its rows carry
+    ``strategy_source`` and every section's items land in the same buckets.
 
     Rows with no usable ``strategy_source`` are **dropped**, not bucketed
     under a placeholder: an item whose serving strategy is unrecorded must
@@ -551,8 +575,8 @@ def stray_citations(
     one is missing signal, the other is discarded signal.
 
     Callers must skip a pack whose ``served`` set is empty. Emptiness means
-    the pack's membership is unrecorded (a sectioned pack, or one older
-    than the payload key), and subtracting from it would report every
+    the pack's membership is unrecorded (a sectioned pack assembled before
+    #958, or one older than the payload key), and subtracting from it would report every
     citation on it as a stray.
     """
     lookup = set(served)

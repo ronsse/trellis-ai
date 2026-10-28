@@ -24,6 +24,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
+from trellis.feedback.attribution import is_sectioned_payload
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventType,
@@ -129,6 +130,14 @@ def analyze_pack_telemetry(  # noqa: PLR0915
     # A withheld pack served nothing and records no rejections: counted, it
     # would dilute every per-pack rate below.
     events = drop_holdout(scan.events, ())[0]
+    # A sectioned pack (#958) carries per-item rows but no ``rejected_items``
+    # or ``budget_trace``: its rows are ignored below, or they would raise the
+    # yield rate. It still counts in ``total_packs``, as it did when it had no
+    # rows at all, so every existing total reads as before; the note says how
+    # many such packs diluted the per-pack rates.
+    sectioned_skipped = sum(
+        1 for event in events if is_sectioned_payload(event.payload or {})
+    )
 
     total_packs = len(events)
     total_injected = 0
@@ -144,7 +153,9 @@ def analyze_pack_telemetry(  # noqa: PLR0915
 
     for event in events:
         payload = event.payload or {}
-        injected_items = payload.get("injected_items") or []
+        injected_items = (
+            [] if is_sectioned_payload(payload) else payload.get("injected_items") or []
+        )
         rejected_items = payload.get("rejected_items") or []
 
         total_injected += len(injected_items)
@@ -208,7 +219,11 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         max_tokens_hit_rate=max_tokens_hit_rate,
         contributions=contributions,
     )
-    notes = _build_notes(total_packs=total_packs, coverage=scan.coverage)
+    notes = _build_notes(
+        total_packs=total_packs,
+        coverage=scan.coverage,
+        sectioned_skipped=sectioned_skipped,
+    )
 
     report = PackTelemetryReport(
         total_packs=total_packs,
@@ -235,9 +250,20 @@ def analyze_pack_telemetry(  # noqa: PLR0915
     return report
 
 
-def _build_notes(*, total_packs: int, coverage: ScanCoverage) -> list[str]:
+def _build_notes(
+    *, total_packs: int, coverage: ScanCoverage, sectioned_skipped: int = 0
+) -> list[str]:
     """Caveats an operator needs before reading the numbers above."""
     notes: list[str] = []
+    if sectioned_skipped:
+        notes.append(
+            f"{sectioned_skipped} sectioned pack(s) counted in total_packs "
+            "but contributing no injected, rejected or budget figures (packs "
+            "from before #958 recorded no per-item rows, later ones have "
+            "theirs ignored here): build_sectioned records no rejected_items "
+            "or budget_trace, so they cannot enter a yield or budget-hit "
+            "rate and dilute the per-pack rates."
+        )
     if total_packs == 0:
         notes.append(
             "No PACK_ASSEMBLED events in this window. Either the window is "

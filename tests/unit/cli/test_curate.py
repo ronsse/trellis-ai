@@ -2421,7 +2421,7 @@ class TestCurateEvaluatePrecedentDemotion:
         result = runner.invoke(app, ["curate", "evaluate-precedent-demotion"])
         assert result.exit_code == 0, result.output
         output = plain(result.stdout)
-        assert "flat" in output
+        assert "sectioned" in output
         assert "get_context" in output
         assert "would_demote: 0" in output
 

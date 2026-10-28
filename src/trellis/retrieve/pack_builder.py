@@ -1667,16 +1667,23 @@ class PackBuilder:
 
         # 4. Fill each section independently
         #    Track which section each item lands in (for cross-section dedup)
+        #
+        #    Keyed by the section's *position* in the request, never its
+        #    name: names are caller-supplied and nothing makes them unique,
+        #    so a name key let a second same-named section overwrite the
+        #    first's selection (silently dropping its items) and then pass
+        #    the "best section" test alongside it, serving the same item
+        #    twice in one pack.
         item_best_section: dict[
-            str, tuple[str, float]
-        ] = {}  # item_id -> (section, score)
-        raw_sections: dict[str, list[PackItem]] = {}
+            str, tuple[int, float]
+        ] = {}  # item_id -> (section index, score)
+        raw_sections: dict[int, list[PackItem]] = {}
         # Ids some requested section matched, accumulated across the fill
         # loop so the section-routing gate below can be defined as "matched
         # *no* section" rather than per-section leftovers (#440).
         matched_any: set[str] = set()
 
-        for section_req in sections:
+        for section_idx, section_req in enumerate(sections):
             section_budget = PackBudget(
                 max_items=section_req.max_items,
                 max_tokens=section_req.max_tokens,
@@ -1700,13 +1707,13 @@ class PackBuilder:
             selected = self._apply_token_budget(within_items, section_budget.max_tokens)
             rejected.extend(self._reject(within_items[len(selected) :], "token_budget"))
 
-            raw_sections[section_req.name] = selected
+            raw_sections[section_idx] = selected
 
             for item in selected:
                 prev = item_best_section.get(item.item_id)
                 if prev is None or item.relevance_score > prev[1]:
                     item_best_section[item.item_id] = (
-                        section_req.name,
+                        section_idx,
                         item.relevance_score,
                     )
 
@@ -1738,11 +1745,11 @@ class PackBuilder:
 
         # 4. Cross-section dedup — keep item only in its best section
         pack_sections: list[PackSection] = []
-        for section_req in sections:
+        for section_idx, section_req in enumerate(sections):
             deduped_items = [
                 item
-                for item in raw_sections.get(section_req.name, [])
-                if item_best_section.get(item.item_id, (None,))[0] == section_req.name
+                for item in raw_sections.get(section_idx, [])
+                if item_best_section.get(item.item_id, (None,))[0] == section_idx
             ]
 
             annotated = self._annotate_selected_items(deduped_items)
@@ -1758,7 +1765,7 @@ class PackBuilder:
 
             section_report = RetrievalReport(
                 queries_run=len(strategies_used),
-                candidates_found=len(raw_sections.get(section_req.name, [])),
+                candidates_found=len(raw_sections.get(section_idx, [])),
                 items_selected=len(annotated),
                 duration_ms=section_duration_ms,
                 strategies_used=strategies_used,
@@ -2075,11 +2082,6 @@ class PackBuilder:
                 "agent_id": pack.agent_id,
                 "session_id": pack.session_id,
                 # Symmetric with the flat payload (see _emit_telemetry).
-                # Known gap: this payload carries no ``injected_items``, so
-                # ``pack_observations._join_one`` yields zero per-item rows
-                # for a sectioned pack and these two fields stay inert until
-                # that is fixed. Emitted now so the sectioned path does not
-                # need a second change once it is.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
                 "project": self._project,
@@ -2103,6 +2105,13 @@ class PackBuilder:
                     for item in section.items
                 },
                 "sections": self._section_rows(pack.sections),
+                # The per-item rows the learning join reads (#958), one per
+                # served item across every section: see
+                # :meth:`_sectioned_injected_item_rows` for the order, the
+                # section-local ``rank`` and the ``section`` key. No
+                # ``injected_item_ids`` rides beside it, deliberately (that
+                # list gates ``analyze_effectiveness``'s noise pass).
+                "injected_items": self._sectioned_injected_item_rows(pack.sections),
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "advisories_matched": (
                     len(pack.advisories)
@@ -2514,6 +2523,40 @@ class PackBuilder:
             }
             for item in items
         ]
+
+    @classmethod
+    def _sectioned_injected_item_rows(
+        cls, sections: Iterable[PackSection]
+    ) -> list[dict[str, Any]]:
+        """``injected_items[]`` for a sectioned pack: the flat row plus ``section``.
+
+        Each row is exactly what :meth:`_injected_item_rows` builds, so every
+        reader of the flat list reads this one unchanged, and carries the name
+        of the section that served it under ``section``.
+
+        **Order:** sections in the order the request named them, and within a
+        section the order the section served its items. **Rank:** ``rank``
+        is the item's 1-based position *within its section*, because each
+        section is ranked and budgeted on its own (a pack with three sections
+        has three rank-1 rows). Read it with ``section``; it is not a
+        pack-wide position and nothing here invents one. **Identity:**
+        ``item_id`` is unique across the pack, so ``(pack_id, item_id)``
+        keys a serving exactly as it does on a flat pack. Cross-section
+        dedup in :meth:`build_sectioned` already leaves an item in one
+        section only; the first-wins dedupe here makes the invariant
+        structural rather than a property of that loop, because a repeated
+        row would join as a repeated judgement (``unhelpful_count=2`` from
+        one citation) and pass the demotion gate's repeat-citation floor.
+        """
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for section in sections:
+            for row in cls._injected_item_rows(section.items):
+                if row["item_id"] in seen:
+                    continue
+                seen.add(row["item_id"])
+                rows.append({**row, "section": section.name})
+        return rows
 
     def _build_token_budget_payload(
         self,

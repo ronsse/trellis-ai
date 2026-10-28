@@ -5942,7 +5942,7 @@
                 body.innerHTML = packs.map((p, i) => `
                     <tr class="clickable" tabindex="0" role="button" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}"${i === packs.length - 1 ? ` data-oldest-stamp="${escHtml(p.created_at)}"` : ''}>
                         <td class="num" style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
-                        <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
+                        <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${(p.sectioned && !p.attributable) ? ' <span class="badge badge-info" title="This sectioned pack carries no injected_items[] (assembled before #958), so per-item attribution cannot join to it">unattributable (sectioned)</span>' : ''}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span class="text-dim">-</span>'}</td>
                         <td class="mono fs-2">${p.agent_id ? escHtml(p.agent_id) : '<span class="text-dim">-</span>'}</td>
                         <td class="num">${p.items_count != null ? p.items_count.toLocaleString('en-US') : '-'}</td>
@@ -5986,14 +5986,15 @@
                 const feedbackSubText = data.feedback_truncated
                     ? 'signals recorded (capped list)' : 'signals recorded';
 
-                // A sectioned pack emits `sections`, never `injected_items[]`,
-                // so per-item feedback attribution cannot join to it -- say so
+                // A sectioned pack assembled before #958 emits `sections` and
+                // no `injected_items[]`, so per-item feedback attribution
+                // cannot join to it -- say so
                 // up front rather than let an empty injected-items table read
                 // as "nothing was served". A holdout-blinded pack is the other
                 // case a reader could mistake for "nothing here": the payload
                 // was withheld for measurement, not because it is empty.
                 let noticeHtml = '';
-                if (pack.sectioned) {
+                if (pack.sectioned && !pack.attributable) {
                     noticeHtml += `<p class="fs-4 text-dim"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
                 }
                 if (data.holdout_blinded) {

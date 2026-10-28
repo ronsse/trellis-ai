@@ -39,11 +39,11 @@ specifically — a promoted precedent's citation base rate has never been
 measured. Every report this module produces says so; re-measure before any
 future commit-mode policy enables on this number.
 
-**Attribution coverage gap.** Only a precedent served through a *flat*
-``get_context`` pack can accumulate evidence here at all. ``get_lessons``
-and ``list_precedents`` never assemble a ``PACK_ASSEMBLED`` event (they
-have no ``pack_id``), and a *sectioned* pack
-(``PackBuilder.build_sectioned``) emits no ``injected_items`` — both are
+**Attribution coverage gap.** Only a precedent served through a
+``get_context`` pack or a sectioned pack (``injected_items`` rows since
+#958; one assembled before that has none) can accumulate evidence here at
+all. ``get_lessons`` and ``list_precedents`` never assemble a
+``PACK_ASSEMBLED`` event (they have no ``pack_id``), so they are
 structurally invisible to the join below, not merely unmeasured. A
 precedent reachable only through those surfaces will always read
 ``REFUSED_NO_EVIDENCE`` here, regardless of how often agents actually find
@@ -138,11 +138,11 @@ SKIPPED_INCOMPLETE_EVIDENCE = "incomplete_evidence"
 #: (CLI text, CLI JSON, the emitted event's payload) — see the module
 #: docstring's "Attribution coverage gap".
 ATTRIBUTION_CAVEAT = (
-    "Only precedents served through flat get_context packs can "
-    "accumulate citation evidence here. get_lessons and sectioned packs "
-    "emit no per-item attribution, so a precedent reachable only through "
-    "those surfaces always reads no_evidence_supplied regardless of how "
-    "useful it actually is."
+    "Only precedents served through get_context or sectioned packs can "
+    "accumulate citation evidence here. get_lessons emits no per-item "
+    "attribution (and neither does a sectioned pack assembled before "
+    "#958), so a precedent reachable only through those surfaces always "
+    "reads no_evidence_supplied regardless of how useful it actually is."
 )
 
 #: Scan limit for the promotion-discovery scan — mirrors

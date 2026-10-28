@@ -1689,9 +1689,9 @@ class GraphSearch(SearchStrategy):
     which says who chose the candidates. On a flat pack it is forwarded into
     ``PACK_ASSEMBLED.injected_items[]``, so which branch ran is legible
     there rather than inferred from the wiring. ``caller_seeded`` arises only
-    in a sectioned pack, and ``build_sectioned`` emits no ``injected_items[]``,
-    so that value is readable on the served item's own metadata and is not
-    in the event log (a telemetry gap, not a design choice). What the slice
+    in a sectioned pack, whose ``injected_items[]`` carries it too since
+    #958 (before that it was readable only on the served item's metadata).
+    What the slice
     then did is a separate fact under its own key,
     :data:`GRAPH_SLICE_PRIORITISED_KEY`, described below; it is not another
     value of ``graph_selection``.

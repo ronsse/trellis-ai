@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
+from trellis.feedback.attribution import is_sectioned_payload
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import require_scope
@@ -279,14 +280,18 @@ def get_event(event_id: str) -> dict[str, Any]:
 
 
 def _is_sectioned(payload: dict[str, Any]) -> bool:
-    """A sectioned pack (``PackBuilder.build_sectioned``) emits ``sections``
-    and no ``injected_items[]`` — the same discriminator ``pack_value.py``
-    uses to exclude sectioned packs from per-item attribution. A flat pack
-    contributes ``injected_items[]`` and, before #371, could legitimately
-    have none (zero candidates); checking ``sections`` first keeps that
-    case flagged as flat, not sectioned.
+    """A sectioned pack (``PackBuilder.build_sectioned``) emits ``sections``;
+    a flat pack never does. Since #958 a sectioned pack also emits
+    ``injected_items[]``, so the rows no longer tell the two apart, and
+    :func:`_is_attributable` answers the question the old discriminator
+    stood in for.
     """
-    return bool(payload.get("sections")) and not payload.get("injected_items")
+    return is_sectioned_payload(payload)
+
+
+def _is_attributable(payload: dict[str, Any]) -> bool:
+    """Whether the pack carries per-item rows a verdict can join to."""
+    return bool(payload.get("injected_items"))
 
 
 def _pack_summary(event: Event) -> dict[str, Any]:
@@ -303,6 +308,7 @@ def _pack_summary(event: Event) -> dict[str, Any]:
         "strategies_used": payload.get("strategies_used", []),
         "reranker": payload.get("reranker"),
         "sectioned": _is_sectioned(payload),
+        "attributable": _is_attributable(payload),
     }
 
 
