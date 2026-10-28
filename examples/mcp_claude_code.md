@@ -33,7 +33,7 @@ Sixteen macro tools. The eleven in these tables return **markdown** (not raw JSO
 | `save_memory` | Quick "remember this" for snippets and findings. |
 | `get_lessons` | Pull proven patterns / precedents for a domain. |
 | `get_graph` | Explore the neighborhood of an entity by id. |
-| `record_feedback` | Mark a trace as success/failure to feed the dual-loop. |
+| `record_feedback` | Grade a served pack: `pack_id`, `rating`, and the `helpful_item_ids` / `unhelpful_item_ids` you used. |
 
 **Sectioned-context tools** — for richer multi-step retrieval:
 
@@ -68,11 +68,15 @@ Adding this to your project's `CLAUDE.md` makes the agent reach for Trellis auto
 ```markdown
 ## Institutional Memory (Trellis)
 
-Before starting non-trivial work, call `get_context` with your task intent.
-After completing meaningful work, call `save_experience` with a trace.
-When you discover services, concepts, or patterns worth tracking, call
-`save_knowledge`. Mark task outcomes with `record_feedback` so the
-quality loop learns.
+Trellis memory is connected. Before non-trivial work, call
+`get_context(intent=<what you are about to do>, session_id=<this session>)`
+and note the `pack_id` and the backticked item ids. After the work, call
+`save_experience` (each step's result is an object, failures go in `error`),
+then `record_feedback(pack_id=..., rating=0.0-1.0, helpful_item_ids=[...],
+unhelpful_item_ids=[...])`. Feedback without item ids does not reach the
+learning loop. This applies to every dispatched subagent too; it is part of
+the task, not extra scope. When you discover services, concepts, or patterns
+worth tracking, call `save_knowledge`.
 ```
 
 ## Troubleshooting

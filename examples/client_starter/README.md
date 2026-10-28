@@ -126,7 +126,8 @@ not silently at the wire.
 - Custom classifiers — see [`../custom_classifier.py`](../custom_classifier.py)
 - Sectioned packs (agent-specific budgets per section) — covered in the
   SDK method `assemble_sectioned_pack()`; add when your agent needs it.
-- Feedback recording — `client.record_feedback(...)` closes the loop
-  after an agent uses a pack; add once you have a signal to send back.
+- Feedback recording — `client.record_feedback(pack_id, rating=..., helpful_item_ids=[...])`
+  closes the loop after an agent uses a pack, naming the item ids it cited;
+  add once you have a signal to send back.
 - Auth — deferred until Trellis ships native API keys; today this
   integration assumes VPN / network-level access control.
