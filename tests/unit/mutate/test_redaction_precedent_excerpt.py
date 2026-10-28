@@ -329,6 +329,64 @@ class TestChunkMatching:
         assert {p: _everything_stored(registry, p) for p in lookalikes} == before
 
 
+class TestCallerNamedTarget:
+    """A caller-named ``<x>#chunk-intro`` is a parent, not a chunk of ``<x>`` (#1001).
+
+    ``is_chunk_doc_id`` reads only the shape ingest mints, so redacting a
+    document a caller named ``notes#chunk-intro`` blanks the chunks minted
+    under it and scrubs precedents sourced from them, and leaves ``notes``
+    and the minted chunks of ``notes`` alone.
+    """
+
+    TARGET = "notes#chunk-intro"
+
+    def test_it_blanks_its_own_minted_chunks_and_nothing_of_notes(
+        self, registry: StoreRegistry
+    ) -> None:
+        documents = registry.knowledge.document_store
+        _node(registry, self.TARGET)
+        for doc_id in ("notes", "notes#chunk-0", self.TARGET + "#chunk-0"):
+            documents.put(doc_id, COPIED_TEXT, {})
+        documents.put(self.TARGET, COPIED_TEXT, {})
+        documents.put(self.TARGET + "#chunk-1", COPIED_TEXT, {})
+
+        payload = _redact(registry, self.TARGET)
+
+        assert payload["documents_tombstoned"] == [
+            self.TARGET + "#chunk-0",
+            self.TARGET + "#chunk-1",
+            self.TARGET,
+        ]
+        for blanked in payload["documents_tombstoned"]:
+            row = documents.get(blanked)
+            assert row is not None
+            assert COPIED_TEXT not in repr(row)
+        for kept in ("notes", "notes#chunk-0"):
+            row = documents.get(kept)
+            assert row is not None
+            assert COPIED_TEXT in repr(row)
+
+    def test_it_scrubs_precedents_sourced_from_its_chunks(
+        self, registry: StoreRegistry
+    ) -> None:
+        _node(registry, self.TARGET)
+        own = _promote(registry, self.TARGET)
+        minted = _promote(registry, self.TARGET + "#chunk-0")
+        untouched = [
+            _promote(registry, "notes"),
+            _promote(registry, "notes#chunk-0"),
+            _promote(registry, "notes#chunk-intro-b"),
+        ]
+        before = {p: _everything_stored(registry, p) for p in untouched}
+
+        payload = _redact(registry, self.TARGET)
+
+        assert sorted(payload["scrubbed_precedent_ids"]) == sorted([own, minted])
+        for precedent_id in (own, minted):
+            assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
+        assert {p: _everything_stored(registry, p) for p in untouched} == before
+
+
 class TestNothingToScrub:
     def test_no_precedents_leaves_the_payload_as_it_was(
         self, registry: StoreRegistry

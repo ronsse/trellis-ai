@@ -131,6 +131,20 @@ class SessionDigest:
     #: not know: a truncated result, or a header off the formatters' layout.
     #: Non-zero means :attr:`pack_ids` may be missing a pack.
     pack_ids_unparsed: int = 0
+    #: 1-based position, among :attr:`tool_calls`, of the call whose result
+    #: first served a pack (the call behind ``pack_ids[0]``), or ``None``
+    #: when no pack was parsed. The pack holdout's unit takes that pack as
+    #: its treatment, so this is when the treatment happened.
+    first_retrieval_ordinal: int | None = None
+    #: How many Stop or SubagentStop hook feedback messages the transcript
+    #: holds, however late. A count rather than a flag so the analysis can
+    #: tell "no hook fired" from "the detector matches nothing": see
+    #: :data:`~trellis_workers.session_capture.transcripts.HOOK_FEEDBACK_PATTERN`.
+    hook_feedback_messages: int = 0
+    #: ``len(tool_calls)`` when the first hook feedback message was read, so
+    #: the calls up to and including that count precede it. ``None`` when no
+    #: hook feedback was read.
+    hook_feedback_after_calls: int | None = None
     #: What the session did, as counts, a duration and flags, read from the
     #: whole file and from nothing a pack touched. Counts derived from tool
     #: inputs and results, never their text.
@@ -157,6 +171,58 @@ class SessionDigest:
         """The name of the call *use_id* identifies, if this file held it."""
         call = self._calls_by_use_id.get(use_id or "")
         return call.name if call is not None else None
+
+    def record_first_retrieval(self, use_id: str | None) -> None:
+        """Note the call *use_id* identifies as the one that first served a pack.
+
+        A no-op after the first, and for an id this file never held, which
+        leaves :attr:`first_retrieval_ordinal` ``None``: an unknown position
+        is not a guessed one.
+        """
+        if self.first_retrieval_ordinal is not None:
+            return
+        call = self._calls_by_use_id.get(use_id or "")
+        self.first_retrieval_ordinal = next(
+            (i for i, held in enumerate(self.tool_calls, 1) if held is call), None
+        )
+
+    def record_hook_feedback(self) -> None:
+        """Count one hook feedback message, dating the first by calls made so far."""
+        self.hook_feedback_messages += 1
+        if self.hook_feedback_after_calls is None:
+            self.hook_feedback_after_calls = len(self.tool_calls)
+
+    @property
+    def hook_feedback_before_first_retrieval(self) -> bool | None:
+        """Whether hook feedback came before the call that first served a pack.
+
+        ``None`` when no pack was parsed, because there is no first retrieval
+        to be before. The first retrieval call precedes the feedback when its
+        ordinal is among the calls made by then.
+        """
+        if self.first_retrieval_ordinal is None:
+            return None
+        return (
+            self.hook_feedback_after_calls is not None
+            and self.hook_feedback_after_calls < self.first_retrieval_ordinal
+        )
+
+    def retrieval_timing_payload(self) -> dict[str, int | bool | None]:
+        """The join's ``retrieval_timing``: where the first retrieval sat.
+
+        ``tool_call_count`` is :attr:`tool_calls` as the ordinal counts it,
+        not ``outcome.tool_calls``, which counts a record written again once.
+        The ordinal over it is the share of the session's calls that came
+        before the first retrieval.
+        """
+        return {
+            "first_retrieval_ordinal": self.first_retrieval_ordinal,
+            "tool_call_count": len(self.tool_calls),
+            "hook_feedback_messages": self.hook_feedback_messages,
+            "hook_feedback_before_first_retrieval": (
+                self.hook_feedback_before_first_retrieval
+            ),
+        }
 
     def mark_tool_result(self, use_id: str | None, *, errored: bool) -> None:
         """Attribute one ``tool_result`` back to its ``tool_use``.
@@ -400,8 +466,9 @@ class CaptureReport:
     #: exists to remove.
     candidates_reconciled_supersede: int = 0
     #: SUPERSEDE verdicts whose SCD-2 stale-mark could not be applied after
-    #: the write seam ran — the target doc had vanished, or the successor
-    #: never landed. The bool
+    #: the write seam ran — the target doc had vanished, the target was a
+    #: promoted precedent's row (never stamped, #994), or the successor never
+    #: landed. What
     #: :func:`~trellis.mcp.reconcile.mark_document_superseded` returns used to
     #: be discarded here, so a supersession that did not happen was recorded
     #: as one that did (#407). Applied count is

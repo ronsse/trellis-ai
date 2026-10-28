@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.learning.judged_outcomes import (
     PHASE_1_GATE,
     JudgedOutcomeCell,
@@ -186,6 +187,59 @@ class TestContainment:
         report = summarize_judged_outcomes(log)
 
         assert _rungs(report.totals) == {"never_served": 1}
+
+    def test_a_caller_named_id_is_no_chunk_of_the_text_before_its_marker(
+        self, log: SQLiteEventLog
+    ) -> None:
+        """Serving reads only ``<parent>#chunk-<digits>`` as a chunk (#1001)."""
+        _judged(log, "notes", at=_ago(hours=3))
+        _judged(log, "memo", at=_ago(hours=3))
+        _pack(
+            log,
+            "p1",
+            ["notes#chunk-intro", chunk_doc_id("memo", 3)],
+            at=_ago(hours=2),
+        )
+
+        report = summarize_judged_outcomes(log)
+
+        # ``memo`` is covered by its minted chunk; ``notes`` by nothing, since
+        # ``notes#chunk-intro`` is a document of its own.
+        assert _rungs(report.totals) == {"served_ungraded": 1, "never_served": 1}
+        assert report.totals.servings == 1
+
+    def test_a_chunk_id_is_split_at_its_last_separator(
+        self, log: SQLiteEventLog
+    ) -> None:
+        """``x#chunk-5#chunk-0`` is a chunk of ``x#chunk-5``, as serving reads it."""
+        nested = chunk_doc_id(chunk_doc_id("x", 5), 0)
+        _judged(log, "x", at=_ago(hours=3), decision="outer")
+        _judged(log, chunk_doc_id("x", 5), at=_ago(hours=3), decision="inner")
+        _pack(log, "p1", [nested], at=_ago(hours=2))
+
+        report = summarize_judged_outcomes(log)
+
+        inner = _cell(report, "classification", "inner")
+        assert _rungs(inner) == {"served_ungraded": 1}
+        assert _rungs(_cell(report, "classification", "outer")) == {"never_served": 1}
+
+    def test_a_stray_citation_joins_only_through_a_minted_chunk_shape(
+        self, log: SQLiteEventLog
+    ) -> None:
+        _judged(log, "notes", at=_ago(hours=4))
+        _pack(log, "p1", ["other"], at=_ago(hours=3))
+        _feedback(
+            log,
+            "p1",
+            at=_ago(hours=2),
+            helpful=["notes#chunk-intro"],
+            unhelpful=[chunk_doc_id("notes", 3)],
+        )
+
+        report = summarize_judged_outcomes(log)
+
+        assert report.stray_citations == 2
+        assert report.stray_citations_matching_judged == 1
 
     def test_ref_type_is_reported_and_never_matched_on(
         self, log: SQLiteEventLog

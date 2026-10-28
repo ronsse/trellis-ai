@@ -29,6 +29,7 @@ from tests.unit.analyze._holdout_fixture import (
     seed_guardrails,
     seed_late_build,
     seed_missing_tool_errors,
+    timing_payload,
 )
 from trellis.analyze import holdout as holdout_analysis
 from trellis.analyze.holdout import analyze_holdout
@@ -161,6 +162,70 @@ def test_rules_the_analysis_cannot_apply_are_printed_in_both_formats(
     assert "pre-treatment (pre_treatment): not applied." in flat
     assert "post-treatment (cut_offs): applied, 1 excluded." in flat
     assert "residualised permutation (secondary analysis): not applied" in flat
+
+
+def test_a_partly_decided_pre_treatment_exclusion_is_printed_in_both_formats(
+    log: HoldoutLog,
+) -> None:
+    timings = [
+        timing_payload(hook_before=True),
+        timing_payload(hook_before=False),
+        timing_payload(hook_before=False),
+        None,
+        None,
+    ]
+    for index, timing in enumerate(timings):
+        log.task(
+            start=MONDAY + timedelta(hours=index),
+            arms=[index % 2 == 1],
+            timing=timing,
+        )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    payload = _payload(machine)
+    pre = next(e for e in payload["exclusions"] if e["name"] == "pre_treatment")
+    assert (pre["applied"], pre["excluded"], pre["unknown"]) == (True, 1, 2)
+    funnel = payload["funnel"]
+    assert funnel["pre_treatment_excluded"] == 1
+    assert funnel["pre_treatment_unknown"] == 2
+    assert funnel["eligible"] == 4
+    flat = _flat(text)
+    assert (
+        "pre-treatment (pre_treatment): partially applied, 1 excluded, "
+        "2 undecidable and kept. Partially applied:" in flat
+    )
+    assert "1 first retrieval after a stop hook's feedback" in flat
+    assert "2 with no retrieval timing" in flat
+
+
+def test_a_join_without_a_pack_is_split_by_why_in_the_funnel(
+    log: HoldoutLog,
+) -> None:
+    for index, counters in enumerate(
+        [{"retrieval_results": 0}, {"retrieval_results": 1, "retrieval_errors": 1}]
+    ):
+        log.join(
+            f"task-{index}",
+            at=MONDAY + timedelta(hours=index),
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=5),
+            **counters,  # type: ignore[arg-type]
+        )
+    log.sweep()
+
+    text, machine = _run()
+
+    funnel = _payload(machine)["funnel"]
+    assert funnel["no_retrieval"] == 2
+    assert funnel["no_retrieval_never_called"] == 1
+    assert funnel["no_retrieval_errored"] == 1
+    assert "2 without a pack (1 never retrieved, 1 errored, 0 unparsed, 0 empty" in (
+        _flat(text)
+    )
 
 
 def test_every_cli_default_is_the_library_default() -> None:
@@ -379,7 +444,9 @@ def test_a_figure_the_rows_cannot_give_reads_not_measurable(
         "pr_base_rate_served": "no analysed served-arm task records prs_created",
         "prs_created_mean": "no analysed task records prs_created",
     }
-    assert "capture records none of them" in d["not_measurable"]["post_hoc_share"]
+    assert (
+        "records only the stop-hook position" in d["not_measurable"]["post_hoc_share"]
+    )
     for key in ("outcome_sd_within_parent", "between_parent_share"):
         assert d[key] is None
     assert d["n_for_10pct_effect"] is None

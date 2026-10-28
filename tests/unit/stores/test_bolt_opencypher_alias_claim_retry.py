@@ -16,6 +16,8 @@ pin the test to itself rather than to what the servers actually send.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -25,6 +27,7 @@ pytest.importorskip("neo4j")
 
 from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 from trellis.stores.base.graph import AliasBindStatus
+from trellis.stores.bolt_opencypher import graph as bolt_graph
 from trellis.stores.bolt_opencypher.graph import (
     _ALIAS_CLAIM_KEY_PROPERTY,
     _ALIAS_CLAIM_LABEL,
@@ -125,6 +128,21 @@ def _arm_execute_write(
     driver = store._driver  # type: ignore[attr-defined]
     driver.session.return_value.__enter__.return_value = session
     return session.execute_write
+
+
+def _ticking_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the store's clock a second later on every read.
+
+    Two writes stamped by two reads are told apart, and a stamp reused
+    across attempts shows as two equal ones. Same helper as
+    ``test_bolt_opencypher_edge_claim_retry.py``'s.
+    """
+    ticks = iter(range(1, 1000))
+    monkeypatch.setattr(
+        bolt_graph,
+        "utc_now",
+        lambda: datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=next(ticks)),
+    )
 
 
 class TestPredicate:
@@ -274,6 +292,214 @@ class TestUpsertAliasRetries:
             store.upsert_alias("ent_a", "name", "hermes")
 
         assert execute_write.call_count == 1
+
+
+class _AttemptTx:
+    """One attempt's transaction: records each statement, answers the reads.
+
+    ``answers`` maps a statement's Cypher to what its ``.single()`` returns;
+    the writes that follow the reads are consumed and ignored.
+    """
+
+    def __init__(self, answers: Callable[[str], Any]) -> None:
+        self.statements: list[tuple[str, dict[str, Any]]] = []
+        self._answers = answers
+
+    def run(self, cypher: str, **params: Any) -> MagicMock:
+        self.statements.append((cypher, params))
+        result = MagicMock()
+        result.single.return_value = self._answers(cypher)
+        return result
+
+    def sent(self, fragment: str) -> list[dict[str, Any]]:
+        """The parameters of every statement whose Cypher holds ``fragment``."""
+        return [kw for cypher, kw in self.statements if fragment in cypher]
+
+
+def _lose_the_first_attempt(
+    store: BoltOpenCypherGraphStore,
+    answers: Callable[[str], Any],
+    error: Exception | None = None,
+) -> list[_AttemptTx]:
+    """Run the real transaction function; the first attempt fails at commit.
+
+    ArcadeDB detects an ``AliasClaim`` violation at commit, after every
+    statement was sent, so the refused attempt has already stamped its
+    time when the re-run begins. ``error`` is what the first attempt
+    raises (claim contention by default). Returns one :class:`_AttemptTx`
+    per attempt, in order.
+    """
+    attempts: list[_AttemptTx] = []
+
+    def execute_write(tx_function: Callable[[Any], Any]) -> Any:
+        tx = _AttemptTx(answers)
+        attempts.append(tx)
+        result = tx_function(tx)
+        if len(attempts) == 1:
+            raise error if error is not None else _contention()
+        return result
+
+    session = MagicMock()
+    session.execute_write.side_effect = execute_write
+    store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+    return attempts
+
+
+def _created_alias(tx: _AttemptTx) -> dict[str, Any]:
+    """The properties of the one alias version an attempt created."""
+    (sent,) = tx.sent("CREATE (a:Alias)")
+    return sent["new_props"]
+
+
+# What a writer finds when the alias already has a current version.
+_PRIOR_CREATED_AT = "2025-12-31T00:00:00+00:00"
+_PRIOR_ALIAS = {
+    "alias_id": "alias_old",
+    "entity_id": "ent_old",
+    "source_system": "name",
+    "raw_id": "hermes",
+    "created_at": _PRIOR_CREATED_AT,
+    "valid_from": _PRIOR_CREATED_AT,
+    "valid_to": None,
+}
+
+
+class TestAliasWritersStampEachAttempt:
+    """A re-run stamps its own time, not the refused attempt's (#1005).
+
+    Another writer can commit a newer version of the alias between a refused
+    attempt and its re-run. The re-run closes that version with ``$now``, so
+    a ``now`` kept from the first attempt would give it a ``valid_to``
+    before its own ``valid_from``: an inverted interval that ``as_of``
+    reads get wrong. Driven with a fake session that runs the real
+    transaction function against a clock that ticks on every read; the
+    sibling of ``TestUpsertEdgeStampsEachAttempt`` in
+    ``test_bolt_opencypher_edge_claim_retry.py`` (#1002).
+    """
+
+    @pytest.mark.parametrize("has_current", [True, False], ids=["close", "create"])
+    def test_upsert_alias_re_run_sends_a_later_timestamp(
+        self, monkeypatch: pytest.MonkeyPatch, has_current: bool
+    ) -> None:
+        _ticking_clock(monkeypatch)
+        store = _make_store()
+
+        def answers(cypher: str) -> Any:
+            if "RETURN a" in cypher and has_current:
+                return {"a": dict(_PRIOR_ALIAS)}
+            return None
+
+        attempts = _lose_the_first_attempt(store, answers)
+
+        assert store.upsert_alias("ent_new", "name", "hermes") is not None
+
+        assert len(attempts) == 2
+        stamped = []
+        for tx in attempts:
+            created = _created_alias(tx)
+            closes = tx.sent("SET a.valid_to = $now")
+            # Everything an attempt stamps from ``now`` shares one time:
+            # the version closed and the version created.
+            assert created["updated_at"] == created["valid_from"]
+            if has_current:
+                assert [kw["now"] for kw in closes] == [created["valid_from"]]
+                assert created["created_at"] == _PRIOR_CREATED_AT
+            else:
+                assert closes == []
+                assert created["created_at"] == created["valid_from"]
+            stamped.append(datetime.fromisoformat(created["valid_from"]))
+        refused, rerun = stamped
+        assert rerun > refused
+
+    @pytest.mark.parametrize(
+        ("has_current", "status"),
+        [
+            pytest.param(True, AliasBindStatus.REBOUND, id="repair-closes-current"),
+            pytest.param(False, AliasBindStatus.BOUND, id="first-bind-creates"),
+        ],
+    )
+    def test_bind_alias_if_absent_re_run_sends_a_later_timestamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        has_current: bool,
+        status: AliasBindStatus,
+    ) -> None:
+        _ticking_clock(monkeypatch)
+        store = _make_store()
+
+        def answers(cypher: str) -> Any:
+            if "MERGE (c:AliasClaim" in cypher:
+                # The claim names the previous owner when there is one (the
+                # repair path), and this caller otherwise (a first bind).
+                return (
+                    {"entity_id": "ent_old", "alias_id": "alias_old"}
+                    if has_current
+                    else {"entity_id": "ent_new", "alias_id": "alias_new"}
+                )
+            if "MATCH (a:Alias" in cypher and "RETURN a" in cypher and has_current:
+                return {"a": dict(_PRIOR_ALIAS)}
+            # The previous owner's node: absent, so its name cannot match
+            # the stale-owner key and the repair proceeds.
+            return None
+
+        attempts = _lose_the_first_attempt(store, answers)
+
+        result = store.bind_alias_if_absent(
+            "ent_new", "name", "hermes", stale_owner_name_key="stale-name"
+        )
+
+        # The path the case names is the one that ran.
+        assert result.status is status
+        assert len(attempts) == 2
+        stamped = []
+        for tx in attempts:
+            created = _created_alias(tx)
+            closes = tx.sent("SET a.valid_to = $now")
+            assert created["updated_at"] == created["valid_from"]
+            if has_current:
+                assert [kw["now"] for kw in closes] == [created["valid_from"]]
+                assert created["created_at"] == _PRIOR_CREATED_AT
+            else:
+                assert closes == []
+                assert created["created_at"] == created["valid_from"]
+            stamped.append(datetime.fromisoformat(created["valid_from"]))
+        refused, rerun = stamped
+        assert rerun > refused
+
+    def test_update_node_if_current_re_run_sends_a_later_timestamp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The third caller of ``_execute_alias_write`` (#1005).
+
+        It touches no claim, so only ArcadeDB re-runs it, on the generic
+        engine code a compare-and-set that lost to a concurrent write
+        fails with. That is the refusal driven here.
+        """
+        _ticking_clock(monkeypatch)
+        store = _make_arcadedb_store()
+        attempts = _lose_the_first_attempt(
+            store, lambda _cypher: {"node_id": "node_01"}, error=_stale_record()
+        )
+
+        assert store.update_node_if_current(
+            "node_01",
+            _PRIOR_CREATED_AT,
+            "concept",
+            {},
+            node_role="semantic",
+        )
+
+        assert len(attempts) == 2
+        stamped = []
+        for tx in attempts:
+            (sent,) = tx.sent("SET c.valid_to = $now")
+            # The version closed, the ``created_at`` fallback and the
+            # version created all read the one ``now`` of the attempt.
+            assert sent["new_props"]["updated_at"] == sent["now"]
+            assert sent["new_props"]["valid_from"] == sent["now"]
+            stamped.append(datetime.fromisoformat(sent["now"]))
+        refused, rerun = stamped
+        assert rerun > refused
 
 
 class TestArcadeDBWidensOverItsGenericErrorChannel:

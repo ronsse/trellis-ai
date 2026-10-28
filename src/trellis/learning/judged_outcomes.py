@@ -65,7 +65,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import is_sectioned_payload
-from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR
+from trellis.ingest_corpus.models import chunk_parent_id
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.retrieve.pack_value import collect_pack_verdicts
 from trellis.stores.base.event_log import (
@@ -239,15 +239,18 @@ class _ServingIndex:
                 served.add(item_id)
                 serving = _Serving(pack_id=pack_id, item_id=item_id, at=at)
                 self.by_item[item_id].append(serving)
-                if CHUNK_ID_SEPARATOR in item_id:
-                    self.by_parent[_parent_id(item_id)].append(serving)
+                parent = chunk_parent_id(item_id)
+                if parent is not None:
+                    self.by_parent[parent].append(serving)
 
     def matching(self, subject: str) -> Iterator[_Serving]:
         """Servings a judgment about ``subject`` covers (containment).
 
-        No guard is needed for a chunk subject: ``by_parent`` is keyed by the
-        text before the first separator, which cannot contain one, so a chunk
-        judgment matches its own servings and nothing else.
+        ``by_parent`` is keyed by :func:`chunk_parent_id`, the reading serving
+        takes of an id (#1001): only the minted shape ``<parent>#chunk-<digits>``
+        is a chunk, split at the last separator, so a caller-named id such as
+        ``notes#chunk-intro`` is a document of its own and never a chunk of
+        ``notes``.
         """
         yield from self.by_item.get(subject, ())
         yield from self.by_parent.get(subject, ())
@@ -604,9 +607,8 @@ def _stray_citations(
         )
         for item_id in cited - index.served_ids.get(pack_id, set()):
             strays += 1
-            if item_id in subjects or (
-                CHUNK_ID_SEPARATOR in item_id and _parent_id(item_id) in subjects
-            ):
+            parent = chunk_parent_id(item_id)
+            if item_id in subjects or (parent is not None and parent in subjects):
                 matching += 1
     return strays, matching
 
@@ -683,10 +685,6 @@ def _per_30d(count: int, window_days: float) -> float | None:
     if window_days <= 0:
         return None
     return round(count * 30 / window_days, 1)
-
-
-def _parent_id(item_id: str) -> str:
-    return item_id.split(CHUNK_ID_SEPARATOR, 1)[0]
 
 
 def _as_utc(moment: datetime) -> datetime:

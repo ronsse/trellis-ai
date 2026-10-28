@@ -2780,6 +2780,98 @@ class TestWorkerCaptureSessions:
         assert payload["status"] == "partial"
 
 
+class TestEnrichSparesPromotedPrecedents:
+    """``worker enrich`` leaves a promoted precedent's document row alone (#957).
+
+    The row's ``document_form`` and ``decision`` tag are what the promote handler
+    wrote; an enrichment pass would overwrite the first with the model's guess and
+    merge LLM facets into the second. The noise pass, retention and classify
+    refresh already skip the row, keyed on the id namespace.
+
+    Defective subject: drop the ``is_promoted_precedent_document`` skip in
+    ``_select_enrichment_candidates`` and the row is a candidate, is sent to the
+    model, and comes back rewritten.
+    """
+
+    PRECEDENT_ID = "precedent://learning/quokka"
+
+    def _seed(self, doc_store: Any) -> dict[str, Any]:
+        from trellis.learning.scoring import (
+            precedent_document_content,
+            precedent_document_metadata,
+        )
+
+        properties = {"name": "Quokka pooling", "description": "Reuse pooled widgets."}
+        doc_store.put(
+            self.PRECEDENT_ID,
+            precedent_document_content(properties["name"], properties["description"]),
+            precedent_document_metadata(properties),
+        )
+        doc_store.put("doc-ordinary", "an ordinary note", {"title": "Ordinary"})
+        row = doc_store.get(self.PRECEDENT_ID)
+        assert row is not None
+        return row
+
+    def test_the_row_is_not_a_candidate_even_with_reenrich(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._seed(doc_store)
+
+        for reenrich in (False, True):
+            ids = {
+                c["doc_id"]
+                for c in worker._select_enrichment_candidates(
+                    doc_store, limit=50, reenrich=reenrich
+                )
+            }
+            assert "doc-ordinary" in ids
+            assert self.PRECEDENT_ID not in ids
+
+    def test_a_run_never_calls_the_model_on_it_or_rewrites_it(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        before = self._seed(doc_store)
+        prompts: list[str] = []
+
+        class RecordingLLM:
+            async def generate(self, **kwargs: Any) -> LLMResponse:
+                prompts.append(kwargs["messages"][1].content)
+                return LLMResponse(
+                    content=json.dumps(
+                        {
+                            "tags": ["alpha"],
+                            "class": "reference",
+                            "summary": "Summary.",
+                            "importance": 0.6,
+                            "class_confidence": 0.9,
+                        }
+                    ),
+                    model="test-model",
+                )
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: RecordingLLM(),
+        )
+
+        result = runner.invoke(
+            app, ["worker", "enrich", "--reenrich", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        assert len(prompts) == 1
+        assert "Quokka" not in prompts[0]
+        assert doc_store.get(self.PRECEDENT_ID) == before
+        assert before["metadata"]["document_form"] == "precedent"
+        ordinary = doc_store.get("doc-ordinary")
+        assert ordinary is not None
+        assert ordinary["metadata"]["document_form"] == "reference"
+
+
 class TestEnrichedContentTags:
     """``worker enrich``'s write-back must produce a parseable ``ContentTags``.
 

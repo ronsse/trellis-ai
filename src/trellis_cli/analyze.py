@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from trellis.analyze.holdout import (
+        HoldoutExclusion,
         HoldoutGuardrailArm,
         HoldoutHorizon,
         HoldoutReport,
@@ -669,6 +670,7 @@ def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
         f"{sync.reinstatements} reinstatement(s) reported a failed re-stamp, "
         f"{len(sync.document_unresolved)} document / "
         f"{len(sync.vector_unresolved)} vector still unresolved"
+        + (f", {len(sync.uncertain)} uncertain" if sync.uncertain else "")
     )
 
 
@@ -1902,36 +1904,47 @@ def _render_holdout(report: HoldoutReport) -> None:
     console.print(
         f"    {f.joins_scanned} capture joins, {f.sessions} sessions: "
         f"{f.main_sessions} main sessions, {f.no_outcome} without an outcome, "
-        f"{f.no_retrieval} without a pack, {f.first_pack_not_found} first pack "
+        f"{f.no_retrieval} without a pack ({f.no_retrieval_never_called} never "
+        f"retrieved, {f.no_retrieval_errored} errored, "
+        f"{f.no_retrieval_unparsed} unparsed, {f.no_retrieval_empty_answer} "
+        f"empty answer), {f.first_pack_not_found} first pack "
         f"not found, {f.outside_window} outside the window, "
         f"{f.first_pack_old_build} from a build without the holdout, "
         f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
-        f"first pack, {f.unfinished} unfinished"
+        f"first pack, {f.unfinished} unfinished, {f.pre_treatment_excluded} "
+        "first retrieval after a stop hook's feedback"
     )
     console.print(
         f"    eligible {f.eligible} "
         f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
-        f"pack id), cut-offs excluded {f.cut_offs_excluded}, outcome "
+        f"pack id, {f.pre_treatment_unknown} with no retrieval timing), "
+        f"cut-offs excluded {f.cut_offs_excluded}, outcome "
         f"missing {f.outcome_missing}, analysed {f.analysed}"
     )
     _render_holdout_descriptive(report)
     console.print()
     console.print("  [bold]Exclusions[/bold]")
     for exclusion in report.exclusions:
-        if not exclusion.applied:
-            state = "not applied"
-        elif exclusion.excluded is None:
-            state = "applied"
-        else:
-            state = f"applied, {exclusion.excluded} excluded"
         console.print(
-            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): {state}. "
-            f"{escape(exclusion.note)}"
+            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): "
+            f"{_holdout_exclusion_state(exclusion)}. {escape(exclusion.note)}"
         )
     _render_holdout_inference(report)
     _render_holdout_guardrails(report)
     for note in report.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+def _holdout_exclusion_state(exclusion: HoldoutExclusion) -> str:
+    """``not applied``, ``applied`` or ``partially applied``, with what it removed."""
+    if not exclusion.applied:
+        return "not applied"
+    state = "partially applied" if exclusion.unknown else "applied"
+    if exclusion.excluded is not None:
+        state += f", {exclusion.excluded} excluded"
+    if exclusion.unknown:
+        state += f", {exclusion.unknown} undecidable and kept"
+    return state
 
 
 @analyze_app.command("holdout")

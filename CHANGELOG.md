@@ -6,6 +6,36 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The holdout's `pre_treatment` exclusion is applicable: capture records
+  where the first retrieval sat, and `trellis analyze holdout` drops a task
+  whose first retrieval followed a stop hook's feedback.** The pre-registration
+  counts a task as treated only if its first retrieval came before the work,
+  but session capture recorded nothing that could decide it, so the rule was
+  reported "not applied" while an operator's Stop/SubagentStop hook, which asks
+  for a `get_context` at the end of a session that skipped one, produced
+  afterthought retrievals that counted as treatment. Each
+  `CAPTURE_SESSION_PACKS` join now carries `retrieval_timing`:
+  `first_retrieval_ordinal` (the first tool call whose result served a pack),
+  `tool_call_count`, `hook_feedback_messages` and
+  `hook_feedback_before_first_retrieval`, counts and a flag only, never the
+  message. Hook feedback is a user-record text block that opens like one,
+  matched by `HOOK_FEEDBACK_PATTERN` in `transcripts.py` against the shape
+  Claude Code writes (an `isMeta` user record whose string content opens
+  `Stop hook feedback:`), and the funnel's
+  `pre_treatment_hook_feedback_seen` makes a pattern that matches nothing
+  visible instead of silent. The holdout excludes a task whose join says
+  hook feedback came first (`pre_treatment_excluded`, a funnel stage before
+  `eligible`), keeps one whose join predates the field (`pre_treatment_unknown`)
+  so the analysis can be read both ways, and reports the exclusion as "not
+  applied", "partially applied" or "applied". `no_retrieval` keeps its total
+  and gains `never_called`, `errored` (the join's `retrieval_errors`, which
+  nothing read before), `unparsed` and `empty_answer`, so a transport-failed
+  `get_context` is no longer counted as never called. A session parsed again
+  after this change gets one extra join (its payload now differs); the holdout
+  reads each session's latest join only, so it counts once, and a session
+  whose file never changes keeps its legacy join until a watermark reset parses
+  it. The half of the rule about a first retrieval after a commit, and the
+  post-hoc share, are still not recorded.
 - **`MEMORY_EXTRACTION_STATE`: a dead memory extractor is a health event, and
   a failed LLM-client resolution is retried (#987).** With
   `TRELLIS_ENABLE_MEMORY_EXTRACTION` on, `_get_memory_extractor` cached `None`
@@ -994,6 +1024,80 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Class-prior chunk scope and replay: a caller-named `#chunk-` id is no
+  chunk, a chunk whose row is gone still resolves, and a pointer replays at
+  its recorded charge (#1001).** `is_chunk_doc_id` was a substring test, so a
+  document a caller named `notes#chunk-intro` read as a chunk of `notes` and
+  the `parents_and_chunks` scope withheld it by `notes`'s form. It now matches
+  the shape ingest mints (`chunk_doc_id`: `<parent>#chunk-<digits>`, split at
+  the last separator), and a new `chunk_parent_id` gives the parent for the
+  same shape, so `parent_id_of`'s id-prefix fallback agrees with the
+  predicate. The store-level `LIKE '%#chunk-%'` exclusion is unchanged (SQL
+  cannot test digits), so a caller-named `notes#chunk-intro` is still hidden
+  by the SQL surfaces (API search and explore, `count(include_chunks=False)`,
+  the MCP fuzzy-dedup seed) while file-context `docs_by_path` now lists it and
+  `sync --prune` now considers it. The judged-outcomes join, which split on
+  the first separator, now uses `chunk_parent_id`, so it and serving read
+  `notes#chunk-intro` and `x#chunk-5#chunk-0` alike, and redacting a
+  caller-named target cascades to its own minted chunks. `analyze replay --class-prior` resolved a chunk whose own row had
+  been deleted as `unresolved` without trying its parent; serving never needed
+  that row, only the parent's, so replay now falls back to the id prefix the
+  same way and counts it resolved when the parent carries a form (a chunk
+  whose parent is also gone stays unresolved). `analyze replay` also priced a
+  row the pack served as a disclosure pointer from the character estimate,
+  which runs about two tokens over the charge the pack paid, so a policy
+  matching the served disclosure read as a small saving (`token_delta`
+  0.007 to 0.035 on a disclosed pack); a row served as a pointer is now
+  replayed at its recorded tokens, and only a row the policy newly demotes is
+  estimated. A null `ReplayPolicy` still prices every row as a body at the
+  walk charge, as before. #1001's scope-stamp box was already satisfied by
+  #990: the resolved scope, whether from config or `TRELLIS_CLASS_PRIOR_SCOPE`,
+  is appended to the replay's `applied_config` whenever it is not the default.
+
+- **A promoted precedent's document row is no longer rewritten by
+  `worker enrich`, and `retention.restore` will not un-archive a redaction's
+  blank row (#957).** `worker enrich` selected a precedent's row like any
+  other document, so its LLM pass could merge facets into it or overwrite the
+  `decision` `content_type` the promotion stamped; the candidate selection now
+  skips every id in `precedent://learning/` (the same id predicate the noise
+  pass and classify refresh use), with or without `--reenrich`. Separately,
+  `redaction.apply` blanks a document row and then purges its node, and
+  `retention.restore` read the document store first, so it re-stamped that
+  empty archived row `current`, either beside a deleted node (a redacted
+  precedent) or beside a live one (a redaction whose purge failed, which is
+  re-runnable). Two refusals now ride the existing `refused` path, so each is
+  named in `refused_items`, the `RETENTION_RESTORED` event and
+  `CommandResult.warnings`, and the rest of the batch still restores:
+  `retention_restore_precedent_node_missing` (a namespace row archived with no
+  node) and `retention_restore_redaction_tombstone` (an archived row whose
+  `deprecation_reason` is `redacted` *and* whose content is empty, in or out of
+  the namespace; the reason alone is caller-chosen text and does not qualify).
+  A batch restoring nothing rejects with the one refusal code present, or
+  `retention_restore_nothing_restored` when the codes differ; the summary line
+  now names the codes in place of "refused (history unavailable)". The
+  `classify.shadow`, `domain_normalization` and `tag_evolution` loops were
+  audited and left alone: shadow overlays only `content_tags_shadow`, which is
+  never served, and the other two write events, not documents.
+
+- **A refused precedent supersede is `target_protected`, not a `stale_recheck`
+  or a missing target (#994).** `mark_document_superseded` returns the reason
+  it did not apply (`None` when it did) instead of a bool, and a protected
+  `precedent://learning/...` target now reports `target_protected` where it
+  used to read as a vanished one. The successor's `reconciliation` marker and
+  the `RECONCILE_DEGRADED` event both say so, and the marker is not
+  `stale_recheck` because a re-judge would be refused again. The session
+  capture sweep maps it to `supersede_target_protected` rather than
+  `supersede_target_missing`. The reason is not a judge failure
+  (`judge_failure=false`), and a protected target still emits no
+  `MEMORY_OP_JUDGED`: that stream pairs a verdict with its outcome, and a
+  verdict that never took effect has none. `precedent_sync_health` also
+  breaks a same-microsecond tie toward the failure, lists a failed reinstate
+  older than a capped `precedent.demoted` read as `uncertain` rather than
+  unresolved (the dropped demote may have superseded it), and its vector
+  warning now says semantic retrieval withholds the demoted snapshot, which is
+  what the collect seam does, not that it serves it. A test id now carries
+  markup so the escaped-id CLI test discriminates.
+
 - **`promote-learning`: re-running a file after a refused run no longer
   re-promotes the rows that landed (#983).** A mixed run exits `2` /
   `refused` and the next move is to fix the bad row and run the same file
@@ -1007,7 +1111,12 @@ All notable changes to Trellis will be documented in this file.
   is carried in a new `already_promoted_count` (CLI JSON, REST response,
   review-decision event detail; `docs/api/v1.yaml` regenerated) apart from
   `promoted_count`. A `promoted_incomplete` row and a row with changed
-  content still write. `review-ready --approve` keeps refusing an existing
+  content still write. A re-run skips a row whose payload keys still match,
+  so a key since dropped from `precedent_properties` is not removed by a
+  re-run, on purpose: a key a later writer added, a lifecycle stamp say, reads
+  the same as a dropped one, and that is not content the promotion owns
+  ([#996](https://github.com/ronsse/trellis-ai/issues/996)).
+  `review-ready --approve` keeps refusing an existing
   precedent as `refused_already_promoted`. Two smaller fixes ride with it:
   `review-ready --approve ""` could raise `IndexError` when a malformed
   artifact held a ready row with a blank `candidate_id`, and is now refused as
@@ -1311,6 +1420,13 @@ All notable changes to Trellis will be documented in this file.
   every item above that wasn't already covered.
 
 ### Changed
+
+- **`save_experience`'s tool description says a step's `result` is an object.**
+  `trellis analyze health` reported the same boundary rejection recurring
+  (`type` at `steps[].result`, 14 times in 7 days): agents wrote a bare string
+  where `TraceStep.result` takes a dict. The skill that teaches the trace shape
+  already said so; the MCP tool description, the only guide an agent without
+  that skill sees, did not. The schema is unchanged.
 
 - **BREAKING: `trellis admin quickstart` no longer writes Claude Code settings
   files; it prints the `claude mcp add` command that registers `trellis-mcp`.**

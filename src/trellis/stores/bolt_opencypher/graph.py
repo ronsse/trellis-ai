@@ -156,7 +156,13 @@ same way, in its pre-check and its ``UNWIND``, and gets the same re-run
 (:meth:`_rerun_on_unreadable_endpoints`, one helper for both), around the
 whole pre-check-then-write attempt: a refused attempt wrote nothing (the
 write's transaction rolls back whole), so re-running it is safe. The bulk
-re-run probes only the endpoints of the row that was refused.
+re-run probes only the endpoints of the row that was refused. Every attempt
+stamps its own ``valid_from`` and ``valid_to`` (``now``), read inside the
+write's transaction function: a version another writer committed since a
+refused attempt must not be closed with that attempt's earlier time. The
+writers that run through :meth:`_execute_alias_write` (:meth:`upsert_alias`,
+:meth:`bind_alias_if_absent`, :meth:`update_node_if_current`) read ``now``
+the same way, inside the transaction function it re-runs.
 
 Per-backend subclasses override the **seams**:
 
@@ -873,7 +879,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         validate_version_token(expected_valid_from)
         validate_node_role_args(node_role, generation_spec)
         validate_document_ids(document_ids)
-        now = _iso(utc_now())
+        # ``updated_at`` and ``valid_from`` are stamped per attempt, in ``_tx``.
         new_props = {
             "node_id": node_id,
             "version_id": generate_ulid(),
@@ -886,8 +892,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             if document_ids is not None
             else None,
             "properties_json": json.dumps(properties or {}, allow_nan=False),
-            "updated_at": now,
-            "valid_from": now,
             "valid_to": None,
         }
         # No current row, no write: the shown row is then ``null`` and
@@ -925,13 +929,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         """
 
         def _tx(tx: ManagedTransaction) -> bool:
+            # Read per attempt, as in ``upsert_alias`` (#1005): a re-run can
+            # follow another writer's commit of a newer version of this
+            # node, and closing it with the first attempt's ``now`` would
+            # give it a ``valid_to`` before its own ``valid_from``.
+            now = _iso(utc_now())
             record = tx.run(
                 cypher,
                 node_id=node_id,
                 expected_valid_from=expected_valid_from,
                 node_role=node_role,
                 now=now,
-                new_props=new_props,
+                new_props={**new_props, "updated_at": now, "valid_from": now},
             ).single()
             return record is not None
 
@@ -1354,10 +1363,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         match_confidence: float = 1.0,
         is_primary: bool = False,
     ) -> str:
-        now = _iso(utc_now())
         claim_key = _alias_claim_key(source_system, raw_id)
 
         def _tx(tx: ManagedTransaction) -> str:
+            # Read per attempt, not per call: ``_execute_alias_write``
+            # re-runs this function after a lost claim race, and the
+            # winner may have committed a newer version of this alias in
+            # between. Closing that version with the first attempt's
+            # ``now`` would give it a ``valid_to`` before its own
+            # ``valid_from`` (#1005, as #1002 for edges).
+            now = _iso(utc_now())
             record = tx.run(
                 """
                 MATCH (a:Alias {source_system: $src, raw_id: $rid})
@@ -1429,11 +1444,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
         """Atomically claim or repair an alias through ``AliasClaim``."""
-        now = _iso(utc_now())
         candidate_alias_id = generate_ulid()
         claim_key = _alias_claim_key(source_system, raw_id)
 
         def _tx(tx: ManagedTransaction) -> AliasBindResult:
+            # Per attempt, as in ``upsert_alias`` (#1005): the repair path
+            # closes the current alias with ``now``, and a re-run can
+            # follow another writer's commit of a newer one.
+            now = _iso(utc_now())
             current_record = tx.run(
                 """
                 MATCH (a:Alias {source_system: $src, raw_id: $rid})
@@ -1682,7 +1700,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # Neo4j and links two new empty vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
         # from any current version, so the write stays one round trip.
-        now = _iso(utc_now())
+        # ``valid_from`` is stamped per attempt, in ``_tx``.
         candidate_edge_id = generate_ulid()
         base_props = {
             "version_id": generate_ulid(),
@@ -1690,7 +1708,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "target_id": target_id,
             "edge_type": edge_type,
             "properties_json": json.dumps(properties or {}, allow_nan=False),
-            "valid_from": now,
             "valid_to": None,
             "source_trace_id": source_trace_id,
             "agent_id": agent_id,
@@ -1779,6 +1796,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # ever observed) but a fresh value per attempt keeps the
             # claim row's content distinguishable call to call for
             # debugging.
+            #
+            # ``now`` is read per attempt for a stronger reason: a re-run
+            # (the claim race, a driver retry, an endpoint that read as
+            # absent) can follow another writer's commit of a newer version
+            # of this edge, and closing that version with the first
+            # attempt's ``now`` would give it a ``valid_to`` before its own
+            # ``valid_from`` (#1002).
+            now = _iso(utc_now())
             return tx.run(
                 cypher,
                 source_id=source_id,
@@ -1788,7 +1813,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 edge_type=edge_type,
                 now=now,
                 candidate_edge_id=candidate_edge_id,
-                base_props=base_props,
+                base_props={**base_props, "valid_from": now},
                 edge_claim_key=edge_claim_key,
                 edge_claim_token=generate_ulid(),
             ).single()
@@ -1848,7 +1873,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # between the prior edge_id (carry forward) and ours (new edge).
         # ``row_index`` lets us reorder the returned rows back into input
         # order — the UNWIND doesn't promise stable iteration.
-        now = _iso(utc_now())
+        # ``valid_from`` is stamped per attempt, in ``_tx``.
         rows: list[dict[str, Any]] = [
             {
                 "row_index": i,
@@ -1864,7 +1889,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     "properties_json": json.dumps(
                         spec.get("properties") or {}, allow_nan=False
                     ),
-                    "valid_from": now,
                     "valid_to": None,
                     **per_row_provenance[i],
                 },
@@ -1961,7 +1985,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             """
 
             def _tx(tx: ManagedTransaction) -> list[Any]:
-                records = list(tx.run(cypher, rows=rows, lock_ids=lock_ids))
+                # Stamped per attempt, as in ``upsert_edge``: a re-run
+                # must not close a version a racing writer committed since
+                # the refused attempt with a ``valid_to`` before its own
+                # ``valid_from`` (#1002).
+                now = _iso(utc_now())
+                stamped = [
+                    {**row, "props": {**row["props"], "valid_from": now}}
+                    for row in rows
+                ]
+                records = list(tx.run(cypher, rows=stamped, lock_ids=lock_ids))
                 # Compare row indices, not counts: one UNWIND row yields
                 # exactly one RETURN row (the FOREACH above collapses
                 # every matched old edge into one close), but comparing
