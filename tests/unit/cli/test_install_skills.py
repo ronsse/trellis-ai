@@ -48,7 +48,11 @@ class TestPackageData:
         text = (files("trellis_cli.skills") / name / "SKILL.md").read_text()
         frontmatter = text.split("---")[1]
         fields = dict(line.split(": ", 1) for line in frontmatter.strip().splitlines())
-        assert {"name", "description", "version", "status"} <= set(fields)
+        assert {"name", "description", "version"} <= set(fields)
+        # The skills are the supported path, so they carry no preview marker,
+        # in the frontmatter or as a banner an agent would read as "in flux".
+        assert "status" not in fields
+        assert "preview" not in text.lower()
         # Hosts that list skills truncate or refuse a longer description.
         assert len(fields["description"]) < 200
 

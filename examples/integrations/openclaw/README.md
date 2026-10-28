@@ -60,7 +60,7 @@ This installs the skill and configures the MCP server automatically.
 | `save_memory` | Store a document for later retrieval |
 | `get_lessons` | List precedents (proven patterns from past work) |
 | `get_graph` | Explore entity neighborhood in the knowledge graph |
-| `record_feedback` | Record task success/failure for quality tracking |
+| `record_feedback` | Grade a served pack: `pack_id`, `rating`, `helpful_item_ids`, `unhelpful_item_ids` |
 | `search` | Combined document + entity search |
 | `get_objective_context` | Workflow-level pack: domain knowledge + operational context |
 | `get_task_context` | Step-level pack scoped to specific entity ids |

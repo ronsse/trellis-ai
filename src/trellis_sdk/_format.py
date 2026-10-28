@@ -80,7 +80,7 @@ def format_pack_as_markdown(
         lines.append(
             "\n---\n"
             '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '
-            "success=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+            "rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
         )
     return "\n".join(lines)
 

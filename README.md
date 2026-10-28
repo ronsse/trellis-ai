@@ -338,7 +338,7 @@ trellis admin migrate-graph \
 | POST | `/api/v1/feedback` | Record pack outcome |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
-**MCP server** — `trellis-mcp`. Sixteen macro tools. Thirteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
+**MCP server** — `trellis-mcp`. Local agents use the default stdio transport; remote clients use the opt-in HTTP transport (`TRELLIS_MCP_TRANSPORT=http`, bearer-token auth), documented in [adr-mcp-http-transport.md](docs/design/adr-mcp-http-transport.md). Sixteen macro tools. Thirteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
 
 | Tool | Purpose |
 |------|---------|
@@ -380,6 +380,8 @@ from trellis_sdk.skills import get_context_for_task
 
 context = get_context_for_task(client, "implement retry logic", domain="backend")
 ```
+
+The returned markdown carries the `pack_id` whenever the pack has items; pass it to `client.record_feedback` together with the item ids the model cites.
 
 ## Planes & substrates
 

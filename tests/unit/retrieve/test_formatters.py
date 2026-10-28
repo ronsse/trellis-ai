@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from typing import Any
+
+import pytest
 
 from trellis.retrieve.formatters import (
     format_advisories_as_markdown,
@@ -415,6 +419,129 @@ class TestFormatAdvisories:
         assert "2." in result
         assert "approach" in result.lower()
         assert "anti_pattern" in result.lower()
+
+    def test_every_line_names_where_to_cite_it(self) -> None:
+        """The footer's call hint can sit far from an advisory, and the bare
+        message ("Consider including it") names no tool call at all."""
+        advs = [
+            _advisory(AdvisoryCategory.APPROACH, "Validate schema first"),
+            _advisory(AdvisoryCategory.ANTI_PATTERN, "Skipping dry-run hurt"),
+        ]
+
+        lines = [
+            line
+            for line in format_advisories_as_markdown(advs).splitlines()
+            if line[:1].isdigit()
+        ]
+
+        assert len(lines) == len(advs)
+        assert all(
+            line.endswith(" — cite it in `followed_advisory_ids` if you act on it.")
+            for line in lines
+        )
+
+
+def _advisory(
+    category: AdvisoryCategory = AdvisoryCategory.APPROACH,
+    message: str = "Validate schema first",
+) -> Advisory:
+    return Advisory(
+        category=category,
+        confidence=0.7,
+        message=message,
+        evidence=AdvisoryEvidence(
+            sample_size=20,
+            success_rate_with=0.8,
+            success_rate_without=0.3,
+            effect_size=0.5,
+        ),
+        scope="global",
+    )
+
+
+_FOOTER_ITEMS = [
+    {
+        "item_id": f"item_{n}",
+        "item_type": "document",
+        "excerpt": "alpha bravo charlie " * 30,
+        "relevance_score": 0.5,
+    }
+    for n in range(5)
+]
+
+#: Each pack shape's renderer, bound to the same items.
+_RENDERERS: dict[str, Callable[..., str]] = {
+    "flat": lambda **kw: format_pack_as_markdown(_FOOTER_ITEMS, "intent", **kw),
+    "index": lambda **kw: format_pack_as_index_markdown(_FOOTER_ITEMS, "intent", **kw),
+    "sectioned": lambda **kw: format_sectioned_pack_as_markdown(
+        [{"name": "All", "items": _FOOTER_ITEMS}], "intent", **kw
+    ),
+    "empty": lambda **kw: format_pack_as_markdown(
+        [], "intent", empty_text="No context found for: intent", **kw
+    ),
+}
+
+
+class TestFeedbackFooterAndAdvisoryOrder:
+    """The footer is the only grading hint a pack carries: it leads with
+    ``rating``, names every field the learning loop joins on, and is the last
+    thing an agent reads, so no advisory can sit below it uncited."""
+
+    @pytest.mark.parametrize("shape", sorted(_RENDERERS))
+    def test_footer_leads_with_rating_and_names_every_field(self, shape: str) -> None:
+        footer = _RENDERERS[shape](pack_id="pack_abc").splitlines()[-1]
+
+        assert 'record_feedback(pack_id="pack_abc", rating=..., ' in footer
+        for field in (
+            "helpful_item_ids",
+            "unhelpful_item_ids",
+            "followed_advisory_ids",
+        ):
+            assert f"{field}=[...]" in footer
+        assert "success" not in footer
+
+    @pytest.mark.parametrize("shape", sorted(_RENDERERS))
+    def test_advisories_sit_above_the_footer(self, shape: str) -> None:
+        text = _RENDERERS[shape](pack_id="pack_abc", advisories=[_advisory()])
+
+        assert text.index("## Advisories") < text.index("record_feedback(")
+        assert "record_feedback(" in text.splitlines()[-1]
+        assert "Validate schema first" not in text.split("record_feedback(")[1]
+
+    @pytest.mark.parametrize("shape", sorted(_RENDERERS))
+    def test_no_advisories_leaves_the_pack_as_it_was(self, shape: str) -> None:
+        plain = _RENDERERS[shape](pack_id="pack_abc")
+
+        assert _RENDERERS[shape](pack_id="pack_abc", advisories=[]) == plain
+        assert "Advisories" not in plain
+
+    @pytest.mark.parametrize("shape", sorted(_RENDERERS))
+    def test_advisories_without_a_pack_id_still_render_and_no_footer_appears(
+        self, shape: str
+    ) -> None:
+        text = _RENDERERS[shape](advisories=[_advisory()])
+
+        assert "Validate schema first" in text
+        assert "record_feedback" not in text
+
+    @pytest.mark.parametrize("shape", ["flat", "index", "sectioned"])
+    def test_advisories_are_not_charged_to_the_item_budget(self, shape: str) -> None:
+        """Placing them inside the formatter must not move what fits."""
+
+        def served(text: str) -> list[str]:
+            return re.findall(r"item_\d", text)
+
+        # An index line is a fraction of a body, so its budget is smaller.
+        budget = 40 if shape == "index" else 300
+        without = _RENDERERS[shape](pack_id="p", max_tokens=budget)
+        with_advisories = _RENDERERS[shape](
+            pack_id="p", max_tokens=budget, advisories=[_advisory(), _advisory()]
+        )
+
+        # The budget bites (not all five fit), and adding advisories moves
+        # nothing in or out.
+        assert 0 < len(served(without)) < len(_FOOTER_ITEMS)
+        assert served(with_advisories) == served(without)
 
 
 class TestAdvisoryEvidenceIsRenderedOnce:

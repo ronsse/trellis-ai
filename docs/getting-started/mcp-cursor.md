@@ -66,10 +66,15 @@ Add this to `.cursorrules` (or your project rules) so Cursor uses Trellis automa
 ```markdown
 ## Institutional Memory (Trellis)
 
-Before starting non-trivial work, call `get_context` with your task intent
-to find prior art. After completing meaningful work, call `save_experience`
-with a trace JSON. When you discover services, concepts, or patterns,
-call `save_knowledge`. Mark task outcomes with `record_feedback`.
+Trellis memory is connected. Before non-trivial work, call
+`get_context(intent=<what you are about to do>, session_id=<this session>)`
+and note the `pack_id` and the backticked item ids. After the work, call
+`save_experience` (each step's result is an object, failures go in `error`),
+then `record_feedback(pack_id=..., rating=0.0-1.0, helpful_item_ids=[...],
+unhelpful_item_ids=[...])`. Feedback without item ids does not reach the
+learning loop. This applies to every dispatched subagent too; it is part of
+the task, not extra scope. When you discover services, concepts, or patterns,
+call `save_knowledge`.
 ```
 
 For drop-in skill templates, see [../../skills/](../../skills/).

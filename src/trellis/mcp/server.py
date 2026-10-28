@@ -147,7 +147,6 @@ from trellis.retrieve.builder_factory import (
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
-    format_advisories_as_markdown,
     format_entity_as_markdown,
     format_fetched_items_as_markdown,
     format_file_context_as_markdown,
@@ -160,10 +159,7 @@ from trellis.retrieve.formatters import (
 )
 from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
-from trellis.retrieve.withholding import (
-    format_withholding_note,
-    withholding_from_payload,
-)
+from trellis.retrieve.withholding import withholding_from_payload
 from trellis.schemas.classification import lifecycle_state_of
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
@@ -353,19 +349,23 @@ mcp = FastMCP(
         "traces and precedents are cheap; re-deriving them is not. Pass "
         "`session_id` to dedup across calls in one conversation. `domain=` is "
         "safe to pass — it scopes with default-pass semantics and never "
-        "hard-excludes memories that carry no domain. An empty pack is a real "
-        "answer: it means greenfield, so say so.\n"
+        "hard-excludes memories that carry no domain. The pack header carries "
+        "its `pack_id`, and each item's id is in backticks. An empty pack is a "
+        "real answer: it means greenfield, so say so; a `**Withheld:**` line, "
+        "when present, counts what matched but was not served.\n"
         "\n"
         "2. AFTER meaningful work — a fix, a discovery, an instructive failure "
-        "— call `save_experience`. Put failures in the step's `error` field; a "
-        "workaround the next agent would otherwise rediscover is the most "
-        "reusable thing you can leave behind.\n"
+        "— call `save_experience`. Each step's `result` is an object, never a "
+        "bare string. Put failures in the step's `error` field; a workaround "
+        "the next agent would otherwise rediscover is the most reusable thing "
+        "you can leave behind.\n"
         "\n"
-        "3. GRADE what you were served: `record_feedback(pack_id=...)` naming "
-        "`helpful_item_ids` and `unhelpful_item_ids`. Feedback without item "
-        "ids cannot join to the pack and is invisible to the learning loop, so "
-        "a reflexive success=true teaches nothing. An honest low `rating` is "
-        "worth more than a polite high one.\n"
+        "3. GRADE what you were served: `record_feedback(pack_id=..., "
+        "rating=0.0-1.0)` naming `helpful_item_ids` and `unhelpful_item_ids` "
+        "(and `followed_advisory_ids` for advisories you acted on). Feedback "
+        "without item ids cannot join to the pack and is invisible to the "
+        "learning loop, so a reflexive success=true teaches nothing. An honest "
+        "low `rating` is worth more than a polite high one.\n"
         "\n"
         "The common failure is retrieval that never happens, not retrieval "
         "that returns nothing."
@@ -1355,40 +1355,26 @@ def _flat_context(
         # ``_sectioned_context``, which never special-cases empty sections
         # before appending advisories — rather than silently dropping the
         # only content an empty-item response would otherwise carry.
-        adv_md = format_advisories_as_markdown(pack.advisories)
-        if builder.holdout_rate > 0:
-            # With the pack holdout on, an empty pack may be a withheld one.
-            # It must still carry the ``pack_id`` header the capture join
-            # reads, so all empty packs render through the formatter while
-            # the rate is above zero. ``adv_md`` is always empty here too
-            # — this branch's pack has no items and the rate is above
-            # zero, so the builder rule above has already blinded
-            # ``pack.advisories`` — but the append stays in case a future
-            # caller reaches this branch some other way. At rate 0 the
-            # one-liner below is unchanged.
-            formatter = (
-                format_pack_as_index_markdown if index else format_pack_as_markdown
-            )
-            result = formatter(
-                [],
-                title or intent,
-                max_tokens=max_tokens,
-                pack_id=pack.pack_id,
-                withholding=withholding,
-                empty_text=empty,
-                axis_note=axis_note,
-            )
-            if adv_md:
-                result = f"{result}\n\n{adv_md}"
-            return f"{banner}\n\n{result}" if banner else result
-        if axis_note:
-            empty = f"{empty}\n\n{axis_note}"
-        note = format_withholding_note(withholding)
-        if note:
-            empty = f"{empty}\n\n{note}"
-        if adv_md:
-            empty = f"{empty}\n\n{adv_md}"
-        return f"{banner}\n\n{empty}" if banner else empty
+        #
+        # Every empty pack renders through the formatter, whatever the
+        # holdout rate. At rate 0 nothing is withheld, but the server's own
+        # instructions tell an agent to grade the pack it was served by
+        # ``pack_id``, and a bare one-line reply left it nothing to name.
+        # One shape for all empty packs also keeps the look-alike rule
+        # above true by construction: a withheld pack and a genuinely empty
+        # one take this same path, so neither can differ by its header.
+        formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
+        result = formatter(
+            [],
+            title or intent,
+            max_tokens=max_tokens,
+            pack_id=pack.pack_id,
+            withholding=withholding,
+            empty_text=empty,
+            axis_note=axis_note,
+            advisories=pack.advisories,
+        )
+        return f"{banner}\n\n{result}" if banner else result
 
     item_dicts = [
         {
@@ -1411,15 +1397,11 @@ def _flat_context(
         pack_id=pack.pack_id,
         withholding=withholding,
         axis_note=axis_note,
+        # Advisories ride outside the item budget on both pack shapes, and
+        # the formatter places them above the citation footer so the
+        # footer stays the last thing read (see ``_advisories_block``).
+        advisories=pack.advisories,
     )
-    # Advisories ride outside the item budget on both pack shapes — see
-    # ``_sectioned_context``, which appends them after
-    # ``format_sectioned_pack_as_markdown`` and before the capture banner.
-    # Mirrored here (same helper, same position) so the flat path, which
-    # agents actually call, stops building advisories it never shows.
-    adv_md = format_advisories_as_markdown(pack.advisories)
-    if adv_md:
-        result = f"{result}\n\n{adv_md}"
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
@@ -1511,10 +1493,8 @@ def _sectioned_context(
                 sectioned_pack.metadata.get("withholding")
             ),
             axis_note=axis_note,
+            advisories=sectioned_pack.advisories,
         )
-        adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
-        if adv_md:
-            result = result + "\n\n" + adv_md
         banner = _capture_warning_banner(registry)
         if banner:
             result = f"{banner}\n\n{result}"

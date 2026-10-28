@@ -1,13 +1,10 @@
 ---
 name: link-evidence
 description: Store a durable fact (API contract, config value, ownership, gotcha) in Trellis anchored to its knowledge-graph entity, so later work in that area retrieves it. Not for opinions or churning state.
-version: 1.1.0
-status: preview
+version: 1.2.0
 ---
 
 # Link Evidence
-
-> **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
 retrieve-before-task pulls knowledge; record-after-task captures process.
 This skill captures **discrete facts** — the kind you'd otherwise jot in a

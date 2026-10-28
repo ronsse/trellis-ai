@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -96,6 +97,43 @@ def test_get_context_for_task_places_withholding_before_served_items() -> None:
 
     assert result.index("**Withheld:**") < result.index("## [document]")
     assert "noise-id" not in result
+
+
+def test_get_context_for_task_carries_pack_id_and_feedback_footer() -> None:
+    """The markdown names the pack, so the caller can grade it with item ids."""
+    seen: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "pack_id": "pack:served",
+                "count": 1,
+                "items": [
+                    {
+                        "item_type": "document",
+                        "item_id": "served-id",
+                        "excerpt": "Use a token bucket.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+            },
+        )
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(_handler), base_url="http://testserver"
+    )
+    with TrellisClient(http=http, verify_version=False) as client:
+        result = get_context_for_task(client, "test intent", max_tokens=1234)
+
+    assert "`pack:served`" in result
+    footer = result.rstrip().splitlines()[-1]
+    assert footer.startswith("*Cite feedback via `record_feedback(pack_id=")
+    assert "rating=..." in footer
+    assert "helpful_item_ids=[...]" in footer
+    assert "`served-id`" in result
+    assert seen["body"]["max_tokens"] == 1234  # type: ignore[index]
 
 
 def test_get_latest_successful_trace_none(client: TrellisClient):
