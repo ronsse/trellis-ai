@@ -13,6 +13,7 @@ A 5-10 minute on-ramp. Pick the path that matches what you want to do.
 | Plug Trellis into Claude Code | [mcp-claude-code.md](mcp-claude-code.md) |
 | Plug Trellis into Cursor | [mcp-cursor.md](mcp-cursor.md) |
 | Plug Trellis into Claude Desktop | [mcp-claude-desktop.md](mcp-claude-desktop.md) |
+| Give a model with an API key (or a subagent) the loop as a system prompt | [system-prompt.md](system-prompt.md) |
 | Use the Python SDK in your own agent | [../../examples/sdk_local_demo.py](../../examples/sdk_local_demo.py) |
 | Wrap Trellis tools in LangGraph | [../../examples/integrations/langgraph/README.md](../../examples/integrations/langgraph/README.md) |
 | Run the REST API as a shared service | see "Running a shared server" below |

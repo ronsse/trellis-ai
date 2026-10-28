@@ -11,11 +11,14 @@ How does your agent talk to tools?
 ├─ It's a Python framework (LangGraph, CrewAI, a custom loop)
 │     → Path 2: SDK + hooks  (pip install, wrap your tasks)
 │
-└─ It's a script, a CI job, or a non-Python service
-      → Path 3: REST + CLI  (HTTP calls / shell commands)
+├─ It's a script, a CI job, or a non-Python service
+│     → Path 3: REST + CLI  (HTTP calls / shell commands)
+│
+└─ It's a model you call with an API key, given Trellis tools
+      → Path 4: system prompt  (paste a text; no skills involved)
 ```
 
-All three paths read and write the **same substrate**. An agent that records traces over MCP and a CI job that posts traces over REST land in the same graph; a Python agent retrieves a pack that includes everything every other surface wrote.
+All four paths read and write the **same substrate**. An agent that records traces over MCP and a CI job that posts traces over REST land in the same graph; a Python agent retrieves a pack that includes everything every other surface wrote.
 
 ---
 
@@ -33,7 +36,7 @@ For any agent that loads MCP servers: Claude Code, Cursor, Claude Desktop, or an
    ```
 
    `quickstart` initializes local SQLite stores and (with `--with-skills user`)
-   installs three drop-in skills into `~/.claude/skills/`. It then prints the
+   installs four drop-in skills into `~/.claude/skills/`. It then prints the
    `claude mcp add` command that registers the `trellis` MCP server with
    Claude Code; run that command once. Use `--with-skills project` to install
    into `./.claude/skills/` instead, and `--scope project` to keep stores
@@ -48,10 +51,10 @@ For any agent that loads MCP servers: Claude Code, Cursor, Claude Desktop, or an
    trellis demo load
    ```
 
-### What the three skills make your agent do automatically
+### What the four skills make your agent do automatically
 
-The skills install as `/retrieve-before-task`, `/record-after-task`, and
-`/link-evidence`. Together they close the loop without you prompting for it
+The skills install as `/retrieve-before-task`, `/record-after-task`,
+`/link-evidence` and `/trellis-loop`. Together they close the loop without you prompting for it
 every session:
 
 - **Pre-task retrieve** (`retrieve-before-task`): before non-trivial work —
@@ -60,12 +63,15 @@ every session:
   graph knowledge instead of re-deriving them.
 - **Post-task record** (`record-after-task`): after meaningful work, the agent
   writes a structured trace via `save_experience` and grades the packs it was
-  served with `record_feedback`, citing item ids — this is what makes future
-  retrievals useful.
+  served with `record_feedback`, citing item ids (`helpful_item_ids` /
+  `unhelpful_item_ids`) — this is what makes future retrievals useful.
 - **Evidence linking** (`link-evidence`): when the agent learns a durable fact,
   it stores it with `save_knowledge`, linked to the graph entity the fact is
   about, so the fact resurfaces from any future task that touches the same
   area.
+- **The loop for subagents** (`trellis-loop`): a dispatched subagent reads no
+  skill, so this one carries a short paragraph to add to every agent
+  definition and to `CLAUDE.md`. `install-skills` prints the same paragraph.
 
 You can install or reinstall the skills on their own at any time with
 `trellis admin install-skills user` (or `project`). It is idempotent — existing
@@ -215,9 +221,39 @@ is retrievable.
 
 ---
 
+## Path 4 — A model with an API key plus Trellis tools
+
+For a model you call yourself (the Messages API, the OpenAI API, a LangGraph
+or other framework agent) that has the Trellis tools. There is no skill to
+load, so the loop reaches the model as text in its system message.
+
+### Steps
+
+1. **Give the model the Trellis tools**, from an MCP client or from wrappers
+   over the SDK or REST API (Path 1, 2 or 3 covers that).
+
+2. **Put the loop in its system message:**
+
+   ```bash
+   trellis admin show-prompt                 # print the system prompt
+   trellis admin show-prompt --format json   # {"variant": ..., "text": ...}
+   ```
+
+   [system-prompt.md](system-prompt.md) holds the text, where to paste it for
+   each host, and the two shorter variants for `CLAUDE.md` and for agent
+   definitions.
+
+### How you know it worked
+
+Give the model a small task and read its first tool call: it should be
+`get_context`. After the task, `trellis retrieve traces --limit 5 --format
+json` lists the trace it saved.
+
+---
+
 ## What runs on the Trellis side
 
-Two server-side processes back all three paths. Path 1 (MCP) runs the stores
+Two server-side processes back all four paths. Path 1 (MCP) runs the stores
 in-process and needs neither, but a shared or production deployment runs both.
 
 ### The API + UI server — `trellis admin serve`
@@ -251,6 +287,7 @@ For how to run them — flags, autonomy tiers, scheduling — see the operating 
 
 - **Path 1 details:** [mcp-claude-code.md](mcp-claude-code.md) and the
   [skills/](../../skills/) templates.
+- **Path 4 details:** [system-prompt.md](system-prompt.md).
 - **Decisions before a team / production rollout:**
   [setup-decisions.md](setup-decisions.md) — domains & ontology, ownership,
   API security.

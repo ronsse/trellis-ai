@@ -14,10 +14,9 @@ that mentions ``record_feedback`` must also mention ``helpful_item_ids``.**
 It is scanned from the directory tree, never from a list of known files, so a
 new setup page is covered the day it lands.
 
-``_PENDING`` is the one exception and may only shrink. It names a page whose
-rewrite is owned by another change; ``test_every_exemption_is_still_needed``
-fails the moment that page satisfies the rule, so the entry cannot outlive
-its reason.
+``_PENDING`` held one page while its rewrite was owned by another change. It
+is empty now and may only stay empty: ``test_every_exemption_is_still_needed``
+fails on any entry that is new or no longer needed.
 """
 
 from __future__ import annotations
@@ -31,9 +30,8 @@ SCANNED_ROOTS = ("docs/getting-started", "examples")
 TOOL = "record_feedback"
 REQUIRED = "helpful_item_ids"
 
-#: Pages exempt until their own rewrite lands. Remove an entry when its page
-#: mentions ``helpful_item_ids``; the test below fails if you forget.
-_PENDING: frozenset[str] = frozenset({"docs/getting-started/integrate-your-agent.md"})
+#: Pages exempt until their own rewrite lands. Empty, and shrink-only.
+_PENDING: frozenset[str] = frozenset()
 
 
 def _scan(root: Path) -> list[Path]:
@@ -85,7 +83,7 @@ def test_the_scan_sees_the_pages_it_guards() -> None:
 
 def test_every_exemption_is_still_needed() -> None:
     # Shrink-only: a new exemption is a new non-compliant page, not a pending one.
-    allowed = {"docs/getting-started/integrate-your-agent.md"}
+    allowed: frozenset[str] = frozenset()
     assert _PENDING.issubset(allowed), sorted(_PENDING)
     stale = [rel for rel in sorted(_PENDING) if rel not in violations(REPO_ROOT)]
     assert stale == [], f"remove from _PENDING, the page now complies: {stale}"

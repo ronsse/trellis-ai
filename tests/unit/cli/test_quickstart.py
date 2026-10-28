@@ -14,6 +14,7 @@ from tests.cli_output import assert_coloured, force_colour, plain
 from trellis_cli import admin
 from trellis_cli.main import app
 from trellis_cli.output import build_console
+from trellis_cli.prompts import agent_rule_text
 
 runner = CliRunner()
 
@@ -295,6 +296,7 @@ class TestQuickstart:
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert "skills" not in data
+        assert "agent_rule" not in data
         assert "skills_installed" not in data["steps"]
         assert not (self.tmp / "home" / ".claude" / "skills").exists()
 
@@ -311,7 +313,9 @@ class TestQuickstart:
             "retrieve-before-task": "installed",
             "record-after-task": "installed",
             "link-evidence": "installed",
+            "trellis-loop": "installed",
         }
+        assert data["agent_rule"] == agent_rule_text()
         skills_dir = self.tmp / "home" / ".claude" / "skills"
         for name in statuses:
             assert (skills_dir / name / "SKILL.md").exists()
@@ -344,6 +348,17 @@ class TestQuickstart:
         assert result.exit_code == 0
         assert "Skills installed to:" in result.stdout
         assert "retrieve-before-task" in result.stdout
+        # The summary ends with the rule, so it is the last thing a user reads.
+        assert plain(result.stdout).endswith(
+            agent_rule_text()
+            + "\n\nSystem prompt for API-key and non-Claude-Code clients: "
+            "trellis admin show-prompt\n"
+        )
+
+    def test_without_skills_text_output_has_no_rule(self):
+        result = runner.invoke(app, ["admin", "quickstart"])
+        assert result.exit_code == 0
+        assert "show-prompt" not in result.stdout
 
     def test_with_skills_invalid_scope(self):
         result = runner.invoke(

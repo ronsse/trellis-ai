@@ -16,4 +16,5 @@ SKILL_NAMES: tuple[str, ...] = (
     "retrieve-before-task",
     "record-after-task",
     "link-evidence",
+    "trellis-loop",
 )
