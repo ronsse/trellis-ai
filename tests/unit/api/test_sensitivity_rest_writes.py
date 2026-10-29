@@ -8,6 +8,7 @@ its executor at the key's clearance rather than at a trusted ``restricted``.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, ClassVar
 
@@ -23,6 +24,11 @@ from trellis.auth import generate_api_key
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
+from trellis.retrieve.embed_ingest_hook import (
+    VECTOR_METADATA_EXCERPT_CHARS,
+    build_vector_row,
+)
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
@@ -543,6 +549,143 @@ class TestVectorsRewriteKeepsTheDocumentsMirroredMetadata:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "upserted": 0, "errors": 1}
         assert _vector_row(registry, "doc-secret") is None
+
+
+LONG = "Drain the write queue first, then promote the replica. " * 30
+FORGED = "forged excerpt: this is not what the document says"
+
+
+def _served_item(pack, item_id):
+    return next((i for i in pack.items if i.item_id == item_id), None)
+
+
+class TestVectorsRowTakesItsDocumentsIdentity:
+    """A row at a stored document carries that document's content and role.
+
+    The semantic axis builds the pack item from the row: the excerpt from
+    ``metadata["content"]``, the rest spread into the item, where
+    ``node_role: structural`` withholds it. The upsert replaces the document's
+    own row, so a forged copy would be its only semantic copy.
+    """
+
+    def _post(self, client, registry, item_id, metadata, scopes=("ingest",)):
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, list(scopes)),
+            (item_id, {"metadata": metadata}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["upserted"] == 1
+        return _vector_row(registry, item_id)["metadata"]
+
+    def test_a_forged_content_does_not_reach_the_pack_excerpt(self, client, registry):
+        row = self._post(client, registry, "doc-open", {"content": FORGED})
+        assert row["content"] == OPEN
+        item = _served_item(_semantic_pack(registry, "internal"), "doc-open")
+        assert item is not None
+        assert FORGED not in item.excerpt
+        assert item.excerpt.startswith(OPEN[:60])
+
+    def test_a_forged_structural_role_does_not_withhold_the_document(
+        self, client, registry
+    ):
+        row = self._post(client, registry, "doc-open", {"node_role": "structural"})
+        assert "node_role" not in row
+        assert "doc-open" in _served_ids(_semantic_pack(registry, "internal"))
+
+    def test_the_content_is_cut_as_the_embed_path_cuts_it(self, client, registry):
+        registry.knowledge.document_store.put("doc-long", LONG, {"title": "Long"})
+        row = self._post(client, registry, "doc-long", {"content": FORGED})
+        assert row["content"] == truncate_excerpt(LONG, VECTOR_METADATA_EXCERPT_CHARS)
+        assert len(row["content"]) <= VECTOR_METADATA_EXCERPT_CHARS < len(LONG)
+
+    def test_a_forged_doc_id_is_replaced_by_the_id(self, client, registry):
+        assert self._post(client, registry, "doc-open", {"doc_id": "doc-secret"})[
+            "doc_id"
+        ] == ("doc-open")
+
+    @pytest.mark.parametrize(
+        "key", ["node_role", "node_type", "agent_id", "document_form", "excerpt"]
+    )
+    def test_a_key_the_document_lacks_is_removed_from_the_row(
+        self, client, registry, key
+    ):
+        row = self._post(client, registry, "doc-open", {key: "forged", "title": "t"})
+        assert key not in row
+        assert row["title"] == "t", "only the identity keys are the document's"
+
+    @pytest.mark.parametrize(
+        "key", ["node_role", "node_type", "agent_id", "document_form", "excerpt"]
+    )
+    def test_a_key_the_document_carries_is_copied_over_the_callers(
+        self, client, registry, key
+    ):
+        registry.knowledge.document_store.put("doc-own", OPEN, {key: "own"})
+        row = self._post(client, registry, "doc-own", {key: "forged"})
+        assert row[key] == "own"
+
+    def test_a_chunk_takes_its_own_documents_identity(self, client, registry):
+        chunk_id = chunk_doc_id("doc-open", 0)
+        registry.knowledge.document_store.put(
+            chunk_id, LONG, {"document_form": "note", "parent_doc_id": "doc-open"}
+        )
+        row = self._post(
+            client,
+            registry,
+            chunk_id,
+            {"content": FORGED, "document_form": "forged", "node_role": "structural"},
+        )
+        assert row["content"] == truncate_excerpt(LONG, VECTOR_METADATA_EXCERPT_CHARS)
+        assert row["document_form"] == "note"
+        assert "node_role" not in row
+        assert row["doc_id"] == chunk_id
+
+    def test_an_id_naming_no_document_is_stored_as_supplied(self, client, registry):
+        supplied = {
+            "content": FORGED,
+            "excerpt": "kept",
+            "doc_id": "elsewhere",
+            "node_role": "structural",
+            "node_type": "Thing",
+            "agent_id": "someone",
+            "document_form": "note",
+            "title": "t",
+        }
+        row = self._post(client, registry, "entity:not-a-document", supplied)
+        assert row == supplied
+
+    @pytest.mark.parametrize(
+        ("item_id", "doc_metadata"),
+        [
+            (
+                "doc-honest",
+                {
+                    "title": "Honest",
+                    "document_form": "note",
+                    "content_tags": {"domain": "ops"},
+                    "auto_importance": 0.2,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+            ),
+            (
+                chunk_doc_id("doc-open", 3),
+                {"parent_doc_id": "doc-open", "node_role": "semantic"},
+            ),
+            ("doc-bare", {}),
+        ],
+        ids=["document", "chunk", "no-metadata"],
+    )
+    def test_a_row_the_embed_path_built_is_stored_unchanged(
+        self, client, registry, item_id, doc_metadata
+    ):
+        """Honest writers are untouched: byte for byte, key order included."""
+        registry.knowledge.document_store.put(item_id, LONG, doc_metadata)
+        honest = build_vector_row(
+            item_id, LONG, doc_metadata, lambda _t: _vector(registry)
+        )["metadata"]
+        stored = self._post(client, registry, item_id, honest)
+        assert json.dumps(stored) == json.dumps(honest)
 
 
 class TestVectorsRowShape:

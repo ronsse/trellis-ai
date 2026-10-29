@@ -35,6 +35,8 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
+from trellis.retrieve.embed_ingest_hook import VECTOR_METADATA_EXCERPT_CHARS
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
 from trellis.retrieve.strategies import DEFAULT_IMPORTANCE_DECAY_THRESHOLD
 from trellis.schemas.classification import LIFECYCLE_KEY
@@ -253,6 +255,20 @@ _PARENT_DOC_ID_KEY = "parent_doc_id"
 #: written instead of the caller's.
 _ITEM_POINTER_KEYS: tuple[str, ...] = (LIFECYCLE_KEY, EVIDENCE_REF_KEY)
 
+#: Row ``metadata`` keys that say what a document *is* to the pack builder. The
+#: semantic axis spreads a row's metadata into the pack item it builds, and the
+#: builder withholds on these: ``node_role: structural`` drops the item, the form
+#: feeds the class-prior gate, and ``excerpt`` is the text served when the row has
+#: no ``content``. At a stored document each is the document's, copied if its
+#: metadata carries the key and removed from the row if not.
+_DOCUMENT_IDENTITY_KEYS: tuple[str, ...] = (
+    "node_role",
+    "node_type",
+    "agent_id",
+    "document_form",
+    "excerpt",
+)
+
 #: The largest finite float32. A vector element past it becomes ``inf`` when the
 #: store keeps it as float32.
 _FLOAT32_MAX = 3.4028234663852886e38
@@ -292,6 +308,17 @@ def _vector_row_metadata(
     :data:`_ITEM_POINTER_KEYS` are dropped: the route has already refused them
     there, so they can only be present if the document was deleted between its
     first-pass read and this one.
+
+    The row also says what its document is and what it says, and that is the
+    document's too. ``content`` (the excerpt a semantic hit serves) is the
+    document's content cut to :data:`VECTOR_METADATA_EXCERPT_CHARS`, and
+    ``doc_id`` is the id, as ``build_vector_row`` writes them. The keys in
+    :data:`_DOCUMENT_IDENTITY_KEYS` (``node_role``, ``node_type``, ``agent_id``,
+    ``document_form``, ``excerpt``) follow the mirrored keys' rule. Without this
+    a ``mutate``-scoped caller could replace a readable document's only semantic
+    row with one carrying forged ``content``, or a ``structural`` role that
+    withholds the document from every pack. A row ``build_vector_row`` wrote for
+    the stored document is stored unchanged. Every other key is the caller's.
     """
     row = dict(supplied)
     stored = document_store.get(item_id)
@@ -299,11 +326,20 @@ def _vector_row_metadata(
     if not isinstance(source, dict):
         source = {}
     if stored is not None:
-        for key in (*MIRRORED_METADATA_KEYS, EVIDENCE_REF_KEY):
+        for key in (
+            *MIRRORED_METADATA_KEYS,
+            EVIDENCE_REF_KEY,
+            *_DOCUMENT_IDENTITY_KEYS,
+        ):
             if key in source:
                 row[key] = source[key]
             else:
                 row.pop(key, None)
+        content = stored.get("content")
+        row["content"] = truncate_excerpt(
+            content if isinstance(content, str) else "", VECTOR_METADATA_EXCERPT_CHARS
+        )
+        row["doc_id"] = item_id
     else:
         # The first pass refused these keys only if no document was there then.
         # One deleted since would let the caller's through, so they are dropped
@@ -526,6 +562,10 @@ def upsert_vectors(
     When ``item_id`` names a stored document the row is written carrying that
     document's mirrored metadata (its label and lifecycle among them) and its
     ``evidence_ref``, for every caller, whatever the row's own ``metadata`` says.
+    Its ``content`` (the excerpt a semantic hit serves) is the document's content,
+    cut as the embed path cuts it, and its ``node_role``, ``node_type``,
+    ``agent_id``, ``document_form`` and ``excerpt`` are the document's, or absent
+    where the document has none.
     For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
     document's own, else the parent the id names, whatever the row supplied; for
     any other id it is kept as supplied.
