@@ -1544,10 +1544,18 @@ class SemanticSearch(SearchStrategy):
                 for r in results
                 if _passes_domain_scope(r.get("metadata", {}), domain)
             ][:limit]
+        # Checked once, outside the per-row guard below: a bad registry value
+        # raises ``TypeError`` inside ``_apply_importance`` too, and inside
+        # the guard it would read as a malformed row and silently drop every
+        # row with a nonzero importance from every pack.
+        self._require_numeric_importance_params(importance_params)
         items = []
         for result in results:
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
+            # The store's own score is not row metadata, so it is checked
+            # before the guard for the same reason as the params above.
+            self._require_numeric_score(base_score)
             # A vector row's metadata is caller-supplied (any ``ingest`` key
             # can write a row that names no stored document, so nothing is
             # mirrored over it). One malformed value must cost that row, not
@@ -1598,6 +1606,33 @@ class SemanticSearch(SearchStrategy):
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
+
+    @staticmethod
+    def _require_numeric_score(score: Any) -> None:
+        """Raise ``TypeError`` for a store score that is not a number.
+
+        Never skips: the score comes from the vector store, not from the
+        caller's row metadata, so a bad one is a store defect that has to
+        stay loud (``strategy_failures``) rather than be logged per row.
+        """
+        if not isinstance(score, (int, float)):
+            msg = f"semantic row score is {type(score).__name__}, not a number"
+            raise TypeError(msg)
+
+    @staticmethod
+    def _require_numeric_importance_params(params: _ImportanceParams) -> None:
+        """Raise ``TypeError`` for a resolved importance param that is not a number.
+
+        ``ParameterSnapshot.values`` allows a string, so a registry can hand
+        ``importance < "0.8"`` to ``_apply_importance``, which raises. That is
+        a configuration defect and must stay loud, not be skipped per row.
+        """
+        for key, value in params.items():
+            if not isinstance(value, (int, float)):
+                msg = (
+                    f"importance param {key!r} is {type(value).__name__}, not a number"
+                )
+                raise TypeError(msg)
 
     def _row_excerpt(self, raw: Any) -> str:
         """Bound a vector row's excerpt source, refusing a non-string.

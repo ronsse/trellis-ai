@@ -11,6 +11,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from trellis.errors import BackendNotInstalledError, ConfigError
+from trellis.ops import ParameterRegistry
 from trellis.retrieve import strategies as strategies_module
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_FLOOR,
@@ -29,7 +30,10 @@ from trellis.retrieve.strategies import (
     _warn_semantic_search_init_failed_once,
     build_strategies,
 )
+from trellis.schemas.outcome import SEMANTIC_SEARCH_COMPONENT_ID
+from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.sqlite.graph import SQLiteGraphStore
+from trellis.stores.sqlite.parameter import SQLiteParameterStore
 
 
 def _fresh_meta(importance: float) -> dict[str, Any]:
@@ -408,10 +412,13 @@ class TestSemanticSearchMalformedRowMetadata:
         }
 
     @staticmethod
-    def _search(rows: list[dict[str, Any]]) -> list[Any]:
+    def _search(rows: list[dict[str, Any]], **strategy_kwargs: Any) -> list[Any]:
         store = MagicMock()
         store.query.return_value = rows
-        return SemanticSearch(store, MagicMock(return_value=[0.1, 0.2])).search("q")
+        strategy = SemanticSearch(
+            store, MagicMock(return_value=[0.1, 0.2]), **strategy_kwargs
+        )
+        return strategy.search("q")
 
     @staticmethod
     def _bad(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +457,12 @@ class TestSemanticSearchMalformedRowMetadata:
                 "content",
                 "TypeError",
                 id="content-null",
+            ),
+            pytest.param(
+                {"content": None, "excerpt": "fallback"},
+                "content",
+                "TypeError",
+                id="content-null-does-not-fall-back-to-excerpt",
             ),
             pytest.param(
                 {"content": ["a"]},
@@ -528,24 +541,92 @@ class TestSemanticSearchMalformedRowMetadata:
             e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
         ]
 
-    def test_bug_outside_the_guarded_computations_still_surfaces(self) -> None:
-        # The guard is narrow: a ValueError raised by something other than
-        # the importance or excerpt computation (here, a non-numeric store
-        # score failing ``PackItem`` validation) is a different defect and
-        # must still raise rather than be swallowed as "malformed metadata".
-        with capture_logs() as logs, pytest.raises(ValueError, match="relevance_score"):
-            self._search(
-                [
-                    {
-                        "item_id": "x",
-                        "score": "not-a-number",
-                        "metadata": {"content": "x"},
-                    }
-                ]
-            )
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            pytest.param(
+                {"content": "x", "auto_importance": 0.2}, id="with-importance"
+            ),
+            pytest.param({"content": "x"}, id="without-importance"),
+        ],
+    )
+    @pytest.mark.parametrize("score", [None, "not-a-number"], ids=["none", "string"])
+    def test_non_numeric_store_score_still_raises(
+        self, score: Any, metadata: dict[str, Any]
+    ) -> None:
+        # The store's score is not row metadata, so a bad one is a store
+        # defect that stays loud. With ``auto_importance`` set, the failing
+        # arithmetic (``score * (1 + importance)``) sits inside
+        # ``_apply_importance``: an unvalidated score would be caught by the
+        # row guard and logged as a malformed ``auto_importance``.
+        row = {"item_id": "x", "score": score, "metadata": metadata}
+        with capture_logs() as logs, pytest.raises(TypeError, match="score"):
+            self._search([row, self._good()])
         assert not [
             e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
         ]
+
+    @pytest.fixture
+    def param_store(self, tmp_path: Path) -> Any:
+        store = SQLiteParameterStore(tmp_path / "parameters.db")
+        yield store
+        store.close()
+
+    @staticmethod
+    def _registry(store: SQLiteParameterStore, **values: Any) -> ParameterRegistry:
+        store.put(
+            ParameterSet(
+                scope=ParameterScope(component_id=SEMANTIC_SEARCH_COMPONENT_ID),
+                values=values,
+            )
+        )
+        return ParameterRegistry(store)
+
+    def test_string_registry_importance_param_still_raises(
+        self, param_store: SQLiteParameterStore
+    ) -> None:
+        # ``ParameterSnapshot.values`` allows a string, and ``importance <
+        # "0.8"`` raises inside ``_apply_importance``. Caught by the row
+        # guard, that would drop every row with a nonzero importance from
+        # every pack, silently; it must stay a loud configuration failure.
+        registry = self._registry(param_store, importance_decay_threshold="0.8")
+        row = {"item_id": "x", "score": 0.5, "metadata": {"auto_importance": 0.5}}
+        with (
+            capture_logs() as logs,
+            pytest.raises(TypeError, match="decay_threshold"),
+        ):
+            self._search([row, self._good()], registry=registry)
+        assert not [
+            e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+
+    def test_numeric_registry_importance_param_is_honoured(
+        self, param_store: SQLiteParameterStore
+    ) -> None:
+        # A threshold of 1 makes 0.9 sub-threshold, so the row needs no
+        # ``importance_scored_at`` stamp and is served rather than skipped.
+        registry = self._registry(param_store, importance_decay_threshold=1)
+        row = {"item_id": "x", "score": 0.5, "metadata": {"auto_importance": 0.9}}
+        items = self._search([row], registry=registry)
+        assert [i.item_id for i in items] == ["x"]
+
+    def test_content_wins_over_excerpt_when_both_are_present(self) -> None:
+        row = {
+            "item_id": "both",
+            "score": 0.5,
+            "metadata": {"content": "from content", "excerpt": "from excerpt"},
+        }
+        assert [i.excerpt for i in self._search([row])] == ["from content"]
+
+    def test_excerpt_max_chars_bounds_the_excerpt(self) -> None:
+        content = " ".join(["word"] * 400)  # well past the 500-char default
+        row = {"item_id": "long", "score": 0.5, "metadata": {"content": content}}
+
+        bounded = self._search([row], excerpt_max_chars=80)[0].excerpt
+        default = self._search([row])[0].excerpt
+
+        assert len(bounded) <= 80
+        assert len(default) > 80
 
 
 class TestGraphSearch:
