@@ -3,7 +3,7 @@
 ```yaml
 status: active
 owner: nronsse
-last-review: 2026-09-20
+last-review: 2026-10-29
 ```
 
 > Rules: ≤ 2 pages. §3 **and §5** contain only verifiable facts — every claim cites a path or
@@ -30,7 +30,7 @@ Adopter profiles beyond the author (it's public, on PyPI — who else deploys th
 
 1. **MCP-agent power users** — hire Trellis for persistent cross-session memory for Claude Code/Cursor with one `pip install`, SQLite, no cloud. The proven path (skynet dogfood is this profile).
 2. **Agent-platform teams (LangGraph, custom Python)** who want *self-hosted* memory instead of Zep/Mem0/Letta SaaS — hire it for Postgres+pgvector on infra they already run, REST/SDK, governed writes + audit log. The wedge vs those systems: feedback attributes to the **specific items served**, not to a session or user, plus SCD-2 time-travel.
-3. **Data-platform teams** pointing agents at warehouse/dbt/BI metadata — hire it as a governed usage-evidence graph with an explicit promotion ladder and privacy rules (`docs/design/adr-query-history-promotion.md`). This profile sourced issues #200–#203 via the paused consumer-kg pilot.
+3. **Data-platform teams** pointing agents at warehouse/dbt/BI metadata — hire it as a governed usage-evidence graph with an explicit promotion ladder and privacy rules (`docs/design/adr-query-history-promotion.md`). This profile sourced issues #200–#203 via the paused consumer-kg pilot; they were closed as deferred 2026-10-29 and reopen with it (roadmap §3.H.2).
 
 Honesty note: verified deployments today = the author's dogfood + that paused pilot. Profiles 2–3 are targets, not evidence.
 
@@ -81,7 +81,7 @@ LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec c
   judged stage targets a local model first; no judged stage may be designed to require
   frontier-scale reasoning; every judged op is logged with its downstream outcome as a
   training pair — the memory system generates its own fine-tuning corpus.
-- **Now** — Productionization (roadmap §3.H): the three retrieval defects + feedback/evidence plumbing + the auto-capture keystone landed 2026-07-14 (§3.H.0); what remains is the security floor (#250 credential purge, #194 classification enforcement), the query-history curation primitives (#200–#203) as fixture-tested code, and dispositioning #208.
+- **Now** — Productionization (roadmap §3.H): the three retrieval defects + feedback/evidence plumbing + the auto-capture keystone landed 2026-07-14 (§3.H.0); what remains is the security floor (#250 credential purge, #194 classification enforcement, unblocked 2026-10-29 with its first slice in progress). The query-history curation primitives (#200–#203) were deferred 2026-10-29 until the data-platform pilot resumes.
 - **Next** — the auto-capture keystone (#255) landed 2026-07-14, so the live loop is now wired end-to-end; watch it *un-starve* (advisories / lessons > 0) over the 30-day window. Then §G.4 corpus handlers strictly by observed dogfood need; Phase F F1 harness when the owner schedules it.
 - **Not doing** — the anti-scope list; this project has scope-creep gravity:
   - **No new storage backends.** FalkorDB (SSPL), Kuzu (single-writer), Neptune (cost) already rejected — `adr-arcadedb-blessed-substrate.md`.
@@ -105,7 +105,7 @@ LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec c
 ## 8. Open questions
 
 - **Who is deployer #2?** Every §5 verdict assumes N≈1. Owner: nronsse. Trigger: first external production issue/PR, or 2026-10 quarterly review — whichever first; revisit the Bolt freeze and profiles 2–3 then.
-- **#194 pull-forward** contradicts the roadmap's "design partner asks" gate. Owner decision at milestone commit: does MCP-over-HTTP (#252) exposure justify enforcing now?
-- **#200–#203 timing**: implement against fixtures now vs honor the anti-pre-build doctrine until the consumer-kg pilot restarts. Owner call.
+- **#194 pull-forward** contradicts the roadmap's "design partner asks" gate. Owner decision at milestone commit: does MCP-over-HTTP (#252) exposure justify enforcing now? Status 2026-10-29: the issue is labelled `ready` and its first slice (read-side) is in progress (roadmap §3.H.1).
+- ~~**#200–#203 timing**: implement against fixtures now vs honor the anti-pre-build doctrine until the consumer-kg pilot restarts.~~ **Answered (owner, 2026-09-30): deferred** until the consumer-kg pilot is active again; the issues closed 2026-10-29 with the reopen trigger recorded (roadmap §3.H.2).
 - **AuraDB reality**: roadmap §1 says the instance is GONE; #250's body says rebuilt 2026-06-16 with a ~2026-07-16 lapse watch. Reconcile before executing #250 (which credentials still exist to rotate?).
 - **Is session auto-capture the flagship?** If ambient capture works, the pitch shifts from "call `save_*`" to "memory that fills itself" — affects README positioning and profile 1. Decide after the first 30-day capture run.

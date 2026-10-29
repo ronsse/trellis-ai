@@ -149,7 +149,13 @@ browser session at <https://console.neo4j.io> → Account → API credentials. N
 path exists. The other three tasks were verified done 2026-08-26. Instance re-confirmed
 `NXDOMAIN`, so there is no live exposure — this is credential-surface hygiene.
 
-### A-2 · Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208)
+### A-2 · Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208) — **resolved 2026-10-29**
+
+**Resolved 2026-10-29: closed, not re-homed.** The blockers in the title cleared
+2026-06-01 and the separate direct-write failure it surfaced was fixed in core under
+[#211](https://github.com/ronsse/trellis-ai/issues/211); the remaining managed-cluster
+access work belongs to the consumer's deployment and nothing in this repo waits on it,
+so no gate was left to hide. The entry below is the original recommendation, kept as written.
 
 Pilot-infra blockage (ArcadeDB secret + expired AWS SSO), not a trellis-ai code defect.
 **Recommendation: re-home to the consumer-kg repo** rather than close. Closing an issue
@@ -793,7 +799,8 @@ lift-based learning.
 **Owner decision (2026-09-04): defer.** Keep the current five confidence-ranked served
 advisories. Preserve `advisory_ids` as the exposure set and dispatch no #502
 implementation. [#503](https://github.com/ronsse/trellis-ai/issues/503) remains
-signal-gated.
+signal-gated. *(Resolved 2026-10-29: #503 closed, selector unchanged; no category is
+structurally shut out, so no per-category reservation is built.)*
 
 **Cost of being wrong:** the never-served tail remains unmeasured and cannot participate
 in fitness. This avoids spending one-fifth of the advisory budget on an experiment that
