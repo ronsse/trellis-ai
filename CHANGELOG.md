@@ -337,8 +337,9 @@ All notable changes to Trellis will be documented in this file.
   separate change. A non-numeric store score, or a string importance parameter
   in the registry, is not a malformed row and still raises, as before.
 
-- **`POST /api/v1/vectors` keeps a chunk's parent and refuses a row the
-  semantic axis cannot serve or that acts on another item (part of #1029).** The
+- **`POST /api/v1/vectors` keeps a chunk's parent, refuses a row the semantic
+  axis cannot serve, and refuses the `lifecycle` / `evidence_ref` pointer keys at
+  ids naming no stored document (part of #1029).** The
   write side of the malformed-row fix above: a refused batch stores nothing, and
   the caller is told, where before the row was accepted with a 200 and then
   dropped from every pack. For a chunk id (`<parent>#chunk-<digits>`) the written
@@ -354,18 +355,28 @@ All notable changes to Trellis will be documented in this file.
   second). A `vector` that is present must be a list of finite, non-bool numbers
   within float32 range whose squared length stays under 1e38 (the store keeps
   float32: a larger element becomes `inf`, and `[3e38] * 8`, though in range,
-  overflows the norm and scores `NaN`), and whose length equals the store's
-  `dimensions` where the store declares one (pgvector, ArcadeDB, Neo4j); SQLite
-  declares none, so there the first non-empty vector of the batch sets the width
-  the rest must match, and a batch is not checked against rows already stored.
+  overflows the norm and scores `NaN`), whose float32 norm is not zero
+  (`[0.0] * 8`, `[1e-30] * 8` and `[1e-23] * 8` are skipped by the SQLite store
+  and so never served), and whose length equals the store's `dimensions` where
+  the store declares one (pgvector, ArcadeDB, Neo4j); `0`, `false`, `""` and `{}`
+  are not lists and are a 422, while an absent, `null` or empty-list `vector`
+  stays a counted error. SQLite declares no width, so there the first non-empty
+  vector of the batch sets the width the rest must match, and a batch is not
+  checked against rows already stored: a later batch of another width is accepted,
+  and once two widths are stored every semantic query raises. A semantic-only
+  build then fails with `PackAssemblyError`, and a multi-strategy build silently
+  drops the semantic axis from every pack.
   An `item_id` starting `trace-summary:` is a 422 for every caller, since a row
   there made the trace-embed worker skip that trace permanently. A row whose
   `item_id` names no stored document may not carry `metadata.lifecycle` or
   `metadata.evidence_ref` (422, any caller): the pack builder withholds by id, so
   `{"state": "superseded", ...}` there withheld every item holding the id, and an
   `evidence_ref` made the row the resolution target of another item's
-  `superseded_by`. At a stored document both keys are written from the document,
-  as the other mirrored keys are. The route docstring (and `docs/api/v1.yaml`)
+  `superseded_by`. These two keys are the only ones refused at such an id; every
+  other key a row carries is stored as sent. At a stored document both keys are
+  written from the document, as the other mirrored keys are, and they are dropped
+  without an error if the document has been deleted between the first-pass read
+  and the mirror's. The route docstring (and `docs/api/v1.yaml`)
   states what is and is not atomic: the first pass is all-or-nothing, the second
   counts a failed document read or upsert in `errors` while earlier rows have
   landed, and if a relabel's own vector sync runs between this route's document

@@ -7090,15 +7090,21 @@ paths:
 
         ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
 
-        is a ``vector`` that is not a list of finite numbers (a bool is not one)
+        is a ``vector`` that is present and not a list of finite numbers (a bool is
 
-        within float32 range, one whose squared length would overflow float32 in the
+        not one) within float32 range, one whose squared length would overflow float32
 
-        store''s norm, or one whose length differs from the store''s width (when the
+        in the store''s norm, one whose float32 norm is zero (all zeros, or too small
 
-        store declares one; the SQLite backend does not, and then the batch''s first
+        to survive float32), or one whose length differs from the store''s width (when
 
-        non-empty vector sets the width the rest must match). So is an ``item_id``
+        the store declares one; the SQLite backend does not, and then the batch''s first
+
+        non-empty vector sets the width the rest must match, and a later batch of
+
+        another width is accepted and breaks every semantic query once both widths are
+
+        stored). So is an ``item_id``
 
         starting ``trace-summary:``, for every caller: that namespace is the
 
@@ -7114,7 +7120,11 @@ paths:
 
         withholds by id, so those keys would act on whatever item holds that id.
 
-        A row whose ``item_id`` is a document (or a chunk of one) above the key''s
+        Those two pointer keys are the only metadata refused at such an id; every
+
+        other key is stored as sent. A row whose ``item_id`` is a document (or a chunk
+
+        of one) above the key''s
 
         clearance is refused (409): replacing its vector row would replace what a
 

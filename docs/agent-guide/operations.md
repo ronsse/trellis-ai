@@ -3940,14 +3940,20 @@ above its own clearance, and cannot touch a document it may not read.**
   a larger value becomes `inf` and the row's score `NaN`, which also breaks the
   pack's audit event. Its squared length must stay under 1e38 as well, because
   the store's float32 norm overflows past about 3.4e38 even when every element
-  fits (`[3e38] * 8` scores `NaN` against an ordinary query). Its length must
-  equal the store's width when the store declares one (`VectorStore.dimensions`;
-  pgvector, ArcadeDB and Neo4j do). SQLite declares none and the store interface
-  has no way to ask what width its rows hold, so there the first non-empty
-  vector of the batch sets the width the rest must match and a batch is not
-  checked against rows already stored: a later batch of another width is
-  accepted on SQLite, and then fails every semantic query against it. A missing,
-  `null` or empty `vector` is not judged; the second pass counts it in `errors`.
+  fits (`[3e38] * 8` scores `NaN` against an ordinary query). Its float32 norm
+  may not be zero (`[0.0] * 8`, `[1e-30] * 8` and `[1e-23] * 8` all are, the last
+  two because the sum of squares underflows), as the SQLite store skips a norm-0
+  row and it would never be served. Its length must equal the store's width when
+  the store declares one (`VectorStore.dimensions`; pgvector, ArcadeDB and Neo4j
+  do). SQLite declares none and the store interface has no way to ask what width
+  its rows hold, so there the first non-empty vector of the batch sets the width
+  the rest must match and a batch is not checked against rows already stored: a
+  later batch of another width is accepted on SQLite, and once two widths are
+  stored every semantic query raises. A semantic-only build then fails with
+  `PackAssemblyError`, and a multi-strategy build silently drops the semantic
+  axis from every pack. Only a missing, `null` or empty-list `vector` is not
+  judged (the second pass counts it in `errors`); `0`, `false`, `""` and `{}`
+  are not lists and are a 422.
 - A row whose `item_id` names no stored document (a chunk id with no chunk
   document included) may not carry `metadata.lifecycle` or `metadata.evidence_ref`
   (422, whatever the value and the caller): the pack builder withholds by id, so a
@@ -3955,8 +3961,12 @@ above its own clearance, and cannot touch a document it may not read.**
   withhold every item holding that id, the real one from another axis included,
   and an `evidence_ref` makes the row the successor another item's
   `superseded_by` resolves to. At a stored document the keys are not refused: the
-  document's own `lifecycle` and `evidence_ref` are written over them. Only a row
-  that carries one of these keys costs the first pass a document read.
+  document's own `lifecycle` and `evidence_ref` are written over them. These two
+  keys are the only metadata refused at such an id; every other key is stored as
+  sent. Only a row that carries one of these keys costs the first pass a
+  document read. The write drops them again, without an error, if the document
+  has been deleted by the time the row is mirrored, so a delete between the two
+  reads cannot let them through.
 - For a chunk id (`<parent>#chunk-<digits>`) a written row's `parent_doc_id` is
   the chunk document's own, else the parent the id names, over whatever the row
   supplied; for any other id it is kept as supplied. Serving trusts a row's

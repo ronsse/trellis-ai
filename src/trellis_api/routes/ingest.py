@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -285,8 +286,10 @@ def _vector_row_metadata(
     trusts it before the id prefix, so for a chunk id it is set to the chunk
     document's own, else to the parent the id names, whatever was supplied. A
     non-chunk id keeps what was supplied. An id that names no document is
-    otherwise written as supplied (the route has already refused the keys in
-    :data:`_ITEM_POINTER_KEYS` there).
+    otherwise written as supplied, except that the keys in
+    :data:`_ITEM_POINTER_KEYS` are dropped: the route has already refused them
+    there, so they can only be present if the document was deleted between its
+    first-pass read and this one.
     """
     row = dict(supplied)
     stored = document_store.get(item_id)
@@ -299,6 +302,12 @@ def _vector_row_metadata(
                 row[key] = source[key]
             else:
                 row.pop(key, None)
+    else:
+        # The first pass refused these keys only if no document was there then.
+        # One deleted since would let the caller's through, so they are dropped
+        # here (silently: the batch has already been judged).
+        for key in _ITEM_POINTER_KEYS:
+            row.pop(key, None)
     id_parent = chunk_parent_id(item_id)
     if id_parent is not None:
         own_parent = source.get(_PARENT_DOC_ID_KEY)
@@ -339,12 +348,14 @@ def _vector_element_problem(position: int, value: Any) -> str | None:
 def _vector_problem(vector: Any, width: tuple[int, str] | None) -> str | None:
     """Why ``vector`` would break a semantic read, or ``None``.
 
-    A missing, ``null`` or empty vector is not judged: the second pass counts it
-    in ``errors`` and stores nothing. Anything else must be a list of finite
+    A missing, ``null`` or empty-list vector is not judged: the second pass counts
+    it in ``errors`` and stores nothing. Anything else must be a list of finite
     numbers (never a bool) that fit float32, whose squared length stays inside
-    float32 so the store's norm is finite, and whose length is ``width``'s.
+    float32 so the store's norm is finite, whose length is ``width``'s, and whose
+    float32 norm is not zero (the SQLite store skips such a row, so it is never
+    served).
     """
-    if not vector:
+    if vector is None or vector == []:
         return None
     if not isinstance(vector, list):
         return "vector must be a list of numbers"
@@ -358,6 +369,13 @@ def _vector_problem(vector: Any, width: tuple[int, str] | None) -> str | None:
         return "vector is too large to compare: its squared length overflows float32"
     if width is not None and len(vector) != width[0]:
         return f"vector has {len(vector)} dimensions, expected {width[0]} ({width[1]})"
+    # The store's own arithmetic (``SQLiteVectorStore.query``): all zeros, or so
+    # small the float32 sum of squares underflows, and the row is skipped.
+    if float(np.linalg.norm(np.array(vector, dtype=np.float32))) == 0.0:
+        return (
+            "vector has no length: every element is zero or too small for "
+            "float32, and the store never serves such a row"
+        )
     return None
 
 
@@ -472,11 +490,14 @@ def upsert_vectors(
     ``auto_importance`` that is not a finite number (a bool is not one), or an
     ``auto_importance`` at or above the importance decay threshold with no
     ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
-    is a ``vector`` that is not a list of finite numbers (a bool is not one)
-    within float32 range, one whose squared length would overflow float32 in the
-    store's norm, or one whose length differs from the store's width (when the
-    store declares one; the SQLite backend does not, and then the batch's first
-    non-empty vector sets the width the rest must match). So is an ``item_id``
+    is a ``vector`` that is present and not a list of finite numbers (a bool is
+    not one) within float32 range, one whose squared length would overflow float32
+    in the store's norm, one whose float32 norm is zero (all zeros, or too small
+    to survive float32), or one whose length differs from the store's width (when
+    the store declares one; the SQLite backend does not, and then the batch's first
+    non-empty vector sets the width the rest must match, and a later batch of
+    another width is accepted and breaks every semantic query once both widths are
+    stored). So is an ``item_id``
     starting ``trace-summary:``, for every caller: that namespace is the
     trace-embed worker's, and a row there makes it skip the trace for good. A
     row's ``metadata`` may not carry a raw ``data_classification`` (422), whoever
@@ -484,7 +505,9 @@ def upsert_vectors(
     here. A row whose ``item_id`` names no stored document may not carry
     ``metadata.lifecycle`` or ``metadata.evidence_ref`` (422): the pack builder
     withholds by id, so those keys would act on whatever item holds that id.
-    A row whose ``item_id`` is a document (or a chunk of one) above the key's
+    Those two pointer keys are the only metadata refused at such an id; every
+    other key is stored as sent. A row whose ``item_id`` is a document (or a chunk
+    of one) above the key's
     clearance is refused (409): replacing its vector row would replace what a
     semantic hit shows and carries.
 
@@ -523,9 +546,9 @@ def upsert_vectors(
             )
         # A row the semantic axis could not serve (it would skip it, or a bad
         # vector would poison scores), that squats on the trace-embed worker's
-        # ids, or that carries a key acting on another item, is refused here,
-        # where the caller can be told, rather than stored for packs (or the
-        # worker) to trip on.
+        # ids, or that carries ``lifecycle`` / ``evidence_ref`` at an id naming no
+        # stored document, is refused here, where the caller can be told, rather
+        # than stored for packs (or the worker) to trip on.
         problem = _vector_item_problem(item, document_store, width)
         if problem is not None:
             raise HTTPException(status_code=422, detail=f"vectors[{index}].{problem}")

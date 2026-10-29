@@ -23,7 +23,7 @@ from trellis.auth import generate_api_key
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackAssemblyError, PackBuilder
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
     SearchStrategy,
@@ -986,8 +986,12 @@ class TestVectorsVectorValues:
         assert resp.json()["detail"] == f"vectors[1].{detail}"
         assert registry.knowledge.vector_store.count() == 0
 
-    @pytest.mark.parametrize("bad", ["abc", 5, {"a": 1}, True], ids=repr)
+    @pytest.mark.parametrize(
+        "bad", ["abc", 5, {"a": 1}, True, 0, False, "", {}, 0.0], ids=repr
+    )
     def test_a_vector_that_is_not_a_list_is_refused(self, client, registry, bad):
+        """Falsy values included: ``0``, ``false``, ``""`` and ``{}`` are not the
+        absent, ``null`` or empty-list vector the second pass counts as an error."""
         self._refused(client, registry, bad, "vector must be a list of numbers")
 
     @pytest.mark.parametrize("bad", ["x", None, True, False, [0.5]], ids=repr)
@@ -1053,21 +1057,68 @@ class TestVectorsVectorValues:
     @pytest.mark.parametrize(
         "make",
         [
-            lambda dims: [1] * dims,
-            lambda dims: [-0.5] * dims,
-            lambda dims: [1e18] * dims,
+            lambda dims: [0.0] * dims,
+            lambda dims: [0] * dims,
+            lambda dims: [-0.0] * dims,
             lambda dims: [1e-30] * dims,
+            lambda dims: [1e-23] * dims,
+            lambda dims: [1e-30, -1e-30] * (dims // 2),
+        ],
+        ids=["zeros", "int-zeros", "negative-zeros", "1e-30", "1e-23", "mixed-signs"],
+    )
+    def test_a_vector_with_no_float32_length_is_refused(self, client, registry, make):
+        """Its float32 norm is 0.0 (all zeros, or a sum of squares that underflows),
+        and the SQLite store skips a norm-0 row, so it would answer 200 and never
+        be served."""
+        self._refused(
+            client,
+            registry,
+            make(_dims(registry)),
+            "vector has no length: every element is zero or too small for "
+            "float32, and the store never serves such a row",
+        )
+
+    def test_that_row_would_not_have_been_served(self, registry):
+        """The premise of the refusal above, stated against the store directly."""
+        store = registry.knowledge.vector_store
+        store.upsert(item_id="entity:b", vector=[0.0] * _dims(registry), metadata={})
+        assert store.query(_vector(registry), top_k=1) == []
+
+    def test_a_vector_with_one_tiny_element_among_ordinary_ones_is_accepted(
+        self, client, registry
+    ):
+        vector = [1e-30] * (_dims(registry) - 1) + [0.5]
+        resp = self._post(client, registry, vector)
+        assert resp.status_code == 200, resp.text
+        assert "entity:b" in _served_ids(_semantic_pack(registry, "restricted"))
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda dims: [1] * dims,
+            lambda dims: [1e18] * dims,
+            lambda dims: [1e-18] * dims,
+            lambda dims: [(i + 1) / 10 for i in range(dims)],
+            lambda dims: [-0.5] * dims,
             lambda dims: [(-1) ** i * (i + 1) / 10 for i in range(dims)],
         ],
-        ids=["ints", "negative", "large-but-safe", "tiny", "mixed"],
+        ids=[
+            "ints",
+            "large-but-safe",
+            "small-but-live",
+            "ascending",
+            "negative",
+            "mixed",
+        ],
     )
-    def test_a_well_formed_vector_is_accepted_and_readable_by_the_semantic_axis(
+    def test_a_well_formed_vector_is_accepted_and_served_by_the_semantic_axis(
         self, client, registry, make
     ):
         resp = self._post(client, registry, make(_dims(registry)))
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
-        _semantic_pack(registry, "restricted")
+        served = _served_ids(_semantic_pack(registry, "restricted"))
+        assert sorted(served) == ["doc-open", "entity:b"]
 
 
 class TestVectorsWidth:
@@ -1136,6 +1187,31 @@ class TestVectorsWidth:
         assert registry.knowledge.vector_store.dimensions is None
         assert self._post(client, registry, [0.5] * 8).status_code == 200
         assert self._post(client, registry, [0.5] * 3).status_code == 200
+
+    def test_two_stored_widths_break_the_semantic_axis_for_every_pack(
+        self, client, registry
+    ):
+        """What the limit above costs on SQLite, which the docs state: with two
+        widths held, a semantic-only build fails and a multi-strategy build quietly
+        loses the semantic axis."""
+        for item_id, width in (("entity:wide", 8), ("entity:narrow", 3)):
+            resp = client.post(
+                "/api/v1/vectors",
+                json={"vectors": [{"item_id": item_id, "vector": [0.5] * width}]},
+                headers=_headers(registry, ["ingest"]),
+            )
+            assert resp.status_code == 200, resp.text
+        with pytest.raises(PackAssemblyError):
+            _semantic_pack(registry, "restricted")
+        other = PackItem(
+            item_id="ent-01",
+            item_type="entity",
+            excerpt="found by another axis",
+            relevance_score=0.9,
+            estimated_tokens=10,
+            metadata={},
+        )
+        assert _served_ids(_pack_with_another_axis(registry, other)) == ["ent-01"]
 
 
 class _Fixed(SearchStrategy):
@@ -1369,6 +1445,42 @@ class TestVectorsItemPointerKeys:
         assert resp.status_code == 200, resp.text
         assert reads == ["doc-open", "ent-01"], "the mirror's read, once per row"
 
+    def test_a_document_deleted_after_the_first_pass_cannot_carry_pointer_keys_in(
+        self, client, registry, monkeypatch
+    ):
+        """The first pass reads the document and finds it; the mirror's read, later
+        in the same request, finds it gone. The keys the first pass would have
+        refused are dropped, and the rest of the row is written as sent."""
+        docs = registry.knowledge.document_store
+        docs.put("doc-vanishing", OPEN, {})
+        real_get = docs.get
+        seen: set[str] = set()
+
+        def vanishing(doc_id):
+            if doc_id == "doc-vanishing" and doc_id in seen:
+                return None
+            seen.add(doc_id)
+            return real_get(doc_id)
+
+        monkeypatch.setattr(docs, "get", vanishing)
+        resp = self._post(
+            client,
+            registry,
+            {
+                LIFECYCLE_KEY: {"state": "superseded", "superseded_by": "doc-open"},
+                "evidence_ref": "doc-open",
+                "title": "t",
+            },
+            item_id="doc-vanishing",
+            scopes=("admin",),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
+        row = _vector_row(registry, "doc-vanishing")["metadata"]
+        assert LIFECYCLE_KEY not in row
+        assert "evidence_ref" not in row
+        assert row["title"] == "t"
+
     def test_a_document_that_cannot_be_read_while_judging_the_keys_is_a_server_error(
         self, client, registry, monkeypatch
     ):
@@ -1392,7 +1504,9 @@ class TestVectorsItemPointerKeys:
                     }
                 ]
             },
-            headers=_headers(registry, ["ingest"]),
+            # Admin: an ``ingest`` key makes ``refuse_vector_write`` read the
+            # document too, and that read, not this check, would be the 500.
+            headers=_headers(registry, ["admin"]),
         )
         assert resp.status_code == 500, resp.text
         assert registry.knowledge.vector_store.count() == 0
