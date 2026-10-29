@@ -4029,6 +4029,8 @@ paths:
         schema:
           default: 50
           description: Max PROPOSAL_DRAFTED events to return
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       responses:
@@ -6304,6 +6306,8 @@ paths:
         schema:
           default: 100
           description: Max proposals to return
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       responses:
@@ -6538,6 +6542,8 @@ paths:
         schema:
           default: 200
           description: Max WELL_KNOWN_CANDIDATE events to scan
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       responses:
@@ -6648,6 +6654,8 @@ paths:
         schema:
           default: 20
           description: Max results
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       - description: 'Include <parent>#chunk-N fragment rows. Excluded by default: they are slices of documents the same search
@@ -6929,6 +6937,8 @@ paths:
         required: false
         schema:
           default: 20
+          maximum: 500
+          minimum: 1
           title: Limit
           type: integer
       responses:

@@ -453,7 +453,14 @@ _REPORTS: dict[str, _ReportEntry] = {
             "clean guardrail section; a bad one shows no measurable "
             "difference, or a window spanning more than one holdout rate, which "
             "needs the rate parameter to pick one. This is the "
-            "single strongest answer to whether context packs help at all."
+            "single strongest answer to whether context packs help at all. "
+            "The report also carries two covariate-adjusted secondary fits, "
+            "one on brief length and one on brief length plus agent type; "
+            "they are not decisive and never replace the verdict above. A "
+            "fit marked not measurable was refused rather than run (too few "
+            "tasks carry the covariates, too few residual degrees of freedom "
+            "remain, no stratum holds both arms, or the covariates nearly "
+            "determine the arm), and its reason and task counts say which."
         ),
         params_model=HoldoutParams,
         run=_run_holdout,
