@@ -51,10 +51,14 @@ def build_evidence_ingest_command(
 
     ``reingest_redacted`` says the write is meant to bring a redacted document
     id back (:func:`~trellis.core.document_write.put_document`). It rides the
-    evidence dict and the idempotency digest **only when set**, so a command
-    that does not use it keeps the bytes and the key it had before the flag
-    existed. A value that is set but not a boolean is carried as given, for the
-    handler to refuse.
+    evidence dict and the idempotency digest **only when it is not ``False``**,
+    so a command that does not use it keeps the bytes and the key it had before
+    the flag existed. Any other value is carried as given, ``None``, ``0`` and
+    ``""`` included, for the handler to refuse unless it is ``True``: the
+    generic command door hands the caller's raw value through, and a falsy
+    non-boolean must not read as an absent flag. It rides the digest too, so a
+    refused value never shares a key with the unflagged write it resembles
+    (the idempotency stage answers before the handler's refusal).
     """
     resolved_id = doc_id or (
         _stable_document_id(idempotency_key) if idempotency_key else generate_ulid()
@@ -70,7 +74,7 @@ def build_evidence_ingest_command(
         evidence["uri"] = uri
     if created_at is not None:
         evidence["created_at"] = created_at
-    if reingest_redacted:
+    if reingest_redacted is not False:
         evidence["reingest_redacted"] = reingest_redacted
 
     resolved_key = idempotency_key
@@ -86,7 +90,7 @@ def build_evidence_ingest_command(
             "preserve_updated_at": preserve_updated_at,
             "created_at": created_at,
         }
-        if reingest_redacted:
+        if reingest_redacted is not False:
             payload["reingest_redacted"] = reingest_redacted
         resolved_key = f"evidence.ingest:{_canonical_digest(payload)}"
 
