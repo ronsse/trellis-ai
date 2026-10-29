@@ -4289,7 +4289,7 @@ paths:
 
         Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...},
 
-        "sensitivity": "..."}``
+        "sensitivity": "...", "reingest_redacted": false}``
 
 
         An optional ``sensitivity`` labels the stored document, under the rules of
@@ -4309,7 +4309,20 @@ paths:
 
         write carries: a re-put replaces the row, so it must not destroy or
 
-        downgrade content the caller may not read.'
+        downgrade content the caller may not read.
+
+
+        An optional boolean ``reingest_redacted`` says the write is meant to bring a
+
+        redacted ``doc_id`` back (#1034), under the rules of ``POST /evidence``:
+
+        without it a write to one is refused (400) and nothing is written, and a
+
+        value that is not a boolean is a 422. It is no way past the clearance rule above.
+
+        A reused ``idempotency_key`` answers as the write it first named, so a
+
+        flagged retry needs a fresh one.'
       operationId: create_document_api_v1_documents_post
       requestBody:
         content:
@@ -4781,7 +4794,30 @@ paths:
 
         An optional ``sensitivity`` labels the stored document. The key needs that
 
-        clearance itself (403 otherwise), and an unknown label is a 422.'
+        clearance itself (403 otherwise), and an unknown label is a 422.
+
+
+        An optional boolean ``reingest_redacted`` says the write is meant to bring a
+
+        redacted ``evidence_id`` back (#1034). Without it a write to one is refused
+
+        (400) and the row stays blank; with it the row is written and stamped
+
+        ``reingested_after_redaction``. Setting it needs the ``mutate`` scope as
+
+        well as ``ingest`` (403 otherwise, nothing written), the bar the command
+
+        route already sets, because undoing a redaction is not an ingest. It
+
+        changes nothing for an id that was not redacted, and it is no way past the
+
+        clearance rules above: a key that may not read a labelled document still
+
+        cannot overwrite it (409). A value that is not a boolean is a 422. A reused
+
+        ``idempotency_key`` answers as the write it first named, so a flagged retry
+
+        needs a fresh one.'
       operationId: ingest_evidence_api_v1_evidence_post
       requestBody:
         content:

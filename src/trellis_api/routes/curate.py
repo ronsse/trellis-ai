@@ -316,7 +316,7 @@ def create_document(
     """Write a document to the document store for FTS retrieval.
 
     Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...},
-    "sensitivity": "..."}``
+    "sensitivity": "...", "reingest_redacted": false}``
 
     An optional ``sensitivity`` labels the stored document, under the rules of
     ``POST /evidence`` and MCP ``save_memory``: the key needs that clearance
@@ -328,9 +328,17 @@ def create_document(
     document's label is above the key's clearance, or above the label this
     write carries: a re-put replaces the row, so it must not destroy or
     downgrade content the caller may not read.
+
+    An optional boolean ``reingest_redacted`` says the write is meant to bring a
+    redacted ``doc_id`` back (#1034), under the rules of ``POST /evidence``:
+    without it a write to one is refused (400) and nothing is written, and a
+    value that is not a boolean is a 422. It is no way past the clearance rule above.
+    A reused ``idempotency_key`` answers as the write it first named, so a
+    flagged retry needs a fresh one.
     """
     doc_id = body.get("doc_id")
     content = body.get("content", "")
+    reingest_redacted = body.get("reingest_redacted", False)
     # ``or {}`` not ``.get(..., {})``: an explicit ``"metadata": null`` is a
     # shape real clients send, and every consumer below wants a mapping.
     metadata = body.get("metadata") or {}
@@ -341,6 +349,10 @@ def create_document(
         raise HTTPException(status_code=422, detail="metadata must be an object")
     if sensitivity is not None and not isinstance(sensitivity, str):
         raise HTTPException(status_code=422, detail="sensitivity must be a string")
+    if not isinstance(reingest_redacted, bool):
+        raise HTTPException(
+            status_code=422, detail="reingest_redacted must be a boolean"
+        )
     metadata = stamp_request_sensitivity(metadata, sensitivity, ctx=ctx)
     if isinstance(doc_id, str) and doc_id:
         refuse_document_overwrite(
@@ -353,6 +365,7 @@ def create_document(
         doc_id=doc_id,
         content=content,
         metadata=metadata,
+        reingest_redacted=reingest_redacted,
         requested_by="api:create-document",
         idempotency_key=body.get("idempotency_key"),
     )
