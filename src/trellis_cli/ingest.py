@@ -8,11 +8,16 @@ import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
+import structlog
 import typer
 from rich.markup import escape
 
 from trellis.classify.ingest import classify_metadata_on_write
-from trellis.core.document_write import RedactionTombstoneError, put_document
+from trellis.core.document_write import (
+    TOMBSTONE_OVERWRITE_CODE,
+    RedactionTombstoneError,
+    put_document,
+)
 from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
@@ -58,6 +63,8 @@ from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
+
+logger = structlog.get_logger(__name__)
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -352,13 +359,21 @@ def _execute_batch(
 def _index_dbt_descriptions(
     registry: StoreRegistry,
     result: ExtractionResult,
-) -> tuple[int, int | None]:
+) -> tuple[int, int | None, int]:
     """Index dbt model descriptions into the document store.
 
     A dbt-specific side-channel that used to live inside the worker's
-    ``load()`` override. Returns ``(documents_written, embedded)``, where
-    ``embedded`` is ``None`` when ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is off —
-    which is the default, and is not a fault.
+    ``load()`` override. Returns ``(documents_written, embedded,
+    skipped_redacted)``, where ``embedded`` is ``None`` when
+    ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is off — which is the default, and is
+    not a fault.
+
+    A description whose ``dbt:<id>`` row is a redaction tombstone is skipped
+    and counted in ``skipped_redacted`` (#1034): ``put_document`` refuses the
+    write, and a manifest that still describes a redacted model is a known
+    state, not a failure. It never reaches the embed hook and is not in
+    ``documents_written``. Only the overwrite refusal is skipped; any other
+    error propagates.
 
     Tagged through the same seam the MCP / REST single-document writes use
     (#568, first half): deterministic, inline, flag-gated on
@@ -399,6 +414,7 @@ def _index_dbt_descriptions(
     doc_store = registry.knowledge.document_store
     vector_store = resolve_vector_store(registry)
     doc_count = 0
+    skipped_redacted = 0
     embedded_count = 0
     embed_ran = False
     for entity in result.entities:
@@ -418,14 +434,21 @@ def _index_dbt_descriptions(
         written_metadata = classify_metadata_on_write(
             metadata, desc, doc_id=doc_id, registry=registry
         )
-        put_document(
-            doc_store,
-            vector_store,
-            doc_id,
-            desc,
-            written_metadata,
-            preserve_updated_at=False,
-        )
+        try:
+            put_document(
+                doc_store,
+                vector_store,
+                doc_id,
+                desc,
+                written_metadata,
+                preserve_updated_at=False,
+            )
+        except RedactionTombstoneError as exc:
+            if exc.code != TOMBSTONE_OVERWRITE_CODE:
+                raise
+            skipped_redacted += 1
+            logger.warning("dbt_description_skipped_redacted", doc_id=doc_id)
+            continue
         doc_count += 1
         # The same bag that was written, not one re-selected afterwards
         # (#360), and *after* the seam — the reference shape is
@@ -439,7 +462,20 @@ def _index_dbt_descriptions(
             embed_ran = True
             if outcome.get("embedded"):
                 embedded_count += 1
-    return doc_count, (embedded_count if embed_ran else None)
+    return doc_count, (embedded_count if embed_ran else None), skipped_redacted
+
+
+def _print_dbt_counts(counts: dict[str, Any]) -> None:
+    """The text-format count lines of ``ingest dbt-manifest``."""
+    console.print(f"  Nodes: {counts['nodes']}")
+    console.print(f"  Edges: {counts['edges']}")
+    console.print(f"  Documents: {counts['documents']}")
+    if counts["skipped_redacted"]:
+        console.print(f"  Skipped (redacted): {counts['skipped_redacted']}")
+    if counts["embedded"] is not None:
+        console.print(f"  Embedded: {counts['embedded']}")
+    elif counts["documents"]:
+        console.print("  Embedded: not run (TRELLIS_ENABLE_EMBED_ON_INGEST is off)")
 
 
 @ingest_app.command("dbt-manifest")
@@ -493,7 +529,7 @@ def ingest_dbt_manifest(
         raise typer.Exit(code=exit_code_for(exc)) from None
     refusal = outcome.refusal
 
-    doc_count, embedded = _index_dbt_descriptions(registry, result)
+    doc_count, embedded, skipped_redacted = _index_dbt_descriptions(registry, result)
 
     # Reported, not absorbed (#410): "embedded 0 of 12" and "the embed never
     # ran" call for completely different actions, and a bare count cannot tell
@@ -504,6 +540,7 @@ def ingest_dbt_manifest(
         "edges": edges,
         "documents": doc_count,
         "embedded": embedded,
+        "skipped_redacted": skipped_redacted,
     }
     if output_format == "json":
         emit_json({**outcome.status, **counts})
@@ -514,13 +551,7 @@ def ingest_dbt_manifest(
             else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]",
             soft_wrap=True,
         )
-        console.print(f"  Nodes: {counts['nodes']}")
-        console.print(f"  Edges: {counts['edges']}")
-        console.print(f"  Documents: {counts['documents']}")
-        if embedded is not None:
-            console.print(f"  Embedded: {embedded}")
-        elif doc_count:
-            console.print("  Embedded: not run (TRELLIS_ENABLE_EMBED_ON_INGEST is off)")
+        _print_dbt_counts(counts)
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))
 
