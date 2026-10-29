@@ -1,0 +1,515 @@
+"""The mutation side of the sensitivity floor (#194, #1023).
+
+Each layer is exercised alone, so a test fails when *its* layer is removed
+rather than being covered for by the other: handlers run behind an empty gate,
+and the Stage-2 floor runs in front of a stub handler that records whether it
+was reached.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from tests.unit.retrieve.test_sensitivity import label
+from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.handlers import create_curate_handlers
+from trellis.mutate.policy_gate import DefaultPolicyGate
+from trellis.mutate.policy_source import build_policy_gate
+from trellis.mutate.sensitivity_floor import (
+    SensitivityFloor,
+    refuse_relabel,
+    targeted_document_ids,
+)
+from trellis.retrieve.sensitivity import OverwriteRefusedError
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    Sensitivity,
+    sensitivity_of,
+)
+from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+BODY = "rotate the vault seal keys every quarter"
+
+
+@pytest.fixture
+def registry(tmp_path: Path) -> Iterator[StoreRegistry]:
+    reg = StoreRegistry(stores_dir=tmp_path / "stores")
+    yield reg
+    reg.close()
+
+
+def _handlers_only(registry: StoreRegistry, clearance: Sensitivity) -> MutationExecutor:
+    """Handlers with the floor's Stage-2 half absent: an empty, plain gate."""
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_curate_handlers(
+            registry, evidence_embed="none", clearance=clearance
+        ),
+        policy_gate=DefaultPolicyGate(),
+    )
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        self.calls += 1
+        return None, "reached"
+
+
+def _gate_only(
+    registry: StoreRegistry, operation: Operation, clearance: Sensitivity
+) -> tuple[MutationExecutor, _Recorder]:
+    """Stage 2 with the floor, in front of a handler that only counts."""
+    recorder = _Recorder()
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers={operation: recorder},
+        policy_gate=DefaultPolicyGate(
+            sensitivity_floor=SensitivityFloor(
+                registry.knowledge.document_store, clearance
+            )
+        ),
+    )
+    return executor, recorder
+
+
+def _put(registry: StoreRegistry, doc_id: str, level: str | None) -> None:
+    registry.knowledge.document_store.put(
+        doc_id, BODY, label(level) if level else {"title": "t"}
+    )
+
+
+def _ingest(
+    doc_id: str, level: str | None, content: str = "replacement body"
+) -> Command:
+    metadata = label(level) if level else {}
+    return Command(
+        operation=Operation.EVIDENCE_INGEST,
+        args={"evidence": {"doc_id": doc_id, "content": content, "metadata": metadata}},
+        requested_by="tester",
+    )
+
+
+def _set(doc_id: str, level: str) -> Command:
+    return Command(
+        operation=Operation.CLASSIFICATION_SET,
+        args={"doc_id": doc_id, "sensitivity": level},
+        requested_by="tester",
+    )
+
+
+def _stored_level(registry: StoreRegistry, doc_id: str) -> Sensitivity:
+    row = registry.knowledge.document_store.get(doc_id)
+    assert row is not None
+    return sensitivity_of(row["metadata"])
+
+
+class TestClassificationSetHandler:
+    def test_relabels_without_touching_content_or_the_clock(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        before = registry.knowledge.document_store.get("doc")
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+        after = registry.knowledge.document_store.get("doc")
+        assert after is not None
+        assert before is not None
+        assert sensitivity_of(after["metadata"]) == "restricted"
+        assert after["content"] == before["content"]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["metadata"]["title"] == "t", "other metadata keys survive"
+
+    def test_keeps_the_other_fields_of_a_readable_record(
+        self, registry: StoreRegistry
+    ) -> None:
+        record = {
+            "sensitivity": "confidential",
+            "regulatory_tags": ["gdpr"],
+            "jurisdiction": ["eu"],
+            "classified_by": ["test"],
+            "classification_version": "1",
+        }
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: record}
+        )
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        stored = registry.knowledge.document_store.get("doc")
+        assert stored is not None
+        new = stored["metadata"][DATA_CLASSIFICATION_KEY]
+        assert new["sensitivity"] == "restricted"
+        assert new["regulatory_tags"] == ["gdpr"]
+        assert new["jurisdiction"] == ["eu"]
+        assert new["classified_by"] == ["test", "caller"]
+
+    def test_mirrors_the_label_onto_the_vector_row(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        vectors = registry.knowledge.vector_store
+        vectors.upsert(item_id="doc", vector=[0.1, 0.2, 0.3], metadata={"title": "t"})
+
+        _handlers_only(registry, "restricted").execute(_set("doc", "restricted"))
+
+        row = vectors.get("doc")
+        assert row is not None
+        assert sensitivity_of(row["metadata"]) == "restricted"
+
+    def test_reapplying_the_stored_label_writes_nothing(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "confidential")
+        before = registry.knowledge.document_store.get("doc")
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "confidential")
+        )
+        assert result.status == CommandStatus.SUCCESS
+        assert "unchanged" in result.message
+        assert registry.knowledge.document_store.get("doc") == before
+
+    @pytest.mark.parametrize(
+        ("doc_id", "level", "code"),
+        [
+            ("ghost", "restricted", "target_not_found"),
+            ("doc", "top-secret", "classification_set_shape"),
+            (chunk_doc_id("doc", 0), "restricted", "classification_set_chunk"),
+        ],
+        ids=["missing", "outside-vocabulary", "chunk"],
+    )
+    def test_refuses_a_bad_target_or_value(
+        self, registry: StoreRegistry, doc_id: str, level: str, code: str
+    ) -> None:
+        _put(registry, "doc", None)
+        _put(registry, chunk_doc_id("doc", 0), None)
+        result = _handlers_only(registry, "restricted").execute(_set(doc_id, level))
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == code
+        assert _stored_level(registry, "doc") == "internal"
+
+    def test_a_caller_below_the_current_label_cannot_relabel(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        result = _handlers_only(registry, "confidential").execute(
+            _set("doc", "internal")
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert _stored_level(registry, "doc") == "restricted"
+
+    def test_a_caller_cannot_assign_a_label_above_its_own_clearance(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        result = _handlers_only(registry, "confidential").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert _stored_level(registry, "doc") == "internal"
+
+    def test_a_cleared_caller_may_lower_the_label(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "confidential")
+        result = _handlers_only(registry, "confidential").execute(
+            _set("doc", "internal")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert _stored_level(registry, "doc") == "internal"
+
+    def test_a_malformed_record_can_only_be_repaired_by_a_restricted_caller(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: "garbage"}
+        )
+        low = _handlers_only(registry, "confidential").execute(_set("doc", "internal"))
+        assert low.status == CommandStatus.REJECTED
+        high = _handlers_only(registry, "restricted").execute(_set("doc", "internal"))
+        assert high.status == CommandStatus.SUCCESS, high.message
+        assert _stored_level(registry, "doc") == "internal"
+
+    def test_refuse_relabel_names_neither_label(self, registry: StoreRegistry) -> None:
+        _put(registry, "doc", "restricted")
+        with pytest.raises(OverwriteRefusedError) as refused:
+            refuse_relabel(
+                registry.knowledge.document_store,
+                "doc",
+                "internal",
+                clearance="internal",
+            )
+        assert "restricted" not in str(refused.value)
+
+
+class TestEvidenceIngestHandlerRefusesOverwrite:
+    """#1023: the rule runs in the handler, so no door can skip it."""
+
+    def test_a_caller_below_the_stored_label_cannot_overwrite(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        result = _handlers_only(registry, "internal").execute(_ingest("doc", None))
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        stored = registry.knowledge.document_store.get("doc")
+        assert stored is not None
+        assert stored["content"] == BODY
+        assert _stored_level(registry, "doc") == "restricted"
+
+    def test_the_clearance_arm_refuses_alone_when_the_same_label_is_written(
+        self, registry: StoreRegistry
+    ) -> None:
+        """No downgrade here, so only the clearance check can refuse."""
+        _put(registry, "doc", "confidential")
+        result = _handlers_only(registry, "internal").execute(
+            _ingest("doc", "confidential")
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        stored = registry.knowledge.document_store.get("doc")
+        assert stored is not None
+        assert stored["content"] == BODY
+
+    def test_a_cleared_caller_may_not_lower_the_label(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        for clearance in ("restricted", "confidential"):
+            result = _handlers_only(registry, clearance).execute(  # type: ignore[arg-type]
+                _ingest("doc", "confidential")
+            )
+            assert result.status == CommandStatus.REJECTED, clearance
+        assert _stored_level(registry, "doc") == "restricted"
+
+    @pytest.mark.parametrize("written", ["confidential", "restricted"])
+    def test_a_cleared_caller_may_rewrite_at_the_same_or_a_higher_label(
+        self, registry: StoreRegistry, written: str
+    ) -> None:
+        _put(registry, "doc", "confidential")
+        result = _handlers_only(registry, "restricted").execute(_ingest("doc", written))
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert _stored_level(registry, "doc") == written
+
+    def test_a_new_document_id_is_written(self, registry: StoreRegistry) -> None:
+        result = _handlers_only(registry, "internal").execute(_ingest("fresh", None))
+        assert result.status == CommandStatus.SUCCESS, result.message
+
+    def test_an_unlabelled_store_is_unchanged_for_the_lowest_clearance(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        result = _handlers_only(registry, "internal").execute(_ingest("doc", None))
+        assert result.status == CommandStatus.SUCCESS, result.message
+
+
+class TestStageTwoFloor:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            _ingest("doc", None),
+            _set("doc", "internal"),
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": ["doc"], "reason": "r"},
+                requested_by="tester",
+            ),
+            Command(
+                operation=Operation.REDACTION_APPLY,
+                args={"target_id": "doc", "reason": "r"},
+                requested_by="tester",
+            ),
+            Command(
+                operation=Operation.PRECEDENT_DEMOTE,
+                args={"target_id": "doc", "reason": "r"},
+                requested_by="tester",
+            ),
+            Command(
+                operation=Operation.PRECEDENT_REINSTATE,
+                args={"target_id": "doc", "reason": "r"},
+                requested_by="tester",
+            ),
+        ],
+        ids=lambda c: str(c.operation),
+    )
+    def test_a_command_aimed_at_a_document_above_clearance_is_denied(
+        self, registry: StoreRegistry, command: Command
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        executor, recorder = _gate_only(registry, command.operation, "confidential")
+
+        result = executor.execute(command)
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert recorder.calls == 0, "the handler must never be reached"
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, limit=10
+        )
+        assert len(rejected) == 1
+        assert "restricted" not in result.message
+
+    def test_a_cleared_caller_reaches_the_handler(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        executor, recorder = _gate_only(
+            registry, Operation.EVIDENCE_INGEST, "restricted"
+        )
+        assert executor.execute(_ingest("doc", None)).status == CommandStatus.SUCCESS
+        assert recorder.calls == 1
+
+    @pytest.mark.parametrize("level", [None, "public", "internal"])
+    def test_an_unlabelled_or_open_document_is_not_denied(
+        self, registry: StoreRegistry, level: str | None
+    ) -> None:
+        _put(registry, "doc", level)
+        executor, recorder = _gate_only(registry, Operation.EVIDENCE_INGEST, "internal")
+        assert executor.execute(_ingest("doc", None)).status == CommandStatus.SUCCESS
+        assert recorder.calls == 1
+
+    def test_a_missing_document_is_no_verdict(self, registry: StoreRegistry) -> None:
+        executor, recorder = _gate_only(registry, Operation.EVIDENCE_INGEST, "internal")
+        assert executor.execute(_ingest("ghost", None)).status == CommandStatus.SUCCESS
+        assert recorder.calls == 1
+
+    def test_a_chunk_is_denied_on_its_parents_label(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "parent", "restricted")
+        chunk = chunk_doc_id("parent", 0)
+        registry.knowledge.document_store.put(chunk, BODY, {})
+        command = Command(
+            operation=Operation.RETENTION_RESTORE,
+            args={"item_ids": [chunk], "reason": "r"},
+            requested_by="tester",
+        )
+        executor, recorder = _gate_only(
+            registry, Operation.RETENTION_RESTORE, "internal"
+        )
+        assert executor.execute(command).status == CommandStatus.REJECTED
+        assert recorder.calls == 0
+
+    def test_a_restricted_clearance_never_reads_the_store(self) -> None:
+        class Exploding:
+            def get(self, doc_id: str) -> Any:
+                msg = "a trusted caller must not pay for the floor"
+                raise AssertionError(msg)
+
+        floor = SensitivityFloor(Exploding(), "restricted")  # type: ignore[arg-type]
+        assert floor.refusal(_ingest("doc", None)) is None
+
+    def test_a_label_read_that_fails_is_not_permission(self) -> None:
+        class Down:
+            def get(self, doc_id: str) -> Any:
+                msg = "store down"
+                raise OSError(msg)
+
+        floor = SensitivityFloor(Down(), "internal")  # type: ignore[arg-type]
+        with pytest.raises(OSError, match="store down"):
+            floor.refusal(_ingest("doc", None))
+
+    def test_operations_that_write_no_caller_named_document_name_no_target(
+        self,
+    ) -> None:
+        for operation, args in (
+            (
+                Operation.ENTITY_CREATE,
+                {"entity_type": "t", "name": "n", "document_ids": ["doc"]},
+            ),
+            (
+                Operation.LINK_CREATE,
+                {"source_id": "doc", "target_id": "x", "edge_kind": "k"},
+            ),
+            (Operation.LABEL_ADD, {"target_id": "doc", "label": "l"}),
+        ):
+            assert targeted_document_ids(Command(operation=operation, args=args)) == []
+
+
+class TestDefaultPostureIsTransparent:
+    def test_the_default_executor_carries_no_floor(
+        self, registry: StoreRegistry
+    ) -> None:
+        assert build_policy_gate(registry)._sensitivity_floor is None
+        assert build_policy_gate(registry, clearance="internal")._sensitivity_floor
+
+    def test_a_labelless_store_gives_every_clearance_the_same_result(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        outcomes = []
+        for clearance in ("internal", "confidential", "restricted"):
+            executor = build_curate_executor(
+                registry,
+                evidence_embed="none",
+                clearance=clearance,  # type: ignore[arg-type]
+            )
+            result = executor.execute(_ingest("doc", None, content=f"v-{clearance}"))
+            outcomes.append((result.status, result.warnings, result.created_id))
+        assert len(set(map(str, outcomes))) == 1
+        assert outcomes[0][0] == CommandStatus.SUCCESS
+
+
+class TestRelabelWithholdsOnBothAxes:
+    """Relabelling to ``restricted`` hides the document from a ``read`` caller."""
+
+    def test_keyword_and_semantic_axes_stop_serving_the_document(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.retrieve.pack_builder import PackBuilder
+        from trellis.retrieve.strategies import (
+            KeywordSearch,
+            SemanticSearch,
+        )
+
+        text = "failover runbook zebra ledger: rotate the vault seal keys"
+        registry.knowledge.document_store.put("doc", text, {"title": "t"})
+        vectors = registry.knowledge.vector_store
+        vectors.upsert(item_id="doc", vector=[0.1, 0.2, 0.3], metadata={"title": "t"})
+        builder = PackBuilder(
+            strategies=[
+                KeywordSearch(registry.knowledge.document_store),
+                SemanticSearch(vectors, lambda _text: [0.1, 0.2, 0.3]),
+            ]
+        )
+
+        def served(clearance: Sensitivity) -> dict[str, set[str]]:
+            pack = builder.build("failover runbook", clearance=clearance)
+            by_axis: dict[str, set[str]] = {}
+            for item in pack.items:
+                by_axis.setdefault(item.item_id, set()).add(item.item_id)
+            return by_axis
+
+        assert "doc" in served("internal"), "unlabelled, so served before the relabel"
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+
+        assert "doc" not in served("internal")
+        assert "doc" not in served("confidential")
+        assert "doc" in served("restricted")
+        # The semantic axis reads the vector row's snapshot, which the relabel
+        # re-synced; assert it directly so a keyword-only hit cannot hide a stale one.
+        row = vectors.get("doc")
+        assert row is not None
+        assert sensitivity_of(row["metadata"]) == "restricted"

@@ -2506,7 +2506,9 @@ def save_memory(
 
     registry = _get_registry()
     metadata = _stamp_sensitivity(metadata, sensitivity, tool="save_memory")
-    executor = build_curate_executor(registry, evidence_embed="none")
+    executor = build_curate_executor(
+        registry, evidence_embed="none", clearance=current_clearance()
+    )
 
     chash = content_hash(content)
 
@@ -4475,7 +4477,7 @@ def execute_mutation(
         )
 
     try:
-        executor = build_curate_executor(_get_registry())
+        executor = build_curate_executor(_get_registry(), clearance=current_clearance())
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))

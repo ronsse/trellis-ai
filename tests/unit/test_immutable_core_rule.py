@@ -615,6 +615,10 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
+    ("src/trellis_api/routes/curate.py", "set_document_sensitivity", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
     ("src/trellis_api/routes/extract.py", "submit_drafts", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
@@ -665,6 +669,10 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         _PASSTHROUGH_REASON,
     ),
     ("src/trellis_cli/classify.py", "revoke_rule", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_cli/curate.py", "classify_sensitivity", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),

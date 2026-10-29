@@ -1319,6 +1319,56 @@ A `target_id` that names no node, including one redacted while the command
 runs, exits `2` with `"status": "rejected"` and the message
 `Node not found: <target_id>`, and no label is written.
 
+### `trellis curate classify-sensitivity`
+
+Relabel a stored document's sensitivity (`public`, `internal`, `confidential`,
+`restricted`). A metadata-only write through the governed `classification.set`
+operation: the content and the row's `updated_at` are untouched, and the vector
+row carries the new label, so the document is withheld from (or served to)
+readers on the next pack, keyword and semantic alike. See
+[Sensitivity clearance](#sensitivity-clearance).
+
+```bash
+trellis curate classify-sensitivity <doc_id> --sensitivity <level> [--by <who>] [--format text|json]
+```
+
+| Argument / option | Required | Description |
+|-------------------|----------|-------------|
+| `doc_id` | **Yes** | Document ID to relabel |
+| `--sensitivity` | **Yes** | One of `public`, `internal`, `confidential`, `restricted` |
+| `--by` | No | Caller recorded on the command (default `cli:classify-sensitivity`) |
+
+**Example:**
+
+```bash
+trellis curate classify-sensitivity doc-1 --sensitivity restricted --format json
+```
+
+**JSON output (success):**
+
+```json
+{
+  "status": "success",
+  "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
+  "operation": "classification.set",
+  "message": "Classification set: doc-1 internal -> restricted",
+  "created_id": null,
+  "warnings": []
+}
+```
+
+Re-applying the stored label answers `Classification unchanged: ...` and writes
+nothing. A document that does not exist, a chunk id (a chunk reads its parent's
+label, so relabel the parent) and a value outside the vocabulary exit `2` with
+`"status": "rejected"`. The exit code is the same under `--format text` and
+`--format json`. The CLI is a trusted-local surface and holds `restricted`
+clearance; the REST route is the credentialed equivalent:
+
+`POST /api/v1/documents/{doc_id}/sensitivity` with body `{"sensitivity": "restricted"}`
+returns a `CommandResponse`. It needs the `mutate` scope, and the key's clearance
+must cover both the document's current label and the requested one, otherwise
+the answer is `400` and nothing is written.
+
 ### `trellis curate redact`
 
 Redact (hard-purge) a graph entity through the governed pipeline. Irreversible:
@@ -2983,6 +3033,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline |
+| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). Refused (`policy_violation`, nothing written) unless the caller's clearance covers both the stored label and the requested one. A missing document is `target_not_found`; a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations
@@ -3658,6 +3709,21 @@ appear in a pack's withholding note as `sensitivity N`, as counts only. MCP over
 stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
+
+The same clearance governs writes. `classification.set` (CLI `trellis curate
+classify-sensitivity`, REST `POST /api/v1/documents/{doc_id}/sensitivity`)
+relabels a document, and is refused unless the caller's clearance covers both
+the old label and the new one. Any other mutation aimed at a document above the
+caller's clearance (`evidence.ingest` at that id, `retention.restore`,
+`redaction.apply`, `precedent.demote`/`precedent.reinstate`) is denied at Stage
+2 as a `policy_violation`, recorded as a `MUTATION_REJECTED` event. An
+`evidence.ingest` at an id that already names a document applies the same rule
+as `save_memory`/`save_knowledge`: a key cannot overwrite a document above its
+clearance, and no write may lower a stored label (relabel with
+`classification.set`). That check lives in the handler, so `POST
+/api/v1/commands/batch` and MCP `execute_mutation` are covered too. A
+trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
+never refused.
 
 ### Managing keys
 

@@ -105,8 +105,8 @@ class _StubExecutor:
         return self._result
 
 
-def _stub_build_executor(result: CommandResult) -> Callable[[object], _StubExecutor]:
-    return lambda _registry: _StubExecutor(result)
+def _stub_build_executor(result: CommandResult) -> Callable[..., _StubExecutor]:
+    return lambda _registry, **_kwargs: _StubExecutor(result)
 
 
 def _rejected(operation: Operation) -> CommandResult:

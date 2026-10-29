@@ -867,6 +867,33 @@ components:
       - count
       title: ClassPriorWithheldDetail
       type: object
+    ClassificationSetRequest:
+      additionalProperties: false
+      description: 'Request to relabel one document''s sensitivity. ``doc_id`` rides the URL path.
+
+
+        ``sensitivity`` is the closed ``DataClassification`` vocabulary, lowest to
+
+        highest. A key needs the ``confidential`` (or ``restricted``/``admin``)
+
+        scope to touch a document at that label, or to assign it.'
+      properties:
+        requested_by:
+          default: api:classify-sensitivity
+          title: Requested By
+          type: string
+        sensitivity:
+          enum:
+          - public
+          - internal
+          - confidential
+          - restricted
+          title: Sensitivity
+          type: string
+      required:
+      - sensitivity
+      title: ClassificationSetRequest
+      type: object
     ClassifyCandidate:
       additionalProperties: false
       description: 'One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
@@ -4280,6 +4307,65 @@ paths:
       summary: Get Document
       tags:
       - explore
+  /api/v1/documents/{doc_id}/sensitivity:
+    post:
+      description: 'Relabel a document''s ``DataClassification.sensitivity`` (#194).
+
+
+        A metadata-only write through ``classification.set``: the content and the
+
+        row''s ``updated_at`` are untouched, and the document''s vector row is
+
+        re-synced so a semantic hit carries the new label. Refused with 400 unless
+
+        the caller''s clearance covers both the document''s current label and the
+
+        requested one, so a key without ``restricted`` cannot relabel or lower a
+
+        restricted document, nor push one above its own reach. A missing
+
+        document, a chunk id (it reads its parent''s label) and a value outside
+
+        the vocabulary are refused too. Re-applying the stored label is a no-op.
+
+
+        ``requested_by`` is derived from the authenticated principal when one is
+
+        present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
+
+        the body''s own claim rides along as ``metadata["requested_by_claim"]``.'
+      operationId: set_document_sensitivity_api_v1_documents__doc_id__sensitivity_post
+      parameters:
+      - in: path
+        name: doc_id
+        required: true
+        schema:
+          title: Doc Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassificationSetRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Set Document Sensitivity
+      tags:
+      - curate
   /api/v1/effectiveness:
     get:
       description: Analyze context pack effectiveness.

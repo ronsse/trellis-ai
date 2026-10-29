@@ -334,6 +334,42 @@ def reinstate_precedent(
     _execute_command(cmd, output_format)
 
 
+@curate_app.command("classify-sensitivity")
+def classify_sensitivity(
+    doc_id: str = typer.Argument(..., help="Document ID to relabel"),
+    sensitivity: str = typer.Option(
+        ...,
+        "--sensitivity",
+        help="New label: public, internal, confidential or restricted",
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-sensitivity",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Relabel a document's ``DataClassification.sensitivity`` (#194).
+
+    A metadata-only write (``classification.set``): the content and the row's
+    ``updated_at`` are untouched, and the document's vector row is re-synced
+    so a semantic hit carries the new label. A document above the caller's
+    clearance is withheld from every read surface, so relabelling to
+    ``restricted`` hides it from a ``read`` token. The CLI is trusted-local
+    and clears every label. A missing document, a chunk id (it reads its
+    parent's label) and a value outside the vocabulary are refused. Re-applying
+    the stored label is a no-op (exit 0, message says so).
+    """
+    cmd = Command(
+        operation=Operation.CLASSIFICATION_SET,
+        args={"doc_id": doc_id, "sensitivity": sensitivity},
+        target_id=doc_id,
+        target_type="document",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
 @curate_app.command()
 def prune(
     reason: str = typer.Option(

@@ -98,7 +98,9 @@ class TestOperation:
         # the SCD-2 rewrite back to Lifecycle.state="current", required
         # because entity.update refuses to touch a precedent's lifecycle
         # directly — see EntityUpdateHandler)
-        assert len(Operation) == 27
+        # + CLASSIFICATION_SET (governed document sensitivity relabel, #194;
+        # the write half of the label retrieval already reads)
+        assert len(Operation) == 28
 
 
 class TestCommand:
@@ -406,8 +408,8 @@ class TestIdBearingArgNulSafety:
         out). Deleting an entry drops one of these counts and fails here —
         a silent shrink is the one failure mode this test exists to catch.
         """
-        assert len(ID_BEARING_ARG_KEYS) == 10
-        assert len(_ID_BEARING_PAIRS) == 17
+        assert len(ID_BEARING_ARG_KEYS) == 11
+        assert len(_ID_BEARING_PAIRS) == 18
 
     def test_mapping_is_pinned_by_full_content(self) -> None:
         """Content equality, not just size — a count floor cannot tell
@@ -421,6 +423,7 @@ class TestIdBearingArgNulSafety:
             Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
             Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
             Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
+            Operation.CLASSIFICATION_SET: frozenset({"doc_id"}),
             Operation.LABEL_ADD: frozenset({"target_id", "label"}),
             Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
             Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),

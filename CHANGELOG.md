@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **A document's `sensitivity` label is enforced on writes (#194, part 2; closes
+  #1023).** A new governed `classification.set` operation relabels a document
+  as a metadata-only write (`updated_at` preserved, vector row re-mirrored); the
+  CLI gains `trellis curate classify-sensitivity <doc_id> --sensitivity
+  <level>` and REST gains `POST /api/v1/documents/{doc_id}/sensitivity`. A
+  relabel needs clearance for both the old and the new label, so a `mutate` key
+  without `restricted` cannot relabel or lower a restricted document. Every
+  mutation whose target is a document above the caller's clearance is denied at
+  Stage 2 (`policy_violation`, `MUTATION_REJECTED`). `evidence.ingest` now runs
+  the `save_memory` overwrite rule in its handler, so `POST
+  /api/v1/commands/batch` and MCP `execute_mutation` can no longer overwrite
+  a document above the caller's clearance or lower its label. The clearance is
+  carried on the executor (`build_curate_executor(..., clearance=)`, default
+  `"restricted"`), not on the command; an unlabelled store, and every
+  trusted-local caller, behave exactly as before.
+
 - **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
   `save_memory` and `save_knowledge` take an optional `sensitivity`
   (`public` / `internal` / `confidential` / `restricted`); a key can label only

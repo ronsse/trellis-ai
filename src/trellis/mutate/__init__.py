@@ -44,6 +44,7 @@ from trellis.mutate.reserved_metadata import (
 )
 
 if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.registry import StoreRegistry
 
 
@@ -51,6 +52,7 @@ def build_curate_executor(
     registry: StoreRegistry,
     *,
     evidence_embed: EvidenceEmbedMode = "soft",
+    clearance: Sensitivity = "restricted",
 ) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with the default curate handlers.
 
@@ -85,14 +87,24 @@ def build_curate_executor(
     small JSON read per mutation surface call; cache here if that ever
     shows up in a profile, but do not cache away the ability to pick up an
     edited policy file without a restart.
+
+    **``clearance`` is the caller's document clearance (#194).** A credentialed
+    surface passes what its token allows to read (``current_clearance()`` on
+    MCP, ``request_clearance(ctx)`` on REST); the default ``"restricted"`` is
+    trusted-local and clears everything. It reaches Stage 2, which refuses a
+    command aimed at a document above it, and the handlers that decide a
+    document's label. It rides the executor, not the :class:`Command`, so a
+    caller cannot name its own clearance in a payload.
     """
     from trellis.mutate.handlers import create_curate_handlers  # noqa: PLC0415
     from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
 
     return MutationExecutor(
         event_log=registry.operational.event_log,
-        handlers=create_curate_handlers(registry, evidence_embed=evidence_embed),
-        policy_gate=build_policy_gate(registry),
+        handlers=create_curate_handlers(
+            registry, evidence_embed=evidence_embed, clearance=clearance
+        ),
+        policy_gate=build_policy_gate(registry, clearance=clearance),
     )
 
 
