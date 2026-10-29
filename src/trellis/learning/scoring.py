@@ -1252,6 +1252,11 @@ def _precedent_reapproval_refusal(
     }
 
 
+#: Status of a row whose precedent id a redaction already purged or blanked.
+#: Nothing is written for it. A refusal (``refused*``), so every surface counts
+#: it with the others and the run's verdict is ``refused``.
+REFUSED_REDACTED = "refused_redacted"
+
 #: Status of a row whose precedent is already current, complete and carries
 #: exactly what the submission would write. Nothing is written for it. It is
 #: not a refusal and not a failure: the operator's request is already met.
@@ -1319,12 +1324,10 @@ def _document_row_in_place(
     and a node that already matches. Without a ``document_store`` the row cannot
     be checked, which reads as missing.
 
-    A redaction's blank tombstone counts as in place: a redaction that blanked
-    the row and then failed to purge the node must not be undone by a re-run
-    writing the redacted text back.
+    A redaction's blank tombstone never reaches here: :func:`_pre_write_outcome`
+    refuses it first (:func:`_redaction_refusal`), so a re-run cannot write the
+    redacted text back over it.
     """
-    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
-
     properties = entity_payload["properties"]
     expected = precedent_document_content(
         entity_payload["name"], properties.get("description")
@@ -1336,7 +1339,65 @@ def _document_row_in_place(
     row = document_store.get(entity_payload["entity_id"])
     if row is None:
         return False
-    return is_redaction_tombstone(row) or row.get("content") == expected
+    return row.get("content") == expected
+
+
+def _redaction_refusal(
+    entity_id: str,
+    *,
+    event_log: EventLog | None,
+    document_store: DocumentStore | None,
+) -> dict[str, Any] | None:
+    """A refusal if a redaction already took ``entity_id``, else ``None``.
+
+    ``redaction.apply`` purges the node, so the node read in
+    :func:`_pre_write_outcome` finds nothing and a re-run reads the candidate as
+    new: it would write the redacted precedent, its row and its edges back, and
+    serve the redacted text again. Two traces survive the purge, and either one
+    refuses:
+
+    * the document row's blank tombstone (:func:`is_redaction_tombstone`),
+      which a redaction writes before it purges and which outlives a failed
+      purge or a failed audit emit;
+    * a ``REDACTION_APPLIED`` event whose ``entity_id`` is the id. The handler
+      records the purged node's id there and nowhere else (a precedent's node
+      id, its document id and the id a candidate promotes to are one string),
+      and purges aliases with the node, so there is no other id form to name.
+      One row decides, so the read is ``limit=1`` on a type and id filter.
+
+    The document row is checked only when a ``document_store`` is passed, and
+    the event only when an ``event_log`` is, as for ``already_promoted``; a
+    caller passing neither gets no check from either. An event log that raises
+    propagates, so a log that cannot be read refuses the write by failing it
+    rather than letting a redacted precedent through. The message names the id
+    and never the redacted content.
+    """
+    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    redacted = False
+    if document_store is not None:
+        row = document_store.get(entity_id)
+        redacted = row is not None and is_redaction_tombstone(row)
+    if not redacted and event_log is not None:
+        redacted = bool(
+            event_log.get_events(
+                event_type=EventType.REDACTION_APPLIED,
+                entity_id=entity_id,
+                limit=1,
+            )
+        )
+    if not redacted:
+        return None
+    return {
+        "status": REFUSED_REDACTED,
+        "entity_id": entity_id,
+        "message": (
+            f"{entity_id} was redacted and will not be promoted again from its "
+            "learning candidate; a redaction is final, so promote a new "
+            "candidate under a new id if the lesson is still wanted"
+        ),
+    }
 
 
 def _promotion_is_complete(
@@ -1392,9 +1453,11 @@ def _pre_write_outcome(
 ) -> dict[str, Any] | None:
     """The outcome a submission answers before its first write, or ``None``.
 
-    Two answers exist, both reached from one graph read: a refusal
-    (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
-    second needs a current precedent that holds what the payload would write,
+    Three answers exist. A redaction refuses first (:func:`_redaction_refusal`),
+    ahead of every graph read, because a purged node reads as absent and would
+    pass for a first-time promotion. The other two come from one graph read: a
+    refusal (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
+    last needs a current precedent that holds what the payload would write,
     has every edge it names (with the properties named), has its document row
     and has its promotion event. Without an ``event_log`` the event cannot be
     checked, so nothing is skipped and the write goes ahead; without a
@@ -1404,6 +1467,11 @@ def _pre_write_outcome(
     run cannot disagree about a row.
     """
     entity_id = entity_payload["entity_id"]
+    redacted = _redaction_refusal(
+        entity_id, event_log=event_log, document_store=document_store
+    )
+    if redacted is not None:
+        return redacted
     existing_node = graph_store.get_node(entity_id)
     refusal = _precedent_reapproval_refusal(existing_node, entity_id)
     if refusal is not None:
@@ -1492,6 +1560,15 @@ def submit_learning_promotion(
     refusal while the rest proceed — and it is neither a silent overwrite
     nor a silent no-op: a distinct ``"refused_<state>"`` (or
     ``"refused_not_current"``) status with a message an operator reads.
+
+    **A redacted precedent is refused, never written back.** A redaction purges
+    the node, so without this check a re-run finds no node, treats the
+    candidate as new, and writes the precedent, its row and its edges again:
+    the redacted text is served once more. The answer is ``"refused_redacted"``
+    when the id's document row is a redaction tombstone or a
+    ``REDACTION_APPLIED`` event names the id (:func:`_redaction_refusal`), and
+    nothing is written. Pass ``document_store`` and ``event_log`` for the check;
+    each guards only its own half, so a caller passing neither gets no refusal.
 
     **A precedent that already holds this promotion is skipped.** When the
     node is current, carries every value the payload would write (bar
@@ -1878,6 +1955,7 @@ __all__ = [
     "NAME_SOURCE_SOURCE_TEXT",
     "PRECEDENT_DOCUMENT_FORM",
     "PROMOTE_RECOMMENDATIONS",
+    "REFUSED_REDACTED",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "SOURCE_EXCERPT_REDACTED",
     "PromotionVerdict",
