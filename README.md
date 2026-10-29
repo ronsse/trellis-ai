@@ -354,7 +354,7 @@ trellis admin migrate-graph \
 | `get_lessons` | Precedents as markdown |
 | `get_graph` | Entity + neighborhood as markdown |
 | `get_items` | Full bodies for known item ids (max 50), token-budgeted — the fetch step after an index pack |
-| `get_file_context` | Stored context for file paths: documents whose `source_path` names the file, plus doc-linked entities |
+| `get_file_context` | Stored context for file paths: documents whose `source_path` names the file, plus doc-linked entities. Returns results only when documents carry code paths; session capture writes none, so a store fed by capture alone answers empty (#549) |
 | `record_feedback` | Grade a pack (`rating` 0.0–1.0) or a trace, with per-item attribution; writes the JSONL audit row **and** the authoritative event |
 | `search` | Combined doc (keyword + semantic) + graph search as markdown |
 | `execute_mutation` | Governed mutation escape hatch (validate → policy → execute → audit) |

@@ -75,14 +75,14 @@ stream at all.**
 - Acceptance: `trellis admin write-config --format json` and `GET /api/version` on the
   running API report a commit that `git branch --contains` can resolve on `main`.
 
-**N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (`owner-only`, needs
-1Password + the Neo4j console) and #194 classification enforcement (`keystone`,
-`blocked:owner-decision`). #194's pull-forward is an open question in PRD §8, not a
-scheduled item: it needs a decision before it needs an implementer.
+**N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (closed 2026-09-30, owner
+confirmed the cleanup) and #194 classification enforcement (`keystone`, `ready`
+since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21; its first slice, the
+read-side floor, is in progress.
 
-**N4 · Query-history curation primitives** #200–#203 — all three carry
-`blocked:owner-decision`. They are fixture-testable today; what they are waiting on is the
-disposition in PRD §8, not code.
+- Acceptance: `pytest tests/unit/ -k classification` proves a restricted document is
+  withheld from packs and search for a caller without the clearance (roadmap §3.H.1 (a));
+  the mutation-side deny, (b), follows in a second PR.
 
 ## 4. Next
 
@@ -131,7 +131,14 @@ Cloudflare public hostname, and the litellm Kimi tier used for panel-style reaso
 (The `[cloud]` extra is a misnomer and is tracked for rename — psycopg and pgvector are
 what make the *local* Postgres work.)
 
-**L3 · Icebox** — PRD §6 "Not doing" is the anti-scope list, and it is load-bearing: this
+**L3 · Query-history curation primitives** #200–#203 — closed as deferred 2026-10-29 (owner
+decision 2026-09-30: wait for the consumer-kg pilot). Not scheduled; the spec stays
+[`adr-query-history-promotion.md`](design/adr-query-history-promotion.md).
+
+- Trigger: the data-platform pilot resumes, or a second deployer brings query-history or BI
+  data. Reopen the issues then.
+
+**L4 · Icebox** — PRD §6 "Not doing" is the anti-scope list, and it is load-bearing: this
 project has scope-creep gravity and several of those entries are things that were built
 and deleted. Read it before proposing an addition.
 

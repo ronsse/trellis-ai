@@ -8,6 +8,8 @@ Trellis ships an MCP server (`trellis-mcp`) that exposes 16 macro tools to Claud
 
 The core and sectioned-context tools return markdown.
 
+`get_file_context` returns results only when stored documents carry code paths. Session capture writes none, so a store fed by capture alone answers empty ([#549](https://github.com/ronsse/trellis-ai/issues/549)).
+
 ## Install
 
 ```bash

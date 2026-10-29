@@ -704,6 +704,85 @@ class TestMalformedLifecycleReadsAsCurrent:
         assert [r["status"] for r in data["results"]] == ["refused_demoted"]
 
 
+class TestARedactedPrecedentIsRefused:
+    """A re-run after ``redaction.apply`` is refused, in both formats (#1019).
+
+    The redaction purges the node, so the re-run used to read the candidate as
+    new and write the redacted precedent back. The refusal is a ``refused_*``
+    like the lifecycle ones: exit ``2`` and ``refused`` whatever ``--format``.
+    """
+
+    @staticmethod
+    def _redact(candidate_id: str) -> None:
+        from trellis.mutate import (
+            Command,
+            CommandStatus,
+            Operation,
+            build_curate_executor,
+        )
+
+        entity_id = precedent_entity_id_for_candidate(candidate_id)
+        registry = curate_cli._get_registry()
+        try:
+            result = build_curate_executor(registry).execute(
+                Command(
+                    operation=Operation.REDACTION_APPLY,
+                    args={"target_id": entity_id, "reason": "owner request"},
+                    target_id=entity_id,
+                    target_type="entity",
+                    requested_by="test",
+                )
+            )
+            assert result.status == CommandStatus.SUCCESS, result.message
+        finally:
+            registry.close()
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_a_re_run_exits_refused_in_both_formats(
+        self, fmt: str, tmp_path: Path
+    ) -> None:
+        candidates = [_candidate("redacted")]
+        code, data, out = _promote(
+            tmp_path, candidates, [("redacted", True)], fmt="json"
+        )
+        assert code == EXIT_OK, out
+        self._redact("redacted")
+        before = _store_counts()
+
+        code, data, out = _promote(tmp_path, candidates, [("redacted", True)], fmt=fmt)
+
+        assert code == EXIT_VALIDATION, out
+        assert _store_counts() == before
+        if data is not None:
+            assert data["status"] == "refused"
+            assert data["promoted_count"] == 0
+            assert [r["status"] for r in data["results"]] == ["refused_redacted"]
+        else:
+            assert "refused_redacted" in out
+            assert "Verdict: refused (exit 2)" in out
+
+    def test_the_dry_run_previews_the_refusal_the_real_run_gives(
+        self, tmp_path: Path
+    ) -> None:
+        candidates = [_candidate("redacted")]
+        _promote(tmp_path, candidates, [("redacted", True)], fmt="json")
+        self._redact("redacted")
+
+        preview_code, preview, _ = _promote(
+            tmp_path, candidates, [("redacted", True)], fmt="json", dry_run=True
+        )
+        code, data, _ = _promote(tmp_path, candidates, [("redacted", True)], fmt="json")
+
+        assert preview is not None
+        assert data is not None
+        assert preview_code == EXIT_OK
+        assert preview["would_exit_code"] == code == EXIT_VALIDATION
+        assert [r["would_status"] for r in preview["results"]] == [
+            r["status"] for r in data["results"]
+        ]
+        assert data["results"][0]["status"] == "refused_redacted"
+
+
 class TestPromotionVerdict:
     """The shared helper, read directly: the same table both commands use."""
 
