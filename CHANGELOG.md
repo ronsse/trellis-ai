@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The sensitivity floor covers the rest of the read surface (#194, part 3;
+  closes #1022).** A restricted document that an earlier gate rejected (noise,
+  archived, superseded, demoted) is no longer named in a pack response to a key
+  below `restricted`: the builder now judges every rejected candidate against the
+  clearance, chunks by their parent's label, not only the rows rejected for
+  `sensitivity`. `GET /documents` (the list and `?q=`) shows such a key no row,
+  id or title of a document above it and does not count it in `total`; below
+  `restricted` the list is served from a bounded scan of the store, as a search
+  is, so `total_exact` is `false` past 2000 rows. `POST /evidence` takes an
+  optional `sensitivity` under the rules the MCP save tools use (403 above the
+  key's clearance, 422 for an unknown label or a raw `data_classification`
+  key), through one shared helper. `GET /traces/{id}` answers `evidence_links`
+  for a document the key cannot read as it does for a missing one. A roster rule
+  (`tests/unit/test_sensitivity_rest_roster_rule.py`) fails a REST route that is
+  neither gated nor named as free of document content.
 - **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
   `save_memory` and `save_knowledge` take an optional `sensitivity`
   (`public` / `internal` / `confidential` / `restricted`); a key can label only

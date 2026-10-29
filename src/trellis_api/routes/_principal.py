@@ -22,7 +22,12 @@ from fastapi import HTTPException
 from trellis.auth import clearance_of
 from trellis.core.elision import elide_text
 from trellis.core.text_safety import replace_nul_and_lone_surrogates
-from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
+from trellis.retrieve.sensitivity import (
+    OverwriteRefusedError,
+    SensitivityLabelError,
+    refuse_overwrite,
+    stamp_sensitivity,
+)
 from trellis_api.auth import AuthContext
 
 if TYPE_CHECKING:
@@ -129,3 +134,24 @@ def refuse_document_overwrite(
         )
     except OverwriteRefusedError as exc:
         raise HTTPException(status_code=409, detail=exc.message) from exc
+
+
+def stamp_request_sensitivity(
+    metadata: Mapping[str, Any] | None,
+    sensitivity: str | None,
+    *,
+    ctx: AuthContext,
+) -> dict[str, Any]:
+    """The metadata to store, carrying the caller's ``sensitivity`` label (#194).
+
+    The rule is :func:`trellis.retrieve.sensitivity.stamp_sensitivity`, the one
+    the MCP save tools apply. A label above the caller's clearance answers 403
+    (the key lacks the scope); an unknown label, or a raw ``data_classification``
+    key in ``metadata``, answers 422. Nothing is written in either case.
+    """
+    try:
+        return stamp_sensitivity(metadata, sensitivity, request_clearance(ctx))
+    except SensitivityLabelError as exc:
+        raise HTTPException(
+            status_code=403 if exc.above_clearance else 422, detail=exc.message
+        ) from exc

@@ -60,6 +60,9 @@ _PREVIEW_CHARS = 300
 #: ``total_exact: false`` rather than a silently wrong exact total.
 _SEARCH_SCAN_LIMIT = 2000
 
+#: Rows fetched per round trip when a list is filtered by clearance.
+_SCAN_BATCH = 500
+
 
 def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored document into a list row: preview, never full content."""
@@ -112,8 +115,15 @@ def list_documents(
             " they are slices of documents already in the list."
         ),
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """List or search documents, returning previews only.
+
+    A document above the key's clearance is absent: no row, no id, no title,
+    and ``total`` does not count it (#194). A key below ``restricted`` is
+    served from a bounded scan of the store, the way a search is, so a store
+    of more than :data:`_SEARCH_SCAN_LIMIT` rows reports ``total_exact: false``
+    for such a key.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -130,13 +140,26 @@ def list_documents(
     """
     registry = get_registry()
     store = registry.knowledge.document_store
+    gate = DocumentClearance(store, request_clearance(ctx))
     if q:
         matches = store.search(
             q, limit=_SEARCH_SCAN_LIMIT, include_chunks=include_chunks
         )
+        total_exact = len(matches) < _SEARCH_SCAN_LIMIT
+        matches = [m for m in matches if gate.permits(m["doc_id"], m.get("metadata"))]
         total = len(matches)
-        total_exact = total < _SEARCH_SCAN_LIMIT
         docs = matches[offset : offset + limit]
+    elif gate.clearance != "restricted":
+        visible, scanned, exhausted = _scan_readable(
+            store, gate, include_chunks=include_chunks
+        )
+        total_exact = exhausted
+        total = len(visible) + (
+            0
+            if exhausted
+            else max(store.count(include_chunks=include_chunks) - scanned, 0)
+        )
+        docs = visible[offset : offset + limit]
     else:
         docs = store.list_documents(
             limit=limit, offset=offset, include_chunks=include_chunks
@@ -153,6 +176,32 @@ def list_documents(
         "include_chunks": include_chunks,
         "documents": rows,
     }
+
+
+def _scan_readable(
+    store: Any, gate: DocumentClearance, *, include_chunks: bool
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Every document the gate permits among the first scan-limit rows.
+
+    Returns ``(readable rows, rows scanned, whether the store ran out)``.
+    ``DocumentStore`` has no label predicate, so the filter runs here, in
+    batches, and a page is cut from the readable rows rather than from the
+    store's: filtering a store page would hand back short pages.
+    """
+    readable: list[dict[str, Any]] = []
+    scanned = 0
+    while scanned < _SEARCH_SCAN_LIMIT:
+        want = min(_SCAN_BATCH, _SEARCH_SCAN_LIMIT - scanned)
+        batch = store.list_documents(
+            limit=want, offset=scanned, include_chunks=include_chunks
+        )
+        scanned += len(batch)
+        readable.extend(
+            d for d in batch if gate.permits(d["doc_id"], d.get("metadata"))
+        )
+        if len(batch) < want:
+            return readable, scanned, True
+    return readable, scanned, False
 
 
 @router.get("/documents/{doc_id:path}")

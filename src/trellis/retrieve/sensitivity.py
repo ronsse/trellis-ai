@@ -42,11 +42,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
-from trellis.schemas.classification import sensitivity_of, sensitivity_rank
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    SENSITIVITY_ORDER,
+    DataClassification,
+    sensitivity_of,
+    sensitivity_rank,
+)
 from trellis.schemas.pack import PackItem
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping, Sequence
 
     from trellis.schemas.classification import Sensitivity
     from trellis.schemas.pack import RejectedItem
@@ -56,9 +62,12 @@ if TYPE_CHECKING:
 #: withholding report (:mod:`trellis.retrieve.withholding`) can name it.
 SENSITIVITY_REJECTION_REASON = "sensitivity"
 
-#: ``Pack.metadata`` / ``SectionedPack.metadata`` key holding the ids this gate
-#: withheld. In-memory only: it rides the returned pack so a surface can
-#: :func:`conceal_withheld_ids`, and it is never written to ``PACK_ASSEMBLED``.
+#: ``Pack.metadata`` / ``SectionedPack.metadata`` key holding the ids a surface
+#: must not name to a below-``restricted`` caller: the ids this gate withheld,
+#: and every other rejected candidate the caller may not read
+#: (:func:`concealed_ids_metadata`). In-memory only: it rides the returned pack
+#: so a surface can :func:`conceal_withheld_ids`, and it is never written to
+#: ``PACK_ASSEMBLED``.
 SENSITIVITY_WITHHELD_IDS_KEY = "sensitivity_withheld_ids"
 
 
@@ -246,16 +255,161 @@ def conceal_withheld_ids(
     return shown_report, shown_withholding
 
 
+class CandidateIndex:
+    """Every candidate a build collected, by id, so a rejected row can be judged.
+
+    A ``RejectedItem`` carries an id and a score but no metadata, so the label
+    of a document an *earlier* gate (noise, archived, demoted, superseded)
+    rejected is unknown by the time the pack is assembled. The builder adds
+    each strategy's candidates here before any gate runs. Holds references
+    only, and nothing at all for a ``restricted`` caller, who is shown every id.
+    """
+
+    def __init__(self, clearance: Sensitivity) -> None:
+        self._clearance = clearance
+        self._by_id: dict[str, list[PackItem]] = {}
+
+    def add(self, items: Iterable[PackItem]) -> None:
+        if self._clearance == "restricted":
+            return
+        for item in items:
+            self._by_id.setdefault(item.item_id, []).append(item)
+
+    def get(self, item_id: str) -> Sequence[PackItem]:
+        return self._by_id.get(item_id, ())
+
+
+def unreadable_rejected_ids(
+    rejected: Iterable[RejectedItem],
+    candidates: CandidateIndex,
+    clearance: Sensitivity,
+    parent_verdict_cache: ParentVerdictCache | None,
+) -> list[str]:
+    """Ids of every rejected candidate a caller at ``clearance`` may not read.
+
+    The ``sensitivity`` rows (:func:`withheld_ids`) plus any row another gate
+    rejected, whatever its reason, whose candidate is above the clearance:
+    a chunk by its parent's label too, a failed parent lookup as unreadable.
+    An id counts when *any* of its collected copies is above the clearance.
+    """
+    ids = set(withheld_ids(rejected))
+    if clearance == "restricted":
+        return sorted(ids)
+    for row in rejected:
+        if row.item_id in ids:
+            continue
+        if any(
+            not permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+            for item in candidates.get(row.item_id)
+        ):
+            ids.add(row.item_id)
+    return sorted(ids)
+
+
+def concealed_ids_metadata(
+    rejected: Iterable[RejectedItem],
+    candidates: CandidateIndex,
+    clearance: Sensitivity,
+    parent_verdict_cache: ParentVerdictCache | None,
+) -> dict[str, list[str]]:
+    """The pack-metadata entry naming what a surface must not show, or ``{}``.
+
+    :func:`withheld_ids_metadata` widened from the rows this gate rejected to
+    every rejected candidate the caller cannot read (#1022), so a restricted
+    document that a per-strategy gate or supersession removed first does not
+    surface its id and score under that other reason. Absent rather than empty
+    when there is nothing to hide, for the reason given there.
+    """
+    ids = unreadable_rejected_ids(rejected, candidates, clearance, parent_verdict_cache)
+    return {SENSITIVITY_WITHHELD_IDS_KEY: ids} if ids else {}
+
+
+class SensitivityLabelError(ValueError):
+    """A ``sensitivity`` label a producer may not write.
+
+    ``message`` is text Trellis wrote, safe to show. ``data`` names the field
+    at fault (and the caller's clearance, when that is the reason), for a
+    surface that wants structured detail. ``above_clearance`` separates a
+    label the caller may not set (a permission) from a malformed request.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        data: dict[str, Any],
+        above_clearance: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.data = data
+        self.above_clearance = above_clearance
+
+
+def stamp_sensitivity(
+    metadata: Mapping[str, Any] | None,
+    sensitivity: str | None,
+    clearance: Sensitivity,
+) -> dict[str, Any]:
+    """The metadata to store, carrying the caller's ``sensitivity`` label (#194).
+
+    The one producer rule, shared by every write surface (MCP ``save_memory``
+    and ``save_knowledge``, REST ingest). No label leaves the bag untouched: an
+    unlabelled save is byte-identical to one before the parameter existed. A
+    label above the caller's own ``clearance`` is refused, since the caller
+    could then store content it cannot read back. A raw ``data_classification``
+    in ``metadata`` is refused for the same reason: it would be a second,
+    unchecked way to write the label.
+    """
+    stamped = dict(metadata or {})
+    if DATA_CLASSIFICATION_KEY in stamped:
+        msg = (
+            f"metadata may not set {DATA_CLASSIFICATION_KEY!r}; use the "
+            "sensitivity parameter"
+        )
+        raise SensitivityLabelError(
+            msg, data={"field": f"metadata.{DATA_CLASSIFICATION_KEY}"}
+        )
+    if sensitivity is None:
+        return stamped
+    if sensitivity not in SENSITIVITY_ORDER:
+        msg = (
+            f"sensitivity must be one of {list(SENSITIVITY_ORDER)}, got {sensitivity!r}"
+        )
+        raise SensitivityLabelError(msg, data={"field": "sensitivity"})
+    if sensitivity_rank(sensitivity) > sensitivity_rank(clearance):  # type: ignore[arg-type]
+        msg = (
+            f"sensitivity {sensitivity!r} is above this credential's clearance "
+            f"({clearance!r}); nothing was written. A key needs the "
+            f"{sensitivity!r} (or admin) scope to label content that high."
+        )
+        raise SensitivityLabelError(
+            msg,
+            data={"field": "sensitivity", "clearance": clearance},
+            above_clearance=True,
+        )
+    stamped[DATA_CLASSIFICATION_KEY] = DataClassification(
+        sensitivity=sensitivity,  # type: ignore[arg-type]
+        classified_by=["caller"],
+    ).model_dump(mode="json")
+    return stamped
+
+
 __all__ = [
     "SENSITIVITY_REJECTION_REASON",
     "SENSITIVITY_WITHHELD_IDS_KEY",
+    "CandidateIndex",
     "DocumentClearance",
     "OverwriteRefusedError",
+    "SensitivityLabelError",
     "conceal_withheld_ids",
+    "concealed_ids_metadata",
     "effective_sensitivity",
     "partition_by_clearance",
     "permits",
     "refuse_overwrite",
+    "stamp_sensitivity",
+    "unreadable_rejected_ids",
     "withheld_ids",
     "withheld_ids_metadata",
 ]

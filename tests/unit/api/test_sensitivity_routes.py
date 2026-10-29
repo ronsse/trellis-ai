@@ -6,9 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
-from tests.unit.retrieve.test_sensitivity import label
+from tests.unit.retrieve.test_sensitivity import _lifecycle, label
 from trellis.auth import generate_api_key
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mutate.retention import ARCHIVED_STATE
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -285,3 +286,202 @@ class TestOverwriteOfALabelledDocument:
     def test_a_new_id_is_unaffected(self, client, registry, write, writer_scopes):
         registry.knowledge.document_store.delete("doc-secret")
         assert write(client, _headers(registry, writer_scopes)).status_code == 200
+
+
+_NOISE = {"content_tags": {"signal_quality": "noise"}}
+
+
+class TestEveryRejectedCandidateIsConcealed:
+    """A restricted document an earlier gate rejected is not named either (#1022)."""
+
+    @pytest.fixture(
+        params=[
+            pytest.param(_NOISE, id="noise"),
+            pytest.param(_lifecycle(ARCHIVED_STATE), id="archived"),
+            pytest.param(_lifecycle("superseded", "doc-open"), id="superseded"),
+        ]
+    )
+    def hidden_id(self, request, registry):
+        registry.knowledge.document_store.put(
+            "doc-rejected",
+            SECRET,
+            {"title": "Rejected", **label("restricted"), **request.param},
+        )
+        return "doc-rejected"
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    @pytest.mark.parametrize("scopes", [["read"], ["read", "confidential"]])
+    def test_a_read_key_never_sees_the_id(
+        self, client, registry, hidden_id, request_body, scopes
+    ):
+        resp = _post(client, headers=_headers(registry, scopes), **request_body)
+        assert hidden_id not in resp.text
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    def test_a_restricted_key_still_sees_the_row(
+        self, client, registry, hidden_id, request_body
+    ):
+        headers = _headers(registry, ["read", "restricted"])
+        resp = _post(client, headers=headers, **request_body)
+        assert hidden_id in resp.text
+
+
+class TestEvidenceLinksAreNotAnExistenceOracle:
+    """A link to a labelled document answers as a missing one would (#194)."""
+
+    def _ingest(self, client, registry, *evidence_ids):
+        trace = {
+            "source": "agent",
+            "intent": "cite evidence",
+            "steps": [],
+            "context": {},
+        }
+        trace["evidence_used"] = [{"evidence_id": e} for e in evidence_ids]
+        resp = client.post(
+            "/api/v1/traces", json=trace, headers=_headers(registry, ["admin"])
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["trace_id"]
+
+    def _links(self, client, headers, trace_id):
+        resp = client.get(f"/api/v1/traces/{trace_id}", headers=headers)
+        assert resp.status_code == 200, resp.text
+        return resp.json()["evidence_links"]
+
+    def test_a_restricted_document_reads_as_a_missing_one(self, client, registry):
+        read = _headers(registry, ["read"])
+        secret = self._ingest(client, registry, "doc-secret")
+        missing = self._ingest(client, registry, "doc-missing")
+        assert self._links(client, read, secret) == self._links(client, read, missing)
+        assert self._links(client, read, secret) == {}
+
+    def test_an_unlabelled_document_still_links(self, client, registry):
+        trace_id = self._ingest(client, registry, "doc-open", "doc-secret")
+        links = self._links(client, _headers(registry, ["read"]), trace_id)
+        assert links == {"doc-open": {"document_id": "doc-open"}}
+
+    def test_a_restricted_key_sees_the_link(self, client, registry):
+        trace_id = self._ingest(client, registry, "doc-secret")
+        headers = _headers(registry, ["read", "restricted"])
+        assert self._links(client, headers, trace_id) == {
+            "doc-secret": {"document_id": "doc-secret"}
+        }
+
+
+class TestExploreDocumentList:
+    """The list and ``?q=`` show nothing of a document above the key (#194)."""
+
+    def _get(self, client, headers, **params):
+        resp = client.get("/api/v1/documents", params=params, headers=headers)
+        assert resp.status_code == 200, resp.text
+        return resp
+
+    def test_a_read_key_sees_no_trace_of_the_restricted_row(self, client, registry):
+        resp = self._get(client, _headers(registry, ["read"]))
+        assert "doc-secret" not in resp.text
+        assert "zebra" not in resp.text
+        assert [d["doc_id"] for d in resp.json()["documents"]] == ["doc-open"]
+        assert resp.json()["total"] == 1
+
+    def test_a_search_shows_a_read_key_nothing_of_it(self, client, registry):
+        resp = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert resp.json()["documents"] == []
+        assert resp.json()["total"] == 0
+        assert "doc-secret" not in resp.text
+
+    def test_admin_sees_the_row_in_the_list_and_the_search(self, client, registry):
+        admin = _headers(registry, ["admin"])
+        listed = self._get(client, admin)
+        assert listed.json()["total"] == 2
+        assert "doc-secret" in listed.text
+        found = self._get(client, admin, q="zebra")
+        assert [d["doc_id"] for d in found.json()["documents"]] == ["doc-secret"]
+
+    def test_a_page_is_not_short_because_a_row_was_hidden(self, client, registry):
+        store = registry.knowledge.document_store
+        for n in range(3):
+            store.put(f"doc-more-{n}", OPEN, {"title": f"More {n}"})
+        resp = self._get(client, _headers(registry, ["read"]), limit=2)
+        assert resp.json()["count"] == 2
+        assert resp.json()["total"] == 4
+        second = self._get(client, _headers(registry, ["read"]), limit=2, offset=2)
+        assert second.json()["count"] == 2
+        ids = [d["doc_id"] for d in resp.json()["documents"]]
+        ids += [d["doc_id"] for d in second.json()["documents"]]
+        assert len(set(ids)) == 4
+        assert "doc-secret" not in ids
+
+    def test_a_chunk_of_a_restricted_parent_is_hidden(self, client, registry):
+        registry.knowledge.document_store.put(
+            chunk_doc_id("doc-secret", 0), SECRET, {"title": "chunk"}
+        )
+        resp = self._get(client, _headers(registry, ["read"]), include_chunks="true")
+        assert "doc-secret" not in resp.text
+
+
+class TestRestIngestSensitivity:
+    """``POST /evidence`` labels with the rules the MCP save tools use (#194)."""
+
+    def _post(self, client, headers, evidence_id, **extra):
+        body = {
+            "evidence_id": evidence_id,
+            "evidence_type": "snippet",
+            "content": OPEN,
+            "source_origin": "test",
+            **extra,
+        }
+        return client.post("/api/v1/evidence", json=body, headers=headers)
+
+    def test_a_key_below_the_label_is_refused_and_nothing_is_written(
+        self, client, registry
+    ):
+        headers = _headers(registry, ["read", "ingest"])
+        resp = self._post(client, headers, "ev-new", sensitivity="restricted")
+        assert resp.status_code == 403
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_admin_may_label_and_the_row_carries_it(self, client, registry):
+        resp = self._post(
+            client, _headers(registry, ["admin"]), "ev-new", sensitivity="restricted"
+        )
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("ev-new")
+        assert stored["metadata"]["data_classification"]["sensitivity"] == "restricted"
+
+    def test_a_key_may_label_up_to_its_own_clearance(self, client, registry):
+        headers = _headers(registry, ["read", "ingest", "confidential"])
+        assert (
+            self._post(client, headers, "ev-a", sensitivity="confidential").status_code
+            == 200
+        )
+        assert (
+            self._post(client, headers, "ev-b", sensitivity="restricted").status_code
+            == 403
+        )
+
+    def test_an_unknown_label_is_refused(self, client, registry):
+        resp = self._post(
+            client, _headers(registry, ["admin"]), "ev-new", sensitivity="secret"
+        )
+        assert resp.status_code == 422
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_a_raw_label_in_the_body_is_not_a_way_to_write_one(self, client, registry):
+        resp = self._post(
+            client,
+            _headers(registry, ["read", "ingest"]),
+            "ev-new",
+            metadata={"data_classification": {"sensitivity": "public"}},
+        )
+        assert resp.status_code == 422
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_no_label_leaves_the_row_unlabelled(self, client, registry):
+        resp = self._post(client, _headers(registry, ["read", "ingest"]), "ev-new")
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("ev-new")
+        assert "data_classification" not in stored["metadata"]

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mutate.retention import ARCHIVED_STATE
 from trellis.retrieve.formatters import format_pack_as_markdown
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
@@ -22,6 +23,7 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     OverwriteRefusedError,
     conceal_withheld_ids,
+    concealed_ids_metadata,
     partition_by_clearance,
     refuse_overwrite,
     withheld_ids,
@@ -31,6 +33,7 @@ from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.withholding import withholding_from_payload
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
     DataClassification,
     Sensitivity,
     sensitivity_of,
@@ -277,6 +280,132 @@ class TestBuildersApplyTheGate:
         builder = PackBuilder(strategies=[_strategy("keyword", self._pool())])
         pack = builder.build("deploy checklist", clearance="restricted")
         assert sorted(i.item_id for i in pack.items) == ["open-doc", "secret-doc"]
+
+
+_NOISE = {"content_tags": {"signal_quality": "noise"}}
+
+
+def _lifecycle(state: str, successor: str | None = None) -> dict[str, Any]:
+    return {LIFECYCLE_KEY: {"state": state, "superseded_by": successor}}
+
+
+class TestConcealmentCoversEveryRejectedCandidate:
+    """An earlier gate's rejection must not leak what the clearance gate hides (#1022).
+
+    Noise, archived and superseded candidates are rejected *before* the
+    sensitivity gate runs, so their rows never carry the ``sensitivity``
+    reason. A response that strips only that reason still names a
+    restricted document by id.
+    """
+
+    @pytest.fixture(
+        params=[
+            pytest.param(_NOISE, id="noise"),
+            pytest.param(_lifecycle(ARCHIVED_STATE), id="archived"),
+            pytest.param(_lifecycle("superseded", "successor-doc"), id="superseded"),
+        ]
+    )
+    def earlier_gate(self, request: pytest.FixtureRequest) -> dict[str, Any]:
+        return dict(request.param)
+
+    def _pool(self, earlier_gate: dict[str, Any]) -> list[PackItem]:
+        return [
+            _item("open-doc"),
+            _item("successor-doc"),
+            _item("secret-doc", {**label("restricted"), **earlier_gate}),
+        ]
+
+    def test_a_flat_pack_conceals_a_restricted_row_an_earlier_gate_rejected(
+        self, earlier_gate: dict[str, Any]
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", self._pool(earlier_gate))]
+        )
+        pack = builder.build("deploy checklist", clearance="internal")
+
+        rejected = {r.item_id: r.reason for r in pack.retrieval_report.rejected_items}
+        assert rejected["secret-doc"] != SENSITIVITY_REJECTION_REASON
+        assert pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY] == ["secret-doc"]
+
+    def test_a_sectioned_pack_conceals_it_too(
+        self, earlier_gate: dict[str, Any]
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", self._pool(earlier_gate))]
+        )
+        pack = builder.build_sectioned(
+            "deploy checklist",
+            clearance="internal",
+            sections=[SectionRequest(name="All")],
+        )
+        assert pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY] == ["secret-doc"]
+
+    def test_a_restricted_clearance_records_nothing_to_conceal(
+        self, earlier_gate: dict[str, Any]
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", self._pool(earlier_gate))]
+        )
+        pack = builder.build("deploy checklist", clearance="restricted")
+        assert SENSITIVITY_WITHHELD_IDS_KEY not in pack.metadata
+
+    def test_an_unlabelled_rejected_row_stays_visible(
+        self, earlier_gate: dict[str, Any]
+    ) -> None:
+        """The transparent default: no label, no concealment."""
+        pool = [
+            _item("open-doc"),
+            _item("successor-doc"),
+            _item("plain-doc", dict(earlier_gate)),
+        ]
+        builder = PackBuilder(strategies=[_strategy("keyword", pool)])
+        pack = builder.build("deploy checklist", clearance="internal")
+        assert SENSITIVITY_WITHHELD_IDS_KEY not in pack.metadata
+        assert "plain-doc" in {r.item_id for r in pack.retrieval_report.rejected_items}
+
+    def test_a_noise_chunk_of_a_restricted_parent_is_concealed(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("parent", "classified body", label("restricted"))
+        chunk_id = chunk_doc_id("parent", 0)
+        pool = [_item("open-doc"), _item(chunk_id, dict(_NOISE))]
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", pool)], document_store=doc_store
+        )
+        pack = builder.build("deploy checklist", clearance="internal")
+        assert pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY] == [chunk_id]
+
+    def test_a_noise_chunk_whose_parent_cannot_be_read_is_concealed(self) -> None:
+        """An outage reads as restricted, as it does at the gate."""
+
+        class _Broken:
+            def get(self, _doc_id: str) -> dict[str, Any]:
+                msg = "store down"
+                raise RuntimeError(msg)
+
+        chunk_id = chunk_doc_id("parent", 0)
+        pool = [_item("open-doc"), _item(chunk_id, dict(_NOISE))]
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", pool)],
+            document_store=_Broken(),  # type: ignore[arg-type]
+        )
+        pack = builder.build("deploy checklist", clearance="internal")
+        assert pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY] == [chunk_id]
+
+
+class TestConcealedIdsMetadata:
+    def test_a_row_the_collect_seam_never_saw_is_not_judged(self) -> None:
+        """No collected copy, no label to read: the sensitivity ids alone."""
+        from trellis.retrieve.sensitivity import CandidateIndex
+        from trellis.schemas.pack import RejectedItem
+
+        rejected = [
+            RejectedItem(item_id="ghost", item_type="document", reason="noise"),
+        ]
+        out = concealed_ids_metadata(
+            rejected, CandidateIndex("internal"), "internal", ParentVerdictCache(None)
+        )
+        assert out == {}
 
 
 def _report(*rows: tuple[str, str]) -> dict[str, Any]:

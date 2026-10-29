@@ -4115,6 +4115,17 @@ paths:
       description: 'List or search documents, returning previews only.
 
 
+        A document above the key''s clearance is absent: no row, no id, no title,
+
+        and ``total`` does not count it (#194). A key below ``restricted`` is
+
+        served from a bounded scan of the store, the way a search is, so a store
+
+        of more than :data:`_SEARCH_SCAN_LIMIT` rows reports ``total_exact: false``
+
+        for such a key.
+
+
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
 
         ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -4618,7 +4629,12 @@ paths:
 
         An ``evidence_id`` that already names a labelled document is refused (409):
 
-        the write carries no label, so it would replace the row and downgrade it.'
+        the write carries no label, so it would replace the row and downgrade it.
+
+
+        An optional ``sensitivity`` labels the stored document. The key needs that
+
+        clearance itself (403 otherwise), and an unknown label is a 422.'
       operationId: ingest_evidence_api_v1_evidence_post
       requestBody:
         content:
@@ -6800,7 +6816,11 @@ paths:
 
         ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
 
-        neither, or with an empty ``evidence_id``, has no entry.
+        neither, or with an empty ``evidence_id``, has no entry. A document above
+
+        the caller''s clearance counts as no document, so the links cannot tell a
+
+        labelled record from a missing one.
 
         ``evidence_links`` is ``null`` when the knowledge stores cannot be read.'
       operationId: get_trace_api_v1_traces__trace_id__get
