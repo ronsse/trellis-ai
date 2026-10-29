@@ -17,8 +17,10 @@ who lacks the scope. A *malformed* label reads ``restricted``
 
 **Enforced where PackBuilder collects, not per strategy**, for the reason in
 :mod:`trellis.retrieve.lifecycle`: the strategy set is open. It runs over the
-merged pool after supersession, so a withheld successor does not un-supersede
-its loser.
+merged pool after supersession. Supersession itself skips a successor the
+caller cannot read (:func:`reader_for`), so a restricted successor withholds
+no loser the caller may read and a below-clearance pack is the pack built
+without it.
 
 **A chunk inherits its parent's label.** A chunk row carries its own metadata
 and none of the parent's later labels, so :func:`effective_sensitivity` takes
@@ -41,6 +43,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
@@ -52,11 +56,13 @@ from trellis.schemas.classification import (
 from trellis.schemas.pack import PackItem
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from trellis.schemas.classification import Sensitivity
     from trellis.schemas.pack import RejectedItem
     from trellis.stores.base.document import DocumentStore
+
+logger = structlog.get_logger(__name__)
 
 #: ``RejectedItem.reason`` recorded when this gate removes an item, so the
 #: withholding report (:mod:`trellis.retrieve.withholding`) can name it.
@@ -112,6 +118,25 @@ def partition_by_clearance(
     return kept, withheld
 
 
+def reader_for(
+    clearance: Sensitivity, parent_verdict_cache: ParentVerdictCache | None = None
+) -> Callable[[PackItem], bool] | None:
+    """The predicate "may a caller at ``clearance`` read this item", or ``None``.
+
+    :func:`partition_by_clearance`'s test, for a gate that must ask the same
+    question before the withholding step (supersession: an item the caller
+    cannot read must not suppress one it can). ``None`` for ``restricted``,
+    which reads everything, so the trusted-local path pays no parent reads.
+    """
+    if clearance == "restricted":
+        return None
+
+    def _readable(item: PackItem) -> bool:
+        return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+
+    return _readable
+
+
 class DocumentClearance:
     """:func:`partition_by_clearance`'s predicate over a stored document.
 
@@ -136,6 +161,36 @@ class DocumentClearance:
         if self.clearance == "restricted":
             return True
         return permits(self.clearance, self.sensitivity(doc_id, metadata))
+
+
+def readable_ids(
+    document_store: DocumentStore, ids: Iterable[str], clearance: Sensitivity
+) -> list[str]:
+    """The ``ids`` a caller at ``clearance`` may read, in order.
+
+    For a surface that would otherwise hand a caller ids lifted from a pack it
+    did not build (the feedback attribution check): the same predicate the
+    pack gate and ``get_items`` use, a chunk judged by its parent. An id with
+    no document row is no verdict (a graph node, a trace), as it is for
+    ``get_items``. A store that raises is unreadable: an outage must not read
+    as permission. ``restricted`` reads everything without touching the store.
+    """
+    if clearance == "restricted":
+        return list(ids)
+    gate = DocumentClearance(document_store, clearance)
+    readable: list[str] = []
+    for item_id in ids:
+        try:
+            doc = document_store.get(item_id)
+        except Exception:
+            # GRACEFUL-DEGRADATION: fail closed. An id the store cannot answer
+            # for is withheld from the caller; the surface's own check still
+            # fails open on an empty answer, so no write is refused for it.
+            logger.warning("readable_ids_fetch_failed", item_id=item_id)
+            continue
+        if gate.permits(item_id, (doc or {}).get("metadata")):
+            readable.append(item_id)
+    return readable
 
 
 class OverwriteRefusedError(ValueError):
@@ -407,6 +462,8 @@ __all__ = [
     "effective_sensitivity",
     "partition_by_clearance",
     "permits",
+    "readable_ids",
+    "reader_for",
     "refuse_overwrite",
     "stamp_sensitivity",
     "unreadable_rejected_ids",

@@ -3712,6 +3712,15 @@ stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
 
+Two answers no longer reveal a document the caller cannot read. A superseded document whose declared successor the caller may
+not read is served, as it would be if the successor did not exist (the
+successor is judged the way the pack's own gate judges it: by its own label, and
+a chunk by its parent's too). With
+`TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
+MCP `record_feedback` names, and counts, only the served ids the caller may
+read; a pack that served none reads as an unknown pack and the call is
+recorded. A trusted-local caller sees every id.
+
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
 
