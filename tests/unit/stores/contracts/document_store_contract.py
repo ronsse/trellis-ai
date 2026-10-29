@@ -33,6 +33,8 @@ Subclass shape::
 
 from __future__ import annotations
 
+import sys
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -276,6 +278,28 @@ class DocumentStoreContractTests:
         first_ids = {d["doc_id"] for d in first_page}
         second_ids = {d["doc_id"] for d in second_page}
         assert first_ids.isdisjoint(second_ids)
+
+    def test_list_documents_breaks_a_created_at_tie_by_doc_id(
+        self, store: DocumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows sharing a ``created_at`` page in a fixed order: no repeat, no skip.
+
+        The clock is pinned in the store's own module (both backends read
+        ``utc_now`` there), so every row lands on one timestamp. The ids go in
+        out of order so insertion order is not the answer by accident.
+        """
+        module = sys.modules[type(store).__module__]
+        pinned = datetime(2026, 1, 1, tzinfo=UTC)
+        monkeypatch.setattr(module, "utc_now", lambda: pinned)
+        ids = ["d3", "d0", "d6", "d2", "d5", "d1", "d4"]
+        for doc_id in ids:
+            store.put(doc_id, f"content {doc_id}")
+
+        paged: list[str] = []
+        for offset in range(0, len(ids) + 3, 3):
+            paged += [d["doc_id"] for d in store.list_documents(limit=3, offset=offset)]
+
+        assert paged == sorted(ids, reverse=True)
 
     # ------------------------------------------------------------------
     # include_chunks — chunk documents are excluded on request (#385)

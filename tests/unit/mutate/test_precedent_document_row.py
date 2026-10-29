@@ -43,7 +43,11 @@ from trellis.mutate.handlers import (
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import GraphSearch, KeywordSearch, SemanticSearch
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
+    sensitivity_of,
+)
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -220,6 +224,66 @@ class TestPromotion:
         assert not registry.operational.event_log.get_events(
             event_type=EventType.PRECEDENT_PROMOTED
         )
+
+
+class TestRepromotionKeepsTheStoredLabel:
+    """A re-promotion rebuilds the row's metadata from the node.
+
+    The node holds no sensitivity label, so a rewrite built from it alone
+    would read a labelled row as ``internal`` again. The stored label is
+    carried over, on the row and (embedding on) on its vector row.
+
+    Defective subject: drop the ``stored_label`` copy in
+    ``_write_precedent_document`` and the label is gone after the second
+    promotion.
+    """
+
+    @staticmethod
+    def _label(registry: StoreRegistry, level: str) -> None:
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            Command(
+                operation=Operation.CLASSIFICATION_SET,
+                args={"doc_id": NODE_ID, "sensitivity": level},
+                requested_by="test",
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+
+    def test_the_label_survives_a_trusted_repromotion(
+        self, registry: StoreRegistry
+    ) -> None:
+        assert _promote(registry) == CommandStatus.SUCCESS
+        self._label(registry, "confidential")
+        stored = _document(registry)["metadata"][DATA_CLASSIFICATION_KEY]
+
+        assert _promote(registry, create_node=False) == CommandStatus.SUCCESS
+
+        metadata = _document(registry)["metadata"]
+        assert metadata[DATA_CLASSIFICATION_KEY] == stored
+        assert sensitivity_of(metadata) == "confidential"
+        # The rest of the bag is still rebuilt from the node.
+        assert metadata["document_form"] == "precedent"
+        assert metadata["title"] == TITLE
+
+    def test_the_vector_row_keeps_the_label_too(
+        self, registry: StoreRegistry, embed_on: None
+    ) -> None:
+        assert _promote(registry) == CommandStatus.SUCCESS
+        self._label(registry, "restricted")
+
+        assert _promote(registry, create_node=False) == CommandStatus.SUCCESS
+
+        row = registry.knowledge.vector_store.get(NODE_ID)
+        assert row is not None
+        assert sensitivity_of(row["metadata"]) == "restricted"
+
+    def test_an_unlabelled_row_is_left_unlabelled(
+        self, registry: StoreRegistry
+    ) -> None:
+        assert _promote(registry) == CommandStatus.SUCCESS
+        assert _promote(registry, create_node=False) == CommandStatus.SUCCESS
+
+        assert DATA_CLASSIFICATION_KEY not in _document(registry)["metadata"]
 
 
 class TestPromotionOutsideTheNamespace:

@@ -450,8 +450,11 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         include_chunks: bool = True,
     ) -> list[dict[str, Any]]:
         where, params = chunk_exclusion_clause("?", include_chunks=include_chunks)
+        # ``doc_id`` breaks a ``created_at`` tie, so an OFFSET-paged scan neither
+        # repeats nor skips rows that share a timestamp.
         cursor = self._conn.execute(
-            f"SELECT * FROM documents{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM documents{where}"
+            " ORDER BY created_at DESC, doc_id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         )
         return [self._row_to_dict(row) for row in cursor.fetchall()]

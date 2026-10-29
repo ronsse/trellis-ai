@@ -367,11 +367,13 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
     ) -> list[dict[str, Any]]:
         where, params = chunk_exclusion_clause("%s", include_chunks=include_chunks)
         with self._conn() as conn, conn.cursor() as cur:
+            # ``doc_id`` breaks a ``created_at`` tie, so an OFFSET-paged scan
+            # neither repeats nor skips rows that share a timestamp.
             cur.execute(
                 "SELECT doc_id, content, content_hash, metadata, "
                 "created_at, updated_at "
                 f"FROM documents{where}"
-                " ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                " ORDER BY created_at DESC, doc_id DESC LIMIT %s OFFSET %s",
                 (*params, limit, offset),
             )
             rows = cur.fetchall()
