@@ -341,7 +341,7 @@ which is in progress. The open set is
 its labels and its latest owner comment. This file keeps no list, because each list it kept
 went stale.
 
-### Closed work *(historical)*
+### Historical context
 
 **Waves 1, 1b and 2 are closed**, along with A3 and C1. What follows is **historical
 context** — do not dispatch from it without checking the corpus.
