@@ -3893,7 +3893,9 @@ label, but without any id the caller may not read in any of them: on `GET
 /api/v1/graph/history` (every version), `GET /api/v1/entities/{id}` (the entity
 and every node of its `subgraph`), `GET /api/v1/graph/search` (every hit's
 `properties`), MCP `get_graph` (the root and each neighbour), MCP `get_items` on an
-entity id, and the entities `build_file_context` returns. A pointer key is removed rather than blanked, `lifecycle.state` and every
+entity id, the entities `build_file_context` returns, and the observation reads: `GET
+/api/v1/observations` and MCP `query_observations` (every observation's
+`evidence_ref`, which is normally a document id). A pointer key is removed rather than blanked, `lifecycle.state` and every
 other property stay, and a `document_ids` member that is not a string, a
 `document_ids` that is not a list and an `evidence_ref` that is not a string are
 left as stored. The store judges the ids as above, in one pass over the distinct
@@ -3907,9 +3909,16 @@ that resolves through the ref (a loser whose successor a node names) is decided
 before the drop. `GET /api/v1/graph/search/facets` counts nodes per `node_type` and
 names no property, so there is nothing in it to conceal, and a concealed pointer
 never removes a node, so its counts and `/graph/search`'s `total` are the same for
-every caller. An edge's own `evidence_ref` field (a top-level field of an edge in
-the `subgraph` of `GET /api/v1/entities/{id}`, not a node property) does not
-conceal yet and is served as stored.
+every caller. An edge is concealed on the same terms in the `subgraph` of `GET
+/api/v1/entities/{id}`: a string top-level `evidence_ref` (the provenance
+column, not a node property) is dropped when it names a document the caller may
+not read, and so is a pointer inside its `properties` (`evidence_ref`,
+`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`); every other
+field and property stays, and a value that is not a string is left as stored. The
+entity, its nodes and its edges are judged in one pass, so a response costs one
+store read per distinct id whichever kind of row names it. MCP `get_graph` reads
+the same edges and renders only their endpoints and type, so it names no edge
+pointer.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is

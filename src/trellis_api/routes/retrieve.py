@@ -19,6 +19,7 @@ from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
     conceal_document_rows,
+    conceal_graph_pointers,
     conceal_node_pointers,
     conceal_withheld_ids,
 )
@@ -487,7 +488,8 @@ def get_entity(
     A node carries no label, so the entity and every node of the subgraph are
     served; one whose ``document_ids``, ``evidence_ref`` property or
     ``lifecycle.superseded_by`` names a document the caller may not read is
-    served without that id. An edge's own ``evidence_ref`` is served as stored.
+    served without that id. An edge is served whole too, without an
+    ``evidence_ref``, or a property pointer, that names such a document.
     """
     registry = get_registry()
     node = registry.knowledge.graph_store.get_node(entity_id)
@@ -497,16 +499,18 @@ def get_entity(
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
-    # One judgement over the entity and the subgraph's nodes together.
-    node, *neighbours = conceal_node_pointers(
+    # One judgement over the entity, the subgraph's nodes and its edges together.
+    nodes, edges = conceal_graph_pointers(
         [node, *subgraph["nodes"]],
+        subgraph["edges"],
         registry.knowledge.document_store,
         request_clearance(ctx),
     )
+    node, *neighbours = nodes
     return {
         "status": "ok",
         "entity": node,
-        "subgraph": {**subgraph, "nodes": neighbours},
+        "subgraph": {**subgraph, "nodes": neighbours, "edges": edges},
     }
 
 
