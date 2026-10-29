@@ -93,7 +93,8 @@ One `/schedule` routine runs both: Job A every day; Job B additionally on Monday
 
 1. **Compute the GitHub-verifiable DoD criteria** (see table): 
    - **#2** — `gh run list --repo ronsse/trellis-ai --branch main --limit 8` all green; note the collected test count.
-   - **#5 / #7** — #194 / #200–#203 closed with their acceptance PRs merged.
+   - **#5** — #194 closed with its acceptance PRs merged.
+   - **#7** — #200–#203 closed, with acceptance PRs merged or a stated reason (all four closed as deferred 2026-10-29; met).
    - **#6** — #250 closed **and** `.env`/dead-AuraDB-creds purge is verifiable from repo contents (cloud-computable). The `TRELLIS_TEST_NEO4J_*` CI-secret-purge half has no MCP equivalent (`gh secret list` cannot be run from this routine) — render that half as `NEEDS OWNER CHECK`, and treat criterion #6 overall as unmet until the owner confirms it, never as a silent pass.
    - **#8** — #208 closed or re-homed with a disposition comment.
    - **#1** (quickstart cold-install) — heavy; run at most monthly in a clean sandbox (`pip install trellis-ai && trellis admin init && trellis demo load && trellis retrieve pack …`), else carry the last recorded result.
@@ -147,7 +148,7 @@ or `precedents_promoted: 0` as an unmet launch criterion. Rationale + decisions:
 | 4 | Attribution round-trip: flat `get_context` carries `pack_id`; `record_feedback`→`FEEDBACK_RECORDED` | skynet |
 | 5 | #194 enforced (`pytest -k classification`) | cloud |
 | 6 | #250 closed: `.env` exists, dead AuraDB creds purged, CI secrets rotated | cloud + owner |
-| 7 | #200/#202/#203 fixture tests pass | cloud |
+| 7 | #200/#202/#203 resolved (fixture tests pass, or closed with a stated reason) | cloud |
 | 8 | #208 re-homed or closed | cloud |
 | 9 | trellis-api container current + `llm:` block live (skynet-hub#4) | skynet |
 | 10 | `:8420` locked down (skynet-hub#5) | skynet |

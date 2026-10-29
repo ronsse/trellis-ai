@@ -75,8 +75,8 @@ stream at all.**
 - Acceptance: `trellis admin write-config --format json` and `GET /api/version` on the
   running API report a commit that `git branch --contains` can resolve on `main`.
 
-**N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (`owner-only`, needs
-1Password + the Neo4j console) and #194 classification enforcement (`keystone`, `ready`
+**N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (closed 2026-09-30, owner
+confirmed the cleanup) and #194 classification enforcement (`keystone`, `ready`
 since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21; its first slice, the
 read-side floor, is in progress.
 

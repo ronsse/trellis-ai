@@ -81,7 +81,7 @@ LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec c
   judged stage targets a local model first; no judged stage may be designed to require
   frontier-scale reasoning; every judged op is logged with its downstream outcome as a
   training pair — the memory system generates its own fine-tuning corpus.
-- **Now** — Productionization (roadmap §3.H): the three retrieval defects + feedback/evidence plumbing + the auto-capture keystone landed 2026-07-14 (§3.H.0); what remains is the security floor (#250 credential purge, #194 classification enforcement, unblocked 2026-10-29 with its first slice in progress). The query-history curation primitives (#200–#203) were deferred 2026-10-29 until the data-platform pilot resumes.
+- **Now** — Productionization (roadmap §3.H): the three retrieval defects + feedback/evidence plumbing + the auto-capture keystone landed 2026-07-14 (§3.H.0); what remains is the security floor (#194 classification enforcement; #250's credential purge closed 2026-09-30), unblocked 2026-10-29 with its first slice in progress). The query-history curation primitives (#200–#203) were deferred 2026-10-29 until the data-platform pilot resumes.
 - **Next** — the auto-capture keystone (#255) landed 2026-07-14, so the live loop is now wired end-to-end; watch it *un-starve* (advisories / lessons > 0) over the 30-day window. Then §G.4 corpus handlers strictly by observed dogfood need; Phase F F1 harness when the owner schedules it.
 - **Not doing** — the anti-scope list; this project has scope-creep gravity:
   - **No new storage backends.** FalkorDB (SSPL), Kuzu (single-writer), Neptune (cost) already rejected — `adr-arcadedb-blessed-substrate.md`.
