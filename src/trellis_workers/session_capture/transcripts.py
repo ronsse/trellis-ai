@@ -59,10 +59,13 @@ Claude Code writes one JSONL file per session under
   object, and :func:`_agent_type_digest` reads it for its ``agentType`` alone:
   the sidecar's ``description`` is free text the dispatcher wrote and its
   ``toolUseId`` an id, so neither is read into anything, kept or logged. Only
-  a 12-character SHA-256 prefix of the type survives, so the join holds an
-  opaque handle that lets the holdout tell one type from another and no
-  name. A missing, unreadable or malformed sidecar gives ``None``, never an
-  error.
+  a 12-character SHA-256 prefix of the type survives, so the join holds a
+  pseudonymous handle that lets the holdout tell one type from another and
+  no name. It is pseudonymous, not anonymous: a small known vocabulary of
+  types is reversible by trying names, so the digest stays in the local event
+  log and never reaches a report. A missing, unreadable or malformed sidecar
+  gives ``None``, never an error. A session parsed again after its sidecar
+  has gone gets a new join with ``None``, which shadows the earlier one.
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
@@ -425,8 +428,10 @@ def _agent_type_digest(path: Path) -> str | None:
     ``agent-<id>.jsonl``: an object with ``agentType``, ``description``,
     ``spawnDepth`` and ``toolUseId``. Only ``agentType`` is picked out; the
     rest is parsed along with it and dropped unread. The first 12 hex
-    characters of its SHA-256 are returned, enough to tell one type from
-    another and not a name.
+    characters of its SHA-256 are returned: enough to tell one type from
+    another, and pseudonymous rather than anonymous, since a small known
+    vocabulary of types is reversible by trying names. The digest therefore
+    stays in the local event log.
 
     ``None`` when the sidecar is absent, unreadable, not a JSON object, or
     has no non-empty string ``agentType``. None of those is an error, and the

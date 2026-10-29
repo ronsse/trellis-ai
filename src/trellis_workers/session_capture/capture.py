@@ -371,8 +371,10 @@ def _record_pack_join(
     The payload's ``covariates`` are two pre-treatment facts the holdout's
     secondary analysis adjusts for: ``brief_chars``, the length of the first
     user turn (a sub-agent's brief), and ``agent_type_digest``, a SHA-256
-    prefix of the type its sidecar names. A count and an opaque handle, never
-    the text or the name. See :meth:`SessionDigest.covariates_payload`.
+    prefix of the type its sidecar names. A count and a pseudonymous handle
+    (a short hash of a small vocabulary can be reversed by trying names, so it
+    stays in the local event log), never the text or the name. See
+    :meth:`SessionDigest.covariates_payload`.
 
     A transcript with no turn and no tool call gets no join: a blank file or
     a workflow journal is not a session, and an empty join there would claim

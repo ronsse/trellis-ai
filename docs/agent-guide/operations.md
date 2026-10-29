@@ -3435,23 +3435,57 @@ those. `no_retrieval` is split into
 `get_context` no longer reads as never called. The post-hoc share is the
 fraction of decided tasks whose first retrieval came after hook feedback, after
 the first commit or in the last tenth of the session's tool calls; it is `null`
-with its reason when no task carries every position. The report also carries
-the pre-registered covariate-adjusted permutation as a secondary analysis,
-`covariate_adjusted`, which decides nothing and leaves the primary unchanged.
-Capture records two pre-treatment covariates in each join's `covariates` block:
-`brief_chars`, the length of the first user turn it counts as a person's, and
-`agent_type_digest`, a 12-character hash of the sub-agent's type (no text is
-kept). The outcome is regressed on the stratum indicators and `log1p` of the
-brief length (`brief_length`, pre-registered), then again with the agent type's
-indicators (`brief_length_and_agent_type`, exploratory; types with fewer than
-3 tasks are pooled into one level), and the permutation test and bootstrap run
-on the residuals. The arm is never in the fit, the bootstrap holds the fitted
-coefficients fixed, and a task missing a covariate is dropped and counted in
-`n_missing_covariate`, never imputed. An adjustment reads `not_measurable` with
-its reason when no task has the covariates, fewer than 4 residual degrees of
-freedom remain, or no stratum holds both arms; joins written before capture
-recorded the block stay missing until their session is parsed again. The
-guardrails block
+with its reason when no task carries every position.
+
+The report also carries the pre-registered covariate-adjusted permutation as a
+secondary analysis, `covariate_adjusted`. It decides nothing: the primary, the
+power simulation and the funnel do not depend on it, and its own verdict is
+always `secondary_not_decisive`, never the primary's. Capture records the two
+pre-treatment covariates in each join's `covariates` block: `brief_chars`, the
+length of the first user turn it counts as a person's, and `agent_type_digest`,
+a 12-character pseudonymous hash of the sub-agent's type that stays in the
+local event log (no text is kept, and the report carries neither the digest nor
+an id). The exact specification:
+
+- **Outcome.** The primary's outcome (`--outcome`, default `log1p_turns`), one
+  value per analysed task.
+- **Subset.** The analysed tasks whose join carries every covariate the
+  adjustment needs. The rest are dropped, counted in `n_missing_covariate` and
+  never imputed, so `n_used` of `funnel.analysed` tasks are used, and an
+  adjusted figure's gap to the primary mixes the adjustment with the subset.
+  `unadjusted_same_subset` is the primary's test run on the same tasks' raw
+  outcomes: the gap between it and the adjusted figure is the adjustment alone.
+- **Covariates.** `log1p(brief_chars)` (`brief_length`, pre-registered), and
+  that plus the sub-agent type (`brief_length_and_agent_type`, exploratory).
+- **Fit.** Least squares of the outcome on one indicator per stratum (parent
+  session x ISO week), the covariates and, for the agent type, one indicator per
+  level. Types with fewer than 3 tasks pool into a single level first, and the
+  most common level (ties by sort order) is the reference and is dropped. The
+  arm is never a column of the fit, so the residuals do not depend on the
+  assignment.
+- **Test.** The primary's within-stratum permutation test, with its statistic
+  and strata, run on the residuals. It is exact under the sharp null because the
+  residuals are the same whichever way the arms are shuffled. The interval is
+  the primary's stratified bootstrap of the residual difference with the fitted
+  coefficients held fixed, so it ignores their uncertainty and is narrower than
+  a refit would give. The text output says so on the Secondary line.
+- **Balance gate.** `arm_balance_r2` is the share of the arm indicator's
+  within-stratum variance the whole design explains (the drop in its residual
+  sum of squares from strata alone to the full design, over the strata-alone
+  figure). Above 0.9 the covariates stand in for the arm, the adjusted
+  difference is not identified, and the adjustment reads `not_measurable` with
+  that reason; `unadjusted_same_subset` is still reported.
+- **Other refusals.** `not_measurable` also when no analysed task has the
+  covariates, when fewer than 4 residual degrees of freedom remain (tasks used
+  less the design's rank), or when no stratum holds both arms. Joins written
+  before capture recorded the block stay missing until their session is parsed
+  again.
+- **Reading the means.** An adjusted run's `mean_residual_served` and
+  `mean_residual_withheld` are means of residuals, not of the outcome, and sit
+  under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
+  the unadjusted run, where they are outcome means.
+
+The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
 p-value or verdict: PRs created and any commit (each left out when it is the
 primary), log1p commits, tool errors and the re-call rate (tasks whose capture

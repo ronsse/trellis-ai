@@ -165,8 +165,10 @@ def test_parsed_covariates_are_read_by_both_adjustments(
     log: HoldoutLog, tmp_path: Path
 ) -> None:
     """Sixteen sessions in two parents. Every fourth has no sidecar, so the
-    brief-length fit uses all sixteen and the agent-type fit twelve."""
-    types = {0: "reviewer", 1: "planner", 2: "reviewer"}
+    brief-length fit uses all sixteen and the agent-type fit twelve. The
+    planners are spread over both arms and both parents, so the agent type
+    does not stand in for the arm."""
+    planners = {1, 6, 9, 12}
     for index in range(16):
         path = tmp_path / f"s{index}.jsonl"
         write_transcript(
@@ -176,11 +178,11 @@ def test_parsed_covariates_are_read_by_both_adjustments(
                 *_served(),
             ],
         )
-        if index % 4 in types:
+        if index % 4 != 3:
             path.with_name(f"s{index}.meta.json").write_text(
                 json.dumps(
                     {
-                        "agentType": types[index % 4],
+                        "agentType": "planner" if index in planners else "reviewer",
                         "description": "a generic piece of free text",
                         "toolUseId": "fake-tool-use",
                     }
@@ -214,6 +216,8 @@ def test_parsed_covariates_are_read_by_both_adjustments(
     assert both.n_missing_covariate == 4
     # Eight reviewer tasks and four planner tasks: neither is pooled.
     assert both.agent_type_levels == 2
+    assert both.arm_balance_r2 is not None
+    assert both.arm_balance_r2 < 0.5
     dumped = report.model_dump_json()
     assert "reviewer" not in dumped
     assert "planner" not in dumped

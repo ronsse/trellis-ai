@@ -33,7 +33,7 @@ from tests.unit.analyze._holdout_fixture import (
     timing_payload,
 )
 from trellis.analyze import holdout as holdout_analysis
-from trellis.analyze.holdout import analyze_holdout
+from trellis.analyze.holdout import SECONDARY_VERDICT, analyze_holdout
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.analyze import holdout
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
@@ -167,6 +167,7 @@ def test_rules_the_analysis_cannot_apply_are_printed_in_both_formats(
         "Secondary (covariate-adjusted, not decisive): brief-length (pre-registered) "
         "not measurable: no analysed task's join records the covariates" in flat
     )
+    assert "CI ignores coefficient uncertainty" not in flat
     assert payload["covariate_adjusted"]["status"] == "not_measurable"
 
 
@@ -670,6 +671,24 @@ def test_the_covariate_adjusted_block_is_printed_in_both_formats(
     assert first < second
     assert "served minus withheld" in flat[first:second]
     assert "24 tasks used, 0 missing a covariate" in flat[second:]
+    # The caveat is on the Secondary line itself, once per adjustment.
+    assert flat.count("(CI ignores coefficient uncertainty)") == 2
+    assert flat.index("(CI ignores coefficient uncertainty)") < flat.index(
+        "adjusted: served minus withheld"
+    )
+    assert flat.count("unadjusted, same tasks: served minus withheld") == 2
+    assert flat.count("arm balance R2") == 2
+    for adjustment in block["adjustments"]:
+        assert adjustment["arm_balance_r2"] is not None
+        assert adjustment["unadjusted_same_subset"]["verdict"] == SECONDARY_VERDICT
+        assert adjustment["inference"]["verdict"] == SECONDARY_VERDICT
+        assert adjustment["inference"]["mean_served"] is None
+        assert adjustment["inference"]["mean_withheld"] is None
+        assert adjustment["inference"]["mean_residual_served"] is not None
+        assert adjustment["unadjusted_same_subset"]["mean_served"] is not None
+    # The only verdict a reader finds in the text is the primary's.
+    assert flat.count("Inference:") == 1
+    assert "secondary_not_decisive" not in flat
     for digest in digests:
         assert digest not in text.stdout
         assert digest not in machine.stdout
