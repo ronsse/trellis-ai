@@ -92,6 +92,13 @@ def timing_payload(
     }
 
 
+def covariates_payload(
+    *, brief_chars: Any = 400, agent_type: Any = "aaaaaaaaaaaa"
+) -> dict[str, Any]:
+    """A ``SessionDigest.covariates_payload()`` dict; the defaults are fake."""
+    return {"brief_chars": brief_chars, "agent_type_digest": agent_type}
+
+
 def legacy_timing_payload(*, hook_before: bool | None) -> dict[str, Any]:
     """A ``retrieval_timing`` as capture wrote it before it kept commits.
 
@@ -220,12 +227,14 @@ class HoldoutLog:
         pack_ids_unparsed: int = 0,
         source_system: str = SOURCE_SYSTEM,
         timing: dict[str, Any] | None = None,
+        covariates: dict[str, Any] | None = None,
     ) -> None:
         """Append one ``CAPTURE_SESSION_PACKS`` join for ``task_id``.
 
         ``retrieval_results`` defaults to one result per pack id. ``timing``
-        is the join's ``retrieval_timing``; left ``None`` the join is one
-        from before capture recorded it.
+        is the join's ``retrieval_timing`` and ``covariates`` its
+        ``covariates``; left ``None`` the join is one from before capture
+        recorded it.
         """
         payload: dict[str, Any] = {
             "pack_ids": list(pack_ids),
@@ -241,6 +250,8 @@ class HoldoutLog:
             payload["outcome"] = outcome
         if timing is not None:
             payload["retrieval_timing"] = timing
+        if covariates is not None:
+            payload["covariates"] = covariates
         self.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SESSION_PACKS,
@@ -272,6 +283,7 @@ class HoldoutLog:
         sectioned: bool = False,
         with_outcome: bool = True,
         timing: dict[str, Any] | None = None,
+        covariates: dict[str, Any] | None = None,
     ) -> str:
         """One task: a pack per entry of ``arms``, a minute apart, then its join.
 
@@ -311,6 +323,7 @@ class HoldoutLog:
             parent=parent,
             outcome=outcome,
             timing=timing,
+            covariates=covariates,
         )
         return task_id
 
