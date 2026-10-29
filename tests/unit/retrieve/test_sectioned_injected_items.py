@@ -108,7 +108,9 @@ def _payload(event_log: SQLiteEventLog, pack_id: str) -> dict[str, Any]:
 
 
 def _sectioned_payload(event_log: SQLiteEventLog) -> tuple[str, dict[str, Any]]:
-    pack = _builder(event_log).build_sectioned("rotate keys", sections=_SECTIONS)
+    pack = _builder(event_log).build_sectioned(
+        "rotate keys", sections=_SECTIONS, clearance="restricted"
+    )
     return pack.pack_id, _payload(event_log, pack.pack_id)
 
 
@@ -140,7 +142,7 @@ class TestEmit:
     def test_a_row_is_the_flat_row_plus_section(
         self, event_log: SQLiteEventLog
     ) -> None:
-        flat = _builder(event_log).build("rotate keys")
+        flat = _builder(event_log).build("rotate keys", clearance="restricted")
         flat_row = _payload(event_log, flat.pack_id)["injected_items"][0]
         _, payload = _sectioned_payload(event_log)
 
@@ -163,7 +165,7 @@ class TestEmit:
         self, event_log: SQLiteEventLog
     ) -> None:
         pack = _builder(event_log, rate=1.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         payload = _payload(event_log, pack.pack_id)
 
@@ -181,7 +183,7 @@ class TestPredicate:
         assert is_sectioned_payload({"sections": []}) is True
 
     def test_a_flat_payload_is_not(self, event_log: SQLiteEventLog) -> None:
-        flat = _builder(event_log).build("rotate keys")
+        flat = _builder(event_log).build("rotate keys", clearance="restricted")
         assert is_sectioned_payload(_payload(event_log, flat.pack_id)) is False
         assert is_sectioned_payload({"injected_items": [{"item_id": "a"}]}) is False
         assert is_sectioned_payload({"sections": "no"}) is False
@@ -327,6 +329,7 @@ class TestSameNamedSections:
                 _named("dup", "reference", 2),
                 _named("dup", "domain_knowledge", 1),
             ],
+            clearance="restricted",
         )
         return pack, pack.pack_id
 
@@ -358,6 +361,7 @@ class TestSameNamedSections:
         pack = _builder(event_log).build_sectioned(
             "rotate keys",
             sections=[_named("dup", "reference", 1), _named("dup", "reference", 1)],
+            clearance="restricted",
         )
         rows = _payload(event_log, pack.pack_id)["injected_items"]
 

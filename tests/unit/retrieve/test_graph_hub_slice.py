@@ -159,7 +159,7 @@ class TestHubSeedKeepsItsPrecedent:
         builder = PackBuilder(
             strategies=[GraphSearch(graph, seed_extractor=_Extractor([SEED]))]
         )
-        pack = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
         assert PRECEDENT in {i.item_id for i in pack.items}
 
     def test_a_seed_the_store_returns_late_is_not_dropped(self) -> None:
@@ -357,7 +357,9 @@ class TestADemotedPrecedentTakesNoPrioritySlot:
                 GraphSearch(self._hub_store(state), seed_extractor=_Extractor([SEED]))
             ]
         )
-        pack = builder.build("anything", limit_per_strategy=LIMIT)
+        pack = builder.build(
+            "anything", limit_per_strategy=LIMIT, clearance="restricted"
+        )
         ids = [i.item_id for i in pack.items]
         assert len(ids) == LIMIT
         assert not [i for i in ids if i.startswith("precedent://dead")]

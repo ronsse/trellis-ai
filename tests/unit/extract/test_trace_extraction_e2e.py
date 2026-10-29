@@ -114,7 +114,9 @@ class TestPackGate:
             event_log=registry.operational.event_log,
         )
         pack = builder.build(
-            intent="bash", budget=PackBudget(max_items=25, max_tokens=4000)
+            intent="bash",
+            budget=PackBudget(max_items=25, max_tokens=4000),
+            clearance="restricted",
         )
         assert "tool:bash" not in {item.item_id for item in pack.items}
 
@@ -132,6 +134,7 @@ class TestPackGate:
             intent="bash",
             budget=PackBudget(max_items=25, max_tokens=4000),
             include_structural=True,
+            clearance="restricted",
         )
         assert "tool:bash" in {item.item_id for item in pack.items}
 

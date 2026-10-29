@@ -769,7 +769,7 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         assert row["vector"] == pytest.approx([0.1, 0.2, 0.3])
 
         builder = PackBuilder(strategies=[self._semantic_strategy(registry)])
-        pack = builder.build(intent="pooling pattern")
+        pack = builder.build(intent="pooling pattern", clearance="restricted")
         assert node_id not in [item.item_id for item in pack.items]
 
     def test_reinstate_re_syncs_the_vector_row_and_the_seam_serves_it_again(
@@ -793,7 +793,7 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         assert row["metadata"][LIFECYCLE_KEY]["state"] == "current"
 
         builder = PackBuilder(strategies=[self._semantic_strategy(registry)])
-        pack = builder.build(intent="pooling pattern")
+        pack = builder.build(intent="pooling pattern", clearance="restricted")
         assert node_id in [item.item_id for item in pack.items]
 
     def test_missing_vector_row_is_not_an_error_for_either_verb(

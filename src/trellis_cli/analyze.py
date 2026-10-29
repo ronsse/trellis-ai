@@ -2803,6 +2803,7 @@ def _assemble_pack_for_scenario(scenario: EvaluationScenario) -> object:
         {"domain": scenario.domain} if scenario.domain else None
     )
     return builder.build(
+        clearance="restricted",  # operator replay, trusted-local
         intent=scenario.intent,
         domain=scenario.domain,
         filters=filters,

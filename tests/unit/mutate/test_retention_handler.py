@@ -444,7 +444,7 @@ class TestRetrievalExclusion:
         )
         strategy = KeywordSearch(registry.knowledge.document_store)
         builder = PackBuilder(strategies=[strategy])
-        before = builder.build(intent="kangaroo")
+        before = builder.build(intent="kangaroo", clearance="restricted")
         assert any(i.item_id == "target" for i in before.items)
 
         doc = registry.knowledge.document_store.get("target")
@@ -453,7 +453,7 @@ class TestRetrievalExclusion:
         metadata[LIFECYCLE_KEY] = {"state": ARCHIVED_STATE}
         registry.knowledge.document_store.put("target", doc["content"], metadata)
 
-        after = builder.build(intent="kangaroo")
+        after = builder.build(intent="kangaroo", clearance="restricted")
         assert not any(i.item_id == "target" for i in after.items)
 
 
@@ -504,7 +504,8 @@ class TestRestore:
         metadata[LIFECYCLE_KEY] = {"state": ARCHIVED_STATE}
         registry.knowledge.document_store.put("target", doc["content"], metadata)
         assert not any(
-            i.item_id == "target" for i in builder.build(intent="wombat").items
+            i.item_id == "target"
+            for i in builder.build(intent="wombat", clearance="restricted").items
         )
 
         build_curate_executor(registry).execute(
@@ -513,7 +514,10 @@ class TestRestore:
                 args={"item_ids": ["target"], "reason": "restored"},
             )
         )
-        assert any(i.item_id == "target" for i in builder.build(intent="wombat").items)
+        assert any(
+            i.item_id == "target"
+            for i in builder.build(intent="wombat", clearance="restricted").items
+        )
 
     def test_non_archived_id_is_skipped_not_raised(
         self, registry: StoreRegistry
@@ -1280,7 +1284,7 @@ class TestVectorRowSyncOnGraphNodeRestore:
         ).strategies
         semantic = next(s for s in strategies if s.name == "semantic")
         builder = PackBuilder(strategies=[semantic])
-        pack = builder.build(intent="deprecated widget")
+        pack = builder.build(intent="deprecated widget", clearance="restricted")
         assert node_id in [item.item_id for item in pack.items]
 
 

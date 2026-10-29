@@ -309,10 +309,10 @@ class TestFlatWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         control = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         held = _builder(event_log, advisory_store, 1.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
 
         # The control served a varied pack, advisories and a withholding note.
@@ -337,10 +337,18 @@ class TestFlatWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-1", run_id="run-1"
+            "rotate keys",
+            budget=_BUDGET,
+            session_id="sess-1",
+            run_id="run-1",
+            clearance="restricted",
         )
         greenfield = _builder(event_log, None, 0.0, items=[]).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-1", run_id="run-1"
+            "rotate keys",
+            budget=_BUDGET,
+            session_id="sess-1",
+            run_id="run-1",
+            clearance="restricted",
         )
         assert greenfield.items == []
         assert _comparable(held) == _comparable(greenfield)
@@ -349,10 +357,10 @@ class TestFlatWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         control = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         held = _builder(event_log, advisory_store, 1.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         served_row = _payload(event_log, control.pack_id)
         held_row = _payload(event_log, held.pack_id)
@@ -391,7 +399,7 @@ class TestFlatWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0).build(
-            "rotate keys", budget=_BUDGET, index_mode=True
+            "rotate keys", budget=_BUDGET, index_mode=True, clearance="restricted"
         )
         row = _payload(event_log, held.pack_id)
         assert held.items == []
@@ -404,7 +412,7 @@ class TestFlatWithheld:
         ]
         assert row["injected_items"] == []
         greenfield = _builder(event_log, None, 0.0, items=[]).build(
-            "rotate keys", budget=_BUDGET, index_mode=True
+            "rotate keys", budget=_BUDGET, index_mode=True, clearance="restricted"
         )
         natural = _payload(event_log, greenfield.pack_id)
         assert row["disclosure"] == natural["disclosure"]
@@ -417,7 +425,7 @@ class TestFlatWithheld:
         builder = _builder(event_log, advisory_store, 0.5)
         arms = []
         for _ in range(40):
-            pack = builder.build("rotate keys", budget=_BUDGET)
+            pack = builder.build("rotate keys", budget=_BUDGET, clearance="restricted")
             row = _payload(event_log, pack.pack_id)
             expected = is_held_out(pack.pack_id, 0.5)
             assert row["holdout"] is expected
@@ -434,7 +442,7 @@ class TestFlatAtRateZero:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         pack = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         row = _payload(event_log, pack.pack_id)
         assert set(row) - _BASE_FLAT_KEYS == _FLAT_KEYS_ADDED_SINCE_BASE
@@ -451,10 +459,10 @@ class TestFlatAtRateZero:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         zero = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         tiny = _builder(event_log, advisory_store, 1e-12).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         zero_row = _payload(event_log, zero.pack_id)
         tiny_row = _payload(event_log, tiny.pack_id)
@@ -472,10 +480,10 @@ class TestSectionedWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         control = _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         held = _builder(event_log, advisory_store, 1.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
 
         assert [[i.item_id for i in s.items] for s in control.sections] == [
@@ -495,10 +503,16 @@ class TestSectionedWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-2"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-2",
+            clearance="restricted",
         )
         greenfield = _builder(event_log, None, 0.0, items=[]).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-2"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-2",
+            clearance="restricted",
         )
         assert greenfield.total_items == 0
         assert _comparable(held) == _comparable(greenfield)
@@ -507,10 +521,10 @@ class TestSectionedWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         control = _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         held = _builder(event_log, advisory_store, 1.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         served_row = _payload(event_log, control.pack_id)
         held_row = _payload(event_log, held.pack_id)
@@ -537,7 +551,7 @@ class TestSectionedWithheld:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         pack = _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         row = _payload(event_log, pack.pack_id)
         assert set(row) - _BASE_SECTIONED_KEYS == _SECTIONED_KEYS_ADDED_SINCE_BASE
@@ -553,7 +567,9 @@ class TestSectionedWithheld:
         builder = _builder(event_log, advisory_store, 0.5)
         arms = []
         for _ in range(40):
-            pack = builder.build_sectioned("rotate keys", sections=_SECTIONS)
+            pack = builder.build_sectioned(
+                "rotate keys", sections=_SECTIONS, clearance="restricted"
+            )
             row = _payload(event_log, pack.pack_id)
             expected = is_held_out(pack.pack_id, 0.5)
             assert row["holdout"] is expected
@@ -569,10 +585,10 @@ class TestSessionDedup:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-h"
+            "rotate keys", budget=_BUDGET, session_id="sess-h", clearance="restricted"
         )
         after = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-h"
+            "rotate keys", budget=_BUDGET, session_id="sess-h", clearance="restricted"
         )
         assert held.items == []
         assert [i.item_id for i in after.items] == [
@@ -585,10 +601,10 @@ class TestSessionDedup:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         first = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-s"
+            "rotate keys", budget=_BUDGET, session_id="sess-s", clearance="restricted"
         )
         again = _builder(event_log, advisory_store, 0.0).build(
-            "rotate keys", budget=_BUDGET, session_id="sess-s"
+            "rotate keys", budget=_BUDGET, session_id="sess-s", clearance="restricted"
         )
         assert len(first.items) == 3
         assert [i.item_id for i in again.items] == ["doc-delta"]
@@ -597,10 +613,16 @@ class TestSessionDedup:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-hs"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-hs",
+            clearance="restricted",
         )
         after = _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-hs"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-hs",
+            clearance="restricted",
         )
         assert held.total_items == 0
         assert [[i.item_id for i in s.items] for s in after.sections] == [
@@ -612,10 +634,16 @@ class TestSessionDedup:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-ss"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-ss",
+            clearance="restricted",
         )
         again = _builder(event_log, advisory_store, 0.0).build_sectioned(
-            "rotate keys", sections=_SECTIONS, session_id="sess-ss"
+            "rotate keys",
+            sections=_SECTIONS,
+            session_id="sess-ss",
+            clearance="restricted",
         )
         assert [[i.item_id for i in s.items] for s in again.sections] == [
             [],
@@ -638,7 +666,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         natural_empty = _builder(event_log, advisory_store, 1e-12, items=[]).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         row = _payload(event_log, natural_empty.pack_id)
 
@@ -656,7 +684,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
         """Inert at the default rate: #404's rule is unchanged when the
         holdout is off."""
         natural_empty = _builder(event_log, advisory_store, 0.0, items=[]).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         assert natural_empty.items == []
         assert len(natural_empty.advisories) == 3
@@ -669,7 +697,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
         ``holdout_advisory_ids`` — the blind applies to the served copy
         only, never to the apart-kept would-be pack."""
         held = _builder(event_log, advisory_store, 1.0, items=[]).build(
-            "rotate keys", budget=_BUDGET
+            "rotate keys", budget=_BUDGET, clearance="restricted"
         )
         row = _payload(event_log, held.pack_id)
 
@@ -686,7 +714,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
     ) -> None:
         natural_empty = _builder(
             event_log, advisory_store, 1e-12, items=[]
-        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        ).build_sectioned("rotate keys", sections=_SECTIONS, clearance="restricted")
         row = _payload(event_log, natural_empty.pack_id)
 
         assert natural_empty.total_items == 0
@@ -700,7 +728,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
     ) -> None:
         natural_empty = _builder(
             event_log, advisory_store, 0.0, items=[]
-        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        ).build_sectioned("rotate keys", sections=_SECTIONS, clearance="restricted")
         assert natural_empty.total_items == 0
         assert len(natural_empty.advisories) == 3
 
@@ -708,7 +736,7 @@ class TestNaturallyEmptyPackBlindsAdvisoriesToo:
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
     ) -> None:
         held = _builder(event_log, advisory_store, 1.0, items=[]).build_sectioned(
-            "rotate keys", sections=_SECTIONS
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
         )
         row = _payload(event_log, held.pack_id)
 
@@ -762,7 +790,9 @@ class TestFactoryWiring:
         try:
             registry.knowledge.document_store.put("d1", "a canary rollout runbook body")
             registry.knowledge.document_store.put("d2", "canary rollout pause criteria")
-            pack = build_pack_builder(registry, surface="test").build("canary rollout")
+            pack = build_pack_builder(registry, surface="test").build(
+                "canary rollout", clearance="restricted"
+            )
             events = registry.operational.event_log.get_events(
                 event_type=EventType.PACK_ASSEMBLED, limit=10
             )

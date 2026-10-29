@@ -76,7 +76,7 @@ def _build(
         ],
         event_log=event_log,
     )
-    pack = builder.build("fix the cache layer", filters=filters)
+    pack = builder.build("fix the cache layer", filters=filters, clearance="restricted")
     (event,) = event_log.get_events(
         event_type=EventType.PACK_ASSEMBLED, entity_id=pack.pack_id
     )

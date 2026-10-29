@@ -127,14 +127,12 @@ Derived from the gates that exist, not from a wish list. The values are the
 rather than re-labelled: a second vocabulary for the same facts is how
 ``content_type`` and ``document_form`` drifted apart in #325/#326.
 
-There is deliberately **no** ``sensitivity`` reason. Nothing in
-``src/trellis/retrieve/`` reads ``DataClassification``, and ``Pack``'s
-``policies_applied`` field is populated by no code path in the repository —
-so a ``sensitivity`` count could only ever render ``0``. Emitting a reason
-code for a gate that does not exist is the defect this module was filed to
-remove, not to reproduce. Sensitivity *enforcement* is #194; when it lands it
-adds a gate here, and this report will count it because it counts whatever
-the pipeline rejects.
+``sensitivity`` (#194) is the one reason with no earlier counterpart: a
+document above the caller's clearance
+(:func:`~trellis.retrieve.sensitivity.partition_by_clearance`). It is reported
+as a count like every other reason, so a caller without the scope learns that
+*something* was withheld and never what. That is the same disclosure the other
+gates make, and it is deliberate: silence would read as greenfield.
 
 Section routing is a gate too, and it is reported differently
 -------------------------------------------------------------

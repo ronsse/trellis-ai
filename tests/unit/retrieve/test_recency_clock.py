@@ -600,7 +600,7 @@ class TestRecencyClockReachesTheServedRecord:
             ],
             event_log=event_log,
         )
-        return builder.build("roth")
+        return builder.build("roth", clearance="restricted")
 
     def test_every_served_item_carries_its_clock(
         self, event_log: SQLiteEventLog

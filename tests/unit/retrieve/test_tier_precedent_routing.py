@@ -215,7 +215,9 @@ class TestSectionedPackEndToEnd:
         self._seed(graph)
         builder = PackBuilder(strategies=[GraphSearch(graph)])
 
-        pack = builder.build_sectioned("deploy", sections=[_DOMAIN])
+        pack = builder.build_sectioned(
+            "deploy", sections=[_DOMAIN], clearance="restricted"
+        )
 
         served = {i.item_id for s in pack.sections for i in s.items}
         assert "prec-1" in served
@@ -227,10 +229,14 @@ class TestSectionedPackEndToEnd:
         self._seed(graph)
         builder = PackBuilder(strategies=[GraphSearch(graph)])
 
-        flat = {i.item_id for i in builder.build("deploy").items}
+        flat = {
+            i.item_id for i in builder.build("deploy", clearance="restricted").items
+        }
         sectioned = {
             i.item_id
-            for s in builder.build_sectioned("deploy", sections=[_DOMAIN]).sections
+            for s in builder.build_sectioned(
+                "deploy", sections=[_DOMAIN], clearance="restricted"
+            ).sections
             for i in s.items
         }
 
@@ -244,7 +250,9 @@ class TestSectionedPackEndToEnd:
         self._seed(graph)
         builder = PackBuilder(strategies=[GraphSearch(graph)])
 
-        pack = builder.build_sectioned("deploy", sections=[_DOMAIN, _REFERENCE])
+        pack = builder.build_sectioned(
+            "deploy", sections=[_DOMAIN, _REFERENCE], clearance="restricted"
+        )
 
         by_section = {s.name: [i.item_id for i in s.items] for s in pack.sections}
         all_ids = [i for ids in by_section.values() for i in ids]
@@ -307,7 +315,7 @@ class TestPromotedPrecedentDocumentRoutesByIdNamespace:
         strategy.search.return_value = [precedent, ordinary]
 
         pack = PackBuilder(strategies=[strategy]).build_sectioned(
-            "drain the queue", sections=[_DOMAIN]
+            "drain the queue", sections=[_DOMAIN], clearance="restricted"
         )
 
         assert [i.item_id for i in pack.sections[0].items] == [

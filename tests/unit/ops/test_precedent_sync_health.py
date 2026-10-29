@@ -487,6 +487,7 @@ class TestVectorReasonWording:
             pack = builder.build(
                 intent="fixture gateway note",
                 budget=PackBudget(max_items=10, max_tokens=100_000),
+                clearance="restricted",
             )
         finally:
             vectors.close()

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 from trellis.core.error_sanitize import describe_validation_error
@@ -15,12 +15,19 @@ from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis.retrieve.sensitivity import (
+    SENSITIVITY_WITHHELD_IDS_KEY,
+    DocumentClearance,
+    conceal_withheld_ids,
+)
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import request_clearance
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
@@ -29,6 +36,7 @@ from trellis_wire.dtos import (
     SectionedPackRequest,
     SectionedPackResponse,
     StringDetailError,
+    WithholdingResponse,
 )
 
 logger = structlog.get_logger(__name__)
@@ -162,8 +170,12 @@ def search(
             " they are slices of documents the same search already ranks."
         ),
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """Full-text search across documents.
+
+    A document labelled above the caller's clearance is left out of the
+    results (so a page can come back shorter than ``limit``).
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied
@@ -176,6 +188,12 @@ def search(
     results = registry.knowledge.document_store.search(
         q, limit=limit, filters=filters, include_chunks=include_chunks
     )
+    readable = DocumentClearance(
+        registry.knowledge.document_store, request_clearance(ctx)
+    )
+    results = [
+        r for r in results if readable.permits(r.get("doc_id", ""), r.get("metadata"))
+    ]
     return {
         "status": "ok",
         "query": q,
@@ -186,7 +204,10 @@ def search(
 
 
 @router.post("/packs", response_model=PackResponse)
-def assemble_pack(req: PackRequest) -> PackResponse:
+def assemble_pack(
+    req: PackRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> PackResponse:
     """Assemble a context pack."""
     registry = get_registry()
     builder = _build_pack_builder(registry)
@@ -208,8 +229,10 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     filters: dict[str, Any] | None = None
     if req.domain:
         filters = {"domain": req.domain}
+    clearance = request_clearance(ctx)
     pack = builder.build(
         intent=req.intent,
+        clearance=clearance,
         domain=req.domain,
         agent_id=req.agent_id,
         run_id=req.run_id,
@@ -232,6 +255,15 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         graph_axis=pack.retrieval_report.graph_axis,
     )
 
+    # A caller below ``restricted`` is shown the withheld counts but not the ids
+    # (or ``sensitivity`` rows) of documents it may not read. The event payload
+    # keeps them for its admin readers.
+    report, withholding = conceal_withheld_ids(
+        pack.retrieval_report.model_dump(),
+        pack.metadata.get("withholding"),
+        pack.metadata.get(SENSITIVITY_WITHHELD_IDS_KEY, ()),
+        clearance,
+    )
     return PackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -240,8 +272,12 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         count=len(pack.items),
         items=[item.model_dump() for item in pack.items],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
-        retrieval_report=pack.retrieval_report.model_dump(),
-        withholding=pack.metadata.get("withholding"),
+        retrieval_report=report,
+        withholding=(
+            WithholdingResponse.model_validate(withholding)
+            if withholding is not None
+            else None
+        ),
         axes=AxisReportResponse(**axes),
     )
 
@@ -262,7 +298,10 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         },
     },
 )
-def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
+def assemble_sectioned_pack(
+    req: SectionedPackRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> SectionedPackResponse:
     """Assemble a sectioned pack with independently budgeted sections.
 
     The SDK's ``assemble_sectioned_pack()`` targets this route; section
@@ -287,8 +326,10 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
     filters: dict[str, Any] | None = None
     if req.domain:
         filters = {"domain": req.domain}
+    clearance = request_clearance(ctx)
     pack = builder.build_sectioned(
         req.intent,
+        clearance=clearance,
         sections=sections,
         domain=req.domain,
         agent_id=req.agent_id,
@@ -315,14 +356,30 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         )
     )
 
+    # As in ``assemble_pack``: counts survive, ids of unreadable documents do not.
+    hidden = pack.metadata.get(SENSITIVITY_WITHHELD_IDS_KEY, ())
+    sections_out: list[dict[str, Any]] = []
+    for section in pack.sections:
+        dumped = section.model_dump(mode="json")
+        dumped["retrieval_report"], _ = conceal_withheld_ids(
+            dumped["retrieval_report"], None, hidden, clearance
+        )
+        sections_out.append(dumped)
+    _, withholding = conceal_withheld_ids(
+        None, pack.metadata.get("withholding"), hidden, clearance
+    )
     return SectionedPackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
         domain=pack.domain,
         agent_id=pack.agent_id,
-        sections=[s.model_dump(mode="json") for s in pack.sections],
+        sections=sections_out,
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
-        withholding=pack.metadata.get("withholding"),
+        withholding=(
+            WithholdingResponse.model_validate(withholding)
+            if withholding is not None
+            else None
+        ),
         axes=axes,
     )
 
