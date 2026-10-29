@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from tests.cli_output import plain
 from trellis_cli.worker import worker_app
 from trellis_workers.trace_embed import trace_summary_doc_id
 
@@ -163,3 +164,48 @@ class TestEmbedTracesCLI:
         assert result.exit_code == 0, result.output
         assert "worker embed-traces" in result.output
         assert "cursor:" in result.output
+
+    def test_text_output_shows_redacted_summaries_only_when_there_are_some(
+        self, registry, tmp_path, cli_runner
+    ) -> None:
+        from tests.redaction_tombstone import make_tombstone
+        from trellis.core.vector_metadata import resolve_vector_store
+
+        traces = seed_traces(registry, 3)
+        make_tombstone(
+            registry.knowledge.document_store,
+            resolve_vector_store(registry),
+            trace_summary_doc_id(traces[1].trace_id),
+        )
+
+        redacted = cli_runner.invoke(
+            worker_app,
+            ["embed-traces", "--dry-run", "--watermark", str(tmp_path / "wm.json")],
+        )
+        assert redacted.exit_code == 0, redacted.output
+        assert "1 trace(s) skipped because their summary was redacted" in plain(
+            redacted.stdout
+        )
+
+    def test_text_output_omits_the_redacted_line_when_none_were(
+        self, registry, tmp_path, cli_runner
+    ) -> None:
+        seed_traces(registry, 2)
+        result = cli_runner.invoke(
+            worker_app,
+            ["embed-traces", "--dry-run", "--watermark", str(tmp_path / "wm.json")],
+        )
+        assert result.exit_code == 0, result.output
+        # Not a bare "redacted": the structured log line carries
+        # ``skipped_redacted=0`` as a key, whatever the renderer prints.
+        assert "because their summary was redacted" not in plain(result.stdout)
+
+    def test_json_always_carries_skipped_redacted(
+        self, registry, tmp_path, cli_runner
+    ) -> None:
+        seed_traces(registry, 1)
+        payload, result = _run_json(
+            cli_runner, "--dry-run", "--watermark", str(tmp_path / "wm.json")
+        )
+        assert result.exit_code == 0, result.output
+        assert payload["skipped_redacted"] == 0

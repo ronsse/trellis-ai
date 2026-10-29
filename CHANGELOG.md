@@ -321,6 +321,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Derived tags are no longer written onto a redaction tombstone (part of
+  #1034).** `worker enrich` and `classify shadow` read a row, spend a slow model
+  call on its text, then write derived metadata back through
+  `apply_derived_metadata`. A redaction landing inside that window left a blank
+  archived row, and `put_document`'s guard lets an unflagged write through when
+  the row it leaves is still a tombstone, so the facets, `auto_importance` and
+  `document_form` the model derived from the redacted text were written beside
+  the lifecycle stamp, the pass counted the row as enriched and emitted a judged
+  event for it. The helper now returns the new `redacted` outcome before it
+  builds or writes anything, logging `derived_metadata.row_redacted` with the
+  document id only. `worker enrich` counts it under a new `skipped_redacted`
+  key (always present in `--format json`; the "concurrent writes" text line
+  prints when it is non-zero) and emits no judged event; `classify shadow`
+  counts it under a new `skipped_redacted` bucket, not under `errors`, so the
+  exit status is unchanged. The same family: `worker embed-traces --dry-run`
+  never read the summary row, so it counted a trace whose summary id was
+  redacted as would-embed while the live pass counts it under
+  `skipped_redacted`; the dry run now reads that one row and reports the same
+  `embedded` and `skipped_redacted` the live pass will, still writing nothing.
+  The text output prints `skipped_redacted` when it is non-zero.
+
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
   number (or is above the staleness threshold with no `importance_scored_at`),

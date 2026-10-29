@@ -1659,6 +1659,9 @@ def enrich_cmd(
                 # racing another writer and the batch wants a smaller --limit.
                 "stale_snapshot": summary.stale_snapshot,
                 "vanished": summary.vanished,
+                # Rows redacted inside the same window: their derived tags
+                # are dropped, not written onto the blank row.
+                "skipped_redacted": summary.skipped_redacted,
                 "vector_rows_synced": summary.vector_rows_synced,
             }
         )
@@ -1667,11 +1670,12 @@ def enrich_cmd(
         f"[bold]worker enrich[/bold] — {summary.enriched}/{len(candidates)} "
         f"document(s) enriched"
     )
-    if summary.stale_snapshot or summary.vanished:
+    if summary.stale_snapshot or summary.vanished or summary.skipped_redacted:
         console.print(
             f"  [yellow]concurrent writes during the LLM window:[/yellow] "
             f"{summary.stale_snapshot} document(s) changed (enriched onto "
-            f"current content), {summary.vanished} deleted (skipped)"
+            f"current content), {summary.vanished} deleted (skipped), "
+            f"{summary.skipped_redacted} redacted (skipped)"
         )
 
 
@@ -1856,12 +1860,17 @@ class BatchEnrichmentResult:
     for the operator, not a failure count; ``enriched`` includes these rows.
     ``vanished`` counts rows deleted inside the same window, which are *not*
     written — a ``put`` would resurrect them.
+    ``skipped_redacted`` counts rows redacted inside that window: also not
+    written, because the derived tags came from text that no longer exists,
+    and not counted as ``enriched`` or ``vanished`` (the row is still there,
+    blank). They emit no judged event either.
     """
 
     enriched: int = 0
     failed: int = 0
     stale_snapshot: int = 0
     vanished: int = 0
+    skipped_redacted: int = 0
     vector_rows_synced: int = 0
 
 
@@ -1954,6 +1963,12 @@ def _run_batch_enrichment(
         )
         if write.content_changed:
             summary.stale_snapshot += 1
+        if write.redacted:
+            # Redacted inside the LLM window: the tags were derived from text
+            # that is gone, so they are dropped rather than written onto the
+            # blank row, and the pass neither counts nor judges it.
+            summary.skipped_redacted += 1
+            continue
         if not write.written:
             # The row was deleted inside the LLM window. Not resurrected: a
             # ``put`` on a missing id inserts, which would undo the delete and
@@ -2005,6 +2020,7 @@ def _run_batch_enrichment(
         failed=summary.failed,
         stale_snapshot=summary.stale_snapshot,
         vanished=summary.vanished,
+        skipped_redacted=summary.skipped_redacted,
         vector_rows_synced=summary.vector_rows_synced,
         vector_store_supplied=vector_store is not None,
     )
@@ -2380,6 +2396,11 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         f"{payload['skipped_empty']} nothing to render  "
         f"{payload['skipped_invalid']} permanently invalid"
     )
+    if payload["skipped_redacted"]:
+        console.print(
+            f"  redacted: {payload['skipped_redacted']} trace(s) skipped "
+            f"because their summary was redacted"
+        )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "
         f"{payload['watermark_after'] or '(none)'}"

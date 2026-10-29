@@ -394,6 +394,9 @@ def shadow(
         "skipped_fresh": result.skipped_fresh,
         "skipped_no_signal": result.skipped_no_signal,
         "skipped_missing_content": result.skipped_missing_content,
+        # Documents redacted while the model was judging them: the verdict is
+        # dropped, not written onto the blank row, and is not an error.
+        "skipped_redacted": result.skipped_redacted,
         "errors": result.errors,
         # #421: documents whose content changed while the model was judging
         # them. A subset of ``written`` — the record landed on the *current*
@@ -415,6 +418,11 @@ def shadow(
             f"{result.skipped_no_signal} no signal, "
             f"{result.skipped_missing_content} empty)"
         )
+        if result.skipped_redacted:
+            console.print(
+                f"[yellow]  {result.skipped_redacted} document(s) were redacted "
+                f"while being judged — no shadow record was written.[/yellow]"
+            )
         if result.errors:
             console.print(
                 f"[red]  {result.errors} document(s) failed and were skipped — "

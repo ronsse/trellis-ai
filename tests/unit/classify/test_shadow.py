@@ -25,14 +25,17 @@ from trellis.classify.protocol import (
 from trellis.classify.shadow import (
     PROTECTED_LIVE_KEYS,
     REASON_NO_SIGNAL,
+    REASON_REDACTED,
     SHADOW_TAGS_KEY,
     compare_shadow_to_live,
     shadow_classify_item,
     shadow_classify_stale,
 )
+from trellis.core.document_write import put_document
 from trellis.retrieve.strategies import _apply_recency_decay
 from trellis.schemas.classification import (
     DOCUMENT_FORM_KEY,
+    LIFECYCLE_KEY,
     ContentTags,
     ShadowTags,
     shadow_verdict,
@@ -1179,6 +1182,116 @@ class TestShadowSurvivesAConcurrentWrite:
         assert outcome.written is False
         assert document_store.get("d1") is None
         assert event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED) == []
+
+    @staticmethod
+    def _redact_while_judging(
+        store: SQLiteDocumentStore, doc_id: str, redacted_row: list[dict[str, Any]]
+    ) -> RacingClassifier:
+        """A classifier that redacts ``doc_id`` while it is being judged."""
+
+        def redact() -> None:
+            put_document(
+                store,
+                None,
+                doc_id,
+                "",
+                {
+                    LIFECYCLE_KEY: {
+                        "state": "archived",
+                        "deprecation_reason": "redacted",
+                    }
+                },
+                preserve_updated_at=False,
+            )
+            redacted_row.append(store.get(doc_id))
+
+        class _RedactsOneDocument(RacingClassifier):
+            def classify(
+                self,
+                content: str,
+                *,
+                context: ClassificationContext | None = None,
+            ) -> ClassificationResult:
+                # Fire in the window of the one document, wherever it falls.
+                if content == f"body of {doc_id}":
+                    redact()
+                return FakeClassifier.classify(self, content, context=context)
+
+        return _RedactsOneDocument(
+            lambda: None, tags=TestShadowSurvivesAConcurrentWrite._TAGS
+        )
+
+    def test_a_document_redacted_during_the_model_call_is_not_tagged(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        """The verdict describes text that is gone, so it is not written.
+
+        Not ``written``, not an error, and no ``MEMORY_OP_JUDGED``: the event
+        would record a classification the store does not hold. The row is
+        byte-identical to the blank tombstone the redaction left.
+        """
+        _seed(document_store, "d1", "body of d1")
+        redacted: list[dict[str, Any]] = []
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=self._redact_while_judging(document_store, "d1", redacted),
+            document_store=document_store,
+            vector_store=None,
+            event_log=event_log,
+        )
+
+        assert outcome.written is False
+        assert outcome.reason == REASON_REDACTED
+        assert outcome.shadow is None
+        assert document_store.get("d1") == redacted[0]
+        assert SHADOW_TAGS_KEY not in redacted[0]["metadata"]
+        assert event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED) == []
+
+    def test_a_redacted_document_lands_in_its_own_batch_bucket(
+        self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
+    ) -> None:
+        for doc_id in ("d1", "d2", "d3"):
+            _seed(document_store, doc_id, f"body of {doc_id}")
+        redacted: list[dict[str, Any]] = []
+
+        result = shadow_classify_stale(
+            classifier=self._redact_while_judging(document_store, "d2", redacted),
+            document_store=document_store,
+            vector_store=None,
+            event_log=event_log,
+        )
+
+        assert result.written == 2
+        assert result.skipped_redacted == 1
+        assert result.errors == 0
+        assert sorted(result.item_ids_written) == ["d1", "d3"]
+        # Every scanned document lands in exactly one bucket.
+        assert result.scanned == (
+            result.written
+            + result.skipped_missing_content
+            + result.skipped_fresh
+            + result.skipped_no_signal
+            + result.skipped_redacted
+            + result.errors
+        )
+        assert document_store.get("d2") == redacted[0]
+        judged = event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED)
+        assert sorted(
+            MemoryOpJudgedPayload.model_validate(e.payload).subject_ref.ref_id
+            for e in judged
+        ) == ["d1", "d3"]
+
+    def test_the_redacted_bucket_reads_zero_when_nothing_was_redacted(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        _seed(document_store, "d1", "body")
+        result = shadow_classify_stale(
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=None,
+        )
+        assert result.written == 1
+        assert result.skipped_redacted == 0
 
     def test_the_write_still_preserves_updated_at(
         self,

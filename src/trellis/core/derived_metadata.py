@@ -69,6 +69,16 @@ and the write. ``put`` on a missing id *inserts*, so the snapshot write-back
 would resurrect a deleted document with stale content and a fresh
 ``created_at``. That is reported as
 :attr:`DerivedMetadataWrite.vanished` and nothing is written.
+
+**A row redacted in the window is not merged into either.** A redaction leaves
+a blank archived tombstone, and ``put_document``'s tombstone guard lets an
+unflagged write through when the row it leaves is still a tombstone, which a
+metadata-only write over a blank row is. The guard therefore cannot catch it,
+and facets, importance and form derived from text that was then redacted would
+persist on the redacted row, counted as a successful enrichment. The helper
+looks for itself, after the vanished check: that is reported as
+:attr:`DerivedMetadataWrite.redacted`, and neither ``build_updates`` nor the
+store is called.
 """
 
 from __future__ import annotations
@@ -78,7 +88,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.document_write import put_document
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.vector_metadata import VectorSyncOutcome
 
 if TYPE_CHECKING:
@@ -102,6 +112,11 @@ class DerivedMetadataWrite:
     #: ``True`` when the row no longer existed at write time. Mutually
     #: exclusive with ``written`` — nothing is inserted in that case.
     vanished: bool = False
+    #: ``True`` when the row is a redaction tombstone at write time, i.e. it was
+    #: redacted after the caller read it. Mutually exclusive with ``written``
+    #: and ``vanished`` — nothing is built, written or mirrored, so a derived
+    #: record cannot outlive the redaction it should have been dropped by.
+    redacted: bool = False
     #: ``True`` when the stored content differed from the snapshot the caller
     #: derived from, i.e. a concurrent write landed inside the slow window.
     #: The derived metadata is still written (onto the *current* content);
@@ -158,6 +173,11 @@ def apply_derived_metadata(
     if current is None:
         logger.warning("derived_metadata.row_vanished", doc_id=doc_id)
         return DerivedMetadataWrite(doc_id=doc_id, written=False, vanished=True)
+    if is_redaction_tombstone(current):
+        # The doc id only: the row is blank, and nothing about the text it
+        # held belongs in a log line.
+        logger.warning("derived_metadata.row_redacted", doc_id=doc_id)
+        return DerivedMetadataWrite(doc_id=doc_id, written=False, redacted=True)
 
     # Subscripted, not ``.get``: ``content`` is the ``DocumentStore``
     # contract and both shipped backends always return it. A backend that

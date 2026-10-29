@@ -3286,6 +3286,116 @@ class TestEnrichSurvivesAConcurrentWrite:
         assert data["vanished"] == 1
         assert doc_store.get("doc-x") is None
 
+    def _batch_with_a_redaction(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """Three candidates, the middle one redacted inside the LLM window.
+
+        Returns the store and the redacted row as it stood the moment the
+        redaction landed.
+        """
+        from trellis.core.document_write import put_document
+        from trellis.schemas.classification import LIFECYCLE_KEY
+
+        doc_store = temp_stores.knowledge.document_store
+        redacted_row: list[dict[str, Any]] = []
+        for doc_id in ("doc-a", "doc-b", "doc-c"):
+            doc_store.put(doc_id, f"the body of {doc_id}", {"title": doc_id})
+
+        def redact() -> None:
+            put_document(
+                doc_store,
+                None,
+                "doc-b",
+                "",
+                {
+                    LIFECYCLE_KEY: {
+                        "state": "archived",
+                        "deprecation_reason": "redacted",
+                    }
+                },
+                preserve_updated_at=False,
+            )
+            redacted_row.append(doc_store.get("doc-b"))
+
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: self._llm_that_writes(self._CANNED, redact),
+        )
+        return doc_store, redacted_row
+
+    def test_a_document_redacted_mid_batch_is_skipped_and_counted(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The derived tags came from text that is gone, so they are dropped.
+
+        Counted in its own bucket: not ``enriched`` (nothing was written), not
+        ``vanished`` (the blank row is still there), and no judged event, which
+        would record a classification the store does not hold.
+        """
+        doc_store, redacted_row = self._batch_with_a_redaction(temp_stores, monkeypatch)
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enriched"] == 2
+        assert data["skipped_redacted"] == 1
+        assert data["vanished"] == 0
+        assert data["failed"] == 0
+        # Byte-identical to the row the redaction left: no derived key, and
+        # the stamp the pass would have preserved is untouched.
+        assert doc_store.get("doc-b") == redacted_row[0]
+        assert "content_tags" not in redacted_row[0]["metadata"]
+        for doc_id in ("doc-a", "doc-c"):
+            tags = doc_store.get(doc_id)["metadata"]["content_tags"]
+            assert tags["classified_mode"] == "enrichment"
+        judged = temp_stores.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+        assert sorted(e.payload["subject_ref"]["ref_id"] for e in judged) == [
+            "doc-a",
+            "doc-c",
+        ]
+
+    def test_the_redacted_count_is_in_the_text_line_only_when_non_zero(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        self._batch_with_a_redaction(temp_stores, monkeypatch)
+        redacted = runner.invoke(app, ["worker", "enrich"])
+        assert redacted.exit_code == 0, redacted.output
+        assert "1 redacted (skipped)" in plain(redacted.stdout)
+
+    def test_a_clean_batch_prints_no_redacted_text(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """Paired with the test above so the line cannot drift to unconditional."""
+        temp_stores.knowledge.document_store.put("doc-x", "a body", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
+        )
+        clean = runner.invoke(app, ["worker", "enrich"])
+        assert clean.exit_code == 0, clean.output
+        assert "redacted" not in plain(clean.stdout)
+        assert "concurrent writes" not in plain(clean.stdout)
+
+    def test_a_clean_batch_reports_zero_redacted(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The key is always present, so a consumer never branches on its absence."""
+        temp_stores.knowledge.document_store.put("doc-x", "a body", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["skipped_redacted"] == 0
+
     def test_the_vector_mirror_carries_the_merged_metadata(
         self, temp_stores: StoreRegistry, monkeypatch
     ) -> None:

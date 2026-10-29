@@ -17,6 +17,8 @@ import pytest
 
 from tests.document_recency import fake_document_clock
 from trellis.core.derived_metadata import apply_derived_metadata
+from trellis.core.document_write import put_document
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
@@ -212,6 +214,122 @@ class TestVanishedRow:
             vector_store=None,
         )
         assert calls == []
+
+
+def _redact(store: DocumentStore, doc_id: str) -> None:
+    """Leave the blank archived row a redaction leaves."""
+    put_document(
+        store,
+        None,
+        doc_id,
+        "",
+        {LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"}},
+        preserve_updated_at=False,
+    )
+
+
+class TestRedactedRow:
+    """A redaction landing inside the slow window drops the derived record.
+
+    ``put_document`` lets an unflagged write through when the row it leaves is
+    still a tombstone, and a metadata-only write over a blank row keeps the
+    lifecycle stamp, so its own guard cannot catch this: the helper has to
+    look, before it builds anything or writes anything.
+    """
+
+    def _redacted(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> dict[str, Any]:
+        document_store.put("doc-1", "pre-redaction text", {"keep": "me"})
+        _redact(document_store, "doc-1")
+        stored = document_store.get("doc-1")
+        assert stored is not None
+        return stored
+
+    def test_derived_keys_are_not_written_onto_a_tombstone(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        before = self._redacted(document_store, vector_store)
+
+        write = apply_derived_metadata(
+            document_store,
+            "doc-1",
+            lambda _cur: {"content_tags": {"signal_quality": "noise"}, "summary": "s"},
+            vector_store=vector_store,
+            snapshot_content="pre-redaction text",
+        )
+
+        assert write.written is False
+        assert write.redacted is True
+        assert write.vanished is False
+        assert write.metadata is None
+        assert write.mirror is None
+        assert document_store.get("doc-1") == before
+
+    def test_the_update_builder_is_not_called_for_a_tombstone(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        self._redacted(document_store, vector_store)
+        spy = MagicMock(return_value={"derived": "yes"})
+
+        apply_derived_metadata(document_store, "doc-1", spy, vector_store=vector_store)
+
+        spy.assert_not_called()
+
+    def test_the_vector_store_is_not_touched(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        self._redacted(document_store, MagicMock())
+        vectors = MagicMock(spec=SQLiteVectorStore)
+
+        apply_derived_metadata(document_store, "doc-1", _tag, vector_store=vectors)
+
+        assert vectors.mock_calls == []
+
+    def test_an_ordinary_archived_row_with_content_is_still_written(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """A tombstone needs both halves; the reason alone is free text."""
+        document_store.put(
+            "doc-1",
+            "still here",
+            {LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"}},
+        )
+
+        write = apply_derived_metadata(document_store, "doc-1", _tag, vector_store=None)
+
+        assert write.written is True
+        assert write.redacted is False
+        stored = document_store.get("doc-1")
+        assert stored is not None
+        assert stored["content"] == "still here"
+        assert stored["metadata"]["derived"] == "yes"
+
+    def test_a_blank_row_without_the_redaction_stamp_is_still_written(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """The other half: emptiness alone is not a tombstone either."""
+        document_store.put("blank", "", {})
+        document_store.put(
+            "archived-blank",
+            "",
+            {LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "stale"}},
+        )
+
+        for doc_id in ("blank", "archived-blank"):
+            write = apply_derived_metadata(
+                document_store, doc_id, _tag, vector_store=None
+            )
+            assert write.written is True, doc_id
+            assert write.redacted is False, doc_id
+
+    def test_a_missing_row_is_vanished_and_not_redacted(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        write = apply_derived_metadata(document_store, "gone", _tag, vector_store=None)
+
+        assert write.vanished is True
+        assert write.redacted is False
 
 
 class TestFailuresPropagate:
