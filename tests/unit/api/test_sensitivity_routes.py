@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import gc
+import time
+import weakref
+
 import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
-from tests.unit.retrieve.test_sensitivity import label
+import trellis_api.routes.explore as explore_mod
+from tests.unit.retrieve.test_sensitivity import _lifecycle, label
 from trellis.auth import generate_api_key
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mutate.retention import ARCHIVED_STATE
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -285,3 +291,540 @@ class TestOverwriteOfALabelledDocument:
     def test_a_new_id_is_unaffected(self, client, registry, write, writer_scopes):
         registry.knowledge.document_store.delete("doc-secret")
         assert write(client, _headers(registry, writer_scopes)).status_code == 200
+
+
+_NOISE = {"content_tags": {"signal_quality": "noise"}}
+
+
+class TestEveryRejectedCandidateIsConcealed:
+    """A restricted document an earlier gate rejected is not named either (#1022)."""
+
+    @pytest.fixture(
+        params=[
+            pytest.param(_NOISE, id="noise"),
+            pytest.param(_lifecycle(ARCHIVED_STATE), id="archived"),
+            pytest.param(_lifecycle("superseded", "doc-open"), id="superseded"),
+        ]
+    )
+    def hidden_id(self, request, registry):
+        registry.knowledge.document_store.put(
+            "doc-rejected",
+            SECRET,
+            {"title": "Rejected", **label("restricted"), **request.param},
+        )
+        return "doc-rejected"
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    @pytest.mark.parametrize("scopes", [["read"], ["read", "confidential"]])
+    def test_a_read_key_never_sees_the_id(
+        self, client, registry, hidden_id, request_body, scopes
+    ):
+        resp = _post(client, headers=_headers(registry, scopes), **request_body)
+        assert hidden_id not in resp.text
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    def test_a_restricted_key_still_sees_the_row(
+        self, client, registry, hidden_id, request_body
+    ):
+        headers = _headers(registry, ["read", "restricted"])
+        resp = _post(client, headers=headers, **request_body)
+        assert hidden_id in resp.text
+
+
+class TestEvidenceLinksAreNotAnExistenceOracle:
+    """A link to a labelled document answers as a missing one would (#194)."""
+
+    def _ingest(self, client, registry, *evidence_ids):
+        trace = {
+            "source": "agent",
+            "intent": "cite evidence",
+            "steps": [],
+            "context": {},
+        }
+        trace["evidence_used"] = [{"evidence_id": e} for e in evidence_ids]
+        resp = client.post(
+            "/api/v1/traces", json=trace, headers=_headers(registry, ["admin"])
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["trace_id"]
+
+    def _links(self, client, headers, trace_id):
+        resp = client.get(f"/api/v1/traces/{trace_id}", headers=headers)
+        assert resp.status_code == 200, resp.text
+        return resp.json()["evidence_links"]
+
+    def test_a_restricted_document_reads_as_a_missing_one(self, client, registry):
+        read = _headers(registry, ["read"])
+        secret = self._ingest(client, registry, "doc-secret")
+        missing = self._ingest(client, registry, "doc-missing")
+        assert self._links(client, read, secret) == self._links(client, read, missing)
+        assert self._links(client, read, secret) == {}
+
+    def test_an_unlabelled_document_still_links(self, client, registry):
+        trace_id = self._ingest(client, registry, "doc-open", "doc-secret")
+        links = self._links(client, _headers(registry, ["read"]), trace_id)
+        assert links == {"doc-open": {"document_id": "doc-open"}}
+
+    def test_a_restricted_key_sees_the_link(self, client, registry):
+        trace_id = self._ingest(client, registry, "doc-secret")
+        headers = _headers(registry, ["read", "restricted"])
+        assert self._links(client, headers, trace_id) == {
+            "doc-secret": {"document_id": "doc-secret"}
+        }
+
+
+class TestExploreDocumentList:
+    """The list and ``?q=`` show nothing of a document above the key (#194)."""
+
+    def _get(self, client, headers, **params):
+        resp = client.get("/api/v1/documents", params=params, headers=headers)
+        assert resp.status_code == 200, resp.text
+        return resp
+
+    def test_a_read_key_sees_no_trace_of_the_restricted_row(self, client, registry):
+        resp = self._get(client, _headers(registry, ["read"]))
+        assert "doc-secret" not in resp.text
+        assert "zebra" not in resp.text
+        assert [d["doc_id"] for d in resp.json()["documents"]] == ["doc-open"]
+        assert resp.json()["total"] == 1
+
+    def test_a_search_shows_a_read_key_nothing_of_it(self, client, registry):
+        resp = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert resp.json()["documents"] == []
+        assert resp.json()["total"] == 0
+        assert "doc-secret" not in resp.text
+
+    def test_a_search_rank_is_withheld_from_a_key_that_cannot_read_everything(
+        self, client, registry
+    ):
+        # The full-text score is computed over every document, so a hidden
+        # one holding the term moves a visible row's rank.
+        registry.knowledge.document_store.put("doc-visible", "zebra field notes", None)
+        read = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert [d["doc_id"] for d in read.json()["documents"]] == ["doc-visible"]
+        assert "rank" not in read.json()["documents"][0]
+        admin = self._get(client, _headers(registry, ["admin"]), q="zebra")
+        assert all("rank" in d for d in admin.json()["documents"])
+
+    def test_admin_sees_the_row_in_the_list_and_the_search(self, client, registry):
+        admin = _headers(registry, ["admin"])
+        listed = self._get(client, admin)
+        assert listed.json()["total"] == 2
+        assert "doc-secret" in listed.text
+        found = self._get(client, admin, q="zebra")
+        assert [d["doc_id"] for d in found.json()["documents"]] == ["doc-secret"]
+
+    def test_a_page_is_not_short_because_a_row_was_hidden(self, client, registry):
+        store = registry.knowledge.document_store
+        for n in range(3):
+            store.put(f"doc-more-{n}", OPEN, {"title": f"More {n}"})
+        resp = self._get(client, _headers(registry, ["read"]), limit=2)
+        assert resp.json()["count"] == 2
+        # One readable row past the page, so there is a next page; the exact
+        # count is not read out.
+        assert (resp.json()["total"], resp.json()["total_exact"]) == (3, False)
+        second = self._get(client, _headers(registry, ["read"]), limit=2, offset=2)
+        assert second.json()["count"] == 2
+        assert (second.json()["total"], second.json()["total_exact"]) == (4, True)
+        ids = [d["doc_id"] for d in resp.json()["documents"]]
+        ids += [d["doc_id"] for d in second.json()["documents"]]
+        assert len(set(ids)) == 4
+        assert "doc-secret" not in ids
+
+    def test_a_chunk_of_a_restricted_parent_is_hidden(self, client, registry):
+        registry.knowledge.document_store.put(
+            chunk_doc_id("doc-secret", 0), SECRET, {"title": "chunk"}
+        )
+        resp = self._get(client, _headers(registry, ["read"]), include_chunks="true")
+        assert "doc-secret" not in resp.text
+
+    def _small_window(self, monkeypatch, *, window=10, batch=4):
+        monkeypatch.setattr(explore_mod, "_SEARCH_SCAN_LIMIT", window)
+        monkeypatch.setattr(explore_mod, "_SCAN_BATCH", batch)
+
+    def test_a_partial_scan_reports_one_page_more_not_the_store_count(
+        self, client, registry, monkeypatch
+    ):
+        """Stopping early must not turn the store's row count into a total."""
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        for n in range(3):
+            store.put(f"doc-secret-{n}", SECRET, {"title": "S", **label("restricted")})
+        for n in range(20):
+            store.put(f"doc-open-{n}", OPEN, {"title": f"O{n}"})
+        body = self._get(client, _headers(registry, ["read"]), limit=5).json()
+        assert (body["total"], body["total_exact"], body["count"]) == (6, False, 5)
+
+    @pytest.mark.parametrize("secret_first", [True, False])
+    def test_the_total_does_not_move_with_where_a_hidden_row_sits(
+        self, client, registry, monkeypatch, secret_first
+    ):
+        """Same readable rows, one hidden row moved across a batch boundary."""
+        self._small_window(monkeypatch, batch=4)
+        store = registry.knowledge.document_store
+        store.delete("doc-open")
+        store.delete("doc-secret")
+        if not secret_first:
+            store.put("doc-secret-x", SECRET, {"title": "S", **label("restricted")})
+        for n in range(12):
+            store.put(f"doc-open-{n:02d}", OPEN, {"title": f"O{n}"})
+            time.sleep(0.002)
+        if secret_first:
+            store.put("doc-secret-x", SECRET, {"title": "S", **label("restricted")})
+        body = self._get(client, _headers(registry, ["read"]), limit=1).json()
+        assert (body["total"], body["total_exact"], body["count"]) == (2, False, 1)
+
+    def test_a_store_that_is_exactly_one_batch_reports_exact(
+        self, client, registry, monkeypatch
+    ):
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        store.put("doc-open-a", OPEN, {"title": "A"})
+        store.put("doc-open-b", OPEN, {"title": "B"})
+        body = self._get(client, _headers(registry, ["read"]), limit=5).json()
+        assert (body["total"], body["total_exact"]) == (3, True)
+
+    def test_a_read_key_pages_past_the_old_window_like_admin(
+        self, client, registry, monkeypatch
+    ):
+        """An unlabelled store reads the same to a read key as to admin."""
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        store.delete("doc-secret")
+        for n in range(20):
+            store.put(f"doc-open-{n}", OPEN, {"title": f"O{n}"})
+        paged = {"limit": 5, "offset": 15}
+        read = self._get(client, _headers(registry, ["read"]), **paged).json()
+        admin = self._get(client, _headers(registry, ["admin"]), **paged).json()
+        assert read["count"] == admin["count"] == 5
+        assert [d["doc_id"] for d in read["documents"]] == [
+            d["doc_id"] for d in admin["documents"]
+        ]
+
+    def test_next_stays_enabled_across_a_batch_boundary_like_admin(
+        self, client, registry
+    ):
+        """The explorer disables Next when ``offset + count >= total``.
+
+        Real batch size: 600 unlabelled rows, a page that ends on the first
+        batch boundary. A read key must be offered the next page exactly as
+        admin is, and the last page must end it for both.
+        """
+        store = registry.knowledge.document_store
+        store.delete("doc-open")
+        store.delete("doc-secret")
+        for n in range(600):
+            store.put(f"doc-open-{n:04d}", OPEN, {"title": f"O{n}"})
+
+        def next_disabled(body):
+            return body["offset"] + body["count"] >= body["total"]
+
+        read, admin = _headers(registry, ["read"]), _headers(registry, ["admin"])
+        for offset, disabled in ((450, False), (500, False), (550, True)):
+            paged = {"limit": 50, "offset": offset}
+            r = self._get(client, read, **paged).json()
+            a = self._get(client, admin, **paged).json()
+            assert r["count"] == a["count"] == 50
+            assert next_disabled(r) is next_disabled(a) is disabled, offset
+        assert (r["total"], r["total_exact"]) == (600, True)
+
+    def test_a_key_below_restricted_cannot_ask_for_an_offset_past_the_ceiling(
+        self, client, registry, monkeypatch
+    ):
+        monkeypatch.setattr(explore_mod, "_MAX_FILTERED_OFFSET", 5)
+        for scopes in (["read"], ["read", "confidential"]):
+            ok = client.get(
+                "/api/v1/documents",
+                params={"offset": 5},
+                headers=_headers(registry, scopes),
+            )
+            assert ok.status_code == 200, scopes
+            refused = client.get(
+                "/api/v1/documents",
+                params={"offset": 6},
+                headers=_headers(registry, scopes),
+            )
+            assert refused.status_code == 400, scopes
+            assert "restricted scope" in refused.json()["detail"]
+            assert "doc-secret" not in refused.text
+        # A restricted or admin key reads the store directly: no ceiling.
+        for scopes in (["admin"], ["read", "restricted"]):
+            deep = client.get(
+                "/api/v1/documents",
+                params={"offset": 6},
+                headers=_headers(registry, scopes),
+            )
+            assert deep.status_code == 200, scopes
+
+    def test_the_ceiling_is_documented_in_the_openapi_spec(self, client):
+        spec = client.get("/openapi.json").json()
+        assert "400" in spec["paths"]["/api/v1/documents"]["get"]["responses"]
+
+    def test_a_search_capture_filled_with_hidden_rows_is_widened(
+        self, client, registry, monkeypatch
+    ):
+        """Exactness depends on rows the key can read, not on hidden ones."""
+        self._small_window(monkeypatch, window=4)
+        store = registry.knowledge.document_store
+        for n in range(4):
+            store.put(f"doc-secret-{n}", SECRET, {"title": "S", **label("restricted")})
+        for n in range(2):
+            store.put(f"doc-open-{n}", SECRET, {"title": f"O{n}"})
+        resp = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert resp.json()["total"] == 2
+        assert resp.json()["total_exact"] is True
+        assert "doc-secret" not in resp.text
+
+    @pytest.mark.parametrize("hidden", [0, 1, 3])
+    def test_a_search_total_is_clipped_and_ignores_hidden_matches(
+        self, client, registry, monkeypatch, hidden
+    ):
+        """Past the window the answer is the same however many matches are hidden."""
+        self._small_window(monkeypatch, window=4)
+        store = registry.knowledge.document_store
+        store.delete("doc-open")
+        store.delete("doc-secret")
+        for n in range(hidden):
+            store.put(f"doc-secret-{n}", SECRET, {"title": "S", **label("restricted")})
+        for n in range(9):
+            store.put(f"doc-open-{n}", SECRET, {"title": f"O{n}"})
+        read = self._get(client, _headers(registry, ["read"]), q="zebra").json()
+        assert (read["total"], read["total_exact"]) == (4, False)
+        assert not any(d["doc_id"].startswith("doc-secret") for d in read["documents"])
+        tail = self._get(
+            client, _headers(registry, ["read"]), q="zebra", limit=2, offset=3
+        ).json()
+        assert tail["count"] == 1
+
+
+class _Row(dict):  # type: ignore[type-arg]
+    """A document row that can be weakly referenced."""
+
+
+class _ListStub:
+    """Serves fresh rows on every call and keeps none of them.
+
+    ``most_alive`` is the most rows of its own still referenced when it was
+    asked for the next batch, so it measures what the caller retains while it
+    scans.
+    """
+
+    def __init__(self, n: int, hidden: frozenset[int] = frozenset()) -> None:
+        self.n = n
+        self.hidden = hidden
+        self.rows: list[weakref.ref[_Row]] = []
+        self.most_alive = 0
+
+    def list_documents(self, *, limit, offset, include_chunks):
+        gc.collect()
+        alive = sum(r() is not None for r in self.rows)
+        self.most_alive = max(self.most_alive, alive)
+        out = []
+        for i in range(offset, min(offset + limit, self.n)):
+            row = _Row(doc_id=f"H{i}" if i in self.hidden else f"R{i}", metadata={})
+            self.rows.append(weakref.ref(row))
+            out.append(row)
+        return out
+
+
+class _Gate:
+    clearance = "internal"
+
+    def permits(self, doc_id, metadata):
+        return not doc_id.startswith("H")
+
+
+class TestListScanHelpers:
+    def test_only_the_page_is_kept_while_the_scan_walks_past_it(self, monkeypatch):
+        monkeypatch.setattr(explore_mod, "_SCAN_BATCH", 10)
+        store = _ListStub(1000)
+        page, total, exact = explore_mod._list_readable(
+            store, _Gate(), offset=300, limit=5, include_chunks=False
+        )
+        gc.collect()
+        assert [d["doc_id"] for d in page] == [f"R{i}" for i in range(300, 305)]
+        assert (total, exact) == (306, False)
+        assert sum(r() is not None for r in store.rows) == len(page)
+        # 31 batches were read; while scanning, never more than the batch in
+        # hand plus the page so far was retained.
+        assert len(store.rows) == 310
+        assert store.most_alive <= 10 + 5
+
+    def test_the_scan_stops_at_the_first_readable_row_past_the_page(self, monkeypatch):
+        monkeypatch.setattr(explore_mod, "_SCAN_BATCH", 10)
+        store = _ListStub(1000)
+        explore_mod._list_readable(
+            store, _Gate(), offset=0, limit=5, include_chunks=False
+        )
+        assert len(store.rows) == 10
+
+    @pytest.mark.parametrize(
+        ("n_rows", "hidden", "offset", "limit", "expect"),
+        [
+            (500, (), 0, 500, (500, 500, True)),
+            (500, (), 0, 1, (1, 2, False)),
+            (1000, (), 0, 1000, (1000, 1000, True)),
+            (1000, (), 0, 999, (999, 1000, False)),
+            (1001, (), 0, 1000, (1000, 1001, False)),
+            (0, (), 0, 1, (0, 0, True)),
+            (10, (0, 1, 2), 0, 7, (7, 7, True)),
+            (10, (0, 1, 2), 0, 6, (6, 7, False)),
+            (10, (7, 8, 9), 2, 5, (5, 7, True)),
+        ],
+    )
+    def test_the_total_follows_readable_rows_only(
+        self, n_rows, hidden, offset, limit, expect
+    ):
+        store = _ListStub(n_rows, frozenset(hidden))
+        page, total, exact = explore_mod._list_readable(
+            store, _Gate(), offset=offset, limit=limit, include_chunks=False
+        )
+        assert (len(page), total, exact) == expect
+
+    def test_a_hidden_row_anywhere_does_not_change_the_answer(self, monkeypatch):
+        monkeypatch.setattr(explore_mod, "_SCAN_BATCH", 4)
+        args = {"offset": 2, "limit": 3, "include_chunks": False}
+        _, ref_total, ref_exact = explore_mod._list_readable(
+            _ListStub(15), _Gate(), **args
+        )
+        for pos in (0, 3, 4, 9, 15):
+            hidden_store = _ListStub(16, frozenset({pos}))
+            _, total, exact = explore_mod._list_readable(hidden_store, _Gate(), **args)
+            assert (total, exact) == (ref_total, ref_exact), pos
+
+
+class _SearchStub:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def search(self, q, *, limit, include_chunks):
+        self.calls.append(limit)
+        return [{"doc_id": r, "metadata": {}} for r in self.rows[:limit]]
+
+
+class _Everything:
+    clearance = "restricted"
+
+    def permits(self, *_):
+        return True
+
+
+class TestSearchScanHelpers:
+    def test_one_hidden_match_does_not_move_the_total(self):
+        readable = [f"R{n}" for n in range(70000)]
+        plain = _SearchStub(readable)
+        with_hidden = _SearchStub(["H0", *readable])
+        a, a_exact = explore_mod._search_readable(plain, _Gate(), "q", False)
+        b, b_exact = explore_mod._search_readable(with_hidden, _Gate(), "q", False)
+        assert (len(a), a_exact) == (len(b), b_exact) == (2000, False)
+        assert [m["doc_id"] for m in a] == [m["doc_id"] for m in b]
+
+    def test_a_capture_that_runs_out_past_the_window_is_still_clipped(self):
+        # One hidden match pushes the first capture short of the window, so
+        # the second capture runs out of matches holding 2500 readable rows;
+        # unclipped, that count would answer only because a hidden row ranked.
+        readable = [f"R{n}" for n in range(2500)]
+        plain = _SearchStub(readable)
+        with_hidden = _SearchStub(["H0", *readable])
+        a, a_exact = explore_mod._search_readable(plain, _Gate(), "q", False)
+        b, b_exact = explore_mod._search_readable(with_hidden, _Gate(), "q", False)
+        assert len(with_hidden.calls) == 2
+        assert (len(a), a_exact) == (len(b), b_exact) == (2000, False)
+        assert [m["doc_id"] for m in a] == [m["doc_id"] for m in b]
+
+    def test_exactness_at_the_window_edge_does_not_move_with_a_hidden_match(self):
+        exactly = [f"R{n}" for n in range(2000)]
+        plain = _SearchStub(exactly)
+        with_hidden = _SearchStub(["H0", *exactly])
+        a = explore_mod._search_readable(plain, _Gate(), "q", False)
+        b = explore_mod._search_readable(with_hidden, _Gate(), "q", False)
+        assert (len(a[0]), a[1]) == (len(b[0]), b[1]) == (2000, False)
+
+    def test_below_the_window_the_readable_count_is_exact(self):
+        store = _SearchStub(["H0", "R0", "H1", "R1", "R2"])
+        found, exact = explore_mod._search_readable(store, _Gate(), "q", False)
+        assert (len(found), exact) == (3, True)
+
+    def test_a_key_that_reads_everything_takes_one_capture(self):
+        store = _SearchStub([f"R{n}" for n in range(5000)])
+        found, exact = explore_mod._search_readable(store, _Everything(), "q", False)
+        assert (len(found), exact, store.calls) == (2000, False, [2000])
+        store = _SearchStub([f"R{n}" for n in range(1999)])
+        found, exact = explore_mod._search_readable(store, _Everything(), "q", False)
+        assert (len(found), exact, store.calls) == (1999, True, [2000])
+
+    def test_the_widening_stops_at_the_growth_cap(self):
+        rows = [f"H{n}" for n in range(200000)]
+        store = _SearchStub(rows)
+        found, exact = explore_mod._search_readable(store, _Gate(), "q", False)
+        assert (found, exact) == ([], False)
+        assert store.calls[-1] == 2000 * explore_mod._SEARCH_GROWTH_CAP
+
+
+class TestRestIngestSensitivity:
+    """``POST /evidence`` labels with the rules the MCP save tools use (#194)."""
+
+    def _post(self, client, headers, evidence_id, **extra):
+        body = {
+            "evidence_id": evidence_id,
+            "evidence_type": "snippet",
+            "content": OPEN,
+            "source_origin": "test",
+            **extra,
+        }
+        return client.post("/api/v1/evidence", json=body, headers=headers)
+
+    def test_a_key_below_the_label_is_refused_and_nothing_is_written(
+        self, client, registry
+    ):
+        headers = _headers(registry, ["read", "ingest"])
+        resp = self._post(client, headers, "ev-new", sensitivity="restricted")
+        assert resp.status_code == 403
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_admin_may_label_and_the_row_carries_it(self, client, registry):
+        resp = self._post(
+            client, _headers(registry, ["admin"]), "ev-new", sensitivity="restricted"
+        )
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("ev-new")
+        assert stored["metadata"]["data_classification"]["sensitivity"] == "restricted"
+
+    def test_a_key_may_label_up_to_its_own_clearance(self, client, registry):
+        headers = _headers(registry, ["read", "ingest", "confidential"])
+        assert (
+            self._post(client, headers, "ev-a", sensitivity="confidential").status_code
+            == 200
+        )
+        assert (
+            self._post(client, headers, "ev-b", sensitivity="restricted").status_code
+            == 403
+        )
+
+    def test_an_unknown_label_is_refused(self, client, registry):
+        resp = self._post(
+            client, _headers(registry, ["admin"]), "ev-new", sensitivity="secret"
+        )
+        assert resp.status_code == 422
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_a_raw_label_in_the_body_is_not_a_way_to_write_one(self, client, registry):
+        resp = self._post(
+            client,
+            _headers(registry, ["read", "ingest"]),
+            "ev-new",
+            metadata={"data_classification": {"sensitivity": "public"}},
+        )
+        assert resp.status_code == 422
+        assert registry.knowledge.document_store.get("ev-new") is None
+
+    def test_no_label_leaves_the_row_unlabelled(self, client, registry):
+        resp = self._post(client, _headers(registry, ["read", "ingest"]), "ev-new")
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("ev-new")
+        assert "data_classification" not in stored["metadata"]
