@@ -390,6 +390,164 @@ class TestSemanticSearch:
         assert SemanticSearch(vector_store, embedding_fn).name == "semantic"
 
 
+class TestSemanticSearchMalformedRowMetadata:
+    """A malformed vector-row value costs that row, never the whole axis.
+
+    Any ``ingest`` key can write a vector row whose id names no stored
+    document, so its metadata is whatever the caller sent. The read side has
+    to survive that on its own: rows already stored, and rows written by a
+    path other than the route, stay malformed.
+    """
+
+    @staticmethod
+    def _good() -> dict[str, Any]:
+        return {
+            "item_id": "good",
+            "score": 0.5,
+            "metadata": {"content": "Data pipelines", "auto_importance": 0.2},
+        }
+
+    @staticmethod
+    def _search(rows: list[dict[str, Any]]) -> list[Any]:
+        store = MagicMock()
+        store.query.return_value = rows
+        return SemanticSearch(store, MagicMock(return_value=[0.1, 0.2])).search("q")
+
+    @staticmethod
+    def _bad(metadata: dict[str, Any]) -> dict[str, Any]:
+        # Scores higher than the sibling, so an accidental serve would sort first.
+        return {"item_id": "bad", "score": 0.99, "metadata": metadata}
+
+    @pytest.mark.parametrize(
+        ("metadata", "field", "error_type"),
+        [
+            pytest.param(
+                {"content": "x", "auto_importance": "high"},
+                "auto_importance",
+                "ValueError",
+                id="importance-non-numeric-string",
+            ),
+            pytest.param(
+                {"content": "x", "auto_importance": 0.99},
+                "auto_importance",
+                "ValueError",
+                id="importance-unstamped-above-threshold",
+            ),
+            pytest.param(
+                {"content": "x", "auto_importance": [1]},
+                "auto_importance",
+                "TypeError",
+                id="importance-list",
+            ),
+            pytest.param(
+                {"content": 5},
+                "content",
+                "TypeError",
+                id="content-int",
+            ),
+            pytest.param(
+                {"content": None},
+                "content",
+                "TypeError",
+                id="content-null",
+            ),
+            pytest.param(
+                {"content": ["a"]},
+                "content",
+                "TypeError",
+                id="content-short-list",
+            ),
+            pytest.param(
+                {"excerpt": 5},
+                "excerpt",
+                "TypeError",
+                id="excerpt-int-no-content",
+            ),
+        ],
+    )
+    def test_malformed_row_skipped_and_sibling_served(
+        self, metadata: dict[str, Any], field: str, error_type: str
+    ) -> None:
+        with capture_logs() as logs:
+            items = self._search([self._bad(metadata), self._good()])
+
+        assert [i.item_id for i in items] == ["good"]
+        skipped = [
+            e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+        assert len(skipped) == 1
+        assert skipped[0]["item_id"] == "bad"
+        assert skipped[0]["field"] == field
+        assert skipped[0]["error_type"] == error_type
+        assert skipped[0]["log_level"] == "warning"
+
+    def test_warning_carries_no_caller_value(self) -> None:
+        marker = "zq-caller-value-91"
+        with capture_logs() as logs:
+            self._search([self._bad({"content": "x", "auto_importance": marker})])
+
+        skipped = [
+            e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+        assert len(skipped) == 1
+        assert marker not in repr(skipped[0])
+
+    def test_every_bad_row_skipped_in_one_search(self) -> None:
+        rows = [
+            {"item_id": "b1", "score": 0.9, "metadata": {"auto_importance": "high"}},
+            self._good(),
+            {"item_id": "b2", "score": 0.8, "metadata": {"content": 5}},
+        ]
+        with capture_logs() as logs:
+            items = self._search(rows)
+
+        assert [i.item_id for i in items] == ["good"]
+        skipped = [
+            e["item_id"]
+            for e in logs
+            if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+        assert skipped == ["b1", "b2"]
+
+    def test_well_formed_corpus_serves_unchanged_and_logs_nothing(self) -> None:
+        rows = [
+            {
+                "item_id": "a",
+                "score": 0.9,
+                "metadata": {**_fresh_meta(0.9), "content": "alpha"},
+            },
+            {"item_id": "b", "score": 0.5, "metadata": {"excerpt": "beta"}},
+            {"item_id": "c", "score": 0.4, "metadata": {}},
+        ]
+        with capture_logs() as logs:
+            items = self._search(rows)
+
+        assert [i.item_id for i in items] == ["a", "b", "c"]
+        assert [i.excerpt for i in items] == ["alpha", "beta", ""]
+        assert not [
+            e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+
+    def test_bug_outside_the_guarded_computations_still_surfaces(self) -> None:
+        # The guard is narrow: a ValueError raised by something other than
+        # the importance or excerpt computation (here, a non-numeric store
+        # score failing ``PackItem`` validation) is a different defect and
+        # must still raise rather than be swallowed as "malformed metadata".
+        with capture_logs() as logs, pytest.raises(ValueError, match="relevance_score"):
+            self._search(
+                [
+                    {
+                        "item_id": "x",
+                        "score": "not-a-number",
+                        "metadata": {"content": "x"},
+                    }
+                ]
+            )
+        assert not [
+            e for e in logs if e["event"] == "semantic_row_skipped_malformed_metadata"
+        ]
+
+
 class TestGraphSearch:
     @pytest.fixture
     def graph_store(self) -> MagicMock:
