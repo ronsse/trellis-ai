@@ -321,6 +321,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` omit evidence
+  pointers to documents the caller cannot read.** Follows #1063, which left these
+  two routes. A node served by either could still name a document a
+  below-`restricted` key may not read, in `document_ids`, in its `evidence_ref`
+  property or as `lifecycle.superseded_by`. Both routes now apply the same
+  `conceal_node_pointers` step: the entity and every node of its `subgraph` (one
+  judgement over all of them), and every search hit's `properties`, are served
+  without such an id; the pointer key is removed, `lifecycle.state` and every
+  other property stay, and `restricted`, `admin` and auth off read nothing and see
+  the node as stored. Nothing else changes: the same nodes, edges, page, `total`
+  and order are served. `GET /api/v1/graph/search/facets` counts nodes per
+  `node_type` and names no property, so it needed no change. An edge's own
+  `evidence_ref` (served in the entity's `subgraph.edges`) is still served as
+  stored.
+
 - **Graph reads omit evidence pointers to documents the caller cannot read.**
   Follows #1045: the same concealment, for the pointers a graph node carries. A
   node has no label, but the document ids it names can point at a document a
