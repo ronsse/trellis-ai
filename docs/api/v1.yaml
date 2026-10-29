@@ -4311,7 +4311,11 @@ paths:
 
         without it a write to one is refused (400) and nothing is written, and a
 
-        value that is not a boolean is a 422. It is no way past the clearance rule above.'
+        value that is not a boolean is a 422. It is no way past the clearance rule above.
+
+        A reused ``idempotency_key`` answers as the write it first named, so a
+
+        flagged retry needs a fresh one.'
       operationId: create_document_api_v1_documents_post
       requestBody:
         content:
@@ -4790,13 +4794,21 @@ paths:
 
         (400) and the row stays blank; with it the row is written and stamped
 
-        ``reingested_after_redaction``. It changes nothing for an id that was not
+        ``reingested_after_redaction``. Setting it needs the ``mutate`` scope as
 
-        redacted, and it is no way past the clearance rules above: a key that may
+        well as ``ingest`` (403 otherwise, nothing written), the bar the command
 
-        not read a labelled document still cannot overwrite it (409). A value that
+        route already sets, because undoing a redaction is not an ingest. It
 
-        is not a boolean is a 422.'
+        changes nothing for an id that was not redacted, and it is no way past the
+
+        clearance rules above: a key that may not read a labelled document still
+
+        cannot overwrite it (409). A value that is not a boolean is a 422. A reused
+
+        ``idempotency_key`` answers as the write it first named, so a flagged retry
+
+        needs a fresh one.'
       operationId: ingest_evidence_api_v1_evidence_post
       requestBody:
         content:
