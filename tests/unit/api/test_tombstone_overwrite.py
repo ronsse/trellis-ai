@@ -214,6 +214,45 @@ def test_commands_batch_with_the_flag_writes_and_stamps(
     assert REINGEST_STAMP_KEY in row["metadata"]
 
 
+@pytest.mark.parametrize("value", [None, 0, "", "yes", 1, [True]], ids=repr)
+def test_commands_batch_refuses_any_set_non_boolean_flag(
+    client: TestClient, registry: StoreRegistry, value: object
+) -> None:
+    """The two REST routes answer these 422; this door carries the value to the
+    handler, which refuses it, so ``null``, ``0`` and ``""`` do not read as an
+    absent flag (#1049). Defective subject: carry the flag only when truthy and
+    the first three are refused as an unflagged write instead, with the other
+    message."""
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json=_batch(
+            {"doc_id": DOC_ID, "content": NEW_TEXT, "reingest_redacted": value}
+        ),
+    )
+
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["results"][0]
+    assert result["status"] == "rejected"
+    assert "evidence.reingest_redacted must be a boolean" in result["message"]
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
+
+
+def test_commands_batch_treats_a_false_flag_as_the_unflagged_write(
+    client: TestClient, registry: StoreRegistry
+) -> None:
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json=_batch(
+            {"doc_id": DOC_ID, "content": NEW_TEXT, "reingest_redacted": False}
+        ),
+    )
+
+    result = resp.json()["results"][0]
+    assert result["status"] == "rejected"
+    assert "--reingest-redacted" in result["message"]
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
+
+
 # ── the flag is no way past the clearance rules ─────────────────────────
 
 LABELLED = "doc-gone-labelled"

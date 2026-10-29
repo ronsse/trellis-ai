@@ -1404,7 +1404,11 @@ Scope boundaries, stated plainly:
   `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`), or
   a boolean `reingest_redacted` in the body of `POST /api/v1/evidence` or
   `POST /api/v1/documents` (a non-boolean is a 422, nothing written; the refusal
-  without it is a 400 whose message names these ways). Each REST way needs the
+  without it is a 400 whose message names these ways). On the command door
+  (`execute_mutation`, `POST /api/v1/commands/batch`) a flag that is present
+  and not a boolean, `null`, `0` and `""` included, is refused the same way
+  (`evidence_ingest_shape`, nothing written); only absent or `false` is the
+  unflagged write (#1049). Each REST way needs the
   `mutate` scope: an `ingest`-only key that sets the flag on
   `POST /api/v1/evidence` is a 403 with nothing written. A reused
   `idempotency_key` answers as the write it first named, so a flagged retry
@@ -1416,7 +1420,11 @@ Scope boundaries, stated plainly:
   but a class label, so a real tombstone carries no label of its own; the cases
   that remain are a label stamped on a tombstone afterwards and a chunk whose
   parent is labelled. Setting it on an id that was not redacted changes nothing
-  and stamps nothing.
+  and stamps nothing. Known gap (#1049): an unflagged re-put of exactly the
+  content first written under an id that was later redacted, under a derived
+  idempotency key, is answered as a duplicate (200 on the two REST routes)
+  because the idempotency stage runs before the handler's guard; nothing is
+  written and the tombstone stays.
   A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
   caller may not set that key, `reingest_stamp_reserved`), and promotion's
   re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back

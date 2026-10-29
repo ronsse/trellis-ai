@@ -1349,6 +1349,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A falsy non-boolean `evidence.reingest_redacted` is refused on the command
+  door like a truthy one (part of #1049).** `POST /api/v1/commands/batch` and MCP
+  `execute_mutation` build the `evidence.ingest` command without the flag
+  unless it was truthy, so `null`, `0` and `""` read as an absent flag and the
+  write went ahead as an unflagged one, while `"yes"` was refused and both REST
+  routes answered every non-boolean with a 422. The builder now carries any
+  value that is not `False`, so the handler refuses it (`evidence_ingest_shape`,
+  nothing written). Absent and `false` are the unflagged write and keep the
+  derived idempotency key they had; a refused value is part of the digest, so
+  it cannot be answered as a replay of the unflagged write it resembles. Also
+  adds the missing direct test that `put_document` guards a tombstoned
+  `#chunk-` id (corpus sync's own skip masked a seam that stopped guarding
+  them). Still open under #1049: an unflagged re-put of the exact content first
+  written under an id that was later redacted is answered as a duplicate (200 on
+  the REST routes), not refused; nothing is written and the tombstone stays.
+
 - **Small sensitivity-floor follow-ups (#1029, part of).** A re-promotion of a
   precedent (`precedent.promote` over an existing row) no longer drops the row's
   stored `data_classification` label: the row's metadata is rebuilt from the
