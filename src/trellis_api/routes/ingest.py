@@ -36,6 +36,7 @@ from trellis_api.routes._principal import (
     refuse_document_overwrite,
     request_clearance,
     resolve_requested_by,
+    stamp_request_sensitivity,
 )
 from trellis_wire.dtos import (
     BulkAliasItem,
@@ -135,9 +136,14 @@ def ingest_evidence(
 
     An ``evidence_id`` that already names a labelled document is refused (409):
     the write carries no label, so it would replace the row and downgrade it.
+
+    An optional ``sensitivity`` labels the stored document. The key needs that
+    clearance itself (403 otherwise), and an unknown label is a 422.
     """
+    fields = dict(body)
+    sensitivity = fields.pop("sensitivity", None)
     try:
-        evidence = Evidence.model_validate(body)
+        evidence = Evidence.model_validate(fields)
     except Exception as exc:
         raise HTTPException(
             status_code=422,
@@ -149,6 +155,15 @@ def ingest_evidence(
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
+    # The body's own ``metadata`` is never stored here, but a raw label in it is
+    # refused all the same: one rule, whichever key a caller reaches for.
+    if isinstance(fields.get("metadata"), dict):
+        stamp_request_sensitivity(fields["metadata"], None, ctx=ctx)
+    if sensitivity is not None and not isinstance(sensitivity, str):
+        raise HTTPException(status_code=422, detail="sensitivity must be a string")
+    evidence_metadata = stamp_request_sensitivity(
+        evidence_metadata, sensitivity, ctx=ctx
+    )
     refuse_document_overwrite(
         registry.knowledge.document_store,
         evidence.evidence_id,

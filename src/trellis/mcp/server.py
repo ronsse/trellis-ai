@@ -162,14 +162,14 @@ from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     OverwriteRefusedError,
+    SensitivityLabelError,
     refuse_overwrite,
+    stamp_sensitivity,
 )
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import withholding_from_payload
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
-    SENSITIVITY_ORDER,
-    DataClassification,
     lifecycle_state_of,
     sensitivity_of,
     sensitivity_rank,
@@ -2203,40 +2203,14 @@ def _stamp_sensitivity(
 ) -> dict[str, Any]:
     """The metadata to store, carrying the caller's ``sensitivity`` label (#194).
 
-    No label leaves the bag untouched: an unlabelled save is byte-identical to
-    one before this parameter existed. A label above the caller's own
-    clearance is refused, since the caller could then store content they cannot
-    read back. A raw ``data_classification`` in ``metadata`` is refused for the
-    same reason: it would be a second, unchecked way to write the label.
+    The rule is :func:`trellis.retrieve.sensitivity.stamp_sensitivity`, shared
+    with the REST producers; this wrapper only maps its refusal to this
+    surface's invalid-params error.
     """
-    stamped = dict(metadata or {})
-    if DATA_CLASSIFICATION_KEY in stamped:
-        _raise_invalid_params(
-            f"metadata may not set {DATA_CLASSIFICATION_KEY!r}; use the "
-            "sensitivity parameter",
-            data={"field": f"metadata.{DATA_CLASSIFICATION_KEY}", "tool": tool},
-        )
-    if sensitivity is None:
-        return stamped
-    if sensitivity not in SENSITIVITY_ORDER:
-        _raise_invalid_params(
-            f"sensitivity must be one of {list(SENSITIVITY_ORDER)}, "
-            f"got {sensitivity!r}",
-            data={"field": "sensitivity", "tool": tool},
-        )
-    clearance = current_clearance()
-    if sensitivity_rank(sensitivity) > sensitivity_rank(clearance):  # type: ignore[arg-type]
-        _raise_invalid_params(
-            f"sensitivity {sensitivity!r} is above this credential's clearance "
-            f"({clearance!r}); nothing was written. A key needs the "
-            f"{sensitivity!r} (or admin) scope to label content that high.",
-            data={"field": "sensitivity", "tool": tool, "clearance": clearance},
-        )
-    stamped[DATA_CLASSIFICATION_KEY] = DataClassification(
-        sensitivity=sensitivity,  # type: ignore[arg-type]
-        classified_by=["caller"],
-    ).model_dump(mode="json")
-    return stamped
+    try:
+        return stamp_sensitivity(metadata, sensitivity, current_clearance())
+    except SensitivityLabelError as exc:
+        _raise_invalid_params(exc.message, data={**exc.data, "tool": tool})
 
 
 def _match_readable(registry: StoreRegistry, doc_id: str) -> bool:

@@ -4142,6 +4142,37 @@ paths:
       description: 'List or search documents, returning previews only.
 
 
+        A document above the key''s clearance is absent: no row, id, title or
+
+        preview, and ``total`` does not count it (#194). ``DocumentStore`` has no
+
+        label predicate, so a key below ``restricted`` is served by scanning the
+
+        store in batches from the start, keeping the rows of the requested page.
+
+        The scan stops at the first readable row past the page. If it finds one,
+
+        ``total`` is ``offset + limit + 1`` and ``total_exact`` is ``false``: there
+
+        is at least one more page, which is all a pager needs, and nothing past
+
+        that is counted. If the store runs out first, ``total`` is the exact count
+
+        of readable rows. Either way the response depends only on the rows the key
+
+        can read; counts are approximate below ``restricted``. A key below
+
+        ``restricted`` may not ask for an ``offset`` above 10000 (400): the scan''s
+
+        cost grows with it, so narrow the list with ``q`` or use a key with the
+
+        ``restricted`` scope, which reads the store directly and has no ceiling.
+
+        The scan still walks past rows the key cannot read, so its cost grows with
+
+        the store, not only with the page.
+
+
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
 
         ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -4157,13 +4188,23 @@ paths:
 
         ``DocumentStore`` counts a query''s total matches or offsets into them,
 
-        so this captures up to :data:`_SEARCH_SCAN_LIMIT` matches once and
+        so this captures the first matches once and pages that capture in
 
-        pages that capture in Python; ``total`` and ``total_exact`` describe
+        Python, never more than 2000 of them: ``total`` is clipped to 2000 and a
 
-        the capture, so a query matching at least the scan bound reports
+        query with that many readable matches reports ``total_exact: false``. For
 
-        ``total_exact: false`` instead of a silently wrong exact total.'
+        a key that cannot read everything the capture is widened (to at most 32
+
+        times) until it holds 2000 readable matches, so one hidden match does not
+
+        move ``total``. Past that widening bound a residual count leak is
+
+        unavoidable: a capture still short of 2000 readable matches reports the
+
+        readable ones it holds, a count that depends on how many hidden matches
+
+        ranked ahead of them, with ``total_exact: false``.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -4217,6 +4258,13 @@ paths:
                 title: Response List Documents Api V1 Documents Get
                 type: object
           description: Successful Response
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StringDetailError'
+          description: A key below `restricted` asked for an `offset` past the ceiling its filtered scan allows; narrow the
+            list with `q` or use a key with the `restricted` scope.
         '422':
           content:
             application/json:
@@ -4704,7 +4752,12 @@ paths:
 
         An ``evidence_id`` that already names a labelled document is refused (409):
 
-        the write carries no label, so it would replace the row and downgrade it.'
+        the write carries no label, so it would replace the row and downgrade it.
+
+
+        An optional ``sensitivity`` labels the stored document. The key needs that
+
+        clearance itself (403 otherwise), and an unknown label is a 422.'
       operationId: ingest_evidence_api_v1_evidence_post
       requestBody:
         content:
@@ -6896,7 +6949,11 @@ paths:
 
         ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
 
-        neither, or with an empty ``evidence_id``, has no entry.
+        neither, or with an empty ``evidence_id``, has no entry. A document above
+
+        the caller''s clearance counts as no document, so the links cannot tell a
+
+        labelled record from a missing one.
 
         ``evidence_links`` is ``null`` when the knowledge stores cannot be read.'
       operationId: get_trace_api_v1_traces__trace_id__get
