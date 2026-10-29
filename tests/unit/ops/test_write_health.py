@@ -968,6 +968,144 @@ class TestFailedStrategies:
         assert report.failed_strategies.latest_at is None
 
 
+class TestMalformedRows:
+    """``PACK_ASSEMBLED.malformed_row_skips`` tallied off the attribution scan."""
+
+    def test_skips_tallied_per_strategy_with_withheld_packs(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        now = datetime.now(tz=UTC).replace(microsecond=0)
+        withheld = {HOLDOUT_KEY: True, "malformed_row_skips": {"semantic": 2}}
+        served = {"malformed_row_skips": {"semantic": 1, "graph": 3}}
+        for hours_ago, payload in ((3, withheld), (2, {}), (1, served)):
+            event_log.append(
+                Event(
+                    event_type=EventType.PACK_ASSEMBLED,
+                    source="pack_builder",
+                    occurred_at=now - timedelta(hours=hours_ago),
+                    payload=payload,
+                )
+            )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.malformed_rows.packs == 2
+        assert report.malformed_rows.by_strategy == {"semantic": 3, "graph": 3}
+        assert report.malformed_rows.latest_at == now - timedelta(hours=1)
+
+    @pytest.mark.parametrize(
+        "value",
+        [{}, None, [], "semantic", 3, {"semantic": 0}, {"semantic": -1}],
+    )
+    def test_no_key_or_an_empty_one_counts_nothing(
+        self, tmp_path: Path, value: object
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"malformed_row_skips": value},
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.malformed_rows.packs == 0
+        assert report.malformed_rows.by_strategy == {}
+        assert report.malformed_rows.latest_at is None
+
+    def test_a_malformed_entry_is_dropped_and_the_rest_counts(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "malformed_row_skips": {
+                    "semantic": 2,
+                    "graph": True,
+                    "keyword": "many",
+                    "other": 1.5,
+                }
+            },
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.malformed_rows.packs == 1
+        assert report.malformed_rows.by_strategy == {"semantic": 2}
+
+    def test_a_skip_outside_the_window_is_not_counted(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.append(
+            Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=datetime.now(tz=UTC) - timedelta(days=10),
+                payload={"malformed_row_skips": {"semantic": 1}},
+            )
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.malformed_rows.packs == 0
+        assert report.malformed_rows.latest_at is None
+
+    def test_a_skipping_pack_warns_by_name_and_count(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"malformed_row_skips": {"semantic": 2}},
+        )
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "warn"
+        assert any(
+            "skipped malformed retrieval rows (semantic: 2)" in reason
+            for reason in report.reasons
+        )
+        assert report.model_dump(mode="json")["serve"]["malformed_rows"] == {
+            "packs": 1,
+            "by_strategy": {"semantic": 2},
+            "latest_at": report.serve.malformed_rows.latest_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+        }
+
+    def test_packs_with_no_skip_add_no_reason(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "injected_items": [{"item_id": "a"}],
+                "malformed_row_skips": {},
+            },
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "ok"
+        assert report.reasons == []
+
+    def test_a_malformed_entry_never_fails_health(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"malformed_row_skips": ["not", "a", "dict"]},
+        )
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert not any("malformed" in reason for reason in report.reasons)
+
+
 class TestBackendHealth:
     def test_unattributed_feedback_warns(self, tmp_path: Path) -> None:
         """The starvation signature: feedback exists, none attributed."""
