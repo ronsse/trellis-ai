@@ -6,6 +6,34 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The sensitivity floor covers the rest of the read surface (#194, part 3;
+  closes #1022).** A restricted document that an earlier gate rejected (noise,
+  archived, superseded, demoted) is no longer named in a pack response to a key
+  below `restricted`: the builder now judges every rejected candidate against the
+  clearance, chunks by their parent's label, not only the rows rejected for
+  `sensitivity`. `GET /documents` (the list and `?q=`) shows such a key no row,
+  id or title of a document above it and does not count it in `total`. Below
+  `restricted` the list scans the store in batches from the start, keeping only
+  the requested page, and stops at the first readable row past it: `total` is
+  then `offset + limit + 1` with `total_exact` `false` (there is a next page; the
+  rest is not counted), or the exact readable count when the store runs out
+  first, so the response depends only on rows the key can read and counts are
+  approximate. Such a key may not ask for an `offset` above 10000 (400: narrow by
+  `q` or use a `restricted` key); a `restricted` or admin key reads the store
+  directly and has no ceiling. A `?q=` total is clipped to 2000, widening the
+  capture (to at most 32 times) until it holds 2000 readable matches so one
+  hidden match does not move it; past that bound a residual count leak is
+  unavoidable. A `?q=` row carries `rank` only for a `restricted` or admin key:
+  the full-text score is computed over every document, so a hidden one holding
+  the term moves it. `POST /evidence` takes an
+  optional `sensitivity` under the rules the MCP save tools use (403 above the
+  key's clearance, 422 for an unknown label or a raw `data_classification`
+  key), through one shared helper. `GET /traces/{id}` answers `evidence_links`
+  for a document the key cannot read as it does for a missing one. A roster rule
+  (`tests/unit/test_sensitivity_rest_roster_rule.py`) fails a REST route that is
+  neither gated, nor free of document content, nor admin-only, nor a mutation
+  that goes through the governed executor, nor a named known gap (`POST
+  /vectors` and `GET /classify/candidates` are the two).
 - **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
   `save_memory` and `save_knowledge` take an optional `sensitivity`
   (`public` / `internal` / `confidential` / `restricted`); a key can label only

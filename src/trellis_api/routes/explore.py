@@ -56,13 +56,33 @@ _PREVIEW_CHARS = 300
 #: total matches, unlike ``list_documents``/``count`` for the unfiltered
 #: listing. Paging a search the same way the list is paged means capturing
 #: a bounded window of matches once and slicing it in Python; this is that
-#: bound. A query that matches at least this many documents gets
-#: ``total_exact: false`` rather than a silently wrong exact total.
+#: bound. A query with at least this many readable matches reports
+#: ``total`` clipped to it and ``total_exact: false`` rather than a silently
+#: wrong exact total, whoever asks.
 _SEARCH_SCAN_LIMIT = 2000
 
+#: Rows fetched per round trip when a list is filtered by clearance.
+_SCAN_BATCH = 500
 
-def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
-    """Shape a stored document into a list row: preview, never full content."""
+#: How far a filtered search may grow its capture past ``_SEARCH_SCAN_LIMIT``
+#: while looking for that many readable matches.
+_SEARCH_GROWTH_CAP = 32
+
+#: The deepest ``offset`` a key below ``restricted`` may ask of the list. Its
+#: page is found by reading the store from the start, so the cost of a request
+#: grows with the offset; a ``restricted`` or admin key is served by the store
+#: directly and has no such ceiling.
+_MAX_FILTERED_OFFSET = 10_000
+
+
+def _document_row(doc: dict[str, Any], *, with_rank: bool) -> dict[str, Any]:
+    """Shape a stored document into a list row: preview, never full content.
+
+    ``rank`` is the store's full-text score, computed from term statistics
+    over every document, hidden ones included, so a key that cannot read
+    everything would learn from it whether hidden documents hold a term.
+    It is returned only when ``with_rank`` says the caller reads everything.
+    """
     content = doc.get("content") or ""
     row = {
         "doc_id": doc.get("doc_id"),
@@ -72,7 +92,7 @@ def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
-    if "rank" in doc:
+    if with_rank and "rank" in doc:
         row["rank"] = doc["rank"]
     return row
 
@@ -100,7 +120,19 @@ def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
 #   ``list_documents`` caller still sees them (the store default is
 #   ``include_chunks=True``), and ``?include_chunks=true`` restores the
 #   old response here.
-@router.get("/documents")
+@router.get(
+    "/documents",
+    responses={
+        400: {
+            "description": (
+                "A key below `restricted` asked for an `offset` past the "
+                "ceiling its filtered scan allows; narrow the list with `q` "
+                "or use a key with the `restricted` scope."
+            ),
+            "model": StringDetailError,
+        },
+    },
+)
 def list_documents(
     q: str | None = Query(None, description="Full-text search query"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
@@ -112,8 +144,25 @@ def list_documents(
             " they are slices of documents already in the list."
         ),
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """List or search documents, returning previews only.
+
+    A document above the key's clearance is absent: no row, id, title or
+    preview, and ``total`` does not count it (#194). ``DocumentStore`` has no
+    label predicate, so a key below ``restricted`` is served by scanning the
+    store in batches from the start, keeping the rows of the requested page.
+    The scan stops at the first readable row past the page. If it finds one,
+    ``total`` is ``offset + limit + 1`` and ``total_exact`` is ``false``: there
+    is at least one more page, which is all a pager needs, and nothing past
+    that is counted. If the store runs out first, ``total`` is the exact count
+    of readable rows. Either way the response depends only on the rows the key
+    can read; counts are approximate below ``restricted``. A key below
+    ``restricted`` may not ask for an ``offset`` above 10000 (400): the scan's
+    cost grows with it, so narrow the list with ``q`` or use a key with the
+    ``restricted`` scope, which reads the store directly and has no ceiling.
+    The scan still walks past rows the key cannot read, so its cost grows with
+    the store, not only with the page.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -123,27 +172,44 @@ def list_documents(
     A search (``q`` set) is paged the same way the unfiltered list is:
     ``offset`` and ``limit`` both apply to the matches. Nothing in
     ``DocumentStore`` counts a query's total matches or offsets into them,
-    so this captures up to :data:`_SEARCH_SCAN_LIMIT` matches once and
-    pages that capture in Python; ``total`` and ``total_exact`` describe
-    the capture, so a query matching at least the scan bound reports
-    ``total_exact: false`` instead of a silently wrong exact total.
+    so this captures the first matches once and pages that capture in
+    Python, never more than 2000 of them: ``total`` is clipped to 2000 and a
+    query with that many readable matches reports ``total_exact: false``. For
+    a key that cannot read everything the capture is widened (to at most 32
+    times) until it holds 2000 readable matches, so one hidden match does not
+    move ``total``. Past that widening bound a residual count leak is
+    unavoidable: a capture still short of 2000 readable matches reports the
+    readable ones it holds, a count that depends on how many hidden matches
+    ranked ahead of them, with ``total_exact: false``.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
+    gate = DocumentClearance(store, request_clearance(ctx))
     if q:
-        matches = store.search(
-            q, limit=_SEARCH_SCAN_LIMIT, include_chunks=include_chunks
-        )
+        matches, total_exact = _search_readable(store, gate, q, include_chunks)
         total = len(matches)
-        total_exact = total < _SEARCH_SCAN_LIMIT
         docs = matches[offset : offset + limit]
+    elif gate.clearance != "restricted":
+        if offset > _MAX_FILTERED_OFFSET:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"offset above {_MAX_FILTERED_OFFSET} is not available to "
+                    "this key; narrow the list with q or use a key with the "
+                    "restricted scope"
+                ),
+            )
+        docs, total, total_exact = _list_readable(
+            store, gate, offset=offset, limit=limit, include_chunks=include_chunks
+        )
     else:
         docs = store.list_documents(
             limit=limit, offset=offset, include_chunks=include_chunks
         )
         total = store.count(include_chunks=include_chunks)
         total_exact = True
-    rows = [_document_row(d) for d in docs]
+    with_rank = gate.clearance == "restricted"
+    rows = [_document_row(d, with_rank=with_rank) for d in docs]
     return {
         "status": "ok",
         "total": total,
@@ -153,6 +219,78 @@ def list_documents(
         "include_chunks": include_chunks,
         "documents": rows,
     }
+
+
+def _list_readable(
+    store: Any,
+    gate: DocumentClearance,
+    *,
+    offset: int,
+    limit: int,
+    include_chunks: bool,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """One page of the documents the gate permits: ``(page, total, exact)``.
+
+    ``DocumentStore`` has no label predicate, so the filter runs here, over
+    batches of :data:`_SCAN_BATCH` read from the start; the page is cut from
+    the readable rows, not the store's, so a hidden row never shortens it.
+    Only the page is kept, so memory grows with ``limit``. The scan stops at
+    the first readable row past the page and reports ``offset + limit + 1``
+    as an inexact total; a store that runs out first reports its exact
+    readable count. Neither the store's own row count nor anything about a
+    hidden row reaches the result.
+    """
+    need = offset + limit
+    page: list[dict[str, Any]] = []
+    seen = 0
+    scanned = 0
+    while True:
+        batch = store.list_documents(
+            limit=_SCAN_BATCH, offset=scanned, include_chunks=include_chunks
+        )
+        scanned += len(batch)
+        for doc in batch:
+            if not gate.permits(doc["doc_id"], doc.get("metadata")):
+                continue
+            if offset <= seen < need:
+                page.append(doc)
+            seen += 1
+            if seen > need:
+                return page, need + 1, False
+        if len(batch) < _SCAN_BATCH:
+            return page, seen, True
+
+
+def _search_readable(
+    store: Any, gate: DocumentClearance, q: str, include_chunks: bool
+) -> tuple[list[dict[str, Any]], bool]:
+    """The search matches the gate permits, and whether they are all of them.
+
+    ``DocumentStore.search`` has only a ``limit``, so a match capture is cut
+    at a bound, and the answer must not move with a hidden row inside it: a
+    capture whose readable rows fall short of :data:`_SEARCH_SCAN_LIMIT` while
+    the store may hold more matches is re-run with a bound twice as large,
+    until it holds that many readable rows, runs out of matches, or reaches
+    :data:`_SEARCH_GROWTH_CAP` times the base bound. The result is clipped to
+    :data:`_SEARCH_SCAN_LIMIT` readable rows and is exact only when the
+    matches ran out below that, so a key that reads everything stops after
+    the first capture. Past the growth cap the readable count can depend on
+    hidden rows; that residual is unavoidable with a bounded capture.
+    """
+    bound = _SEARCH_SCAN_LIMIT
+    while True:
+        found = store.search(q, limit=bound, include_chunks=include_chunks)
+        readable = [m for m in found if gate.permits(m["doc_id"], m.get("metadata"))]
+        if len(found) < bound:
+            return (
+                readable[:_SEARCH_SCAN_LIMIT],
+                len(readable) < _SEARCH_SCAN_LIMIT,
+            )
+        if len(readable) >= _SEARCH_SCAN_LIMIT:
+            return readable[:_SEARCH_SCAN_LIMIT], False
+        if bound >= _SEARCH_SCAN_LIMIT * _SEARCH_GROWTH_CAP:
+            return readable, False
+        bound *= 2
 
 
 @router.get("/documents/{doc_id:path}")

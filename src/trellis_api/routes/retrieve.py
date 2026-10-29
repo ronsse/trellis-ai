@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -38,6 +38,9 @@ from trellis_wire.dtos import (
     StringDetailError,
     WithholdingResponse,
 )
+
+if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
 
 logger = structlog.get_logger(__name__)
 
@@ -517,13 +520,18 @@ def list_trace_domains() -> dict[str, Any]:
 
 
 @router.get("/traces/{trace_id}")
-def get_trace(trace_id: str) -> dict[str, Any]:
+def get_trace(
+    trace_id: str,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Get a trace and what can show each of its evidence refs.
 
     ``evidence_links`` maps an ``evidence_id`` to ``{"document_id": ...}``
     when a document holds that evidence record, else to
     ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
-    neither, or with an empty ``evidence_id``, has no entry.
+    neither, or with an empty ``evidence_id``, has no entry. A document above
+    the caller's clearance counts as no document, so the links cannot tell a
+    labelled record from a missing one.
     ``evidence_links`` is ``null`` when the knowledge stores cannot be read.
     """
     registry = get_registry()
@@ -532,7 +540,7 @@ def get_trace(trace_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
     links: dict[str, dict[str, str]] | None
     try:
-        links = _evidence_links(registry, trace)
+        links = _evidence_links(registry, trace, request_clearance(ctx))
     # GRACEFUL-DEGRADATION: the links only point at views of the evidence. A
     # knowledge store that cannot answer costs the links, never the trace,
     # which lives in the operational plane.
@@ -546,7 +554,9 @@ def get_trace(trace_id: str) -> dict[str, Any]:
     }
 
 
-def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
+def _evidence_links(
+    registry: Any, trace: Trace, clearance: Sensitivity
+) -> dict[str, dict[str, str]]:
     """Where each evidence ref can be viewed, keyed by its ``evidence_id``.
 
     The evidence writers (``POST /evidence``, ``trellis ingest evidence``, the
@@ -554,16 +564,20 @@ def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
     a document, trace extraction, when it ran, wrote an ``evidence:<id>``
     graph node. A ref with neither has no entry, nor does one with an empty
     ``evidence_id``: it names no record, even where a graph holds a node
-    ``evidence:``.
+    ``evidence:``. A document the caller may not read is treated as absent
+    (#194): the link is an existence check, and answering it would tell a
+    below-clearance key which ids hold a labelled record.
     """
     documents = registry.knowledge.document_store
     graph = registry.knowledge.graph_store
+    gate = DocumentClearance(documents, clearance)
     links: dict[str, dict[str, str]] = {}
     for ref in trace.evidence_used:
         if not ref.evidence_id:
             continue
         node_id = f"evidence:{ref.evidence_id}"
-        if documents.get(ref.evidence_id) is not None:
+        doc = documents.get(ref.evidence_id)
+        if doc is not None and gate.permits(ref.evidence_id, doc.get("metadata")):
             links[ref.evidence_id] = {"document_id": ref.evidence_id}
         elif graph.get_node(node_id) is not None:
             links[ref.evidence_id] = {"entity_id": node_id}

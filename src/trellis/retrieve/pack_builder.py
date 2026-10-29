@@ -93,8 +93,9 @@ from trellis.retrieve.parent_verdicts import (
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
+    CandidateIndex,
+    concealed_ids_metadata,
     partition_by_clearance,
-    withheld_ids_metadata,
 )
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
@@ -1129,6 +1130,9 @@ class PackBuilder:
         # from two axes (or by several chunks on one axis) costs one
         # DocumentStore.get() for the whole pack, not one per strategy.
         parent_verdict_cache = ParentVerdictCache(self._document_store)
+        # Every collected candidate, kept so a row an earlier gate rejects can
+        # still be judged against the clearance (#1022).
+        candidates = CandidateIndex(clearance)
         for strategy in self._strategies:
             try:
                 found, axis_state = _search_strategy(
@@ -1138,8 +1142,10 @@ class PackBuilder:
                     filters=(dict(merged_filters) if merged_filters else None),
                 )
                 graph_axis_withheld = axis_state or graph_axis_withheld
+                servable = strip_non_servable(found)
+                candidates.add(servable)
                 items, gate_rejected = self._apply_collect_gates(
-                    strip_non_servable(found),
+                    servable,
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                     parent_verdict_cache=parent_verdict_cache,
@@ -1402,7 +1408,9 @@ class PackBuilder:
             # must read it the same way for both.
             metadata={
                 "withholding": withholding.as_telemetry(),
-                **withheld_ids_metadata(rejected),
+                **concealed_ids_metadata(
+                    rejected, candidates, clearance, parent_verdict_cache
+                ),
             },
         )
 
@@ -1546,6 +1554,9 @@ class PackBuilder:
         # One cache for the whole build — see the matching note in
         # :meth:`build`.
         parent_verdict_cache = ParentVerdictCache(self._document_store)
+        # Every collected candidate, kept so a row an earlier gate rejects can
+        # still be judged against the clearance (#1022).
+        candidates = CandidateIndex(clearance)
         for strategy in self._strategies:
             try:
                 found, axis_state = _search_strategy(
@@ -1555,8 +1566,10 @@ class PackBuilder:
                     filters=(dict(merged_filters) if merged_filters else None),
                 )
                 graph_axis_withheld = axis_state or graph_axis_withheld
+                servable = strip_non_servable(found)
+                candidates.add(servable)
                 items, gate_rejected = self._apply_collect_gates(
-                    strip_non_servable(found),
+                    servable,
                     signal_quality_spec=signal_quality_spec,
                     strategy_name=strategy.name,
                     parent_verdict_cache=parent_verdict_cache,
@@ -1850,7 +1863,9 @@ class PackBuilder:
             assembled_at=utc_now(),
             metadata={
                 "withholding": withholding.as_telemetry(),
-                **withheld_ids_metadata(rejected),
+                **concealed_ids_metadata(
+                    rejected, candidates, clearance, parent_verdict_cache
+                ),
             },
         )
 
