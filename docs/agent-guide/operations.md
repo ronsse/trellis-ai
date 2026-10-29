@@ -3765,6 +3765,27 @@ stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
 
+Two answers no longer reveal a document the caller cannot read. A superseded
+document whose declared successor the caller may not read is served, as it would
+be if the successor did not exist (the successor is judged the way the pack's
+own gate judges it: by its own label, and a chunk by its parent's too). The
+served items are the same with and without that successor among the candidates;
+the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
+count it as a sensitivity withholding, as for any hidden candidate. The served
+loser's own `lifecycle.superseded_by` is dropped from the served copy when it
+names a document the caller cannot read, in flat and sectioned packs and in
+`GET /api/v1/documents/{id}`; the store judges it, so the answer does not depend
+on whether the successor matched, and a store error reads as unreadable (a chunk
+successor under a parent-fetch outage reads as unreadable, so the loser is
+still served). The loser's `lifecycle.state` stays `superseded`, so such a
+caller can tell that some document it cannot read supersedes this one, though
+not which. `GET /api/v1/search` and the rows of `GET /api/v1/documents`
+return stored metadata as before. With
+`TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
+MCP `record_feedback` names, and counts, only the served ids the caller may
+read; a pack that served none reads as an unknown pack and the call is
+recorded. A trusted-local caller sees every id.
+
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
 

@@ -21,6 +21,7 @@ from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.schemas.classification import sensitivity_of
+from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -34,6 +35,7 @@ get_items = unwrap_tool(server_mod.get_items)
 get_file_context = unwrap_tool(server_mod.get_file_context)
 save_memory = unwrap_tool(server_mod.save_memory)
 save_knowledge = unwrap_tool(server_mod.save_knowledge)
+record_feedback = unwrap_tool(server_mod.record_feedback)
 
 INTENT = "failover runbook"
 OPEN_TEXT = "failover runbook open: drain the write queue, promote the replica. " * 4
@@ -430,3 +432,125 @@ class TestOverwriteOfALabelledDocument:
     def test_a_new_id_is_unaffected(self, temp_registry: StoreRegistry) -> None:
         with as_http(WRITER):
             assert "Memory saved" in save_memory(REPLACEMENT, doc_id="doc-fresh")
+
+
+class TestAttributionRefusalNamesOnlyReadableIds:
+    """A refusal hands back served ids; a caller must not learn ones it cannot read.
+
+    ``record_feedback`` takes a pack by id alone, and the ids it served were
+    cleared for whoever built it. The refusal's ``item_ids`` and counts are
+    judged again against *this* caller's clearance (#1029).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _enforce(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+
+    @staticmethod
+    def _serve(
+        registry: StoreRegistry,
+        pack_id: str,
+        served: list[str],
+        pointers: list[str] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"intent": "t", "injected_item_ids": served}
+        if pointers is not None:
+            payload["disclosure"] = {"mode": "on", "pointer_item_ids": pointers}
+        registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload=payload,
+        )
+
+    @staticmethod
+    def _refusal(**kwargs: Any) -> McpError:
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(rating=0.4, **kwargs)
+        return excinfo.value
+
+    def test_the_pack_refusal_leaves_out_an_id_the_caller_cannot_read(
+        self, seeded: StoreRegistry
+    ) -> None:
+        seeded.knowledge.document_store.put(chunk_doc_id("doc-secret", 0), "x", {})
+        served = ["doc-secret", "doc-open", chunk_doc_id("doc-secret", 0), "node-1"]
+        self._serve(seeded, "pack_a", served, pointers=served)
+
+        with as_http(READ):
+            error = self._refusal(pack_id="pack_a").error
+
+        assert isinstance(error.data, dict)
+        assert error.data["item_ids"] == ["doc-open", "node-1"]
+        assert "it served 2 and none cited" in error.message
+        assert "doc-secret" not in error.message
+
+    @pytest.mark.parametrize(
+        "caller", [as_http(ADMIN), as_http(RESTRICTED), as_stdio()]
+    )
+    def test_a_trusted_caller_is_handed_every_served_id(
+        self, seeded: StoreRegistry, caller: Any
+    ) -> None:
+        self._serve(seeded, "pack_a", ["doc-secret", "doc-open"], pointers=[])
+        with caller:
+            error = self._refusal(pack_id="pack_a", helpful_item_ids=[]).error
+        assert isinstance(error.data, dict)
+        assert error.data["item_ids"] == ["doc-secret", "doc-open"]
+
+    def test_a_pack_that_served_only_unreadable_ids_reads_as_unknown(
+        self, seeded: StoreRegistry
+    ) -> None:
+        """Nothing nameable to cite, so the call is let through and recorded."""
+        self._serve(seeded, "pack_a", ["doc-secret"])
+        with as_http(READ):
+            result = record_feedback(pack_id="pack_a", rating=0.4)
+        assert "Feedback recorded" in result
+
+        self._serve(seeded, "pack_b", ["doc-secret"])
+        with as_http(ADMIN), pytest.raises(McpError):
+            record_feedback(pack_id="pack_b", rating=0.4)
+
+    def test_the_bodied_refusal_counts_and_names_only_readable_ids(
+        self, seeded: StoreRegistry
+    ) -> None:
+        self._serve(seeded, "pack_b", ["doc-secret", "doc-open", "node-1"], pointers=[])
+        with as_http(READ):
+            error = self._refusal(pack_id="pack_b", helpful_item_ids=["node-1"]).error
+
+        assert isinstance(error.data, dict)
+        assert error.data["item_ids"] == ["doc-open"]
+        assert error.data["bodied_item_count"] == 2
+        assert "1 of 2" in error.message
+
+        with as_http(ADMIN):
+            error = self._refusal(pack_id="pack_b", helpful_item_ids=["node-1"]).error
+        assert isinstance(error.data, dict)
+        assert error.data["item_ids"] == ["doc-secret", "doc-open"]
+        assert error.data["bodied_item_count"] == 3
+
+    def test_an_unreadable_bodied_item_is_not_owed_a_verdict(
+        self, seeded: StoreRegistry
+    ) -> None:
+        self._serve(seeded, "pack_b", ["doc-secret", "doc-open"], pointers=[])
+        with as_http(READ):
+            result = record_feedback(
+                pack_id="pack_b", rating=0.4, helpful_item_ids=["doc-open"]
+            )
+        assert "Feedback recorded" in result
+
+    def test_without_labels_every_caller_gets_the_same_refusal(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The transparent default: no label in the store, no change."""
+        store = temp_registry.knowledge.document_store
+        store.put("doc-a", OPEN_TEXT, {})
+        store.put("doc-b", OPEN_TEXT, {})
+        self._serve(temp_registry, "pack_a", ["doc-a", "doc-b"])
+        seen = []
+        for caller in (as_http(READ), as_http(ADMIN), as_stdio()):
+            with caller:
+                error = self._refusal(pack_id="pack_a").error
+            seen.append((error.message, error.data))
+        assert seen[0] == seen[1] == seen[2]
+        assert seen[0][1]["item_ids"] == ["doc-a", "doc-b"]

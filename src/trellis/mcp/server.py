@@ -163,6 +163,7 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     OverwriteRefusedError,
     SensitivityLabelError,
+    readable_ids,
     refuse_overwrite,
     stamp_sensitivity,
 )
@@ -3419,6 +3420,24 @@ def get_file_context(
 _MAX_CITABLE_IDS_IN_ERROR = 60
 
 
+def _readable_served_ids(registry: StoreRegistry, item_ids: list[str]) -> list[str]:
+    """The ids of a named pack's items that the caller may read (#1029).
+
+    A pack is looked up by id alone, so the caller need not be the one who
+    built it, and the ids it served were cleared for *that* caller. The
+    attribution refusal hands them back, so each is judged again against this
+    caller's clearance, as ``get_items`` judges a by-id read. An id that fails
+    is neither named nor counted: the refusal reads as it would for a pack
+    that served only the readable ids, and a pack that served none reads as
+    an unknown pack, which the check lets through. The rule is by clearance
+    and not by owner because ``PACK_ASSEMBLED`` records no principal, and a
+    pack's own caller reads everything it was served.
+    """
+    return readable_ids(
+        registry.knowledge.document_store, item_ids, current_clearance()
+    )
+
+
 def _require_pack_attribution(
     registry: StoreRegistry, pack_id: str, *, ignored_count: int = 0
 ) -> None:
@@ -3454,7 +3473,9 @@ def _require_pack_attribution(
     if not resolve_write_behaviour(registry).require_pack_attribution:
         return
 
-    item_ids = lookup_pack_item_ids(registry.operational.event_log, pack_id)
+    item_ids = _readable_served_ids(
+        registry, lookup_pack_item_ids(registry.operational.event_log, pack_id)
+    )
     if not item_ids:
         logger.debug("pack_attribution_not_enforceable", pack_id=pack_id)
         return
@@ -3537,7 +3558,9 @@ def _require_bodied_attribution(
     if not resolve_write_behaviour(registry).require_bodied_attribution:
         return
 
-    bodied = lookup_pack_bodied_item_ids(registry.operational.event_log, pack_id)
+    bodied = _readable_served_ids(
+        registry, lookup_pack_bodied_item_ids(registry.operational.event_log, pack_id)
+    )
     if not bodied:
         logger.debug("bodied_attribution_not_enforceable", pack_id=pack_id)
         return

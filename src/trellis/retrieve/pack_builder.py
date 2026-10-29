@@ -94,8 +94,10 @@ from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
     CandidateIndex,
+    conceal_unreadable_successors,
     concealed_ids_metadata,
     partition_by_clearance,
+    reader_for,
 )
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
@@ -1205,18 +1207,28 @@ class PackBuilder:
         # Never serve both sides of a declared supersession (#613). Over the
         # whole pool, not per strategy: the successor may be on another axis.
         # Before dedup, so rows are per (strategy, item) like every gate, and
-        # after the promote above, so each row carries its item's axis.
-        all_items, superseded = partition_superseded(all_items)
+        # after the promote above, so each row carries its item's axis. A
+        # successor the caller cannot read is no successor (#1029): the pack
+        # is the one built without it, not one that names its presence.
+        all_items, superseded = partition_superseded(
+            all_items, successor_visible=reader_for(clearance, parent_verdict_cache)
+        )
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
 
         # The caller's clearance (#194): a document above it is withheld on
         # every strategy's candidates, a chunk by its parent's label too.
-        # After supersession for the same reason class_prior is: a withheld
-        # successor must not un-supersede its loser.
+        # After supersession so the gate sees the survivors, but supersession
+        # itself ignores a successor the caller cannot read (above), so a
+        # restricted successor never withholds a loser the caller may read.
         all_items, over_clearance = partition_by_clearance(
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A loser kept above still carries its stored ``superseded_by``: drop
+        # an id the caller cannot read from the served copy (#1029).
+        all_items = conceal_unreadable_successors(
+            all_items, self._document_store, clearance
+        )
 
         # The class-level serving prior runs after supersession is resolved,
         # not inside the per-strategy loop above: applying it earlier let a
@@ -1616,18 +1628,26 @@ class PackBuilder:
         )
         self._record_embedder_resolve_failure(strategy_failures)
 
-        # 1a. Pairwise supersession gate (#613) — see build().
-        all_items, superseded = partition_superseded(all_items)
+        # 1a. Pairwise supersession gate (#613) — see build(). A successor the
+        # caller cannot read does not count as one.
+        all_items, superseded = partition_superseded(
+            all_items, successor_visible=reader_for(clearance, parent_verdict_cache)
+        )
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
 
         # The caller's clearance (#194): a document above it is withheld on
         # every strategy's candidates, a chunk by its parent's label too.
-        # After supersession for the same reason class_prior is: a withheld
-        # successor must not un-supersede its loser.
+        # After supersession so the gate sees the survivors, but supersession
+        # itself ignores a successor the caller cannot read (above).
         all_items, over_clearance = partition_by_clearance(
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A kept loser's stored ``superseded_by`` is dropped when the caller
+        # cannot read the successor — see build() (#1029).
+        all_items = conceal_unreadable_successors(
+            all_items, self._document_store, clearance
+        )
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected, class_prior_forms = (

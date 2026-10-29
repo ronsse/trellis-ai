@@ -5,7 +5,7 @@ from __future__ import annotations
 import gc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -639,8 +639,10 @@ def _copy_pool_after_collection(
     keepalive: list[PackItem] = []
     real = pack_builder_module.partition_superseded
 
-    def copying(items: list[PackItem]) -> tuple[list[PackItem], list[PackItem]]:
-        kept, withheld = real(items)
+    def copying(
+        items: list[PackItem], **kwargs: Any
+    ) -> tuple[list[PackItem], list[PackItem]]:
+        kept, withheld = real(items, **kwargs)
         if arm == "none":
             return kept, withheld
         if arm == "alive":
