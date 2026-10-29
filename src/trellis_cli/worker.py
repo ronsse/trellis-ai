@@ -1642,8 +1642,8 @@ def enrich_cmd(
 
     Results are written back through the tagging path: each enriched
     document's ``metadata.content_tags`` is updated with the LLM-suggested
-    tags / classification / importance plus a fresh ``classified_at`` and
-    ``tag_confidence`` stamp, then persisted via ``DocumentStore.put``.
+    tags / classification / importance plus a fresh ``classified_at`` stamp
+    and ``classified_mode``, then persisted via ``DocumentStore.put``.
 
     **Requires an LLM extra.** Enrichment needs a configured ``llm:`` block
     and the matching ``\\[llm-openai]`` / ``\\[llm-anthropic]`` extra. When no
