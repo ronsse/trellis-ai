@@ -32,7 +32,10 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import resolve_requested_by
+from trellis_api.routes._principal import (
+    refuse_document_overwrite,
+    resolve_requested_by,
+)
 from trellis_wire.dtos import (
     BulkAliasItem,
     BulkEdgeItem,
@@ -120,8 +123,15 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
 
 
 @router.post("/evidence", response_model=IngestResponse, responses={422: _BODY_422})
-def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
-    """Ingest evidence."""
+def ingest_evidence(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> IngestResponse:
+    """Ingest evidence.
+
+    An ``evidence_id`` that already names a labelled document is refused (409):
+    the write carries no label, so it would replace the row and downgrade it.
+    """
     try:
         evidence = Evidence.model_validate(body)
     except Exception as exc:
@@ -135,6 +145,12 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
+    refuse_document_overwrite(
+        registry.knowledge.document_store,
+        evidence.evidence_id,
+        ctx=ctx,
+        metadata=evidence_metadata,
+    )
     command = build_evidence_ingest_command(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",

@@ -15,15 +15,21 @@ module rather than reintroducing a body passthrough.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from fastapi import HTTPException
 
 from trellis.auth import clearance_of
 from trellis.core.elision import elide_text
 from trellis.core.text_safety import replace_nul_and_lone_surrogates
+from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
 from trellis_api.auth import AuthContext
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from trellis.schemas.classification import Sensitivity
+    from trellis.stores.base.document import DocumentStore
 
 #: ``requested_by_claim`` is attacker-controlled free text, so it is bounded
 #: the same way a pack excerpt is -- long enough to be useful on an audit
@@ -100,3 +106,26 @@ def request_clearance(ctx: AuthContext) -> Sensitivity:
     ``internal``.
     """
     return clearance_of(ctx.scopes)
+
+
+def refuse_document_overwrite(
+    document_store: DocumentStore,
+    doc_id: str,
+    *,
+    ctx: AuthContext,
+    metadata: Mapping[str, Any] | None,
+) -> None:
+    """Raise 409 when re-putting ``doc_id`` would destroy or downgrade a label (#194).
+
+    The caller's clearance comes from ``ctx``; see
+    :func:`trellis.retrieve.sensitivity.refuse_overwrite` for the rule.
+    """
+    try:
+        refuse_overwrite(
+            document_store,
+            doc_id,
+            clearance=request_clearance(ctx),
+            metadata=metadata,
+        )
+    except OverwriteRefusedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

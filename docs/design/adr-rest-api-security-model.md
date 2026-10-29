@@ -287,6 +287,20 @@ to protect data that has no label. The posture that replaces it:
   the caller's own clearance is refused, and so is a raw `data_classification`
   key in `metadata`. A document labelled above `internal` is not run through
   memory extraction, because the entities it mints would carry no label.
+- **A response names no withheld document.** A REST pack shows a caller below
+  `restricted` the `sensitivity` count, never the ids or the `rejected_items`
+  rows, since an id with a score is a per-query oracle on content the caller
+  may not read. The builder records the ids in in-memory pack metadata and the
+  route strips them (`conceal_withheld_ids`); the `PACK_ASSEMBLED` event, read
+  only by admin routes, keeps full detail.
+- **No overwrite across a label.** A write at a caller-chosen id replaces the
+  row, metadata included. `refuse_overwrite` (MCP `save_memory`, REST
+  `POST /documents` and `POST /evidence`) refuses it when the stored label,
+  inherited from the parent for a chunk id, is above the caller's clearance or
+  above the label being written, and its message names no label. Residual:
+  rows for items rejected by an earlier gate (noise, archived, superseded) are
+  not concealed, and the generic `/mutations` evidence-ingest door is not
+  guarded.
 - **Not covered yet:** graph nodes, entities, precedents, advisories and
   observations carry no label; relabelling an existing document and the
   mutation-path deny are the next part of #194; the REST ingest producer and the

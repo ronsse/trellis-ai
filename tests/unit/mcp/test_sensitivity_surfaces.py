@@ -19,6 +19,7 @@ from mcp.shared.exceptions import McpError
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.retrieve.test_sensitivity import label
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.schemas.classification import sensitivity_of
 
 if TYPE_CHECKING:
@@ -330,3 +331,102 @@ class TestProducer:
         assert str(hidden.value).replace("doc-secret", "I") == str(
             missing.value
         ).replace("doc-ghost", "I")
+
+
+WRITER = ["read", "ingest"]
+REPLACEMENT = "unrelated replacement text about queue depth dashboards"
+
+
+class TestOverwriteOfALabelledDocument:
+    """A caller-chosen ``doc_id`` cannot replace a row the caller may not read (#194).
+
+    The put replaces the whole row, metadata included, so an unguarded re-put
+    would reset the label to the default and publish the document's chunks.
+    """
+
+    def _stored(self, registry: StoreRegistry) -> dict[str, Any]:
+        doc = registry.knowledge.document_store.get("doc-secret")
+        assert doc is not None
+        return doc
+
+    def test_a_key_below_the_label_cannot_replace_the_document(
+        self, seeded: StoreRegistry
+    ) -> None:
+        with as_http(WRITER), pytest.raises(McpError, match="clearance") as refused:
+            save_memory(REPLACEMENT, doc_id="doc-secret")
+        stored = self._stored(seeded)
+        assert stored["content"] == SECRET_TEXT
+        assert sensitivity_of(stored["metadata"]) == "restricted"
+        assert "zebra ledger" not in str(refused.value), "the refusal must not echo"
+        assert "restricted" not in str(refused.value), "nor name the label"
+
+    def test_the_chunks_stay_withheld_after_the_refused_save(
+        self, seeded: StoreRegistry
+    ) -> None:
+        chunk_id = chunk_doc_id("doc-secret", 0)
+        seeded.knowledge.document_store.put(chunk_id, SECRET_TEXT, {})
+        with as_http(WRITER), pytest.raises(McpError):
+            save_memory(REPLACEMENT, doc_id="doc-secret")
+        with as_http(READ):
+            withheld = get_items([chunk_id])
+            missing = get_items(["doc-ghost#chunk-0"])
+        assert "zebra ledger" not in withheld
+        assert withheld.replace(chunk_id, "X") == missing.replace(
+            "doc-ghost#chunk-0", "X"
+        )
+
+    def test_a_cleared_key_may_not_lower_the_label(self, seeded: StoreRegistry) -> None:
+        with as_http([*RESTRICTED, "ingest"]), pytest.raises(McpError, match="lower"):
+            save_memory(REPLACEMENT, doc_id="doc-secret")
+        stored = self._stored(seeded)
+        assert stored["content"] == SECRET_TEXT
+        assert sensitivity_of(stored["metadata"]) == "restricted"
+
+    def test_a_cleared_key_may_not_lower_it_to_a_lower_named_label(
+        self, seeded: StoreRegistry
+    ) -> None:
+        with as_http(ADMIN), pytest.raises(McpError, match="lower"):
+            save_memory(REPLACEMENT, doc_id="doc-secret", sensitivity="confidential")
+        assert sensitivity_of(self._stored(seeded)["metadata"]) == "restricted"
+
+    def test_a_cleared_key_may_replace_at_the_same_label(
+        self, seeded: StoreRegistry
+    ) -> None:
+        with as_http(ADMIN):
+            reply = save_memory(
+                REPLACEMENT, doc_id="doc-secret", sensitivity="restricted"
+            )
+        assert "Memory saved" in reply
+        stored = self._stored(seeded)
+        assert stored["content"] == REPLACEMENT
+        assert sensitivity_of(stored["metadata"]) == "restricted"
+
+    def test_a_cleared_key_may_raise_the_label(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        store = temp_registry.knowledge.document_store
+        store.put("doc-note", "an internal note about queues", {})
+        with as_http(ADMIN):
+            save_memory(REPLACEMENT, doc_id="doc-note", sensitivity="confidential")
+        doc = store.get("doc-note")
+        assert doc is not None
+        assert sensitivity_of(doc["metadata"]) == "confidential"
+
+    def test_a_stdio_caller_is_never_refused(self, seeded: StoreRegistry) -> None:
+        with as_stdio():
+            save_memory(REPLACEMENT, doc_id="doc-secret", sensitivity="restricted")
+        assert self._stored(seeded)["content"] == REPLACEMENT
+
+    def test_an_unlabelled_document_is_still_replaceable_by_a_read_key(
+        self, seeded: StoreRegistry
+    ) -> None:
+        """The guard is about labels: an ``internal`` row is the default posture."""
+        with as_http(WRITER):
+            assert "Memory saved" in save_memory(REPLACEMENT, doc_id="doc-open")
+        doc = seeded.knowledge.document_store.get("doc-open")
+        assert doc is not None
+        assert doc["content"] == REPLACEMENT
+
+    def test_a_new_id_is_unaffected(self, temp_registry: StoreRegistry) -> None:
+        with as_http(WRITER):
+            assert "Memory saved" in save_memory(REPLACEMENT, doc_id="doc-fresh")

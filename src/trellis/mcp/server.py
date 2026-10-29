@@ -159,7 +159,11 @@ from trellis.retrieve.formatters import (
     index_render_overhead_tokens,
 )
 from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
-from trellis.retrieve.sensitivity import DocumentClearance
+from trellis.retrieve.sensitivity import (
+    DocumentClearance,
+    OverwriteRefusedError,
+    refuse_overwrite,
+)
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import withholding_from_payload
 from trellis.schemas.classification import (
@@ -2657,7 +2661,22 @@ def _store_new_memory(
     classify-on-write may have added tags to it, and the post-store tail
     (MEMORY_STORED payload, embed hook) must see what was actually persisted —
     every reconcile verdict that stores a doc funnels through here.
+
+    A caller-chosen ``doc_id`` that already names a document is refused when
+    that document's label is above the caller's clearance or above the label
+    being written (#194): the put replaces the row, metadata included, so it
+    would destroy content the caller may not read and publish its chunks.
     """
+    if doc_id is not None:
+        try:
+            refuse_overwrite(
+                document_store,
+                doc_id,
+                clearance=current_clearance(),
+                metadata=metadata,
+            )
+        except OverwriteRefusedError as exc:
+            _raise_invalid_params(str(exc), data={"field": "doc_id"})
     command = build_evidence_ingest_command(
         doc_id=doc_id,
         content=content,

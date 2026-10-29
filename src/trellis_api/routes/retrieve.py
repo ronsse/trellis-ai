@@ -15,7 +15,11 @@ from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
-from trellis.retrieve.sensitivity import DocumentClearance
+from trellis.retrieve.sensitivity import (
+    SENSITIVITY_WITHHELD_IDS_KEY,
+    DocumentClearance,
+    conceal_withheld_ids,
+)
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType, scan_events
@@ -32,6 +36,7 @@ from trellis_wire.dtos import (
     SectionedPackRequest,
     SectionedPackResponse,
     StringDetailError,
+    WithholdingResponse,
 )
 
 logger = structlog.get_logger(__name__)
@@ -224,9 +229,10 @@ def assemble_pack(
     filters: dict[str, Any] | None = None
     if req.domain:
         filters = {"domain": req.domain}
+    clearance = request_clearance(ctx)
     pack = builder.build(
         intent=req.intent,
-        clearance=request_clearance(ctx),
+        clearance=clearance,
         domain=req.domain,
         agent_id=req.agent_id,
         run_id=req.run_id,
@@ -249,6 +255,15 @@ def assemble_pack(
         graph_axis=pack.retrieval_report.graph_axis,
     )
 
+    # A caller below ``restricted`` is shown the withheld counts but not the ids
+    # (or ``sensitivity`` rows) of documents it may not read. The event payload
+    # keeps them for its admin readers.
+    report, withholding = conceal_withheld_ids(
+        pack.retrieval_report.model_dump(),
+        pack.metadata.get("withholding"),
+        pack.metadata.get(SENSITIVITY_WITHHELD_IDS_KEY, ()),
+        clearance,
+    )
     return PackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -257,8 +272,12 @@ def assemble_pack(
         count=len(pack.items),
         items=[item.model_dump() for item in pack.items],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
-        retrieval_report=pack.retrieval_report.model_dump(),
-        withholding=pack.metadata.get("withholding"),
+        retrieval_report=report,
+        withholding=(
+            WithholdingResponse.model_validate(withholding)
+            if withholding is not None
+            else None
+        ),
         axes=AxisReportResponse(**axes),
     )
 
@@ -307,9 +326,10 @@ def assemble_sectioned_pack(
     filters: dict[str, Any] | None = None
     if req.domain:
         filters = {"domain": req.domain}
+    clearance = request_clearance(ctx)
     pack = builder.build_sectioned(
         req.intent,
-        clearance=request_clearance(ctx),
+        clearance=clearance,
         sections=sections,
         domain=req.domain,
         agent_id=req.agent_id,
@@ -336,14 +356,30 @@ def assemble_sectioned_pack(
         )
     )
 
+    # As in ``assemble_pack``: counts survive, ids of unreadable documents do not.
+    hidden = pack.metadata.get(SENSITIVITY_WITHHELD_IDS_KEY, ())
+    sections_out: list[dict[str, Any]] = []
+    for section in pack.sections:
+        dumped = section.model_dump(mode="json")
+        dumped["retrieval_report"], _ = conceal_withheld_ids(
+            dumped["retrieval_report"], None, hidden, clearance
+        )
+        sections_out.append(dumped)
+    _, withholding = conceal_withheld_ids(
+        None, pack.metadata.get("withholding"), hidden, clearance
+    )
     return SectionedPackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
         domain=pack.domain,
         agent_id=pack.agent_id,
-        sections=[s.model_dump(mode="json") for s in pack.sections],
+        sections=sections_out,
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
-        withholding=pack.metadata.get("withholding"),
+        withholding=(
+            WithholdingResponse.model_validate(withholding)
+            if withholding is not None
+            else None
+        ),
         axes=axes,
     )
 

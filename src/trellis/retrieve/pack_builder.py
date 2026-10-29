@@ -93,7 +93,9 @@ from trellis.retrieve.parent_verdicts import (
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
+    SENSITIVITY_WITHHELD_IDS_KEY,
     partition_by_clearance,
+    withheld_ids,
 )
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
@@ -1399,7 +1401,10 @@ class PackBuilder:
             # One home, on both pack kinds: ``SectionedPack`` has no
             # top-level ``RetrievalReport`` to hold this, and the renderer
             # must read it the same way for both.
-            metadata={"withholding": withholding.as_telemetry()},
+            metadata={
+                "withholding": withholding.as_telemetry(),
+                SENSITIVITY_WITHHELD_IDS_KEY: withheld_ids(rejected),
+            },
         )
 
         telemetry: dict[str, Any] = {
@@ -1844,7 +1849,10 @@ class PackBuilder:
             intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
-            metadata={"withholding": withholding.as_telemetry()},
+            metadata={
+                "withholding": withholding.as_telemetry(),
+                SENSITIVITY_WITHHELD_IDS_KEY: withheld_ids(rejected),
+            },
         )
 
         telemetry: dict[str, Any] = {
