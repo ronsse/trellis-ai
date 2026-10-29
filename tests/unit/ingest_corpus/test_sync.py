@@ -1720,3 +1720,45 @@ class TestRedactionTombstones:
             "path": "long.md",
             "doc_id": chunk_id,
         } in report.warnings
+
+    def test_a_redacted_chunk_survives_a_shrink_and_a_regrow(self, registry, vault):
+        """Shrinking the file used to delete the tombstone as an orphan, so the
+        file growing back recreated the chunk with the redacted text.
+
+        Defective subject: drop the tombstone ``continue`` in ``_apply_record``'s
+        shrink loop, and the chunk row is gone after the shrink and comes back
+        as live text after the regrow.
+        """
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        docs = registry.knowledge.document_store
+        count = docs.get(parent_id)["metadata"]["chunk_count"]
+        assert count >= 3
+        last_id = chunk_doc_id(parent_id, count - 1)
+        make_tombstone(docs, registry.knowledge.vector_store, last_id)
+
+        (vault / "long.md").write_text(_long_markdown(topics=("kubernetes", "grapes")))
+        shrunk = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert docs.get(parent_id)["metadata"]["chunk_count"] < count
+        assert is_redaction_tombstone(docs.get(last_id))
+        assert {
+            "kind": "redaction_tombstone",
+            "path": "long.md",
+            "doc_id": last_id,
+        } in shrunk.warnings
+
+        (vault / "long.md").write_text(_long_markdown())
+        regrown = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert docs.get(parent_id)["metadata"]["chunk_count"] == count
+        assert is_redaction_tombstone(docs.get(last_id))
+        assert docs.get(last_id)["content"] == ""
+        assert {
+            "kind": "redaction_tombstone",
+            "path": "long.md",
+            "doc_id": last_id,
+        } in regrown.warnings
+        # The chunks that were not redacted shrink and regrow as before.
+        assert docs.get(chunk_doc_id(parent_id, count - 2))["content"] != ""

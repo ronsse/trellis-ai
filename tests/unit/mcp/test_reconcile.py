@@ -421,6 +421,40 @@ class TestSupersedeNeverStampsAPrecedentRow:
         assert not [e for e in logs if e["event"] == "supersede_target_missing"]
 
 
+class TestSupersedeNeverUnmarksARedactionTombstone:
+    """A ``superseded`` stamp replaces the archived lifecycle a redaction left,
+    so it would unmark the tombstone and the next unflagged write would pass
+    the guard (#1034). The seam answers ``TARGET_PROTECTED`` so both callers
+    take their degrade path instead of raising after the new memory is stored.
+
+    Defective subject: drop the ``is_redaction_tombstone`` branch in
+    ``mark_document_superseded``; the put is refused and this raises.
+    """
+
+    def test_the_stamp_seam_refuses_a_tombstone_and_leaves_the_row(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        from tests.redaction_tombstone import make_tombstone
+        from trellis.core.document_write import is_redaction_tombstone
+        from trellis.mcp.reconcile import mark_document_superseded
+
+        docs = temp_registry.knowledge.document_store
+        make_tombstone(docs, None, "redacted-doc")
+        docs.put("successor", "The current note about the gateway port.", {})
+        before = docs.get("redacted-doc")
+
+        applied = mark_document_superseded(
+            docs,
+            old_doc_id="redacted-doc",
+            new_doc_id="successor",
+            vector_store=None,
+        )
+
+        assert applied is ReconcileFallbackReason.TARGET_PROTECTED
+        assert docs.get("redacted-doc") == before
+        assert is_redaction_tombstone(docs.get("redacted-doc"))
+
+
 # ---------------------------------------------------------------------------
 # Lock discipline — the model call must not hold _save_memory_lock
 # ---------------------------------------------------------------------------

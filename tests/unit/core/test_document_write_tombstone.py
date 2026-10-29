@@ -30,6 +30,7 @@ from trellis.mutate.evidence_ingest import (
     build_evidence_ingest_command,
     build_evidence_ingest_command_from_args,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
@@ -183,6 +184,66 @@ class TestBlankWritesStillPass:
         assert is_redaction_tombstone(row)
 
 
+class TestAnUnflaggedWriteMayNotUnmarkATombstone:
+    """A write that leaves a row no longer blank-and-archived is a write over a
+    tombstone, whatever its content (#1034).
+
+    Two-step bypass the first cut allowed: a blank write that dropped the
+    lifecycle stamp unmarked the row, and the next unflagged write passed as if
+    nothing had been redacted.
+
+    Defective subject: restore the early return on ``not content`` in
+    ``_guard_tombstone``.
+    """
+
+    def test_a_blank_write_that_drops_the_stamp_is_refused_then_a_content_write_is(
+        self, tombstoned, vector_store
+    ) -> None:
+        with pytest.raises(RedactionTombstoneError) as first:
+            _write(tombstoned, vector_store, "", {"evidence_type": "x"})
+        assert first.value.code == TOMBSTONE_OVERWRITE_CODE
+        assert is_redaction_tombstone(tombstoned.get(DOC_ID))
+
+        with pytest.raises(RedactionTombstoneError):
+            _write(tombstoned, vector_store, NEW_TEXT)
+
+        assert is_redaction_tombstone(tombstoned.get(DOC_ID))
+
+    def test_a_blank_write_that_replaces_the_stamp_is_refused(
+        self, tombstoned, vector_store
+    ) -> None:
+        superseded = {
+            LIFECYCLE_KEY: {"state": "superseded", "superseded_by": "other-doc"}
+        }
+
+        with pytest.raises(RedactionTombstoneError):
+            _write(tombstoned, vector_store, "", superseded)
+
+        assert is_redaction_tombstone(tombstoned.get(DOC_ID))
+
+    def test_a_flagged_blank_write_is_the_deliberate_way_to_unmark(
+        self, tombstoned, vector_store
+    ) -> None:
+        _write(
+            tombstoned,
+            vector_store,
+            "",
+            {"evidence_type": "x"},
+            reingest_redacted=True,
+        )
+
+        row = tombstoned.get(DOC_ID)
+        assert not is_redaction_tombstone(row)
+        assert REINGEST_STAMP_KEY in row["metadata"]
+
+    def test_a_blank_write_over_a_live_row_is_unaffected(
+        self, document_store, vector_store
+    ) -> None:
+        _write(document_store, vector_store, "", {"evidence_type": "x"})
+
+        assert document_store.get(DOC_ID)["metadata"] == {"evidence_type": "x"}
+
+
 class TestStampIsReserved:
     def test_a_forged_stamp_on_a_new_row_is_refused(
         self, document_store, vector_store
@@ -281,6 +342,28 @@ class TestHandler:
         assert result.status == CommandStatus.REJECTED
         assert result.metadata["rejection_reason"] == TOMBSTONE_OVERWRITE_CODE
         assert "--reingest-redacted" in result.message
+        assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
+
+    def test_a_uri_only_blank_command_is_rejected_and_the_next_write_still_is(
+        self, registry, executor, tombstone
+    ) -> None:
+        """The governed route to the two-step bypass: a blank ingest carrying
+        only a ``uri`` rebuilt the row without its lifecycle stamp, and the
+        content write after it passed."""
+        blank = build_evidence_ingest_command(
+            content="",
+            requested_by="tester",
+            doc_id=DOC_ID,
+            uri="file:///probe.md",
+        )
+
+        first = executor.execute(blank)
+        second = executor.execute(self._command())
+
+        assert first.status == CommandStatus.REJECTED
+        assert first.metadata["rejection_reason"] == TOMBSTONE_OVERWRITE_CODE
+        assert second.status == CommandStatus.REJECTED
+        assert second.metadata["rejection_reason"] == TOMBSTONE_OVERWRITE_CODE
         assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
 
     def test_a_flagged_command_succeeds_and_stamps(

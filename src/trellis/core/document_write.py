@@ -187,9 +187,16 @@ def _guard_tombstone(
         or metadata[REINGEST_STAMP_KEY] != held_bag[REINGEST_STAMP_KEY]
     ):
         raise RedactionTombstoneError(STAMP_RESERVED_MESSAGE, code=STAMP_RESERVED_CODE)
-    # The same truthiness ``is_redaction_tombstone`` uses for "blank": a write
-    # that leaves the row empty is not bringing anything back.
-    if stored is None or not content or not is_redaction_tombstone(stored):
+    # An unflagged write passes only when the row it leaves is still a
+    # tombstone (a second redaction, a metadata write that keeps the lifecycle
+    # stamp). A blank write that drops the stamp, or one that replaces it with
+    # another state, would unmark the row, and the next unflagged write would
+    # then pass the guard as if nothing had been redacted.
+    if (
+        stored is None
+        or not is_redaction_tombstone(stored)
+        or is_redaction_tombstone({"content": content, "metadata": metadata})
+    ):
         return metadata
     if not reingest_redacted:
         raise RedactionTombstoneError(
@@ -260,9 +267,14 @@ def put_document(
             tombstone (:func:`is_redaction_tombstone`) is refused with a
             :class:`RedactionTombstoneError` unless this is set, because a
             redaction is only as good as the next write to its id (#1034; a
-            corpus re-sync did exactly that). A blank-content write passes
-            either way, which is every metadata-only writer (each passes the
-            row's own empty content) and a second redaction. When set over a
+            corpus re-sync did exactly that). An unflagged write passes only
+            if the row it writes is still a tombstone: a second redaction, or
+            a metadata write that keeps the blank content and the lifecycle
+            stamp. A blank write that drops or replaces the stamp would
+            unmark the row, so it is refused like a content write. The check
+            is read-then-write, not atomic: a redaction that lands between
+            the ``get`` and the ``put`` can still be overwritten, and a
+            failing ``get`` fails the write closed. When set over a
             tombstone, the row is written with
             ``metadata[REINGEST_STAMP_KEY]`` = now, the provenance promotion
             reads (:func:`trellis.learning.scoring._reingested_after`); a

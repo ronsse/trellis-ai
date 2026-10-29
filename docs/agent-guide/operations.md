@@ -1392,8 +1392,13 @@ Scope boundaries, stated plainly:
   redaction re-runnable.
 - **A write over a redacted id is refused unless it says it means to (#1034).**
   `put_document` refuses a non-blank write to a document id whose row is a
-  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; a
-  blank write (a second redaction, a metadata-only write) still passes. The
+  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; an
+  unflagged write passes only if the row it writes is still a tombstone (a
+  second redaction, or a metadata write that keeps the blank content and the
+  lifecycle stamp), so a blank write that drops or replaces the stamp is refused
+  too. The check reads the row and then writes it, so it is not atomic: a
+  redaction that lands between the two can still be overwritten, and a read that
+  fails stops the write. The
   deliberate way back is `reingest_redacted`: `trellis ingest evidence
   --reingest-redacted`, or `evidence.reingest_redacted=true` on
   `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`).
@@ -1402,7 +1407,10 @@ Scope boundaries, stated plainly:
   re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back
   by some other route is not mistaken for the owner's re-ingest. `corpus sync`
   never writes over a tombstone: it skips the row (or chunk) and reports a
-  `{"kind": "redaction_tombstone", "path", "doc_id"}` warning.
+  `{"kind": "redaction_tombstone", "path", "doc_id"}` warning, and a file that
+  shrinks keeps a redacted chunk's row (with the same warning) rather than
+  deleting it as an orphan. `worker embed-traces` reports a redacted trace
+  summary as `skipped_redacted` and moves its watermark past it.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up

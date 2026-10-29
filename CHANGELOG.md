@@ -1191,17 +1191,31 @@ All notable changes to Trellis will be documented in this file.
   document keeps its id as a blank archived row, and nothing stopped a later
   write from filling it again: `trellis corpus sync` did it on every run over an
   unchanged vault, because the blanked row never matched its file's hash.
-  `put_document` now refuses a non-blank write to a tombstone
-  (`redaction_tombstone_overwrite`; a blank write still passes) unless the
-  keyword-only `reingest_redacted` is set, and a flagged write stamps the row
-  `reingested_after_redaction`. A caller-supplied stamp is refused
+  `put_document` now refuses an unflagged write to a tombstone
+  (`redaction_tombstone_overwrite`) unless the row it writes is still a
+  tombstone (a second redaction, or a metadata write that keeps the blank
+  content and the lifecycle stamp); a blank write that drops or replaces the
+  stamp would unmark the row, so it is refused like a content write. Setting
+  the keyword-only `reingest_redacted` is the way past it, and a flagged write
+  stamps the row `reingested_after_redaction`. The guard reads the row, then
+  writes: it is not atomic, so a redaction that lands between the two can still
+  be overwritten, and a `get` that fails now fails the write closed
+  (deliberate; before, the write went ahead unchecked). A caller-supplied stamp is refused
   (`reingest_stamp_reserved`). Promotion's re-ingest exemption (`refused_redacted`)
   now needs that stamp, so a row put back by a raw write is no longer read as
   the owner's re-ingest. The flag is `trellis ingest evidence
   --reingest-redacted` and `evidence.reingest_redacted` on `evidence.ingest`;
   MCP `save_memory`, `POST /api/v1/documents` and the dbt docs load carry none and
   are refused. Corpus sync skips a tombstoned row or chunk and reports a
-  `redaction_tombstone` warning instead of writing. A command that does not set
+  `redaction_tombstone` warning instead of writing, and a file that shrinks no
+  longer deletes a redacted chunk as an orphan (the file growing back would have
+  recreated it with the redacted text). The refusals degrade cleanly on the
+  paths that stamp a row: MCP supersession answers `target_protected` for a
+  tombstone, a precedent lifecycle stamp skips one, and a precedent whose
+  document row is already a tombstone is not rewritten by a source redaction.
+  The embed-traces worker counts a refused trace summary under
+  `skipped_redacted` and advances past it, so one redacted summary no longer
+  holds the watermark behind every newer trace. A command that does not set
   the flag keeps its bytes and idempotency key.
 
 - **A redaction scrub of a precedent drops the name alias of its source-text

@@ -560,9 +560,17 @@ def _apply_record(
         report=report,
     )
     for index in range(len(spans), old_chunk_count):
-        _delete_doc_and_vector(
-            doc_store, vector_store, chunk_doc_id(outcome.doc_id, index)
-        )
+        orphan_id = chunk_doc_id(outcome.doc_id, index)
+        # A redacted chunk is not an orphan to clean up: deleting its row loses
+        # the tombstone, and the file growing back would write the redacted
+        # text under the same id with nothing to refuse it (#1034).
+        orphan = doc_store.get(orphan_id)
+        if orphan is not None and is_redaction_tombstone(orphan):
+            report.warnings.append(
+                _redaction_tombstone_warning(outcome.relpath, orphan_id)
+            )
+            continue
+        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
     if not spans:
         run_embed_on_ingest(
             registry, outcome.doc_id, text, metadata, source=requested_by
