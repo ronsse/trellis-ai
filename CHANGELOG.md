@@ -1152,6 +1152,36 @@ All notable changes to Trellis will be documented in this file.
   precedent scrubbed before this change keeps whatever alias it already has:
   once renamed it no longer matches, so a re-run finds nothing to key on.
 
+- **`promote-learning` no longer restores a source-text name over its source's
+  redaction (#1025).** Redacting a precedent's *source document* scrubs the
+  precedent (neutral name, `source_excerpt_status` `source_redacted`) and leaves
+  it in place, and the `REDACTION_APPLIED` event names the source's id, so the
+  #1019 refusal, keyed on the precedent id, did not fire. A re-run with the
+  candidate captured before the redaction, as the on-disk candidates file holds
+  it, wrote a new node version whose name was rebuilt from the source text (up
+  to 96 characters). A row is now refused as `refused_redacted` when its source
+  was redacted and its name may hold that source's text. The source counts as
+  redacted by the redaction's own trace, a tombstone row or a
+  `REDACTION_APPLIED` event on the payload's `source_item_id` or on that id's
+  chunk parent (one `limit=1` lookup by type and id each), or by the existing
+  node's scrub markers. The markers alone were not enough: promoting a
+  regenerated candidate overwrites them, and a candidate first promoted after
+  the redaction has no node to carry them. The name counts when the payload
+  says it came from the source (the test the scrub itself uses, so an unmarked
+  pre-marker candidate is refused too) or when it equals a source-derived name
+  the precedent carried earlier, read from its node versions and its
+  `PRECEDENT_PROMOTED` events. The second case is a decisions file kept from
+  before the redaction: its `promotion_name` is pre-filled with the derived
+  name, so it reads as a reviewer's title. To promote again, regenerate the
+  candidate **and** its decisions file, or clear the decision's
+  `promotion_name`; a new title written by a reviewer still writes. One case no
+  signal can catch: a decisions file pre-filled before the redaction, paired with
+  a regenerated candidate for an id that was never promoted, because nothing then
+  records the old name. The dry run and the submission share the check, and it
+  runs ahead of the lifecycle refusals. The `--dry-run` JSON no longer echoes
+  `entity_payload.name` on a row that would be refused. The message names the id
+  and never the name.
+
 - **`promote-learning` no longer writes a redacted precedent back (#1019).**
   `redaction.apply` purges a promoted precedent's node, so a re-run of
   `trellis curate promote-learning`, `review-ready --approve`,
