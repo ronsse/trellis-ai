@@ -144,9 +144,22 @@ def ingest_evidence(
 
     An optional ``sensitivity`` labels the stored document. The key needs that
     clearance itself (403 otherwise), and an unknown label is a 422.
+
+    An optional boolean ``reingest_redacted`` says the write is meant to bring a
+    redacted ``evidence_id`` back (#1034). Without it a write to one is refused
+    (400) and the row stays blank; with it the row is written and stamped
+    ``reingested_after_redaction``. It changes nothing for an id that was not
+    redacted, and it is no way past the clearance rules above: a key that may
+    not read a labelled document still cannot overwrite it (409). A value that
+    is not a boolean is a 422.
     """
     fields = dict(body)
     sensitivity = fields.pop("sensitivity", None)
+    reingest_redacted = fields.pop("reingest_redacted", False)
+    if not isinstance(reingest_redacted, bool):
+        raise HTTPException(
+            status_code=422, detail="reingest_redacted must be a boolean"
+        )
     try:
         evidence = Evidence.model_validate(fields)
     except Exception as exc:
@@ -180,6 +193,7 @@ def ingest_evidence(
         content=evidence.content or "",
         uri=evidence.uri,
         metadata=evidence_metadata,
+        reingest_redacted=reingest_redacted,
         requested_by="api:ingest-evidence",
     )
     result = build_curate_executor(registry, clearance=request_clearance(ctx)).execute(

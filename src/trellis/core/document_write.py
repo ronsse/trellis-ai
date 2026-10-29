@@ -116,8 +116,9 @@ STAMP_RESERVED_CODE = "reingest_stamp_reserved"
 TOMBSTONE_OVERWRITE_MESSAGE = (
     "the document was redacted and a write over it was refused; writing the "
     "id again is deliberate, so set reingest_redacted (`trellis ingest "
-    "evidence --reingest-redacted`, or `execute_mutation` with "
-    "evidence.reingest_redacted=true)"
+    "evidence --reingest-redacted`, `execute_mutation` with "
+    "evidence.reingest_redacted=true, or `reingest_redacted: true` in the "
+    "body of POST /evidence or POST /documents)"
 )
 STAMP_RESERVED_MESSAGE = (
     f"metadata.{REINGEST_STAMP_KEY} is reserved; it is written only by a "

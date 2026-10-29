@@ -1400,8 +1400,18 @@ Scope boundaries, stated plainly:
   redaction that lands between the two can still be overwritten, and a read that
   fails stops the write. The
   deliberate way back is `reingest_redacted`: `trellis ingest evidence
-  --reingest-redacted`, or `evidence.reingest_redacted=true` on
-  `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`).
+  --reingest-redacted`, `evidence.reingest_redacted=true` on
+  `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`), or
+  a boolean `reingest_redacted` in the body of `POST /api/v1/evidence` or
+  `POST /api/v1/documents` (a non-boolean is a 422, nothing written; the refusal
+  without it is a 400 whose message names these ways). The flag is no way past
+  the clearance rules: a key that may not read a labelled document, or a
+  tombstoned chunk of one, still gets the overwrite refusal (409), and the write
+  must still carry the document's label. A redaction blanks every metadata key
+  but a class label, so a real tombstone carries no label of its own; the cases
+  that remain are a label stamped on a tombstone afterwards and a chunk whose
+  parent is labelled. Setting it on an id that was not redacted changes nothing
+  and stamps nothing.
   A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
   caller may not set that key, `reingest_stamp_reserved`), and promotion's
   re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back
@@ -4091,7 +4101,7 @@ Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools 
 | `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?`, `index?`, `refresh?`, `retrieval_phase?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. Pass `index=True` for the id index (see "Progressive disclosure" below); mutually exclusive with `sections`. Pass `retrieval_phase="post_hoc"` when retrieving after the work is done, e.g. to check conclusions — `"pre_work"` and `"mid_task"` are the other allowed values; an unrecognised value is refused (`INVALID_PARAMS`), never silently stored. |
 | `save_experience` | `trace_json` | Confirmation with trace_id. The server sets `metadata.project` before ingest ([trace-format.md § Project stamp](trace-format.md#project-stamp)) |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?`, `content?`, `evidence_ref?`, `supersedes?` | Confirmation with entity_id. `supersedes` names an entity this one replaces (see "The stamp's first deterministic producer" above). |
-| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. A `doc_id` that names a redacted document is refused (`redaction_tombstone_overwrite`) with nothing written: an agent's save is not the owner's decision to bring a redacted id back, and `save_memory` has no parameter for it. The error names the two ways that can: `trellis ingest evidence --reingest-redacted`, or `execute_mutation` with `evidence.reingest_redacted=true`. |
+| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. A `doc_id` that names a redacted document is refused (`redaction_tombstone_overwrite`) with nothing written: an agent's save is not the owner's decision to bring a redacted id back, and `save_memory` has no parameter for it. The error names the ways that can: `trellis ingest evidence --reingest-redacted`, `execute_mutation` with `evidence.reingest_redacted=true`, or `reingest_redacted: true` in the body of `POST /api/v1/evidence` or `POST /api/v1/documents`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents, excluding demoted/archived ones |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
