@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from fastapi import FastAPI
@@ -90,9 +90,11 @@ def in_memory_client(
     When omitted, store ops that need a path will raise — retrieval
     and version calls still work.
 
-    Sync implementation uses Starlette's :class:`TestClient` (which
-    *is* an :class:`httpx.Client` subclass) because bare
-    :class:`httpx.ASGITransport` is async-only.  The async variant
+    Sync implementation uses Starlette's :class:`TestClient` because bare
+    :class:`httpx.ASGITransport` is async-only. It subclasses
+    :class:`httpx.Client`, except when ``httpx2`` is installed (anthropic 2.x
+    pulls it in): starlette then prefers ``httpx2.Client``, which offers the
+    same interface, so the cast below only quiets the type checker.  The async variant
     below uses the async transport directly.
     """
     registry = _make_registry(stores_dir) if stores_dir else _empty_registry()
@@ -101,7 +103,7 @@ def in_memory_client(
     # Enter the starlette test client context so lifespan startup runs
     # and async portal is initialized.
     http.__enter__()
-    client = TrellisClient(http=http, verify_version=False)
+    client = TrellisClient(http=cast("httpx.Client", http), verify_version=False)
     try:
         yield client
     finally:
