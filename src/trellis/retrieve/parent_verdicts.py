@@ -42,6 +42,12 @@ many strategies or how many gates consult it. A non-chunk item — its own
 id fails :func:`~trellis.ingest_corpus.models.is_chunk_doc_id`, or (should
 that check somehow pass) :func:`~trellis.retrieve.concentration.resolve_parent_id`
 still returns the item's own id — never reaches the store at all.
+
+**A request builds one too.** A pack build is not the only owner:
+:class:`~trellis.retrieve.sensitivity.DocumentClearance` constructs one per
+request, and the explore list drives it across a scan of the document store.
+There the cache holds one metadata dict per distinct chunk parent seen, hidden
+parents included, so it is bounded by the scan and not by the page returned.
 """
 
 from __future__ import annotations
@@ -69,7 +75,12 @@ logger = structlog.get_logger(__name__)
 
 
 class ParentVerdictCache:
-    """Per-pack memoized lookup of a chunk's parent document metadata.
+    """Per-owner memoized lookup of a chunk's parent document metadata.
+
+    An owner is one pack build (``PackBuilder.build`` / ``build_sectioned``) or
+    one request (``DocumentClearance``); the cache lives and dies with it. In
+    the request case it grows with the number of distinct chunk parents a scan
+    reads, hidden ones included, not with the size of the page returned.
 
     Not a general document cache: :meth:`resolve` only ever returns
     something non-``None`` for an item whose own id is a real chunk id
@@ -89,9 +100,9 @@ class ParentVerdictCache:
         self._document_store = document_store
         self._cache: dict[str, dict[str, Any] | None] = {}
         #: Set once any parent fetch raises; sticky for the cache's whole
-        #: lifetime (one pack build). Only the failed parent is cached as a
-        #: miss: every other distinct parent is still fetched, so one
-        #: unreadable row cannot switch the check off for the whole pack.
+        #: lifetime (one pack build or request). Only the failed parent is
+        #: cached as a miss: every other distinct parent is still fetched, so
+        #: one unreadable row cannot switch the check off for the whole pack.
         #: The caller reports the condition once per build, not per chunk.
         self.degraded = False
         #: Parent ids whose fetch raised. A miss for these is an outage, not
