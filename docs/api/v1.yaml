@@ -7064,11 +7064,25 @@ paths:
         Body: ``{"vectors": [{"item_id": "...", "vector": [...], "metadata": {...}}, ...]}``
 
 
-        Every row is judged before any is written, so a refused batch stores
+        **What is judged before any write.** Every row is checked in a first pass
 
-        nothing. A row that is not an object, or whose ``metadata`` is neither an
+        and any refusal in it stores nothing from the batch. A row that is not an
 
-        object nor ``null``, is a 422. A row''s ``metadata`` may not carry a raw
+        object, or whose ``metadata`` is neither an object nor ``null``, is a 422. So
+
+        is a ``metadata`` that would break a semantic read: ``content`` that is not a
+
+        string, ``auto_importance`` that is not a finite number (a bool is not one),
+
+        or an ``auto_importance`` at or above the importance decay threshold with no
+
+        ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
+
+        is an ``item_id`` starting ``trace-summary:``, for every caller: that
+
+        namespace is the trace-embed worker''s, and a row there makes it skip the
+
+        trace for good. A row''s ``metadata`` may not carry a raw
 
         ``data_classification`` (422), whoever the caller is: a vector row''s label
 
@@ -7083,11 +7097,32 @@ paths:
         since an id the gate cannot read cannot be judged.
 
 
+        **What is not atomic.** The second pass writes row by row. A row whose
+
+        document read or upsert fails is counted in ``errors`` and does not stop
+
+        the rest, so a batch can answer ``upserted: 1, errors: 1`` with the first
+
+        row stored. A row with no ``item_id`` or no ``vector`` is counted the same
+
+        way. Nothing makes the mirror below atomic with a concurrent relabel either:
+
+        a relabel between the read of the document and the upsert leaves the row
+
+        unlabelled until that relabel''s own vector sync runs.
+
+
         When ``item_id`` names a stored document the row is written carrying that
 
         document''s mirrored metadata (its label and lifecycle among them), for
 
-        every caller, whatever the row''s own ``metadata`` says.'
+        every caller, whatever the row''s own ``metadata`` says. For a chunk id
+
+        (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk document''s own,
+
+        else the parent the id names, whatever the row supplied; for any other id it
+
+        is kept as supplied.'
       operationId: upsert_vectors_api_v1_vectors_post
       requestBody:
         content:

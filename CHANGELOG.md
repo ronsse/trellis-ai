@@ -6,6 +6,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`POST /api/v1/vectors` keeps a chunk's parent, validates metadata value
+  types and reserves the trace-summary ids (part of #1029).** For a chunk id
+  (`<parent>#chunk-<digits>`) the written row's `parent_doc_id` is now the chunk
+  document's own, else the parent the id names, whatever the row supplied;
+  serving trusts that key before the id, so a supplied one could lower a chunk's
+  effective label. Only a `restricted` key or auth `off` can reach the row (a
+  lower key is refused 409 first); a non-chunk id keeps what it supplied. A row
+  is a 422, with nothing written from the batch, when `metadata.content` is not a
+  string, `metadata.auto_importance` is not a finite number (a bool is not one),
+  or `auto_importance` is at or above the importance decay threshold with no
+  `importance_scored_at` (in `metadata` or `metadata.content_tags`): each made
+  `SemanticSearch` raise on every pack that reached the row. An `item_id`
+  starting `trace-summary:` is a 422 for every caller, since a row there made the
+  trace-embed worker skip that trace permanently. The route docstring (and
+  `docs/api/v1.yaml`) now says what is and is not atomic: the first pass is
+  all-or-nothing, the second counts a failed document read or upsert in `errors`
+  while earlier rows have landed, and a relabel between the mirror's read and the
+  upsert leaves the row unlabelled until its own vector sync. The decay threshold
+  checked is the default; one lowered through the parameter registry is not
+  reflected at write time.
+
 - **`POST /api/v1/evidence` and `POST /api/v1/documents` take
   `reingest_redacted` (part of #1034).** A REST caller had no single-route way to
   bring a redacted id back: the refusal over a tombstone

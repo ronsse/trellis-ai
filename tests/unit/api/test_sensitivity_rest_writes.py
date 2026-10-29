@@ -8,6 +8,8 @@ its executor at the key's clearance rather than at a trusted ``restricted``.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,10 +23,14 @@ from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.strategies import SemanticSearch
+from trellis.retrieve.strategies import (
+    DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
+    SemanticSearch,
+)
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
+from trellis_workers.trace_embed.render import DOC_ID_PREFIX, trace_summary_doc_id
 
 SECRET = "failover runbook zebra ledger: rotate the vault seal keys. " * 4
 OPEN = "failover runbook open: drain the write queue, promote the replica. " * 4
@@ -463,7 +469,12 @@ class TestVectorsRewriteKeepsTheDocumentsMirroredMetadata:
                 "doc-tagged",
                 {
                     "metadata": {
-                        "content_tags": {"domain": "forged"},
+                        # Stamped, or the pre-pass refuses 0.99 outright; both
+                        # are replaced by the document's, which is the point.
+                        "content_tags": {
+                            "domain": "forged",
+                            "importance_scored_at": "2026-01-01T00:00:00+00:00",
+                        },
                         "auto_importance": 0.99,
                         LIFECYCLE_KEY: ARCHIVED,
                         "title": "kept",
@@ -577,6 +588,317 @@ class TestVectorsRowShape:
         assert resp.status_code == 422, resp.text
         assert "must be an object" in resp.json()["detail"]
         assert _vector_row(registry, "doc-open") is None
+
+
+class TestVectorsKeepAChunksParent:
+    """``parent_doc_id`` is read before the id prefix, at serve time, so a row
+    may not carry one the chunk's own document does not.
+
+    Only a ``restricted`` key (or auth off) can write a restricted chunk's row
+    at all: a lower key is judged on the chunk id and refused (409) before the
+    row is built. The lower-key cases below use a chunk of an open parent."""
+
+    FORGED: ClassVar = {
+        "metadata": {"parent_doc_id": "doc-open", "content": SECRET[:200]}
+    }
+
+    def _parent(self, registry, item_id):
+        return _vector_row(registry, item_id)["metadata"]["parent_doc_id"]
+
+    def test_a_supplied_parent_is_replaced_by_the_chunk_documents_own(
+        self, client, registry
+    ):
+        chunk_id = chunk_doc_id("doc-secret", 0)
+        registry.knowledge.document_store.put(
+            chunk_id, SECRET, {"parent_doc_id": "doc-secret"}
+        )
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest", "restricted"]),
+            (chunk_id, self.FORGED),
+        )
+        assert resp.status_code == 200, resp.text
+        # The end effect, through the real partition: still judged by the
+        # restricted parent, not by the open one the caller named.
+        assert chunk_id not in _served_ids(_semantic_pack(registry, "internal"))
+        assert chunk_id in _served_ids(_semantic_pack(registry, "restricted"))
+        assert self._parent(registry, chunk_id) == "doc-secret"
+
+    def test_the_chunk_documents_own_parent_wins_over_the_id_prefix(
+        self, client, registry
+    ):
+        chunk_id = chunk_doc_id("doc-open", 0)
+        registry.knowledge.document_store.put(
+            chunk_id, OPEN, {"parent_doc_id": "doc-relocated"}
+        )
+        resp = _post_vectors(
+            client, registry, _headers(registry, ["ingest"]), (chunk_id, self.FORGED)
+        )
+        assert resp.status_code == 200, resp.text
+        assert self._parent(registry, chunk_id) == "doc-relocated"
+
+    @pytest.mark.parametrize("own", [None, "", 5, ["doc-secret"]], ids=repr)
+    def test_a_chunk_document_without_a_usable_parent_gets_the_one_the_id_names(
+        self, client, registry, own
+    ):
+        chunk_id = chunk_doc_id("doc-open", 3)
+        metadata = {} if own is None else {"parent_doc_id": own}
+        registry.knowledge.document_store.put(chunk_id, OPEN, metadata)
+        resp = _post_vectors(
+            client, registry, _headers(registry, ["ingest"]), (chunk_id, self.FORGED)
+        )
+        assert resp.status_code == 200, resp.text
+        assert self._parent(registry, chunk_id) == "doc-open"
+
+    def test_a_chunk_with_no_stored_document_gets_the_one_the_id_names(
+        self, client, registry
+    ):
+        chunk_id = chunk_doc_id("doc-secret", 7)
+        assert registry.knowledge.document_store.get(chunk_id) is None
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest", "restricted"]),
+            (chunk_id, self.FORGED),
+        )
+        assert resp.status_code == 200, resp.text
+        assert self._parent(registry, chunk_id) == "doc-secret"
+        assert chunk_id not in _served_ids(_semantic_pack(registry, "internal"))
+
+    def test_a_lower_key_cannot_point_a_chunk_of_an_open_parent_at_a_restricted_one(
+        self, client, registry
+    ):
+        chunk_id = chunk_doc_id("doc-open", 0)
+        registry.knowledge.document_store.put(chunk_id, OPEN, {})
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            (chunk_id, {"metadata": {"parent_doc_id": "doc-secret"}}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert self._parent(registry, chunk_id) == "doc-open"
+
+    @pytest.mark.parametrize(
+        "item_id", ["entity:not-a-document", "doc-open", "notes#chunk-intro"]
+    )
+    def test_an_id_that_is_not_a_chunk_keeps_the_parent_it_supplied(
+        self, client, registry, item_id
+    ):
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            (item_id, {"metadata": {"parent_doc_id": "doc-x"}}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert self._parent(registry, item_id) == "doc-x"
+
+    def test_a_non_chunk_id_with_no_parent_gets_none(self, client, registry):
+        resp = _post_vectors(
+            client, registry, _headers(registry, ["ingest"]), ("entity:plain", {})
+        )
+        assert resp.status_code == 200, resp.text
+        assert "parent_doc_id" not in _vector_row(registry, "entity:plain")["metadata"]
+
+
+class TestVectorsValueTypes:
+    """A row that makes ``SemanticSearch`` raise is the caller's 422."""
+
+    STAMPED = "2026-01-01T00:00:00+00:00"
+
+    def _post(self, client, registry, metadata, scopes=("ingest",)):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        bad = {"item_id": "entity:b", "vector": _vector(registry), "metadata": metadata}
+        return client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, bad]},
+            headers=_headers(registry, list(scopes)),
+        )
+
+    def _refused(self, client, registry, metadata, detail):
+        resp = self._post(client, registry, metadata)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"].startswith(f"vectors[1].metadata.{detail}")
+        assert registry.knowledge.vector_store.count() == 0
+
+    @pytest.mark.parametrize(
+        ("metadata", "detail"),
+        [
+            ({"content": 5}, "content must be a string"),
+            ({"content": None}, "content must be a string"),
+            ({"content": ["a"]}, "content must be a string"),
+            ({"auto_importance": "high"}, "auto_importance must be a number"),
+            ({"auto_importance": True}, "auto_importance must be a number"),
+            ({"auto_importance": False}, "auto_importance must be a number"),
+            ({"auto_importance": None}, "auto_importance must be a number"),
+            ({"auto_importance": [0.5]}, "auto_importance must be a number"),
+            ({"auto_importance": 10**400}, "auto_importance must be a finite number"),
+        ],
+        ids=repr,
+    )
+    def test_a_wrongly_typed_value_is_refused_and_nothing_is_written(
+        self, client, registry, metadata, detail
+    ):
+        self._refused(client, registry, metadata, detail)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"auto_importance": 0.99},
+            {"auto_importance": 1},
+            {"auto_importance": DEFAULT_IMPORTANCE_DECAY_THRESHOLD},
+            {"auto_importance": 0.99, "content_tags": {"domain": "ops"}},
+            {"auto_importance": 0.99, "content_tags": "ops"},
+            {"auto_importance": 0.99, "content_tags": {"importance_scored_at": None}},
+        ],
+        ids=repr,
+    )
+    def test_an_unstamped_importance_at_the_threshold_is_refused(
+        self, client, registry, metadata
+    ):
+        self._refused(
+            client,
+            registry,
+            metadata,
+            "auto_importance at or above "
+            f"{DEFAULT_IMPORTANCE_DECAY_THRESHOLD} needs importance_scored_at",
+        )
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_a_non_finite_importance_is_refused_and_nothing_is_written(
+        self, client, registry, literal
+    ):
+        """Starlette's JSON parser accepts the literals, so the route must not."""
+        body = (
+            '{"vectors": [{"item_id": "entity:b", "vector": '
+            f'{_vector(registry)}, "metadata": {{"auto_importance": {literal}}}}}]}}'
+        )
+        resp = client.post(
+            "/api/v1/vectors",
+            content=body,
+            headers={
+                **_headers(registry, ["ingest"]),
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert "must be a finite number" in resp.json()["detail"]
+        assert registry.knowledge.vector_store.count() == 0
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"auto_importance": 0.99, "importance_scored_at": STAMPED},
+            {
+                "auto_importance": 0.99,
+                "content_tags": {"importance_scored_at": STAMPED},
+            },
+            {"auto_importance": 0.2},
+            {"auto_importance": 0},
+            {"auto_importance": 1, "importance_scored_at": STAMPED},
+            {"content": "text", "title": "t"},
+            {"title": "no typed keys"},
+            {},
+            None,
+        ],
+        ids=repr,
+    )
+    def test_a_well_formed_row_is_accepted_and_readable_by_the_semantic_axis(
+        self, client, registry, metadata
+    ):
+        resp = self._post(client, registry, metadata)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
+        # Not just stored: a semantic read over it does not raise.
+        _semantic_pack(registry, "restricted")
+
+    def test_the_check_does_not_depend_on_the_document_overwriting_the_key(
+        self, client, registry
+    ):
+        """``auto_importance`` is mirrored, so a document's row would discard a
+        bad supplied value; it is refused all the same, so the answer does not
+        turn on what the store holds."""
+        registry.knowledge.document_store.put("doc-tagged", OPEN, {})
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            ("doc-tagged", {"metadata": {"auto_importance": 0.99}}),
+        )
+        assert resp.status_code == 422, resp.text
+        assert registry.knowledge.vector_store.count() == 0
+
+
+class TestVectorsReservedIds:
+    """``trace-summary:<id>`` belongs to the trace-embed worker: a vector row
+    there makes ``trace_is_embedded`` true and the worker skips the trace."""
+
+    def _post(self, client, registry, item_id, scopes):
+        return _post_vectors(
+            client,
+            registry,
+            _headers(registry, scopes),
+            ("doc-open", {}),
+            (item_id, {}),
+        )
+
+    @pytest.mark.parametrize("scopes", [["ingest"], ["admin"]], ids=["ingest", "admin"])
+    @pytest.mark.parametrize(
+        "item_id", [f"{DOC_ID_PREFIX}x", trace_summary_doc_id("t-1"), DOC_ID_PREFIX]
+    )
+    def test_the_reserved_prefix_is_refused_and_nothing_is_written(
+        self, client, registry, scopes, item_id
+    ):
+        resp = self._post(client, registry, item_id, scopes)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"].startswith("vectors[1].item_id")
+        assert registry.knowledge.vector_store.count() == 0
+
+    def test_the_prefix_the_route_reserves_is_the_workers(self):
+        assert ingest_mod.TRACE_SUMMARY_ID_PREFIX == DOC_ID_PREFIX
+        assert DOC_ID_PREFIX == "trace-summary:", (
+            "operations.md and the route docstring name this literal"
+        )
+
+    @pytest.mark.parametrize(
+        "item_id",
+        ["trace:t-1", "trace-summary", "my-trace-summary:x", "Trace-Summary:x"],
+    )
+    def test_an_id_that_merely_resembles_it_is_written(self, client, registry, item_id):
+        resp = self._post(client, registry, item_id, ["ingest"])
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, item_id) is not None
+
+
+class TestVectorsPartialBatch:
+    """The first pass is all-or-nothing; the second is not, as the docstring says."""
+
+    def test_a_row_whose_document_read_fails_is_counted_and_the_rest_land(
+        self, client, registry, monkeypatch
+    ):
+        store = registry.knowledge.document_store
+        real_get = store.get
+
+        def flaky(doc_id):
+            if doc_id == "doc-secret":
+                msg = "store down"
+                raise RuntimeError(msg)
+            return real_get(doc_id)
+
+        monkeypatch.setattr(store, "get", flaky)
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["admin"]),
+            ("doc-open", {}),
+            ("doc-secret", {}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 1, "errors": 1}
+        assert _vector_row(registry, "doc-open") is not None
+        assert _vector_row(registry, "doc-secret") is None
 
 
 # ── credentialed write routes build their executor at the key's clearance ──

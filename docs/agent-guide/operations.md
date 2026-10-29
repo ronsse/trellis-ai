@@ -3905,6 +3905,31 @@ above its own clearance, and cannot touch a document it may not read.**
   that names no document is written as sent. The trace and memory extraction
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
+- `POST /api/v1/vectors` also refuses, with a 422 and nothing written, a row
+  that would make the semantic axis raise: a `metadata.content` that is not a
+  string; a `metadata.auto_importance` that is not a finite number (a bool is not
+  one); and an `auto_importance` at or above the importance decay threshold
+  (0.5 by default) with no `importance_scored_at`, in `metadata` or in
+  `metadata.content_tags`. The detail names the row and field
+  (`vectors[1].metadata.content must be a string`). It is judged on what the
+  caller sent, whether or not the row's document will overwrite the key
+  (`auto_importance` is mirrored). An `item_id` starting `trace-summary:` is a 422
+  for every caller, `admin` and auth `off` included: that namespace is the
+  trace-embed worker's, and a vector row under it makes the worker treat the trace
+  as embedded and skip it for good.
+- For a chunk id (`<parent>#chunk-<digits>`) a written row's `parent_doc_id` is
+  the chunk document's own, else the parent the id names, over whatever the row
+  supplied; for any other id it is kept as supplied. Serving trusts a row's
+  `parent_doc_id` before the id when it judges a chunk's parent, so a supplied
+  one could lower a chunk's effective label. Only a `restricted` key or auth
+  `off` can write a restricted chunk's row (a lower key is refused 409 first), so
+  those are the callers this closes it for.
+- `POST /api/v1/vectors` is all-or-nothing only in its first pass (the 422s, the
+  409 and the unreadable-id error above). The second pass writes row by row: a
+  row whose document read or upsert fails is counted in `errors` and the rest
+  still land (`{"upserted": 1, "errors": 1}`, status 200), and a relabel between
+  the mirror's read and the upsert leaves the row unlabelled until that relabel's
+  own vector sync runs.
 - The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
   `/traces`, `/observations` and `/measurements` build their executor at the
   key's clearance, as `/documents` and `/evidence` do, instead of at
