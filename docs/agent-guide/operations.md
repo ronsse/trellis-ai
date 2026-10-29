@@ -1660,7 +1660,8 @@ way and prints the same line.
 
 `promoted_count` counts the rows this run fully wrote. A row whose precedent
 is already current, complete and unchanged (same values bar `approved_at`,
-every named edge, a non-miner `PRECEDENT_PROMOTED` event) is reported
+every named edge with its properties, the precedent's document row, a non-miner
+`PRECEDENT_PROMOTED` event) is reported
 `already_promoted`, writes no new version and no second event, counts as
 satisfied for the verdict, and is carried in `already_promoted_count`
 instead; this is what makes re-running a refused file after fixing its bad

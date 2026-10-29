@@ -506,11 +506,11 @@ def _rewrite_precedent_document(
 
 # The ``deprecation_reason`` a redaction's blanked document row carries.
 # ``retention.restore`` reads it back to recognise the tombstone
-# (:func:`_is_redaction_tombstone`).
+# (:func:`is_redaction_tombstone`).
 REDACTION_TOMBSTONE_REASON = "redacted"
 
 
-def _is_redaction_tombstone(doc: dict[str, Any]) -> bool:
+def is_redaction_tombstone(doc: dict[str, Any]) -> bool:
     """Whether a document row is the blank archived row a redaction leaves.
 
     Both halves are required. The reason alone is a free-text field that
@@ -4372,7 +4372,7 @@ class RetentionRestoreHandler:
             raise ValidationError(
                 msg, errors=[msg], code="retention_restore_precedent_node_missing"
             )
-        if _is_redaction_tombstone(doc):
+        if is_redaction_tombstone(doc):
             msg = (
                 f"retention.restore will not un-archive {item_id}: it is the "
                 "blank row a redaction left, so there is no content to "
