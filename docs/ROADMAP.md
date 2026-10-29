@@ -1,7 +1,7 @@
 # Roadmap — trellis-ai
 
 ```yaml
-last-review: 2026-09-16
+last-review: 2026-10-29
 ```
 
 > **This file is a router, not a restatement.** Five documents already say where this
@@ -47,42 +47,46 @@ become true and how to check it, because the check outlives the number.
 
 ## 3. Now
 
-**N1 · Unblock the merge gate.** `swarm-handoff.md` §4 sets the gate at *"green against
-current `main`"* — and it is currently unsatisfiable for reasons unrelated to any PR's own
-change. Measured 2026-09-16 over the last 40 `live-infra` runs: of the 37 triggered by
-`pull_request`, **31 failed, 5 passed, 1 cancelled** — and 4 of the 5 passes were on the
-two branches that *fix the ArcadeDB alias-claim race*. Sampling four failing branches
-spanning docs, feature and CI work, all four fail the **same single test**,
+**N1 · Unblock the merge gate — met 2026-10-29.** `swarm-handoff.md` §4 sets the gate at
+*"green against current `main`"* — and it was unsatisfiable for reasons unrelated to any
+PR's own change. Measured 2026-09-16 over the last 40 `live-infra` runs: of the 37
+triggered by `pull_request`, **31 failed, 5 passed, 1 cancelled** — and 4 of the 5 passes
+were on the two branches that *fix the ArcadeDB alias-claim race*. Sampling four failing
+branches spanning docs, feature and CI work, all four failed the **same single test**,
 `test_arcadedb_graph_contract.py::…::test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`.
-One race is red-lighting the whole open queue, which makes it a *precondition*, not an
+One race was red-lighting the whole open queue, which made it a *precondition*, not an
 item competing with 35 others.
 
-- Acceptance: the tally below stops being dominated by `failure`.
+- Acceptance: the tally below stops being dominated by `failure`. Run 2026-10-29, it
+  returned `[{"cancelled":2},{"success":28}]`: no `failure`, so the gate is met.
   ```bash
   gh run list --workflow live-infra.yml --limit 40 --json conclusion,event \
     --jq '[.[] | select(.event=="pull_request") | .conclusion] | group_by(.) | map({(.[0]): length})'
   ```
 - **Owner-gated.** Merging is never the agent's, at any confidence.
 
-**N2 · Deployment catch-up (#546, `owner-only`).** Production runs a commit that exists on
-no remote branch, so the drift detector cannot see it. Re-measured 2026-09-16 (method and
-figures in PR #594): the fork is **exactly one file**, `src/trellis_api/static/index.html`
-— a fast-forward plus one three-way merge, not the 42-commit rebase the issue's framing
-implies. Nine modules are absent from the running build, and one of them,
-`core/memory_op_judged.py`, is the data source N3 depends on: **prod is not producing that
-stream at all.**
+**N2 · Deployment catch-up (#546, `owner-only`) — closed in the tracker 2026-10-24.**
+Production ran a commit that exists on no remote branch, so the drift detector could not
+see it. Re-measured 2026-09-16 (method and figures in PR #594): the fork was **exactly one
+file**, `src/trellis_api/static/index.html` — a fast-forward plus one three-way merge, not
+the 42-commit rebase the issue's framing implied. Nine modules were absent from the
+running build, and one of them, `core/memory_op_judged.py`, is the data source X1 depends
+on: **prod was not producing that stream at all.**
 
 - Acceptance: `trellis admin write-config --format json` and `GET /api/version` on the
   running API report a commit that `git branch --contains` can resolve on `main`.
+- The acceptance is a production read, so it is the owner's to run. The tracker closing is
+  not evidence that it holds.
 
 **N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (closed 2026-09-30, owner
 confirmed the cleanup) and #194 classification enforcement (`keystone`, `ready`
-since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21; its first slice, the
-read-side floor, is in progress.
+since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21. Its read-side floor
+has merged, and the mutation-side deny followed as #1027 (merged 2026-10-29). #194 stays
+open, and its remaining work is tracked in #1029.
 
 - Acceptance: `pytest tests/unit/ -k classification` proves a restricted document is
   withheld from packs and search for a caller without the clearance (roadmap §3.H.1 (a));
-  the mutation-side deny, (b), follows in a second PR.
+  the mutation-side deny, (b), merged as #1027 on 2026-10-29.
 
 ## 4. Next
 
