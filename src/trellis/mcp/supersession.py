@@ -30,7 +30,7 @@ answer that resend with a silent ``DUPLICATE`` and leave the undo standing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -44,6 +44,7 @@ from trellis.mutate import (
     build_curate_executor,
     build_evidence_ingest_command,
 )
+from trellis.mutate.sensitivity_floor import visible_document, visible_row
 from trellis.retrieve.lifecycle import (
     EVIDENCE_REF_KEY,
     declared_successor,
@@ -52,6 +53,9 @@ from trellis.retrieve.lifecycle import (
 from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.registry import StoreRegistry
+
+if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
 
 logger = structlog.get_logger(__name__)
 
@@ -124,6 +128,7 @@ def check_memory_target(
     *,
     doc_id: str | None,
     existing: dict[str, Any] | None,
+    clearance: Sensitivity,
 ) -> Refusal | None:
     """Refuse ``save_memory(supersedes=target)`` before the memory is stored.
 
@@ -131,8 +136,14 @@ def check_memory_target(
     (the exact-hash hit), and ``doc_id`` the id the caller asked for; either
     could be the successor, so either naming ``target`` would declare a
     memory superseding itself.
+
+    A ``target`` above the caller's ``clearance`` is answered exactly as a
+    missing one, so a key that cannot read it cannot learn it exists, and
+    cannot stamp it superseded.
     """
-    doc = registry.knowledge.document_store.get(target)
+    doc = visible_document(
+        registry.knowledge.document_store, target, clearance=clearance
+    )
     if doc is None:
         return _refused(
             "dangling_reference",
@@ -172,6 +183,7 @@ def plan_entity_supersession(
     *,
     content: str | None,
     evidence_ref: str | None,
+    clearance: Sensitivity,
 ) -> EntityPlan | Refusal | None:
     """Check ``save_knowledge(supersedes=target)`` before anything is written.
 
@@ -182,6 +194,10 @@ def plan_entity_supersession(
     Returns ``None`` when ``evidence_ref`` names no document, before any
     check on the target's state, so the tool's existing ``evidence_ref``
     rejection fires once, unchanged, whatever state the target is in.
+
+    A document above the caller's ``clearance`` is treated as absent: it is
+    not read as the successor, and it is left unchanged as the old entity's
+    evidence (a key that cannot read it cannot supersede it).
     """
     node = registry.knowledge.graph_store.get_node(target)
     if node is None:
@@ -199,11 +215,13 @@ def plan_entity_supersession(
         )
     docs = registry.knowledge.document_store
     if evidence_ref is not None:
-        z_doc = docs.get(evidence_ref)
+        z_doc = visible_document(docs, evidence_ref, clearance=clearance)
         if z_doc is None:
             return None
     elif content is not None and content.strip():
-        z_doc = docs.get_by_hash(content_hash(content))
+        z_doc = visible_row(
+            docs, docs.get_by_hash(content_hash(content)), clearance=clearance
+        )
     else:
         return _refused(
             "missing",
@@ -241,21 +259,29 @@ def plan_entity_supersession(
             loc,
             f"{loc} resolves to {z_pre}, which is itself superseded by {z_prior}",
         )
-    return EntityPlan(t_doc=t_doc, t_doc_skip=_t_doc_skip(docs, t_doc, z_pre))
+    return EntityPlan(
+        t_doc=t_doc, t_doc_skip=_t_doc_skip(docs, t_doc, z_pre, clearance=clearance)
+    )
 
 
 def _t_doc_skip(
-    docs: DocumentStore, t_doc: str | None, successor: str | None
+    docs: DocumentStore,
+    t_doc: str | None,
+    successor: str | None,
+    *,
+    clearance: Sensitivity,
 ) -> str | None:
     """Why the old entity's evidence document is left unchanged, if it is.
 
     Leaving it is not a refusal: the entity is what the caller named, and
     its evidence may be shared, chunked, archived or already replaced by
-    something else. The tool reports the document it left.
+    something else. The tool reports the document it left. A document above the
+    caller's ``clearance`` is reported as ``no such document``, the same words a
+    missing one gets, and is never stamped.
     """
     if t_doc is None:
         return None
-    doc = docs.get(t_doc)
+    doc = visible_document(docs, t_doc, clearance=clearance)
     if doc is None:
         return "no such document"
     allowed = {successor} if successor is not None else set()
@@ -263,7 +289,12 @@ def _t_doc_skip(
 
 
 def supersede_document(
-    registry: StoreRegistry, *, doc_id: str, successor: str, requested_by: str
+    registry: StoreRegistry,
+    *,
+    doc_id: str,
+    successor: str,
+    requested_by: str,
+    clearance: Sensitivity,
 ) -> str | None:
     """Stamp document ``doc_id`` superseded by ``successor``.
 
@@ -272,7 +303,11 @@ def supersede_document(
     """
     try:
         return _stamp_document(
-            registry, doc_id=doc_id, successor=successor, requested_by=requested_by
+            registry,
+            doc_id=doc_id,
+            successor=successor,
+            requested_by=requested_by,
+            clearance=clearance,
         )
     except Exception as exc:
         logger.exception(
@@ -283,9 +318,18 @@ def supersede_document(
 
 
 def _stamp_document(
-    registry: StoreRegistry, *, doc_id: str, successor: str, requested_by: str
+    registry: StoreRegistry,
+    *,
+    doc_id: str,
+    successor: str,
+    requested_by: str,
+    clearance: Sensitivity,
 ) -> str | None:
-    doc = registry.knowledge.document_store.get(doc_id)
+    # Above the caller's clearance reads as absent, in the same words, so a
+    # race past the check cannot turn the stamp into an existence oracle.
+    doc = visible_document(
+        registry.knowledge.document_store, doc_id, clearance=clearance
+    )
     if doc is None:
         return f"document {doc_id} no longer exists"
     metadata = dict(doc.get("metadata") or {})
@@ -306,11 +350,19 @@ def _stamp_document(
         preserve_updated_at=True,
         derive_idempotency=False,
     )
-    return _execute(build_curate_executor(registry, evidence_embed="none"), command)
+    executor = build_curate_executor(
+        registry, evidence_embed="none", clearance=clearance
+    )
+    return _execute(executor, command)
 
 
 def supersede_entity(
-    registry: StoreRegistry, *, node_id: str, successor: str, requested_by: str
+    registry: StoreRegistry,
+    *,
+    node_id: str,
+    successor: str,
+    requested_by: str,
+    clearance: Sensitivity,
 ) -> str | None:
     """Stamp graph node ``node_id`` superseded by ``successor``.
 
@@ -319,7 +371,11 @@ def supersede_entity(
     """
     try:
         return _stamp_entity(
-            registry, node_id=node_id, successor=successor, requested_by=requested_by
+            registry,
+            node_id=node_id,
+            successor=successor,
+            requested_by=requested_by,
+            clearance=clearance,
         )
     except Exception as exc:
         logger.exception(
@@ -329,7 +385,12 @@ def supersede_entity(
 
 
 def _stamp_entity(
-    registry: StoreRegistry, *, node_id: str, successor: str, requested_by: str
+    registry: StoreRegistry,
+    *,
+    node_id: str,
+    successor: str,
+    requested_by: str,
+    clearance: Sensitivity,
 ) -> str | None:
     node = registry.knowledge.graph_store.get_node(node_id)
     if node is None:
@@ -343,7 +404,7 @@ def _stamp_entity(
         args={"entity_id": node_id, "properties": {LIFECYCLE_KEY: _stamp(successor)}},
         requested_by=requested_by,
     )
-    return _execute(build_curate_executor(registry), command)
+    return _execute(build_curate_executor(registry, clearance=clearance), command)
 
 
 #: A FAILED/REJECTED ``CommandResult.message`` can carry driver or caller

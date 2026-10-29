@@ -130,7 +130,7 @@ def _promote(
         document_store=knowledge.document_store,
     )
     out = submit_learning_promotion(
-        build_curate_executor(registry),
+        build_curate_executor(registry, clearance="restricted"),
         payloads["entity_payload"],
         payloads["edge_payloads"],
         requested_by="test",
@@ -270,7 +270,7 @@ class TestDocumentTarget:
     def test_through_the_executor_one_command(self, registry: StoreRegistry) -> None:
         _node(registry, "doc-a")
         precedent_id = _promote(registry, "doc-a")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.REDACTION_APPLY,
                 args={"target_id": "doc-a", "reason": "owner request"},
@@ -611,7 +611,7 @@ class TestPrecedentNames:
         assert resolved is not None
         assert resolved["entity_id"] == precedent_id
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.REDACTION_APPLY,
                 args={"target_id": "doc-a", "reason": "owner request"},

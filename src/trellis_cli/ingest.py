@@ -141,7 +141,10 @@ def ingest_trace(
 
     # Persist via the governed mutation pipeline
     registry = _get_registry()
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    )
     # Read before the write: the handler answers a stored trace_id as a
     # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
@@ -311,7 +314,10 @@ def _execute_batch(
     ``outcome`` reads the results by :func:`batch_outcome`, so a partial
     refusal or an empty batch exits 0.
     """
-    results = build_curate_executor(registry).execute_batch(batch)
+    results = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    ).execute_batch(batch)
     nodes = sum(
         1
         for r in results

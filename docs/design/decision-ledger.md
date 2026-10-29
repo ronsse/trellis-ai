@@ -369,6 +369,25 @@ automated here.
 
 ## Taken
 
+### T-8 · [#194](https://github.com/ronsse/trellis-ai/issues/194): the mutation side of the sensitivity floor, two consequences stated
+
+- **Any cleared non-admin key may declassify, by design.** `classification.set` needs the
+  `mutate` scope and a document the key can already read; it does not need `admin`. A key
+  whose clearance covers a document may lower its label to anything within that clearance.
+  The floor stops a key reaching *past* its clearance (a label above it, a document above
+  it); it does not rank keys within one.
+- **The downgrade arm now applies to every trusted `evidence.ingest` caller.** The rule
+  ("a re-put may not lower the stored label") lives in the handler rather than at each
+  door, so the CLI, workers and extractors meet it too, not only the credentialed
+  surfaces. With no labels in the store it is transparent
+  (`tests/unit/mutate/test_sensitivity_floor.py::TestDefaultPostureIsTransparent`); with
+  labels, a trusted caller that re-puts a labelled document without its label is refused
+  where it used to overwrite it.
+
+**Reopen if:** an operator needs `classification.set` limited to `admin` (add the scope
+to the command's policy, not a second code path), or a trusted caller is found that has
+to lower a label as part of normal work.
+
 ### T-1 · No production `min_support=1` flag; exercise the promote path in evals
 
 **Panel: unanimous** (2026-08-26, $0.0144) — `openai/gpt-5.5` 0.78, `moonshotai/kimi-k3`

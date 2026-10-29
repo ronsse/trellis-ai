@@ -104,7 +104,10 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     A refused or failed command exits with ``refusal_exit_code``, as every
     curate write does. A DUPLICATE exits ``0``.
     """
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     # ``Enforcement.WARN`` means "allow, but say so", and the only
     # caller-facing channel it has is ``CommandResult.warnings``. The CLI
@@ -192,7 +195,10 @@ def link(
         target_type="entity",
         requested_by="cli:link",
     )
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         # Handler-raised ValidationError now surfaces as REJECTED (Variant A'
@@ -334,6 +340,42 @@ def reinstate_precedent(
     _execute_command(cmd, output_format)
 
 
+@curate_app.command("classify-sensitivity")
+def classify_sensitivity(
+    doc_id: str = typer.Argument(..., help="Document ID to relabel"),
+    sensitivity: str = typer.Option(
+        ...,
+        "--sensitivity",
+        help="New label: public, internal, confidential or restricted",
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-sensitivity",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Relabel a document's ``DataClassification.sensitivity`` (#194).
+
+    A metadata-only write (``classification.set``): the content and the row's
+    ``updated_at`` are untouched, and the document's vector row is re-synced
+    so a semantic hit carries the new label. A document above the caller's
+    clearance is withheld from every read surface, so relabelling to
+    ``restricted`` hides it from a ``read`` token. The CLI is trusted-local
+    and clears every label. A missing document, a chunk id (it reads its
+    parent's label) and a value outside the vocabulary are refused. Re-applying
+    the stored label is a no-op (exit 0, message says so).
+    """
+    cmd = Command(
+        operation=Operation.CLASSIFICATION_SET,
+        args={"doc_id": doc_id, "sensitivity": sensitivity},
+        target_id=doc_id,
+        target_type="document",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
 @curate_app.command()
 def prune(
     reason: str = typer.Option(
@@ -413,7 +455,10 @@ def prune(
         target_type="retention_run",
         requested_by=requested_by,
     )
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         if output_format == "json":
@@ -511,7 +556,10 @@ def restore(
         target_type="retention_restore",
         requested_by=requested_by,
     )
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         if output_format == "json":
@@ -582,7 +630,10 @@ def redact(
         target_type="entity",
         requested_by=requested_by,
     )
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         # Destructive command: error states must exit non-zero so shell
@@ -665,7 +716,10 @@ def entity(
         target_type="entity",
         requested_by="cli:entity",
     )
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    result = build_curate_executor(
+        _get_registry(),
+        clearance="restricted",  # trusted: operator CLI
+    ).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         if output_format == "json":
@@ -898,7 +952,14 @@ def promote_learning(
     # Only a ready entry reaches the executor; an approved row the planner
     # could not ready (an unknown id, a non-promotable type) passes through
     # as its own outcome, so it is counted in the verdict and not dropped.
-    executor = build_curate_executor(registry) if ready else None
+    executor = (
+        build_curate_executor(
+            registry,
+            clearance="restricted",  # trusted: operator CLI
+        )
+        if ready
+        else None
+    )
 
     submission_results: list[dict[str, Any]] = []
     for entry in plan["results"]:
@@ -1173,7 +1234,10 @@ def _approve_candidates(
     """Promote each named candidate through the governed path; one outcome per id."""
     rows_by_id = {row["candidate_id"]: row for row in rows}
     by_id = {str(c.get("candidate_id")): c for c in candidates if isinstance(c, dict)}
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    )
     outcomes: list[dict[str, Any]] = []
     for candidate_id in dict.fromkeys(approve):
         refusal = approval_refusal(
@@ -1724,7 +1788,10 @@ def auto_promote_candidates(
             candidates=candidates,
             policy=policy,
             event_log=event_log,
-            executor=build_curate_executor(registry),
+            executor=build_curate_executor(
+                registry,
+                clearance="restricted",  # trusted: operator CLI
+            ),
             graph_store=registry.knowledge.graph_store,
             document_store=registry.knowledge.document_store,
             force_report_only=dry_run,
@@ -1909,7 +1976,10 @@ def evaluate_precedent_demotion(
             policy=policy,
             event_log=event_log,
             graph_store=graph_store,
-            executor=build_curate_executor(registry),
+            executor=build_curate_executor(
+                registry,
+                clearance="restricted",  # trusted: operator CLI
+            ),
             force_report_only=dry_run,
             configured_mode=configured_mode,
             min_unhelpful_citations=min_unhelpful_citations,

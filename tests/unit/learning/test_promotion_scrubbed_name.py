@@ -78,7 +78,7 @@ class _Stores:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         self.registry = StoreRegistry(stores_dir=stores_dir)
-        self.executor = build_curate_executor(self.registry)
+        self.executor = build_curate_executor(self.registry, clearance="restricted")
         self.graph = self.registry.knowledge.graph_store
         self.events = self.registry.operational.event_log
         self.documents = self.registry.knowledge.document_store

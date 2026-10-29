@@ -214,7 +214,9 @@ class TestRedactionApplyHandler:
         self, registry: StoreRegistry
     ) -> None:
         node_id = _create_node(registry)
-        result = build_curate_executor(registry).execute(_redact(node_id, reason=""))
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _redact(node_id, reason="")
+        )
         assert result.status == CommandStatus.REJECTED
 
     def test_refuses_null_event_log(self, tmp_path: Path) -> None:
@@ -275,7 +277,7 @@ class TestRedactionApplyHandler:
     ) -> None:
         """A miss is input to fix (REJECTED), not a store failure (FAILED)."""
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         applied = executor.execute(_redact(node_id))
         missing = executor.execute(_redact("nope"))
 
@@ -337,7 +339,7 @@ class TestRedactionApplyHandler:
         # other missing target. Callers wanting at-most-once semantics
         # supply Command.idempotency_key.
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         first = executor.execute(_redact(node_id))
         second = executor.execute(_redact(node_id))
         assert first.status == CommandStatus.SUCCESS
@@ -346,6 +348,8 @@ class TestRedactionApplyHandler:
 
     def test_happy_path_through_executor(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)
-        result = build_curate_executor(registry).execute(_redact(node_id))
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _redact(node_id)
+        )
         assert result.status == CommandStatus.SUCCESS
         assert result.created_id == node_id

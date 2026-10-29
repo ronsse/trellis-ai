@@ -40,7 +40,7 @@ from trellis.wire.translate import (
 )
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import resolve_requested_by
+from trellis_api.routes._principal import request_clearance, resolve_requested_by
 from trellis_api.routes._results import command_response
 from trellis_wire import (
     DraftSubmissionRequest,
@@ -88,7 +88,7 @@ def submit_drafts(
         ctx, claimed_requested_by, claim_was_set=claim_was_set
     )
 
-    executor = build_curate_executor(get_registry())
+    executor = build_curate_executor(get_registry(), clearance=request_clearance(ctx))
 
     # Wire batch → core ExtractionResult → CommandBatch.  The bridge
     # is the same one CLI ingest and MCP save_memory use, so the

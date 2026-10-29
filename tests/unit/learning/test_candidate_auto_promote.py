@@ -800,7 +800,7 @@ class TestRunCandidateAutoPromotionCommit:
         governed executor exactly like the bypass-based tests below."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = LearningCandidateAutoPromotePolicy(
                 enabled=True, mode="commit", demotion_enabled=True
             )
@@ -835,7 +835,7 @@ class TestRunCandidateAutoPromotionCommit:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             candidate = _candidate("cand-1")
 
@@ -871,7 +871,7 @@ class TestRunCandidateAutoPromotionCommit:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             custom_requested_by = "auto:learning_candidate"
 
@@ -900,7 +900,7 @@ class TestRunCandidateAutoPromotionCommit:
     def test_max_promotions_per_run_cap_honoured(self, tmp_path: Path) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True, max_promotions_per_run=2)
             candidates = [_candidate(f"cand-{i}") for i in range(4)]
 
@@ -932,7 +932,7 @@ class TestRunCandidateAutoPromotionCommit:
         promoted even with a cap of 1."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True, max_promotions_per_run=1)
             run_candidate_auto_promotion(
                 candidates=[_candidate("cand-already")],
@@ -972,7 +972,7 @@ class TestRunCandidateAutoPromotionCommit:
         precedent as current via ``ENTITY_CREATE``."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             candidate = _candidate("cand-archived")
             entity_id = precedent_entity_id_for_candidate("cand-archived")
@@ -1015,7 +1015,7 @@ class TestRunCandidateAutoPromotionCommit:
 
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             entity_id = precedent_entity_id_for_candidate("cand-auto")
 
             def _run() -> Any:
@@ -1077,7 +1077,7 @@ class TestRunCandidateAutoPromotionCommit:
                 candidates=[_candidate("cand-landed")],
                 policy=_force_commit_policy(enabled=True),
                 event_log=registry.operational.event_log,
-                executor=build_curate_executor(registry),
+                executor=build_curate_executor(registry, clearance="restricted"),
                 graph_store=registry.knowledge.graph_store,
             )
 
@@ -1097,7 +1097,7 @@ class TestRunCandidateAutoPromotionCommit:
         in this run, and nothing was ever promoted."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             entity_id = precedent_entity_id_for_candidate("cand-archived")
             registry.knowledge.graph_store.upsert_node(
@@ -1136,7 +1136,7 @@ class TestRunCandidateAutoPromotionCommit:
         refused -- reports ``"degraded"``, not ``"failed"``."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             entity_id = precedent_entity_id_for_candidate("cand-archived")
             registry.knowledge.graph_store.upsert_node(
@@ -1189,7 +1189,7 @@ class TestCommitEmbedsSourceExcerpt:
                 candidates=[candidate],
                 policy=policy,
                 event_log=registry.operational.event_log,
-                executor=build_curate_executor(registry),
+                executor=build_curate_executor(registry, clearance="restricted"),
                 graph_store=registry.knowledge.graph_store,
                 document_store=registry.knowledge.document_store,
             )
@@ -1414,7 +1414,7 @@ class TestScanAlreadyPromotedEntityIdsIncludesDemoted:
     def test_promote_then_demote_entity_id_still_scanned(self, tmp_path: Path) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             policy = _force_commit_policy(enabled=True)
             candidate = _candidate("cand-1")
 

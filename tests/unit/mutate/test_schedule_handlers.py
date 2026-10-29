@@ -74,7 +74,7 @@ class TestNotRegisteredInCurateHandlers:
     def test_curate_executor_fails_closed_on_schedule_update(
         self, registry: StoreRegistry
     ) -> None:
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         result = executor.execute(Command(operation=Operation.SCHEDULE_UPDATE, args={}))
         assert result.status == CommandStatus.FAILED
         assert "no handler registered" in result.message.lower()
@@ -82,7 +82,7 @@ class TestNotRegisteredInCurateHandlers:
     def test_curate_executor_fails_closed_on_job_run_request(
         self, registry: StoreRegistry
     ) -> None:
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         result = executor.execute(Command(operation=Operation.JOB_RUN_REQUEST, args={}))
         assert result.status == CommandStatus.FAILED
         assert "no handler registered" in result.message.lower()

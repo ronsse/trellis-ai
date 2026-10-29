@@ -174,7 +174,10 @@ def run_memory_extraction(
             return (0, 0)
 
         batch = result_to_batch(result, requested_by=requested_by)
-        results = build_curate_executor(registry).execute_batch(batch)
+        results = build_curate_executor(
+            registry,
+            clearance="restricted",  # trusted: graph drafts, no document
+        ).execute_batch(batch)
     except Exception:
         # GRACEFUL-DEGRADATION: ingest's success contract is "the document
         # is stored + MEMORY_STORED emitted". Extraction is a bonus pass;

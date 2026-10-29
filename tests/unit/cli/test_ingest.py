@@ -983,7 +983,9 @@ def _fake_executor(
         )
 
     executor.execute.side_effect = _execute
-    monkeypatch.setattr(ingest_cli, "build_curate_executor", lambda _reg: executor)
+    monkeypatch.setattr(
+        ingest_cli, "build_curate_executor", lambda _reg, **_kw: executor
+    )
 
 
 class TestIngestTraceExitCodes:
@@ -1182,7 +1184,9 @@ def _fake_batch(
         ]
 
     executor.execute_batch.side_effect = _execute_batch
-    monkeypatch.setattr(ingest_cli, "build_curate_executor", lambda _reg: executor)
+    monkeypatch.setattr(
+        ingest_cli, "build_curate_executor", lambda _reg, **_kw: executor
+    )
 
 
 _POLICY = {"rejection_reason": "policy_violation"}

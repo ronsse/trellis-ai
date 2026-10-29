@@ -222,7 +222,10 @@ def run_trace_extraction(
 
         reconcile_node_roles(batch, registry.knowledge.graph_store)
         entity_count, edge_count = batch_draft_counts(batch)
-        results = build_curate_executor(registry).execute_batch(batch)
+        results = build_curate_executor(
+            registry,
+            clearance="restricted",  # trusted: graph drafts, no document
+        ).execute_batch(batch)
         failed = [r for r in results if r.status in _UNSUCCESSFUL]
     except Exception as exc:
         # GRACEFUL-DEGRADATION: trace ingest's success contract is "the

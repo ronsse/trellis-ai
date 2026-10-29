@@ -212,7 +212,7 @@ class TestMeasurementRecordHandler:
         cmd = Command(
             operation=Operation.MEASUREMENT_RECORD, args={"measurement": body}
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         result = executor.execute(cmd)
 
@@ -247,7 +247,7 @@ class TestMeasurementRecordHandler:
             "metric_value": _SENTINEL,  # str where a float is required
             "observer_agent_id": "agent-1",
         }
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         cmd = Command(
             operation=Operation.MEASUREMENT_RECORD, args={"measurement": body}
         )

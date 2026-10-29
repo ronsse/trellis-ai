@@ -558,7 +558,7 @@ class TestRunPrecedentAutoDemotionCommit:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
             )
@@ -617,7 +617,7 @@ class TestRunPrecedentAutoDemotionCommit:
         not the routine one."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
             )
@@ -656,7 +656,7 @@ class TestRunPrecedentAutoDemotionCommit:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1",
                 node_type="precedent",
@@ -697,7 +697,7 @@ class TestRunPrecedentAutoDemotionCommit:
         ``skipped_rate_limited`` — none silently dropped."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             entity_ids = ["p1", "p2", "p3"]
             for i, entity_id in enumerate(entity_ids):
                 registry.knowledge.graph_store.upsert_node(
@@ -768,7 +768,7 @@ class TestRunPrecedentAutoDemotionCommit:
         precedent in that same second run still gets demoted."""
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             for entity_id, offset in (("p1", 0), ("p2", 1)):
                 registry.knowledge.graph_store.upsert_node(
                     node_id=entity_id, node_type="precedent", properties={}
@@ -834,7 +834,7 @@ class TestRunPrecedentAutoDemotionCommit:
     def test_requested_by_override_is_propagated(self, tmp_path: Path) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
             )
@@ -891,7 +891,7 @@ class TestRunPrecedentAutoDemotionCommit:
         """
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             event_log = registry.operational.event_log
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
@@ -987,7 +987,7 @@ class TestRunPrecedentAutoDemotionCommit:
         """
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             event_log = registry.operational.event_log
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
@@ -1219,7 +1219,7 @@ class TestRunPrecedentAutoDemotionCommit:
         """
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             registry.knowledge.graph_store.upsert_node(
                 node_id="p1", node_type="precedent", properties={}
             )
@@ -1340,7 +1340,7 @@ class TestDefaultPostureBothPoliciesInert:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             promote_policy = LearningCandidateAutoPromotePolicy()
             demote_policy = PrecedentAutoDemotePolicy()
             assert promote_policy.enabled is False
@@ -1395,7 +1395,7 @@ class TestEndToEndLoopClosure:
     ) -> None:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
-            executor = build_curate_executor(registry)
+            executor = build_curate_executor(registry, clearance="restricted")
             promote_policy = LearningCandidateAutoPromotePolicy(
                 enabled=True, mode="commit", demotion_enabled=True
             )

@@ -34,6 +34,7 @@ from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
     refuse_document_overwrite,
+    request_clearance,
     resolve_requested_by,
     stamp_request_sensitivity,
 )
@@ -83,7 +84,10 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
         ) from exc
 
     registry = get_registry()
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: a trace write names no document
+    )
     # Read before the write: the handler answers a stored trace_id as a
     # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
@@ -173,7 +177,9 @@ def ingest_evidence(
         metadata=evidence_metadata,
         requested_by="api:ingest-evidence",
     )
-    result = build_curate_executor(registry).execute(command)
+    result = build_curate_executor(registry, clearance=request_clearance(ctx)).execute(
+        command
+    )
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         raise HTTPException(
             status_code=400, detail=sanitize_error_message(result.message)
@@ -412,7 +418,7 @@ def ingest_bulk(
         )
 
     registry = get_registry()
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(registry, clearance=request_clearance(ctx))
     requested_by, requested_by_claim = resolve_requested_by(
         ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
     )

@@ -309,7 +309,7 @@ def test_commands_batch_sanitizes_per_item_message(
     # assertion but fails the second.
     monkeypatch.setattr(
         "trellis_api.routes.mutations.build_curate_executor",
-        lambda _registry: _StubBatchExecutor(
+        lambda _registry, **_kwargs: _StubBatchExecutor(
             [
                 _rejected(Operation.ENTITY_CREATE),
                 _rejected(Operation.ENTITY_CREATE, message=_CLEAN_REJECTED_MESSAGE),
@@ -347,7 +347,7 @@ def test_commands_batch_success_message_with_a_long_name_is_verbatim(
     message = f"Entity created: {_LONG_NAME}"
     monkeypatch.setattr(
         "trellis_api.routes.mutations.build_curate_executor",
-        lambda _registry: _StubBatchExecutor(
+        lambda _registry, **_kwargs: _StubBatchExecutor(
             _success(Operation.ENTITY_CREATE, message)
         ),
     )
@@ -376,7 +376,7 @@ def test_commands_batch_duplicate_message_with_a_digest_key_is_verbatim(
     message = f"Duplicate command (persisted): {_DIGEST_KEY}"
     monkeypatch.setattr(
         "trellis_api.routes.mutations.build_curate_executor",
-        lambda _registry: _StubBatchExecutor(
+        lambda _registry, **_kwargs: _StubBatchExecutor(
             _duplicate(Operation.ENTITY_CREATE, message)
         ),
     )
@@ -408,7 +408,7 @@ def test_ingest_bulk_sanitizes_every_item_result_message(
     # check but fails the clean-message checks.
     monkeypatch.setattr(
         "trellis_api.routes.ingest.build_curate_executor",
-        lambda _registry: _StubBulkExecutor(
+        lambda _registry, **_kwargs: _StubBulkExecutor(
             [
                 _rejected(Operation.ENTITY_CREATE),
                 _rejected(Operation.LINK_CREATE, message=_CLEAN_REJECTED_MESSAGE),
@@ -450,7 +450,9 @@ def test_ingest_bulk_success_message_with_a_long_name_is_verbatim(
     message = f"Entity created: {_LONG_NAME}"
     monkeypatch.setattr(
         "trellis_api.routes.ingest.build_curate_executor",
-        lambda _registry: _StubBulkExecutor(_success(Operation.ENTITY_CREATE, message)),
+        lambda _registry, **_kwargs: _StubBulkExecutor(
+            _success(Operation.ENTITY_CREATE, message)
+        ),
     )
 
     resp = client.post(

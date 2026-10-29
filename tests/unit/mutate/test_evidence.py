@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.retrieve.test_sensitivity import label
 from trellis.core.hashing import content_hash
+from trellis.errors import MutationError
 from trellis.mutate import ensure_evidence_document
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -27,7 +29,9 @@ def registry(tmp_path: Path) -> StoreRegistry:
 
 class TestEnsureEvidenceDocument:
     def test_creates_document(self, registry: StoreRegistry) -> None:
-        doc_id = ensure_evidence_document(registry, "the evidence prose")
+        doc_id = ensure_evidence_document(
+            registry, "the evidence prose", clearance="restricted"
+        )
         stored = registry.knowledge.document_store.get(doc_id)
         assert stored is not None
         assert stored["content"] == "the evidence prose"
@@ -39,8 +43,12 @@ class TestEnsureEvidenceDocument:
         assert events[0].payload["requested_by"] == "mcp:save_knowledge"
 
     def test_is_idempotent_on_same_content(self, registry: StoreRegistry) -> None:
-        first = ensure_evidence_document(registry, "identical body")
-        second = ensure_evidence_document(registry, "identical body")
+        first = ensure_evidence_document(
+            registry, "identical body", clearance="restricted"
+        )
+        second = ensure_evidence_document(
+            registry, "identical body", clearance="restricted"
+        )
         assert first == second
         # Exactly one document persisted despite two calls.
         assert registry.knowledge.document_store.count() == 1
@@ -48,13 +56,13 @@ class TestEnsureEvidenceDocument:
     def test_resolves_to_preexisting_doc_by_hash(self, registry: StoreRegistry) -> None:
         content = "pre-existing memory"
         existing_id = registry.knowledge.document_store.put(None, content)
-        resolved = ensure_evidence_document(registry, content)
+        resolved = ensure_evidence_document(registry, content, clearance="restricted")
         assert resolved == existing_id
         assert registry.knowledge.document_store.count() == 1
 
     def test_stores_metadata(self, registry: StoreRegistry) -> None:
         doc_id = ensure_evidence_document(
-            registry, "body", metadata={"domain": "platform"}
+            registry, "body", metadata={"domain": "platform"}, clearance="restricted"
         )
         stored = registry.knowledge.document_store.get(doc_id)
         assert stored is not None
@@ -63,4 +71,29 @@ class TestEnsureEvidenceDocument:
 
     def test_empty_content_raises(self, registry: StoreRegistry) -> None:
         with pytest.raises(ValueError, match="content must not be empty"):
-            ensure_evidence_document(registry, "   ")
+            ensure_evidence_document(registry, "   ", clearance="restricted")
+
+    def test_a_label_above_the_callers_clearance_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The clearance reaches the executor: a caller may not mint a document
+        labelled above its own reach, and nothing is stored."""
+        with pytest.raises(MutationError, match="not stored"):
+            ensure_evidence_document(
+                registry,
+                "restricted prose",
+                metadata=label("restricted"),
+                clearance="internal",
+            )
+        assert registry.knowledge.document_store.count() == 0
+
+    def test_a_label_within_the_callers_clearance_is_stored(
+        self, registry: StoreRegistry
+    ) -> None:
+        doc_id = ensure_evidence_document(
+            registry,
+            "restricted prose",
+            metadata=label("restricted"),
+            clearance="restricted",
+        )
+        assert registry.knowledge.document_store.get(doc_id) is not None

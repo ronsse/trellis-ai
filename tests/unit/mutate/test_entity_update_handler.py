@@ -188,7 +188,7 @@ class TestEntityUpdateHandler:
     ) -> None:
         """A miss is input to fix (REJECTED), not a store failure (FAILED)."""
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         applied = executor.execute(
             Command(
                 operation=Operation.ENTITY_UPDATE,
@@ -216,7 +216,7 @@ class TestEntityUpdateHandler:
 
     def test_happy_path_through_executor(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         result = executor.execute(
             Command(
                 operation=Operation.ENTITY_UPDATE,
@@ -354,7 +354,7 @@ class TestEntityUpdatePrecedentLifecycleRefusal:
                 LIFECYCLE_KEY: {"state": "demoted"},
             },
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         result = executor.execute(
             Command(
@@ -508,7 +508,7 @@ class TestEntityUpdatePropertiesPairsFormNormalised:
                 LIFECYCLE_KEY: {"state": "demoted"},
             },
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         result = executor.execute(
             Command(
@@ -698,7 +698,7 @@ class TestEntityUpdateRacingAnotherWrite:
     def test_purged_mid_command_is_refused_and_stays_purged(
         self, registry: StoreRegistry, args: dict[str, Any]
     ) -> None:
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph = registry.knowledge.graph_store
         created = executor.execute(
             Command(
@@ -737,7 +737,7 @@ class TestEntityUpdateRacingAnotherWrite:
         self, registry: StoreRegistry
     ) -> None:
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph = registry.knowledge.graph_store
         first = Command(
             operation=Operation.ENTITY_UPDATE,
@@ -767,7 +767,7 @@ class TestEntityUpdateRacingAnotherWrite:
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph = registry.knowledge.graph_store
         attempts: list[str] = []
 
@@ -901,7 +901,7 @@ class TestEntityCreateOverExistingPrecedentRefusal:
                 LIFECYCLE_KEY: {"state": "demoted"},
             },
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         result = executor.execute(
             Command(

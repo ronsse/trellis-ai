@@ -79,7 +79,7 @@ def _promote(registry: StoreRegistry, target_id: str, *, requested_by: str) -> N
         target_type="entity",
         requested_by=requested_by,
     )
-    result = build_curate_executor(registry).execute(cmd)
+    result = build_curate_executor(registry, clearance="restricted").execute(cmd)
     assert result.status == CommandStatus.SUCCESS
 
 
@@ -128,7 +128,7 @@ def _promote_trace(registry: StoreRegistry, trace_id: str) -> None:
         target_type="trace",
         requested_by="cli:promote",
     )
-    result = build_curate_executor(registry).execute(cmd)
+    result = build_curate_executor(registry, clearance="restricted").execute(cmd)
     assert result.status == CommandStatus.SUCCESS
 
 
@@ -299,14 +299,18 @@ class TestPrecedentDemoteHandler:
 
     def test_through_executor_success(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)
-        result = build_curate_executor(registry).execute(_demote(node_id))
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _demote(node_id)
+        )
         assert result.status == CommandStatus.SUCCESS
         assert result.created_id == node_id
 
     def test_missing_target_through_executor_is_rejected(
         self, registry: StoreRegistry
     ) -> None:
-        result = build_curate_executor(registry).execute(_demote("nope"))
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _demote("nope")
+        )
         assert result.status == CommandStatus.REJECTED
         assert result.metadata["rejection_reason"] == "target_not_found"
 
@@ -361,7 +365,7 @@ class TestPrecedentDemoteHandler:
         rejection, for the idempotent no-op.
         """
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id))
 
         result = executor.execute(_demote(node_id))
@@ -681,7 +685,7 @@ class TestPrecedentReinstateHandler:
 
     def test_through_executor_success(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id))
 
         result = executor.execute(_reinstate(node_id))
@@ -698,7 +702,7 @@ class TestPrecedentReinstateHandler:
         """
         node_id = _create_node(registry)
         _promote(registry, node_id, requested_by=AUTO_PROMOTE_REQUESTED_BY)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id, requested_by=AUTO_DEMOTE_REQUESTED_BY))
 
         result = executor.execute(_reinstate(node_id, requested_by="cli:reinstate"))
@@ -760,7 +764,9 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         node_id = _create_node(registry)
         self._embed(registry, node_id)
 
-        build_curate_executor(registry).execute(_demote(node_id, reason="stale"))
+        build_curate_executor(registry, clearance="restricted").execute(
+            _demote(node_id, reason="stale")
+        )
 
         row = registry.knowledge.vector_store.get(node_id)
         assert row is not None
@@ -783,7 +789,7 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         """
         node_id = _create_node(registry)
         self._embed(registry, node_id)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id, reason="stale"))
 
         executor.execute(_reinstate(node_id, reason="re-reviewed"))
@@ -804,7 +810,7 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         not a precondition.
         """
         node_id = _create_node(registry)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         demote_result = executor.execute(_demote(node_id, reason="stale"))
         assert demote_result.status == CommandStatus.SUCCESS
@@ -852,7 +858,7 @@ class TestVectorSyncFailureSurfacesAsAWarning:
         self._embed(registry, node_id)
         self._break_vector_upsert(registry, monkeypatch)
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _demote(node_id, reason="stale")
         )
 
@@ -873,7 +879,7 @@ class TestVectorSyncFailureSurfacesAsAWarning:
     ) -> None:
         node_id = _create_node(registry)
         self._embed(registry, node_id)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id, reason="stale"))
         self._break_vector_upsert(registry, monkeypatch)
 
@@ -906,7 +912,7 @@ class TestVectorSyncFailureSurfacesAsAWarning:
         self._embed(registry, node_id)
         self._break_vector_upsert(registry, monkeypatch)
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _demote(node_id, reason="stale")
         )
 
@@ -922,7 +928,7 @@ class TestVectorSyncFailureSurfacesAsAWarning:
     ) -> None:
         node_id = _create_node(registry)
         self._embed(registry, node_id)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id, reason="stale"))
         self._break_vector_upsert(registry, monkeypatch)
 
@@ -944,7 +950,9 @@ class TestVectorSyncFailureSurfacesAsAWarning:
         node_id = _create_node(registry)
         self._embed(registry, node_id)
 
-        build_curate_executor(registry).execute(_demote(node_id, reason="stale"))
+        build_curate_executor(registry, clearance="restricted").execute(
+            _demote(node_id, reason="stale")
+        )
 
         events = registry.operational.event_log.get_events(
             event_type=EventType.PRECEDENT_DEMOTED
@@ -997,7 +1005,9 @@ class TestVectorSyncRoutesThroughTheSharedMirror:
         self._embed(registry, node_id)
         calls = self._spy_on_the_mirror(monkeypatch)
 
-        build_curate_executor(registry).execute(_demote(node_id, reason="stale"))
+        build_curate_executor(registry, clearance="restricted").execute(
+            _demote(node_id, reason="stale")
+        )
 
         assert calls == [(node_id, (LIFECYCLE_KEY,))], calls
 
@@ -1006,7 +1016,7 @@ class TestVectorSyncRoutesThroughTheSharedMirror:
     ) -> None:
         node_id = _create_node(registry)
         self._embed(registry, node_id)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_demote(node_id, reason="stale"))
         calls = self._spy_on_the_mirror(monkeypatch)
 
@@ -1024,7 +1034,7 @@ class TestVectorSyncRoutesThroughTheSharedMirror:
         node_id = _create_node(registry)
         calls = self._spy_on_the_mirror(monkeypatch)
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _demote(node_id, reason="stale")
         )
 

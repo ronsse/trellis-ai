@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+from pydantic import ValidationError as PydanticValidationError
 
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import describe_validation_error
@@ -32,6 +33,7 @@ from trellis.core.vector_metadata import (
 from trellis.errors import (
     DegradedStoreWriteError,
     NotFoundError,
+    PolicyViolationError,
     StaleStoreWriteError,
     StoreError,
     ValidationError,
@@ -51,11 +53,21 @@ from trellis.mutate.retention import (
     RetentionCriteria,
     resolve_candidates,
 )
+from trellis.mutate.sensitivity_floor import (
+    SENSITIVITY_FLOOR_POLICY_ID,
+    refuse_written_label,
+    visible_document,
+)
 from trellis.retrieve.precedents import is_miner_candidate_event
+from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
 from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
     LIFECYCLE_KEY,
+    SENSITIVITY_ORDER,
+    DataClassification,
     Lifecycle,
     lifecycle_state_of,
+    sensitivity_of,
 )
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -77,6 +89,8 @@ logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from trellis.schemas.classification import Sensitivity
 
 
 def _evidence_document_id(value: object) -> str:
@@ -124,11 +138,43 @@ class EvidenceIngestHandler:
         embed: EvidenceEmbedMode = "soft",
         embedding_fn: Callable[[str], list[float]] | None = None,
         empty_error_code: str = "evidence_ingest_empty",
+        clearance: Sensitivity = "restricted",
     ) -> None:
         self._registry = registry
         self._embed = embed
         self._embedding_fn = embedding_fn
         self._empty_error_code = empty_error_code
+        self._clearance = clearance
+
+    def _enforce_clearance(self, doc_id: str, metadata: dict[str, Any]) -> None:
+        """The save surfaces' write rules, run where the write is.
+
+        Run here so the generic doors (``POST /commands/batch``,
+        ``execute_mutation``) are covered too (#1023). Two refusals, both
+        before any write:
+
+        * the label being written is above this caller's clearance, for a new
+          document and an existing one alike (the rule ``classification.set``
+          and ``save_memory`` apply, in the same words);
+        * a write at an existing id would replace the row, label included, and
+          the stored label is above this caller's clearance or above the label
+          being written. A trusted caller (``clearance="restricted"``) still may
+          not lower a label.
+        """
+        try:
+            refuse_written_label(
+                doc_id, sensitivity_of(metadata), clearance=self._clearance
+            )
+            refuse_overwrite(
+                self._registry.knowledge.document_store,
+                doc_id,
+                clearance=self._clearance,
+                metadata=metadata,
+            )
+        except OverwriteRefusedError as exc:
+            raise PolicyViolationError(
+                exc.message, policy_id=SENSITIVITY_FLOOR_POLICY_ID
+            ) from exc
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         evidence = command.args.get("evidence")
@@ -176,6 +222,7 @@ class EvidenceIngestHandler:
             doc_id=doc_id,
             registry=self._registry,
         )
+        self._enforce_clearance(doc_id, metadata)
         # Through the seam even though both embed modes below rebuild the
         # whole row: ``run_embed_on_ingest`` is gated on
         # ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with that
@@ -231,6 +278,111 @@ class EvidenceIngestHandler:
             )
 
         return doc_id, f"Evidence stored: {doc_id}"
+
+
+def _relabelled_record(prior: object, sensitivity: str) -> dict[str, Any]:
+    """A ``DataClassification`` record carrying ``sensitivity``, keeping what it can.
+
+    The other fields of a readable prior record (regulatory tags, jurisdiction)
+    survive a relabel; an unreadable one is replaced whole. ``"caller"`` is
+    recorded as a classifier because a person asked for this label.
+    """
+    kept = (
+        {k: v for k, v in prior.items() if k in DataClassification.model_fields}
+        if isinstance(prior, dict)
+        else {}
+    )
+    try:
+        record = DataClassification.model_validate({**kept, "sensitivity": sensitivity})
+    except PydanticValidationError:
+        record = DataClassification(sensitivity=sensitivity)  # type: ignore[arg-type]
+    if "caller" not in record.classified_by:
+        record = record.model_copy(
+            update={"classified_by": [*record.classified_by, "caller"]}
+        )
+    return record.model_dump(mode="json")
+
+
+class ClassificationSetHandler:
+    """Relabel one document's sensitivity, leaving its content untouched (#194).
+
+    A metadata-only write: ``put_document(..., preserve_updated_at=True)``, so
+    the row's clock is not bumped, and ``put_document`` mirrors
+    ``data_classification`` onto the document's own vector row (it is in
+    ``MIRRORED_METADATA_KEYS``), so a semantic hit stops carrying the old
+    label. A chunk reads its parent's label (``effective_sensitivity``), so
+    relabelling the parent relabels every chunk with no write to them.
+
+    A document above ``clearance`` answers exactly as a missing one
+    (``target_not_found``, via
+    :func:`~trellis.mutate.sensitivity_floor.visible_document`), so a key that
+    cannot read it cannot learn it exists by trying to relabel it.
+    The new label must be within ``clearance`` too
+    (:func:`~trellis.mutate.sensitivity_floor.refuse_written_label`), so a caller
+    cannot push a document out of its own reach. Re-applying the stored label is
+    a no-op.
+    """
+
+    def __init__(
+        self, registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+    ) -> None:
+        self._registry = registry
+        self._clearance = clearance
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        doc_id = command.args.get("doc_id")
+        sensitivity = command.args.get("sensitivity")
+        if not isinstance(doc_id, str) or not doc_id:
+            msg = "classification.set doc_id must be a non-empty string"
+            raise ValidationError(msg, errors=[msg], code="classification_set_shape")
+        if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITY_ORDER:
+            msg = (
+                "classification.set sensitivity must be one of "
+                f"{', '.join(SENSITIVITY_ORDER)}"
+            )
+            raise ValidationError(msg, errors=[msg], code="classification_set_shape")
+
+        document_store = self._registry.knowledge.document_store
+        existing = visible_document(document_store, doc_id, clearance=self._clearance)
+        if existing is None:
+            msg = f"document {doc_id!r} not found"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+        # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
+        from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+        if is_chunk_doc_id(doc_id):
+            msg = (
+                f"document {doc_id!r} is a chunk and reads its parent's label; "
+                "relabel the parent document instead"
+            )
+            raise ValidationError(msg, errors=[msg], code="classification_set_chunk")
+        try:
+            refuse_written_label(
+                doc_id,
+                sensitivity,  # type: ignore[arg-type]
+                clearance=self._clearance,
+            )
+        except OverwriteRefusedError as exc:
+            raise PolicyViolationError(
+                exc.message, policy_id=SENSITIVITY_FLOOR_POLICY_ID
+            ) from exc
+
+        metadata: dict[str, Any] = dict(existing.get("metadata") or {})
+        previous = sensitivity_of(metadata)
+        if DATA_CLASSIFICATION_KEY in metadata and previous == sensitivity:
+            return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
+        metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
+            metadata.get(DATA_CLASSIFICATION_KEY), sensitivity
+        )
+        put_document(
+            document_store,
+            resolve_vector_store(self._registry),
+            doc_id,
+            str(existing.get("content") or ""),
+            metadata,
+            preserve_updated_at=True,
+        )
+        return doc_id, f"Classification set: {doc_id} {previous} -> {sensitivity}"
 
 
 def _bind_entity_name_alias(
@@ -4500,12 +4652,22 @@ def create_curate_handlers(
     registry: StoreRegistry,
     *,
     evidence_embed: EvidenceEmbedMode = "soft",
+    clearance: Sensitivity = "restricted",
 ) -> dict[str, Any]:
-    """Create all curate operation handlers for a given registry."""
+    """Create all curate operation handlers for a given registry.
+
+    ``clearance`` is the caller's document clearance; the handlers that decide
+    a document's label (``evidence.ingest``, ``classification.set``) refuse
+    against it. The default is trusted-local, which clears everything.
+    """
     return {
         Operation.EVIDENCE_INGEST: EvidenceIngestHandler(
             registry,
             embed=evidence_embed,
+            clearance=clearance,
+        ),
+        Operation.CLASSIFICATION_SET: ClassificationSetHandler(
+            registry, clearance=clearance
         ),
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),

@@ -96,6 +96,7 @@ from trellis_api.auth import (
     resolve_auth_mode,
 )
 from trellis_api.observability import resolve_metrics_public
+from trellis_api.routes._principal import request_clearance
 from trellis_api.routes.health import probe_backends, resolve_ops_detail
 from trellis_api.routes.settings import resolve_env_pinned_bool_setting
 from trellis_wire.dtos import (
@@ -1490,7 +1491,7 @@ def promote_learning_candidates(
     )
     ready = [r for r in plan["results"] if r["status"] == "ready"]
 
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(registry, clearance=request_clearance(ctx))
     rows: list[LearningPromotionResultRow] = []
     # What the verdict reads: the executor's own answer, edges and precedent
     # event included, which the response rows do not carry. The CLI reads the
