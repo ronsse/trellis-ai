@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.retrieve.excerpts import truncate_excerpt
-from trellis.retrieve.sensitivity import DocumentClearance
+from trellis.retrieve.sensitivity import DocumentClearance, conceal_node_pointers
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -324,8 +324,10 @@ def _scan_doc_linked_nodes(graph_store: Any, limit: int) -> list[dict[str, Any]]
 
 def _linked_entities(
     graph_store: Any,
+    document_store: DocumentStore,
     anchors_by_path: dict[str, set[str]],
     *,
+    clearance: Sensitivity,
     include_unconfirmed: bool,
     include_structural: bool,
     graph_scan_limit: int,
@@ -335,6 +337,11 @@ def _linked_entities(
     Returns the per-path entity lists and whether the node scan hit its
     cap — a saturated scan means the entity half of the answer may be
     incomplete, which the caller reports rather than swallows.
+
+    An entity is anchored by a document the caller may read but lists every
+    id it links, so each entry is built from the node as a caller at
+    ``clearance`` may be shown it (:func:`conceal_node_pointers`). Anchoring
+    uses the stored ids; the anchors are readable by construction.
     """
     entities_by_path: dict[str, list[dict[str, Any]]] = {p: [] for p in anchors_by_path}
     all_anchor_ids: set[str] = set().union(*anchors_by_path.values())
@@ -350,6 +357,7 @@ def _linked_entities(
             limit=graph_scan_limit,
         )
     excluded_unconfirmed = 0
+    matched: list[dict[str, Any]] = []
     for node in nodes:
         linked = set(node.get("document_ids") or [])
         if not linked & all_anchor_ids:
@@ -363,7 +371,14 @@ def _linked_entities(
         ):
             excluded_unconfirmed += 1
             continue
-        entry = _entity_entry(node)
+        matched.append(node)
+    for node, shown in zip(
+        matched,
+        conceal_node_pointers(matched, document_store, clearance),
+        strict=True,
+    ):
+        linked = set(node.get("document_ids") or [])
+        entry = _entity_entry(shown)
         for path, anchor_ids in anchors_by_path.items():
             if linked & anchor_ids:
                 entities_by_path[path].append(entry)
@@ -422,7 +437,9 @@ def build_file_context(
     )
     entities_by_path, graph_scan_truncated = _linked_entities(
         graph_store,
+        document_store,
         anchors_by_path,
+        clearance=clearance,
         include_unconfirmed=include_unconfirmed,
         include_structural=include_structural,
         graph_scan_limit=graph_scan_limit,
