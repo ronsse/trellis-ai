@@ -3488,7 +3488,9 @@ class PackBuilder:
         ``malformed_metadata``. The placeholder joins ``candidates`` first,
         because the clearance rules judge a rejected id only through a
         candidate they were given. Both build loops call this, so they cannot
-        drift.
+        drift. It runs before the collect gates, and the withholding summary
+        is first-reason-wins, so an id also rejected on another axis counts as
+        ``malformed_metadata``.
         """
         if not skipped:
             return

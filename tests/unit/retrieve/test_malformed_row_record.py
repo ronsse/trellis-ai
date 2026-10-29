@@ -147,6 +147,8 @@ class TestStrategyChannel:
 
         assert [i.item_id for i in result.items] == ["good"]
         assert [i.item_id for i in result.skipped] == ["bad"]
+        assert result.skipped[0].item_type == "vector"
+        assert result.skipped[0].excerpt == ""
 
     def test_a_clean_axis_skips_nothing(self) -> None:
         assert _semantic([_good()]).search_result("q").skipped == []

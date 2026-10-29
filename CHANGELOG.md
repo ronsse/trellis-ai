@@ -337,7 +337,11 @@ All notable changes to Trellis will be documented in this file.
   takes part in supersession, so a loser whose successor was skipped is still
   served. A skipped row labelled above the caller's clearance has its id
   concealed like any other withheld candidate. Counts and strategy names
-  only: neither the pack nor health carries a row value.
+  only: neither the pack nor health carries a row value. Because the semantic
+  axis now hands its skipped rows back, `analyze pack-telemetry`'s semantic
+  `yield_rate` and `rejection_reason_counts`, and the pack observations'
+  `selection_efficiency`, count them as returned and not selected; a drop in
+  those after an upgrade is that accounting, not a retrieval regression.
 
 ### Added
 
