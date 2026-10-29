@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
+  #1044).** `GET /api/v1/analyze` now describes the holdout report's
+  covariate-adjusted secondary fits (brief length, then brief length with agent
+  type): that they are not decisive and what a `not_measurable` fit means. In
+  `trellis analyze holdout`'s text output a refused fit used to stop after its
+  reason, so a reader could not tell a fit with too few tasks from one with
+  none; it now also prints `n_used` and `n_missing_covariate`, and the arm
+  balance R2 when the refusal came after it was computed. JSON is unchanged.
+  Five REST reads took a `limit` with no bounds, so `limit=0`, a negative value
+  or a huge one reached the store unchecked: `GET /search`, `GET /traces`,
+  `GET /proposals`, `GET /schema-evolution/candidates` and `GET /code-proposals`
+  now take `ge=1, le=500` and answer 422 outside it, like the routes beside
+  them. Defaults are unchanged; no SDK method or UI call passes a value over
+  500.
+
 - **`POST /api/v1/evidence` and `POST /api/v1/documents` take
   `reingest_redacted` (part of #1034).** A REST caller had no single-route way to
   bring a redacted id back: the refusal over a tombstone

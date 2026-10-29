@@ -166,7 +166,7 @@ def _resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
 def search(
     q: str = Query(..., description="Search query"),
     domain: str | None = Query(None, description="Domain filter"),
-    limit: int = Query(20, description="Max results"),
+    limit: int = Query(20, ge=1, le=500, description="Max results"),
     include_chunks: bool = Query(
         False,
         description=(
@@ -492,7 +492,7 @@ def list_traces(
             " oldest created_at you have, same convention as GET /events."
         ),
     ),
-    limit: int = Query(20),
+    limit: int = Query(20, ge=1, le=500),
 ) -> dict[str, Any]:
     """List recent traces.
 

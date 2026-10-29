@@ -67,6 +67,19 @@ def test_list_reports_names_every_allowlisted_report(client):
         assert isinstance(row["default_params"], dict)
 
 
+def test_the_holdout_description_names_the_secondary_fits_the_report_carries(client):
+    # The report gained covariate-adjusted secondary fits (#1044); a description
+    # that stops at the primary verdict leaves a reader of the Reports tab
+    # unable to say what the "not measurable" block under it means.
+    rows = {r["name"]: r for r in client.get("/api/v1/analyze").json()["reports"]}
+    description = " ".join(rows["holdout"]["description"].split())
+    assert "covariate-adjusted" in description
+    assert "brief length" in description
+    assert "agent type" in description
+    assert "not decisive" in description
+    assert "not measurable" in description
+
+
 def test_every_report_carries_a_human_title_distinct_from_its_raw_name(client):
     # B15: the Reports tab's picker must not show the raw kebab-case
     # route/CLI name as its primary label -- every entry needs a title,

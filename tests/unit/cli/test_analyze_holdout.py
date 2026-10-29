@@ -14,7 +14,8 @@ import math
 import statistics
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -33,15 +34,22 @@ from tests.unit.analyze._holdout_fixture import (
     timing_payload,
 )
 from trellis.analyze import holdout as holdout_analysis
-from trellis.analyze.holdout import SECONDARY_VERDICT, analyze_holdout
+from trellis.analyze.holdout import (
+    SECONDARY_VERDICT,
+    HoldoutAdjustment,
+    HoldoutCovariateAdjusted,
+    analyze_holdout,
+)
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.analyze import holdout
+from trellis_cli.analyze import _render_holdout_secondary, holdout
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
 if TYPE_CHECKING:
     from click.testing import Result
+
+    from trellis.analyze.holdout import HoldoutReport
 
 runner = CliRunner()
 
@@ -169,6 +177,14 @@ def test_rules_the_analysis_cannot_apply_are_printed_in_both_formats(
     )
     assert "CI ignores coefficient uncertainty" not in flat
     assert payload["covariate_adjusted"]["status"] == "not_measurable"
+    # A refused fit still says how many tasks it had, and prints no R2 it never
+    # computed: its counts are what tell a reader the fit had nothing to use.
+    assert flat.count("0 tasks used, 3 missing a covariate") == 2
+    assert all(
+        (a["n_used"], a["n_missing_covariate"]) == (0, 3)
+        for a in payload["covariate_adjusted"]["adjustments"]
+    )
+    assert "arm balance R2" not in flat
 
 
 def test_a_partly_decided_pre_treatment_exclusion_is_printed_in_both_formats(
@@ -629,6 +645,78 @@ def test_the_task_window_is_printed_in_both_formats(log: HoldoutLog) -> None:
     assert "eligible tasks 10 (7.5 per 30 days); analysed 8 (6 per 30 days)" in flat
     assert "whole 60-day window" in flat
     assert "not by the 60-day window" in flat
+
+
+def test_a_fit_refused_for_too_few_tasks_prints_the_counts_that_explain_it(
+    log: HoldoutLog,
+) -> None:
+    """Five of eight tasks carry a brief length: too few left once the fit's
+    stratum columns and covariate are paid for, so the fit is refused."""
+    for parent in range(2):
+        for index in range(4):
+            task = 4 * parent + index
+            log.task(
+                start=MONDAY + timedelta(hours=task),
+                parent=f"parent-{parent}",
+                arms=[index % 2 == 1],
+                turns=10 + task,
+                covariates=(
+                    covariates_payload(brief_chars=100 + 30 * task)
+                    if task < 5
+                    else None
+                ),
+            )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    block = _payload(machine)["covariate_adjusted"]
+    assert block["status"] == "not_measurable"
+    for adjustment in block["adjustments"]:
+        assert adjustment["inference"] is None
+        assert "residual degrees of freedom" in adjustment["reason"]
+        assert (adjustment["n_used"], adjustment["n_missing_covariate"]) == (5, 3)
+        assert adjustment["arm_balance_r2"] is None
+    flat = _flat(text)
+    assert (
+        flat.count(
+            "not measurable: 2 residual degrees of freedom after the fit, fewer "
+            "than 4 5 tasks used, 3 missing a covariate"
+        )
+        == 2
+    )
+    assert "arm balance R2" not in flat
+
+
+def test_a_fit_refused_after_its_r2_is_computed_prints_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the R2 refusal reaches a figure for the balance line to print."""
+    refused = HoldoutAdjustment(
+        name="brief_length",
+        preregistered=True,
+        status="not_measurable",
+        reason="the covariates explain 0.95 of the arm's within-stratum variance",
+        n_used=40,
+        n_missing_covariate=2,
+        agent_type_levels=None,
+        df_residual=36,
+        arm_balance_r2=0.95,
+        inference=None,
+        unadjusted_same_subset=None,
+    )
+    report = SimpleNamespace(
+        covariate_adjusted=HoldoutCovariateAdjusted(
+            status="not_measurable", note="", adjustments=[refused]
+        )
+    )
+
+    _render_holdout_secondary(cast("HoldoutReport", report))
+
+    flat = " ".join(plain(capsys.readouterr().out).split())
+    assert "not measurable: the covariates explain 0.95" in flat
+    assert "40 tasks used, 2 missing a covariate; arm balance R2 0.95" in flat
 
 
 def test_the_covariate_adjusted_block_is_printed_in_both_formats(
