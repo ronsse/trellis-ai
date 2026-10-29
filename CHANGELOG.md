@@ -78,6 +78,19 @@ All notable changes to Trellis will be documented in this file.
   mirrored onto the vector row. Not yet covered: REST ingest labelling, the
   explore document list, graph-node labels, relabelling, the generic
   `/mutations` evidence-ingest door and the mutation-path deny.
+- **CI: a cold-install job installs the built wheel and runs the first-run paths
+  (#1041).** `.github/workflows/cold-install.yml` builds the wheel and calls
+  `scripts/cold_install_check.sh <wheel>` on Python 3.11 and 3.13. The script
+  installs the wheel with no extras into a fresh venv, works from an empty
+  directory with an empty `HOME` and no `TRELLIS_*`, `PYTHONPATH` or
+  `PYTHONHOME`, asserts `trellis` imports from the venv's site-packages, then
+  runs `admin quickstart` (with and without `--with-skills user`), `admin
+  health`, the README quick-start commands, a two-file `ingest corpus` followed by
+  a non-empty `retrieve pack`, `admin serve` (`/healthz` and `/api/version`
+  answer 200) and the `trellis-mcp` stdio handshake (`initialize`, `tools/list`,
+  at least 10 tools). Each step prints one line and the first failure names its
+  step. It also runs locally: `PYTHON=$(uv python find 3.11)
+  scripts/cold_install_check.sh dist/*.whl`. Nothing gates `publish.yml` on it yet.
 
 ### Changed
 
