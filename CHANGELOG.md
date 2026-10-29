@@ -398,6 +398,24 @@ All notable changes to Trellis will be documented in this file.
   `redaction_tombstone` warning on every sync; corpus sync has no flag to
   re-ingest them.
 
+- **A SQLite vector row of another width no longer fails every semantic query
+  (#1058).** `SQLiteVectorStore.upsert` stores a vector of any width, so an
+  embedder swap, or a `POST /api/v1/vectors` write at a different width, leaves
+  rows of two widths in one store. `query` scored every row, and one row whose
+  width differed from the query's raised `ValueError` out of the dot product:
+  a semantic-only build failed with `PackAssemblyError`, and a multi-strategy
+  build lost its semantic axis (recorded under `strategy_failures`). `query` now
+  scores only rows of the query's own width, filtered in SQL so the others are
+  not read. While the query returns rows the skip is silent: counting the
+  skipped rows is a second full scan of `vectors`. The one case that is
+  reported is a width that matches no stored row (what an embedder change that
+  re-embedded nothing produces): the query returns `[]` and, only then, runs one
+  `COUNT(*)` over the rows of other widths that pass the same SQL-pushed
+  filters. If it finds any it logs one `vector_query.width_mismatch` warning
+  with `query_width` and `other_width_rows`, counts only. Rows of a single
+  width rank exactly as before. This supersedes the `POST /api/v1/vectors`
+  entry's note that once two widths are stored every semantic query raises.
+
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
   number (or is above the staleness threshold with no `importance_scored_at`),

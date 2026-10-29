@@ -496,8 +496,8 @@ def upsert_vectors(
     to survive float32), or one whose length differs from the store's width (when
     the store declares one; the SQLite backend does not, and then the batch's first
     non-empty vector sets the width the rest must match, and a later batch of
-    another width is accepted and breaks every semantic query once both widths are
-    stored). So is an ``item_id``
+    another width is accepted; a query there scores only the rows of its own
+    width). So is an ``item_id``
     starting ``trace-summary:``, for every caller: that namespace is the
     trace-embed worker's, and a row there makes it skip the trace for good. A
     row's ``metadata`` may not carry a raw ``data_classification`` (422), whoever

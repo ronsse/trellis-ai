@@ -23,7 +23,7 @@ from trellis.auth import generate_api_key
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
-from trellis.retrieve.pack_builder import PackAssemblyError, PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
     SearchStrategy,
@@ -1188,12 +1188,13 @@ class TestVectorsWidth:
         assert self._post(client, registry, [0.5] * 8).status_code == 200
         assert self._post(client, registry, [0.5] * 3).status_code == 200
 
-    def test_two_stored_widths_break_the_semantic_axis_for_every_pack(
+    def test_two_stored_widths_still_serve_the_rows_of_the_querys_width(
         self, client, registry
     ):
-        """What the limit above costs on SQLite, which the docs state: with two
-        widths held, a semantic-only build fails and a multi-strategy build quietly
-        loses the semantic axis."""
+        """What the limit above costs on SQLite: nothing a pack can see. The store
+        scores only the rows of the query's width (#1058), so a semantic-only build
+        serves the 8-wide row and a multi-strategy build keeps its semantic axis
+        beside the other one."""
         for item_id, width in (("entity:wide", 8), ("entity:narrow", 3)):
             resp = client.post(
                 "/api/v1/vectors",
@@ -1201,8 +1202,7 @@ class TestVectorsWidth:
                 headers=_headers(registry, ["ingest"]),
             )
             assert resp.status_code == 200, resp.text
-        with pytest.raises(PackAssemblyError):
-            _semantic_pack(registry, "restricted")
+        assert _served_ids(_semantic_pack(registry, "restricted")) == ["entity:wide"]
         other = PackItem(
             item_id="ent-01",
             item_type="entity",
@@ -1211,7 +1211,10 @@ class TestVectorsWidth:
             estimated_tokens=10,
             metadata={},
         )
-        assert _served_ids(_pack_with_another_axis(registry, other)) == ["ent-01"]
+        assert set(_served_ids(_pack_with_another_axis(registry, other))) == {
+            "ent-01",
+            "entity:wide",
+        }
 
 
 class _Fixed(SearchStrategy):
