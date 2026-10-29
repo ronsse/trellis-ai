@@ -15,6 +15,9 @@ from trellis.core.error_sanitize import (
     sanitize_error_message,
 )
 from trellis.core.ids import generate_ulid
+from trellis.core.reserved_doc_ids import (
+    TRACE_SUMMARY_DOC_ID_PREFIX as TRACE_SUMMARY_ID_PREFIX,
+)
 from trellis.core.vector_metadata import MIRRORED_METADATA_KEYS
 from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
@@ -58,7 +61,6 @@ from trellis_wire.dtos import (
     IngestResponse,
     StringDetailError,
 )
-from trellis_workers.trace_embed.render import DOC_ID_PREFIX as TRACE_SUMMARY_ID_PREFIX
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore

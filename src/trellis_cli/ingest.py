@@ -28,6 +28,11 @@ from trellis.core.precedent_document import (
     is_promoted_precedent_document,
     reserved_document_id_message,
 )
+from trellis.core.reserved_doc_ids import (
+    RESERVED_TRACE_SUMMARY_ID_CODE,
+    is_trace_summary_doc_id,
+    reserved_trace_summary_id_message,
+)
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
@@ -266,6 +271,15 @@ def ingest_evidence(
             output_format,
             error_type="ValidationError",
             code=RESERVED_DOCUMENT_ID_CODE,
+        )
+    # And the trace embed worker's summary namespace (#1054): a row there makes
+    # the trace it names look already embedded.
+    if is_trace_summary_doc_id(evidence.evidence_id):
+        _fail(
+            reserved_trace_summary_id_message("evidence_id", evidence.evidence_id),
+            output_format,
+            error_type="ValidationError",
+            code=RESERVED_TRACE_SUMMARY_ID_CODE,
         )
 
     # Persist to document store

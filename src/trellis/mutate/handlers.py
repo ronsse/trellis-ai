@@ -28,6 +28,11 @@ from trellis.core.precedent_document import (
     is_promoted_precedent_document,
     reserved_document_id_message,
 )
+from trellis.core.reserved_doc_ids import (
+    RESERVED_TRACE_SUMMARY_ID_CODE,
+    TRACE_SUMMARY_DOC_ID_PREFIX,
+    reserved_trace_summary_id_message,
+)
 from trellis.core.settings_registry import get_setting, resolve_source, validate_value
 from trellis.core.text_safety import (
     contains_nul_or_lone_surrogate,
@@ -101,7 +106,10 @@ if TYPE_CHECKING:
     from trellis.schemas.classification import Sensitivity
 
 
-def _evidence_document_id(value: object) -> str:
+def _evidence_document_id(
+    value: object,
+    reserved_prefixes: tuple[str, ...] = (TRACE_SUMMARY_DOC_ID_PREFIX,),
+) -> str:
     """``evidence.doc_id`` as a caller-chosen document id, or a refusal.
 
     A promoted precedent's document row is written by the promote handler
@@ -109,7 +117,10 @@ def _evidence_document_id(value: object) -> str:
     its own memory from noise demotion and retention (see
     :mod:`trellis.core.precedent_document`). A chunk id is written by corpus
     ingestion alone: an id in the minted ``<x>#chunk-<digits>`` shape cannot be
-    told from one afterwards, so a caller may not choose it (#1008).
+    told from one afterwards, so a caller may not choose it (#1008). An id
+    under one of ``reserved_prefixes`` (the trace embed worker's summary
+    namespace, by default) is refused too: a row there makes the trace it names
+    look already embedded (#1054).
     """
     if not isinstance(value, str) or not value:
         msg = "evidence.doc_id must be a non-empty string"
@@ -126,6 +137,9 @@ def _evidence_document_id(value: object) -> str:
     if is_chunk_doc_id(value):
         msg = reserved_chunk_doc_id_message("evidence.doc_id", value)
         raise ValidationError(msg, code=RESERVED_DOCUMENT_ID_CODE)
+    if any(value.startswith(prefix) for prefix in reserved_prefixes):
+        msg = reserved_trace_summary_id_message("evidence.doc_id", value)
+        raise ValidationError(msg, code=RESERVED_TRACE_SUMMARY_ID_CODE)
     return value
 
 
@@ -147,6 +161,12 @@ class EvidenceIngestHandler:
     ``none`` lets ``save_memory`` keep embedding outside its process-wide
     deduplication lock.
     """
+
+    #: Document id prefixes this handler refuses from a caller (#1054). A class
+    #: attribute, not a command field: only code that constructs the trace
+    #: embed worker's handler can clear it, where ``Command.requested_by`` is a
+    #: string any caller may write.
+    reserved_doc_id_prefixes: tuple[str, ...] = (TRACE_SUMMARY_DOC_ID_PREFIX,)
 
     def __init__(
         self,
@@ -251,7 +271,9 @@ class EvidenceIngestHandler:
             msg = "evidence must be a mapping"
             raise ValidationError(msg, code="evidence_ingest_shape")
 
-        doc_id = _evidence_document_id(evidence.get("doc_id"))
+        doc_id = _evidence_document_id(
+            evidence.get("doc_id"), self.reserved_doc_id_prefixes
+        )
         content = evidence.get("content")
         uri = evidence.get("uri")
         if not isinstance(content, str):

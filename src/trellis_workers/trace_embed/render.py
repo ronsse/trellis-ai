@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from trellis.core.elision import elide_text
+from trellis.core.reserved_doc_ids import TRACE_SUMMARY_DOC_ID_PREFIX
 from trellis.extract.evidence import parse_trace_evidence
 from trellis.schemas.document_metadata import DocumentMetadata
 
@@ -68,7 +69,9 @@ __all__ = [
 #: ``trace:<id>`` there would have this worker upserting a vector onto a live
 #: SCD-2 graph node — a write into the graph plane from a worker that has no
 #: business touching it. A distinct namespace is correct on every backend.
-DOC_ID_PREFIX = "trace-summary:"
+#: Defined in core (``trellis.core.reserved_doc_ids``) because every write door
+#: refuses a caller-chosen id under it; kept under this name for the worker.
+DOC_ID_PREFIX = TRACE_SUMMARY_DOC_ID_PREFIX
 
 #: ``metadata["source_system"]`` — the corpus namespace these documents belong
 #: to. Read by ``SourceSystemClassifier`` and by the pack attribution fields.
