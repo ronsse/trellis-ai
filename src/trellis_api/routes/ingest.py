@@ -31,7 +31,9 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
+from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
 from trellis.retrieve.strategies import DEFAULT_IMPORTANCE_DECAY_THRESHOLD
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
@@ -239,6 +241,25 @@ def ingest_evidence(
 #: serve-time sensitivity judgement of a chunk both read it.
 _PARENT_DOC_ID_KEY = "parent_doc_id"
 
+#: Row ``metadata`` keys that act on an item other than the row. The pack
+#: builder withholds *by id*: a ``lifecycle`` that says ``superseded`` withholds
+#: every item holding the row's id, and an ``evidence_ref`` makes the row the
+#: successor that another item's ``superseded_by`` resolves to. A row that carries
+#: either at an id naming no stored document could hide a real item from another
+#: axis, so it is refused there; at a stored document the document's value is
+#: written instead of the caller's.
+_ITEM_POINTER_KEYS: tuple[str, ...] = (LIFECYCLE_KEY, EVIDENCE_REF_KEY)
+
+#: The largest finite float32. A vector element past it becomes ``inf`` when the
+#: store keeps it as float32.
+_FLOAT32_MAX = 3.4028234663852886e38
+
+#: The largest squared length a vector may have. The store takes the float32
+#: norm of every row it compares against; the sum of squares overflows float32
+#: at about 3.4e38, which makes the norm ``inf`` and the cosine score ``nan`` or a
+#: silent 0. The bound sits well under that so accumulation error cannot cross it.
+_MAX_SQUARED_LENGTH = 1e38
+
 
 def _vector_row_metadata(
     document_store: DocumentStore, item_id: str, supplied: dict[str, Any]
@@ -249,11 +270,14 @@ def _vector_row_metadata(
     ``lifecycle``, ``content_tags``, ``auto_importance``) are the document's, not
     the caller's: the semantic axis builds its pack item, excerpt included, from
     this row, so a rewrite that dropped the label would serve a restricted
-    excerpt to a lower clearance. The rule is ``sync_vector_metadata_outcome``'s,
-    applied before the one write instead of after it, so the row this route
-    writes is never stripped: a key the document carries is copied, a key it
-    lacks is removed from the row. (A relabel that lands between the read here
-    and the write is not seen until its own vector sync runs.)
+    excerpt to a lower clearance. ``evidence_ref`` is taken from the document the
+    same way, since it names a successor to the pack builder. The rule is
+    ``sync_vector_metadata_outcome``'s, applied before the one write instead of
+    after it, so the row this route writes is never stripped: a key the document
+    carries is copied, a key it lacks is removed from the row. (A relabel whose
+    own vector sync runs between the read here and the write is overwritten by
+    this write, and the row stays stale until a later sync or
+    ``trellis admin resync-vector-metadata``.)
 
     A chunk id is mirrored from its own stored document, which is what the chunk
     embed path does; its parent's label is judged at serve time through the id.
@@ -261,7 +285,8 @@ def _vector_row_metadata(
     trusts it before the id prefix, so for a chunk id it is set to the chunk
     document's own, else to the parent the id names, whatever was supplied. A
     non-chunk id keeps what was supplied. An id that names no document is
-    otherwise written as supplied.
+    otherwise written as supplied (the route has already refused the keys in
+    :data:`_ITEM_POINTER_KEYS` there).
     """
     row = dict(supplied)
     stored = document_store.get(item_id)
@@ -269,7 +294,7 @@ def _vector_row_metadata(
     if not isinstance(source, dict):
         source = {}
     if stored is not None:
-        for key in MIRRORED_METADATA_KEYS:
+        for key in (*MIRRORED_METADATA_KEYS, EVIDENCE_REF_KEY):
             if key in source:
                 row[key] = source[key]
             else:
@@ -283,21 +308,109 @@ def _vector_row_metadata(
     return row
 
 
-def _vector_row_problem(item_id: Any, metadata: dict[str, Any] | None) -> str | None:
-    """Why a vector row is a 422, phrased from ``item_id`` or ``metadata``, or ``None``.
+def _vector_width(vectors: list[Any], declared: Any) -> tuple[int, str] | None:
+    """The width every vector in the batch must have, and whose it is.
 
-    ``item_id`` is whatever the caller sent: a non-string id is not this
-    check's concern (it is counted as an error, and cannot name a reserved one).
+    The store's own when it declares one (``VectorStore.dimensions``; the SQLite
+    backend pins none). Otherwise the first non-empty vector in the batch: rows
+    of different widths cannot be compared with each other, so at least the
+    batch has to agree.
     """
+    if isinstance(declared, int) and not isinstance(declared, bool):
+        return declared, "the store's width"
+    for index, item in enumerate(vectors):
+        vector = item.get("vector") if isinstance(item, dict) else None
+        if isinstance(vector, list) and vector:
+            return len(vector), f"the width of vectors[{index}].vector"
+    return None
+
+
+def _vector_element_problem(position: int, value: Any) -> str | None:
+    """Why one vector element is refused, or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return f"vector[{position}] must be a number"
+    # NaN, the infinities and anything past float32 all fail this one
+    # comparison, which also holds for an int too large for a float.
+    if not abs(value) <= _FLOAT32_MAX:
+        return f"vector[{position}] must be a finite number within float32 range"
+    return None
+
+
+def _vector_problem(vector: Any, width: tuple[int, str] | None) -> str | None:
+    """Why ``vector`` would break a semantic read, or ``None``.
+
+    A missing, ``null`` or empty vector is not judged: the second pass counts it
+    in ``errors`` and stores nothing. Anything else must be a list of finite
+    numbers (never a bool) that fit float32, whose squared length stays inside
+    float32 so the store's norm is finite, and whose length is ``width``'s.
+    """
+    if not vector:
+        return None
+    if not isinstance(vector, list):
+        return "vector must be a list of numbers"
+    squared = 0.0
+    for position, value in enumerate(vector):
+        problem = _vector_element_problem(position, value)
+        if problem is not None:
+            return problem
+        squared += float(value) ** 2
+    if squared > _MAX_SQUARED_LENGTH:
+        return "vector is too large to compare: its squared length overflows float32"
+    if width is not None and len(vector) != width[0]:
+        return f"vector has {len(vector)} dimensions, expected {width[0]} ({width[1]})"
+    return None
+
+
+def _item_pointer_problem(
+    document_store: DocumentStore, item_id: Any, metadata: dict[str, Any]
+) -> str | None:
+    """Why a row at an id naming no document may not carry a pointer key, or ``None``.
+
+    Phrased from the ``metadata`` key, like :func:`_vector_metadata_problem`.
+    Reads the document only for a row that carries one of
+    :data:`_ITEM_POINTER_KEYS`, so an ordinary row costs no read here.
+    """
+    key = next((k for k in _ITEM_POINTER_KEYS if k in metadata), None)
+    if key is None or not item_id or document_store.get(item_id) is not None:
+        return None
+    return (
+        f"{key} needs item_id to name a stored document: on any other id it "
+        "would act on whatever item holds that id in a pack"
+    )
+
+
+def _vector_item_problem(
+    item: dict[str, Any],
+    document_store: DocumentStore,
+    width: tuple[int, str] | None,
+) -> str | None:
+    """Why one batch row is a 422, phrased from the row's own field, or ``None``.
+
+    ``item_id`` that is present must be a string (one that is absent, ``null`` or
+    empty is a row with no id, which the second pass counts), ``metadata`` must be
+    an object or ``null``, and then the reserved-id, metadata, pointer-key and
+    vector checks run. Everything here is judged on what the caller sent.
+    """
+    item_id = item.get("item_id")
+    if item_id is not None and not isinstance(item_id, str):
+        return "item_id must be a string"
+    metadata = item.get("metadata")
+    # ``null`` is stored as ``{}``; anything else that is not an object would
+    # be stored as sent and then break every semantic pack that reads it.
+    if metadata is not None and not isinstance(metadata, dict):
+        return "metadata must be an object"
     if isinstance(item_id, str) and item_id.startswith(TRACE_SUMMARY_ID_PREFIX):
         return (
             f"item_id may not start with {TRACE_SUMMARY_ID_PREFIX!r}: that "
             "namespace is the trace-embed worker's"
         )
-    if metadata is None:
-        return None
-    problem = _vector_metadata_problem(metadata)
-    return None if problem is None else f"metadata.{problem}"
+    if metadata is not None:
+        problem = _vector_metadata_problem(metadata)
+        if problem is None:
+            problem = _item_pointer_problem(document_store, item_id, metadata)
+        if problem is not None:
+            return f"metadata.{problem}"
+    return _vector_problem(item.get("vector"), width)
 
 
 def _vector_metadata_problem(metadata: dict[str, Any]) -> str | None:
@@ -306,12 +419,14 @@ def _vector_metadata_problem(metadata: dict[str, Any]) -> str | None:
     Judged on what the caller sent, whether or not the row's own document will
     overwrite the key (``auto_importance`` is mirrored), so the answer does not
     depend on the document store. Mirrors what ``SemanticSearch`` and
-    ``_apply_importance`` demand of a row: ``content`` a string, ``auto_importance``
-    a finite number (never a bool), and a stamp for a score at or above the decay
-    threshold, in ``content_tags`` or at the top level.
+    ``_apply_importance`` demand of a row: ``content`` and ``excerpt`` strings
+    (serving reads ``content``, else ``excerpt``, and truncates it), and
+    ``auto_importance`` a finite number (never a bool), with a stamp for a score at
+    or above the decay threshold, in ``content_tags`` or at the top level.
     """
-    if "content" in metadata and not isinstance(metadata["content"], str):
-        return "content must be a string"
+    for key in ("content", "excerpt"):
+        if key in metadata and not isinstance(metadata[key], str):
+            return f"{key} must be a string"
     if "auto_importance" not in metadata:
         return None
     importance = metadata["auto_importance"]
@@ -347,35 +462,44 @@ def upsert_vectors(
 
     **What is judged before any write.** Every row is checked in a first pass
     and any refusal in it stores nothing from the batch. A row that is not an
-    object, or whose ``metadata`` is neither an object nor ``null``, is a 422. So
-    is a ``metadata`` that would break a semantic read: ``content`` that is not a
-    string, ``auto_importance`` that is not a finite number (a bool is not one),
-    or an ``auto_importance`` at or above the importance decay threshold with no
+    object, whose ``item_id`` is present but not a string, or whose ``metadata``
+    is neither an object nor ``null``, is a 422. So is a ``metadata`` that would
+    break a semantic read: ``content`` or ``excerpt`` that is not a string,
+    ``auto_importance`` that is not a finite number (a bool is not one), or an
+    ``auto_importance`` at or above the importance decay threshold with no
     ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
-    is an ``item_id`` starting ``trace-summary:``, for every caller: that
-    namespace is the trace-embed worker's, and a row there makes it skip the
-    trace for good. A row's ``metadata`` may not carry a raw
-    ``data_classification`` (422), whoever the caller is: a vector row's label
-    is mirrored from its document, never set here. A row whose ``item_id`` is a
-    document (or a chunk of one) above the key's clearance is refused (409):
-    replacing its vector row would replace what a semantic hit shows and
-    carries. A row whose ``item_id`` is not a string is counted as an error,
-    since an id the gate cannot read cannot be judged.
+    is a ``vector`` that is not a list of finite numbers (a bool is not one)
+    within float32 range, one whose squared length would overflow float32 in the
+    store's norm, or one whose length differs from the store's width (when the
+    store declares one; the SQLite backend does not, and then the batch's first
+    non-empty vector sets the width the rest must match). So is an ``item_id``
+    starting ``trace-summary:``, for every caller: that namespace is the
+    trace-embed worker's, and a row there makes it skip the trace for good. A
+    row's ``metadata`` may not carry a raw ``data_classification`` (422), whoever
+    the caller is: a vector row's label is mirrored from its document, never set
+    here. A row whose ``item_id`` names no stored document may not carry
+    ``metadata.lifecycle`` or ``metadata.evidence_ref`` (422): the pack builder
+    withholds by id, so those keys would act on whatever item holds that id.
+    A row whose ``item_id`` is a document (or a chunk of one) above the key's
+    clearance is refused (409): replacing its vector row would replace what a
+    semantic hit shows and carries.
 
-    **What is not atomic.** The second pass writes row by row. A row whose
-    document read or upsert fails is counted in ``errors`` and does not stop
-    the rest, so a batch can answer ``upserted: 1, errors: 1`` with the first
-    row stored. A row with no ``item_id`` or no ``vector`` is counted the same
-    way. Nothing makes the mirror below atomic with a concurrent relabel either:
-    a relabel between the read of the document and the upsert leaves the row
-    unlabelled until that relabel's own vector sync runs.
+    **What is not atomic.** The second pass writes row by row. A row with no
+    ``item_id`` (absent, ``null`` or empty) or no ``vector`` (absent, ``null`` or
+    empty) is counted in ``errors`` and stored as nothing. So is a row whose
+    document read or upsert fails, which does not stop the rest: a batch can
+    answer ``upserted: 1, errors: 1`` with the first row stored. Nothing makes
+    the mirror below atomic with a concurrent relabel either: if the relabel's
+    own vector sync runs between this route's read of the document and its upsert,
+    this upsert overwrites the synced row, and it stays stale until a later sync
+    or ``trellis admin resync-vector-metadata``.
 
     When ``item_id`` names a stored document the row is written carrying that
-    document's mirrored metadata (its label and lifecycle among them), for
-    every caller, whatever the row's own ``metadata`` says. For a chunk id
-    (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk document's own,
-    else the parent the id names, whatever the row supplied; for any other id it
-    is kept as supplied.
+    document's mirrored metadata (its label and lifecycle among them) and its
+    ``evidence_ref``, for every caller, whatever the row's own ``metadata`` says.
+    For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
+    document's own, else the parent the id names, whatever the row supplied; for
+    any other id it is kept as supplied.
     """
     vectors = body.get("vectors", [])
     if not isinstance(vectors, list):
@@ -387,30 +511,25 @@ def upsert_vectors(
         raise HTTPException(status_code=501, detail="Vector store not configured")
 
     document_store = registry.knowledge.document_store
+    width = _vector_width(vectors, vector_store.dimensions)
     for index, item in enumerate(vectors):
         if not isinstance(item, dict):
             raise HTTPException(
                 status_code=422, detail=f"vectors[{index}] must be an object"
             )
-        item_id = item.get("item_id")
-        metadata = item.get("metadata")
-        # ``null`` is stored as ``{}``; anything else that is not an object would
-        # be stored as sent and then break every semantic pack that reads it.
-        if metadata is not None and not isinstance(metadata, dict):
-            raise HTTPException(
-                status_code=422,
-                detail=f"vectors[{index}].metadata must be an object",
-            )
-        # A row that would raise in the semantic axis, or that squats on the
-        # trace-embed worker's ids, is refused here, where the caller can be
-        # told, rather than stored for every pack (or the worker) to trip on.
-        problem = _vector_row_problem(item_id, metadata)
+        # A row that would raise in the semantic axis, that squats on the
+        # trace-embed worker's ids, or that carries a key acting on another item,
+        # is refused here, where the caller can be told, rather than stored for
+        # every pack (or the worker) to trip on.
+        problem = _vector_item_problem(item, document_store, width)
         if problem is not None:
             raise HTTPException(status_code=422, detail=f"vectors[{index}].{problem}")
+        item_id = item.get("item_id")
+        metadata = item.get("metadata")
         # A raw label is refused whoever the caller is, as on ``/evidence``.
         if metadata is not None:
             stamp_request_sensitivity(metadata, None, ctx=ctx)
-        if item_id and isinstance(item_id, str):
+        if item_id:
             refuse_vector_write(document_store, item_id, ctx=ctx)
 
     upserted = 0
@@ -418,7 +537,7 @@ def upsert_vectors(
     for item in vectors:
         item_id = item.get("item_id")
         vector = item.get("vector")
-        if not item_id or not vector or not isinstance(item_id, str):
+        if not item_id or not vector:
             errors += 1
             continue
         try:

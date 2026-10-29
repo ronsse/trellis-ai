@@ -3890,13 +3890,15 @@ above its own clearance, and cannot touch a document it may not read.**
   `data_classification` in a row's `metadata` is a 422 for every caller, auth
   `off` and `admin` included (a vector row's label is mirrored from its
   document). A row that is not an object, or whose `metadata` is neither an
-  object nor `null`, is a 422 too. A row whose `item_id` is not a string is
-  counted as an error, not coerced to one. A key at `restricted`, auth `off` and
-  a shared secret are never refused, and the gate reads no document for them.
+  object nor `null`, is a 422 too, as is a row whose `item_id` is present but
+  not a string (an id the gate cannot read as text is not coerced to one). A key
+  at `restricted`, auth `off` and a shared secret are never refused, and the gate
+  reads no document for them.
 - Whatever the caller, a row whose `item_id` names a stored document is written
   carrying that document's mirrored metadata (`data_classification`,
   `lifecycle`, `content_tags`, `auto_importance`; the same keys, and the same
-  copy-if-present, remove-if-absent rule, as `sync_vector_metadata`), over
+  copy-if-present, remove-if-absent rule, as `sync_vector_metadata`, plus
+  `evidence_ref`, which names a successor to the pack builder), over
   anything the row's own `metadata` says. The semantic axis builds a pack item,
   excerpt included, from this row, so a rewrite that left it unlabelled would
   serve a restricted document at a lower clearance. A chunk id is mirrored from
@@ -3906,10 +3908,12 @@ above its own clearance, and cannot touch a document it may not read.**
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
 - `POST /api/v1/vectors` also refuses, with a 422 and nothing written, a row
-  that would make the semantic axis raise: a `metadata.content` that is not a
-  string; a `metadata.auto_importance` that is not a finite number (a bool is not
-  one); and an `auto_importance` at or above the importance decay threshold
-  (0.5 by default) with no `importance_scored_at`, in `metadata` or in
+  that would make the semantic axis raise: a `metadata.content` or
+  `metadata.excerpt` that is not a string (serving reads `content`, else
+  `excerpt`, and truncates it; a non-string `excerpt` is refused whether or not
+  `content` is present); a `metadata.auto_importance` that is not a finite number
+  (a bool is not one); and an `auto_importance` at or above the importance decay
+  threshold (0.5 by default) with no `importance_scored_at`, in `metadata` or in
   `metadata.content_tags`. The detail names the row and field
   (`vectors[1].metadata.content must be a string`). It is judged on what the
   caller sent, whether or not the row's document will overwrite the key
@@ -3917,6 +3921,29 @@ above its own clearance, and cannot touch a document it may not read.**
   for every caller, `admin` and auth `off` included: that namespace is the
   trace-embed worker's, and a vector row under it makes the worker treat the trace
   as embedded and skip it for good.
+- A `vector` that is present must be a list of numbers (a bool is not one), each
+  finite and within float32 range, or the row is a 422 (`vectors[1].vector[3]
+  must be a finite number within float32 range`): the store keeps float32, where
+  a larger value becomes `inf` and the row's score `NaN`, which also breaks the
+  pack's audit event. Its squared length must stay under 1e38 as well, because
+  the store's float32 norm overflows past about 3.4e38 even when every element
+  fits (`[3e38] * 8` scores `NaN` against an ordinary query). Its length must
+  equal the store's width when the store declares one (`VectorStore.dimensions`;
+  pgvector, ArcadeDB and Neo4j do). SQLite declares none and the store interface
+  has no way to ask what width its rows hold, so there the first non-empty
+  vector of the batch sets the width the rest must match and a batch is not
+  checked against rows already stored: a later batch of another width is
+  accepted on SQLite, and then fails every semantic query against it. A missing,
+  `null` or empty `vector` is not judged; the second pass counts it in `errors`.
+- A row whose `item_id` names no stored document (a chunk id with no chunk
+  document included) may not carry `metadata.lifecycle` or `metadata.evidence_ref`
+  (422, whatever the value and the caller): the pack builder withholds by id, so a
+  `lifecycle` of `{"state": "superseded", "superseded_by": ...}` at an id would
+  withhold every item holding that id, the real one from another axis included,
+  and an `evidence_ref` makes the row the successor another item's
+  `superseded_by` resolves to. At a stored document the keys are not refused: the
+  document's own `lifecycle` and `evidence_ref` are written over them. Only a row
+  that carries one of these keys costs the first pass a document read.
 - For a chunk id (`<parent>#chunk-<digits>`) a written row's `parent_doc_id` is
   the chunk document's own, else the parent the id names, over whatever the row
   supplied; for any other id it is kept as supplied. Serving trusts a row's
@@ -3925,11 +3952,14 @@ above its own clearance, and cannot touch a document it may not read.**
   `off` can write a restricted chunk's row (a lower key is refused 409 first), so
   those are the callers this closes it for.
 - `POST /api/v1/vectors` is all-or-nothing only in its first pass (the 422s, the
-  409 and the unreadable-id error above). The second pass writes row by row: a
-  row whose document read or upsert fails is counted in `errors` and the rest
-  still land (`{"upserted": 1, "errors": 1}`, status 200), and a relabel between
-  the mirror's read and the upsert leaves the row unlabelled until that relabel's
-  own vector sync runs.
+  409 and the unreadable-id error above). The second pass writes row by row. A
+  row with no `item_id` (absent, `null` or empty) or no `vector` (absent, `null`
+  or empty) is counted in `errors` and stores nothing, and so is a row whose
+  document read or upsert fails, with the rest still landing
+  (`{"upserted": 1, "errors": 1}`, status 200). If a relabel's own vector sync
+  runs between the route's read of the document and its upsert, the upsert
+  overwrites the synced row, and it stays stale until a later sync or
+  `trellis admin resync-vector-metadata`.
 - The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
   `/traces`, `/observations` and `/measurements` build their executor at the
   key's clearance, as `/documents` and `/evidence` do, instead of at

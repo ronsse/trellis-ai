@@ -8,7 +8,8 @@ its executor at the key's clearance rather than at a trusted ``restricted``.
 
 from __future__ import annotations
 
-from typing import ClassVar
+import math
+from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,9 +26,11 @@ from trellis.mutate import build_curate_executor
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_THRESHOLD,
+    SearchStrategy,
     SemanticSearch,
 )
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
+from trellis.schemas.pack import PackItem
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 from trellis_workers.trace_embed.render import DOC_ID_PREFIX, trace_summary_doc_id
@@ -330,7 +333,7 @@ class TestVectorsWrite:
         self, client, registry
     ):
         """The store would coerce ``123`` to the text id ``'123'``; the gate cannot
-        judge an id it cannot read as text, so the row is counted, not written."""
+        judge an id it cannot read as text, so the batch is refused."""
         registry.knowledge.document_store.put("123", SECRET, label("restricted"))
         registry.knowledge.vector_store.upsert(
             item_id="123", vector=_vector(registry, 0.1), metadata=label("restricted")
@@ -341,8 +344,8 @@ class TestVectorsWrite:
             json={"vectors": [{"item_id": 123, "vector": _vector(registry)}]},
             headers=_headers(registry, ["ingest"]),
         )
-        assert resp.status_code == 200, resp.text
-        assert resp.json() == {"status": "ok", "upserted": 0, "errors": 1}
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == "vectors[0].item_id must be a string"
         assert _vector_row(registry, "123") == before
 
     def test_auth_off_is_trusted_local_and_writes_any_row(
@@ -729,6 +732,10 @@ class TestVectorsValueTypes:
             ({"content": 5}, "content must be a string"),
             ({"content": None}, "content must be a string"),
             ({"content": ["a"]}, "content must be a string"),
+            ({"excerpt": 5}, "excerpt must be a string"),
+            ({"excerpt": ["a"]}, "excerpt must be a string"),
+            ({"excerpt": None}, "excerpt must be a string"),
+            ({"content": "text", "excerpt": 5}, "excerpt must be a string"),
             ({"auto_importance": "high"}, "auto_importance must be a number"),
             ({"auto_importance": True}, "auto_importance must be a number"),
             ({"auto_importance": False}, "auto_importance must be a number"),
@@ -799,6 +806,8 @@ class TestVectorsValueTypes:
             {"auto_importance": 0},
             {"auto_importance": 1, "importance_scored_at": STAMPED},
             {"content": "text", "title": "t"},
+            {"excerpt": "text"},
+            {"content": "text", "excerpt": "other"},
             {"title": "no typed keys"},
             {},
             None,
@@ -899,6 +908,494 @@ class TestVectorsPartialBatch:
         assert resp.json() == {"status": "ok", "upserted": 1, "errors": 1}
         assert _vector_row(registry, "doc-open") is not None
         assert _vector_row(registry, "doc-secret") is None
+
+
+_ABSENT = object()
+
+
+class TestVectorsItemIds:
+    """An id the gate cannot read as text is the caller's 422, before any write."""
+
+    @pytest.mark.parametrize("bad", [5, 0, False, True, 1.5, ["a"], {"a": 1}], ids=repr)
+    def test_an_id_that_is_not_a_string_is_refused_and_nothing_is_written(
+        self, client, registry, bad
+    ):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        resp = client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, {"item_id": bad, "vector": _vector(registry)}]},
+            headers=_headers(registry, ["ingest"]),
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == "vectors[1].item_id must be a string"
+        assert _vector_row(registry, "doc-open") is None
+        assert registry.knowledge.vector_store.count() == 0
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("item_id", _ABSENT),
+            ("item_id", None),
+            ("item_id", ""),
+            ("vector", _ABSENT),
+            ("vector", None),
+            ("vector", []),
+        ],
+        ids=repr,
+    )
+    def test_a_row_with_no_id_or_no_vector_is_counted_and_the_rest_land(
+        self, client, registry, field, value
+    ):
+        """The documented second-pass errors: nothing to store, so nothing refused."""
+        row: dict[str, Any] = {"item_id": "doc-x", "vector": _vector(registry)}
+        if value is _ABSENT:
+            del row[field]
+        else:
+            row[field] = value
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        resp = client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, row]},
+            headers=_headers(registry, ["ingest"]),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 1, "errors": 1}
+        assert _vector_row(registry, "doc-open") is not None
+        assert registry.knowledge.vector_store.count() == 1
+
+
+class TestVectorsVectorValues:
+    """A vector that breaks every semantic query, or poisons its score, is a 422."""
+
+    def _post(self, client, registry, vector=None, *, content=None):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        bad = {"item_id": "entity:b", "vector": vector}
+        return client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, bad]} if content is None else None,
+            content=content,
+            headers={
+                **_headers(registry, ["ingest"]),
+                "Content-Type": "application/json",
+            },
+        )
+
+    def _refused(self, client, registry, vector, detail):
+        resp = self._post(client, registry, vector)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == f"vectors[1].{detail}"
+        assert registry.knowledge.vector_store.count() == 0
+
+    @pytest.mark.parametrize("bad", ["abc", 5, {"a": 1}, True], ids=repr)
+    def test_a_vector_that_is_not_a_list_is_refused(self, client, registry, bad):
+        self._refused(client, registry, bad, "vector must be a list of numbers")
+
+    @pytest.mark.parametrize("bad", ["x", None, True, False, [0.5]], ids=repr)
+    def test_an_element_that_is_not_a_number_is_refused(self, client, registry, bad):
+        vector = _vector(registry)
+        vector[-1] = bad
+        self._refused(
+            client, registry, vector, f"vector[{len(vector) - 1}] must be a number"
+        )
+
+    @pytest.mark.parametrize(
+        "bad", [1e39, -1e39, 2 * 3.4028234663852886e38, 10**400, -(10**400)], ids=repr
+    )
+    def test_an_element_past_float32_is_refused(self, client, registry, bad):
+        """The store keeps float32, where these become ``inf``."""
+        vector = _vector(registry)
+        vector[0] = bad
+        self._refused(
+            client,
+            registry,
+            vector,
+            "vector[0] must be a finite number within float32 range",
+        )
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_a_non_finite_element_is_refused(self, client, registry, literal):
+        """Starlette's JSON parser accepts the literals, so the route must not."""
+        elements = ", ".join([literal, *["0.5"] * (_dims(registry) - 1)])
+        body = (
+            '{"vectors": [{"item_id": "doc-open", "vector": '
+            f"{_vector(registry)}}}, "
+            f'{{"item_id": "entity:b", "vector": [{elements}]}}]}}'
+        )
+        resp = self._post(client, registry, content=body)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == (
+            "vectors[1].vector[0] must be a finite number within float32 range"
+        )
+        assert registry.knowledge.vector_store.count() == 0
+
+    @pytest.mark.parametrize("magnitude", [3e38, 1e19], ids=repr)
+    def test_a_vector_whose_norm_overflows_float32_is_refused(
+        self, client, registry, magnitude
+    ):
+        """Every element fits float32, but the store's norm (a float32 sum of
+        squares) is ``inf``, and the cosine score is NaN or a silent zero."""
+        self._refused(
+            client,
+            registry,
+            [magnitude] * _dims(registry),
+            "vector is too large to compare: its squared length overflows float32",
+        )
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    def test_that_bound_is_not_cosmetic(self, registry):
+        """The row the previous test refuses scores NaN once stored, so the
+        element bound alone (float32's maximum) would not have been enough."""
+        store = registry.knowledge.vector_store
+        store.upsert(item_id="entity:b", vector=[3e38] * _dims(registry), metadata={})
+        (hit,) = store.query(_vector(registry), top_k=1)
+        assert math.isnan(hit["score"])
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda dims: [1] * dims,
+            lambda dims: [-0.5] * dims,
+            lambda dims: [1e18] * dims,
+            lambda dims: [1e-30] * dims,
+            lambda dims: [(-1) ** i * (i + 1) / 10 for i in range(dims)],
+        ],
+        ids=["ints", "negative", "large-but-safe", "tiny", "mixed"],
+    )
+    def test_a_well_formed_vector_is_accepted_and_readable_by_the_semantic_axis(
+        self, client, registry, make
+    ):
+        resp = self._post(client, registry, make(_dims(registry)))
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
+        _semantic_pack(registry, "restricted")
+
+
+class TestVectorsWidth:
+    """Rows of different widths cannot be compared; the width is judged first."""
+
+    @pytest.fixture
+    def pinned(self, registry, monkeypatch):
+        """A store that declares its width, as pgvector and the graph databases do."""
+        width = _dims(registry)
+        monkeypatch.setattr(
+            type(registry.knowledge.vector_store),
+            "dimensions",
+            property(lambda _self: width),
+        )
+        return width
+
+    def _post(self, client, registry, *vectors):
+        rows = [
+            {"item_id": f"entity:{index}", "vector": vector}
+            for index, vector in enumerate(vectors)
+        ]
+        return client.post(
+            "/api/v1/vectors",
+            json={"vectors": rows},
+            headers=_headers(registry, ["ingest"]),
+        )
+
+    @pytest.mark.parametrize("width", [3, 9], ids=["shorter", "longer"])
+    def test_a_store_that_declares_a_width_refuses_another_and_stores_nothing(
+        self, client, registry, pinned, width
+    ):
+        resp = self._post(client, registry, [0.5] * pinned, [0.5] * width)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == (
+            f"vectors[1].vector has {width} dimensions, expected {pinned} "
+            "(the store's width)"
+        )
+        assert registry.knowledge.vector_store.count() == 0
+
+    def test_a_store_that_declares_a_width_takes_that_width(
+        self, client, registry, pinned
+    ):
+        resp = self._post(client, registry, [0.5] * pinned, [0.25] * pinned)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
+
+    def test_a_store_that_declares_no_width_holds_the_batch_to_one(
+        self, client, registry
+    ):
+        """The first non-empty vector sets it, whatever rows come before."""
+        assert registry.knowledge.vector_store.dimensions is None
+        resp = self._post(client, registry, [], [0.5] * 8, [0.5] * 3)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == (
+            "vectors[2].vector has 3 dimensions, expected 8 "
+            "(the width of vectors[1].vector)"
+        )
+        assert registry.knowledge.vector_store.count() == 0
+
+    def test_a_store_that_declares_no_width_is_not_checked_against_what_it_holds(
+        self, client, registry
+    ):
+        """The documented limit: SQLite pins no width and the store interface offers
+        no way to ask what width its rows have, so a later batch of another width
+        is not refused here (it is for any backend that declares one)."""
+        assert registry.knowledge.vector_store.dimensions is None
+        assert self._post(client, registry, [0.5] * 8).status_code == 200
+        assert self._post(client, registry, [0.5] * 3).status_code == 200
+
+
+class _Fixed(SearchStrategy):
+    """Serves fixed candidates: the item another axis found."""
+
+    def __init__(self, items: list[PackItem]) -> None:
+        self._items = items
+
+    @property
+    def name(self) -> str:
+        return "keyword"
+
+    def search(self, query, *, limit=20, filters=None):
+        return [item.model_copy() for item in self._items[:limit]]
+
+
+def _pack_with_another_axis(registry, *items):
+    """The semantic axis beside another axis that found ``items``."""
+    builder = PackBuilder(
+        strategies=[
+            SemanticSearch(
+                registry.knowledge.vector_store,
+                embedding_fn=lambda _text: _vector(registry),
+            ),
+            _Fixed(list(items)),
+        ],
+        document_store=registry.knowledge.document_store,
+    )
+    return builder.build("failover runbook", clearance="restricted")
+
+
+class TestVectorsItemPointerKeys:
+    """``lifecycle`` and ``evidence_ref`` act on other items, by id: a row at an id
+    that names no document may not carry them."""
+
+    FOUND_ELSEWHERE = PackItem(
+        item_id="ent-01",
+        item_type="entity",
+        excerpt="a real entity another axis found",
+        relevance_score=0.9,
+        estimated_tokens=10,
+        metadata={},
+    )
+
+    def _post(self, client, registry, metadata, item_id="ent-01", scopes=("ingest",)):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        bad = {"item_id": item_id, "vector": _vector(registry), "metadata": metadata}
+        return client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, bad]},
+            headers=_headers(registry, list(scopes)),
+        )
+
+    @pytest.mark.parametrize(
+        ("metadata", "key"),
+        [
+            (
+                {LIFECYCLE_KEY: {"state": "superseded", "superseded_by": "doc-open"}},
+                "lifecycle",
+            ),
+            ({LIFECYCLE_KEY: ARCHIVED}, "lifecycle"),
+            ({LIFECYCLE_KEY: None}, "lifecycle"),
+            ({LIFECYCLE_KEY: "superseded"}, "lifecycle"),
+            ({"evidence_ref": "doc-open"}, "evidence_ref"),
+            ({"evidence_ref": None}, "evidence_ref"),
+            ({"title": "t", "evidence_ref": "doc-x"}, "evidence_ref"),
+        ],
+        ids=repr,
+    )
+    @pytest.mark.parametrize(
+        "item_id",
+        ["ent-01", "entity:probe", "doc-gone#chunk-1", "doc-open#chunk-1"],
+    )
+    def test_an_id_naming_no_document_may_not_carry_one_and_nothing_is_written(
+        self, client, registry, metadata, key, item_id
+    ):
+        resp = self._post(client, registry, metadata, item_id=item_id)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"].startswith(
+            f"vectors[1].metadata.{key} needs item_id to name a stored document"
+        )
+        assert registry.knowledge.vector_store.count() == 0
+
+    def test_a_forged_supersession_would_have_withheld_another_axiss_item(
+        self, client, registry
+    ):
+        """The end effect. Withholding is by id, so a row at ``ent-01`` that says
+        it is superseded by a candidate withholds every copy of ``ent-01``,
+        including the real one another axis found. Through the route it is
+        refused and the item is served; written past the route it is not."""
+        headers = _headers(registry, ["ingest"])
+        assert (
+            _post_vectors(client, registry, headers, ("doc-open", {})).status_code
+            == 200
+        )
+        forged = {LIFECYCLE_KEY: {"state": "superseded", "superseded_by": "doc-open"}}
+
+        resp = _post_vectors(
+            client, registry, headers, ("ent-01", {"metadata": forged})
+        )
+        assert resp.status_code == 422, resp.text
+        served = _served_ids(_pack_with_another_axis(registry, self.FOUND_ELSEWHERE))
+        assert sorted(served) == ["doc-open", "ent-01"]
+
+        registry.knowledge.vector_store.upsert(
+            item_id="ent-01", vector=_vector(registry), metadata=forged
+        )
+        served = _served_ids(_pack_with_another_axis(registry, self.FOUND_ELSEWHERE))
+        assert served == ["doc-open"], "premise: a row past the route withholds it"
+
+    def test_a_forged_evidence_ref_would_have_withheld_an_item_that_names_a_successor(
+        self, client, registry
+    ):
+        """``evidence_ref`` makes a row the successor another item's
+        ``superseded_by`` resolves to; the old version is then withheld for a
+        row that is not its successor."""
+        docs = registry.knowledge.document_store
+        docs.put(
+            "doc-old",
+            OPEN,
+            {LIFECYCLE_KEY: {"state": "superseded", "superseded_by": "doc-new"}},
+        )
+        headers = _headers(registry, ["ingest"])
+        mirror = _post_vectors(client, registry, headers, ("doc-old", {}))
+        assert mirror.status_code == 200, mirror.text
+        assert _served_ids(_pack_with_another_axis(registry)) == ["doc-old"], (
+            "its successor is not a candidate, so the old version is served"
+        )
+
+        forged = {"evidence_ref": "doc-new"}
+        resp = _post_vectors(
+            client, registry, headers, ("entity:probe", {"metadata": forged})
+        )
+        assert resp.status_code == 422, resp.text
+        assert _served_ids(_pack_with_another_axis(registry)) == ["doc-old"]
+
+        registry.knowledge.vector_store.upsert(
+            item_id="entity:probe", vector=_vector(registry), metadata=forged
+        )
+        assert _served_ids(_pack_with_another_axis(registry)) == ["entity:probe"], (
+            "premise: a row stored past the route does withhold the old version"
+        )
+
+    @pytest.mark.parametrize("scopes", [["ingest"], ["admin"]], ids=["ingest", "admin"])
+    def test_the_refusal_is_for_every_caller(self, client, registry, scopes):
+        resp = self._post(
+            client, registry, {LIFECYCLE_KEY: ARCHIVED}, scopes=tuple(scopes)
+        )
+        assert resp.status_code == 422, resp.text
+
+    def test_a_stored_document_takes_its_own_pointer_keys_not_the_callers(
+        self, client, registry
+    ):
+        """At a document the keys are not refused: the document's value is written
+        (lifecycle by the mirror, ``evidence_ref`` the same way)."""
+        resp = self._post(
+            client,
+            registry,
+            {LIFECYCLE_KEY: ARCHIVED, "evidence_ref": "doc-new", "title": "t"},
+            item_id="doc-open",
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 2, "errors": 0}
+        row = _vector_row(registry, "doc-open")["metadata"]
+        assert LIFECYCLE_KEY not in row
+        assert "evidence_ref" not in row
+        assert row["title"] == "t"
+
+    def test_a_document_that_carries_an_evidence_ref_passes_it_to_its_row(
+        self, client, registry
+    ):
+        registry.knowledge.document_store.put(
+            "doc-pointing", OPEN, {"evidence_ref": "doc-target"}
+        )
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            ("doc-pointing", {"metadata": {"evidence_ref": "doc-forged"}}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, "doc-pointing")["metadata"]["evidence_ref"] == (
+            "doc-target"
+        )
+
+    def test_a_chunk_with_a_stored_document_is_a_document(self, client, registry):
+        chunk = chunk_doc_id("doc-open", 1)
+        registry.knowledge.document_store.put(chunk, OPEN, {})
+        resp = self._post(client, registry, {LIFECYCLE_KEY: ARCHIVED}, item_id=chunk)
+        assert resp.status_code == 200, resp.text
+        assert LIFECYCLE_KEY not in _vector_row(registry, chunk)["metadata"]
+
+    def test_a_row_with_no_id_is_counted_whatever_keys_it_carries(
+        self, client, registry
+    ):
+        """No id: nothing to look up or refuse, and the second pass counts it."""
+        row = {"vector": _vector(registry), "metadata": {LIFECYCLE_KEY: ARCHIVED}}
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        resp = client.post(
+            "/api/v1/vectors",
+            json={"vectors": [good, row]},
+            headers=_headers(registry, ["ingest"]),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 1, "errors": 1}
+
+    def test_the_other_keys_of_a_row_at_such_an_id_are_still_written(
+        self, client, registry
+    ):
+        resp = self._post(
+            client,
+            registry,
+            {"title": "t", "content": "text", "content_tags": {"domain": ["ops"]}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, "ent-01")["metadata"]["title"] == "t"
+
+    def test_a_row_without_those_keys_costs_no_read_in_the_first_pass(
+        self, client, registry, monkeypatch
+    ):
+        store = registry.knowledge.document_store
+        real_get = store.get
+        reads: list[str] = []
+
+        def counting(doc_id):
+            reads.append(doc_id)
+            return real_get(doc_id)
+
+        monkeypatch.setattr(store, "get", counting)
+        resp = self._post(client, registry, {"title": "t"}, scopes=("admin",))
+        assert resp.status_code == 200, resp.text
+        assert reads == ["doc-open", "ent-01"], "the mirror's read, once per row"
+
+    def test_a_document_that_cannot_be_read_while_judging_the_keys_is_a_server_error(
+        self, client, registry, monkeypatch
+    ):
+        """Not an accepted row: with no answer to "is it a document", nothing is
+        written (and the failure is not hidden as a 422 about the caller)."""
+
+        def boom(_doc_id):
+            msg = "store down"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry.knowledge.document_store, "get", boom)
+        quiet = TestClient(create_app(), raise_server_exceptions=False)
+        resp = quiet.post(
+            "/api/v1/vectors",
+            json={
+                "vectors": [
+                    {
+                        "item_id": "ent-01",
+                        "vector": _vector(registry),
+                        "metadata": {LIFECYCLE_KEY: ARCHIVED},
+                    }
+                ]
+            },
+            headers=_headers(registry, ["ingest"]),
+        )
+        assert resp.status_code == 500, resp.text
+        assert registry.knowledge.vector_store.count() == 0
 
 
 # ── credentialed write routes build their executor at the key's clearance ──
