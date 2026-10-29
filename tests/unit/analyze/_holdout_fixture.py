@@ -65,21 +65,43 @@ def outcome_payload(
 
 
 def timing_payload(
-    *, hook_before: bool | None, hook_messages: int | None = None
+    *,
+    hook_before: bool | None,
+    hook_messages: int | None = None,
+    commit_before: bool | None = False,
+    ordinal: int = 3,
+    calls: int = 10,
 ) -> dict[str, Any]:
     """A ``SessionDigest.retrieval_timing_payload()`` dict.
 
-    ``hook_before`` is ``hook_feedback_before_first_retrieval``. The count
-    defaults to one message when feedback came first and none otherwise.
+    ``hook_before`` is ``hook_feedback_before_first_retrieval`` and
+    ``commit_before`` is ``commit_before_first_retrieval``. The hook count
+    defaults to one message when feedback came first and none otherwise. The
+    first retrieval is call ``ordinal`` of ``calls``, a first commit (when one
+    came before it) call 2.
     """
     if hook_messages is None:
         hook_messages = 1 if hook_before else 0
     return {
-        "first_retrieval_ordinal": 3,
-        "tool_call_count": 10,
+        "first_retrieval_ordinal": ordinal,
+        "tool_call_count": calls,
         "hook_feedback_messages": hook_messages,
         "hook_feedback_before_first_retrieval": hook_before,
+        "first_commit_ordinal": 2 if commit_before else None,
+        "commit_before_first_retrieval": commit_before,
     }
+
+
+def legacy_timing_payload(*, hook_before: bool | None) -> dict[str, Any]:
+    """A ``retrieval_timing`` as capture wrote it before it kept commits.
+
+    The same keys less the two about the first commit, so a join carrying it
+    can decide the hook comparison and nothing about commits.
+    """
+    timing = timing_payload(hook_before=hook_before)
+    del timing["first_commit_ordinal"]
+    del timing["commit_before_first_retrieval"]
+    return timing
 
 
 class HoldoutLog:

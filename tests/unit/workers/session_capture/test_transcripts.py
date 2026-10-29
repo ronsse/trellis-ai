@@ -863,6 +863,8 @@ class TestRetrievalTiming:
             "tool_call_count": 3,
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": False,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": False,
         }
 
     def test_a_first_retrieval_after_hook_feedback(self, tmp_path: Path) -> None:
@@ -879,6 +881,8 @@ class TestRetrievalTiming:
             "tool_call_count": 3,
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": True,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": False,
         }
 
     def test_the_first_hook_feedback_dates_the_comparison(self, tmp_path: Path) -> None:
@@ -914,6 +918,8 @@ class TestRetrievalTiming:
             "tool_call_count": 2,
             "hook_feedback_messages": 0,
             "hook_feedback_before_first_retrieval": False,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": False,
         }
 
     def test_a_retrieval_before_the_first_call_is_ordinal_one(
@@ -952,6 +958,8 @@ class TestRetrievalTiming:
             "tool_call_count": 2,
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": True,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": False,
         }
 
     def test_a_session_whose_only_retrieval_errored_has_no_first_retrieval(
@@ -978,6 +986,8 @@ class TestRetrievalTiming:
             "tool_call_count": 1,
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": None,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": None,
         }
 
     def test_the_ordinal_counts_a_parallel_call_in_its_own_position(
@@ -1055,6 +1065,253 @@ class TestRetrievalTiming:
         )
 
         assert "retrieve context" not in repr(timing)
+        assert all(
+            isinstance(value, int | bool) or value is None for value in timing.values()
+        )
+
+
+def _bash(use_id: str, command: str, *, is_error: bool = False) -> list[dict]:
+    """One ``Bash`` call running *command* and its answer, in the shape Claude
+    Code writes: a record per block, the command in the call's input."""
+    return [
+        *api_message(f"msg-{use_id}", bash_block(use_id, command), at=None),
+        tool_results(result_block(use_id, "ok", is_error=is_error), at=None),
+    ]
+
+
+_COMMIT = "git commit -m fake"
+
+
+class TestFirstCommitOrdinal:
+    """Where the first commit sat among the calls, against the first retrieval.
+
+    The pack holdout's pre-treatment exclusion reads it: a retrieval made
+    after the session had committed is an afterthought, not a treatment. The
+    ordinal is the digest's own, the one ``first_retrieval_ordinal`` is in,
+    and a commit counts as ``SessionOutcome.commits`` counts it.
+    """
+
+    def test_a_commit_before_the_first_retrieval(self, tmp_path: Path) -> None:
+        timing = _timing(
+            tmp_path,
+            *_bash("b-1", "ls /fake/repo"),
+            *_bash("b-2", _COMMIT),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing == {
+            "first_retrieval_ordinal": 3,
+            "tool_call_count": 3,
+            "hook_feedback_messages": 0,
+            "hook_feedback_before_first_retrieval": False,
+            "first_commit_ordinal": 2,
+            "commit_before_first_retrieval": True,
+        }
+
+    def test_a_commit_after_the_first_retrieval_is_not_before_it(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path,
+            *_retrieval("u-1", PACK_IDS[0]),
+            *_bash("b-1", "ls /fake/repo"),
+            *_bash("b-2", _COMMIT),
+        )
+
+        assert timing["first_retrieval_ordinal"] == 1
+        assert timing["first_commit_ordinal"] == 3
+        assert timing["commit_before_first_retrieval"] is False
+
+    def test_a_session_that_never_committed_has_no_ordinal(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path, *_bash("b-1", "ls /fake/repo"), *_retrieval("u-1", PACK_IDS[0])
+        )
+
+        # A decided "no", not an unknown: there was a retrieval to be after.
+        assert timing["first_commit_ordinal"] is None
+        assert timing["commit_before_first_retrieval"] is False
+
+    def test_a_session_with_a_commit_and_no_retrieval_is_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(tmp_path, *_bash("b-1", _COMMIT))
+
+        assert timing["first_commit_ordinal"] == 1
+        assert timing["first_retrieval_ordinal"] is None
+        assert timing["commit_before_first_retrieval"] is None
+
+    def test_a_commit_that_errored_is_not_the_first_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """The call at 1 made no commit; the retry at 3 did. Held at the
+        call, confirmed at its result."""
+        timing = _timing(
+            tmp_path,
+            *_bash("b-1", _COMMIT, is_error=True),
+            *_retrieval("u-1", PACK_IDS[0]),
+            *_bash("b-2", _COMMIT),
+        )
+
+        assert timing["first_commit_ordinal"] == 3
+        assert timing["commit_before_first_retrieval"] is False
+
+    def test_only_errored_commits_leave_no_ordinal(self, tmp_path: Path) -> None:
+        timing = _timing(
+            tmp_path,
+            *_bash("b-1", _COMMIT, is_error=True),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing["first_commit_ordinal"] is None
+        assert timing["commit_before_first_retrieval"] is False
+
+    def test_an_unanswered_commit_is_not_a_commit(self, tmp_path: Path) -> None:
+        timing = _timing(
+            tmp_path,
+            *api_message("msg-b-1", bash_block("b-1", _COMMIT), at=None),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing["first_commit_ordinal"] is None
+        assert timing["commit_before_first_retrieval"] is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo git commit",
+            "grep -rn 'git commit' /fake/docs",
+            "git log --grep commit",
+            "git commit-tree fake",
+            "git status",
+        ],
+    )
+    def test_commit_text_that_is_not_a_commit_is_not_counted(
+        self, tmp_path: Path, command: str
+    ) -> None:
+        timing = _timing(
+            tmp_path, *_bash("b-1", command), *_retrieval("u-1", PACK_IDS[0])
+        )
+
+        assert timing["first_commit_ordinal"] is None
+        assert timing["commit_before_first_retrieval"] is False
+
+    def test_a_commit_in_one_call_with_a_chain_has_that_calls_ordinal(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path,
+            *_bash("b-1", "ls /fake/repo"),
+            *_bash("b-2", "git add -A && git commit -m fake && git push"),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing["first_commit_ordinal"] == 2
+
+    def test_a_commit_called_beside_the_retrieval_keeps_its_own_position(
+        self, tmp_path: Path
+    ) -> None:
+        """Parallel calls in one message sit one after another."""
+        timing = _timing(
+            tmp_path,
+            *api_message(
+                "msg-p",
+                bash_block("b-1", _COMMIT),
+                tool_use_block("u-1", _CONTEXT),
+                at=None,
+            ),
+            tool_results(
+                result_block("b-1", "ok"),
+                result_block("u-1", mcp_envelope(pack_markdown(PACK_IDS[0]))),
+                at=None,
+            ),
+        )
+
+        assert timing["first_commit_ordinal"] == 1
+        assert timing["first_retrieval_ordinal"] == 2
+        assert timing["commit_before_first_retrieval"] is True
+
+    def test_the_earliest_commit_wins_whatever_order_the_results_arrive_in(
+        self, tmp_path: Path
+    ) -> None:
+        timing = _timing(
+            tmp_path,
+            *api_message(
+                "msg-p",
+                bash_block("b-1", _COMMIT),
+                bash_block("b-2", "git commit --amend --no-edit"),
+                at=None,
+            ),
+            tool_results(result_block("b-2", "ok"), at=None),
+            tool_results(result_block("b-1", "ok"), at=None),
+            *_retrieval("u-1", PACK_IDS[0]),
+        )
+
+        assert timing["first_commit_ordinal"] == 1
+
+    def test_a_record_written_again_shares_the_retrievals_ordinal_space(
+        self, tmp_path: Path
+    ) -> None:
+        """A resumed session writes its history into the file again. The copy
+        is not held as a second commit, but the digest counts its calls, so a
+        commit made after it is at the position the digest gives it, the one
+        the first retrieval's is counted in."""
+        history = [*_retrieval("u-1", PACK_IDS[0])]
+        again = [{**record, "version": "2.0.1"} for record in history]
+
+        timing = _timing(tmp_path, *history, *again, *_bash("b-1", _COMMIT))
+
+        assert timing["first_retrieval_ordinal"] == 1
+        assert timing["first_commit_ordinal"] == 3
+        assert timing["tool_call_count"] == 3
+
+    def test_a_commit_in_a_record_written_again_is_the_first_sighting(
+        self, tmp_path: Path
+    ) -> None:
+        history = [*_bash("b-1", _COMMIT), *_retrieval("u-1", PACK_IDS[0])]
+        again = [{**record, "version": "2.0.1"} for record in history]
+
+        timing = _timing(tmp_path, *history, *again)
+
+        assert timing["first_commit_ordinal"] == 1
+        assert timing["commit_before_first_retrieval"] is True
+
+    def test_the_ordinal_agrees_with_the_outcomes_commit_count(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy"),
+                *_bash("b-1", _COMMIT, is_error=True),
+                *_bash("b-2", "echo git commit"),
+            ],
+        )
+        digest = parse_session(path)
+
+        assert digest.outcome.commits == 0
+        assert digest.first_commit_ordinal is None
+
+    def test_a_commit_keeps_its_position_and_never_its_text(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy"),
+                *_bash("b-1", "git commit -m 'fake secret-shaped message'"),
+                *_retrieval("u-1", PACK_IDS[0]),
+            ],
+        )
+
+        digest = parse_session(path)
+        timing = digest.retrieval_timing_payload()
+
+        assert digest.first_commit_ordinal == 1
+        assert "fake secret-shaped message" not in repr(digest)
         assert all(
             isinstance(value, int | bool) or value is None for value in timing.values()
         )
