@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("numpy")
 
@@ -195,3 +197,101 @@ def test_replacing_a_row_at_another_width_moves_it_between_queries(
         "n2",
         "w2",
     }
+
+
+# ---------------------------------------------------------------------------
+# The degenerate case is loud: a width no stored row has
+# ---------------------------------------------------------------------------
+
+_MISMATCH = "vector_query.width_mismatch"
+
+
+def _mismatch_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [e for e in logs if e["event"] == _MISMATCH]
+
+
+def test_a_store_holding_only_another_width_warns_once_with_the_count(
+    vector_store: SQLiteVectorStore,
+) -> None:
+    vector_store.upsert("stale-a", [1.0, 0.0, 0.0])
+    vector_store.upsert("stale-b", [0.0, 1.0, 0.0])
+    vector_store.upsert("stale-c", [0.0, 0.0, 1.0])
+
+    with capture_logs() as logs:
+        assert vector_store.query(_wide(1.0), top_k=10) == []
+
+    events = _mismatch_events(logs)
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["query_width"] == _WIDE
+    assert events[0]["other_width_rows"] == 3
+    # Counts only: no row id and no row content reaches the event.
+    assert "stale-" not in repr(events[0])
+
+
+def test_a_width_no_row_of_a_mixed_store_has_warns_with_every_row_counted(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    with capture_logs() as logs:
+        assert mixed_store.query([1.0, 0.0, 0.0, 0.0, 0.0], top_k=10) == []
+
+    events = _mismatch_events(logs)
+    assert len(events) == 1
+    assert events[0]["query_width"] == 5
+    assert events[0]["other_width_rows"] == 5
+
+
+def test_an_empty_store_does_not_warn(vector_store: SQLiteVectorStore) -> None:
+    with capture_logs() as logs:
+        assert vector_store.query(_wide(1.0), top_k=10) == []
+
+    assert not _mismatch_events(logs)
+
+
+def test_a_store_of_the_query_width_does_not_warn(
+    vector_store: SQLiteVectorStore,
+) -> None:
+    vector_store.upsert("w1", _wide(1.0))
+    vector_store.upsert("w2", _wide(0.9, 0.1))
+
+    with capture_logs() as logs:
+        assert [r["item_id"] for r in vector_store.query(_wide(1.0))] == ["w1", "w2"]
+
+    assert not _mismatch_events(logs)
+
+
+def test_a_mixed_store_that_answers_does_not_warn(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    # Rows of another width are present, but the query found rows of its own:
+    # the skip stays silent, and the count is never paid for.
+    with capture_logs() as logs:
+        assert mixed_store.query(_wide(1.0), top_k=10)
+
+    assert not _mismatch_events(logs)
+
+
+def test_a_filter_that_matches_nothing_is_not_misreported_as_a_width_mismatch(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    # The query's width is stored, the filter simply matches no row, and no
+    # row of another width carries the filter value either.
+    with capture_logs() as logs:
+        assert mixed_store.query(_wide(1.0), filters={"cat": "absent"}) == []
+
+    assert not _mismatch_events(logs)
+
+
+def test_the_count_takes_the_same_filters_as_the_query(
+    vector_store: SQLiteVectorStore,
+) -> None:
+    vector_store.upsert("n1", [1.0, 0.0, 0.0], {"cat": "x"})
+    vector_store.upsert("n2", [0.0, 1.0, 0.0], {"cat": "y"})
+    vector_store.upsert("n3", [0.0, 0.0, 1.0], {"cat": "x"})
+
+    with capture_logs() as logs:
+        assert vector_store.query(_wide(1.0), filters={"cat": "x"}) == []
+
+    events = _mismatch_events(logs)
+    assert len(events) == 1
+    assert events[0]["other_width_rows"] == 2
