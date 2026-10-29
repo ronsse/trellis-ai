@@ -1420,9 +1420,10 @@ Scope boundaries, stated plainly:
   but a class label, so a real tombstone carries no label of its own; the cases
   that remain are a label stamped on a tombstone afterwards and a chunk whose
   parent is labelled. Setting it on an id that was not redacted changes nothing
-  and stamps nothing. Known gap (#1049): an unflagged re-put of exactly the
-  content first written under an id that was later redacted, under a derived
-  idempotency key, is answered as a duplicate (200 on the two REST routes)
+  and stamps nothing. Known gap (#1049): an unflagged re-put whose derived
+  idempotency key matches an earlier successful write to an id that was later
+  redacted (same content, metadata and options) is answered as a duplicate (200
+  on the two REST routes)
   because the idempotency stage runs before the handler's guard; nothing is
   written and the tombstone stays.
   A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
