@@ -1247,6 +1247,62 @@ class TestShadowSurvivesAConcurrentWrite:
         assert SHADOW_TAGS_KEY not in redacted[0]["metadata"]
         assert event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED) == []
 
+    def test_a_redaction_after_the_reread_is_skipped_not_an_error(
+        self,
+        document_store: SQLiteDocumentStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The redaction lands between the helper's re-read and its write.
+
+        ``put_document`` then refuses the unflagged write over the new
+        tombstone. Filed under ``errors`` that would flip the exit status for a
+        race that is not a failure; it is the same drop as the mid-judging case.
+        """
+        from trellis.core import derived_metadata
+
+        for doc_id in ("d1", "d2", "d3"):
+            _seed(document_store, doc_id, f"body of {doc_id}")
+        real_put = derived_metadata.put_document
+        redacted: list[dict[str, Any]] = []
+
+        def racing_put(store: Any, vectors: Any, doc_id: str, *args: Any, **kw: Any):
+            if doc_id == "d2" and not redacted:
+                put_document(
+                    store,
+                    None,
+                    "d2",
+                    "",
+                    {
+                        LIFECYCLE_KEY: {
+                            "state": "archived",
+                            "deprecation_reason": "redacted",
+                        }
+                    },
+                    preserve_updated_at=False,
+                )
+                redacted.append(store.get("d2"))
+            return real_put(store, vectors, doc_id, *args, **kw)
+
+        monkeypatch.setattr(derived_metadata, "put_document", racing_put)
+
+        result = shadow_classify_stale(
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=None,
+            event_log=event_log,
+        )
+
+        assert result.written == 2
+        assert result.skipped_redacted == 1
+        assert result.errors == 0
+        assert document_store.get("d2") == redacted[0]
+        judged = event_log.get_events(event_type=EventType.MEMORY_OP_JUDGED)
+        assert sorted(
+            MemoryOpJudgedPayload.model_validate(e.payload).subject_ref.ref_id
+            for e in judged
+        ) == ["d1", "d3"]
+
     def test_a_redacted_document_lands_in_its_own_batch_bucket(
         self, document_store: SQLiteDocumentStore, event_log: SQLiteEventLog
     ) -> None:

@@ -331,11 +331,18 @@ All notable changes to Trellis will be documented in this file.
   the lifecycle stamp, the pass counted the row as enriched and emitted a judged
   event for it. The helper now returns the new `redacted` outcome before it
   builds or writes anything, logging `derived_metadata.row_redacted` with the
-  document id only. `worker enrich` counts it under a new `skipped_redacted`
-  key (always present in `--format json`; the "concurrent writes" text line
-  prints when it is non-zero) and emits no judged event; `classify shadow`
-  counts it under a new `skipped_redacted` bucket, not under `errors`, so the
-  exit status is unchanged. The same family: `worker embed-traces --dry-run`
+  document id only, and the same outcome covers a redaction that lands after
+  that re-read but before `put_document` reads the row (its refusal is caught
+  by code, so any other refusal still propagates). `worker enrich` counts it
+  under a new `skipped_redacted` key (always present in `--format json`; the
+  "concurrent writes" text line prints when it is non-zero) and emits no judged
+  event; `skipped_redacted` counts only rows redacted inside that window,
+  because `worker enrich` now never selects a tombstone to begin with: a blank
+  row with no tags would otherwise be a candidate on every pass, costing a
+  model call each time and, newest first, taking the `--limit` seat of a
+  document that can be enriched. `classify shadow` counts the outcome under a
+  new `skipped_redacted` bucket, not under `errors`, so the exit status is
+  unchanged. The same family: `worker embed-traces --dry-run`
   never read the summary row, so it counted a trace whose summary id was
   redacted as would-embed while the live pass counts it under
   `skipped_redacted`; the dry run now reads that one row and reports the same

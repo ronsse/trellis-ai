@@ -2872,6 +2872,131 @@ class TestEnrichSparesPromotedPrecedents:
         assert ordinary["metadata"]["document_form"] == "reference"
 
 
+def _redact_row(doc_store: Any, doc_id: str) -> dict[str, Any]:
+    """Leave the blank archived row a redaction leaves; return it as stored."""
+    from trellis.core.document_write import put_document
+    from trellis.schemas.classification import LIFECYCLE_KEY
+
+    put_document(
+        doc_store,
+        None,
+        doc_id,
+        "",
+        {LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"}},
+        preserve_updated_at=False,
+    )
+    row = doc_store.get(doc_id)
+    assert row is not None
+    return row
+
+
+class _CountingLLM(_StubLLM):
+    """A stub model that records every prompt it is sent."""
+
+    def __init__(self, content: str) -> None:
+        super().__init__(content)
+        self.prompts: list[str] = []
+
+    async def generate(self, **kwargs: Any) -> LLMResponse:
+        self.prompts.append(kwargs["messages"][1].content)
+        return await super().generate(**kwargs)
+
+
+class TestEnrichSkipsRedactionTombstones:
+    """A redaction tombstone is not a candidate, so a pass never spends on it.
+
+    A tombstone is blank and carries no ``content_tags``, so the "missing or
+    empty tags" arm of the selection predicate matches it on every pass. The
+    pass used to write tags onto it, which hid that; the tags are now dropped
+    (a row redacted mid-batch is counted as ``skipped_redacted``), so without a
+    skip in ``_select_enrichment_candidates`` every pass would re-select every
+    tombstone, send each to the model, and, newest first, let it take the
+    ``--limit`` seat of a document that can be enriched.
+
+    Defective subject: drop the ``is_redaction_tombstone`` skip and the first
+    two tests fail.
+    """
+
+    _CANNED = json.dumps(
+        {
+            "tags": ["alpha"],
+            "class": "reference",
+            "summary": "A summary.",
+            "importance": 0.6,
+            "tag_confidence": 0.9,
+            "class_confidence": 0.9,
+        }
+    )
+
+    def test_a_tombstone_is_never_a_candidate(self, temp_stores: StoreRegistry) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-ordinary", "an ordinary note", {"title": "Ordinary"})
+        doc_store.put("doc-gone", "text that will be redacted", {"title": "Gone"})
+        _redact_row(doc_store, "doc-gone")
+
+        for reenrich in (False, True):
+            ids = {
+                c["doc_id"]
+                for c in worker._select_enrichment_candidates(
+                    doc_store, limit=50, reenrich=reenrich
+                )
+            }
+            assert ids == {"doc-ordinary"}
+
+    def test_a_pass_sends_no_tombstone_to_the_model_on_any_pass(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-ordinary", "an ordinary note", {"title": "Ordinary"})
+        doc_store.put("doc-gone", "text that will be redacted", {"title": "Gone"})
+        tombstone = _redact_row(doc_store, "doc-gone")
+        llm = _CountingLLM(self._CANNED)
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda _consumer, *, command: llm
+        )
+
+        first = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert first.exit_code == 0, first.output
+        data = json.loads(first.stdout.strip())
+        assert data["enriched"] == 1
+        assert data["skipped_redacted"] == 0
+        assert len(llm.prompts) == 1
+
+        # The ordinary document is now enriched and the tombstone is skipped,
+        # so a second pass has nothing to send: it must not cost a call per
+        # tombstone, which is what re-selecting them would do every night.
+        second = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert second.exit_code == 0, second.output
+        assert len(llm.prompts) == 1
+        assert doc_store.get("doc-gone") == tombstone
+
+    def test_a_newer_tombstone_does_not_take_the_limit_seat(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """Newest first: with ``--limit 1`` the tombstone would be the one picked."""
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("a-older", "an ordinary note", {"title": "Older"})
+        # ``doc_id`` breaks a ``created_at`` tie newest-first, so ``z-`` sorts
+        # ahead of ``a-`` however close together the two puts land.
+        doc_store.put("z-newer", "text that will be redacted", {"title": "Newer"})
+        _redact_row(doc_store, "z-newer")
+        llm = _CountingLLM(self._CANNED)
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda _consumer, *, command: llm
+        )
+
+        result = runner.invoke(
+            app, ["worker", "enrich", "--limit", "1", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        assert len(llm.prompts) == 1
+        older = doc_store.get("a-older")
+        assert older is not None
+        assert older["metadata"]["content_tags"]["classified_mode"] == "enrichment"
+
+
 class TestEnrichedContentTags:
     """``worker enrich``'s write-back must produce a parseable ``ContentTags``.
 
@@ -3358,6 +3483,44 @@ class TestEnrichSurvivesAConcurrentWrite:
             "doc-a",
             "doc-c",
         ]
+
+    def test_a_redaction_after_the_reread_does_not_abort_the_batch(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """The redaction lands between the helper's re-read and its write.
+
+        ``put_document`` then refuses the unflagged write over the new
+        tombstone. That refusal used to escape the helper and abort every row
+        after it; it is the same race as the mid-batch case, counted the same.
+        """
+        from trellis.core import derived_metadata
+
+        doc_store = temp_stores.knowledge.document_store
+        for doc_id in ("doc-a", "doc-b", "doc-c"):
+            doc_store.put(doc_id, f"the body of {doc_id}", {"title": doc_id})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
+        )
+        real_put = derived_metadata.put_document
+        redacted_row: list[dict[str, Any]] = []
+
+        def racing_put(store: Any, vectors: Any, doc_id: str, *args: Any, **kw: Any):
+            if doc_id == "doc-b" and not redacted_row:
+                redacted_row.append(_redact_row(store, "doc-b"))
+            return real_put(store, vectors, doc_id, *args, **kw)
+
+        monkeypatch.setattr(derived_metadata, "put_document", racing_put)
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enriched"] == 2
+        assert data["skipped_redacted"] == 1
+        assert data["failed"] == 0
+        assert doc_store.get("doc-b") == redacted_row[0]
 
     def test_the_redacted_count_is_in_the_text_line_only_when_non_zero(
         self, temp_stores: StoreRegistry, monkeypatch

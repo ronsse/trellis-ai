@@ -17,7 +17,13 @@ import pytest
 
 from tests.document_recency import fake_document_clock
 from trellis.core.derived_metadata import apply_derived_metadata
-from trellis.core.document_write import put_document
+from trellis.core.document_write import (
+    REINGEST_STAMP_KEY,
+    STAMP_RESERVED_CODE,
+    TOMBSTONE_OVERWRITE_CODE,
+    RedactionTombstoneError,
+    put_document,
+)
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.sqlite.document import SQLiteDocumentStore
@@ -330,6 +336,84 @@ class TestRedactedRow:
 
         assert write.vanished is True
         assert write.redacted is False
+
+
+class TestRedactedAfterTheReRead:
+    """A redaction landing after the re-read, before ``put_document`` reads the row.
+
+    ``put_document``'s own guard then refuses the unflagged write over the new
+    tombstone. That refusal is the same race as the early return, so the helper
+    reports ``redacted`` instead of letting it abort the caller's batch. The
+    race is simulated inside ``build_updates``, the last thing that runs between
+    the re-read and the write.
+    """
+
+    def test_the_refusal_is_reported_as_redacted(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        document_store.put("doc-1", "pre-redaction text", {"keep": "me"})
+        redacted_row: list[dict[str, Any]] = []
+
+        def redact_then_derive(_current: dict[str, Any]) -> dict[str, Any]:
+            _redact(document_store, "doc-1")
+            row = document_store.get("doc-1")
+            assert row is not None
+            redacted_row.append(row)
+            return {"derived": "yes"}
+
+        write = apply_derived_metadata(
+            document_store,
+            "doc-1",
+            redact_then_derive,
+            vector_store=vector_store,
+            snapshot_content="pre-redaction text",
+        )
+
+        assert write.written is False
+        assert write.redacted is True
+        assert write.vanished is False
+        assert write.metadata is None
+        assert write.mirror is None
+        assert document_store.get("doc-1") == redacted_row[0]
+        assert "derived" not in redacted_row[0]["metadata"]
+
+    def test_the_vector_store_is_not_touched(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        document_store.put("doc-1", "pre-redaction text", {})
+        vectors = MagicMock(spec=SQLiteVectorStore)
+
+        def redact_then_derive(_current: dict[str, Any]) -> dict[str, Any]:
+            _redact(document_store, "doc-1")
+            return {"derived": "yes"}
+
+        write = apply_derived_metadata(
+            document_store, "doc-1", redact_then_derive, vector_store=vectors
+        )
+
+        assert write.redacted is True
+        assert vectors.mock_calls == []
+
+    def test_any_other_tombstone_refusal_still_propagates(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """Only the overwrite refusal is the race.
+
+        A bag carrying the reserved re-ingest stamp is refused under another
+        code, and reporting that as ``redacted`` would hide a forged stamp.
+        """
+        document_store.put("doc-1", "still here", {})
+        assert STAMP_RESERVED_CODE != TOMBSTONE_OVERWRITE_CODE
+
+        with pytest.raises(RedactionTombstoneError) as raised:
+            apply_derived_metadata(
+                document_store,
+                "doc-1",
+                lambda _cur: {REINGEST_STAMP_KEY: "2000-01-01T00:00:00+00:00"},
+                vector_store=None,
+            )
+
+        assert raised.value.code == STAMP_RESERVED_CODE
 
 
 class TestFailuresPropagate:

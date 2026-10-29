@@ -49,6 +49,7 @@ import yaml
 from rich.markup import escape
 
 from trellis.core.derived_metadata import apply_derived_metadata
+from trellis.core.document_write import is_redaction_tombstone
 from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
@@ -1591,7 +1592,10 @@ def enrich_cmd(
     ``--reenrich`` takes the already-enriched too. The newest ``--limit``
     documents matching the predicate are enriched. A promoted precedent's
     document row is never a candidate, whatever its tags say
-    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`).
+    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`),
+    and neither is a redaction tombstone
+    (:func:`~trellis.core.document_write.is_redaction_tombstone`): both are
+    skipped before any model call.
 
     This used to select on ``content_tags.tag_confidence``, which does not
     work and cannot: that key is not part of ``ContentTags`` and is never
@@ -1747,6 +1751,14 @@ def _select_enrichment_candidates(
             # row retrievable by intent, reopening the exemption the noise pass,
             # retention and classify refresh already honour. Skipped before
             # anything is read from the row, and so before any LLM call.
+            continue
+        if is_redaction_tombstone(doc):
+            # A tombstone is blank, so there is nothing to enrich, and it never
+            # carries ``content_tags`` (the pass drops tags derived for a row
+            # redacted mid-batch). Without this skip it would be a candidate on
+            # every pass: one model call spent on it each time, and, newest
+            # first, a seat under ``--limit`` taken from a document that can be
+            # enriched.
             continue
         metadata = doc.get("metadata") or {}
         content_tags = metadata.get("content_tags") or {}

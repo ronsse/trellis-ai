@@ -88,7 +88,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.document_write import is_redaction_tombstone, put_document
+from trellis.core.document_write import (
+    TOMBSTONE_OVERWRITE_CODE,
+    RedactionTombstoneError,
+    is_redaction_tombstone,
+    put_document,
+)
 from trellis.core.vector_metadata import VectorSyncOutcome
 
 if TYPE_CHECKING:
@@ -114,8 +119,10 @@ class DerivedMetadataWrite:
     vanished: bool = False
     #: ``True`` when the row is a redaction tombstone at write time, i.e. it was
     #: redacted after the caller read it. Mutually exclusive with ``written``
-    #: and ``vanished`` — nothing is built, written or mirrored, so a derived
-    #: record cannot outlive the redaction it should have been dropped by.
+    #: and ``vanished`` — nothing is written or mirrored, so a derived record
+    #: cannot outlive the redaction it should have been dropped by. Reported
+    #: both when the re-read finds the tombstone and when the redaction lands
+    #: after it, inside ``put_document``'s own read.
     redacted: bool = False
     #: ``True`` when the stored content differed from the snapshot the caller
     #: derived from, i.e. a concurrent write landed inside the slow window.
@@ -200,9 +207,25 @@ def apply_derived_metadata(
         )
 
     merged = {**metadata, **build_updates(metadata)}
-    write = put_document(
-        document_store, vector_store, doc_id, content, merged, preserve_updated_at=True
-    )
+    try:
+        write = put_document(
+            document_store,
+            vector_store,
+            doc_id,
+            content,
+            merged,
+            preserve_updated_at=True,
+        )
+    except RedactionTombstoneError as exc:
+        # A redaction landed between the re-read above and ``put_document``'s
+        # own read of the row, so its guard refused the unflagged write over
+        # the new tombstone. That is the same outcome as the early return, only
+        # later: the derived keys are dropped. Any other refusal (a forged
+        # re-ingest stamp) is not this race and propagates.
+        if exc.code != TOMBSTONE_OVERWRITE_CODE:
+            raise
+        logger.warning("derived_metadata.row_redacted", doc_id=doc_id)
+        return DerivedMetadataWrite(doc_id=doc_id, written=False, redacted=True)
     return DerivedMetadataWrite(
         doc_id=doc_id,
         written=True,
