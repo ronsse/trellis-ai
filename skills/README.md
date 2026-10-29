@@ -1,7 +1,5 @@
 # Trellis Skill Templates
 
-> **Status: preview.** These skills are in flux while parallel work lands. The `SKILL.md` content is intentionally slim so drift stays manageable, but expect minor revisions to prompts and tool-call shapes before the next minor release.
-
 Drop-in skill files for Claude Code (and other agent frameworks that follow the `SKILL.md` convention). Each skill is a self-contained directory with a `SKILL.md` describing when and how the agent should use it.
 
 > **Where the files live.** The canonical copies ship inside the installed package at `src/trellis_cli/skills/` so they travel in the wheel (`pip install trellis-ai`), not just a repo checkout. This `skills/` directory is the public pointer to them. Install them with the CLI — you don't need to copy paths by hand.
