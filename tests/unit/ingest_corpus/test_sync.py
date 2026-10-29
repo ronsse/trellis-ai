@@ -1762,3 +1762,141 @@ class TestRedactionTombstones:
         } in regrown.warnings
         # The chunks that were not redacted shrink and regrow as before.
         assert docs.get(chunk_doc_id(parent_id, count - 2))["content"] != ""
+
+
+class TestRedactedChunksSurviveMoveAndPrune:
+    """A move and a prune delete a document's chunk rows, and a redacted chunk
+    is not one to delete (#1034).
+
+    Deleting it loses the tombstone, so the file coming back under the old path
+    would write the redacted text under the same chunk id with nothing to refuse
+    it. The orphan loop already leaves such a row alone; these two deleters
+    did not. A redacted *parent* is a different case and is deliberately not
+    covered here: the parent row is deleted as before.
+    """
+
+    @staticmethod
+    def _chunked_note(registry, vault: Path) -> tuple[str, int, str]:
+        """Sync a chunked note and redact its middle chunk; return the ids."""
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        docs = registry.knowledge.document_store
+        count = docs.get(parent_id)["metadata"]["chunk_count"]
+        assert count >= 3
+        redacted_id = chunk_doc_id(parent_id, 1)
+        make_tombstone(docs, registry.knowledge.vector_store, redacted_id)
+        return parent_id, count, redacted_id
+
+    @staticmethod
+    def _tombstone_warnings(report) -> list[dict[str, Any]]:
+        return [w for w in report.warnings if w["kind"] == "redaction_tombstone"]
+
+    def test_a_redacted_chunk_survives_a_move(self, registry, vault):
+        """Defective subject: drop the tombstone skip in ``_delete_document_tree``
+        and the old chunk row is gone after the rename, so the file coming back
+        under its old path writes the redacted text under the same id."""
+        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        docs = registry.knowledge.document_store
+        (vault / "long.md").rename(vault / "sub" / "moved.md")
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        moved = next(o for o in report.files if o.relpath == "sub/moved.md")
+        assert moved.action == "move"
+        assert moved.moved_from == parent_id
+        assert is_redaction_tombstone(docs.get(redacted_id))
+        assert docs.get(redacted_id)["content"] == ""
+        assert docs.get(parent_id) is None
+        for index in range(count):
+            if chunk_doc_id(parent_id, index) != redacted_id:
+                assert docs.get(chunk_doc_id(parent_id, index)) is None
+        assert self._tombstone_warnings(report) == [
+            {"kind": "redaction_tombstone", "path": "long.md", "doc_id": redacted_id}
+        ]
+        new_parent_id = corpus_doc_id("obsidian", "sub/moved.md")
+        assert docs.get(new_parent_id)["metadata"]["chunk_count"] == count
+        for index in range(count):
+            assert docs.get(chunk_doc_id(new_parent_id, index))["content"] != ""
+
+    def test_the_old_path_coming_back_still_does_not_refill_the_chunk(
+        self, registry, vault
+    ):
+        _parent_id, _count, redacted_id = self._chunked_note(registry, vault)
+        docs = registry.knowledge.document_store
+        (vault / "long.md").rename(vault / "sub" / "moved.md")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        (vault / "long.md").write_text(_long_markdown())
+        back = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert is_redaction_tombstone(docs.get(redacted_id))
+        assert docs.get(redacted_id)["content"] == ""
+        assert {
+            "kind": "redaction_tombstone",
+            "path": "long.md",
+            "doc_id": redacted_id,
+        } in back.warnings
+
+    def test_a_redacted_chunk_survives_a_prune(self, registry, vault):
+        """Defective subject: drop the tombstone skip in ``_delete_document_tree``
+        and the prune deletes the tombstone with the rest of the tree."""
+        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        docs = registry.knowledge.document_store
+        (vault / "long.md").unlink()
+
+        report = sync_corpus(registry, vault, source_system="obsidian", prune=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [parent_id]
+        assert is_redaction_tombstone(docs.get(redacted_id))
+        assert docs.get(redacted_id)["content"] == ""
+        assert docs.get(parent_id) is None
+        for index in range(count):
+            if chunk_doc_id(parent_id, index) != redacted_id:
+                assert docs.get(chunk_doc_id(parent_id, index)) is None
+        assert self._tombstone_warnings(report) == [
+            {"kind": "redaction_tombstone", "path": "long.md", "doc_id": redacted_id}
+        ]
+
+    def test_a_dry_run_prune_deletes_nothing_and_predicts_the_warning(
+        self, registry, vault
+    ):
+        """Defective subject: let the dry-run branch call the deleter and rows
+        vanish; drop the prediction and the warning is missing from the plan."""
+        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        docs = registry.knowledge.document_store
+        rows_before = docs.count()
+        (vault / "long.md").unlink()
+
+        report = sync_corpus(
+            registry, vault, source_system="obsidian", prune=True, dry_run=True
+        )
+
+        assert [p["doc_id"] for p in report.pruned] == [parent_id]
+        assert docs.count() == rows_before
+        assert docs.get(parent_id) is not None
+        for index in range(count):
+            assert docs.get(chunk_doc_id(parent_id, index)) is not None
+        assert self._tombstone_warnings(report) == [
+            {"kind": "redaction_tombstone", "path": "long.md", "doc_id": redacted_id}
+        ]
+
+    def test_a_move_and_a_prune_with_no_tombstone_warn_of_nothing(
+        self, registry, vault
+    ):
+        (vault / "long.md").write_text(_long_markdown())
+        (vault / "gone.md").write_text(_long_markdown(topics=("tulips", "anchors")))
+        sync_corpus(registry, vault, source_system="obsidian")
+        docs = registry.knowledge.document_store
+        gone_id = corpus_doc_id("obsidian", "gone.md")
+        gone_count = docs.get(gone_id)["metadata"]["chunk_count"]
+        (vault / "long.md").rename(vault / "sub" / "moved.md")
+        (vault / "gone.md").unlink()
+
+        report = sync_corpus(registry, vault, source_system="obsidian", prune=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [gone_id]
+        assert self._tombstone_warnings(report) == []
+        assert docs.get(gone_id) is None
+        for index in range(gone_count):
+            assert docs.get(chunk_doc_id(gone_id, index)) is None

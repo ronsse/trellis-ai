@@ -599,7 +599,12 @@ def _apply_record(
     if outcome.action == "move" and outcome.moved_from is not None:
         old = doc_store.get(outcome.moved_from)
         _delete_document_tree(
-            doc_store, vector_store, outcome.moved_from, _chunk_count_of(old)
+            doc_store,
+            vector_store,
+            outcome.moved_from,
+            _chunk_count_of(old),
+            report=report,
+            relpath=_source_path_or(_stored_metadata(old), outcome.relpath),
         )
 
     _emit_memory_stored(
@@ -901,16 +906,60 @@ def _prune_vanished(
             continue
         if state != "vanished":
             continue
-        if not dry_run:
+        relpath = _source_path_or(candidate["metadata"], candidate["doc_id"])
+        if dry_run:
+            # Nothing is deleted, but the plan still says what the real run
+            # would leave behind.
+            _warn_tombstoned_chunks(
+                report,
+                relpath,
+                _tombstoned_chunk_ids(
+                    doc_store, candidate["doc_id"], candidate["chunk_count"]
+                ),
+            )
+        else:
             _delete_document_tree(
                 doc_store,
                 vector_store,
                 candidate["doc_id"],
                 candidate["chunk_count"],
+                report=report,
+                relpath=relpath,
             )
         report.pruned.append(
             {"doc_id": candidate["doc_id"], "source_path": candidate["source_path"]}
         )
+
+
+def _tombstoned_chunk_ids(
+    doc_store: DocumentStore, doc_id: str, chunk_count: int
+) -> list[str]:
+    """The chunk ids of ``doc_id`` whose row is a redaction tombstone, in order.
+
+    Read-only, so a dry run can predict what :func:`_delete_document_tree`
+    would leave behind.
+    """
+    tombstoned: list[str] = []
+    for index in range(chunk_count):
+        chunk_id = chunk_doc_id(doc_id, index)
+        row = doc_store.get(chunk_id)
+        if row is not None and is_redaction_tombstone(row):
+            tombstoned.append(chunk_id)
+    return tombstoned
+
+
+def _warn_tombstoned_chunks(
+    report: CorpusSyncReport, relpath: str, chunk_ids: list[str]
+) -> None:
+    report.warnings.extend(
+        _redaction_tombstone_warning(relpath, chunk_id) for chunk_id in chunk_ids
+    )
+
+
+def _source_path_or(metadata: dict[str, Any], fallback: str) -> str:
+    """The row's ``source_path`` when it is a string, else ``fallback``."""
+    source_path = metadata.get("source_path")
+    return source_path if isinstance(source_path, str) else fallback
 
 
 def _delete_document_tree(
@@ -918,10 +967,25 @@ def _delete_document_tree(
     vector_store: Any,
     doc_id: str,
     chunk_count: int,
+    *,
+    report: CorpusSyncReport,
+    relpath: str,
 ) -> None:
-    """Delete a parent document, its chunk docs, and their vector rows."""
+    """Delete a parent document, its chunk docs, and their vector rows.
+
+    A chunk that is a redaction tombstone is **kept, with a warning on
+    ``report``**: deleting its row loses the tombstone, and the file coming
+    back under the old path would write the redacted text under the same chunk
+    id with nothing to refuse it (#1034, the same hole the orphan loop in
+    :func:`_apply_record` closes). Its vector row is not touched either; the
+    redaction already deleted it. The parent row is deleted as before.
+    """
+    kept = _tombstoned_chunk_ids(doc_store, doc_id, chunk_count)
+    _warn_tombstoned_chunks(report, relpath, kept)
     for index in range(chunk_count):
-        _delete_doc_and_vector(doc_store, vector_store, chunk_doc_id(doc_id, index))
+        chunk_id = chunk_doc_id(doc_id, index)
+        if chunk_id not in kept:
+            _delete_doc_and_vector(doc_store, vector_store, chunk_id)
     _delete_doc_and_vector(doc_store, vector_store, doc_id)
 
 
