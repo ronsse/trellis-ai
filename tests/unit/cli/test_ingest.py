@@ -468,6 +468,96 @@ class TestIngestEvidence:
         result = runner.invoke(app, ["ingest", "evidence", "/nonexistent.json"])
         assert result.exit_code == 2
 
+    # -- #1034: a write over a redaction tombstone must be explicit ----------
+
+    def _tombstoned_evidence(self, tmp_path: Path) -> str:
+        from tests.redaction_tombstone import make_tombstone
+        from trellis.core.vector_metadata import resolve_vector_store
+        from trellis_cli.stores import _get_registry
+
+        registry = _get_registry()
+        make_tombstone(
+            registry.knowledge.document_store,
+            resolve_vector_store(registry),
+            "evidence-gone",
+        )
+        f = tmp_path / "tombstoned.json"
+        f.write_text(
+            json.dumps(
+                {
+                    "evidence_id": "evidence-gone",
+                    "evidence_type": "snippet",
+                    "content": "Quartz harbor rewritten text",
+                    "source_origin": "trace",
+                }
+            )
+        )
+        return str(f)
+
+    def test_ingest_evidence_refuses_a_write_over_a_tombstone(
+        self, tmp_path: Path
+    ) -> None:
+        """Same exit and payload in text and JSON; the row stays blank.
+
+        Defective subject: drop the tombstone check in ``put_document`` and the
+        exit is 0 with the redacted id written back.
+        """
+        from trellis.core.document_write import is_redaction_tombstone
+        from trellis_cli.stores import get_document_store
+
+        path = self._tombstoned_evidence(tmp_path)
+
+        text = runner.invoke(app, ["ingest", "evidence", path])
+        as_json = runner.invoke(app, ["ingest", "evidence", path, "--format", "json"])
+
+        assert text.exit_code == 2
+        assert "--reingest-redacted" in plain(text.stdout)
+        assert as_json.exit_code == text.exit_code
+        payload = json.loads(as_json.stdout.strip())
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ValidationError"
+        assert payload["code"] == "redaction_tombstone_overwrite"
+        assert is_redaction_tombstone(get_document_store().get("evidence-gone"))
+
+    def test_ingest_evidence_reingest_redacted_writes_and_stamps(
+        self, tmp_path: Path
+    ) -> None:
+        from trellis.core.document_write import (
+            REINGEST_STAMP_KEY,
+            is_redaction_tombstone,
+        )
+        from trellis_cli.stores import get_document_store
+
+        path = self._tombstoned_evidence(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["ingest", "evidence", path, "--reingest-redacted", "--format", "json"],
+        )
+
+        assert result.exit_code == 0, result.stdout
+        row = get_document_store().get("evidence-gone")
+        assert row["content"] == "Quartz harbor rewritten text"
+        assert not is_redaction_tombstone(row)
+        assert REINGEST_STAMP_KEY in row["metadata"]
+
+    def test_the_flag_is_harmless_on_an_id_that_was_never_redacted(
+        self, tmp_path: Path
+    ) -> None:
+        from trellis.core.document_write import REINGEST_STAMP_KEY
+        from trellis_cli.stores import get_document_store
+
+        f = tmp_path / "evidence.json"
+        f.write_text(_evidence_json())
+
+        result = runner.invoke(
+            app, ["ingest", "evidence", str(f), "--reingest-redacted"]
+        )
+
+        assert result.exit_code == 0
+        for doc in get_document_store().list_documents(limit=10):
+            assert REINGEST_STAMP_KEY not in (doc.get("metadata") or {})
+
 
 class TestIngestHelp:
     def test_ingest_help(self) -> None:

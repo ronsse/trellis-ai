@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from pydantic import ValidationError as PydanticValidationError
 
-from trellis.core.document_write import put_document
+# Defined beside the seam that enforces them (#1034); re-exported because
+# ``trellis.learning.scoring`` and retention restore import them from here.
+from trellis.core.document_write import (
+    REDACTION_TOMBSTONE_REASON,
+    is_redaction_tombstone,
+    put_document,
+)
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.precedent_document import (
     PRECEDENT_ENTITY_ID_PREFIX,
@@ -121,6 +127,15 @@ def _evidence_document_id(value: object) -> str:
     return value
 
 
+def _evidence_flag(evidence: dict[str, Any], key: str) -> bool:
+    """An optional ``evidence`` flag, refused unless it is a real boolean."""
+    value = evidence.get(key, False)
+    if not isinstance(value, bool):
+        msg = f"evidence.{key} must be a boolean"
+        raise ValidationError(msg, code="evidence_ingest_shape")
+    return value
+
+
 class EvidenceIngestHandler:
     """Store a document and optionally create its vector row.
 
@@ -204,6 +219,7 @@ class EvidenceIngestHandler:
         if not isinstance(preserve_updated_at, bool):
             msg = "evidence.preserve_updated_at must be a boolean"
             raise ValidationError(msg, code="evidence_ingest_shape")
+        reingest_redacted = _evidence_flag(evidence, "reingest_redacted")
 
         requested_mode = evidence.get("embed_mode")
         if requested_mode is not None and requested_mode != self._embed:
@@ -236,6 +252,7 @@ class EvidenceIngestHandler:
             content,
             metadata,
             preserve_updated_at=preserve_updated_at,
+            reingest_redacted=reingest_redacted,
         )
 
         if self._embed == "soft":
@@ -601,11 +618,13 @@ def _stamp_precedent_document(
     A metadata-only write that also mirrors the stamp onto the vector row
     (:func:`~trellis.core.document_write.put_document`). A precedent promoted
     before it wrote a document has none, and is not given one here. Returns
-    whether a row was stamped; a document-store failure propagates.
+    whether a row was stamped; a document-store failure propagates. A row
+    that is a redaction tombstone is not stamped either (``False``): the stamp
+    would replace the redaction's lifecycle and unmark it.
     """
     document_store = registry.knowledge.document_store
     document = document_store.get(precedent_id)
-    if not document:
+    if not document or is_redaction_tombstone(document):
         return False
     metadata = dict(document.get("metadata") or {})
     metadata[LIFECYCLE_KEY] = lifecycle
@@ -639,7 +658,9 @@ def _rewrite_precedent_document(
 
     Keeps the row's other metadata (a noise tag, a lifecycle stamp) and
     replaces its text and title with what the node now says. ``None`` when
-    the precedent has no document row; nothing is created.
+    the precedent has no document row, or its row is already a redaction
+    tombstone (rewriting it would refuse, after the source rows were blanked);
+    nothing is created.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
         precedent_document_content,
@@ -647,7 +668,7 @@ def _rewrite_precedent_document(
 
     document_store = registry.knowledge.document_store
     document = document_store.get(precedent_id)
-    if not document:
+    if not document or is_redaction_tombstone(document):
         return None
     content = precedent_document_content(
         properties.get("name"), properties.get("description")
@@ -665,28 +686,6 @@ def _rewrite_precedent_document(
         preserve_updated_at=False,
     )
     return content, metadata
-
-
-# The ``deprecation_reason`` a redaction's blanked document row carries.
-# ``retention.restore`` reads it back to recognise the tombstone
-# (:func:`is_redaction_tombstone`).
-REDACTION_TOMBSTONE_REASON = "redacted"
-
-
-def is_redaction_tombstone(doc: dict[str, Any]) -> bool:
-    """Whether a document row is the blank archived row a redaction leaves.
-
-    Both halves are required. The reason alone is a free-text field that
-    ``retention.archive`` and ``retention.prune`` take from the caller, so an
-    ordinary archived note whose reason reads "redacted" must stay
-    restorable; a tombstone is also empty (:func:`_tombstone_document`).
-    """
-    record = (doc.get("metadata") or {}).get(LIFECYCLE_KEY)
-    return (
-        isinstance(record, dict)
-        and record.get("deprecation_reason") == REDACTION_TOMBSTONE_REASON
-        and not doc.get("content")
-    )
 
 
 def _tombstone_document(

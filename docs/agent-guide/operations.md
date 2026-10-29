@@ -983,12 +983,13 @@ it fails.
 Ingest evidence from a JSON file.
 
 ```bash
-trellis ingest evidence <file> [--format text|json]
+trellis ingest evidence <file> [--reingest-redacted] [--format text|json]
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `file` | **Yes** | Path to evidence JSON file |
+| `--reingest-redacted` | No | Write over an `evidence_id` that was redacted. Without it a write to a redacted id exits `2` (`redaction_tombstone_overwrite`, in text and JSON alike) and the row stays blank; with it the row is written and stamped `reingested_after_redaction` (see `trellis curate redact`) |
 
 **Example:**
 
@@ -1389,6 +1390,27 @@ Scope boundaries, stated plainly:
   when none). This happens before the precedent scrub and the purge, so a
   failure leaves the target in place, every precedent unscrubbed and the
   redaction re-runnable.
+- **A write over a redacted id is refused unless it says it means to (#1034).**
+  `put_document` refuses a non-blank write to a document id whose row is a
+  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; an
+  unflagged write passes only if the row it writes is still a tombstone (a
+  second redaction, or a metadata write that keeps the blank content and the
+  lifecycle stamp), so a blank write that drops or replaces the stamp is refused
+  too. The check reads the row and then writes it, so it is not atomic: a
+  redaction that lands between the two can still be overwritten, and a read that
+  fails stops the write. The
+  deliberate way back is `reingest_redacted`: `trellis ingest evidence
+  --reingest-redacted`, or `evidence.reingest_redacted=true` on
+  `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`).
+  A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
+  caller may not set that key, `reingest_stamp_reserved`), and promotion's
+  re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back
+  by some other route is not mistaken for the owner's re-ingest. `corpus sync`
+  never writes over a tombstone: it skips the row (or chunk) and reports a
+  `{"kind": "redaction_tombstone", "path", "doc_id"}` warning, and a file that
+  shrinks keeps a redacted chunk's row (with the same warning) rather than
+  deleting it as an orphan. `worker embed-traces` reports a redacted trace
+  summary as `skipped_redacted` and moves its watermark past it.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
@@ -3771,6 +3793,55 @@ above its own clearance, and cannot touch a document it may not read.**
   differs from the one for a missing id, so these five, and an `evidence.ingest`
   overwrite, tell a key that the document exists; the read side's by-id
   not-found parity does not extend to them.
+- REST `POST /api/v1/documents` takes an optional `sensitivity` beside `doc_id`,
+  `content` and `metadata`, under the rules `POST /api/v1/evidence` and the MCP
+  save tools use: a label above the key's own clearance is a 403, an unknown
+  label (or one that is not a string) is a 422, and so is a raw
+  `data_classification` key in `metadata` (for every caller, `admin` included:
+  the label has one door). `metadata` must be an object (422 otherwise). Nothing
+  is written on any refusal. The overwrite check compares the label this request
+  writes, so a re-put that omits `sensitivity` over a labelled document is the
+  downgrade it always was.
+- REST `POST /api/v1/vectors` judges every row before it writes any, so a refused
+  batch stores nothing. A row whose `item_id` names a document above the key's
+  clearance, or a chunk of one (a chunk id is judged by its parent's label,
+  whether or not the chunk has a row of its own), is a 409 with nothing written.
+  The route stores a vector for any id, so it has no "missing document" answer to
+  give instead, and an id that names no document is written as before. A raw
+  `data_classification` in a row's `metadata` is a 422 for every caller, auth
+  `off` and `admin` included (a vector row's label is mirrored from its
+  document). A row that is not an object, or whose `metadata` is neither an
+  object nor `null`, is a 422 too. A row whose `item_id` is not a string is
+  counted as an error, not coerced to one. A key at `restricted`, auth `off` and
+  a shared secret are never refused, and the gate reads no document for them.
+- Whatever the caller, a row whose `item_id` names a stored document is written
+  carrying that document's mirrored metadata (`data_classification`,
+  `lifecycle`, `content_tags`, `auto_importance`; the same keys, and the same
+  copy-if-present, remove-if-absent rule, as `sync_vector_metadata`), over
+  anything the row's own `metadata` says. The semantic axis builds a pack item,
+  excerpt included, from this row, so a rewrite that left it unlabelled would
+  serve a restricted document at a lower clearance. A chunk id is mirrored from
+  its own stored document, as the chunk embed path does; the parent's label is
+  not copied onto it but read through the chunk id when the row is served. An id
+  that names no document is written as sent. The trace and memory extraction
+  hooks keep running at `restricted`: they write graph drafts, which target no
+  document.
+- The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
+  `/traces`, `/observations` and `/measurements` build their executor at the
+  key's clearance, as `/documents` and `/evidence` do, instead of at
+  `restricted`. None of those operations names a document, so the floor has
+  nothing to refuse on them today; the clearance is threaded so a later rule
+  that does cannot be bypassed by a route that forgot it.
+- **Accepted posture: the 409 tells a key the document exists.** An
+  `evidence.ingest` overwrite refusal (`POST /api/v1/evidence`,
+  `POST /api/v1/documents`, `POST /api/v1/commands/batch`) and the
+  `POST /api/v1/vectors` refusal name the document id, so a key below a
+  document's label can learn that the id is taken by trying to write it. This is
+  the same posture as the Stage-2 refusals above and is accepted for the same
+  reason: answering as for a fresh id would mean either writing over the
+  document or reporting a success that wrote nothing, and a write that
+  silently does not happen is worse than a refusal that names its target. A
+  document's label, content and metadata are never in the refusal.
 
 A trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
 never refused. The clearance is a required keyword of `build_curate_executor`,
@@ -4027,7 +4098,7 @@ Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools 
 | `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?`, `index?`, `refresh?`, `retrieval_phase?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. Pass `index=True` for the id index (see "Progressive disclosure" below); mutually exclusive with `sections`. Pass `retrieval_phase="post_hoc"` when retrieving after the work is done, e.g. to check conclusions — `"pre_work"` and `"mid_task"` are the other allowed values; an unrecognised value is refused (`INVALID_PARAMS`), never silently stored. |
 | `save_experience` | `trace_json` | Confirmation with trace_id. The server sets `metadata.project` before ingest ([trace-format.md § Project stamp](trace-format.md#project-stamp)) |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?`, `content?`, `evidence_ref?`, `supersedes?` | Confirmation with entity_id. `supersedes` names an entity this one replaces (see "The stamp's first deterministic producer" above). |
-| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. |
+| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. A `doc_id` that names a redacted document is refused (`redaction_tombstone_overwrite`) with nothing written: an agent's save is not the owner's decision to bring a redacted id back, and `save_memory` has no parameter for it. The error names the two ways that can: `trellis ingest evidence --reingest-redacted`, or `execute_mutation` with `evidence.reingest_redacted=true`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents, excluding demoted/archived ones |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |

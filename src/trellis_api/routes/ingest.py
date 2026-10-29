@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +13,7 @@ from trellis.core.error_sanitize import (
     sanitize_error_message,
 )
 from trellis.core.ids import generate_ulid
+from trellis.core.vector_metadata import MIRRORED_METADATA_KEYS
 from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
     trace_already_ingested,
@@ -34,6 +35,7 @@ from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
     refuse_document_overwrite,
+    refuse_vector_write,
     request_clearance,
     resolve_requested_by,
     stamp_request_sensitivity,
@@ -50,6 +52,9 @@ from trellis_wire.dtos import (
     IngestResponse,
     StringDetailError,
 )
+
+if TYPE_CHECKING:
+    from trellis.stores.base.document import DocumentStore
 
 #: Every hand-raised 422 in this module carries a plain-string ``detail``
 #: (describing the bad trace/evidence/vectors body), not FastAPI's own
@@ -73,7 +78,10 @@ router = APIRouter()
 
 
 @router.post("/traces", response_model=IngestResponse, responses={422: _BODY_422})
-def ingest_trace(body: dict[str, Any]) -> IngestResponse:
+def ingest_trace(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> IngestResponse:
     """Ingest a trace through the governed mutation pipeline."""
     try:
         trace = Trace.model_validate(body)
@@ -84,10 +92,7 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
         ) from exc
 
     registry = get_registry()
-    executor = build_curate_executor(
-        registry,
-        clearance="restricted",  # trusted: a trace write names no document
-    )
+    executor = build_curate_executor(registry, clearance=request_clearance(ctx))
     # Read before the write: the handler answers a stored trace_id as a
     # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
@@ -202,11 +207,61 @@ def ingest_evidence(
 # ── Vector batch upsert ─────────────────────────────────────────────────
 
 
+def _vector_row_metadata(
+    document_store: DocumentStore, item_id: str, supplied: dict[str, Any]
+) -> dict[str, Any]:
+    """The metadata to store on ``item_id``'s vector row, agreeing with its document.
+
+    A row's mirrored keys (:data:`MIRRORED_METADATA_KEYS`: the label,
+    ``lifecycle``, ``content_tags``, ``auto_importance``) are the document's, not
+    the caller's: the semantic axis builds its pack item, excerpt included, from
+    this row, so a rewrite that dropped the label would serve a restricted
+    excerpt to a lower clearance. The rule is ``sync_vector_metadata_outcome``'s,
+    applied before the one write instead of after it, so there is no moment (and
+    no fail-soft miss) in which the row is stripped: a key the document carries
+    is copied, a key it lacks is removed from the row.
+
+    A chunk id is mirrored from its own stored document, which is what the chunk
+    embed path does; its parent's label is judged at serve time through the id.
+    An id that names no document is written as supplied.
+    """
+    row = dict(supplied)
+    stored = document_store.get(item_id)
+    if stored is None:
+        return row
+    source = stored.get("metadata")
+    if not isinstance(source, dict):
+        source = {}
+    for key in MIRRORED_METADATA_KEYS:
+        if key in source:
+            row[key] = source[key]
+        else:
+            row.pop(key, None)
+    return row
+
+
 @router.post("/vectors", responses={422: _BODY_422})
-def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
+def upsert_vectors(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Batch upsert vectors into the vector store.
 
     Body: ``{"vectors": [{"item_id": "...", "vector": [...], "metadata": {...}}, ...]}``
+
+    Every row is judged before any is written, so a refused batch stores
+    nothing. A row that is not an object, or whose ``metadata`` is neither an
+    object nor ``null``, is a 422. A row's ``metadata`` may not carry a raw
+    ``data_classification`` (422), whoever the caller is: a vector row's label
+    is mirrored from its document, never set here. A row whose ``item_id`` is a
+    document (or a chunk of one) above the key's clearance is refused (409):
+    replacing its vector row would replace what a semantic hit shows and
+    carries. A row whose ``item_id`` is not a string is counted as an error,
+    since an id the gate cannot read cannot be judged.
+
+    When ``item_id`` names a stored document the row is written carrying that
+    document's mirrored metadata (its label and lifecycle among them), for
+    every caller, whatever the row's own ``metadata`` says.
     """
     vectors = body.get("vectors", [])
     if not isinstance(vectors, list):
@@ -217,17 +272,40 @@ def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
     if vector_store is None:
         raise HTTPException(status_code=501, detail="Vector store not configured")
 
+    document_store = registry.knowledge.document_store
+    for index, item in enumerate(vectors):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=422, detail=f"vectors[{index}] must be an object"
+            )
+        item_id = item.get("item_id")
+        metadata = item.get("metadata")
+        # ``null`` is stored as ``{}``; anything else that is not an object would
+        # be stored as sent and then break every semantic pack that reads it.
+        if metadata is not None and not isinstance(metadata, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"vectors[{index}].metadata must be an object",
+            )
+        # A raw label is refused whoever the caller is, as on ``/evidence``.
+        if metadata is not None:
+            stamp_request_sensitivity(metadata, None, ctx=ctx)
+        if item_id and isinstance(item_id, str):
+            refuse_vector_write(document_store, item_id, ctx=ctx)
+
     upserted = 0
     errors = 0
     for item in vectors:
         item_id = item.get("item_id")
         vector = item.get("vector")
-        metadata = item.get("metadata", {})
-        if not item_id or not vector:
+        if not item_id or not vector or not isinstance(item_id, str):
             errors += 1
             continue
         try:
-            vector_store.upsert(item_id=item_id, vector=vector, metadata=metadata)
+            row_metadata = _vector_row_metadata(
+                document_store, item_id, item.get("metadata") or {}
+            )
+            vector_store.upsert(item_id=item_id, vector=vector, metadata=row_metadata)
             upserted += 1
         # AGGREGATE: per-row failures are counted and surfaced in the
         # response's ``errors`` field so a single bad row does not block

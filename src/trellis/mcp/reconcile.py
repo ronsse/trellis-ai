@@ -49,7 +49,7 @@ from pydantic import model_validator
 
 from trellis.core import write_config
 from trellis.core.base import TrellisModel
-from trellis.core.document_write import put_document
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.precedent_document import is_promoted_precedent_document
@@ -432,7 +432,8 @@ def mark_document_superseded(
     Returns ``None`` when the stale-mark was applied, and otherwise the
     :class:`ReconcileFallbackReason` it was not: ``STALE_RECHECK`` when the old
     doc has vanished, ``TARGET_PROTECTED`` when it is a promoted precedent's
-    row. **Test the return with** ``is None`` **and never for truthiness**: a
+    row or a redaction tombstone (stamping that would unmark the redaction).
+    **Test the return with** ``is None`` **and never for truthiness**: a
     reason is a non-empty string, so ``if mark_document_superseded(...)`` would
     read a refusal as success. It used to be a ``bool``, which could not say
     which of the two it was, and the refused-precedent case was recorded as a
@@ -544,6 +545,16 @@ def mark_document_superseded(
             new_doc_id=new_doc_id,
         )
         return ReconcileFallbackReason.STALE_RECHECK
+    if is_redaction_tombstone(doc):
+        # A redacted row is blank and archived already; a ``superseded`` stamp
+        # would replace the archived one and unmark the tombstone. The write
+        # seam refuses that, and refusing here keeps it a degrade, not a raise.
+        logger.warning(
+            "supersede_target_is_redaction_tombstone",
+            old_doc_id=old_doc_id,
+            new_doc_id=new_doc_id,
+        )
+        return ReconcileFallbackReason.TARGET_PROTECTED
     metadata = dict(doc.get("metadata") or {})
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id

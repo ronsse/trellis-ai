@@ -367,3 +367,74 @@ class TestStageTwoRunsOnThisPath:
 
         assert queries == [], "the backlog was scanned before the gate was built"
         assert recorder.texts == []
+
+
+class TestRedactedSummaryIsNotOverwritten:
+    """The embed pass carries no re-ingest flag (#1034): a summary id that was
+    redacted is refused like any other unflagged write, because bringing a
+    redacted id back is the owner's decision.
+
+    The refusal is the same on every retry, so the pass counts it under
+    ``skipped_redacted`` and advances past it, as it does for
+    ``skipped_invalid``. Holding the cursor behind it would pin the watermark
+    at the oldest row: every pass would rescan the same ``max_scan`` rows,
+    embed nothing newer and, past ``max_scan * 20`` rows, raise
+    ``TraceEmbedScanLimitError``.
+
+    Defective subject: return ``False`` after the ``skipped_redacted`` count in
+    ``_process_one`` (or drop the branch), and the watermark stays ``None``.
+    """
+
+    def _tombstone(self, registry, trace) -> str:
+        from tests.redaction_tombstone import make_tombstone
+        from trellis.core.vector_metadata import resolve_vector_store
+
+        doc_id = trace_summary_doc_id(trace.trace_id)
+        make_tombstone(
+            registry.knowledge.document_store, resolve_vector_store(registry), doc_id
+        )
+        return doc_id
+
+    def test_a_refused_write_is_skipped_and_the_row_stays_blank(
+        self, registry, watermark_path
+    ) -> None:
+        from trellis.core.document_write import is_redaction_tombstone
+
+        traces = seed_traces(registry, 3)
+        doc_id = self._tombstone(registry, traces[1])
+
+        first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        second = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert is_redaction_tombstone(registry.knowledge.document_store.get(doc_id))
+        assert first.skipped_redacted == 1
+        assert first.failed == 0
+        assert first.embedded == 2
+        assert first.to_dict()["skipped_redacted"] == 1
+        assert first.to_dict()["status"] == "ok"
+        # Past it for good: not retried, not refused again.
+        assert second.skipped_redacted == 0
+        assert second.scanned == 0
+        assert second.embedded == 0
+
+    def test_the_oldest_row_redacted_does_not_stall_every_newer_one(
+        self, registry, watermark_path
+    ) -> None:
+        traces = seed_traces(registry, 6)
+        self._tombstone(registry, traces[0])
+
+        first = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, max_scan=3, page_size=2
+        )
+        second = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, max_scan=3, page_size=2
+        )
+
+        assert first.watermark_before is None
+        assert first.watermark_after is not None
+        assert first.skipped_redacted == 1
+        assert first.embedded == 2
+        assert second.watermark_after != first.watermark_after
+        assert second.embedded == 3
+        assert second.skipped_redacted == 0
+        assert second.failed == 0

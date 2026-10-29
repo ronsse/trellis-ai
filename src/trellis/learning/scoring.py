@@ -1523,13 +1523,19 @@ def _reingested_after(
 ) -> datetime | None:
     """When the payload's source was last redacted, if it was written again since.
 
-    ``put_document`` does not check for a tombstone, so a redacted id can come
-    back with new content. The answer is the time of the latest
+    Only a write that **said so** counts as a re-ingest (#1034):
+    ``put_document`` refuses a content write over a redaction tombstone unless
+    ``reingest_redacted`` is set, and a flagged one stamps the row with
+    ``reingested_after_redaction``. The answer is the time of the latest
     ``REDACTION_APPLIED`` event naming the source, and only when all of these
     hold, so that a state that merely looks like a re-ingest never reads as
     one:
 
     * the source's own document row is there and is not a redaction tombstone;
+    * that row carries a ``reingested_after_redaction`` stamp that parses
+      and is at or after that event. A live row without one, such as a
+      tombstone an older sync wrote the text back over, proves nothing, so
+      its stale candidate stays refused;
     * no id the redaction named (:func:`_redactable_source_ids`) is still a
       tombstone, so a chunk row left behind by a parent that is still blank
       does not count;
@@ -1540,7 +1546,10 @@ def _reingested_after(
     ``None`` otherwise, and without a ``document_store`` or an ``event_log``,
     which is the cautious answer: it keeps the refusal.
     """
-    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
+    from trellis.core.document_write import (  # noqa: PLC0415
+        REINGEST_STAMP_KEY,
+        is_redaction_tombstone,
+    )
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
 
     source_ids = _redactable_source_ids(entity_payload)
@@ -1548,6 +1557,9 @@ def _reingested_after(
         return None
     row = document_store.get(source_ids[0])
     if row is None or is_redaction_tombstone(row):
+        return None
+    stamped_at = _moment((row.get("metadata") or {}).get(REINGEST_STAMP_KEY))
+    if stamped_at is None:
         return None
     for named_id in source_ids[1:]:
         named = document_store.get(named_id)
@@ -1564,6 +1576,8 @@ def _reingested_after(
             moment = _moment(event.occurred_at)
             if moment is not None and (redacted_at is None or moment > redacted_at):
                 redacted_at = moment
+    if redacted_at is None or stamped_at < redacted_at:
+        return None
     return redacted_at
 
 
