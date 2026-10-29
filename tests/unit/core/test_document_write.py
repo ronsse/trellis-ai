@@ -117,6 +117,10 @@ class TestTheDocumentPlaneIsAuthoritative:
         """
 
         class _ExplodingDocumentStore:
+            def get(self, doc_id: str) -> None:
+                # The pre-write tombstone read (#1034): the row is absent.
+                return None
+
             def put(self, *args: Any, **kwargs: Any) -> str:
                 raise RuntimeError(DOCUMENT_DOWN)
 

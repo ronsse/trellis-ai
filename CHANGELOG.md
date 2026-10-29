@@ -6,6 +6,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The sensitivity floor covers the REST write routes it missed (#194; part of
+  #1029).** `POST /api/v1/documents` takes an optional `sensitivity`
+  (403 above the key's clearance, 422 for an unknown label, a non-string one or
+  a raw `data_classification` in `metadata`, nothing written), through the helper
+  `POST /evidence` uses; a non-object `metadata` is now a 422 where it was a
+  500. `POST /api/v1/vectors` refuses a row whose `item_id` is a document (or a
+  chunk of one) above the key's clearance with a 409, judges every row before
+  writing any so a refused batch stores nothing, refuses a raw
+  `data_classification` in a row's `metadata` (422, for every caller: `admin` and
+  auth `off` included, since a row's label is its document's and has no other
+  door), and counts a non-string `item_id` as an error; the route is no longer a
+  known gap in the roster rule. A row whose `item_id` names a stored document is
+  written carrying that document's `data_classification`, `lifecycle`,
+  `content_tags` and `auto_importance`, whatever the row's own `metadata` says,
+  so a cleared key re-embedding a restricted or archived document cannot leave a
+  row that serves it at a lower clearance. A row that is not an object (a 500
+  before), or whose `metadata` is neither an object nor `null` (stored as sent,
+  after which every semantic pack failed), is now a 422 with nothing written.
+  `POST /links`, `/entities`, `/feedback`, `/traces`, `/observations` and
+  `/measurements` build their executor at the key's clearance, not at
+  `restricted`; the trace and memory extraction hooks that run after a write are
+  not among them and stay at `restricted`, because graph drafts target no
+  document. The `POST /evidence` overwrite refusal keeps naming the document
+  id, and the new `/vectors` refusal does the same; both are documented as the
+  accepted posture in the operations guide. A raw `data_classification` in
+  `metadata` on `POST /documents` is now a 422 for every caller: a label has one
+  door, `sensitivity`.
 - **A document's `sensitivity` label is enforced on writes (#194, part 2; closes
   #1023).** A new governed `classification.set` operation relabels a document
   as a metadata-only write (`updated_at` preserved, vector row re-mirrored); the
@@ -1292,6 +1319,37 @@ All notable changes to Trellis will be documented in this file.
   was newly flagged. The `GET /documents` docstring no longer says the scan's
   memory grows only with `limit`: with `include_chunks=true` the parent-verdict
   cache holds one entry per distinct chunk parent scanned.
+
+- **A write over a redaction tombstone must be explicit (#1034).** A redacted
+  document keeps its id as a blank archived row, and nothing stopped a later
+  write from filling it again: `trellis corpus sync` did it on every run over an
+  unchanged vault, because the blanked row never matched its file's hash.
+  `put_document` now refuses an unflagged write to a tombstone
+  (`redaction_tombstone_overwrite`) unless the row it writes is still a
+  tombstone (a second redaction, or a metadata write that keeps the blank
+  content and the lifecycle stamp); a blank write that drops or replaces the
+  stamp would unmark the row, so it is refused like a content write. Setting
+  the keyword-only `reingest_redacted` is the way past it, and a flagged write
+  stamps the row `reingested_after_redaction`. The guard reads the row, then
+  writes: it is not atomic, so a redaction that lands between the two can still
+  be overwritten, and a `get` that fails now fails the write closed
+  (deliberate; before, the write went ahead unchecked). A caller-supplied stamp
+  is refused (`reingest_stamp_reserved`). Promotion's re-ingest exemption
+  (`refused_redacted`) now needs that stamp, so a row put back by a raw write
+  is no longer read as the owner's re-ingest. The flag is `trellis ingest
+  evidence --reingest-redacted` and `evidence.reingest_redacted` on
+  `evidence.ingest`; MCP `save_memory`, `POST /api/v1/documents` and the dbt
+  docs load carry none and are refused. Corpus sync skips a tombstoned row or chunk and reports a
+  `redaction_tombstone` warning instead of writing, and a file that shrinks no
+  longer deletes a redacted chunk as an orphan (the file growing back would have
+  recreated it with the redacted text). The refusals degrade cleanly on the
+  paths that stamp a row: MCP supersession answers `target_protected` for a
+  tombstone, a precedent lifecycle stamp skips one, and a precedent whose
+  document row is already a tombstone is not rewritten by a source redaction.
+  The embed-traces worker counts a refused trace summary under
+  `skipped_redacted` and advances past it, so one redacted summary no longer
+  holds the watermark behind every newer trace. A command that does not set
+  the flag keeps its bytes and idempotency key.
 
 - **A redaction scrub of a precedent drops the name alias of its source-text
   name (#1030).** `entity.create` binds a `name` alias whose `raw_id` and

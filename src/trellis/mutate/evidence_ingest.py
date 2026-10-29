@@ -35,6 +35,7 @@ def build_evidence_ingest_command(
     doc_id: str | None = None,
     uri: str | None = None,
     preserve_updated_at: bool = False,
+    reingest_redacted: bool = False,
     created_at: str | None = None,
     embed_mode: EvidenceEmbedMode = "soft",
     idempotency_key: str | None = None,
@@ -47,6 +48,13 @@ def build_evidence_ingest_command(
     across transport retries. Keyless mode is reserved for state-based repair
     loops, where a successful historical event must not suppress a missing
     vector row's reconstruction.
+
+    ``reingest_redacted`` says the write is meant to bring a redacted document
+    id back (:func:`~trellis.core.document_write.put_document`). It rides the
+    evidence dict and the idempotency digest **only when set**, so a command
+    that does not use it keeps the bytes and the key it had before the flag
+    existed. A value that is set but not a boolean is carried as given, for the
+    handler to refuse.
     """
     resolved_id = doc_id or (
         _stable_document_id(idempotency_key) if idempotency_key else generate_ulid()
@@ -62,6 +70,8 @@ def build_evidence_ingest_command(
         evidence["uri"] = uri
     if created_at is not None:
         evidence["created_at"] = created_at
+    if reingest_redacted:
+        evidence["reingest_redacted"] = reingest_redacted
 
     resolved_key = idempotency_key
     if resolved_key is None and derive_idempotency:
@@ -76,6 +86,8 @@ def build_evidence_ingest_command(
             "preserve_updated_at": preserve_updated_at,
             "created_at": created_at,
         }
+        if reingest_redacted:
+            payload["reingest_redacted"] = reingest_redacted
         resolved_key = f"evidence.ingest:{_canonical_digest(payload)}"
 
     return Command(
@@ -110,6 +122,7 @@ def build_evidence_ingest_command_from_args(
         uri=evidence.get("uri"),
         metadata=metadata if isinstance(metadata, dict) else None,
         preserve_updated_at=evidence.get("preserve_updated_at", False),
+        reingest_redacted=evidence.get("reingest_redacted", False),
         created_at=evidence.get("created_at"),
         embed_mode=cast("EvidenceEmbedMode", raw_mode),
         requested_by=requested_by,

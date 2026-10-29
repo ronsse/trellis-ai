@@ -395,7 +395,7 @@ class TestOverwriteOfALabelledDocument:
 
     def test_a_cleared_key_may_replace_at_the_same_label(self, client, registry):
         resp = _write_documents(
-            client, _headers(registry, ["admin"]), metadata=label("restricted")
+            client, _headers(registry, ["admin"]), sensitivity="restricted"
         )
         assert resp.status_code == 200, resp.text
         assert _stored(registry)["content"] == REPLACEMENT

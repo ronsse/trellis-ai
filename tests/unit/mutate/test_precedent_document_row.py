@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
+from tests.redaction_tombstone import make_tombstone, tombstone_metadata
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext, ClassificationResult
@@ -24,7 +25,7 @@ from trellis.classify.refresh import (
     reclassify_item,
     reclassify_stale,
 )
-from trellis.core.document_write import put_document
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.errors import StoreError
 from trellis.learning.scoring import (
@@ -40,6 +41,7 @@ from trellis.mutate.handlers import (
     PrecedentDemoteHandler,
     PrecedentReinstateHandler,
     RedactionApplyHandler,
+    _stamp_precedent_document,
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import GraphSearch, KeywordSearch, SemanticSearch
@@ -607,6 +609,36 @@ class TestRedaction:
         for axis in ("keyword", "semantic"):
             assert not _served(registry, axis, precedent_id)
 
+    def test_redacting_a_source_whose_precedent_row_is_a_tombstone_still_scrubs(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A precedent row already blanked (a redaction whose purge failed)
+        cannot be rewritten from the scrubbed node: the write seam refuses it,
+        and that used to reject the command after the source rows were blanked.
+
+        Defective subject: drop the ``is_redaction_tombstone`` branch in
+        ``_rewrite_precedent_document``.
+        """
+        precedent_id = _promote_from_source(registry, "doc-source")
+        docs = registry.knowledge.document_store
+        put_document(
+            docs,
+            registry.knowledge.vector_store,
+            precedent_id,
+            "",
+            tombstone_metadata(),
+            preserve_updated_at=False,
+        )
+        assert is_redaction_tombstone(_document(registry, precedent_id))
+
+        RedactionApplyHandler(registry).handle(_redact_command("doc-source"))
+
+        node = registry.knowledge.graph_store.get_node(precedent_id)
+        assert node is not None
+        assert COPIED_TEXT not in repr(node["properties"])
+        assert is_redaction_tombstone(_document(registry, precedent_id))
+        assert is_redaction_tombstone(_document(registry, "doc-source"))
+
     def test_a_precedents_own_document_is_never_a_source_excerpt(
         self, registry: StoreRegistry
     ) -> None:
@@ -1006,6 +1038,39 @@ class TestRestoreRefusesAnOrphanedPrecedentRow:
         for untrue in ("blank", "tombstone", "redacted"):
             assert untrue not in text
         assert _document(registry)["content"] == row["content"]
+
+
+class TestDemoteStampLeavesARedactionTombstoneAlone:
+    """A lifecycle stamp over a tombstone would replace its archived lifecycle
+    and unmark it, so the stamp helper reports ``False`` (no row stamped)
+    rather than raising mid-demote (#1034).
+
+    Defective subject: drop the ``is_redaction_tombstone`` test in
+    ``_stamp_precedent_document``; it raises ``RedactionTombstoneError``.
+    """
+
+    def test_stamping_a_tombstoned_row_returns_false_and_leaves_it(
+        self, registry: StoreRegistry
+    ) -> None:
+        make_tombstone(
+            registry.knowledge.document_store, registry.knowledge.vector_store, NODE_ID
+        )
+        before = _document(registry)
+
+        stamped = _stamp_precedent_document(registry, NODE_ID, {"state": "deprecated"})
+
+        assert stamped is False
+        assert _document(registry) == before
+        assert is_redaction_tombstone(_document(registry))
+
+    def test_stamping_a_live_row_still_returns_true(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(NODE_ID, "live text", {})
+
+        assert (
+            _stamp_precedent_document(registry, NODE_ID, {"state": "demoted"}) is True
+        )
 
 
 class TestRestoreRefusesARedactionTombstone:
