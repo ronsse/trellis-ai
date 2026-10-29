@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
 from trellis.feedback.attribution import is_sectioned_payload
-from trellis.retrieve.sensitivity import DocumentClearance
+from trellis.retrieve.sensitivity import DocumentClearance, conceal_document_successor
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
@@ -304,18 +304,23 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does.
+    as a missing one does. A superseded document whose successor the caller
+    may not read is served without its ``lifecycle.superseded_by``.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
+    clearance = request_clearance(ctx)
     doc = store.get(doc_id)
-    if doc is not None and not DocumentClearance(store, request_clearance(ctx)).permits(
+    if doc is not None and not DocumentClearance(store, clearance).permits(
         doc_id, doc.get("metadata")
     ):
         doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
-    return {"status": "ok", "document": doc}
+    return {
+        "status": "ok",
+        "document": conceal_document_successor(doc, store, clearance),
+    }
 
 
 def _event_row(event: Event, *, include_payload: bool) -> dict[str, Any]:

@@ -122,6 +122,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **A pack no longer tells a reader about a successor or a served id it cannot
+  read (#194, part of #1029).** Supersession withheld a loser whenever its
+  declared successor was a candidate, even when the caller's clearance hid that
+  successor; the loser was dropped, counted under `superseded`, and a caller
+  could tell a hidden document existed and matched. A successor the caller
+  cannot read, judged as the pack's own gate judges it (its own label, and a
+  chunk's parent's), no longer counts as one: the loser is served. The served
+  items are the same with and without an unreadable successor among the
+  candidates. The pack's counters (`candidates_found`, `total`,
+  `by_reason.sensitivity`) still count that successor as a sensitivity
+  withholding, as for any hidden candidate. A served loser's own stored
+  `lifecycle.superseded_by` is dropped from the served copy when it names a
+  document the caller cannot read, in flat and sectioned packs and in
+  `GET /api/v1/documents/{id}`; the successor is judged by the store, never by
+  whether it matched the query, and the stored record is not rewritten. The
+  loser's `lifecycle.state` stays `superseded`, so the caller can tell that
+  some document it cannot read supersedes it, though not which. A
+  trusted caller, and a store with no labels, see no change. Not changed:
+  `GET /api/v1/search` and the rows of `GET /api/v1/documents` still return a
+  document's stored metadata. MCP `record_feedback` with
+  `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on
+  returned the pack's served ids, and a count of them, to any caller that named
+  the pack id; each id is now judged against the caller's clearance first, as
+  `get_items` judges a by-id read. An id that fails is neither named nor
+  counted, and a pack that served only such ids reads as an unknown pack, which
+  the check lets through. An id whose label cannot be read is treated as
+  unreadable.
 - **The steering text an MCP client reads now teaches the feedback call the
   learning loop can join.** The server `instructions`, the pack footer and the
   per-client setup snippets said "call `record_feedback`" without item ids,
@@ -1253,6 +1280,37 @@ All notable changes to Trellis will be documented in this file.
   was newly flagged. The `GET /documents` docstring no longer says the scan's
   memory grows only with `limit`: with `include_chunks=true` the parent-verdict
   cache holds one entry per distinct chunk parent scanned.
+
+- **A write over a redaction tombstone must be explicit (#1034).** A redacted
+  document keeps its id as a blank archived row, and nothing stopped a later
+  write from filling it again: `trellis corpus sync` did it on every run over an
+  unchanged vault, because the blanked row never matched its file's hash.
+  `put_document` now refuses an unflagged write to a tombstone
+  (`redaction_tombstone_overwrite`) unless the row it writes is still a
+  tombstone (a second redaction, or a metadata write that keeps the blank
+  content and the lifecycle stamp); a blank write that drops or replaces the
+  stamp would unmark the row, so it is refused like a content write. Setting
+  the keyword-only `reingest_redacted` is the way past it, and a flagged write
+  stamps the row `reingested_after_redaction`. The guard reads the row, then
+  writes: it is not atomic, so a redaction that lands between the two can still
+  be overwritten, and a `get` that fails now fails the write closed
+  (deliberate; before, the write went ahead unchecked). A caller-supplied stamp
+  is refused (`reingest_stamp_reserved`). Promotion's re-ingest exemption
+  (`refused_redacted`) now needs that stamp, so a row put back by a raw write
+  is no longer read as the owner's re-ingest. The flag is `trellis ingest
+  evidence --reingest-redacted` and `evidence.reingest_redacted` on
+  `evidence.ingest`; MCP `save_memory`, `POST /api/v1/documents` and the dbt
+  docs load carry none and are refused. Corpus sync skips a tombstoned row or chunk and reports a
+  `redaction_tombstone` warning instead of writing, and a file that shrinks no
+  longer deletes a redacted chunk as an orphan (the file growing back would have
+  recreated it with the redacted text). The refusals degrade cleanly on the
+  paths that stamp a row: MCP supersession answers `target_protected` for a
+  tombstone, a precedent lifecycle stamp skips one, and a precedent whose
+  document row is already a tombstone is not rewritten by a source redaction.
+  The embed-traces worker counts a refused trace summary under
+  `skipped_redacted` and advances past it, so one redacted summary no longer
+  holds the watermark behind every newer trace. A command that does not set
+  the flag keeps its bytes and idempotency key.
 
 - **A redaction scrub of a precedent drops the name alias of its source-text
   name (#1030).** `entity.create` binds a `name` alias whose `raw_id` and

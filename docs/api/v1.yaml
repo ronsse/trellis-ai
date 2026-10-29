@@ -4339,7 +4339,9 @@ paths:
 
         A document labelled above the caller''s clearance answers 404, exactly
 
-        as a missing one does.'
+        as a missing one does. A superseded document whose successor the caller
+
+        may not read is served without its ``lifecycle.superseded_by``.'
       operationId: get_document_api_v1_documents__doc_id__get
       parameters:
       - in: path

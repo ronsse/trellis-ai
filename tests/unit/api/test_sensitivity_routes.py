@@ -185,6 +185,138 @@ class TestRestSurfaces:
 
 REPLACEMENT = "unrelated replacement text about queue depth dashboards"
 
+# Distinct bodies: near-identical ones are collapsed by the pack's semantic dedup.
+OLD = {
+    "doc-old": "failover runbook, first edition: pause the nightly export jobs. " * 4,
+    "doc-stale": "failover runbook, second edition: raise the replica lag alarm. " * 4,
+    "doc-fine": "failover runbook, third edition: rehearse the dns cutover. " * 4,
+}
+
+
+class TestAServedLoserNamesNoUnreadableSuccessor:
+    """A kept loser's stored ``superseded_by`` is not an id leak (#1029).
+
+    A loser whose successor the key cannot read is served, and its own stored
+    lifecycle record still names that successor. The name must not reach a key
+    that may not read the successor, whether the successor matched the query
+    (``doc-old``, successor ``doc-secret``) or did not (``doc-stale``, successor
+    ``doc-newer``): the store decides, not the pool, so the response cannot say
+    which documents matched.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _losers(self, registry):
+        store = registry.knowledge.document_store
+        successors = {
+            "doc-old": "doc-secret",
+            "doc-stale": "doc-newer",
+            # A loser whose successor anyone may read keeps naming it.
+            "doc-fine": "doc-fresh",
+        }
+        for doc_id, successor in successors.items():
+            store.put(
+                doc_id,
+                OLD[doc_id],
+                {"title": doc_id, **_lifecycle("superseded", successor)},
+            )
+        store.put("doc-newer", REPLACEMENT, {"title": "Newer", **label("restricted")})
+        store.put("doc-fresh", REPLACEMENT + " fresh", {"title": "Fresh"})
+
+    @staticmethod
+    def _items(body, path):
+        if path == "packs":
+            return {i["item_id"]: i for i in body["items"]}
+        return {i["item_id"]: i for s in body["sections"] for i in s["items"]}
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    @pytest.mark.parametrize("scopes", [["read"], ["read", "confidential"]])
+    def test_a_pack_serves_the_loser_without_the_id(
+        self, client, registry, request_body, scopes
+    ):
+        resp = _post(client, headers=_headers(registry, scopes), **request_body)
+        items = self._items(resp.json(), request_body["path"])
+        assert {"doc-old", "doc-stale", "doc-fine"} <= set(items), (
+            "the losers are served"
+        )
+        for hidden in ("doc-secret", "doc-newer"):
+            assert hidden not in resp.text
+        for loser in ("doc-old", "doc-stale"):
+            assert items[loser]["metadata"]["lifecycle"] == {"state": "superseded"}
+        assert (
+            items["doc-fine"]["metadata"]["lifecycle"]["superseded_by"] == "doc-fresh"
+        )
+
+    @pytest.mark.parametrize(
+        "request_body", [FLAT, SECTIONED], ids=["flat", "sectioned"]
+    )
+    def test_a_restricted_key_is_served_the_record_as_stored(
+        self, client, registry, request_body
+    ):
+        resp = _post(
+            client, headers=_headers(registry, ["read", "restricted"]), **request_body
+        )
+        items = self._items(resp.json(), request_body["path"])
+        assert "doc-old" not in items, "its readable successor supersedes it"
+        assert (
+            items["doc-stale"]["metadata"]["lifecycle"]["superseded_by"] == "doc-newer"
+        )
+
+    @pytest.mark.parametrize(
+        ("doc_id", "successor"), [("doc-old", "doc-secret"), ("doc-stale", "doc-newer")]
+    )
+    def test_a_by_id_read_serves_the_loser_without_the_id(
+        self, client, registry, doc_id, successor
+    ):
+        resp = client.get(
+            f"/api/v1/documents/{doc_id}", headers=_headers(registry, ["read"])
+        )
+        assert resp.status_code == 200, resp.text
+        assert successor not in resp.text
+        assert resp.json()["document"]["metadata"]["lifecycle"] == {
+            "state": "superseded"
+        }
+        assert resp.json()["document"]["content"] == OLD[doc_id]
+
+    @pytest.mark.parametrize("scopes", [["admin"], ["read", "restricted"]])
+    @pytest.mark.parametrize(
+        ("doc_id", "successor"), [("doc-old", "doc-secret"), ("doc-stale", "doc-newer")]
+    )
+    def test_a_restricted_by_id_read_is_unchanged(
+        self, client, registry, scopes, doc_id, successor
+    ):
+        resp = client.get(
+            f"/api/v1/documents/{doc_id}", headers=_headers(registry, scopes)
+        )
+        stored = registry.knowledge.document_store.get(doc_id)
+        assert resp.json()["document"] == stored
+        assert stored["metadata"]["lifecycle"]["superseded_by"] == successor
+
+    def test_a_readable_successor_is_still_named_by_id(self, client, registry):
+        resp = client.get(
+            "/api/v1/documents/doc-fine", headers=_headers(registry, ["read"])
+        )
+        assert (
+            resp.json()["document"]["metadata"]["lifecycle"]["superseded_by"]
+            == "doc-fresh"
+        )
+
+    def test_the_stored_record_is_never_rewritten(self, client, registry):
+        before = registry.knowledge.document_store.get("doc-old")
+        client.get("/api/v1/documents/doc-old", headers=_headers(registry, ["read"]))
+        _post(client, headers=_headers(registry, ["read"]), **FLAT)
+        assert registry.knowledge.document_store.get("doc-old") == before
+        assert before["metadata"]["lifecycle"]["superseded_by"] == "doc-secret"
+
+    def test_the_event_payload_names_no_stored_lifecycle(self, client, registry):
+        """``PACK_ASSEMBLED`` records no item metadata: nothing to hide there."""
+        _post(client, headers=_headers(registry, ["read"]), **FLAT)
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert "superseded_by" not in str(event.payload)
+
 
 def _stored(registry):
     doc = registry.knowledge.document_store.get("doc-secret")

@@ -983,12 +983,13 @@ it fails.
 Ingest evidence from a JSON file.
 
 ```bash
-trellis ingest evidence <file> [--format text|json]
+trellis ingest evidence <file> [--reingest-redacted] [--format text|json]
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `file` | **Yes** | Path to evidence JSON file |
+| `--reingest-redacted` | No | Write over an `evidence_id` that was redacted. Without it a write to a redacted id exits `2` (`redaction_tombstone_overwrite`, in text and JSON alike) and the row stays blank; with it the row is written and stamped `reingested_after_redaction` (see `trellis curate redact`) |
 
 **Example:**
 
@@ -1389,6 +1390,27 @@ Scope boundaries, stated plainly:
   when none). This happens before the precedent scrub and the purge, so a
   failure leaves the target in place, every precedent unscrubbed and the
   redaction re-runnable.
+- **A write over a redacted id is refused unless it says it means to (#1034).**
+  `put_document` refuses a non-blank write to a document id whose row is a
+  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; an
+  unflagged write passes only if the row it writes is still a tombstone (a
+  second redaction, or a metadata write that keeps the blank content and the
+  lifecycle stamp), so a blank write that drops or replaces the stamp is refused
+  too. The check reads the row and then writes it, so it is not atomic: a
+  redaction that lands between the two can still be overwritten, and a read that
+  fails stops the write. The
+  deliberate way back is `reingest_redacted`: `trellis ingest evidence
+  --reingest-redacted`, or `evidence.reingest_redacted=true` on
+  `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`).
+  A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
+  caller may not set that key, `reingest_stamp_reserved`), and promotion's
+  re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back
+  by some other route is not mistaken for the owner's re-ingest. `corpus sync`
+  never writes over a tombstone: it skips the row (or chunk) and reports a
+  `{"kind": "redaction_tombstone", "path", "doc_id"}` warning, and a file that
+  shrinks keeps a redacted chunk's row (with the same warning) rather than
+  deleting it as an orphan. `worker embed-traces` reports a redacted trace
+  summary as `skipped_redacted` and moves its watermark past it.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
@@ -3713,6 +3735,27 @@ stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
 
+Two answers no longer reveal a document the caller cannot read. A superseded
+document whose declared successor the caller may not read is served, as it would
+be if the successor did not exist (the successor is judged the way the pack's
+own gate judges it: by its own label, and a chunk by its parent's too). The
+served items are the same with and without that successor among the candidates;
+the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
+count it as a sensitivity withholding, as for any hidden candidate. The served
+loser's own `lifecycle.superseded_by` is dropped from the served copy when it
+names a document the caller cannot read, in flat and sectioned packs and in
+`GET /api/v1/documents/{id}`; the store judges it, so the answer does not depend
+on whether the successor matched, and a store error reads as unreadable (a chunk
+successor under a parent-fetch outage reads as unreadable, so the loser is
+still served). The loser's `lifecycle.state` stays `superseded`, so such a
+caller can tell that some document it cannot read supersedes this one, though
+not which. `GET /api/v1/search` and the rows of `GET /api/v1/documents`
+return stored metadata as before. With
+`TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
+MCP `record_feedback` names, and counts, only the served ids the caller may
+read; a pack that served none reads as an unknown pack and the call is
+recorded. A trusted-local caller sees every id.
+
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
 
@@ -4048,7 +4091,7 @@ Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools 
 | `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?`, `index?`, `refresh?`, `retrieval_phase?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. Pass `index=True` for the id index (see "Progressive disclosure" below); mutually exclusive with `sections`. Pass `retrieval_phase="post_hoc"` when retrieving after the work is done, e.g. to check conclusions — `"pre_work"` and `"mid_task"` are the other allowed values; an unrecognised value is refused (`INVALID_PARAMS`), never silently stored. |
 | `save_experience` | `trace_json` | Confirmation with trace_id. The server sets `metadata.project` before ingest ([trace-format.md § Project stamp](trace-format.md#project-stamp)) |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?`, `content?`, `evidence_ref?`, `supersedes?` | Confirmation with entity_id. `supersedes` names an entity this one replaces (see "The stamp's first deterministic producer" above). |
-| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. |
+| `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. A `doc_id` that names a redacted document is refused (`redaction_tombstone_overwrite`) with nothing written: an agent's save is not the owner's decision to bring a redacted id back, and `save_memory` has no parameter for it. The error names the two ways that can: `trellis ingest evidence --reingest-redacted`, or `execute_mutation` with `evidence.reingest_redacted=true`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents, excluding demoted/archived ones |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |

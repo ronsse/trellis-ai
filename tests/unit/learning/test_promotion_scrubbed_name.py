@@ -24,6 +24,12 @@ from typing import Any
 
 import pytest
 
+from trellis.core.document_write import (
+    REINGEST_STAMP_KEY,
+    RedactionTombstoneError,
+    is_redaction_tombstone,
+    put_document,
+)
 from trellis.learning.scoring import (
     NAME_SOURCE_NEUTRAL,
     NAME_SOURCE_SOURCE_TEXT,
@@ -593,8 +599,26 @@ def _redact_id(stores: _Stores, target_id: str) -> None:
 def _re_ingest(
     stores: _Stores, item_id: str = SOURCE_ID, first_line: str = FRESH_TEXT
 ) -> None:
-    """Write the redacted id again with new content: ``put_document`` does not
-    look for a tombstone, so this is all a re-ingest is."""
+    """Write the redacted id again with new content, flagged as a re-ingest.
+
+    The flag is the owner's explicit say-so (#1034); it is also what stamps the
+    row, and the stamp is what promotion's re-ingest exemption reads."""
+    put_document(
+        stores.documents,
+        stores.registry.knowledge.vector_store,
+        item_id,
+        f"{first_line}\n\nNewly written body text",
+        {},
+        preserve_updated_at=False,
+        reingest_redacted=True,
+    )
+
+
+def _legacy_resurrect(
+    stores: _Stores, item_id: str = SOURCE_ID, first_line: str = FRESH_TEXT
+) -> None:
+    """A row resurrected the way the corpus sync used to: a raw store write
+    carrying no stamp (a pre-#1034 row)."""
     stores.documents.put(item_id, f"{first_line}\n\nNewly written body text", {})
 
 
@@ -705,6 +729,55 @@ def test_a_name_from_before_the_redaction_is_still_refused_after_a_re_ingest(
     assert stores.graph.get_node_history(entity_id) == history_before
     assert NAME_TEXT not in stores.everything_stored(entity_id)
     assert NAME_TEXT not in by_decision["message"]
+
+
+def test_an_unflagged_write_over_the_redacted_source_leaves_the_name_refused(
+    stores: _Stores,
+) -> None:
+    """The write is refused, so the row is still a tombstone and a candidate
+    named before the redaction is still stale (#1034)."""
+    entity_id, stale = _promoted_then_source_redacted(stores)
+    with pytest.raises(RedactionTombstoneError):
+        put_document(
+            stores.documents,
+            stores.registry.knowledge.vector_store,
+            SOURCE_ID,
+            f"{FRESH_TEXT}\n\nNewly written body text",
+            {},
+            preserve_updated_at=False,
+        )
+
+    outcome = stores.submit(stale)
+
+    assert is_redaction_tombstone(stores.documents.get(SOURCE_ID))
+    assert outcome["status"] == REFUSED_REDACTED
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+
+
+def test_a_legacy_unstamped_resurrection_is_not_a_re_ingest(stores: _Stores) -> None:
+    """A row an unflagged corpus sync wrote back before #1034 reads as live
+    text but carries no stamp, so it is not the owner's re-ingest: a stale
+    candidate stays refused rather than promoting the redacted name again."""
+    _entity_id, stale = _promoted_then_source_redacted(stores)
+    _legacy_resurrect(stores)
+    assert not is_redaction_tombstone(stores.documents.get(SOURCE_ID))
+
+    outcome = stores.submit(stale)
+
+    assert outcome["status"] == REFUSED_REDACTED
+    assert stores.preview(_named_from_current(stores)) is not None
+
+
+def test_a_flagged_re_ingest_stamps_the_row_after_the_redaction(
+    stores: _Stores,
+) -> None:
+    stores.redact_source()
+    before = datetime.now(UTC)
+    _re_ingest(stores)
+
+    stamp = stores.documents.get(SOURCE_ID)["metadata"][REINGEST_STAMP_KEY]
+
+    assert datetime.fromisoformat(stamp) >= before
 
 
 def test_a_redaction_event_with_no_row_and_no_re_ingest_still_refuses(
