@@ -556,6 +556,12 @@ def _write_precedent_document(
     name and description, built by the same function the redaction scrub uses.
     A content write (``preserve_updated_at=False``); a document-store failure
     propagates, so the promotion reads as not landed and can be retried.
+
+    A re-promotion rebuilds the row's metadata from the node, so a
+    ``data_classification`` label stored on the row is carried over verbatim
+    (as :func:`_rewrite_precedent_document` does by keeping the whole bag):
+    the node holds no label, and a rewrite that dropped it would read the row
+    as ``internal`` again.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
         precedent_document_content,
@@ -571,8 +577,13 @@ def _write_precedent_document(
     if not content:
         return
     metadata = precedent_document_metadata(properties)
+    document_store = registry.knowledge.document_store
+    stored = document_store.get(precedent_id)
+    stored_label = ((stored or {}).get("metadata") or {}).get(DATA_CLASSIFICATION_KEY)
+    if stored_label is not None:
+        metadata[DATA_CLASSIFICATION_KEY] = stored_label
     put_document(
-        registry.knowledge.document_store,
+        document_store,
         resolve_vector_store(registry),
         precedent_id,
         content,
@@ -3273,7 +3284,10 @@ def _scrub_precedent_excerpt(
     from the source's first line (``name_source``, see
     :func:`~trellis.learning.scoring.name_may_hold_source_text`), the name:
     that becomes :func:`~trellis.learning.scoring.neutral_precedent_name`,
-    marked ``neutral``. A name that came from a title or a reviewer stays.
+    marked ``neutral``. The source's own title counts too (``item_title``):
+    the redaction blanks the document row's title (:func:`_tombstone_document`),
+    so a precedent name copied from it is the same text. A name that came from
+    a reviewer or is the bare id stays.
 
     Matches how ``redaction.apply`` treats its own target: a purge, not an
     SCD-2 close. A new version would leave the excerpt readable through
