@@ -20,7 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
 from trellis.feedback.attribution import is_sectioned_payload
-from trellis.retrieve.sensitivity import DocumentClearance, conceal_document_successor
+from trellis.retrieve.sensitivity import (
+    DocumentClearance,
+    conceal_document_rows,
+    conceal_document_successor,
+)
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
@@ -164,6 +168,9 @@ def list_documents(
     The scan still walks past rows the key cannot read, so its cost grows with
     the store, not only with the page.
 
+    A row whose ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a
+    document the key may not read is served without that id.
+
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
     counted under the same filter as the rows, and the applied setting is
@@ -209,6 +216,7 @@ def list_documents(
         total = store.count(include_chunks=include_chunks)
         total_exact = True
     with_rank = gate.clearance == "restricted"
+    docs = conceal_document_rows(docs, store, gate.clearance)
     rows = [_document_row(d, with_rank=with_rank) for d in docs]
     return {
         "status": "ok",
@@ -304,8 +312,9 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does. A superseded document whose successor the caller
-    may not read is served without its ``lifecycle.superseded_by``.
+    as a missing one does. A document whose ``lifecycle.superseded_by`` or
+    ``supersedes_doc_id`` names a document the caller may not read is served
+    without that id.
     """
     registry = get_registry()
     store = registry.knowledge.document_store

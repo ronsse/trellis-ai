@@ -18,6 +18,7 @@ from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
+    conceal_document_rows,
     conceal_withheld_ids,
 )
 from trellis.schemas.pack import PackBudget, SectionRequest
@@ -178,7 +179,9 @@ def search(
     """Full-text search across documents.
 
     A document labelled above the caller's clearance is left out of the
-    results (so a page can come back shorter than ``limit``).
+    results (so a page can come back shorter than ``limit``). A row whose
+    ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a document the
+    caller may not read is served without that id.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied
@@ -197,6 +200,9 @@ def search(
     results = [
         r for r in results if readable.permits(r.get("doc_id", ""), r.get("metadata"))
     ]
+    results = conceal_document_rows(
+        results, registry.knowledge.document_store, readable.clearance
+    )
     return {
         "status": "ok",
         "query": q,

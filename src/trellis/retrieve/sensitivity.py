@@ -20,10 +20,10 @@ who lacks the scope. A *malformed* label reads ``restricted``
 merged pool after supersession. Supersession itself skips a successor the
 caller cannot read (:func:`reader_for`), so a restricted successor withholds
 no loser the caller may read and a below-clearance pack is the pack built
-without it. A loser so kept still stores its own ``lifecycle.superseded_by``,
-which :func:`conceal_unreadable_successors` drops from the served copy (and
-:func:`conceal_document_successor` from a by-id document read) when the store
-says the caller cannot read the successor.
+without it. A loser so kept still stores its own ``lifecycle.superseded_by``, and a
+readable successor its ``supersedes_doc_id``: :func:`conceal_unreadable_successors`
+drops either from the served copy (and :func:`conceal_document_rows` from a REST
+document row) when the store says the caller cannot read the id it names.
 
 **A chunk inherits its parent's label.** A chunk row carries its own metadata
 and none of the parent's later labels, so :func:`effective_sensitivity` takes
@@ -197,33 +197,79 @@ def readable_ids(
     return readable
 
 
-def _stored_successor(metadata: Mapping[str, Any] | None) -> str | None:
-    """The id ``metadata["lifecycle"]["superseded_by"]`` names, in any state.
+#: Every metadata key path that stores a supersession pointer, i.e. names the
+#: other end of a supersession by document id. Two exist, one per direction,
+#: both a single id string: ``lifecycle.superseded_by`` on a loser (naming its
+#: successor; ``Lifecycle``, stamped by ``mark_document_superseded`` and the
+#: ``supersedes=`` save path), and ``supersedes_doc_id`` on a successor (naming
+#: its loser; the reconcile SUPERSEDE write and session capture). The second is
+#: spelled here rather than imported because ``trellis.mcp`` imports this
+#: package; ``tests/unit/retrieve/test_sensitivity.py`` pins it to
+#: ``trellis.mcp.reconcile.SUPERSEDES_DOC_KEY`` and to what the writers emit.
+SUPERSESSION_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
+    (LIFECYCLE_KEY, "superseded_by"),
+    ("supersedes_doc_id",),
+)
+
+
+def _pointer_at(
+    metadata: Mapping[str, Any] | None, path: tuple[str, ...]
+) -> str | None:
+    """The id stored at ``path`` in ``metadata``, whatever the record's state.
 
     Only a non-empty string names an id; a missing, empty or malformed value
-    names nothing and is left as stored.
+    (including a list, which no writer stores) names nothing and is left as
+    stored.
     """
-    record = (metadata or {}).get(LIFECYCLE_KEY)
-    if not isinstance(record, dict):
-        return None
-    successor = record.get("superseded_by")
-    return successor if isinstance(successor, str) and successor else None
+    node: Any = metadata
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node if isinstance(node, str) and node else None
 
 
-def _without_successor(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of ``metadata`` whose lifecycle record has no ``superseded_by``.
-
-    Copy-on-write: the stored bag, and a pool's shared one, are never mutated.
-    The record keeps its ``state`` and every other key.
-    """
-    record = metadata[LIFECYCLE_KEY]
+def _stored_pointers(metadata: Mapping[str, Any] | None) -> set[str]:
+    """Every id ``metadata`` names at a :data:`SUPERSESSION_POINTER_PATHS` path."""
     return {
-        **metadata,
-        LIFECYCLE_KEY: {k: v for k, v in record.items() if k != "superseded_by"},
+        pointer
+        for path in SUPERSESSION_POINTER_PATHS
+        if (pointer := _pointer_at(metadata, path))
     }
 
 
-def _unreadable_successors(
+def _dropping(node: Any, path: tuple[str, ...], hidden: Collection[str]) -> Any:
+    """``node`` without the pointer at ``path`` when it names a ``hidden`` id.
+
+    Copy-on-write along the path only: the stored bag, and a pool's shared
+    one, are never mutated, and ``node`` itself comes back when nothing is
+    dropped. A record keeps every other key, ``lifecycle.state`` included.
+    """
+    if not isinstance(node, dict):
+        return node
+    key, *rest = path
+    if key not in node:
+        return node
+    if not rest:
+        value = node[key]
+        if isinstance(value, str) and value in hidden:
+            return {k: v for k, v in node.items() if k != key}
+        return node
+    child = _dropping(node[key], tuple(rest), hidden)
+    return node if child is node[key] else {**node, key: child}
+
+
+def _without_pointers(
+    metadata: Mapping[str, Any], hidden: Collection[str]
+) -> Mapping[str, Any]:
+    """``metadata`` with every pointer that names a ``hidden`` id dropped."""
+    out: Any = metadata
+    for path in SUPERSESSION_POINTER_PATHS:
+        out = _dropping(out, path, hidden)
+    return out  # type: ignore[no-any-return]
+
+
+def _unreadable_pointers(
     document_store: DocumentStore, named: Collection[str], clearance: Sensitivity
 ) -> set[str]:
     """The ids in ``named`` that a caller at ``clearance`` may not read.
@@ -236,39 +282,84 @@ def _unreadable_successors(
     return set(named) - set(readable_ids(document_store, sorted(named), clearance))
 
 
+def _concealed_bags(
+    bags: Sequence[Mapping[str, Any] | None],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[Mapping[str, Any] | None]:
+    """Each metadata bag, or a copy without the pointers the caller cannot read.
+
+    The one batched step every surface shares: the distinct ids named across
+    *all* the bags are judged in a single :func:`readable_ids` call, so a
+    response costs one store read per distinct id however many rows name it,
+    and none when no row names one. A bag that names only readable ids, or
+    none, comes back as the same object. ``restricted`` does no reads, and a
+    missing store (no label to judge, so no verdict, the parent cache's own
+    rule) leaves every bag as it is.
+    """
+    if clearance == "restricted" or document_store is None:
+        return list(bags)
+    named: set[str] = set()
+    for bag in bags:
+        named |= _stored_pointers(bag)
+    if not named:
+        return list(bags)
+    hidden = _unreadable_pointers(document_store, named, clearance)
+    if not hidden:
+        return list(bags)
+    return [_without_pointers(bag, hidden) if bag else bag for bag in bags]
+
+
 def conceal_unreadable_successors(
     items: Iterable[PackItem],
     document_store: DocumentStore | None,
     clearance: Sensitivity,
 ) -> list[PackItem]:
-    """``items`` with every ``lifecycle.superseded_by`` the caller cannot read dropped.
+    """``items`` with every supersession pointer the caller cannot read dropped.
 
     A loser whose successor is above the caller's clearance is served (see
     :func:`~trellis.retrieve.lifecycle.partition_superseded`), and it still
-    carries its own stored record naming that successor. The id would reach the
-    caller in the item's metadata, so it is dropped from the served copy. The
-    state stays; the item reads superseded, by nothing the caller may name.
+    carries its own stored ``lifecycle.superseded_by`` naming that successor.
+    The reverse holds too: a readable successor's ``supersedes_doc_id`` may
+    name a loser the caller cannot read. Either id would reach the caller in
+    the item's metadata, so it is dropped from the served copy
+    (:data:`SUPERSESSION_POINTER_PATHS`). The state stays; the item reads
+    superseded, by nothing the caller may name.
 
     Applies to every item whatever its ``lifecycle.state``, since the id is the
-    leak. ``restricted`` does no reads and returns the items as they are, as
-    does a builder with no document store (no label to judge, so no verdict, the
-    parent cache's own rule). An item that names a readable successor, or none,
-    is passed through unchanged rather than copied.
+    leak. See :func:`_concealed_bags` for the batching and the no-read cases.
+    An item that names readable ids, or none, is passed through unchanged
+    rather than copied.
     """
     pool = list(items)
-    if clearance == "restricted" or document_store is None:
-        return pool
-    named = {s for item in pool if (s := _stored_successor(item.metadata))}
-    if not named:
-        return pool
-    hidden = _unreadable_successors(document_store, named, clearance)
-    if not hidden:
-        return pool
+    bags = _concealed_bags([item.metadata for item in pool], document_store, clearance)
     return [
-        item.model_copy(update={"metadata": _without_successor(item.metadata)})
-        if _stored_successor(item.metadata) in hidden
-        else item
-        for item in pool
+        item if bag is item.metadata else item.model_copy(update={"metadata": bag})
+        for item, bag in zip(pool, bags, strict=True)
+    ]
+
+
+def conceal_document_rows(
+    docs: Iterable[dict[str, Any]],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[dict[str, Any]]:
+    """``docs`` as a caller at ``clearance`` may be shown them by a REST read.
+
+    The same drop as :func:`conceal_unreadable_successors`, for stored document
+    rows the caller already passed the read gate for (``GET /documents`` and
+    its search, ``GET /search``, ``GET /documents/{id}``). One batched store
+    judgement per call, so a response passes all its rows in one call rather
+    than one per row. A row that names nothing unreadable is returned as the
+    same object, else as a copy.
+    """
+    rows = list(docs)
+    bags = _concealed_bags(
+        [row.get("metadata") for row in rows], document_store, clearance
+    )
+    return [
+        row if bag is row.get("metadata") else {**row, "metadata": bag}
+        for row, bag in zip(rows, bags, strict=True)
     ]
 
 
@@ -277,19 +368,11 @@ def conceal_document_successor(
 ) -> dict[str, Any]:
     """``doc`` as a caller at ``clearance`` may be shown it by a by-id read.
 
-    The same drop as :func:`conceal_unreadable_successors`, for a stored
-    document the caller already passed the read gate for: its own
-    ``lifecycle.superseded_by`` may name a successor the caller may not read.
-    Returns ``doc`` itself when nothing is dropped, else a copy.
+    :func:`conceal_document_rows` for one row: returns ``doc`` itself when
+    nothing is dropped, else a copy.
     """
-    successor = _stored_successor(doc.get("metadata"))
-    if (
-        successor is None
-        or clearance == "restricted"
-        or not _unreadable_successors(document_store, {successor}, clearance)
-    ):
-        return doc
-    return {**doc, "metadata": _without_successor(doc["metadata"])}
+    (out,) = conceal_document_rows([doc], document_store, clearance)
+    return out
 
 
 class OverwriteRefusedError(ValueError):
@@ -555,9 +638,11 @@ __all__ = [
     "CandidateIndex",
     "DocumentClearance",
     "OverwriteRefusedError",
+    "SUPERSESSION_POINTER_PATHS",
     "SensitivityLabelError",
-    "conceal_withheld_ids",
+    "conceal_document_rows",
     "conceal_document_successor",
+    "conceal_withheld_ids",
     "conceal_unreadable_successors",
     "concealed_ids_metadata",
     "effective_sensitivity",

@@ -21,8 +21,10 @@ from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
     SENSITIVITY_WITHHELD_IDS_KEY,
+    SUPERSESSION_POINTER_PATHS,
     DocumentClearance,
     OverwriteRefusedError,
+    conceal_document_rows,
     conceal_document_successor,
     conceal_unreadable_successors,
     conceal_withheld_ids,
@@ -791,6 +793,303 @@ class TestConcealUnreadableSuccessors:
         assert [i.item_id for i in served] == ["loser-doc", "other-doc"] * 2
         assert [self._successor_of(i) for i in served] == [None] * 4
         assert self._successor_of(pool[0]) == "succ-doc", "the pool's item is unchanged"
+
+
+def _reverse(loser: Any = "old-doc", **extra: Any) -> dict[str, Any]:
+    """A successor's metadata: ``supersedes_doc_id`` naming its loser."""
+    return {"supersedes_doc_id": loser, "reconciliation": "supersede", **extra}
+
+
+class TestConcealTheReversePointer:
+    """A successor's ``supersedes_doc_id`` may name a loser the caller cannot read.
+
+    Every metadata key that stores a supersession pointer is one path in
+    :data:`SUPERSESSION_POINTER_PATHS`; each gets the same drop, judged by the
+    store, so a successor served without its restricted loser still reads as
+    one that replaced something.
+    """
+
+    @staticmethod
+    def _loser_of(item: PackItem) -> Any:
+        return (item.metadata or {}).get("supersedes_doc_id")
+
+    def test_the_paths_are_the_two_keys_the_writers_emit(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """Run the real writers and demand every pointer key they leave is covered."""
+        from trellis.mcp.reconcile import SUPERSEDES_DOC_KEY, mark_document_superseded
+        from trellis_workers.session_capture.capture import _candidate_metadata
+        from trellis_workers.session_capture.models import CandidateMemory
+
+        assert ("supersedes_doc_id",) in SUPERSESSION_POINTER_PATHS
+        assert SUPERSEDES_DOC_KEY == "supersedes_doc_id"
+
+        doc_store.put("old-doc", "old", {})
+        doc_store.put("new-doc", "new", {})
+        assert (
+            mark_document_superseded(
+                doc_store, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
+            )
+            is None
+        )
+        stamped = doc_store.get("old-doc")
+        assert stamped is not None
+        candidate = CandidateMemory(
+            title="t",
+            memory="m",
+            memory_type="semantic",
+            signal="success",
+            evidence="e",
+            non_derivable=True,
+            durable=True,
+            actionable=True,
+            confidence=0.9,
+            supersedes_doc_id="old-doc",
+        )
+
+        def pointer_paths(
+            node: Any, prefix: tuple[str, ...] = ()
+        ) -> set[tuple[str, ...]]:
+            if not isinstance(node, dict):
+                return set()
+            found: set[tuple[str, ...]] = set()
+            for key, value in node.items():
+                here = (*prefix, key)
+                if "supersed" in key and isinstance(value, str):
+                    found.add(here)
+                found |= pointer_paths(value, here)
+            return found
+
+        emitted = pointer_paths(stamped["metadata"]) | pointer_paths(
+            _candidate_metadata(candidate)
+        )
+        assert emitted == set(SUPERSESSION_POINTER_PATHS)
+
+    def test_an_unreadable_loser_is_dropped_and_the_rest_kept(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("old-doc", "body", label("restricted"))
+        successor = _item("new-doc", _reverse(title="Newer"))
+        (out,) = conceal_unreadable_successors([successor], doc_store, "internal")
+        assert out.metadata == {"reconciliation": "supersede", "title": "Newer"}
+        assert out.item_id == "new-doc"
+        assert successor.metadata["supersedes_doc_id"] == "old-doc"
+
+    def test_a_readable_loser_is_still_named(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("old-doc", "body", {})
+        pool = [_item("new-doc", _reverse())]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert out[0] is pool[0]
+
+    def test_the_store_judges_not_the_pool(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("old-doc", "body", label("confidential"))
+        pool = [_item("new-doc", _reverse())]
+        assert (
+            self._loser_of(
+                conceal_unreadable_successors(pool, doc_store, "internal")[0]
+            )
+            is None
+        )
+        assert (
+            self._loser_of(
+                conceal_unreadable_successors(pool, doc_store, "confidential")[0]
+            )
+            == "old-doc"
+        )
+
+    def test_a_chunk_loser_is_judged_by_its_parent(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("parent", "classified body", label("restricted"))
+        chunk_id = chunk_doc_id("parent", 0)
+        doc_store.put(chunk_id, "slice", {})
+        (out,) = conceal_unreadable_successors(
+            [_item("new-doc", _reverse(chunk_id))], doc_store, "internal"
+        )
+        assert self._loser_of(out) is None
+
+    def test_a_store_error_reads_as_unreadable(self) -> None:
+        class _Broken:
+            def get(self, _doc_id: str) -> dict[str, Any]:
+                msg = "store down"
+                raise RuntimeError(msg)
+
+        broken: Any = _Broken()
+        (out,) = conceal_unreadable_successors(
+            [_item("new-doc", _reverse())], broken, "internal"
+        )
+        assert self._loser_of(out) is None
+
+    def test_restricted_reads_nothing_and_changes_nothing(self) -> None:
+        store = MagicMock()
+        pool = [_item("new-doc", _reverse()), _item("loser-doc", _lifecycle("x", "s"))]
+        out = conceal_unreadable_successors(pool, store, "restricted")
+        assert all(a is b for a, b in zip(out, pool, strict=True))
+        store.get.assert_not_called()
+
+    def test_an_unlabelled_store_changes_nothing_at_any_clearance(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("old-doc", "body", {})
+        doc_store.put("succ-doc", "body", {})
+        pool = [
+            _item("new-doc", _reverse()),
+            _item("loser-doc", _lifecycle("superseded", "succ-doc")),
+        ]
+        for clearance in ("internal", "confidential", "restricted"):
+            out = conceal_unreadable_successors(pool, doc_store, clearance)  # type: ignore[arg-type]
+            assert all(a is b for a, b in zip(out, pool, strict=True))
+
+    def test_a_document_in_a_chain_drops_only_the_unreadable_end(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """Middle of a chain: successor of ``old-doc``, loser to ``succ-doc``."""
+        doc_store.put("old-doc", "body", label("restricted"))
+        doc_store.put("succ-doc", "body", {})
+        middle = _item(
+            "mid-doc", {**_reverse(), **_lifecycle("superseded", "succ-doc")}
+        )
+        (out,) = conceal_unreadable_successors([middle], doc_store, "internal")
+        assert "supersedes_doc_id" not in out.metadata
+        assert out.metadata[LIFECYCLE_KEY] == {
+            "state": "superseded",
+            "superseded_by": "succ-doc",
+        }
+        doc_store.put("old-doc", "body", {})
+        doc_store.put("succ-doc", "body", label("restricted"))
+        (out,) = conceal_unreadable_successors([middle], doc_store, "internal")
+        assert out.metadata["supersedes_doc_id"] == "old-doc"
+        assert out.metadata[LIFECYCLE_KEY] == {"state": "superseded"}
+
+    def test_both_pointers_dropped_when_both_are_unreadable(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("old-doc", "body", label("restricted"))
+        doc_store.put("succ-doc", "body", label("restricted"))
+        shared = {**_reverse(), **_lifecycle("superseded", "succ-doc")}
+        (out,) = conceal_unreadable_successors(
+            [_item("mid-doc", shared)], doc_store, "internal"
+        )
+        assert out.metadata == {
+            "reconciliation": "supersede",
+            LIFECYCLE_KEY: {"state": "superseded"},
+        }
+        assert shared["supersedes_doc_id"] == "old-doc", "the shared bag is untouched"
+        assert shared[LIFECYCLE_KEY]["superseded_by"] == "succ-doc"
+
+    @pytest.mark.parametrize("value", [None, "", 7, ["old-doc"], {"id": "old-doc"}])
+    def test_a_value_that_names_no_id_is_left_as_stored(
+        self, doc_store: SQLiteDocumentStore, value: Any
+    ) -> None:
+        """No writer stores a list or a mapping here; one is left, never a crash."""
+        doc_store.put("old-doc", "body", label("restricted"))
+        pool = [_item("new-doc", _reverse(value))]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert out[0] is pool[0]
+
+    @pytest.mark.parametrize("value", [["old-doc"], {"id": "old-doc"}, 7])
+    def test_a_malformed_value_beside_a_concealed_one_is_left_alone(
+        self, doc_store: SQLiteDocumentStore, value: Any
+    ) -> None:
+        """The drop is reached (another item names a hidden id) and must not choke."""
+        doc_store.put("old-doc", "body", label("restricted"))
+        odd = _item("odd-doc", _reverse(value))
+        named = _item("new-doc", _reverse())
+        out = conceal_unreadable_successors([odd, named], doc_store, "internal")
+        assert out[0] is odd
+        assert self._loser_of(out[1]) is None
+
+
+class TestConcealDocumentRows:
+    """The batched REST variant: one store judgement per response (#1029)."""
+
+    @staticmethod
+    def _row(doc_id: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        return {"doc_id": doc_id, "content": "body " + doc_id, "metadata": metadata}
+
+    def test_each_pointer_is_dropped_from_a_copy_and_the_stored_row_is_intact(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("hidden-doc", "body", label("restricted"))
+        doc_store.put("loser-doc", "x", _lifecycle("superseded", "hidden-doc"))
+        doc_store.put("new-doc", "y", _reverse("hidden-doc"))
+        stored = [doc_store.get("loser-doc"), doc_store.get("new-doc")]
+        assert all(stored)
+        rows: Any = stored
+        out = conceal_document_rows(rows, doc_store, "internal")
+        assert out[0]["metadata"][LIFECYCLE_KEY] == {"state": "superseded"}
+        assert "supersedes_doc_id" not in out[1]["metadata"]
+        assert [r["content"] for r in out] == ["x", "y"]
+        assert doc_store.get("loser-doc") == stored[0]
+        assert doc_store.get("new-doc") == stored[1]
+        assert "hidden-doc" in str(stored)
+
+    def test_a_row_with_nothing_to_drop_is_the_same_object(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("hidden-doc", "body", label("restricted"))
+        doc_store.put("open-doc", "body", {})
+        rows = [
+            self._row("a", None),
+            self._row("b", {}),
+            self._row("c", _reverse("open-doc")),
+            self._row("d", _reverse("hidden-doc")),
+        ]
+        out = conceal_document_rows(rows, doc_store, "internal")
+        assert [a is b for a, b in zip(out, rows, strict=True)] == [
+            True,
+            True,
+            True,
+            False,
+        ]
+
+    def test_a_restricted_caller_reads_nothing_and_gets_the_rows_back(self) -> None:
+        store = MagicMock()
+        rows = [self._row("a", _reverse("hidden-doc"))]
+        (out,) = conceal_document_rows(rows, store, "restricted")
+        assert out is rows[0]
+        store.get.assert_not_called()
+
+    def test_one_read_per_distinct_id_however_many_rows_name_it(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("hidden-doc", "body", label("restricted"))
+        doc_store.put("open-doc", "body", {})
+        counting = MagicMock(wraps=doc_store)
+        rows = [
+            *(
+                self._row(f"l{i}", _lifecycle("superseded", "hidden-doc"))
+                for i in range(5)
+            ),
+            *(self._row(f"n{i}", _reverse("hidden-doc")) for i in range(5)),
+            *(self._row(f"o{i}", _reverse("open-doc")) for i in range(5)),
+            self._row("plain", {}),
+        ]
+        out = conceal_document_rows(rows, counting, "internal")
+        asked = [c.args[0] for c in counting.get.call_args_list]
+        assert sorted(asked) == ["hidden-doc", "open-doc"]
+        assert sum("hidden-doc" in str(r) for r in out) == 0
+
+    def test_a_pool_batches_the_same_way(self, doc_store: SQLiteDocumentStore) -> None:
+        doc_store.put("hidden-doc", "body", label("restricted"))
+        counting = MagicMock(wraps=doc_store)
+        pool = [_item(f"i{i}", _reverse("hidden-doc")) for i in range(6)]
+        conceal_unreadable_successors(pool, counting, "internal")
+        assert [c.args[0] for c in counting.get.call_args_list] == ["hidden-doc"]
+
+    def test_no_pointer_anywhere_means_no_read(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        counting = MagicMock(wraps=doc_store)
+        conceal_document_rows([self._row("a", {"title": "t"})], counting, "internal")
+        conceal_unreadable_successors(
+            [_item("b", {"title": "t"})], counting, "internal"
+        )
+        counting.get.assert_not_called()
 
 
 class TestConcealedIdsMetadata:
