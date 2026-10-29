@@ -58,7 +58,7 @@ cleanup() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill "${SERVER_PID}" 2>/dev/null || true
         local i
-        for i in 1 2 3 4 5 6 7 8 9 10; do
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
             kill -0 "${SERVER_PID}" 2>/dev/null || break
             sleep 1
         done
@@ -73,9 +73,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ "$#" -eq 1 ] || { echo "usage: $0 <path-to-wheel>" >&2; exit 2; }
+[ "$#" -eq 1 ] || {
+    echo "usage: $0 <path-to-wheel> (got $# arguments; a glob that matched several wheels?)" >&2
+    exit 2
+}
 [ -f "$1" ] || { echo "not a file: $1" >&2; exit 2; }
 WHEEL="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+# What the wheel must ship is read from the checkout this script lives in, so the
+# console scripts and packages checked below follow pyproject.toml and cannot drift
+# from it. (The script runs from an empty directory, so resolve the path now.)
+PYPROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/pyproject.toml"
+[ -f "${PYPROJECT}" ] || { echo "no pyproject.toml at ${PYPROJECT}: run the script from a checkout" >&2; exit 2; }
 
 # Run a command, capturing stdout to $OUT and stderr to $ERR. A non-zero exit or
 # a timeout fails the current step and shows both tails.
@@ -126,6 +134,28 @@ VENV="${ROOT}/venv"
 VPY="${VENV}/bin/python"
 "${PYTHON:-python3}" -m venv "${VENV}"
 "${VPY}" -m pip install --quiet --disable-pip-version-check "${WHEEL}"
+# Read out of the venv's python, which has tomllib (requires-python is >=3.11).
+pyproject_names() {
+    "${VPY}" -I -c '
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    cfg = tomllib.load(f)
+if sys.argv[2] == "scripts":
+    names = sorted(cfg["project"]["scripts"])
+else:
+    wheel = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]
+    names = sorted(p.rsplit("/", 1)[-1] for p in wheel["packages"])
+if not names:
+    sys.exit(f"pyproject.toml lists no {sys.argv[2]}")
+print(*names)
+' "${PYPROJECT}" "$1"
+}
+# Assigned first so a failure here stops the run; inside the here-string it would
+# be swallowed and leave an empty roster that every check below passes.
+SCRIPTS_LINE="$(pyproject_names scripts)"
+PACKAGES_LINE="$(pyproject_names packages)"
+read -r -a SCRIPT_NAMES <<<"${SCRIPTS_LINE}"
+read -r -a PACKAGE_NAMES <<<"${PACKAGES_LINE}"
 
 # The environment a deployer's first run has: an empty directory outside any
 # checkout, an empty HOME, and nothing inherited that could point at a source
@@ -151,27 +181,63 @@ fresh_home() {
 
 # ------------------------------------------------------------ provenance
 step "provenance"
-# No -I: this must see the environment the console scripts see.
-FILES="$("${VPY}" -c 'import trellis, trellis_cli; print(trellis.__file__); print(trellis_cli.__file__)')"
-{ read -r TRELLIS_FILE; read -r TRELLIS_CLI_FILE; } <<<"${FILES}"
-if ! "${VPY}" -I -c '
+# No -I: this must see the environment the console scripts see. Every top-level
+# package the wheel ships, not just the two the CLI needs.
+FILES="$("${VPY}" -c '
+import importlib, sys
+for name in sys.argv[1:]:
+    print(importlib.import_module(name).__file__)
+' "${PACKAGE_NAMES[@]}")"
+if ! OUTSIDE="$(printf '%s\n' "${FILES}" | "${VPY}" -I -c '
 import os, sys
 venv = os.path.realpath(sys.argv[1]) + os.sep
-for f in sys.argv[2:]:
+outside = []
+for f in sys.stdin.read().splitlines():
     real = os.path.realpath(f)
     if not (real.startswith(venv) and "site-packages" in real):
-        sys.exit(1)
-' "${VENV}" "${TRELLIS_FILE}" "${TRELLIS_CLI_FILE}"; then
-    die "imported outside the venv's site-packages, so a source tree and not the wheel: ${TRELLIS_FILE}, ${TRELLIS_CLI_FILE}"
+        outside.append(f)
+print(" ".join(outside))
+sys.exit(1 if outside else 0)
+' "${VENV}")"; then
+    die "imported outside the venv's site-packages, so a source tree and not the wheel: ${OUTSIDE}"
 fi
-pass "trellis and trellis_cli import from the venv's site-packages (${TRELLIS_FILE#"${ROOT}"/})"
+pass "${#PACKAGE_NAMES[@]} packages (${PACKAGE_NAMES[*]}) import from the venv's site-packages"
+
+# -------------------------------------------------------- console scripts
+step "console scripts"
+# Every console script resolves to a target that imports. A script is generated
+# from an entry point, so a moved module breaks it without breaking anything the
+# steps below run.
+cat >"${ROOT}/console_scripts.py" <<'PY'
+import sys
+from importlib.metadata import distribution
+
+want = set(sys.argv[1:])
+eps = {
+    e.name: e
+    for e in distribution("trellis-ai").entry_points
+    if e.group == "console_scripts"
+}
+missing = want - eps.keys()
+if missing:
+    raise SystemExit(f"console scripts missing: {sorted(missing)}")
+for name in sorted(want):
+    eps[name].load()
+print(", ".join(sorted(want)))
+PY
+run "${VPY}" -I "${ROOT}/console_scripts.py" "${SCRIPT_NAMES[@]}"
+for name in "${SCRIPT_NAMES[@]}"; do
+    [ -x "${VENV}/bin/${name}" ] || die "${VENV}/bin/${name} was not installed"
+done
+pass "$(cat "${OUT}") load, and are installed in venv/bin"
 
 # ------------------------------------------------------------ quickstart
 step "quickstart"
 fresh_home quickstart
 run "${TRELLIS}" admin quickstart --format json
 jcheck 'd["status"] == "ok"' "status is not \"ok\""
-pass "exit 0, status ok"
+jcheck 'd["mcp_on_path"]' "trellis-mcp is not on PATH after installing the wheel"
+pass "exit 0, status ok, trellis-mcp on PATH"
 
 step "quickstart --with-skills"
 run "${TRELLIS}" admin quickstart --with-skills user --format json
@@ -186,7 +252,11 @@ pass "exit 0, ${SKILL_FILES} skill files under \$HOME/.claude/skills"
 
 step "health"
 run "${TRELLIS}" admin health --format json
-pass "exit 0"
+# It exits 0 whatever it finds, so the report is the check. The *.db keys are not
+# asserted: SQLite files are created lazily and read false right after quickstart.
+jcheck 'd["config"] and d["data_dir"] and d["stores_dir"]' \
+    "health reports no config/stores after quickstart"
+pass "exit 0, config, data_dir and stores_dir present"
 QUICKSTART_HOME="${HOME}"
 
 # --------------------------------------------------------- README sequence
@@ -204,7 +274,8 @@ pass "exit 0"
 
 step "readme: retrieve search"
 run "${TRELLIS}" retrieve search 'user-api' --format json
-pass "exit 0"
+jcheck 'd["count"] >= 1' "the search found nothing in the demo data"
+pass "exit 0, $(jget 'd["count"]') results"
 
 step "readme: retrieve entity"
 run "${TRELLIS}" retrieve entity user-api --format json
@@ -212,7 +283,8 @@ pass "exit 0"
 
 step "readme: retrieve traces"
 run "${TRELLIS}" retrieve traces --domain backend --format json
-pass "exit 0"
+jcheck 'd["count"] >= 1' "no backend traces in the demo data"
+pass "exit 0, $(jget 'd["count"]') traces"
 
 step "readme: retrieve pack"
 run "${TRELLIS}" retrieve pack --intent "deploy staging for user-api" --format json
@@ -265,8 +337,11 @@ except Exception as exc:
 ' "$1"
 }
 READY=""
-for _ in $(seq 1 $((SERVER_WAIT_SECS * 2))); do
+POLLS=0
+T0=${SECONDS}
+while [ $((SECONDS - T0)) -lt "${SERVER_WAIT_SECS}" ]; do
     kill -0 "${SERVER_PID}" 2>/dev/null || break
+    POLLS=$((POLLS + 1))
     if [ "$(http_status "http://127.0.0.1:${PORT}/healthz")" = "200" ]; then
         READY=1
         break
@@ -276,18 +351,20 @@ done
 if [ -z "${READY}" ]; then
     { echo "--- server.log (tail)"; tail -n 20 "${ROOT}/server.log"; } >&2
     if kill -0 "${SERVER_PID}" 2>/dev/null; then
-        die "/healthz did not answer 200 on port ${PORT} within ${SERVER_WAIT_SECS}s"
+        die "/healthz did not answer 200 on port ${PORT}: ${POLLS} polls over $((SECONDS - T0))s (limit ${SERVER_WAIT_SECS}s)"
     fi
     die "the server exited before /healthz answered"
 fi
-for path in /healthz /api/version; do
+# `/` is the dashboard the README sends a new user to: it redirects to /ui/, which
+# urllib follows, so 200 means the bundled static UI was served.
+for path in /healthz /api/version /; do
     got="$(http_status "http://127.0.0.1:${PORT}${path}")"
     [ "${got}" = "200" ] || die "GET ${path} answered ${got}, not 200"
 done
-kill "${SERVER_PID}"
+kill "${SERVER_PID}" || true
 wait "${SERVER_PID}" 2>/dev/null || true
 SERVER_PID=""
-pass "/healthz and /api/version answer 200 on port ${PORT}"
+pass "/healthz, /api/version and / (the dashboard) answer 200 on port ${PORT}"
 
 # -------------------------------------------------------------------- MCP
 step "mcp"
