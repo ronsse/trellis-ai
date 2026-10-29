@@ -277,3 +277,12 @@ def test_get_task_context_for_step_empty(client: TrellisClient) -> None:
         entity_ids=["uc://analytics.domain_c.events"],
     )
     assert isinstance(result, str)
+
+
+def test_get_context_for_task_empty_pack_has_exactly_one_footer() -> None:
+    """The footer comes from the formatter alone, so it cannot be doubled."""
+    with _pack_client({"pack_id": "pack:one", "count": 0, "items": []}) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert result.count("record_feedback(") == 1
+    assert result.endswith("unhelpful_item_ids=[...])`.*")

@@ -21,19 +21,6 @@ from trellis_wire.withholding import (
 _MAX_PREVIEW_STEPS = 5
 
 
-def _feedback_footer(pack_id: str) -> str:
-    """The citation footer ``format_pack_as_markdown`` ends a served pack with.
-
-    Spelled out here for the empty pack, which that formatter does not
-    footer; ``tests/unit/sdk/test_skills.py`` fails if the two texts part.
-    """
-    return (
-        "\n---\n"
-        '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '
-        "rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
-    )
-
-
 def get_context_for_task(
     client: TrellisClient,
     intent: str,
@@ -66,14 +53,14 @@ def get_context_for_task(
         if pack_id:
             # An empty pack is still a served pack, and "nothing relevant" is
             # a verdict worth grading: it needs the same header and footer.
-            header = format_pack_as_markdown(
+            return format_pack_as_markdown(
                 [],
                 intent,
                 max_tokens=max_tokens,
                 pack_id=pack_id,
                 withholding=withholding,
+                empty_text=message,
             )
-            return f"{header}\n{message}\n{_feedback_footer(pack_id)}"
         note = format_withholding_note(withholding)
         return f"{message}\n\n{note}" if note else message
     return format_pack_as_markdown(
