@@ -3812,17 +3812,32 @@ be if the successor did not exist (the successor is judged the way the pack's
 own gate judges it: by its own label, and a chunk by its parent's too). The
 served items are the same with and without that successor among the candidates;
 the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
-count it as a sensitivity withholding, as for any hidden candidate. The served
-loser's own `lifecycle.superseded_by` is dropped from the served copy when it
-names a document the caller cannot read, in flat and sectioned packs and in
-`GET /api/v1/documents/{id}`; the store judges it, so the answer does not depend
-on whether the successor matched, and a store error reads as unreadable (a chunk
-successor under a parent-fetch outage reads as unreadable, so the loser is
-still served). The loser's `lifecycle.state` stays `superseded`, so such a
-caller can tell that some document it cannot read supersedes this one, though
-not which. `GET /api/v1/search` and the rows of `GET /api/v1/documents`
-return stored metadata as before. With
-`TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
+count it as a sensitivity withholding, as for any hidden candidate. A served
+document's own reconcile pointers are dropped from the served copy when they
+name a document the caller cannot read: `lifecycle.superseded_by` (on a loser,
+naming its successor), `supersedes_doc_id` (on a successor, naming its loser)
+and `updates_doc_id` (on an UPDATE addendum, naming the candidate it
+annotates); the last two are written by the reconcile-on-write path and by
+session capture. All three are single id strings, and there is no other
+metadata key that stores one. The
+drop applies to every surface that serves stored metadata: flat and sectioned
+packs, `GET /api/v1/documents/{id}`, the rows of `GET /api/v1/documents` (the
+list and `?q=`), and `GET /api/v1/search`. The store judges the named id, so the
+answer does not depend on whether it matched the query, and a store error reads
+as unreadable (a chunk under a parent-fetch outage reads as unreadable, so the
+pointer is dropped). One store judgement runs per response, over the distinct
+ids its rows name. The stored record is never rewritten, and a reader of
+everything (`restricted`, `admin`, auth off) does no reads and sees the record
+as stored. The loser's `lifecycle.state` stays `superseded`, so such a caller
+can tell that some document it cannot read supersedes this one, though not
+which; likewise the `reconciliation` marker (`supersede` or `update`) stays when
+its pointer is dropped, so a reader can tell a hidden counterpart exists but not
+which. The concealment is itself an existence answer: a caller that can write a
+document carrying a guessed pointer id and read it back learns, from whether the
+id survives, whether a document by that id exists above its clearance. That is
+nothing beyond the accepted 409 posture on `POST /api/v1/documents` below. A
+malformed pointer (anything but a non-empty string) is left as stored.
+With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
 recorded. A trusted-local caller sees every id.
