@@ -106,7 +106,7 @@ the read. The withholding rate is an owner setting and is not part of it.
 pack feedback, and PR #584 joins it to what followed. The Phase 1 gate is 500 strictly
 graded rows; the join currently yields **289 over 30 days**, because citations are capped
 by attributed packs — so the gate is not met and the exporter is not built. Two things
-unblock it, in order: N2 (prod does not emit the stream), then attribution volume.
+unblock it, in order: N2 (prod did not emit the stream; the tracker closed 2026-10-24, and whether prod now emits it is a production read), then attribution volume.
 
 - Acceptance: the strict-graded row count over a 30-day window clears 500.
 
