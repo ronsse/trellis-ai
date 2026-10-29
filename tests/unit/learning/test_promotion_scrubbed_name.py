@@ -18,6 +18,7 @@ name the precedent carried earlier is refused as well."""
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,13 @@ from trellis.learning.scoring import (
     NAME_SOURCE_NEUTRAL,
     NAME_SOURCE_SOURCE_TEXT,
     REFUSED_REDACTED,
+    SOURCE_EXCERPT_INCLUDED,
     SOURCE_EXCERPT_REDACTED,
     _apply_readable_name_fallback,
+    _earlier_source_names,
     _restores_earlier_name,
     build_learning_promotion_payloads,
+    neutral_precedent_name,
     precedent_entity_id_for_candidate,
     prepare_learning_promotions,
     preview_learning_promotion,
@@ -39,6 +43,7 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
+from trellis.retrieve.precedents import list_precedents
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -809,6 +814,29 @@ def test_a_short_earlier_name_does_not_refuse_an_unrelated_title(
         ("see seven7x here", {"Learning: f :: seven7x"}, False),
         ("see eight88x here", {"Learning: f :: eight88x"}, True),
         ("Quartz heron opening", set(), False),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line…"},
+            True,
+        ),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line ..."},
+            True,
+        ),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line..."},
+            True,
+        ),
+        (
+            "Quartz heron opening line…",
+            {"Learning: f :: Quartz heron opening line…"},
+            True,
+        ),
+        ("Quartz", {"Learning: f :: Quartz heron…"}, False),
+        ("Anything at all", {"Learning: f :: …"}, False),
+        ("Anything at all", {"…"}, False),
     ],
 )
 def test_restores_earlier_name(name: str, earlier: set[str], refused: bool) -> None:
@@ -874,3 +902,143 @@ def test_the_refusal_names_the_id_and_is_true_with_no_precedent_to_scrub(
     assert "its source was redacted" in message
     assert "scrubbed" not in message
     assert NAME_TEXT not in message
+
+
+# --- The listing serves a row per promotion, not per node ---------------------
+
+
+@pytest.mark.parametrize(
+    "reviewer_title",
+    [None, "Reuse the rewritten opening"],
+    ids=["current-content-name", "reviewer-title"],
+)
+def test_the_listing_does_not_re_serve_an_older_events_text_after_a_re_ingest(
+    stores: _Stores, reviewer_title: str | None
+) -> None:
+    """Promote with a source-text name, redact, write the id again, promote again.
+
+    The node now reads ``included`` over the new content, but the older
+    ``PRECEDENT_PROMOTED`` event still holds the old title and excerpt, and the
+    log is immutable. A node vouches only for the event whose text it holds."""
+    entity_id, _ = _promoted_then_source_redacted(stores)
+    first_event, *_ = stores.events.get_events(
+        event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id, order="asc"
+    )
+    assert NAME_TEXT in first_event.payload["title"]
+    assert COPIED_TEXT in first_event.payload["description"]
+    _re_ingest(stores)
+    candidate = _named_from_current(stores)
+    outcome = (
+        stores.submit(candidate)
+        if reviewer_title is None
+        else stores.submit_planned(candidate, reviewer_title)
+    )
+    assert outcome["status"] == "promoted", outcome
+    node = stores.graph.get_node(entity_id)
+    assert node is not None
+    assert node["properties"]["source_excerpt_status"] == SOURCE_EXCERPT_INCLUDED
+    second_event = next(
+        e
+        for e in stores.events.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id, order="asc"
+        )
+        if e.event_id != first_event.event_id
+    )
+
+    rows = {
+        r["event_id"]: r
+        for r in list_precedents(stores.events, graph_store=stores.graph)
+    }
+
+    assert set(rows) == {first_event.event_id, second_event.event_id}
+    assert NAME_TEXT not in repr(rows)
+    assert COPIED_TEXT not in repr(rows)
+    older = rows[first_event.event_id]
+    assert older["title"] == neutral_precedent_name(entity_id, "asset_generation")
+    assert "Source excerpt" not in older["description"]
+    # The new event is served as promoted: its own title and its own excerpt.
+    newer = rows[second_event.event_id]
+    assert newer["title"] == node["properties"]["name"]
+    assert newer["title"] == (reviewer_title or newer["title"])
+    assert FRESH_TEXT in newer["title" if reviewer_title is None else "description"]
+    assert "Newly written body text" in newer["description"]
+
+
+# --- #1032 review: boundaries of the earlier-name window, a truncated name -----
+
+
+class _VersionedNode:
+    """A graph store that holds one node, with the given version stamps."""
+
+    def __init__(self, stamps: list[Any]) -> None:
+        self._stamps = stamps
+
+    def get_node_history(self, entity_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "valid_from": stamp,
+                "properties": {
+                    "name": f"Learning: f :: Name at {stamp}",
+                    "name_source": NAME_SOURCE_SOURCE_TEXT,
+                },
+            }
+            for stamp in self._stamps
+        ]
+
+
+def _names_before(stamps: list[Any], before: datetime) -> set[str]:
+    return _earlier_source_names(
+        {"entity_id": "prec-x", "properties": {}},
+        graph_store=_VersionedNode(stamps),  # type: ignore[arg-type]
+        event_log=None,
+        before=before,
+    )
+
+
+def test_a_version_stamped_at_the_redaction_time_counts_as_earlier() -> None:
+    """``before`` is inclusive: a scrub and a promotion can share a timestamp,
+    and the only safe reading is that the name came first."""
+    redacted_at = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    at = redacted_at.isoformat()
+    after = (redacted_at + timedelta(microseconds=1)).isoformat()
+    before = (redacted_at - timedelta(microseconds=1)).isoformat()
+
+    names = _names_before([before, at, after], redacted_at)
+
+    assert names == {f"Learning: f :: Name at {before}", f"Learning: f :: Name at {at}"}
+
+
+def test_a_version_with_an_unreadable_timestamp_counts_as_earlier() -> None:
+    """Fail closed: a version whose time cannot be read might be from before the
+    redaction, so its name stays refused."""
+    redacted_at = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+    names = _names_before(
+        ["not a timestamp", None, "2030-01-01T00:00:00+00:00"], redacted_at
+    )
+
+    assert names == {
+        "Learning: f :: Name at not a timestamp",
+        "Learning: f :: Name at None",
+    }
+
+
+def test_a_truncated_stale_name_the_reviewer_completed_is_still_refused(
+    stores: _Stores,
+) -> None:
+    """A name derived from a long first line is cut with an ellipsis; a reviewer
+    who finishes the sentence has still carried the text the redaction removed."""
+    long_line = "Quartz heron opening line that runs on well past the cap " * 3
+    stores.documents.put(SOURCE_ID, f"{long_line}\n\nbody", {})
+    first = _candidate()
+    _apply_readable_name_fallback(first, stores.documents)
+    truncated = first["precedent_name"]
+    assert truncated.endswith("…")
+    assert stores.submit(first)["status"] == "promoted"
+    stores.redact_source()
+    kept = truncated.partition(" :: ")[2].removesuffix("…").rstrip()
+    completed = f"Reviewer: {kept} and then some words the reviewer added"
+
+    outcome = stores.submit_planned(_regenerated(stores), completed)
+
+    assert outcome["status"] == REFUSED_REDACTED

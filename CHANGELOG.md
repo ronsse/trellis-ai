@@ -1180,7 +1180,7 @@ All notable changes to Trellis will be documented in this file.
   precedent scrubbed before this change keeps whatever alias it already has:
   once renamed it no longer matches, so a re-run finds nothing to key on.
 
-- **`promote-learning`'s redaction check: four follow-ups (#1032).**
+- **`promote-learning`'s redaction check: five follow-ups (#1032).**
   (1) A redacted id that was **written again** (`put_document` does not check
   for a tombstone) no longer refuses a name derived from the new content, or a
   reviewer's title: while the source's own row is live, was redacted by a
@@ -1193,7 +1193,9 @@ All notable changes to Trellis will be documented in this file.
   part (the text after `Learning: <family> :: `, normalised with
   `normalize_entity_name`), so a stale name touched up with a suffix, a prefix
   or a change of case no longer gets through; a distinctive part under 8
-  normalised characters counts only on exact equality. (3) A redaction
+  normalised characters counts only on exact equality. A trailing ellipsis
+  (`…` or `...`) is dropped first, so a name cut at the 96-character cap whose
+  sentence the reviewer then finished is still contained. (3) A redaction
   tombstone blanks the document row's title as well as its text
   (`_tombstone_document`), so a name copied from the item's title
   (`name_source` `item_title`) is the redacted document's text too: the
@@ -1204,7 +1206,21 @@ All notable changes to Trellis will be documented in this file.
   regenerated candidate yields the same title, so for a title-named candidate
   the remedy is a `promotion_name` of your own. (4) The refusal reads "its
   source was redacted", which is true whether or not a precedent already
-  existed; it still names the id and never the name.
+  existed; it still names the id and never the name. (5) The precedent
+  listing (`get_lessons`, `GET /precedents`, `trellis retrieve precedents`)
+  serves one row per `PRECEDENT_PROMOTED` event but judged every row by the
+  *current* node, so a source redacted, written again and promoted again, which
+  (1) now allows, left the node `included` over the new content and served the
+  older event's raw title and excerpt again. A node now vouches only for the
+  event whose text it holds: an `included` node keeps an event's title only when
+  `node.name` is that title and its description only when it is the node's own,
+  and an older event falls back to what it says about itself, a neutral name for
+  a `source_text` or `item_title` title and the excerpt stripped from its
+  description. The same holds for an `item_title` precedent whose node was
+  replaced by a reviewer's title before the redaction, and an `item_title`
+  precedent with no node now lists a neutral name, as a `source_text` one
+  already did. A node scrubbed before names were marked still lists a neutral
+  name for every event.
 
 - **`promote-learning` no longer restores a source-text name over its source's
   redaction (#1025).** Redacting a precedent's *source document* scrubs the

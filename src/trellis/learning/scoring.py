@@ -1065,8 +1065,10 @@ def neutral_precedent_name(entity_id: str, intent_family: object = None) -> str:
     return f"Learning: {family} :: {entity_id}" if family else entity_id or "precedent"
 
 
-#: The markers that name text copied from the source document.
-_NAME_SOURCES_FROM_SOURCE = frozenset({NAME_SOURCE_SOURCE_TEXT, NAME_SOURCE_ITEM_TITLE})
+#: The markers that name text copied from the source document. Shared with
+#: :func:`~trellis.retrieve.precedents.list_precedents`, which serves a neutral
+#: name for an event it marks with one of them when no node vouches for it.
+NAME_SOURCES_FROM_SOURCE = frozenset({NAME_SOURCE_SOURCE_TEXT, NAME_SOURCE_ITEM_TITLE})
 
 #: A distinctive part shorter than this does not refuse a longer name that
 #: merely contains it (:func:`_restores_earlier_name`): a short fragment appears
@@ -1091,7 +1093,7 @@ def name_may_hold_source_text(properties: Mapping[str, Any], entity_id: str) -> 
     """
     marker = properties.get("name_source")
     if marker is not None:
-        return bool(marker in _NAME_SOURCES_FROM_SOURCE)
+        return bool(marker in NAME_SOURCES_FROM_SOURCE)
     name = properties.get("name")
     if not isinstance(name, str) or not name.strip():
         return False
@@ -1625,20 +1627,27 @@ def _earlier_source_names(
     }
 
 
+#: A name cut at its cap ends in the excerpt marker; a reviewer or an earlier
+#: tool may have typed the three-dot form instead.
+_TRAILING_ELLIPSIS_RE = re.compile(r"\s*(?:…|\.\.\.)\s*$")
+
+
 def _distinctive_name(name: str) -> str:
     """The part of a precedent name that carries its source's text, normalised.
 
     A derived name is ``Learning: <intent family> :: <text>``; the text after
     that prefix is what identifies it, and a reviewer who edits the name keeps
     it while changing the prefix. A name without the prefix is its own text.
-    Normalised as :func:`~trellis.schemas.well_known.normalize_entity_name`
-    does (trimmed, whitespace collapsed, case-folded), so a change of case or
-    spacing does not hide it.
+    A trailing ellipsis (``…`` or ``...``) is dropped: a first line cut at the
+    name cap ends in one, and a reviewer who completes the sentence has kept
+    the text without it. Normalised as
+    :func:`~trellis.schemas.well_known.normalize_entity_name` does (trimmed,
+    whitespace collapsed, case-folded), so a change of case or spacing does not
+    hide it.
     """
     head, separator, tail = name.partition(" :: ")
-    return normalize_entity_name(
-        tail if separator and head.startswith("Learning:") else name
-    )
+    text = tail if separator and head.startswith("Learning:") else name
+    return normalize_entity_name(_TRAILING_ELLIPSIS_RE.sub("", text))
 
 
 def _restores_earlier_name(name: str, earlier: set[str]) -> bool:
@@ -2314,6 +2323,7 @@ __all__ = [
     "LEARNING_PROMOTE_SUCCESS_KEY",
     "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
+    "NAME_SOURCES_FROM_SOURCE",
     "NAME_SOURCES_WITHOUT_SOURCE_TEXT",
     "NAME_SOURCE_NEUTRAL",
     "NAME_SOURCE_SOURCE_TEXT",

@@ -461,8 +461,8 @@ class TestServedTitle:
         assert row["payload"]["title"] == "prec-t"
         assert "FIRST LINE" not in repr(row)
 
-    @pytest.mark.parametrize("marker", ["item_title", "item_id", "reviewer", None])
-    def test_a_missing_node_keeps_a_title_not_marked_source_text(
+    @pytest.mark.parametrize("marker", ["item_id", "reviewer", None])
+    def test_a_missing_node_keeps_a_title_not_marked_source_derived(
         self,
         event_log: SQLiteEventLog,
         graph_store: SQLiteGraphStore,
@@ -476,11 +476,22 @@ class TestServedTitle:
 
         assert row["title"] == SOURCE_TITLE
 
+    def test_a_missing_node_serves_the_neutral_name_for_an_item_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        # The source's own title is source text too: a redaction blanks it.
+        _promote_event(event_log, name_source="item_title")
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == "prec-t"
+        assert "FIRST LINE" not in repr(row)
+
     def test_a_node_that_does_not_vouch_for_its_excerpt_serves_the_neutral_name(
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
     ) -> None:
         _promote_event(event_log, name_source="source_text")
-        _node(graph_store, source_excerpt_status="no_content")
+        _node(graph_store, name=SOURCE_TITLE, source_excerpt_status="no_content")
 
         (row,) = list_precedents(event_log, graph_store=graph_store)
 
@@ -490,7 +501,12 @@ class TestServedTitle:
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
     ) -> None:
         _promote_event(event_log, name_source="source_text")
-        _node(graph_store, source_excerpt_status="included", name_source="source_text")
+        _node(
+            graph_store,
+            name=SOURCE_TITLE,
+            source_excerpt_status="included",
+            name_source="source_text",
+        )
 
         (row,) = list_precedents(event_log, graph_store=graph_store)
 
@@ -530,6 +546,7 @@ class TestServedTitle:
         _promote_event(event_log)
         _node(
             graph_store,
+            name=SOURCE_TITLE,
             source_excerpt_status="source_redacted",
             **({"name_source": marker} if marker else {}),
         )
@@ -537,3 +554,151 @@ class TestServedTitle:
         (row,) = list_precedents(event_log, graph_store=graph_store)
 
         assert row["title"] == title
+
+    @pytest.mark.parametrize("event_marker", ["source_text", "item_title"])
+    @pytest.mark.parametrize("status", ["included", "no_content"])
+    def test_a_node_holding_a_different_title_does_not_vouch_for_the_event(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        status: str,
+        event_marker: str,
+    ) -> None:
+        # A source redacted, written again and promoted again leaves the node
+        # ``included`` over the new event's title; the older event's title is
+        # not the node's, so the node says nothing about it.
+        _promote_event(event_log, name_source=event_marker)
+        _node(
+            graph_store,
+            name="Learning: fam :: Title of the rewritten source",
+            name_source="source_text",
+            source_excerpt_status=status,
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == NEUTRAL_TITLE
+        assert "FIRST LINE" not in repr(row)
+
+    def test_a_node_holding_a_different_title_serves_an_unmarked_title_as_promoted(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            name="Learning: fam :: Title of the rewritten source",
+            source_excerpt_status="included",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == SOURCE_TITLE
+
+    @pytest.mark.parametrize("event_marker", ["source_text", "item_title"])
+    def test_a_reviewer_named_scrubbed_node_does_not_vouch_for_an_older_title(
+        self,
+        event_log: SQLiteEventLog,
+        graph_store: SQLiteGraphStore,
+        event_marker: str,
+    ) -> None:
+        # The reviewer's own title survived the scrub; the older event's did not.
+        _promote_event(event_log, name_source=event_marker)
+        _node(
+            graph_store,
+            name="Reuse the approved opening",
+            name_source="reviewer",
+            source_excerpt_status="source_redacted",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == NEUTRAL_TITLE
+
+    def test_a_reviewer_named_scrubbed_node_serves_its_own_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(
+            event_log, title="Reuse the approved opening", name_source="reviewer"
+        )
+        _node(
+            graph_store,
+            name="Reuse the approved opening",
+            name_source="reviewer",
+            source_excerpt_status="source_redacted",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == "Reuse the approved opening"
+
+    def test_a_node_scrubbed_before_names_were_marked_is_neutral_for_every_event(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        # No marker clears the name, so holding the event's title is not what
+        # decides: the node's name may itself be source text.
+        _promote_event(event_log)
+        _node(
+            graph_store,
+            name="Learning: fam :: A name this event never carried",
+            source_excerpt_status="source_redacted",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == NEUTRAL_TITLE
+
+
+# ---------------------------------------------------------------------------
+# The listing strips an excerpt the node does not hold
+# ---------------------------------------------------------------------------
+
+OLD_EXCERPT = "Amber ledger text from the first write of the source"
+NEW_EXCERPT = "Cobalt lantern text from the rewritten source"
+
+
+def _described(excerpt: str) -> str:
+    return (
+        "Reviewed learning for intent family 'fam'. "
+        f"Source excerpt: {excerpt} "
+        "Source item 'doc-s' showed success_rate=1.0 (retry_rate not measured)."
+    )
+
+
+class TestServedDescription:
+    def test_an_included_node_serves_the_description_it_holds(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(
+            event_log,
+            description=_described(NEW_EXCERPT),
+            source_item_id="doc-s",
+        )
+        _node(
+            graph_store,
+            description=_described(NEW_EXCERPT),
+            source_excerpt_status="included",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert NEW_EXCERPT in row["description"]
+
+    def test_an_included_node_does_not_vouch_for_an_older_events_excerpt(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(
+            event_log,
+            description=_described(OLD_EXCERPT),
+            source_item_id="doc-s",
+        )
+        _node(
+            graph_store,
+            description=_described(NEW_EXCERPT),
+            source_excerpt_status="included",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert OLD_EXCERPT not in repr(row)
+        assert NEW_EXCERPT not in repr(row)
+        assert "Reviewed learning for intent family" in row["description"]
