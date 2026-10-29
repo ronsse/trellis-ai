@@ -37,7 +37,7 @@ from trellis.mutate.commands import (
     Operation,
     OperationRegistry,
 )
-from trellis.mutate.executor import CommandHandler, MutationExecutor
+from trellis.mutate.executor import MutationExecutor
 
 # ---------------------------------------------------------------------------
 # Strategies
@@ -106,10 +106,7 @@ def invalid_commands(draw: st.DrawFn) -> Command:
 
 
 def _ok_handler(created_id: str = "id_1", message: str = "ok") -> MagicMock:
-    # ``spec`` keeps the double a handler without the optional
-    # ``replay_refusal`` / ``policy_scope_commands`` hooks: a bare MagicMock
-    # answers any attribute, so the executor would read its answer as a refusal.
-    h = MagicMock(spec=CommandHandler)
+    h = MagicMock()
     h.handle.return_value = (created_id, message)
     return h
 

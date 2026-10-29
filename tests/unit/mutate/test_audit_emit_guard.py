@@ -44,7 +44,6 @@ from trellis.mutate.commands import (
 )
 from trellis.mutate.executor import (
     AUDIT_EMIT_FAILED_MARKER,
-    CommandHandler,
     MutationExecutor,
 )
 from trellis.stores.base.event_log import EventLog, EventType
@@ -57,10 +56,7 @@ def _cmd(**kwargs: Any) -> Command:
 
 
 def _handler(*, created_id: str = "ent_1", raises: BaseException | None = None):
-    # ``spec`` keeps the double a handler without the optional
-    # ``replay_refusal`` / ``policy_scope_commands`` hooks: a bare MagicMock
-    # answers any attribute, so the executor would read its answer as a refusal.
-    h = MagicMock(spec=CommandHandler)
+    h = MagicMock()
     if raises is not None:
         h.handle.side_effect = raises
     else:

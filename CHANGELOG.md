@@ -1410,9 +1410,12 @@ All notable changes to Trellis will be documented in this file.
   tombstone guard's own predicate read-only, so the replay is refused as the
   first write is: the same `redaction_tombstone_overwrite` reason and message
   and the same `mutation.rejected` event (a 400 on the two REST routes,
-  `rejected` on the command door). A hook that raises fails the command closed
-  (`idempotency_check_failed`), never as a duplicate. A replay over a row that
-  is not a tombstone, and every other handler's replay, is the duplicate it was.
+  `rejected` on the command door). A hook that raises, or answers with anything
+  but nothing or a validation error, fails the command closed
+  (`idempotency_check_failed`), never as a duplicate; the executor looks the
+  hook up on the handler's type, so a handler double that answers any attribute
+  has none. Only a tombstone is asked: a replay over a live row, or over an id
+  with no row, is the duplicate it was, as is every other handler's replay.
   A flagged replay (`reingest_redacted=true`) also stays a duplicate: the
   flagged key digests the flag, so it replays a write that already put content
   back and a replay writes nothing; if the id was redacted again since, the

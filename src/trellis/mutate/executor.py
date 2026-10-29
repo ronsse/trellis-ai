@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from collections import OrderedDict
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import structlog
 
@@ -237,8 +237,10 @@ class CommandHandler(Protocol):
     # would have raised, so the replay is REJECTED instead of answered as a
     # duplicate of a write that is no longer in place. It reads and never
     # writes, and it is not asked on a miss, where ``handle`` runs and
-    # refuses for itself. A hook that raises fails the command closed
-    # (``idempotency_check_failed``), never as a duplicate.
+    # refuses for itself. A hook that raises, or answers with anything but
+    # ``None`` or a ``ValidationError``, fails the command closed
+    # (``idempotency_check_failed``), never as a duplicate. It is looked up
+    # on the handler's type, not the instance.
 
 
 class MutationExecutor:
@@ -1001,19 +1003,33 @@ class MutationExecutor:
 
         Called only on a hit, so a miss pays nothing. A hook that raises fails
         closed (:meth:`_idempotency_check_failed`): not a duplicate, and the
-        handler does not run.
+        handler does not run. So does one that answers with anything but
+        ``None`` or a :class:`ValidationError`, which no refusal can be built
+        from.
+
+        The hook is looked up on the handler's type, so an instance that
+        answers any attribute (a mock, a ``__getattr__`` proxy) is not read as
+        having one.
         """
-        ask = getattr(self._handlers.get(command.operation), "replay_refusal", None)
-        if not callable(ask):
+        handler = self._handlers.get(command.operation)
+        if not callable(getattr(type(handler), "replay_refusal", None)):
             return None
         try:
-            refusal = ask(command)
+            refusal = cast("Any", handler).replay_refusal(command)
         except _audit_emit_failure_classes() as exc:
             return self._idempotency_check_failed(
                 command, log, exc, policy_warnings, scope_unevaluated
             )
         if refusal is None:
             return None
+        if not isinstance(refusal, ValidationError):
+            return self._idempotency_check_failed(
+                command,
+                log,
+                TypeError(f"replay_refusal returned {type(refusal).__name__}"),
+                policy_warnings,
+                scope_unevaluated,
+            )
         log.warning("replay_refused", key=command.idempotency_key, reason=refusal.code)
         return self._validation_rejection(
             command, refusal, policy_warnings, scope_unevaluated

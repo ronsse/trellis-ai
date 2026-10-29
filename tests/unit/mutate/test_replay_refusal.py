@@ -237,11 +237,24 @@ class TestExecutorAsksOnlyOnAHit:
 
         assert payload(miss_log) == payload(hit_log)
 
-    def test_a_refused_replay_does_not_consume_the_key(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("event_log", ["with log", "no log"])
+    def test_a_refused_replay_does_not_consume_the_key(
+        self, tmp_path: Path, event_log: str
+    ) -> None:
         """A refused command leaves its key as it found it: once the handler has
-        no objection the same key is the duplicate it was."""
+        no objection the same key is the duplicate it was.
+
+        With an event log the persisted arm would answer DUPLICATE even if the
+        refusal had dropped the key from the cache, so the cache alone is
+        pinned with no log. Defective subject: pop the key on a refusal and the
+        handler runs a second time."""
         handler = _CountingHandler()
-        executor, _ = _executor(handler, tmp_path)
+        if event_log == "with log":
+            executor, _ = _executor(handler, tmp_path)
+        else:
+            executor = MutationExecutor(
+                event_log=None, handlers={Operation.ENTITY_CREATE: handler}
+            )
         executor.execute(_cmd(idempotency_key=KEY))
         handler.refusal = _refusal()
         assert executor.execute(_cmd(idempotency_key=KEY)).status is (
@@ -286,6 +299,98 @@ class TestAHookThatRaisesFailsClosed:
         assert result.message == f"Idempotency check failed: {type(boom).__name__}"
         rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
         assert [e.payload["reason"] for e in rejected] == ["idempotency_check_failed"]
+
+
+class _Answers(_CountingHandler):
+    """A hook whose answer is whatever it was given, refusal or not."""
+
+    def __init__(self, answer: Any) -> None:
+        super().__init__()
+        self.answer = answer
+
+    def replay_refusal(self, command: Command) -> Any:
+        self.asked += 1
+        return self.answer
+
+
+class _BareCode:
+    code = REFUSAL_CODE
+
+
+class TestAnAnswerThatIsNoRefusalFailsClosed:
+    @pytest.mark.parametrize("arm", ["cache", "persisted"])
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            MagicMock(),
+            "refused",
+            True,
+            False,
+            _BareCode(),
+            RuntimeError("returned, not raised"),
+        ],
+        ids=["mock", "str", "True", "False", "object with a code", "returned error"],
+    )
+    def test_the_replay_fails_with_idempotency_check_failed(
+        self, tmp_path: Path, arm: str, answer: Any
+    ) -> None:
+        """Only ``None`` or a ``ValidationError`` is an answer. Defective
+        subject: read ``.code`` off whatever came back and ``execute`` raises
+        with no result, no event and a REST 500."""
+        first, log = _executor(_CountingHandler(), tmp_path)
+        first.execute(_cmd(idempotency_key=KEY))
+        handler = _Answers(answer)
+        if arm == "cache":
+            second = first
+            second.register_handler(Operation.ENTITY_CREATE, handler)
+        else:
+            second = MutationExecutor(
+                event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+            )
+
+        result = second.execute(_cmd(idempotency_key=KEY))
+
+        assert handler.asked == 1
+        assert handler.handled == 0
+        assert result.status is CommandStatus.FAILED
+        assert result.message == "Idempotency check failed: TypeError"
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [e.payload["reason"] for e in rejected] == ["idempotency_check_failed"]
+
+    @pytest.mark.parametrize("arm", ["cache", "persisted"])
+    def test_a_handler_that_answers_any_attribute_has_no_hook(
+        self, tmp_path: Path, arm: str
+    ) -> None:
+        """A bare mock (or a ``__getattr__`` proxy) answers ``replay_refusal``
+        like any name, so asking the instance would read its reply as a
+        refusal. The hook is looked up on the type."""
+
+        class _Proxy(_NoHook):
+            asked = 0
+
+            def __getattr__(self, name: str) -> Any:
+                if name == "replay_refusal":
+                    type(self).asked += 1
+                    return lambda command: _refusal()
+                raise AttributeError(name)
+
+        mock = MagicMock()
+        mock.handle.return_value = ("created-1", "ok")
+        for handler in (mock, _Proxy()):
+            executor, log = _executor(handler, tmp_path, name=f"{id(handler)}.db")
+            executor.execute(_cmd(idempotency_key=KEY))
+            replayer = (
+                executor
+                if arm == "cache"
+                else MutationExecutor(
+                    event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+                )
+            )
+
+            result = replayer.execute(_cmd(idempotency_key=KEY))
+
+            assert result.status is CommandStatus.DUPLICATE
+        assert _Proxy.asked == 0
 
 
 # --- the evidence handler against the real guard ----------------------------
@@ -348,29 +453,29 @@ CASES = {
         _evidence_command(metadata=FORGED),
     ),
     "live row, forged re-ingest stamp": ("live", _evidence_command(metadata=FORGED)),
+    "no row, forged re-ingest stamp": ("absent", _evidence_command(metadata=FORGED)),
+    "tombstone, flagged, stale re-ingest stamp": (
+        "tombstone",
+        _evidence_command(metadata=FORGED, flag=True),
+    ),
 }
 
+# Where the guard's stamp check refuses a write that is not a replay over a
+# tombstone, the hook still answers None: nothing was lost, so the replay is a
+# true duplicate, and a flagged replay is left to it by design.
+STAMP_REFUSED_BUT_REPLAY_IS_A_DUPLICATE = (
+    "live row, forged re-ingest stamp",
+    "no row, forged re-ingest stamp",
+    "tombstone, flagged, stale re-ingest stamp",
+)
 
-@pytest.mark.parametrize("case", CASES, ids=list(CASES))
-def test_the_hook_refuses_exactly_what_put_document_would(
-    registry: StoreRegistry, case: str
-) -> None:
-    """Defective subject: invert the handler's predicate, or compare a different
-    pair of fields than the guard does, and a case below disagrees."""
-    state, command = CASES[case]
-    _seed(registry, state)
-    store = registry.knowledge.document_store
-    before = store.get(DOC)
-    handler = EvidenceIngestHandler(registry)
+
+def _guard_code(registry: StoreRegistry, command: Command) -> str | None:
+    """The code ``put_document`` refuses ``command`` with now, else ``None``."""
     evidence = command.args["evidence"]
-
-    answer = handler.replay_refusal(command)
-
-    assert store.get(DOC) == before, "the hook read and wrote"
-    guard_code: str | None = None
     try:
         put_document(
-            store,
+            registry.knowledge.document_store,
             None,
             DOC,
             evidence["content"],
@@ -379,10 +484,50 @@ def test_the_hook_refuses_exactly_what_put_document_would(
             reingest_redacted=evidence.get("reingest_redacted") is True,
         )
     except RedactionTombstoneError as exc:
-        guard_code = exc.code
-    assert (answer.code if answer is not None else None) == guard_code
+        return exc.code
+    return None
+
+
+@pytest.mark.parametrize("case", CASES, ids=list(CASES))
+def test_the_hook_refuses_exactly_what_put_document_would(
+    registry: StoreRegistry, case: str
+) -> None:
+    """Over an unflagged tombstone the hook answers as the guard does, in both
+    refusal codes; anywhere else it answers ``None`` (next test). Defective
+    subject: invert the handler's predicate, or compare a different pair of
+    fields than the guard does, and a case below disagrees."""
+    state, command = CASES[case]
+    _seed(registry, state)
+    store = registry.knowledge.document_store
+    before = store.get(DOC)
+    handler = EvidenceIngestHandler(registry)
+
+    answer = handler.replay_refusal(command)
+
+    assert store.get(DOC) == before, "the hook read and wrote"
+    expected = (
+        None
+        if case in STAMP_REFUSED_BUT_REPLAY_IS_A_DUPLICATE
+        else _guard_code(registry, command)
+    )
+    assert (answer.code if answer is not None else None) == expected
     if answer is not None:
         assert isinstance(answer, RedactionTombstoneError)
+
+
+@pytest.mark.parametrize("case", STAMP_REFUSED_BUT_REPLAY_IS_A_DUPLICATE)
+def test_a_stamp_the_guard_refuses_is_no_refusal_of_a_replay_that_lost_nothing(
+    registry: StoreRegistry, case: str
+) -> None:
+    """The guard's stamp check refuses a forged stamp on any write, tombstone or
+    not. A replay over a live row or an absent one lost nothing, so answering
+    its refusal would turn a true duplicate into a rejection. Defective subject:
+    run the guard in full on whatever the row is."""
+    state, command = CASES[case]
+    _seed(registry, state)
+    assert _guard_code(registry, command) == STAMP_RESERVED_CODE
+
+    assert EvidenceIngestHandler(registry).replay_refusal(command) is None
 
 
 def test_the_refusal_is_the_guard_s_own_words(registry: StoreRegistry) -> None:
@@ -547,6 +692,68 @@ def test_a_flagged_replay_stays_a_duplicate_and_writes_nothing(
 
     assert result.status is CommandStatus.DUPLICATE
     assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC))
+
+
+@pytest.mark.parametrize("arm", ["cache", "persisted"])
+def test_a_replay_of_a_write_that_carried_the_rows_own_stamp_is_a_duplicate(
+    registry: StoreRegistry, arm: str
+) -> None:
+    """The row is live again and a later write dropped the stamp the replayed
+    command carries. Nothing is lost, so the replay is the duplicate it was and
+    not the guard's ``reingest_stamp_reserved``. Defective subject: run the
+    guard's stamp check on a row that is not a tombstone."""
+    store = registry.knowledge.document_store
+    make_tombstone(store, resolve_vector_store(registry), DOC)
+    executor = build_curate_executor(registry, clearance="restricted")
+
+    def write(
+        content: str,
+        *,
+        key: str,
+        metadata: dict[str, Any] | None = None,
+        flag: bool = False,
+    ) -> Command:
+        return build_evidence_ingest_command(
+            doc_id=DOC,
+            content=content,
+            metadata=metadata,
+            reingest_redacted=flag,
+            requested_by="test:replay",
+            idempotency_key=key,
+        )
+
+    # 1-2. Tombstone, then the flagged re-ingest that stamps the row.
+    assert (
+        executor.execute(write("first", key="k-flag", flag=True)).status
+        is CommandStatus.SUCCESS
+    )
+    stamp = store.get(DOC)["metadata"][REINGEST_STAMP_KEY]
+    # 3. A refresh that carries the row's own stamp.
+    refresh = write("refreshed", key="k-refresh", metadata={REINGEST_STAMP_KEY: stamp})
+    assert executor.execute(refresh).status is CommandStatus.SUCCESS
+    # 4. A rebuild without the stamp: the row is live and no longer holds it.
+    assert (
+        executor.execute(write("rebuilt", key="k-rebuild")).status
+        is CommandStatus.SUCCESS
+    )
+    row = store.get(DOC)
+    assert not is_redaction_tombstone(row)
+    assert REINGEST_STAMP_KEY not in row["metadata"]
+    replayer = (
+        executor
+        if arm == "cache"
+        else build_curate_executor(registry, clearance="restricted")
+    )
+
+    # 5. Step 3 again, same key.
+    result = replayer.execute(refresh)
+
+    assert result.status is CommandStatus.DUPLICATE
+    assert store.get(DOC) == row
+    events = registry.operational.event_log.get_events(
+        event_type=EventType.MUTATION_REJECTED
+    )
+    assert [e.payload["reason"] for e in events] == ["idempotency_replay"]
 
 
 def test_the_flagged_and_unflagged_writes_do_not_share_a_key() -> None:

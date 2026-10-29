@@ -1430,9 +1430,11 @@ Scope boundaries, stated plainly:
   and `evidence.ingest` answers with the guard's own predicate, read-only: the
   replay gets the first write's refusal (`redaction_tombstone_overwrite`, a 400
   on the two REST routes, `rejected` on the command door, one `mutation.rejected`
-  event). A hook that raises fails the command closed
-  (`idempotency_check_failed`). A replay over a row that is not a tombstone is
-  still a duplicate. So is a flagged replay: the flagged key digests the flag,
+  event). A hook that raises, or answers with anything but nothing or a
+  validation error, fails the command closed (`idempotency_check_failed`); the
+  executor looks the hook up on the handler's type. Only a tombstone is asked: a
+  replay over a live row or an id with no row is still a duplicate, even one
+  whose metadata carries a re-ingest stamp. So is a flagged replay: the flagged key digests the flag,
   so it replays a write that already put content back, and a replay writes
   nothing; if the id was redacted again since, the tombstone stays, and putting
   content back again takes a fresh `idempotency_key`.
