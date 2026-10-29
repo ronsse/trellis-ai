@@ -18,6 +18,7 @@ name the precedent carried earlier is refused as well."""
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +28,13 @@ from trellis.learning.scoring import (
     NAME_SOURCE_NEUTRAL,
     NAME_SOURCE_SOURCE_TEXT,
     REFUSED_REDACTED,
+    SOURCE_EXCERPT_INCLUDED,
     SOURCE_EXCERPT_REDACTED,
     _apply_readable_name_fallback,
+    _earlier_source_names,
+    _restores_earlier_name,
     build_learning_promotion_payloads,
+    neutral_precedent_name,
     precedent_entity_id_for_candidate,
     prepare_learning_promotions,
     preview_learning_promotion,
@@ -38,6 +43,7 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
+from trellis.retrieve.precedents import list_precedents
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -342,7 +348,7 @@ def test_a_scrubbed_precedent_is_refused_before_its_lifecycle_state(
 
 @pytest.mark.parametrize(
     "marker",
-    [None, "reviewer", "item_title", "item_id"],
+    [None, "reviewer", "item_id"],
 )
 def test_a_name_with_no_source_text_is_not_refused_on_a_scrubbed_precedent(
     stores: _Stores, marker: str | None
@@ -360,8 +366,6 @@ def test_a_name_with_no_source_text_is_not_refused_on_a_scrubbed_precedent(
         candidate.pop("precedent_name_source")
     else:
         candidate["precedent_name_source"] = marker
-    if marker == "item_title":
-        candidate["precedent_name"] = "Learning: asset_generation :: A real title"
 
     outcome = stores.preview(candidate)
 
@@ -566,3 +570,475 @@ def test_an_earlier_node_version_names_a_source_text_title(stores: _Stores) -> N
     assert refused is not None
     assert refused["status"] == REFUSED_REDACTED
     assert written is None or not promotion_is_refusal(written)
+
+
+# --- #1032: a re-ingested source, an edited stale name, an item title ---------
+
+FRESH_TEXT = "Cobalt lantern first line of the rewritten source"
+
+
+def _redact_id(stores: _Stores, target_id: str) -> None:
+    result = stores.executor.execute(
+        Command(
+            operation=Operation.REDACTION_APPLY,
+            args={"target_id": target_id, "reason": "owner request"},
+            target_id=target_id,
+            target_type="entity",
+            requested_by="test",
+        )
+    )
+    assert result.status == CommandStatus.SUCCESS, result.message
+
+
+def _re_ingest(
+    stores: _Stores, item_id: str = SOURCE_ID, first_line: str = FRESH_TEXT
+) -> None:
+    """Write the redacted id again with new content: ``put_document`` does not
+    look for a tombstone, so this is all a re-ingest is."""
+    stores.documents.put(item_id, f"{first_line}\n\nNewly written body text", {})
+
+
+def _named_from_current(stores: _Stores, item_id: str = SOURCE_ID) -> dict[str, Any]:
+    """The candidate as the analyzer writes it from the source's current text."""
+    candidate = _candidate(item_id)
+    _apply_readable_name_fallback(candidate, stores.documents)
+    assert candidate["precedent_name_source"] == NAME_SOURCE_SOURCE_TEXT
+    assert FRESH_TEXT in candidate["precedent_name"]
+    return candidate
+
+
+def test_a_name_from_the_current_content_promotes_after_a_re_ingest(
+    stores: _Stores,
+) -> None:
+    stores.redact_source()
+    _re_ingest(stores)
+    candidate = _named_from_current(stores)
+    entity_id = precedent_entity_id_for_candidate(candidate["candidate_id"])
+
+    assert stores.preview(candidate) is None
+    outcome = stores.submit(candidate)
+
+    assert outcome["status"] == "promoted", outcome
+    node = stores.graph.get_node(entity_id)
+    assert node is not None
+    assert FRESH_TEXT in node["properties"]["name"]
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+    # And the regenerated candidate is idempotent: the refusal's own remedy
+    # (regenerate) lands on the same name every time.
+    assert stores.submit(copy.deepcopy(candidate))["status"] == "already_promoted"
+
+
+def test_a_name_taken_after_a_re_ingest_is_stale_once_the_source_is_redacted_again(
+    stores: _Stores,
+) -> None:
+    """The cutoff is the latest redaction, not the first."""
+    stores.redact_source()
+    _re_ingest(stores)
+    first = _named_from_current(stores)
+    assert stores.submit(first)["status"] == "promoted"
+    entity_id = precedent_entity_id_for_candidate(first["candidate_id"])
+    # The first redaction deleted the source's graph node, which a second one
+    # needs to find.
+    stores.graph.upsert_node(SOURCE_ID, "CreativeWork", {"name": SOURCE_ID})
+    _redact_id(stores, SOURCE_ID)
+    later_text = "Quartz harbor opening of the second rewrite"
+    _re_ingest(stores, first_line=later_text)
+
+    stale = stores.submit(copy.deepcopy(first))
+    fresh_candidate = _candidate(SOURCE_ID)
+    _apply_readable_name_fallback(fresh_candidate, stores.documents)
+    fresh = stores.submit(fresh_candidate)
+
+    assert stale["status"] == REFUSED_REDACTED
+    assert FRESH_TEXT not in stores.everything_stored(entity_id)
+    assert fresh["status"] == "promoted", fresh
+    assert later_text in stores.graph.get_node(entity_id)["properties"]["name"]
+
+
+def test_a_scrubbed_precedent_takes_a_current_content_name_after_a_re_ingest(
+    stores: _Stores,
+) -> None:
+    """The node still carries its scrub markers (``neutral``, ``source_redacted``),
+    which are not what refuses once the source reads as written again."""
+    entity_id, _ = _promoted_then_source_redacted(stores)
+    _re_ingest(stores)
+
+    outcome = stores.submit(_named_from_current(stores))
+
+    assert outcome["status"] == "promoted", outcome
+    assert FRESH_TEXT in stores.graph.get_node(entity_id)["properties"]["name"]
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+
+
+def test_a_reviewer_title_promotes_after_a_re_ingest(stores: _Stores) -> None:
+    """A candidate named from source text keeps that marker even when its name
+    is edited, so only the source's state tells this title from a stale one."""
+    stores.redact_source()
+    _re_ingest(stores)
+    title = "Reuse the rewritten opening"
+
+    candidate = _named_from_current(stores)
+
+    outcome = stores.submit_planned(candidate, title)
+
+    assert outcome["status"] == "promoted", outcome
+    node = stores.graph.get_node(
+        precedent_entity_id_for_candidate(candidate["candidate_id"])
+    )
+    assert node["properties"]["name"] == title
+
+
+def test_a_name_from_before_the_redaction_is_still_refused_after_a_re_ingest(
+    stores: _Stores,
+) -> None:
+    entity_id, stale = _promoted_then_source_redacted(stores)
+    _re_ingest(stores)
+    history_before = stores.graph.get_node_history(entity_id)
+
+    by_candidate = stores.submit(stale)
+    by_decision = stores.submit_planned(
+        _named_from_current(stores), stale["precedent_name"]
+    )
+
+    assert by_candidate["status"] == REFUSED_REDACTED
+    assert by_decision["status"] == REFUSED_REDACTED
+    assert stores.graph.get_node_history(entity_id) == history_before
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+    assert NAME_TEXT not in by_decision["message"]
+
+
+def test_a_redaction_event_with_no_row_and_no_re_ingest_still_refuses(
+    stores: _Stores,
+) -> None:
+    """The event is the only trace: the id never had a document row to blank,
+    so there is no live row either, and the first test applies."""
+    stores.graph.upsert_node("doc-gone", "CreativeWork", {"name": "doc-gone"})
+    _redact_id(stores, "doc-gone")
+    assert stores.documents.get("doc-gone") is None
+    stale = _candidate("doc-gone")
+    stale["precedent_name"] = NAME_TEXT
+    stale["precedent_name_source"] = NAME_SOURCE_SOURCE_TEXT
+
+    outcome = stores.preview(stale)
+
+    assert outcome is not None
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_a_chunk_row_beside_a_parent_that_is_still_blank_is_not_a_re_ingest(
+    stores: _Stores,
+) -> None:
+    chunk_id = f"{SOURCE_ID}#chunk-0"
+    stores.documents.put(chunk_id, f"{NAME_TEXT}\n\nchunk body", {})
+    stale = _candidate(chunk_id)
+    stale["precedent_name"] = NAME_TEXT
+    stale["precedent_name_source"] = NAME_SOURCE_SOURCE_TEXT
+    stores.redact_source()
+    _re_ingest(stores, chunk_id)
+
+    outcome = stores.preview(stale)
+
+    assert outcome is not None
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_a_chunk_promotes_once_its_parent_is_written_again(stores: _Stores) -> None:
+    chunk_id = f"{SOURCE_ID}#chunk-0"
+    stores.documents.put(chunk_id, f"{NAME_TEXT}\n\nchunk body", {})
+    stores.redact_source()
+    _re_ingest(stores, chunk_id)
+    _re_ingest(stores)
+
+    assert stores.preview(_named_from_current(stores, chunk_id)) is None
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(lambda n: n + " (revised)", id="suffix"),
+        pytest.param(
+            lambda n: f"Reviewer note: {n.split(' :: ')[1].upper()}", id="prefix"
+        ),
+        pytest.param(lambda n: n.replace(" ", "  "), id="spacing"),
+    ],
+)
+def test_an_edited_stale_name_with_a_regenerated_candidate_is_refused(
+    stores: _Stores, edit: Any
+) -> None:
+    """Neither exact equality nor the candidate's marker sees this one: the
+    regenerated candidate is not source-named, and the edited name was never
+    promoted itself. It carries the earlier name's text all the same."""
+    entity_id, stale = _promoted_then_source_redacted(stores)
+
+    outcome = stores.submit_planned(_regenerated(stores), edit(stale["precedent_name"]))
+
+    assert outcome["status"] == REFUSED_REDACTED
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+    assert NAME_TEXT not in outcome["message"]
+
+
+def test_a_short_earlier_name_does_not_refuse_an_unrelated_title(
+    stores: _Stores,
+) -> None:
+    stores.documents.put(SOURCE_ID, "Hi\n\nshort opening body", {})
+    first = _candidate()
+    _apply_readable_name_fallback(first, stores.documents)
+    assert first["precedent_name"].endswith(" :: Hi")
+    entity_id = precedent_entity_id_for_candidate(first["candidate_id"])
+    assert stores.submit(first)["status"] == "promoted"
+    stores.redact_source()
+
+    unrelated = stores.submit_planned(_regenerated(stores), "Hi there, a title of mine")
+    assert unrelated["status"] == "promoted", unrelated
+    assert stores.graph.get_node(entity_id)["properties"]["name_source"] == "reviewer"
+
+    # Equality is still exact, whatever the length.
+    exact = stores.submit_planned(_regenerated(stores), first["precedent_name"])
+    assert exact["status"] == REFUSED_REDACTED
+
+
+@pytest.mark.parametrize(
+    ("name", "earlier", "refused"),
+    [
+        (
+            "Learning: f :: Quartz heron opening",
+            {"Learning: f :: Quartz heron opening"},
+            True,
+        ),
+        ("my QUARTZ  heron opening!", {"Learning: f :: Quartz heron opening"}, True),
+        ("Anything at all", {"Learning: f :: "}, False),
+        ("Anything at all", {""}, False),
+        ("a b c d e f g", {"Learning: f :: abcdefg"}, False),
+        ("Learning: f :: Hi", {"Learning: f :: Hi"}, True),
+        ("Hi there", {"Learning: f :: Hi"}, False),
+        ("see seven7x here", {"Learning: f :: seven7x"}, False),
+        ("see eight88x here", {"Learning: f :: eight88x"}, True),
+        ("Quartz heron opening", set(), False),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line…"},
+            True,
+        ),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line ..."},
+            True,
+        ),
+        (
+            "Reviewer: Quartz heron opening line, finished",
+            {"Learning: f :: Quartz heron opening line..."},
+            True,
+        ),
+        (
+            "Quartz heron opening line…",
+            {"Learning: f :: Quartz heron opening line…"},
+            True,
+        ),
+        ("Quartz", {"Learning: f :: Quartz heron…"}, False),
+        ("Anything at all", {"Learning: f :: …"}, False),
+        ("Anything at all", {"…"}, False),
+    ],
+)
+def test_restores_earlier_name(name: str, earlier: set[str], refused: bool) -> None:
+    assert _restores_earlier_name(name, earlier) is refused
+
+
+def _item_titled(title: str) -> dict[str, Any]:
+    candidate = _candidate()
+    candidate.update(
+        title=title,
+        precedent_name=f"Learning: asset_generation :: {title}",
+        precedent_name_source="item_title",
+    )
+    return candidate
+
+
+def test_an_item_title_name_is_refused_over_a_redacted_source(
+    stores: _Stores,
+) -> None:
+    """The redaction blanks the document row's title, so a name copied from the
+    item's title is the redacted document's text; a reviewer's own title is not."""
+    stores.redact_source()
+    titled = _item_titled("Harbor ledger title of the source")
+
+    refused = stores.preview(titled)
+    assert refused is not None
+    assert refused["status"] == REFUSED_REDACTED
+    assert "Harbor ledger" not in refused["message"]
+    assert stores.preview(titled, "Reuse the approved opening") is None
+
+
+def test_an_earlier_item_title_name_is_refused_after_a_re_ingest(
+    stores: _Stores,
+) -> None:
+    title = "Harbor ledger title of the source"
+    titled = _item_titled(title)
+    entity_id = precedent_entity_id_for_candidate(titled["candidate_id"])
+    assert stores.submit(titled)["status"] == "promoted"
+    stores.redact_source()
+    _re_ingest(stores)
+    node = stores.graph.get_node(entity_id)
+    assert node["properties"]["name_source"] == NAME_SOURCE_NEUTRAL
+    assert title not in stores.everything_stored(entity_id)
+
+    outcome = stores.submit(copy.deepcopy(titled))
+    assert outcome["status"] == REFUSED_REDACTED
+
+    assert stores.submit(titled, "Reuse the approved opening")["status"] == "promoted"
+    assert title not in stores.everything_stored(entity_id)
+
+
+def test_the_refusal_names_the_id_and_is_true_with_no_precedent_to_scrub(
+    stores: _Stores,
+) -> None:
+    stale = stores.named_from_source()
+    stores.redact_source()
+    entity_id = precedent_entity_id_for_candidate(stale["candidate_id"])
+    assert stores.graph.get_node(entity_id) is None
+
+    message = stores.submit(stale)["message"]
+
+    assert entity_id in message
+    assert "its source was redacted" in message
+    assert "scrubbed" not in message
+    assert NAME_TEXT not in message
+
+
+# --- The listing serves a row per promotion, not per node ---------------------
+
+
+@pytest.mark.parametrize(
+    "reviewer_title",
+    [None, "Reuse the rewritten opening"],
+    ids=["current-content-name", "reviewer-title"],
+)
+def test_the_listing_does_not_re_serve_an_older_events_text_after_a_re_ingest(
+    stores: _Stores, reviewer_title: str | None
+) -> None:
+    """Promote with a source-text name, redact, write the id again, promote again.
+
+    The node now reads ``included`` over the new content, but the older
+    ``PRECEDENT_PROMOTED`` event still holds the old title and excerpt, and the
+    log is immutable. A node vouches only for the event whose text it holds."""
+    entity_id, _ = _promoted_then_source_redacted(stores)
+    first_event, *_ = stores.events.get_events(
+        event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id, order="asc"
+    )
+    assert NAME_TEXT in first_event.payload["title"]
+    assert COPIED_TEXT in first_event.payload["description"]
+    _re_ingest(stores)
+    candidate = _named_from_current(stores)
+    outcome = (
+        stores.submit(candidate)
+        if reviewer_title is None
+        else stores.submit_planned(candidate, reviewer_title)
+    )
+    assert outcome["status"] == "promoted", outcome
+    node = stores.graph.get_node(entity_id)
+    assert node is not None
+    assert node["properties"]["source_excerpt_status"] == SOURCE_EXCERPT_INCLUDED
+    second_event = next(
+        e
+        for e in stores.events.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id, order="asc"
+        )
+        if e.event_id != first_event.event_id
+    )
+
+    rows = {
+        r["event_id"]: r
+        for r in list_precedents(stores.events, graph_store=stores.graph)
+    }
+
+    assert set(rows) == {first_event.event_id, second_event.event_id}
+    assert NAME_TEXT not in repr(rows)
+    assert COPIED_TEXT not in repr(rows)
+    older = rows[first_event.event_id]
+    assert older["title"] == neutral_precedent_name(entity_id, "asset_generation")
+    assert "Source excerpt" not in older["description"]
+    # The new event is served as promoted: its own title and its own excerpt.
+    newer = rows[second_event.event_id]
+    assert newer["title"] == node["properties"]["name"]
+    assert newer["title"] == (reviewer_title or newer["title"])
+    assert FRESH_TEXT in newer["title" if reviewer_title is None else "description"]
+    assert "Newly written body text" in newer["description"]
+
+
+# --- #1032 review: boundaries of the earlier-name window, a truncated name -----
+
+
+class _VersionedNode:
+    """A graph store that holds one node, with the given version stamps."""
+
+    def __init__(self, stamps: list[Any]) -> None:
+        self._stamps = stamps
+
+    def get_node_history(self, entity_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "valid_from": stamp,
+                "properties": {
+                    "name": f"Learning: f :: Name at {stamp}",
+                    "name_source": NAME_SOURCE_SOURCE_TEXT,
+                },
+            }
+            for stamp in self._stamps
+        ]
+
+
+def _names_before(stamps: list[Any], before: datetime) -> set[str]:
+    return _earlier_source_names(
+        {"entity_id": "prec-x", "properties": {}},
+        graph_store=_VersionedNode(stamps),  # type: ignore[arg-type]
+        event_log=None,
+        before=before,
+    )
+
+
+def test_a_version_stamped_at_the_redaction_time_counts_as_earlier() -> None:
+    """``before`` is inclusive: a scrub and a promotion can share a timestamp,
+    and the only safe reading is that the name came first."""
+    redacted_at = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+    at = redacted_at.isoformat()
+    after = (redacted_at + timedelta(microseconds=1)).isoformat()
+    before = (redacted_at - timedelta(microseconds=1)).isoformat()
+
+    names = _names_before([before, at, after], redacted_at)
+
+    assert names == {f"Learning: f :: Name at {before}", f"Learning: f :: Name at {at}"}
+
+
+def test_a_version_with_an_unreadable_timestamp_counts_as_earlier() -> None:
+    """Fail closed: a version whose time cannot be read might be from before the
+    redaction, so its name stays refused."""
+    redacted_at = datetime(2026, 3, 1, 12, 0, 0, tzinfo=UTC)
+
+    names = _names_before(
+        ["not a timestamp", None, "2030-01-01T00:00:00+00:00"], redacted_at
+    )
+
+    assert names == {
+        "Learning: f :: Name at not a timestamp",
+        "Learning: f :: Name at None",
+    }
+
+
+def test_a_truncated_stale_name_the_reviewer_completed_is_still_refused(
+    stores: _Stores,
+) -> None:
+    """A name derived from a long first line is cut with an ellipsis; a reviewer
+    who finishes the sentence has still carried the text the redaction removed."""
+    long_line = "Quartz heron opening line that runs on well past the cap " * 3
+    stores.documents.put(SOURCE_ID, f"{long_line}\n\nbody", {})
+    first = _candidate()
+    _apply_readable_name_fallback(first, stores.documents)
+    truncated = first["precedent_name"]
+    assert truncated.endswith("…")
+    assert stores.submit(first)["status"] == "promoted"
+    stores.redact_source()
+    kept = truncated.partition(" :: ")[2].removesuffix("…").rstrip()
+    completed = f"Reviewer: {kept} and then some words the reviewer added"
+
+    outcome = stores.submit_planned(_regenerated(stores), completed)
+
+    assert outcome["status"] == REFUSED_REDACTED
