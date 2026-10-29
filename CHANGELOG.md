@@ -1554,10 +1554,33 @@ All notable changes to Trellis will be documented in this file.
   it cannot be answered as a replay of the unflagged write it resembles. Also
   adds the missing direct test that `put_document` guards a tombstoned
   `#chunk-` id (corpus sync's own skip would mask a seam that stopped guarding
-  them). Still open under #1049: an unflagged re-put whose derived idempotency
-  key matches an earlier successful write to an id that was later redacted is
-  answered as a duplicate (200 on the REST routes), not refused; nothing is
-  written and the tombstone stays.
+  them). The replayed-write case left open here is closed by the next entry.
+
+- **A replayed write over a redaction tombstone is refused, not answered as a
+  duplicate (closes #1049).** The idempotency stage answers a key it has seen,
+  in the executor's cache or in the event log, before the handler's tombstone
+  guard runs. An unflagged re-put whose derived key matched an earlier
+  successful write to an id that was later redacted was therefore told its write
+  was in place (200 on `POST /api/v1/evidence` and `POST /api/v1/documents`,
+  `duplicate` on `POST /api/v1/commands/batch` and MCP `execute_mutation`),
+  though nothing was written and the row was a tombstone. A handler can now
+  implement an optional `replay_refusal(command)`, which the executor asks only
+  on a hit, in both arms and never on a miss, as Stage 2 asks for
+  `policy_scope_commands`. `evidence.ingest` implements it by running the
+  tombstone guard's own predicate read-only, so the replay is refused as the
+  first write is: the same `redaction_tombstone_overwrite` reason and message
+  and the same `mutation.rejected` event (a 400 on the two REST routes,
+  `rejected` on the command door). A hook that raises, or answers with anything
+  but nothing or a validation error, fails the command closed
+  (`idempotency_check_failed`), never as a duplicate; the executor looks the
+  hook up on the handler's type, so a handler double that answers any attribute
+  has none. Only a tombstone is asked: a replay over a live row, or over an id
+  with no row, is the duplicate it was, as is every other handler's replay.
+  A flagged replay (`reingest_redacted=true`) also stays a duplicate: the
+  flagged key digests the flag, so it replays a write that already put content
+  back and a replay writes nothing; if the id was redacted again since, the
+  tombstone stays, and putting content back again takes a fresh
+  `idempotency_key`.
 
 - **Small sensitivity-floor follow-ups (#1029, part of).** A re-promotion of a
   precedent (`precedent.promote` over an existing row) no longer drops the row's
