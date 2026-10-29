@@ -1400,6 +1400,49 @@ def _redaction_refusal(
     }
 
 
+def _scrubbed_name_refusal(
+    existing_node: Mapping[str, Any] | None, entity_payload: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """A refusal if the payload would put source text back on a scrubbed node.
+
+    Redacting a precedent's *source document* scrubs the precedent instead of
+    purging it, and the ``REDACTION_APPLIED`` event names the source's id, not
+    the precedent's, so :func:`_redaction_refusal` does not see it. The node
+    carries the evidence: ``name_source`` reads ``neutral`` or
+    ``source_excerpt_status`` reads ``source_redacted``. A re-run with the
+    candidate captured before the redaction would write a new version whose
+    name is rebuilt from the source (up to 96 characters); the excerpt does not
+    come back, since the source now reads as withheld. Only a name that may hold
+    source text is refused, by the test the scrub applies when it decides what
+    to rename (:func:`name_may_hold_source_text`), so a candidate regenerated
+    after the redaction, named from a title, a reviewer or the bare id, still
+    writes. The message names the id and never the name.
+    """
+    if existing_node is None or existing_node.get("node_type") != "precedent":
+        return None
+    node_props = existing_node.get("properties")
+    if not isinstance(node_props, Mapping) or not (
+        node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+        or node_props.get("source_excerpt_status") == SOURCE_EXCERPT_REDACTED
+    ):
+        return None
+    entity_id = entity_payload["entity_id"]
+    if not name_may_hold_source_text(
+        {**entity_payload["properties"], "name": entity_payload["name"]}, entity_id
+    ):
+        return None
+    return {
+        "status": REFUSED_REDACTED,
+        "entity_id": entity_id,
+        "message": (
+            f"{entity_id} was scrubbed by a redaction of its source, and this "
+            "candidate's name was taken from that source; it will not be "
+            "promoted again as it stands. Regenerate the candidate, whose name "
+            "no longer comes from the redacted text, and promote that"
+        ),
+    }
+
+
 def _promotion_is_complete(
     entity_payload: Mapping[str, Any],
     edge_payloads: Sequence[Mapping[str, Any]],
@@ -1456,12 +1499,16 @@ def _pre_write_outcome(
     Three answers exist. A redaction refuses first (:func:`_redaction_refusal`),
     ahead of every graph read, because a purged node reads as absent and would
     pass for a first-time promotion. The other two come from one graph read: a
-    refusal (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
-    last needs a current precedent that holds what the payload would write,
-    has every edge it names (with the properties named), has its document row
-    and has its promotion event. Without an ``event_log`` the event cannot be
-    checked, so nothing is skipped and the write goes ahead; without a
-    ``document_store`` the same holds for a row the promotion would write.
+    refusal and ``already_promoted``. Of the refusals, a precedent scrubbed by
+    its source's redaction is checked first (:func:`_scrubbed_name_refusal`,
+    also ``refused_redacted``), ahead of its lifecycle state
+    (:func:`_precedent_reapproval_refusal`), since reinstating it first would
+    only reach the same refusal. ``already_promoted`` needs a current precedent
+    that holds what the payload would write, has every edge it names (with the
+    properties named), has its document row and has its promotion event.
+    Without an ``event_log`` the event cannot be checked, so nothing is skipped
+    and the write goes ahead; without a ``document_store`` the same holds for a
+    row the promotion would write.
 
     One function for the submission and its preview, so a dry run and a real
     run cannot disagree about a row.
@@ -1473,6 +1520,9 @@ def _pre_write_outcome(
     if redacted is not None:
         return redacted
     existing_node = graph_store.get_node(entity_id)
+    scrubbed = _scrubbed_name_refusal(existing_node, entity_payload)
+    if scrubbed is not None:
+        return scrubbed
     refusal = _precedent_reapproval_refusal(existing_node, entity_id)
     if refusal is not None:
         return refusal
@@ -1569,6 +1619,10 @@ def submit_learning_promotion(
     ``REDACTION_APPLIED`` event names the id (:func:`_redaction_refusal`), and
     nothing is written. Pass ``document_store`` and ``event_log`` for the check;
     each guards only its own half, so a caller passing neither gets no refusal.
+    A precedent a redaction of its *source* scrubbed (it survives, with a
+    neutral name) is refused the same way when the payload's name may hold that
+    source's text (:func:`_scrubbed_name_refusal`), so a candidate captured
+    before the redaction cannot restore the name.
 
     **A precedent that already holds this promotion is skipped.** When the
     node is current, carries every value the payload would write (bar

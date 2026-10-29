@@ -1139,6 +1139,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`promote-learning` no longer restores a source-text name on a precedent its
+  source's redaction scrubbed (#1025).** Redacting a precedent's *source
+  document* scrubs the precedent (neutral name, `source_excerpt_status`
+  `source_redacted`) and leaves it in place, and the `REDACTION_APPLIED` event
+  names the source's id, so the #1019 refusal, keyed on the precedent id, did not
+  fire. A re-run with the candidate captured before the redaction, as the
+  on-disk candidates file holds it, wrote a new node version whose name was
+  rebuilt from the source text (up to 96 characters). A row is now refused as
+  `refused_redacted` when the existing node reads `name_source` `neutral` or
+  `source_excerpt_status` `source_redacted` and the payload's name may hold
+  source text (the test the scrub itself uses, so an unmarked pre-marker
+  candidate is refused too). The dry run and the submission share the check,
+  and it runs ahead of the lifecycle refusals. A candidate regenerated after
+  the redaction (named from a title, a reviewer or the bare id) still writes;
+  the excerpt never came back, since the source reads as withheld. The message
+  names the id and never the name.
 - **`promote-learning` no longer writes a redacted precedent back (#1019).**
   `redaction.apply` purges a promoted precedent's node, so a re-run of
   `trellis curate promote-learning`, `review-ready --approve`,
