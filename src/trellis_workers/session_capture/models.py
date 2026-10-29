@@ -136,6 +136,12 @@ class SessionDigest:
     #: when no pack was parsed. The pack holdout's unit takes that pack as
     #: its treatment, so this is when the treatment happened.
     first_retrieval_ordinal: int | None = None
+    #: 1-based position, among :attr:`tool_calls`, of the first ``Bash`` call
+    #: that ran ``git commit`` and did not error (the calls
+    #: :attr:`SessionOutcome.commits` counts), or ``None`` when none did. Set
+    #: by the parser from the outcome tally, in the ordinal space of
+    #: :attr:`first_retrieval_ordinal`. A position and never the command.
+    first_commit_ordinal: int | None = None
     #: How many Stop or SubagentStop hook feedback messages the transcript
     #: holds, however late. A count rather than a flag so the analysis can
     #: tell "no hook fired" from "the detector matches nothing": see
@@ -207,13 +213,30 @@ class SessionDigest:
             and self.hook_feedback_after_calls < self.first_retrieval_ordinal
         )
 
+    @property
+    def commit_before_first_retrieval(self) -> bool | None:
+        """Whether a commit came before the call that first served a pack.
+
+        ``None`` when no pack was parsed, as for the hook comparison. A
+        session that never committed, or committed only after, is ``False``:
+        that is a decided answer, where ``None`` is an unknown one.
+        """
+        if self.first_retrieval_ordinal is None:
+            return None
+        return (
+            self.first_commit_ordinal is not None
+            and self.first_commit_ordinal < self.first_retrieval_ordinal
+        )
+
     def retrieval_timing_payload(self) -> dict[str, int | bool | None]:
         """The join's ``retrieval_timing``: where the first retrieval sat.
 
         ``tool_call_count`` is :attr:`tool_calls` as the ordinal counts it,
         not ``outcome.tool_calls``, which counts a record written again once.
         The ordinal over it is the share of the session's calls that came
-        before the first retrieval.
+        before the first retrieval. ``first_commit_ordinal`` is in the same
+        space, so the holdout can tell a retrieval made after the work was
+        committed from one made before it.
         """
         return {
             "first_retrieval_ordinal": self.first_retrieval_ordinal,
@@ -222,6 +245,8 @@ class SessionDigest:
             "hook_feedback_before_first_retrieval": (
                 self.hook_feedback_before_first_retrieval
             ),
+            "first_commit_ordinal": self.first_commit_ordinal,
+            "commit_before_first_retrieval": self.commit_before_first_retrieval,
         }
 
     def mark_tool_result(self, use_id: str | None, *, errored: bool) -> None:
