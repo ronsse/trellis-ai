@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -61,6 +62,96 @@ def test_get_context_for_task_empty_pack_includes_withholding_note() -> None:
     assert "**Withheld:** 2 items" in result
     assert "archive-id" not in result
     assert "noise-id" not in result
+
+
+def _pack_client(payload: dict) -> TrellisClient:
+    """A client whose every request answers ``payload`` (the assemble-pack reply)."""
+    http = httpx.Client(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=payload)),
+        base_url="http://testserver",
+    )
+    return TrellisClient(http=http, verify_version=False)
+
+
+def _footer(markdown: str) -> str:
+    """The feedback footer: everything from the last ``---`` rule on."""
+    return markdown[markdown.rindex("\n---\n") :]
+
+
+def test_get_context_for_task_empty_pack_carries_pack_id_and_footer() -> None:
+    """An empty pack is gradable: it names its ``pack_id`` and how to cite it."""
+    with _pack_client({"pack_id": "pack:empty", "count": 0, "items": []}) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert "No relevant context found for: test intent" in result
+    assert "**pack_id:** `pack:empty`" in result
+    footer = _footer(result)
+    assert 'record_feedback(pack_id="pack:empty"' in footer
+    assert "rating=" in footer
+    assert "helpful_item_ids" in footer
+    assert result.endswith(footer)
+
+
+def test_get_context_for_task_empty_pack_footer_matches_the_served_pack_footer() -> (
+    None
+):
+    """One footer text for both paths, so the two cannot drift apart."""
+    item = {
+        "item_type": "document",
+        "item_id": "served-id",
+        "excerpt": "Use a token bucket.",
+        "relevance_score": 0.9,
+    }
+    with _pack_client({"pack_id": "pack:same", "count": 1, "items": [item]}) as client:
+        served = get_context_for_task(client, "test intent")
+    with _pack_client({"pack_id": "pack:same", "count": 0, "items": []}) as client:
+        empty = get_context_for_task(client, "test intent")
+
+    assert _footer(empty) == _footer(served)
+
+
+def test_get_context_for_task_empty_pack_keeps_the_withholding_note_in_the_header() -> (
+    None
+):
+    payload = {
+        "pack_id": "pack:withheld",
+        "count": 0,
+        "items": [],
+        "withholding": {
+            "total": 2,
+            "by_reason": {"archived": 1, "noise": 1},
+            "withheld_item_ids": ["archive-id", "noise-id"],
+            "non_absence_reasons": [],
+            "section_filtered": 0,
+            "served_count": 0,
+        },
+    }
+    with _pack_client(payload) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert "**Withheld:** 2 items" in result
+    assert result.index("**pack_id:**") < result.index("**Withheld:**")
+    assert result.index("**Withheld:**") < result.index("No relevant context found")
+    assert 'record_feedback(pack_id="pack:withheld"' in result
+
+
+def test_get_context_for_task_empty_pack_without_a_pack_id_has_no_footer() -> None:
+    """Nothing to cite, so nothing claims the reply can be graded."""
+    with _pack_client({"count": 0, "items": []}) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert result == "No relevant context found for: test intent"
+
+
+def test_get_context_for_task_empty_real_pack_is_gradable(
+    client: TrellisClient,
+) -> None:
+    """End to end: the id on an empty reply is one the server minted."""
+    result = get_context_for_task(client, "test intent")
+
+    match = re.search(r"\*\*pack_id:\*\* `([^`]+)`", result)
+    assert match is not None, result
+    assert f'record_feedback(pack_id="{match.group(1)}"' in result
 
 
 def test_get_context_for_task_places_withholding_before_served_items() -> None:
@@ -186,3 +277,12 @@ def test_get_task_context_for_step_empty(client: TrellisClient) -> None:
         entity_ids=["uc://analytics.domain_c.events"],
     )
     assert isinstance(result, str)
+
+
+def test_get_context_for_task_empty_pack_has_exactly_one_footer() -> None:
+    """The footer comes from the formatter alone, so it cannot be doubled."""
+    with _pack_client({"pack_id": "pack:one", "count": 0, "items": []}) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert result.count("record_feedback(") == 1
+    assert result.endswith("unhelpful_item_ids=[...])`.*")
