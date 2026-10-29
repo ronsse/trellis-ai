@@ -1912,7 +1912,7 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"{f.first_pack_old_build} from a build without the holdout, "
         f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
         f"first pack, {f.unfinished} unfinished, {f.pre_treatment_excluded} "
-        "first retrieval after a stop hook's feedback"
+        "first retrieval after a stop hook's feedback or a commit"
     )
     console.print(
         f"    eligible {f.eligible} "

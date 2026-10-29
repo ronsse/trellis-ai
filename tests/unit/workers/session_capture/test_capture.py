@@ -1891,6 +1891,8 @@ class TestRetrievalTimingJoin:
             "tool_call_count": 2,
             "hook_feedback_messages": 1,
             "hook_feedback_before_first_retrieval": True,
+            "first_commit_ordinal": None,
+            "commit_before_first_retrieval": False,
         }
 
     def test_a_session_that_never_retrieved_records_no_first_retrieval(
@@ -1906,6 +1908,7 @@ class TestRetrievalTimingJoin:
         timing = join["retrieval_timing"]
         assert timing["first_retrieval_ordinal"] is None
         assert timing["hook_feedback_before_first_retrieval"] is None
+        assert timing["commit_before_first_retrieval"] is None
 
     def test_a_join_from_before_the_timing_is_rewritten_once(
         self, tmp_path: Path
@@ -1939,4 +1942,44 @@ class TestRetrievalTimingJoin:
         old, new = _joins(registry, outcome=True, timing=True)["sess-timed-0001"]
         assert "retrieval_timing" not in old
         # Only the timing differed: the rewrite is the current parse, whole.
+        assert new == written
+
+    def test_a_join_from_before_the_commit_position_is_rewritten_once(
+        self, tmp_path: Path
+    ) -> None:
+        """The stop-hook half of the timing was written first. A join with
+        only that half is one more difference the next parse writes, once,
+        and the commit keys are the whole of what it adds."""
+        root = tmp_path / "projects"
+        write_transcript(
+            root / "proj" / "sess-timed-0001.jsonl", self._hooked_session()
+        )
+        current = _registry(tmp_path / "current")
+        _sweep(current, root, tmp_path / "wm-current.json")
+        (written,) = _joins(current, outcome=True, timing=True)["sess-timed-0001"]
+        hook_only = {
+            **written,
+            "retrieval_timing": {
+                k: v
+                for k, v in written["retrieval_timing"].items()
+                if k not in {"first_commit_ordinal", "commit_before_first_retrieval"}
+            },
+        }
+
+        registry = _registry(tmp_path / "hook-only")
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SESSION_PACKS,
+            source="worker:session-capture",
+            entity_id="sess-timed-0001",
+            entity_type="capture_session",
+            payload=hook_only,
+        )
+
+        first = _sweep(registry, root, tmp_path / "wm-1.json")
+        second = _sweep(registry, root, tmp_path / "wm-2.json")
+
+        assert first.pack_joins_recorded == 1
+        assert second.pack_joins_recorded == 0
+        old, new = _joins(registry, outcome=True, timing=True)["sess-timed-0001"]
+        assert "first_commit_ordinal" not in old["retrieval_timing"]
         assert new == written

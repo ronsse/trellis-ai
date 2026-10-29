@@ -197,7 +197,7 @@ def test_a_partly_decided_pre_treatment_exclusion_is_printed_in_both_formats(
         "pre-treatment (pre_treatment): partially applied, 1 excluded, "
         "2 undecidable and kept. Partially applied:" in flat
     )
-    assert "1 first retrieval after a stop hook's feedback" in flat
+    assert "1 first retrieval after a stop hook's feedback or a commit" in flat
     assert "2 with no retrieval timing" in flat
 
 
@@ -444,8 +444,11 @@ def test_a_figure_the_rows_cannot_give_reads_not_measurable(
         "pr_base_rate_served": "no analysed served-arm task records prs_created",
         "prs_created_mean": "no analysed task records prs_created",
     }
+    assert d["post_hoc_share"] is None
     assert (
-        "records only the stop-hook position" in d["not_measurable"]["post_hoc_share"]
+        "none of the 3 tasks that reached the pre-treatment rule has a join "
+        "recording the first retrieval's position"
+        in d["not_measurable"]["post_hoc_share"]
     )
     for key in ("outcome_sd_within_parent", "between_parent_share"):
         assert d[key] is None
