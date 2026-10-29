@@ -1,4 +1,4 @@
-"""A re-run never writes a source-text name back onto a scrubbed precedent (#1025).
+"""A re-run never restores a source-text name over its source's redaction (#1025).
 
 Redacting a precedent's *source document* scrubs the precedent rather than
 purging it: the name becomes neutral and ``source_excerpt_status`` reads
@@ -8,7 +8,12 @@ fire. A re-run with the candidate captured before the redaction, as the on-disk
 candidates file holds it, then wrote a new node version whose name was rebuilt
 from the source text. The refusal is ``refused_redacted``, decided in
 ``_pre_write_outcome`` so the preview and the submission cannot disagree.
-"""
+
+The signal that the source was redacted is the redaction's own trace on the
+payload's ``source_item_id`` (or its chunk parent), not the node's scrub
+markers, which a later promotion of a regenerated candidate overwrites. A
+decisions file's ``promotion_name`` is pre-filled with the derived name, so a
+name the precedent carried earlier is refused as well."""
 
 from __future__ import annotations
 
@@ -26,6 +31,7 @@ from trellis.learning.scoring import (
     _apply_readable_name_fallback,
     build_learning_promotion_payloads,
     precedent_entity_id_for_candidate,
+    prepare_learning_promotions,
     preview_learning_promotion,
     promotion_is_refusal,
     promotion_verdict,
@@ -81,16 +87,20 @@ class _Stores:
         assert NAME_TEXT in candidate["precedent_name"]
         return candidate
 
-    def payloads(self, candidate: dict[str, Any]) -> dict[str, Any]:
+    def payloads(
+        self, candidate: dict[str, Any], promotion_name: str = ""
+    ) -> dict[str, Any]:
         return build_learning_promotion_payloads(
             candidate=candidate,
-            promotion_name="",
+            promotion_name=promotion_name,
             rationale="approved",
             document_store=self.documents,
         )
 
-    def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        payloads = self.payloads(candidate)
+    def submit(
+        self, candidate: dict[str, Any], promotion_name: str = ""
+    ) -> dict[str, Any]:
+        payloads = self.payloads(candidate, promotion_name)
         return submit_learning_promotion(
             self.executor,
             payloads["entity_payload"],
@@ -101,14 +111,54 @@ class _Stores:
             document_store=self.documents,
         )
 
-    def preview(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
-        payloads = self.payloads(candidate)
+    def submit_planned(
+        self, candidate: dict[str, Any], decision_name: str
+    ) -> dict[str, Any]:
+        """Submit the row the planner builds from a decisions file."""
+        plan = prepare_learning_promotions(
+            candidates_payload={"candidates": [candidate]},
+            decisions_payload={
+                "decisions": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "approved": True,
+                        "promotion_name": decision_name,
+                        "rationale": "approved",
+                    }
+                ]
+            },
+            document_store=self.documents,
+        )
+        row = plan["results"][0]
+        assert row["status"] == "ready", row
+        return submit_learning_promotion(
+            self.executor,
+            row["entity_payload"],
+            row["edge_payloads"],
+            requested_by="test",
+            graph_store=self.graph,
+            event_log=self.events,
+            document_store=self.documents,
+        )
+
+    def preview(
+        self,
+        candidate: dict[str, Any],
+        promotion_name: str = "",
+        *,
+        event_log: Any = "stores",
+        document_store: Any = "stores",
+    ) -> dict[str, Any] | None:
+        """The preview, by default over this fixture's own log and documents."""
+        payloads = self.payloads(candidate, promotion_name)
         return preview_learning_promotion(
             payloads["entity_payload"],
             payloads["edge_payloads"],
             graph_store=self.graph,
-            event_log=self.events,
-            document_store=self.documents,
+            event_log=self.events if event_log == "stores" else event_log,
+            document_store=(
+                self.documents if document_store == "stores" else document_store
+            ),
         )
 
     def redact_source(self) -> None:
@@ -331,3 +381,188 @@ def test_an_unmarked_candidate_that_holds_source_text_is_refused(
 
     assert outcome is not None
     assert outcome["status"] == REFUSED_REDACTED
+
+
+def _regenerated(stores: _Stores) -> dict[str, Any]:
+    """The candidate as the analyzer writes it once the source reads as withheld."""
+    candidate = _candidate()
+    _apply_readable_name_fallback(candidate, stores.documents)
+    assert candidate["precedent_name_source"] != NAME_SOURCE_SOURCE_TEXT
+    return candidate
+
+
+def test_the_refusal_outlives_a_regenerated_promotion_that_cleared_the_markers(
+    stores: _Stores,
+) -> None:
+    """The node's scrub markers are not the signal: a regenerated candidate may
+    promote (its name holds no source text) and writes a version without them.
+    The stale candidate then reaches the same precedent, whose node reads as
+    unscrubbed; the redaction's trace on the source still refuses it."""
+    entity_id, stale = _promoted_then_source_redacted(stores)
+    assert stores.submit(_regenerated(stores))["status"] == "promoted"
+    props = stores.graph.get_node(entity_id)["properties"]
+    assert props.get("name_source") != NAME_SOURCE_NEUTRAL
+    assert props.get("source_excerpt_status") != SOURCE_EXCERPT_REDACTED
+
+    outcome = stores.submit(stale)
+
+    assert outcome["status"] == REFUSED_REDACTED
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+    assert COPIED_TEXT not in stores.everything_stored(entity_id)
+
+
+def test_a_stale_candidate_first_promoted_after_the_redaction_is_refused(
+    stores: _Stores,
+) -> None:
+    """No precedent exists to scrub, so no node carries a marker; the source's
+    own trace is all there is."""
+    stale = stores.named_from_source()
+    stores.redact_source()
+    entity_id = precedent_entity_id_for_candidate(stale["candidate_id"])
+    assert stores.graph.get_node(entity_id) is None
+
+    outcome = stores.submit(stale)
+
+    assert outcome["status"] == REFUSED_REDACTED
+    assert stores.graph.get_node(entity_id) is None
+    assert stores.documents.get(entity_id) is None
+    assert stores.promote_events(entity_id) == 0
+
+
+def test_a_decisions_file_kept_from_before_the_redaction_is_refused(
+    stores: _Stores,
+) -> None:
+    """The template pre-fills ``promotion_name`` with the derived name, and a
+    name that differs from the regenerated candidate's reads as a reviewer's.
+    The precedent carried it before, in a promotion event the log keeps."""
+    entity_id, stale = _promoted_then_source_redacted(stores)
+
+    outcome = stores.submit_planned(_regenerated(stores), stale["precedent_name"])
+
+    assert outcome["status"] == REFUSED_REDACTED
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+    assert NAME_TEXT not in outcome["message"]
+
+
+def test_a_touched_up_stale_name_is_refused_too(stores: _Stores) -> None:
+    """Stale candidate and stale decisions, the name edited a little."""
+    _, stale = _promoted_then_source_redacted(stores)
+
+    outcome = stores.submit_planned(stale, stale["precedent_name"] + " (revised)")
+
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_a_new_reviewer_title_still_writes_after_the_redaction(
+    stores: _Stores,
+) -> None:
+    entity_id, _ = _promoted_then_source_redacted(stores)
+    title = "Reuse the approved opening"
+
+    assert stores.preview(_regenerated(stores), title) is None
+    outcome = stores.submit_planned(_regenerated(stores), title)
+
+    assert outcome["status"] == "promoted", outcome
+    node = stores.graph.get_node(entity_id)
+    assert node["properties"]["name"] == title
+    assert node["properties"]["name_source"] == "reviewer"
+    assert NAME_TEXT not in stores.everything_stored(entity_id)
+
+
+def test_the_bare_id_name_after_an_unmarked_promotion_is_not_refused(
+    stores: _Stores,
+) -> None:
+    """An earlier name counts only if it may have held source text: an unmarked
+    bare-id title does not, so the same name written again is not refused."""
+    stores.redact_source()
+    candidate = _regenerated(stores)
+    candidate.pop("precedent_name_source")
+    assert stores.submit(candidate)["status"] == "promoted"
+
+    outcome = stores.preview(candidate)
+
+    assert outcome is None or not promotion_is_refusal(outcome)
+
+
+def test_a_chunk_of_the_redacted_document_is_refused_by_its_parent(
+    stores: _Stores,
+) -> None:
+    """A redaction names the document it was asked about; a precedent promoted
+    from one of its chunks carries the chunk's id, so the parent is looked up."""
+    chunk_id = f"{SOURCE_ID}#chunk-0"
+    stale = _candidate(chunk_id)
+    stale["precedent_name"] = NAME_TEXT
+    stale["precedent_name_source"] = NAME_SOURCE_SOURCE_TEXT
+    stores.redact_source()
+    assert stores.documents.get(chunk_id) is None
+
+    outcome = stores.preview(stale)
+
+    assert outcome is not None
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_a_document_that_only_looks_like_a_chunk_does_not_name_its_parent(
+    stores: _Stores,
+) -> None:
+    """``chunk_parent_id`` matches the minted shape only; ``<x>#chunk-intro``
+    is not a chunk of ``<x>``."""
+    stale = _candidate(f"{SOURCE_ID}#chunk-intro")
+    stale["precedent_name"] = NAME_TEXT
+    stale["precedent_name_source"] = NAME_SOURCE_SOURCE_TEXT
+    stores.redact_source()
+
+    assert stores.preview(stale) is None
+
+
+def test_the_tombstone_alone_marks_the_source_redacted(stores: _Stores) -> None:
+    """No event log passed: the source's blank document row is the trace."""
+    stale = stores.named_from_source()
+    stores.redact_source()
+
+    outcome = stores.preview(stale, event_log=None)
+
+    assert outcome is not None
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_the_event_alone_marks_the_source_redacted(stores: _Stores) -> None:
+    """No document store passed: the ``REDACTION_APPLIED`` event is the trace."""
+    stale = stores.named_from_source()
+    stores.redact_source()
+
+    outcome = stores.preview(stale, document_store=None)
+
+    assert outcome is not None
+    assert outcome["status"] == REFUSED_REDACTED
+
+
+def test_an_earlier_node_version_names_a_source_text_title(stores: _Stores) -> None:
+    """The versions count as well as the events: with no log to read, a title
+    an earlier version held (marked ``source_text``) refuses a reviewer's
+    payload that carries it again."""
+    stores.redact_source()
+    candidate = _regenerated(stores)
+    entity_id = stores.payloads(candidate)["entity_payload"]["entity_id"]
+    props = {"intent_family": "asset_generation", "source_item_id": SOURCE_ID}
+    stores.graph.upsert_node(
+        entity_id,
+        "precedent",
+        {**props, "name": NAME_TEXT, "name_source": NAME_SOURCE_SOURCE_TEXT},
+    )
+    stores.graph.upsert_node(
+        entity_id,
+        "precedent",
+        {
+            **props,
+            "name": "Learning: asset_generation :: later",
+            "name_source": "item_id",
+        },
+    )
+
+    refused = stores.preview(candidate, NAME_TEXT, event_log=None)
+    written = stores.preview(candidate, "A different title", event_log=None)
+
+    assert refused is not None
+    assert refused["status"] == REFUSED_REDACTED
+    assert written is None or not promotion_is_refusal(written)
