@@ -1353,7 +1353,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         precedent_id = graph_store.upsert_node(
             node_id=None, node_type="precedent", properties={"name": "reapprove test"}
@@ -1408,7 +1408,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         # Deprecated, not current: "current" and "archived" are both
         # unselectable by retention.prune's lifecycle_states criterion (one
@@ -1516,7 +1516,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         event_log = registry.operational.event_log
         entity_id = "precedent://learning/reapprove-identical"
@@ -1568,7 +1568,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         event_log = registry.operational.event_log
         entity_id = "precedent://learning/reapprove-changed"
@@ -1624,7 +1624,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         entity_id = "precedent://learning/reapprove-reinstated"
         payload = self._entity_payload(entity_id=entity_id)
@@ -1701,7 +1701,7 @@ class TestPromotionVisibleToGetLessons:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         candidate = {
             "candidate_id": "source_analysis:abc123",
@@ -2641,3 +2641,79 @@ class TestCurateHelp:
         assert result.exit_code == 0
         for cmd in ["promote", "link", "label", "feedback", "promote-learning"]:
             assert cmd in result.stdout
+
+
+class TestCurateClassifySensitivity:
+    """``trellis curate classify-sensitivity`` relabels a stored document (#194)."""
+
+    @staticmethod
+    def _seed(doc_id: str = "doc-1") -> None:
+        from trellis_cli.stores import _get_registry
+
+        registry = _get_registry()
+        registry.knowledge.document_store.put(doc_id, "deploy checklist", {"t": "x"})
+
+    @staticmethod
+    def _label(doc_id: str = "doc-1") -> str:
+        from trellis.schemas.classification import sensitivity_of
+        from trellis_cli.stores import _get_registry
+
+        row = _get_registry().knowledge.document_store.get(doc_id)
+        assert row is not None
+        return sensitivity_of(row["metadata"])
+
+    def test_relabels_and_reports_json(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "classify-sensitivity",
+                "doc-1",
+                "--sensitivity",
+                "restricted",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert data["operation"] == "classification.set"
+        assert self._label() == "restricted"
+
+    def test_a_refusal_exits_non_zero_in_both_formats(self) -> None:
+        self._seed()
+        codes = []
+        for fmt in ("json", "text"):
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "classify-sensitivity",
+                    "doc-1",
+                    "--sensitivity",
+                    "top-secret",
+                    "--format",
+                    fmt,
+                ],
+            )
+            codes.append(result.exit_code)
+        assert codes[0] == codes[1] != 0
+        assert self._label() == "internal"
+
+    def test_a_missing_document_is_refused(self) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "classify-sensitivity",
+                "ghost",
+                "--sensitivity",
+                "restricted",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+        assert json.loads(result.stdout.strip())["status"] == "rejected"

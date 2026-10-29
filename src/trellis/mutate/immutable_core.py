@@ -240,6 +240,13 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # SCD-2 rewrite in the other direction, so the demoted version
         # stays readable via get_node_history/as_of too.
         Operation.PRECEDENT_REINSTATE,
+        # classification.set rewrites one metadata key in place, but the
+        # authority over it is the caller's clearance, not the admin scope:
+        # the handler and Stage 2 refuse a caller whose clearance does not
+        # cover both the old and the new label (``sensitivity_floor``), so a
+        # ``mutate`` key holding ``restricted`` can relabel what it can read
+        # and no other key can touch what it cannot.
+        Operation.CLASSIFICATION_SET,
     }
 )
 

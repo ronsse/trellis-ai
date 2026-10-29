@@ -21,7 +21,7 @@ from trellis.mutate import (
 )
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import resolve_requested_by
+from trellis_api.routes._principal import request_clearance, resolve_requested_by
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     BatchCommandBodyError,
@@ -180,7 +180,7 @@ def execute_batch(
             detail=(f"operations require the admin scope: {', '.join(refused)}"),
         )
 
-    executor = build_curate_executor(get_registry())
+    executor = build_curate_executor(get_registry(), clearance=request_clearance(ctx))
 
     requested_by, requested_by_claim = resolve_requested_by(
         ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set

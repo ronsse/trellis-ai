@@ -106,7 +106,7 @@ class TestTraceIngestHandler:
         """
         trace = self._trace()
         trace.trace_id = " \t "
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.TRACE_INGEST,
                 args={"trace": trace},
@@ -260,7 +260,7 @@ class TestLabelOnAMissingNode:
             node_type="concept",
             properties={"name": "test", "labels": ["x"]},
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         applied = executor.execute(
             Command(operation=operation, args={"target_id": node_id, "label": "x"})
         )
@@ -296,7 +296,9 @@ class TestLabelOnAMissingNode:
             strategy=BatchStrategy.STOP_ON_ERROR,
         )
 
-        results = build_curate_executor(registry).execute_batch(batch)
+        results = build_curate_executor(registry, clearance="restricted").execute_batch(
+            batch
+        )
 
         assert [r.status for r in results] == [CommandStatus.REJECTED]
         assert registry.knowledge.graph_store.query(node_type="concept") == []
@@ -328,7 +330,7 @@ class TestLabelOnANodePurgedMidCommand:
             node_type="concept",
             properties={"name": "test", "labels": ["x"]},
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         command = Command(
             operation=operation, args={"target_id": node_id, "label": label}
         )
@@ -377,7 +379,7 @@ class TestLabelRacingAnotherLabel:
             node_type="concept",
             properties={"name": "test", "labels": ["x"]},
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         rival = Command(
             operation=Operation.LABEL_ADD, args={"target_id": node_id, "label": "z"}
         )
@@ -426,7 +428,7 @@ class TestLabelsKeepTheDocumentLink:
             document_ids=["doc-a", "doc-b"],
         )
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(operation=operation, args={"target_id": node_id, "label": label})
         )
 

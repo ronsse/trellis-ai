@@ -540,7 +540,7 @@ class TestExecuteMutationErrors:
                 raise RuntimeError(msg)
 
         monkeypatch.setattr(
-            server_mod, "build_curate_executor", lambda _r: _ExplodingExecutor()
+            server_mod, "build_curate_executor", lambda _r, **_kw: _ExplodingExecutor()
         )
 
         with pytest.raises(McpError) as excinfo:

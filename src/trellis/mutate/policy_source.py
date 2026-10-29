@@ -163,6 +163,7 @@ from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.schemas.policy import Policy
 
 if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -474,7 +475,9 @@ def _record_gate_load_failure(
     )
 
 
-def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
+def build_policy_gate(
+    registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+) -> DefaultPolicyGate:
     """Build the Stage 2 gate for a registry's deployment.
 
     Always returns a gate — never ``None``. A deployment with no declared
@@ -490,6 +493,11 @@ def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
     ``MutationExecutor`` — an invariant enforced by AST scan in
     ``tests/unit/test_policy_gate_rule.py`` rather than by convention — so
     "the gate would not load" and "a write was refused" are the same event.
+
+    ``clearance`` is the caller's document clearance. Below ``"restricted"`` the
+    gate also carries a :class:`~trellis.mutate.sensitivity_floor.SensitivityFloor`
+    that refuses a command aimed at a document above it; at the default
+    (trusted-local) it carries none, and the gate is exactly the policy gate.
 
     Raises:
         ConfigError: the policy file exists and cannot be loaded.
@@ -509,4 +517,9 @@ def build_policy_gate(registry: StoreRegistry) -> DefaultPolicyGate:
             policy_count=len(policies),
             path=str(path),
         )
-    return DefaultPolicyGate(policies=policies)
+    floor = None
+    if clearance != "restricted":
+        from trellis.mutate.sensitivity_floor import SensitivityFloor  # noqa: PLC0415
+
+        floor = SensitivityFloor(registry.knowledge.document_store, clearance)
+    return DefaultPolicyGate(policies=policies, sensitivity_floor=floor)

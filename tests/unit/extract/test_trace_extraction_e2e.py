@@ -56,7 +56,7 @@ def registry(tmp_path: Path) -> StoreRegistry:
 async def _extract_into(registry: StoreRegistry, trace: Trace) -> None:
     result = await TraceExtractor().extract(trace, source_hint="trace")
     batch = result_to_batch(result, requested_by="test")
-    build_curate_executor(registry).execute_batch(batch)
+    build_curate_executor(registry, clearance="restricted").execute_batch(batch)
 
 
 class TestValuesLand:
@@ -165,7 +165,9 @@ class TestUnmigratedGraph:
         trace = Trace.model_validate(_TRACE_DATA)
         result = await TraceExtractor().extract(trace, source_hint="trace")
         batch = result_to_batch(result, requested_by="test")
-        results = build_curate_executor(registry).execute_batch(batch)
+        results = build_curate_executor(registry, clearance="restricted").execute_batch(
+            batch
+        )
         failed = [r for r in results if r.status is CommandStatus.FAILED]
         assert len(failed) == 1
         # The store raises a ValueError, which the caller reads by its type;
@@ -192,7 +194,9 @@ class TestUnmigratedGraph:
         reconciled = reconcile_node_roles(batch, registry.knowledge.graph_store)
 
         assert reconciled == ["tool:bash"]
-        results = build_curate_executor(registry).execute_batch(batch)
+        results = build_curate_executor(registry, clearance="restricted").execute_batch(
+            batch
+        )
         assert [r for r in results if r.status is CommandStatus.FAILED] == []
         # The stored node keeps its role — reconciliation is not a promotion.
         node = registry.knowledge.graph_store.get_node("tool:bash")
@@ -214,7 +218,7 @@ class TestUnmigratedGraph:
 
         assert reconcile_node_roles(batch, registry.knowledge.graph_store) == []
 
-        build_curate_executor(registry).execute_batch(batch)
+        build_curate_executor(registry, clearance="restricted").execute_batch(batch)
         node = registry.knowledge.graph_store.get_node("tool:bash")
         assert node is not None
         assert node["node_role"] == "structural"
@@ -301,7 +305,7 @@ class TestEvidenceLands:
         # Sync: extract_trace_batch owns its own event loop.
         _result, batch = extract_trace_batch(trace, requested_by="test")
         assert batch is not None
-        build_curate_executor(registry).execute_batch(batch)
+        build_curate_executor(registry, clearance="restricted").execute_batch(batch)
 
         node = registry.knowledge.graph_store.get_node(f"trace:{_EVIDENCE_TRACE_ID}")
         assert node is not None

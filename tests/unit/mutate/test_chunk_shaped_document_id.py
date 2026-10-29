@@ -50,7 +50,9 @@ def _ingest(registry: StoreRegistry, doc_id: str) -> CommandResult:
         requested_by="test",
         embed_mode="none",
     )
-    return build_curate_executor(registry, evidence_embed="none").execute(command)
+    return build_curate_executor(
+        registry, evidence_embed="none", clearance="restricted"
+    ).execute(command)
 
 
 @pytest.mark.parametrize("doc_id", REFUSED)

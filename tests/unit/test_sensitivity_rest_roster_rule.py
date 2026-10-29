@@ -24,10 +24,15 @@ rule checks the claim against the module's call graph:
   check ``no-document-content`` makes (no document or vector store named, no
   registry handed to any other helper); the one exemption is the arguments of
   the ``build_curate_executor(...)`` call itself, which has to be given the
-  registry. The executor has no clearance rule on main yet: the mutation-side
-  rule is a separate PR (#1027), and until it lands this claim is only a
-  statement that the route reads no document content itself, not that the
-  executor withholds one. A later rule can tighten it once the executor does.
+  registry. The executor enforces the caller's clearance on a command aimed at a
+  document above it (Stage 2) and on the label a write carries (the
+  ``evidence.ingest`` and ``classification.set`` handlers), and ``clearance`` is
+  a required keyword of ``build_curate_executor``, so a route passes
+  ``request_clearance(...)`` or names ``"restricted"`` with a reason. This rule
+  shows the route reads no document content itself and builds the executor; that
+  it passes the right clearance is carried by the routes' own tests
+  (``tests/unit/api/test_sensitivity_mutations.py``), which fail when it does
+  not, not by this rule.
 * ``left-out``: a known gap, named in the PR that shipped this rule. The set may
   only shrink.
 
@@ -54,8 +59,8 @@ MUTATION = "mutation"
 LEFT_OUT = "left-out"
 
 #: A mutation route builds the governed executor and writes through it. The
-#: executor has no clearance rule on main (PR #1027 adds one), so this names
-#: the one call whose registry argument a ``mutation`` route is excused for.
+#: executor enforces the caller's clearance, so this names only the one call
+#: whose registry argument a ``mutation`` route is excused for.
 EXECUTOR_CALL = "build_curate_executor"
 
 GATE_CALLS = frozenset(
@@ -119,6 +124,7 @@ ROSTER: dict[str, str] = {
     "curate:create_link": MUTATION,  # POST /links
     "curate:create_entity": MUTATION,  # POST /entities
     "curate:create_document": GATED,  # POST /documents
+    "curate:set_document_sensitivity": GATED,  # POST /documents/.../sensitivity
     "curate:record_feedback": MUTATION,  # POST /feedback
     "curate:pack_feedback": FREE,  # POST /packs/{pack_id}/feedback
     "explore:list_documents": GATED,  # GET /documents
@@ -404,11 +410,11 @@ def _sources() -> dict[str, str]:
 
 def test_every_rest_route_is_rostered_and_its_claim_holds() -> None:
     sources = _sources()
-    # Hand read: 76 ``@router.<verb>`` decorators across the modules, on 75
+    # Hand read: 77 ``@router.<verb>`` decorators across the modules, on 76
     # handler functions (one handler carries two routes).
     assert_hand_read_floor(
         len(route_names(sources)),
-        75,
+        76,
         subject="REST route handlers",
         hint="a route module was skipped, or the decorator spelling changed",
     )

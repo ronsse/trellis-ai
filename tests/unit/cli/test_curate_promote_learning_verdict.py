@@ -724,7 +724,7 @@ class TestARedactedPrecedentIsRefused:
         entity_id = precedent_entity_id_for_candidate(candidate_id)
         registry = curate_cli._get_registry()
         try:
-            result = build_curate_executor(registry).execute(
+            result = build_curate_executor(registry, clearance="restricted").execute(
                 Command(
                     operation=Operation.REDACTION_APPLY,
                     args={"target_id": entity_id, "reason": "owner request"},

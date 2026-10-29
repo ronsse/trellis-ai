@@ -301,7 +301,7 @@ class TestDefaultPostureIsTransparent:
             config={"event_log": {"backend": "null"}},
             stores_dir=tmp_path / "stores",
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         assert executor._policy_gate is not None
         assert isinstance(executor._policy_gate, DefaultPolicyGate)
 
@@ -315,7 +315,7 @@ class TestDefaultPostureIsTransparent:
             config={"event_log": {"backend": "null"}},
             stores_dir=tmp_path / "stores",
         )
-        gate = build_curate_executor(registry)._policy_gate
+        gate = build_curate_executor(registry, clearance="restricted")._policy_gate
         assert isinstance(gate, DefaultPolicyGate)
         assert gate._policies == []
         # And it allows.
@@ -1176,7 +1176,7 @@ class TestGateLoadFailureIsObservable:
         )
 
         with pytest.raises(ConfigError):
-            build_curate_executor(registry)
+            build_curate_executor(registry, clearance="restricted")
 
         events = registry.operational.event_log.get_events(
             event_type=EventType.WRITE_REJECTED, limit=10

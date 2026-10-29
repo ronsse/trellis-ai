@@ -92,7 +92,7 @@ def _promote(
         "entity_type": "precedent",
         **extra_args,
     }
-    result = build_curate_executor(registry).execute(
+    result = build_curate_executor(registry, clearance="restricted").execute(
         Command(
             operation=Operation.PRECEDENT_PROMOTE,
             args=args,
@@ -239,7 +239,7 @@ class TestPromotionOutsideTheNamespace:
         registry.knowledge.graph_store.upsert_node(
             self.OUTSIDE_ID, "precedent", {"name": TITLE, "description": DESCRIPTION}
         )
-        return build_curate_executor(registry).execute(
+        return build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.PRECEDENT_PROMOTE,
                 args={
@@ -301,7 +301,7 @@ class TestPromotionOutsideTheNamespace:
         """``entity.create`` cannot refuse the namespace: ``submit_learning_promotion``
         writes a promoted precedent's node with it. The row is what the namespace
         protects, and only ``precedent.promote`` writes that."""
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.ENTITY_CREATE,
                 args={
@@ -457,7 +457,7 @@ def _promote_from_source(
         document_store=knowledge.document_store,
     )
     out = submit_learning_promotion(
-        build_curate_executor(registry),
+        build_curate_executor(registry, clearance="restricted"),
         payloads["entity_payload"],
         payloads["edge_payloads"],
         requested_by="test",
@@ -590,7 +590,9 @@ def _tag_noise_directly(registry: StoreRegistry, doc_id: str = NODE_ID) -> None:
 
 def _put_memory_claiming_to_be_a_precedent(registry: StoreRegistry) -> None:
     """An ordinary caller's document that sets ``document_form`` to ``precedent``."""
-    result = build_curate_executor(registry, evidence_embed="none").execute(
+    result = build_curate_executor(
+        registry, evidence_embed="none", clearance="restricted"
+    ).execute(
         build_evidence_ingest_command(
             doc_id=FORGED_ID,
             content=f"{TITLE}\n\n{DESCRIPTION}",
@@ -618,7 +620,9 @@ class TestPredicateIsUnforgeable:
             embed_mode="none",
         )
 
-        result = build_curate_executor(registry, evidence_embed="none").execute(command)
+        result = build_curate_executor(
+            registry, evidence_embed="none", clearance="restricted"
+        ).execute(command)
 
         assert result.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
         assert "reserved precedent namespace" in (result.message or "")
@@ -679,7 +683,7 @@ class TestNoisePassSparesPromotedPrecedents:
 
 class TestRetentionSparesPromotedPrecedents:
     def _prune(self, registry: StoreRegistry, criteria: dict[str, Any]) -> Any:
-        return build_curate_executor(registry).execute(
+        return build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_PRUNE,
                 args={"criteria": criteria, "reason": "hygiene", "dry_run": False},
@@ -746,7 +750,7 @@ class TestRetentionSparesPromotedPrecedents:
         assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
         assert _document(registry)["metadata"][LIFECYCLE_KEY]["state"] == "demoted"
 
-        restored = build_curate_executor(registry).execute(
+        restored = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": [NODE_ID], "reason": "undo"},
@@ -829,7 +833,7 @@ class TestRestoreRefusesAnOrphanedPrecedentRow:
     """
 
     def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
-        return build_curate_executor(registry).execute(
+        return build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": item_ids, "reason": "corrective"},
@@ -952,7 +956,7 @@ class TestRestoreRefusesARedactionTombstone:
     """
 
     def _restore(self, registry: StoreRegistry, item_ids: list[str]) -> CommandResult:
-        return build_curate_executor(registry).execute(
+        return build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": item_ids, "reason": "corrective"},

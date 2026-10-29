@@ -652,7 +652,7 @@ class TestTraceExtractedEdgesMigrate:
     ) -> None:
         trace = Trace.model_validate(_TRACE_DATA)
         extracted = await TraceExtractor().extract(trace, source_hint="trace")
-        build_curate_executor(registry).execute_batch(
+        build_curate_executor(registry, clearance="restricted").execute_batch(
             result_to_batch(extracted, requested_by="test")
         )
         store = registry.knowledge.graph_store

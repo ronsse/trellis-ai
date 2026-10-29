@@ -55,7 +55,7 @@ def _link(
     domain: Any = "trellis",
 ) -> list[str]:
     return link_knowledge_node(
-        build_curate_executor(registry),
+        build_curate_executor(registry, clearance="restricted"),
         graph_store,
         node_id="01NOTE",
         properties={"domain": domain},
@@ -145,7 +145,7 @@ class TestFailuresBecomeLines:
         self, temp_registry: StoreRegistry, graph: GraphStore
     ) -> None:
         lines = link_knowledge_node(
-            build_curate_executor(temp_registry),
+            build_curate_executor(temp_registry, clearance="restricted"),
             graph,
             node_id="domain:trellis",
             properties={"domain": "trellis"},

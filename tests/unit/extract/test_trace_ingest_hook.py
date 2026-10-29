@@ -88,7 +88,7 @@ class TestHook:
             "trellis.mutate.build_curate_executor", return_value=executor
         ) as build_exec:
             summary = run_trace_extraction(registry, _TRACE, requested_by="t")
-        build_exec.assert_called_once_with(registry)
+        build_exec.assert_called_once_with(registry, clearance="restricted")
         executor.execute_batch.assert_called_once()
         assert summary is not None
         assert summary["executed"] is True

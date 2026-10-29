@@ -85,7 +85,7 @@ def _invoke(tmp_path: Path, candidate: dict[str, Any], *args: str) -> Any:
 def _redact_source() -> None:
     registry = curate_cli._get_registry()
     try:
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.REDACTION_APPLY,
                 args={"target_id": SOURCE_ID, "reason": "owner request"},

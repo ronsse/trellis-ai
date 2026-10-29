@@ -855,7 +855,7 @@ def test_a_redaction_that_lost_a_concurrent_purge_emits_no_audit_event(
     registry = StoreRegistry(
         config={"graph": neo4j_graph}, stores_dir=tmp_path / "stores"
     )
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(registry, clearance="restricted")
     results: dict[str, Any] = {}
 
     def redact(key: str) -> None:

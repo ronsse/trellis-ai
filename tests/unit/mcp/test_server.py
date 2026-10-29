@@ -2322,7 +2322,7 @@ class TestGetLessons:
             entity_id=node_id,
             payload={"title": "Pooling pattern", "description": "Pooling pattern body"},
         )
-        executor = build_curate_executor(temp_registry)
+        executor = build_curate_executor(temp_registry, clearance="restricted")
         demote_result = executor.execute(
             Command(
                 operation=Operation.PRECEDENT_DEMOTE,
@@ -3227,7 +3227,7 @@ class TestStructuredErrorContract:
         monkeypatch.setattr(
             server_mod,
             "build_curate_executor",
-            lambda _registry: _FailingExecutor(),
+            lambda _registry, **_kwargs: _FailingExecutor(),
         )
 
         # Build a syntactically valid trace JSON so we reach the executor.

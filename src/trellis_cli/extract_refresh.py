@@ -306,7 +306,10 @@ def _run_refresh(
 
     before_snapshot = _snapshot_entities(registry, entity_ids)
     batch = result_to_batch(result, requested_by=f"cli:extract-refresh:{source_name}")
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    )
     results = executor.execute_batch(batch)
     after_snapshot = _snapshot_entities(registry, entity_ids)
 
@@ -662,7 +665,10 @@ def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
             )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    )
 
     per_trace: list[dict[str, Any]] = []
     results: list[CommandResult] = []

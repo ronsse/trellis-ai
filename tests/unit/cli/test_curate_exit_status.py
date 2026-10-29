@@ -130,7 +130,9 @@ def _fake(
         )
 
     executor.execute.side_effect = _execute
-    monkeypatch.setattr(curate_cli, "build_curate_executor", lambda _reg: executor)
+    monkeypatch.setattr(
+        curate_cli, "build_curate_executor", lambda _reg, **_kw: executor
+    )
 
 
 def _json(args: list[str]) -> tuple[int, dict]:

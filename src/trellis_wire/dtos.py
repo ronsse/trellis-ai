@@ -282,6 +282,18 @@ class PrecedentReinstateRequest(WireRequestModel):
     requested_by: str = "api:reinstate-precedent"
 
 
+class ClassificationSetRequest(WireRequestModel):
+    """Request to relabel one document's sensitivity. ``doc_id`` rides the URL path.
+
+    ``sensitivity`` is the closed ``DataClassification`` vocabulary, lowest to
+    highest. A key needs the ``confidential`` (or ``restricted``/``admin``)
+    scope to touch a document at that label, or to assign it.
+    """
+
+    sensitivity: Literal["public", "internal", "confidential", "restricted"]
+    requested_by: str = "api:classify-sensitivity"
+
+
 class LinkRequest(WireRequestModel):
     """Request to create a graph edge.
 

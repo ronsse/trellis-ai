@@ -1042,7 +1042,11 @@ def test_a_stamp_that_raises_is_reported_not_raised(temp_registry, monkeypatch):
     monkeypatch.setattr(supersession, "build_curate_executor", broken)
 
     node_error = supersession.supersede_entity(
-        reg, node_id=n_old, successor="zf-z", requested_by="mcp:save_knowledge"
+        reg,
+        node_id=n_old,
+        successor="zf-z",
+        requested_by="mcp:save_knowledge",
+        clearance="restricted",
     )
     reply = save_memory(X_TEXT, supersedes=t)
 
@@ -1067,10 +1071,18 @@ def test_stamp_names_a_target_removed_after_the_check(temp_registry):
     seen = _event_ids(reg, EventType.MUTATION_EXECUTED)
 
     doc_error = supersession.supersede_document(
-        reg, doc_id="doc-gone", successor="zf-z", requested_by="mcp:save_memory"
+        reg,
+        doc_id="doc-gone",
+        successor="zf-z",
+        requested_by="mcp:save_memory",
+        clearance="restricted",
     )
     node_error = supersession.supersede_entity(
-        reg, node_id="node-gone", successor="zf-z", requested_by="mcp:save_knowledge"
+        reg,
+        node_id="node-gone",
+        successor="zf-z",
+        requested_by="mcp:save_knowledge",
+        clearance="restricted",
     )
 
     assert doc_error == "document doc-gone no longer exists"

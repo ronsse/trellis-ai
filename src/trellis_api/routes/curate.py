@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -22,10 +22,12 @@ from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
     refuse_document_overwrite,
+    request_clearance,
     resolve_requested_by,
 )
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
+    ClassificationSetRequest,
     CommandResponse,
     EntityCreateRequest,
     FeedbackRequest,
@@ -38,12 +40,20 @@ from trellis_wire.dtos import (
     PromoteRequest,
 )
 
+if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
+
 router = APIRouter()
 
 
-def _execute_command(cmd: Command) -> CommandResponse:
-    """Execute a command through the mutation pipeline."""
-    result = build_curate_executor(get_registry()).execute(cmd)
+def _execute_command(cmd: Command, *, clearance: Sensitivity) -> CommandResponse:
+    """Execute a command through the mutation pipeline.
+
+    ``clearance`` is the caller's document clearance (#194). It has no default,
+    so a route that forgets to name one fails at the call; a route whose command
+    touches no document says ``"restricted"`` and why.
+    """
+    result = build_curate_executor(get_registry(), clearance=clearance).execute(cmd)
     # Both FAILED (unexpected handler errors) and REJECTED (handler-raised
     # ValidationError, post-Variant A') are 400-class outcomes from the
     # API caller's perspective. See adr-extraction-validation.md §5.5.
@@ -88,7 +98,7 @@ def promote(
         ),
         requested_by=requested_by,
     )
-    return _execute_command(cmd)
+    return _execute_command(cmd, clearance=request_clearance(ctx))
 
 
 @router.post(
@@ -138,7 +148,9 @@ def demote(
         ),
         requested_by=requested_by,
     )
-    result = build_curate_executor(get_registry()).execute(cmd)
+    result = build_curate_executor(
+        get_registry(), clearance=request_clearance(ctx)
+    ).execute(cmd)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         raise HTTPException(
             status_code=400, detail=sanitize_error_message(result.message)
@@ -196,7 +208,46 @@ def reinstate(
         ),
         requested_by=requested_by,
     )
-    return _execute_command(cmd)
+    return _execute_command(cmd, clearance=request_clearance(ctx))
+
+
+@router.post("/documents/{doc_id:path}/sensitivity", response_model=CommandResponse)
+def set_document_sensitivity(
+    doc_id: str,
+    req: ClassificationSetRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> CommandResponse:
+    """Relabel a document's ``DataClassification.sensitivity`` (#194).
+
+    A metadata-only write through ``classification.set``: the content and the
+    row's ``updated_at`` are untouched, and the document's vector row is
+    re-synced so a semantic hit carries the new label. A document above the
+    caller's clearance answers 400 exactly as a missing one does, so a key
+    cannot learn it exists by trying to relabel it; a requested label above the
+    caller's clearance is refused too, so a key cannot push a document out of
+    its own reach. A chunk id (it reads its parent's label) and a value outside
+    the vocabulary are refused. Re-applying the stored label is a no-op.
+
+    ``requested_by`` is derived from the authenticated principal when one is
+    present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
+    the body's own claim rides along as ``metadata["requested_by_claim"]``.
+    """
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
+    cmd = Command(
+        operation=Operation.CLASSIFICATION_SET,
+        args={"doc_id": doc_id, "sensitivity": req.sensitivity},
+        target_id=doc_id,
+        target_type="document",
+        metadata=(
+            {"requested_by_claim": requested_by_claim}
+            if requested_by_claim is not None
+            else {}
+        ),
+        requested_by=requested_by,
+    )
+    return _execute_command(cmd, clearance=request_clearance(ctx))
 
 
 @router.post("/links")
@@ -215,7 +266,10 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:link",
     )
-    response = _execute_command(cmd)
+    response = _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: a link names no document
+    )
     return {
         "status": "ok",
         "edge_id": response.created_id,
@@ -240,7 +294,10 @@ def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:entity",
     )
-    response = _execute_command(cmd)
+    response = _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: an entity write names no document
+    )
     return {
         "status": "ok",
         "node_id": response.created_id,
@@ -284,7 +341,7 @@ def create_document(
         requested_by="api:create-document",
         idempotency_key=body.get("idempotency_key"),
     )
-    response = _execute_command(command)
+    response = _execute_command(command, clearance=request_clearance(ctx))
     stored_id = response.created_id or command.target_id
     if (
         response.status == CommandStatus.DUPLICATE
@@ -312,7 +369,10 @@ def record_feedback(req: FeedbackRequest) -> CommandResponse:
         target_id=req.target_id,
         requested_by="api:feedback",
     )
-    return _execute_command(cmd)
+    return _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: feedback names no document
+    )
 
 
 @router.post("/packs/{pack_id}/feedback", response_model=PackFeedbackResponse)

@@ -6,6 +6,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **A document's `sensitivity` label is enforced on writes (#194, part 2; closes
+  #1023).** A new governed `classification.set` operation relabels a document
+  as a metadata-only write (`updated_at` preserved, vector row re-mirrored); the
+  CLI gains `trellis curate classify-sensitivity <doc_id> --sensitivity
+  <level>` and REST gains `POST /api/v1/documents/{doc_id}/sensitivity`. One
+  rule: a key cannot write a label above its own clearance and cannot touch a
+  document it may not read. A relabel of a document above the caller's
+  clearance answers `target_not_found`, as a missing one does; one to a label
+  above it is a `policy_violation`. `evidence.ingest` refuses a label above the
+  caller's clearance (new id or existing), and, at an existing id, the
+  `save_memory` overwrite rule, in its handler, so `POST /api/v1/commands/batch`,
+  `POST /api/v1/documents` and MCP `execute_mutation` can no longer overwrite
+  a document above the caller's clearance, lower its label or raise one past
+  the key. `retention.restore`, `redaction.apply`, `precedent.demote` /
+  `reinstate` and a learning-path `precedent.promote` aimed at such a document
+  are denied at Stage 2 (`policy_violation`, `MUTATION_REJECTED`). MCP `save_memory(supersedes=)` and
+  `save_knowledge(supersedes=)` no longer stamp a document above the caller's
+  clearance: the target answers as missing. The clearance rides on the executor,
+  not the command, and is a required keyword of `build_curate_executor`; an
+  unlabelled store, and every trusted-local caller, behave exactly as before.
 - **The sensitivity floor covers the rest of the read surface (#194, part 3;
   closes #1022).** A restricted document that an earlier gate rejected (noise,
   archived, superseded, demoted) is no longer named in a pack response to a key

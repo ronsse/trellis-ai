@@ -39,6 +39,7 @@ class Operation(StrEnum):
     FEEDBACK_RECORD = "feedback.record"
     OBSERVATION_RECORD = "observation.record"
     MEASUREMENT_RECORD = "measurement.record"
+    CLASSIFICATION_SET = "classification.set"
 
     # Maintain
     REDACTION_APPLY = "redaction.apply"
@@ -224,6 +225,7 @@ ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
     Operation.PRECEDENT_PROMOTE: frozenset({"trace_id"}),
     Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
     Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
+    Operation.CLASSIFICATION_SET: frozenset({"doc_id"}),
     Operation.LABEL_ADD: frozenset({"target_id", "label"}),
     Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
     Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),
@@ -298,6 +300,9 @@ class OperationRegistry:
         self._schemas[Operation.TRACE_APPEND_STEP] = {"trace_id", "step"}
         self._schemas[Operation.TRACE_RECORD_OUTCOME] = {"trace_id", "outcome"}
         self._schemas[Operation.EVIDENCE_INGEST] = {"evidence"}
+        # ``sensitivity`` is validated against the closed vocabulary by the
+        # handler, not here: this registry checks presence, not values.
+        self._schemas[Operation.CLASSIFICATION_SET] = {"doc_id", "sensitivity"}
         self._schemas[Operation.EVIDENCE_ATTACH] = {
             "evidence_id",
             "target_id",

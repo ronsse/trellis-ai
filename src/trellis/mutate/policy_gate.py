@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 
 from trellis.mutate.commands import Command
 from trellis.schemas.enums import Enforcement
 from trellis.schemas.policy import Policy, PolicyRule
+
+if TYPE_CHECKING:
+    from trellis.mutate.sensitivity_floor import SensitivityFloor
 
 logger = structlog.get_logger()
 
@@ -54,8 +59,18 @@ class DefaultPolicyGate:
     and leaves only a structlog record.
     """
 
-    def __init__(self, policies: list[Policy] | None = None) -> None:
+    def __init__(
+        self,
+        policies: list[Policy] | None = None,
+        *,
+        sensitivity_floor: SensitivityFloor | None = None,
+    ) -> None:
         self._policies: list[Policy] = policies or []
+        # Consulted before any policy, so a command aimed at a document above
+        # the caller's clearance is refused whatever the policy file says
+        # (#194). ``None`` -- the constructor default and every deployment
+        # whose caller is trusted-local -- leaves the gate as it was.
+        self._sensitivity_floor = sensitivity_floor
 
     def add_policy(self, policy: Policy) -> None:
         """Add a policy."""
@@ -74,6 +89,12 @@ class DefaultPolicyGate:
         gate whose policies do not match this command — returns
         ``(True, "", [])``, which the executor treats as a pass-through.
         """
+        if self._sensitivity_floor is not None:
+            refusal = self._sensitivity_floor.refusal(command)
+            if refusal is not None:
+                logger.warning("sensitivity_floor_denied", operation=command.operation)
+                return False, refusal, []
+
         warnings: list[str] = []
 
         matching = self._match_policies(command)

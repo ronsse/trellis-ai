@@ -100,7 +100,10 @@ def record_observation(body: dict[str, Any]) -> dict[str, Any]:
             detail=f"Invalid observation: {describe_validation_error(exc)}",
         ) from exc
 
-    executor = build_curate_executor(get_registry())
+    executor = build_curate_executor(
+        get_registry(),
+        clearance="restricted",  # trusted: a graph-node write
+    )
     result = executor.execute(
         Command(
             operation=Operation.OBSERVATION_RECORD,
@@ -163,7 +166,10 @@ def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
             detail=f"Invalid measurement: {describe_validation_error(exc)}",
         ) from exc
 
-    executor = build_curate_executor(get_registry())
+    executor = build_curate_executor(
+        get_registry(),
+        clearance="restricted",  # trusted: a graph-node write
+    )
     result = executor.execute(
         Command(
             operation=Operation.MEASUREMENT_RECORD,
