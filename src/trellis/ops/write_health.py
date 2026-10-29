@@ -35,7 +35,7 @@ could drift would recreate exactly that failure.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -75,6 +75,7 @@ from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceStep
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
+    Event,
     EventLog,
     EventType,
     ScanCoverage,
@@ -711,6 +712,26 @@ class FailedStrategyReport(TrellisModel):
     latest_at: datetime | None = None
 
 
+class MalformedRowReport(TrellisModel):
+    """Packs in the window where a strategy skipped a malformed stored row.
+
+    Tallied from ``PACK_ASSEMBLED.malformed_row_skips`` over every scanned
+    pack, a withheld one included, since it still ran its strategies. A skip
+    is the writer-contract breach a missing-stamp ``ValueError`` used to
+    surface through ``strategy_failures``, so it is counted here rather than
+    left to a log line. Counts and strategy names only, never an item id or a
+    value, which are caller-controlled.
+    """
+
+    #: Packs in the window where at least one strategy skipped a row.
+    packs: int = 0
+    #: Rows skipped per strategy name, summed over the window's packs.
+    by_strategy: dict[str, int] = Field(default_factory=dict)
+    #: ``occurred_at`` of the most recent such pack in the window, or ``None``
+    #: when ``packs`` is zero.
+    latest_at: datetime | None = None
+
+
 class ServeAttributionReport(TrellisModel):
     """The serve-side coverage numbers the learning join lives or dies on.
 
@@ -826,6 +847,8 @@ class ServeAttributionReport(TrellisModel):
     failed_strategies: FailedStrategyReport = Field(
         default_factory=FailedStrategyReport
     )
+    #: See :class:`MalformedRowReport`.
+    malformed_rows: MalformedRowReport = Field(default_factory=MalformedRowReport)
     #: Which builds assembled the window's served packs, grouped by the
     #: ``write_provenance`` stamp. Counted over the same rows as ``packs``
     #: (the holdout dropped), so the groups sum to it. See
@@ -1001,6 +1024,34 @@ def summarize_write_health(
     )
 
 
+def _malformed_rows_report(events: Iterable[Event]) -> MalformedRowReport:
+    """Tally ``PACK_ASSEMBLED.malformed_row_skips`` over ``events``.
+
+    A payload with no key, an empty dict, or a value of any other shape counts
+    nothing, and an entry that is not a positive integer count (a bool, a
+    string, a negative) is dropped: one bad event must not fail health.
+    """
+    packs = 0
+    by_strategy: dict[str, int] = {}
+    latest_at: datetime | None = None
+    for event in events:
+        raw = event.payload.get("malformed_row_skips")
+        skips = {
+            str(name): rows
+            for name, rows in (raw.items() if isinstance(raw, dict) else ())
+            # ``bool`` is an ``int``; a count must be a real, positive one.
+            if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0
+        }
+        if not skips:
+            continue
+        packs += 1
+        for name, rows in skips.items():
+            by_strategy[name] = by_strategy.get(name, 0) + rows
+        if latest_at is None or event.occurred_at > latest_at:
+            latest_at = event.occurred_at
+    return MalformedRowReport(packs=packs, by_strategy=by_strategy, latest_at=latest_at)
+
+
 def summarize_serve_attribution(
     event_log: EventLog,
     *,
@@ -1115,6 +1166,7 @@ def summarize_serve_attribution(
             by_strategy=failures_by_strategy,
             latest_at=latest_failure_at,
         ),
+        malformed_rows=_malformed_rows_report(pack_scan.events),
         serving_builds=summarize_serving_builds(pack_events),
     )
 
@@ -1162,6 +1214,22 @@ def summarize_backend_health(
         reasons.append(
             f"{serve.failed_strategies.packs} pack(s) in window hit a failed "
             f"retrieval strategy ({by_strategy}), latest {latest_str}"
+        )
+    if serve.malformed_rows.packs > 0:
+        skipped_by_strategy = ", ".join(
+            f"{name}: {count}"
+            for name, count in sorted(
+                serve.malformed_rows.by_strategy.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        latest_skip = serve.malformed_rows.latest_at
+        latest_skip_str = (
+            f"{latest_skip:%Y-%m-%d %H:%M} UTC" if latest_skip else "unknown"
+        )
+        reasons.append(
+            f"{serve.malformed_rows.packs} pack(s) in window skipped malformed "
+            f"retrieval rows ({skipped_by_strategy}), latest {latest_skip_str}"
         )
     mixed = mixed_builds_reason(serve.serving_builds, days=days)
     if mixed:
