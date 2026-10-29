@@ -1318,7 +1318,13 @@ def _document_row_in_place(
     retry after a changed description whose row write failed leaves the old row
     and a node that already matches. Without a ``document_store`` the row cannot
     be checked, which reads as missing.
+
+    A redaction's blank tombstone counts as in place: a redaction that blanked
+    the row and then failed to purge the node must not be undone by a re-run
+    writing the redacted text back.
     """
+    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
+
     properties = entity_payload["properties"]
     expected = precedent_document_content(
         entity_payload["name"], properties.get("description")
@@ -1328,7 +1334,9 @@ def _document_row_in_place(
     if document_store is None:
         return False
     row = document_store.get(entity_payload["entity_id"])
-    return row is not None and row.get("content") == expected
+    if row is None:
+        return False
+    return is_redaction_tombstone(row) or row.get("content") == expected
 
 
 def _promotion_is_complete(
@@ -1429,7 +1437,7 @@ def preview_learning_promotion(
     *,
     graph_store: GraphStore,
     event_log: EventLog | None,
-    document_store: DocumentStore | None = None,
+    document_store: DocumentStore | None,
 ) -> dict[str, Any] | None:
     """The refusal or ``already_promoted`` outcome a submission would answer.
 

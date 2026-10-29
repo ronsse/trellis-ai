@@ -396,6 +396,26 @@ def test_a_stale_document_row_is_rewritten_by_running_it_again(
     assert row["content"] == precedent_document_content("Rerun precedent", "same")
 
 
+def test_a_redaction_tombstone_row_is_not_written_back_by_a_re_run(
+    stores: _Stores,
+) -> None:
+    """A redaction blanks the row before it purges the node; if the purge
+    fails, a re-run must not restore the redacted text."""
+    from trellis.mutate.handlers import REDACTION_TOMBSTONE_REASON
+    from trellis.schemas.classification import LIFECYCLE_KEY
+
+    assert stores.submit()["status"] == "promoted"
+    tombstone = {LIFECYCLE_KEY: {"deprecation_reason": REDACTION_TOMBSTONE_REASON}}
+    stores.documents.put(ENTITY_ID, "", tombstone)
+
+    second = stores.submit()
+
+    assert second["status"] == "already_promoted"
+    row = stores.documents.get(ENTITY_ID)
+    assert row is not None
+    assert row["content"] == ""
+
+
 def test_without_a_document_store_the_row_cannot_be_checked_so_the_write_goes_ahead(
     stores: _Stores,
 ) -> None:
@@ -459,6 +479,7 @@ def test_a_node_that_is_not_a_precedent_is_never_skipped(stores: _Stores) -> Non
         [],
         graph_store=stores.graph,
         event_log=event_log,
+        document_store=None,
     )
 
     # The id holds an ``entity`` node, not a precedent, and the event log says a
