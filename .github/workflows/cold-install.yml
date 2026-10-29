@@ -1,0 +1,46 @@
+name: Cold install
+
+# Installs the built wheel, not the checkout, and runs the first-run paths from an
+# empty HOME. tests.yml installs `-e .` and publish.yml builds the wheel without
+# installing it, so a defect that exists only in the wheel (package data left out,
+# a console script pointing at a moved module) shows up nowhere else. The checks
+# live in scripts/cold_install_check.sh so they run locally too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cold-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor in `requires-python`, and the newest.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # hatch-vcs derives the version from tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install build
+      - run: python -m build --wheel
+      - name: Install the wheel into a fresh venv and run the first-run paths
+        env:
+          PYTHON: python
+        run: |
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "expected exactly one wheel in dist/, found: ${wheels[*]}" >&2
+            exit 1
+          fi
+          bash scripts/cold_install_check.sh "${wheels[0]}"
