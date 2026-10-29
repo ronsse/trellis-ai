@@ -1139,6 +1139,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`promote-learning` no longer writes a redacted precedent back (#1019).**
+  `redaction.apply` purges a promoted precedent's node, so a re-run of
+  `trellis curate promote-learning`, `review-ready --approve`,
+  `POST /learning/promotions` or the auto-promote job found no node, read the
+  candidate as new, and wrote the precedent, its document row and its edges
+  again: the redacted text was served through keyword and semantic retrieval
+  once more. A row is now refused as `refused_redacted`, ahead of every graph
+  read, when the id's document row is a redaction tombstone or a
+  `REDACTION_APPLIED` event names the id (one `limit=1` lookup by type and id).
+  It is a refusal like `refused_demoted`: the run's verdict is `refused`, the
+  CLI exits `2` in both formats, the dry run and the submission share the check
+  and agree, and nothing is written (no node version, no row text, no
+  `PRECEDENT_PROMOTED` event). The tombstone alone refuses with no event log, as
+  the event alone refuses with no document store; an event log that raises
+  fails the write rather than letting it through. The tombstone clause #1018
+  added to the document-row check is gone, since the refusal now precedes it.
 - **`promote-learning`: a re-run no longer skips a precedent whose edge
   properties or document row differ (#996).** The #983 skip counted a row
   complete when each named edge existed and the promote event was there, so an

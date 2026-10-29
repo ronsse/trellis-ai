@@ -400,7 +400,8 @@ def test_a_redaction_tombstone_row_is_not_written_back_by_a_re_run(
     stores: _Stores,
 ) -> None:
     """A redaction blanks the row before it purges the node; if the purge
-    fails, a re-run must not restore the redacted text."""
+    fails, a re-run must not restore the redacted text. It is refused as
+    redacted (#1019), not skipped as already promoted."""
     from trellis.mutate.handlers import REDACTION_TOMBSTONE_REASON
     from trellis.schemas.classification import LIFECYCLE_KEY
 
@@ -410,7 +411,7 @@ def test_a_redaction_tombstone_row_is_not_written_back_by_a_re_run(
 
     second = stores.submit()
 
-    assert second["status"] == "already_promoted"
+    assert second["status"] == "refused_redacted"
     row = stores.documents.get(ENTITY_ID)
     assert row is not None
     assert row["content"] == ""
@@ -469,10 +470,7 @@ def test_a_miner_candidate_row_is_not_the_promotion_event(stores: _Stores) -> No
 
 def test_a_node_that_is_not_a_precedent_is_never_skipped(stores: _Stores) -> None:
     stores.graph.upsert_node(ENTITY_ID, "entity", {"name": "Rerun precedent"})
-    event_log = MagicMock()
-    event_log.get_events.return_value = [
-        MagicMock(source="mutation_executor", payload={})
-    ]
+    event_log = _event_log_with_a_promotion()
 
     outcome = preview_learning_promotion(
         _entity_payload(),
@@ -485,6 +483,19 @@ def test_a_node_that_is_not_a_precedent_is_never_skipped(stores: _Stores) -> Non
     # The id holds an ``entity`` node, not a precedent, and the event log says a
     # promotion exists: the content comparison alone must not skip the write.
     assert outcome is None
+
+
+def _event_log_with_a_promotion() -> MagicMock:
+    """An event log holding one promote event and, as a real one does, no redaction."""
+
+    def _get_events(*, event_type: EventType | None = None, **_: Any) -> list[Any]:
+        if event_type == EventType.REDACTION_APPLIED:
+            return []
+        return [MagicMock(source="mutation_executor", payload={})]
+
+    event_log = MagicMock()
+    event_log.get_events.side_effect = _get_events
+    return event_log
 
 
 def _documents_holding_the_row() -> MagicMock:
@@ -506,10 +517,7 @@ def test_a_backend_that_drops_null_properties_still_matches() -> None:
         "properties": {"name": "Rerun precedent", "description": "same"},
     }
     graph.get_edges.return_value = []
-    event_log = MagicMock()
-    event_log.get_events.return_value = [
-        MagicMock(source="mutation_executor", payload={})
-    ]
+    event_log = _event_log_with_a_promotion()
 
     outcome = preview_learning_promotion(
         _entity_payload(),
@@ -536,10 +544,7 @@ def test_a_property_the_node_gained_later_does_not_block_the_skip() -> None:
         },
     }
     graph.get_edges.return_value = []
-    event_log = MagicMock()
-    event_log.get_events.return_value = [
-        MagicMock(source="mutation_executor", payload={})
-    ]
+    event_log = _event_log_with_a_promotion()
 
     outcome = preview_learning_promotion(
         _entity_payload(),

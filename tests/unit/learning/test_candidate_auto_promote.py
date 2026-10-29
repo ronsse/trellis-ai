@@ -1003,6 +1003,61 @@ class TestRunCandidateAutoPromotionCommit:
         finally:
             registry.close()
 
+    def test_a_redacted_precedent_is_refused_not_promoted_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pre-scan reads a bounded window of promote events, so a
+        promotion older than the window reaches the submission, which must
+        refuse a precedent a redaction purged rather than write it back
+        (#1019)."""
+        import trellis.learning.candidate_auto_promote as auto_promote
+        from trellis.mutate import CommandStatus
+
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            entity_id = precedent_entity_id_for_candidate("cand-auto")
+
+            def _run() -> Any:
+                return run_candidate_auto_promotion(
+                    candidates=[_candidate("cand-auto")],
+                    policy=_force_commit_policy(enabled=True),
+                    event_log=registry.operational.event_log,
+                    executor=executor,
+                    graph_store=registry.knowledge.graph_store,
+                    document_store=registry.knowledge.document_store,
+                )
+
+            assert _run().outcomes[0].disposition == "promoted"
+            redaction = executor.execute(
+                Command(
+                    operation=Operation.REDACTION_APPLY,
+                    args={"target_id": entity_id, "reason": "owner request"},
+                    target_id=entity_id,
+                    target_type="entity",
+                    requested_by="test",
+                )
+            )
+            assert redaction.status == CommandStatus.SUCCESS, redaction.message
+            monkeypatch.setattr(
+                auto_promote,
+                "_scan_already_promoted_entity_ids",
+                lambda *_a, **_k: set(),
+            )
+
+            report = _run()
+
+            outcome = report.outcomes[0]
+            assert outcome.disposition == "ineligible:submission_refused_redacted"
+            assert report.promoted_count == 0
+            assert registry.knowledge.graph_store.get_node(entity_id) is None
+            promoted = registry.operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+            )
+            assert len(promoted) == 1
+        finally:
+            registry.close()
+
     def test_a_submission_that_skips_a_landed_row_reads_already_promoted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
