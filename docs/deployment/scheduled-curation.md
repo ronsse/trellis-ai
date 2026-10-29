@@ -50,7 +50,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # Daily 02:45 — tuner pass (only meaningful with learning.auto_promote.enabled: true)
 45 2 * * *  trellis-user  trellis worker tune --format json >> /var/log/trellis/tune.log 2>&1
 
-# Daily 04:00 (off-peak) — LLM enrichment of under-tagged documents
+# Daily 04:00 (off-peak) — LLM enrichment of under-tagged documents. If you log
+# --format json, watch scan_capped: true with fewer than --limit selected means
+# older documents were not examined (raise --scan-cap).
 0 4 * * *   trellis-user  trellis worker enrich --limit 100 --format json >> /var/log/trellis/enrich.log 2>&1
 
 # Weekly Sun 05:00 — precedent mining (LLM; candidates need human review)

@@ -321,6 +321,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`worker enrich` scans past its newest-rows window (#1068).** It selected from
+  one fixed page of the newest `max(--limit * 5, --limit)` rows and reported zero
+  candidates once that page held only enriched rows, promoted-precedent rows and
+  redaction tombstones, however many older documents had never been enriched. It
+  now pages newest-first until `--limit` candidates are found, the store ends, or
+  `--scan-cap` rows (default 20,000) have been read. `--format json` gains
+  `scanned` (rows read, in whole pages) and `scan_capped` (the scan stopped at
+  the cap with fewer than `--limit` candidates, so older documents were not
+  examined), and text mode prints one line when it is capped. A capped scan is a
+  report, not a failure: the exit code is unchanged. There is no store, schema or
+  API change. The consequence to expect: a scheduled run now enriches older
+  un-enriched documents it used to pass over, so it can write `auto_importance`
+  and `document_form` to rows older than the old window, which ranking and the
+  class-prior gate read, `--limit` rows per run. A store with nothing left to
+  enrich now reads up to `--scan-cap` rows on every run.
+
 - **`POST /api/v1/vectors` takes a stored document's content and role, not the
   caller's (part of #1057).** A row at an id that names a stored document already
   took that document's label, lifecycle, tags, importance and `evidence_ref`, but

@@ -1565,6 +1565,29 @@ def _reconcile_before_cycle() -> None:
 # worker enrich — batch LLM enrichment of under-tagged documents
 # ---------------------------------------------------------------------------
 
+# Rows per page is at least this: an OFFSET read re-walks every skipped row, so a
+# scan in small pages costs quadratic time.
+_ENRICH_SCAN_PAGE_FLOOR = 1000
+# Most rows one run reads looking for candidates: bounds a run over a store with
+# nothing left to enrich, since nothing else can stop the scan early.
+_ENRICH_SCAN_CAP_DEFAULT = 20_000
+
+
+@dataclass(frozen=True)
+class EnrichmentSelection:
+    """What one candidate scan found and how far it read to find it.
+
+    ``scanned`` is rows read from the store, page-granular, and counts the
+    rows skipped as already enriched, as promoted precedents and as redaction
+    tombstones. ``capped`` is true when the scan stopped at its row cap with
+    fewer than ``limit`` candidates and the last page full, so older documents
+    were not examined; a store of exactly ``scan_cap`` rows reads as capped.
+    """
+
+    candidates: list[dict[str, Any]]
+    scanned: int
+    capped: bool
+
 
 @worker_app.command("enrich")
 def enrich_cmd(
@@ -1582,6 +1605,15 @@ def enrich_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Select + report candidates without calling the LLM."
     ),
+    scan_cap: int = typer.Option(
+        _ENRICH_SCAN_CAP_DEFAULT,
+        "--scan-cap",
+        min=1,
+        help=(
+            "Max rows read looking for candidates; the scan stops there even "
+            "if older un-enriched documents remain."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format."),
 ) -> None:
     """Batch-enrich under-tagged documents via :class:`EnrichmentService`.
@@ -1589,8 +1621,12 @@ def enrich_cmd(
     **Selection predicate.** A document is a candidate when its
     ``metadata.content_tags`` is missing or empty, or when it has never been
     through this path — ``content_tags.classified_mode != "enrichment"``.
-    ``--reenrich`` takes the already-enriched too. The newest ``--limit``
-    documents matching the predicate are enriched. A promoted precedent's
+    ``--reenrich`` takes the already-enriched too. Documents are scanned
+    newest-first, past any fixed window, until ``--limit`` of them match the
+    predicate, the store ends, or ``--scan-cap`` rows have been read; the
+    ``--limit`` newest matches are enriched. A scan that stops at the cap
+    reports ``scan_capped``, which is not "nothing left to enrich": older
+    documents were not examined. A promoted precedent's
     document row is never a candidate, whatever its tags say
     (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`),
     and neither is a redaction tombstone
@@ -1606,8 +1642,8 @@ def enrich_cmd(
 
     Results are written back through the tagging path: each enriched
     document's ``metadata.content_tags`` is updated with the LLM-suggested
-    tags / classification / importance plus a fresh ``classified_at`` and
-    ``tag_confidence`` stamp, then persisted via ``DocumentStore.put``.
+    tags / classification / importance plus a fresh ``classified_at`` stamp
+    and ``classified_mode``, then persisted via ``DocumentStore.put``.
 
     **Requires an LLM extra.** Enrichment needs a configured ``llm:`` block
     and the matching ``\\[llm-openai]`` / ``\\[llm-anthropic]`` extra. When no
@@ -1617,9 +1653,10 @@ def enrich_cmd(
     document_store = get_document_store()
     llm = _require_llm_client_or_exit(LLMConsumer.ENRICHMENT, command="worker enrich")
 
-    candidates = _select_enrichment_candidates(
-        document_store, limit=limit, reenrich=reenrich
+    selection = _scan_enrichment_candidates(
+        document_store, limit=limit, reenrich=reenrich, scan_cap=scan_cap
     )
+    candidates = selection.candidates
 
     if dry_run:
         if output_format == "json":
@@ -1628,10 +1665,13 @@ def enrich_cmd(
                     "status": "ok",
                     "dry_run": True,
                     "selected": len(candidates),
+                    "scanned": selection.scanned,
+                    "scan_capped": selection.capped,
                     "doc_ids": [c["doc_id"] for c in candidates],
                 }
             )
         else:
+            _print_scan_capped(selection, limit=limit, scan_cap=scan_cap)
             console.print(
                 f"[bold]worker enrich[/bold] DRY-RUN — "
                 f"{len(candidates)} candidate(s) selected"
@@ -1655,6 +1695,8 @@ def enrich_cmd(
                 "status": "ok",
                 "dry_run": False,
                 "selected": len(candidates),
+                "scanned": selection.scanned,
+                "scan_capped": selection.capped,
                 "enriched": summary.enriched,
                 "failed": summary.failed,
                 # #421: concurrent writes seen inside the LLM window. Not a
@@ -1670,6 +1712,7 @@ def enrich_cmd(
             }
         )
         return
+    _print_scan_capped(selection, limit=limit, scan_cap=scan_cap)
     console.print(
         f"[bold]worker enrich[/bold] — {summary.enriched}/{len(candidates)} "
         f"document(s) enriched"
@@ -1680,6 +1723,18 @@ def enrich_cmd(
             f"{summary.stale_snapshot} document(s) changed (enriched onto "
             f"current content), {summary.vanished} deleted (skipped), "
             f"{summary.skipped_redacted} redacted (skipped)"
+        )
+
+
+def _print_scan_capped(
+    selection: EnrichmentSelection, *, limit: int, scan_cap: int
+) -> None:
+    """Say so when a scan stopped at its row cap short of ``limit`` candidates."""
+    if selection.capped:
+        console.print(
+            f"[yellow]scan stopped at the {scan_cap}-row cap with "
+            f"{len(selection.candidates)} of {limit} candidate(s) found; older "
+            f"documents were not examined (raise --scan-cap)[/yellow]"
         )
 
 
@@ -1732,44 +1787,87 @@ def _select_enrichment_candidates(
 ) -> list[dict[str, Any]]:
     """Return documents that have not been through the enrichment path.
 
-    See :func:`enrich_cmd` for the predicate definition. Scans the newest
-    documents (a generous multiple of ``limit`` so the filter has headroom)
-    and returns at most ``limit`` matches.
+    The candidates of :func:`_scan_enrichment_candidates` at its default row
+    cap, without the account of how far it read.
     """
-    # ``include_chunks`` is named rather than defaulted (#396): this walker
-    # scans for un-enriched documents, and a chunk row is as enrichable as
-    # its parent.
-    scanned = document_store.list_documents(
-        limit=max(limit * 5, limit), include_chunks=True
-    )
+    return _scan_enrichment_candidates(
+        document_store, limit=limit, reenrich=reenrich
+    ).candidates
+
+
+def _scan_enrichment_candidates(
+    document_store: DocumentStore,
+    *,
+    limit: int,
+    reenrich: bool = False,
+    scan_cap: int = _ENRICH_SCAN_CAP_DEFAULT,
+) -> EnrichmentSelection:
+    """Page newest-first for documents not yet through the enrichment path.
+
+    See :func:`enrich_cmd` for the predicate definition. Reads pages until
+    ``limit`` candidates are found, the store ends, or ``scan_cap`` rows have
+    been read, so a newest window holding only enriched rows, precedent rows
+    and tombstones does not hide the older documents behind it.
+
+    A scan that read ``scan_cap`` rows, the last page full, with fewer than
+    ``limit`` candidates reports ``capped``: older documents were not examined.
+    A store of exactly ``scan_cap`` rows reads as capped, because a full last
+    page cannot tell "ended here" from "more behind it".
+    """
+    page = max(limit * 5, _ENRICH_SCAN_PAGE_FLOOR)
     candidates: list[dict[str, Any]] = []
-    for doc in scanned:
-        if is_promoted_precedent_document(doc.get("doc_id")):
-            # A promoted precedent's tags belong to its promote handler: this
-            # path would overwrite its ``document_form`` with the model's guess
-            # and merge LLM facets into the ``decision`` tag set that makes the
-            # row retrievable by intent, reopening the exemption the noise pass,
-            # retention and classify refresh already honour. Skipped before
-            # anything is read from the row, and so before any LLM call.
-            continue
-        if is_redaction_tombstone(doc):
-            # A tombstone is blank, so there is nothing to enrich, and it never
-            # carries ``content_tags`` (the pass drops tags derived for a row
-            # redacted mid-batch). Without this skip it would be a candidate on
-            # every pass: one model call spent on it each time, and, newest
-            # first, a seat under ``--limit`` taken from a document that can be
-            # enriched.
-            continue
-        metadata = doc.get("metadata") or {}
-        content_tags = metadata.get("content_tags") or {}
-        if not content_tags:
-            candidates.append(doc)
-            continue
-        if reenrich or content_tags.get("classified_mode") != "enrichment":
-            candidates.append(doc)
-        if len(candidates) >= limit:
+    # An OFFSET page is not a snapshot: a row written between two pages shifts
+    # the rest down one, so the last row of one page can open the next.
+    seen: set[str] = set()
+    scanned = 0
+    offset = 0
+    capped = False
+    while len(candidates) < limit and scanned < scan_cap:
+        n = min(page, scan_cap - scanned)
+        # ``include_chunks`` is named rather than defaulted (#396): this walker
+        # scans for un-enriched documents, and a chunk row is as enrichable as
+        # its parent.
+        batch = document_store.list_documents(
+            limit=n, offset=offset, include_chunks=True
+        )
+        scanned += len(batch)
+        offset += len(batch)
+        for doc in batch:
+            if doc["doc_id"] in seen:
+                continue
+            seen.add(doc["doc_id"])
+            if is_promoted_precedent_document(doc.get("doc_id")):
+                # A promoted precedent's tags belong to its promote handler:
+                # this path would overwrite its ``document_form`` with the
+                # model's guess and merge LLM facets into the ``decision`` tag
+                # set that makes the row retrievable by intent, reopening the
+                # exemption the noise pass, retention and classify refresh
+                # already honour. Skipped before anything is read from the
+                # row, and so before any LLM call.
+                continue
+            if is_redaction_tombstone(doc):
+                # A tombstone is blank, so there is nothing to enrich, and it
+                # never carries ``content_tags`` (the pass drops tags derived
+                # for a row redacted mid-batch). Without this skip it would be
+                # a candidate on every pass: one model call spent on it each
+                # time, and, newest first, a seat under ``--limit`` taken from
+                # a document that can be enriched.
+                continue
+            metadata = doc.get("metadata") or {}
+            content_tags = metadata.get("content_tags") or {}
+            if (
+                not content_tags
+                or reenrich
+                or content_tags.get("classified_mode") != "enrichment"
+            ):
+                candidates.append(doc)
+                if len(candidates) >= limit:
+                    break
+        if len(batch) < n:
             break
-    return candidates[:limit]
+        if len(candidates) < limit and scanned >= scan_cap:
+            capped = True
+    return EnrichmentSelection(candidates=candidates, scanned=scanned, capped=capped)
 
 
 def _enriched_content_tags(

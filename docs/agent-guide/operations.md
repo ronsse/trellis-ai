@@ -3704,7 +3704,7 @@ Batch-enrich under-tagged documents via the LLM `EnrichmentService`, writing the
 
 ```bash
 trellis worker enrich [--concurrency N] [--limit N] \
-  [--reenrich] [--dry-run] [--format text|json]
+  [--reenrich] [--dry-run] [--scan-cap N] [--format text|json]
 ```
 
 | Option | Default | Description |
@@ -3713,9 +3713,12 @@ trellis worker enrich [--concurrency N] [--limit N] \
 | `--limit` | `50` | Max documents to enrich this run. |
 | `--reenrich` | off | Also take documents that have already been through this path. |
 | `--dry-run` | off | Select + report candidates without calling the LLM. |
+| `--scan-cap` | `20000` | Max rows read looking for candidates (at least `1`); the scan stops there even if older un-enriched documents remain. |
 | `--format` | `text` | `text` or `json`. |
 
 **Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** when `content_tags.classified_mode != "enrichment"` — i.e. it has never been through this path. `--reenrich` takes the already-enriched too. (This used to select on `content_tags.tag_confidence`, a key `ContentTags` does not define and nothing ever wrote, so the threshold could never skip anything.) A promoted precedent's document row (an id in the `precedent://learning/` namespace) is **never** a candidate, with or without `--reenrich`: its `document_form` and `decision` tag belong to the precedent handlers, and the row is skipped before any model call. Neither is a redaction tombstone (the blank archived row a redaction leaves): there is nothing to enrich, and it never carries tags, so it would otherwise be selected on every pass and cost a model call each time.
+
+**How far selection reads (#1068).** Documents are read newest-first in pages (at least 1,000 rows each, or `5 × --limit` when that is larger) until `--limit` candidates are found, the store ends, or `--scan-cap` rows have been read. Enriched rows, promoted precedents and tombstones are skipped but still count as read, so a newest stretch made only of them no longer hides the older documents behind it. `--format json` reports `scanned` (rows read, in whole pages) and `scan_capped` in both the dry-run and the real-run payload; text mode prints one yellow line before the summary when the scan was capped. `scan_capped: true` with fewer than `--limit` selected is not "nothing left to enrich": older documents were not examined, so raise `--scan-cap`. It is a report, not a failure, and the exit code is the same in both formats. A store of exactly `--scan-cap` rows also reads as capped, since a full last page cannot say whether more lie behind it. Every page is a full-row read, so a store with nothing left to enrich reads up to `--scan-cap` rows on every run. A scheduled run therefore enriches older un-enriched documents it used to pass over, and writes `auto_importance` and `document_form` to them, `--limit` rows per run.
 
 **Concurrency counters in `--format json` (#421).** The candidate page is a snapshot taken before *N* model calls, so the write-back re-reads each row and merges only the keys this path owns. `stale_snapshot` counts rows another writer changed inside that window — those are still enriched, onto their current content, so it is a concurrency signal rather than a failure count. `vanished` counts rows deleted inside the window, which are **skipped** (writing them back would resurrect a deleted document). A standing non-zero `stale_snapshot` means the batch is racing another writer and wants a smaller `--limit`. `skipped_redacted` (always present) counts only rows **redacted inside the window** (a tombstone that already existed at selection time is never selected, so it does not appear here): the tags came from text that is gone, so they are dropped rather than written onto the blank tombstone, and the row is neither `enriched` nor `vanished` and emits no `MEMORY_OP_JUDGED` event. The text summary's "concurrent writes" line prints when it is non-zero.
 
