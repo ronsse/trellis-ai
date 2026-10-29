@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 from trellis.core.error_sanitize import describe_validation_error
@@ -15,12 +15,15 @@ from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes._principal import request_clearance
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
@@ -162,8 +165,12 @@ def search(
             " they are slices of documents the same search already ranks."
         ),
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """Full-text search across documents.
+
+    A document labelled above the caller's clearance is left out of the
+    results (so a page can come back shorter than ``limit``).
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied
@@ -176,6 +183,12 @@ def search(
     results = registry.knowledge.document_store.search(
         q, limit=limit, filters=filters, include_chunks=include_chunks
     )
+    readable = DocumentClearance(
+        registry.knowledge.document_store, request_clearance(ctx)
+    )
+    results = [
+        r for r in results if readable.permits(r.get("doc_id", ""), r.get("metadata"))
+    ]
     return {
         "status": "ok",
         "query": q,
@@ -186,7 +199,10 @@ def search(
 
 
 @router.post("/packs", response_model=PackResponse)
-def assemble_pack(req: PackRequest) -> PackResponse:
+def assemble_pack(
+    req: PackRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> PackResponse:
     """Assemble a context pack."""
     registry = get_registry()
     builder = _build_pack_builder(registry)
@@ -210,6 +226,7 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         filters = {"domain": req.domain}
     pack = builder.build(
         intent=req.intent,
+        clearance=request_clearance(ctx),
         domain=req.domain,
         agent_id=req.agent_id,
         run_id=req.run_id,
@@ -262,7 +279,10 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         },
     },
 )
-def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
+def assemble_sectioned_pack(
+    req: SectionedPackRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> SectionedPackResponse:
     """Assemble a sectioned pack with independently budgeted sections.
 
     The SDK's ``assemble_sectioned_pack()`` targets this route; section
@@ -289,6 +309,7 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         filters = {"domain": req.domain}
     pack = builder.build_sectioned(
         req.intent,
+        clearance=request_clearance(ctx),
         sections=sections,
         domain=req.domain,
         agent_id=req.agent_id,

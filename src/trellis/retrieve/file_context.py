@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -103,6 +104,7 @@ from trellis.stores.base.graph_query import DOC_LINK_FIELD, FilterClause, NodeQu
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
 
 logger = structlog.get_logger(__name__)
@@ -234,6 +236,8 @@ def _entity_entry(node: dict[str, Any]) -> dict[str, Any]:
 def _matching_documents(
     document_store: DocumentStore,
     paths: Sequence[str],
+    *,
+    clearance: Sensitivity,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, set[str]]]:
     """Scan the document store once for path matches on either key.
 
@@ -249,6 +253,8 @@ def _matching_documents(
     the same argument the trace summary itself is, and anchoring only the
     ``source_path`` half would return the document while hiding the
     entities linked to it.
+
+    A document above ``clearance`` is skipped before either is recorded.
     """
     # Deferred: ``trellis.ingest_corpus.__init__`` pulls ``sync``, which
     # imports back into ``trellis.retrieve`` (the embed hook). At module
@@ -257,6 +263,7 @@ def _matching_documents(
     # other end turns it into a hard cycle.
     from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
 
+    readable = DocumentClearance(document_store, clearance)
     docs_by_path: dict[str, list[dict[str, Any]]] = {p: [] for p in paths}
     anchors_by_path: dict[str, set[str]] = {p: set() for p in paths}
 
@@ -277,6 +284,10 @@ def _matching_documents(
                 else:
                     continue
                 doc_id = str(doc.get("doc_id") or "")
+                # Above the caller's clearance: neither the document nor an
+                # entity anchored only to it may surface (#194).
+                if not readable.permits(doc_id, metadata):
+                    continue
                 anchors_by_path[path].add(doc_id)
                 if not is_chunk_doc_id(doc_id):
                     docs_by_path[path].append(
@@ -366,6 +377,7 @@ def build_file_context(
     graph_store: Any,
     paths: Sequence[str],
     *,
+    clearance: Sensitivity,
     include_unconfirmed: bool = False,
     include_structural: bool = False,
     graph_scan_limit: int = DEFAULT_GRAPH_SCAN_LIMIT,
@@ -405,7 +417,9 @@ def build_file_context(
     if not deduped:
         return {"paths": [], "graph_scan_truncated": False}
 
-    docs_by_path, anchors_by_path = _matching_documents(document_store, deduped)
+    docs_by_path, anchors_by_path = _matching_documents(
+        document_store, deduped, clearance=clearance
+    )
     entities_by_path, graph_scan_truncated = _linked_entities(
         graph_store,
         anchors_by_path,

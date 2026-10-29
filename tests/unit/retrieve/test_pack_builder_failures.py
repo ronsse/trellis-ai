@@ -65,7 +65,7 @@ class TestRequiredStrategyFailureRaises:
         bad = _failing_strategy("kw", RuntimeError("index missing"))
         builder = PackBuilder(strategies=[bad])
         with pytest.raises(PackAssemblyError) as excinfo:
-            builder.build("q")
+            builder.build("q", clearance="restricted")
         assert "kw" in str(excinfo.value)
         assert "index missing" in str(excinfo.value)
         # ``strategy_failures`` carried on the exception.
@@ -82,6 +82,7 @@ class TestRequiredStrategyFailureRaises:
             builder.build_sectioned(
                 "q",
                 sections=[SectionRequest(name="default")],
+                clearance="restricted",
             )
 
 
@@ -94,7 +95,7 @@ class TestAllStrategiesFailRaises:
         s3 = _failing_strategy("graph", RuntimeError("c"))
         builder = PackBuilder(strategies=[s1, s2, s3])
         with pytest.raises(PackAssemblyError) as excinfo:
-            builder.build("q")
+            builder.build("q", clearance="restricted")
         assert "All 3 configured strategies failed" in str(excinfo.value)
         assert len(excinfo.value.strategy_failures) == 3
         names = {f.strategy for f in excinfo.value.strategy_failures}
@@ -134,9 +135,9 @@ class TestAllStrategiesFailRaises:
             ),
         )
         calls: dict[str, Callable[[], object]] = {
-            "flat": lambda: builder.build("q"),
+            "flat": lambda: builder.build("q", clearance="restricted"),
             "sectioned": lambda: builder.build_sectioned(
-                "q", sections=[SectionRequest(name="default")]
+                "q", sections=[SectionRequest(name="default")], clearance="restricted"
             ),
         }
         with pytest.raises(PackAssemblyError) as excinfo:
@@ -160,7 +161,7 @@ class TestPartialStrategyFailureRecorded:
         bad = _failing_strategy("sem", RuntimeError("embedder down"))
         good_b = _make_strategy("graph", [_item("e1", 0.7)])
         builder = PackBuilder(strategies=[good_a, bad, good_b], event_log=event_log)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         # Survivor strategies returned items.
         item_ids = {item.item_id for item in pack.items}
@@ -175,7 +176,7 @@ class TestPartialStrategyFailureRecorded:
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", ValueError("bad query vector"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         assert len(events) == 1
@@ -194,7 +195,7 @@ class TestPartialStrategyFailureRecorded:
         a = _make_strategy("kw", [_item("d1", 0.9)])
         b = _make_strategy("sem", [_item("v1", 0.8)])
         builder = PackBuilder(strategies=[a, b], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         assert len(events) == 1
@@ -207,7 +208,9 @@ class TestPartialStrategyFailureRecorded:
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError("oops"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         assert len(events) == 1
@@ -226,7 +229,7 @@ class TestRerankerFailureRaises:
         bad_reranker.rerank.side_effect = RuntimeError("model load failed")
         builder = PackBuilder(strategies=[good], reranker=bad_reranker)
         with pytest.raises(PackAssemblyError) as excinfo:
-            builder.build("q")
+            builder.build("q", clearance="restricted")
         assert "cross_encoder" in str(excinfo.value)
         assert isinstance(excinfo.value.__cause__, RuntimeError)
 
@@ -316,7 +319,7 @@ class TestStrategyFailureMessageIsSanitized:
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         payload = events[0].payload or {}
@@ -347,7 +350,7 @@ class TestStrategyFailureMessageIsSanitized:
             RuntimeError('relation "acct_7731" does not exist\nwhile planning query 2'),
         )
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         payload = events[0].payload or {}
@@ -365,7 +368,7 @@ class TestStrategyFailureMessageIsSanitized:
         bad = _failing_strategy("kw", RuntimeError(self._HOSTILE))
         builder = PackBuilder(strategies=[bad])
         with pytest.raises(PackAssemblyError) as excinfo:
-            builder.build("q")
+            builder.build("q", clearance="restricted")
         failure = excinfo.value.strategy_failures[0]
         assert failure.message == self._HOSTILE
         assert failure.audit_message == SUPPRESSED_MARKER
@@ -375,7 +378,9 @@ class TestStrategyFailureMessageIsSanitized:
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         payload = events[0].payload or {}
@@ -392,7 +397,7 @@ class TestStrategyFailureMessageIsSanitized:
         good = _make_strategy("kw", [_item("d1", 0.9)])
         bad = _failing_strategy("sem", RuntimeError("index out of range"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
         payload = events[0].payload or {}
@@ -446,7 +451,7 @@ class TestExoticExceptionSummarizationNeverBlocksADegrade:
         bad = _failing_strategy("sem", _NoSuperTrellisError("d"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
 
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         assert [item.item_id for item in pack.items] == ["d1"]
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
@@ -462,7 +467,7 @@ class TestExoticExceptionSummarizationNeverBlocksADegrade:
         bad = _failing_strategy("sem", _RaisingCodeError("boom"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
 
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         assert [item.item_id for item in pack.items] == ["d1"]
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
@@ -478,7 +483,9 @@ class TestExoticExceptionSummarizationNeverBlocksADegrade:
         bad = _failing_strategy("sem", _NoSuperTrellisError("d"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
 
-        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        pack = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         served_ids = {
             item.item_id for section in pack.sections for item in section.items
@@ -497,7 +504,9 @@ class TestExoticExceptionSummarizationNeverBlocksADegrade:
         bad = _failing_strategy("sem", _RaisingCodeError("boom"))
         builder = PackBuilder(strategies=[good, bad], event_log=event_log)
 
-        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        pack = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         served_ids = {
             item.item_id for section in pack.sections for item in section.items

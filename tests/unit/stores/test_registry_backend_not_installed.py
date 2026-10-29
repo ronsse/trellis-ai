@@ -629,7 +629,7 @@ def test_embedding_fn_bool_provider_degrades_pack_to_keyword_and_graph(
     builder = build_pack_builder(registry, surface="test")
     assert builder.strategy_names == ["keyword", "graph"]
 
-    pack = builder.build("does this still serve a pack")
+    pack = builder.build("does this still serve a pack", clearance="restricted")
 
     axes = describe_axes(
         builder,

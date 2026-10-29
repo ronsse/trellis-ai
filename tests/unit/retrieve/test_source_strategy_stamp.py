@@ -107,5 +107,7 @@ def test_the_forged_label_does_not_reach_the_pack_attribution() -> None:
             "updated_at": datetime.now(UTC).isoformat(),
         }
     ]
-    pack = PackBuilder(strategies=[KeywordSearch(store)]).build("anything")
+    pack = PackBuilder(strategies=[KeywordSearch(store)]).build(
+        "anything", clearance="restricted"
+    )
     assert [i.strategy_source for i in pack.items] == ["keyword"]

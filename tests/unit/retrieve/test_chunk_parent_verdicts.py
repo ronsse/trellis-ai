@@ -138,6 +138,7 @@ def _put_chunk(
 
 
 def _build(builder: PackBuilder, **kwargs: Any) -> Any:
+    kwargs.setdefault("clearance", "restricted")
     return builder.build(
         intent=INTENT,
         budget=PackBudget(max_items=25, max_tokens=100_000),
@@ -146,6 +147,7 @@ def _build(builder: PackBuilder, **kwargs: Any) -> Any:
 
 
 def _build_sectioned(builder: PackBuilder, **kwargs: Any) -> Any:
+    kwargs.setdefault("clearance", "restricted")
     return builder.build_sectioned(
         intent=INTENT,
         sections=[SectionRequest(name="s", max_items=25, max_tokens=100_000)],

@@ -251,6 +251,47 @@ only once enforcement is turned on. This is the only layer whose default
 posture is "off," because turning it on against unclassified historical data
 would otherwise hide everything.
 
+#### Amendment: the read floor shipped as a transparent default (#194, part 1)
+
+The retrieval half shipped without the flag, because the flag was only needed
+to protect data that has no label. The posture that replaces it:
+
+- **Unlabelled means `internal`, and the lowest clearance is `internal`.** A
+  store with no labels serves every caller exactly what it served before, so
+  there is nothing to switch on and nothing retroactively hidden. A document is
+  withheld only when someone labelled it `confidential` or `restricted` and the
+  caller lacks the scope. There is no `public` clearance tier: `public` is a
+  label a document may carry, not a ceiling a caller is held to.
+- **Clearance comes from existing key scopes.** `confidential` and `restricted`
+  are two new scopes (`restricted` implies `confidential`; `admin` implies both),
+  and `trellis.auth.clearance_of(scopes)` maps a scope set to its ceiling. No
+  `ApiKeyRecord` or key-store change.
+- **Trusted-local is unrestricted.** MCP stdio, MCP with enforcement off, REST
+  with `TRELLIS_AUTH_MODE=off` (and `optional` with no credential, which grants
+  all scopes during migration) and the CLI read everything: the process host
+  already holds the store. An MCP call that reaches a tool over HTTP with no
+  credential reads `internal`.
+- **A malformed label reads as `restricted`.** The opposite of a malformed
+  lifecycle record: a bad lifecycle must never hide content, a bad label must
+  never expose it.
+- **One gate, at the collect seam.** `retrieve/sensitivity.py` runs in
+  `PackBuilder` after supersession, so it covers every strategy including a
+  vector-only hit. Both build entry points take a required keyword-only
+  `clearance`. Chunks inherit the higher of their own and their parent's label,
+  and a parent whose fetch raised withholds its chunks. Withheld items are
+  reported by reason `sensitivity`, as counts only.
+- **By-id reads answer as not-found** (`get_items`, `GET /documents/{id}`), and
+  `get_file_context` drops the document and any entity anchored only to it.
+- **Producer.** MCP `save_memory` and `save_knowledge` take an optional
+  `sensitivity`, stamped under `metadata["data_classification"]`. A label above
+  the caller's own clearance is refused, and so is a raw `data_classification`
+  key in `metadata`. A document labelled above `internal` is not run through
+  memory extraction, because the entities it mints would carry no label.
+- **Not covered yet:** graph nodes, entities, precedents, advisories and
+  observations carry no label; relabelling an existing document and the
+  mutation-path deny are the next part of #194; the REST ingest producer and the
+  explore document list are not yet gated.
+
 ### Layer E — Output sanitization (#192, #206, #207)
 
 **Decision.** Nothing internal leaves the process in error payloads, probe

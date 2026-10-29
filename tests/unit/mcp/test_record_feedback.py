@@ -1109,7 +1109,11 @@ class TestBodiedAttributionRequirement:
             event_log=event_log,
             disclosure=DisclosureConfig(body_items=2),
         )
-        pack = builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+        pack = builder.build(
+            intent="loader retries",
+            budget=PackBudget(max_items=10),
+            clearance="restricted",
+        )
         bodied = lookup_pack_bodied_item_ids(event_log, pack.pack_id)
         assert len(bodied) == 2
 

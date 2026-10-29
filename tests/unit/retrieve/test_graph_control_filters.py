@@ -179,8 +179,10 @@ class TestAxesSurviveTheControlKey:
         builder = _three_axis_builder(registry)
         budget = PackBudget(max_items=50, max_tokens=100_000)
 
-        baseline = builder.build("caching", budget=budget)
-        widened = builder.build("caching", budget=budget, include_structural=True)
+        baseline = builder.build("caching", budget=budget, clearance="restricted")
+        widened = builder.build(
+            "caching", budget=budget, include_structural=True, clearance="restricted"
+        )
 
         assert sorted(i.item_id for i in baseline.items) == ["d1", "n1", "v1"]
         # Before the fix this was ``["n1"]`` — keyword and semantic both
@@ -213,6 +215,7 @@ class TestAxesSurviveTheControlKey:
             "caching",
             budget=PackBudget(max_items=50, max_tokens=100_000),
             filters={key: value},
+            clearance="restricted",
         )
         assert sorted(i.item_id for i in pack.items) == ["d1", "n1", "v1"]
 
@@ -243,6 +246,7 @@ class TestAxesSurviveTheControlKey:
             "caching",
             budget=PackBudget(max_items=50, max_tokens=100_000),
             filters={key: value},
+            clearance="restricted",
         )
         assert sorted(i.item_id for i in pack.items) == ["d1", "n1", "v1"]
 

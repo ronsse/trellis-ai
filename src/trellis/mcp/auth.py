@@ -55,7 +55,7 @@ import anyio.to_thread
 import structlog
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
-from trellis.auth import ALL_SCOPES, scopes_satisfy
+from trellis.auth import ALL_SCOPES, clearance_of, scopes_satisfy
 from trellis.auth import verify_token as verify_api_key
 from trellis.errors import ConfigError
 
@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
     from fastmcp.server.auth import AuthContext
 
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.api_key import ApiKeyRecord, ApiKeyStore
 
 logger = structlog.get_logger(__name__)
@@ -361,6 +362,28 @@ def caller_has_scope(scope: str) -> bool:
     if token is None:
         return False
     return scopes_satisfy(frozenset(token.scopes), scope)
+
+
+def current_clearance() -> Sensitivity:
+    """The highest document sensitivity the *current* MCP caller may read (#194).
+
+    Same transport detection as :func:`caller_has_scope`. **stdio** and
+    **enforcement disabled** are trusted-local: the parent host is the trust
+    boundary and holds the store anyway, so the caller reads everything
+    (``"restricted"``). Otherwise the bearer's scopes decide
+    (:func:`trellis.auth.clearance_of`), and a call with no credential reads
+    ``"internal"``: it cannot normally reach a tool at all, and if it does,
+    fail closed.
+    """
+    from fastmcp.server.context import _current_transport  # noqa: PLC0415
+
+    if _current_transport.get() == TRANSPORT_STDIO or not _auth_state.enforced:
+        return "restricted"
+
+    from fastmcp.server.dependencies import get_access_token  # noqa: PLC0415
+
+    token = get_access_token()
+    return clearance_of(token.scopes) if token is not None else "internal"
 
 
 def current_principal_id() -> str | None:

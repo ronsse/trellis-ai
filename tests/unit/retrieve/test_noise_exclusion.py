@@ -98,6 +98,7 @@ def _semantic_builder(vector_store: SQLiteVectorStore) -> PackBuilder:
 
 
 def _ids(builder: PackBuilder, **kwargs: Any) -> list[str]:
+    kwargs.setdefault("clearance", "restricted")
     pack = builder.build(
         intent=INTENT,
         budget=PackBudget(max_items=25, max_tokens=100_000),
@@ -248,6 +249,7 @@ class TestSemanticAxisHonoursTheTag:
         pack = _semantic_builder(vector_store).build_sectioned(
             intent=INTENT,
             sections=[SectionRequest(name="all", max_tokens=100_000, max_items=25)],
+            clearance="restricted",
         )
         served = {item.item_id for section in pack.sections for item in section.items}
         assert served == {"useful"}

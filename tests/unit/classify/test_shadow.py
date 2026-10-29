@@ -234,7 +234,7 @@ class TestShadowIsInvisibleToRetrieval:
         assert SHADOW_TAGS_KEY in document_store.get("d1")["metadata"]
 
         pack = PackBuilder(strategies=[KeywordSearch(document_store)]).build(
-            "kubernetes deploy"
+            "kubernetes deploy", clearance="restricted"
         )
         assert pack.items, "fixture must actually retrieve, else the test is vacuous"
 

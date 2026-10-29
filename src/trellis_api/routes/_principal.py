@@ -15,9 +15,15 @@ module rather than reintroducing a body passthrough.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from trellis.auth import clearance_of
 from trellis.core.elision import elide_text
 from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis_api.auth import AuthContext
+
+if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
 
 #: ``requested_by_claim`` is attacker-controlled free text, so it is bounded
 #: the same way a pack excerpt is -- long enough to be useful on an audit
@@ -83,3 +89,14 @@ def resolve_requested_by(
     if not claim_was_set:
         return f"api:{principal}", None
     return f"api:{principal}", _scrub_claim(claimed)
+
+
+def request_clearance(ctx: AuthContext) -> Sensitivity:
+    """The highest document sensitivity this REST caller may read (#194).
+
+    From the principal's scopes. Auth mode ``off`` (and the legacy shared
+    secret) grant ``ALL_SCOPES``, so a trusted-local deployment reads
+    everything; a key without ``confidential``/``restricted`` reads up to
+    ``internal``.
+    """
+    return clearance_of(ctx.scopes)

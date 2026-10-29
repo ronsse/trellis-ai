@@ -3602,8 +3602,9 @@ migrating to scoped keys.
 
 ### Scopes
 
-Four scopes: `read`, `ingest`, `mutate`, `admin`. `admin` implies all
-others. The router → scope map:
+Six scopes: `read`, `ingest`, `mutate`, `admin`, plus the two read-clearance
+scopes `confidential` and `restricted` (see [Sensitivity](#sensitivity-clearance)).
+`admin` implies all others. The router → scope map:
 
 | Router (`/api/v1`) | Required scope |
 |--------------------|----------------|
@@ -3635,6 +3636,27 @@ without a credential by default (see [Production exposure](#production-exposure)
 for what `/readyz` and `/metrics` reveal to anonymous callers). A valid key
 lacking the required scope gets 403; missing or invalid credentials get an
 undifferentiated 401 (the failure category is logged server-side only).
+
+### Sensitivity clearance
+
+A document can carry a sensitivity label (`public`, `internal`, `confidential`,
+`restricted`), set with the optional `sensitivity` argument of MCP `save_memory`
+and `save_knowledge` (for `save_knowledge` it labels the evidence document
+created from `content`). A reader is served a labelled document only when its
+key holds the matching scope:
+
+| Key scopes | Reads up to |
+|------------|-------------|
+| `read` (and `ingest`, `mutate`) | `internal` |
+| `confidential` | `confidential` |
+| `restricted`, `admin` | `restricted` |
+
+An unlabelled document reads as `internal`, so a store with no labels behaves
+exactly as before. A key can only label up to its own clearance. Withheld items
+appear in a pack's withholding note as `sensitivity N`, as counts only. MCP over
+stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
+`internal` is not memory-extracted, and the `save_memory` reply says so.
+Graph nodes and entities carry no label.
 
 ### Managing keys
 

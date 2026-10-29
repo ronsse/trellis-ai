@@ -72,6 +72,7 @@ def registry(tmp_path: Path) -> StoreRegistry:
 
 
 def _build(registry: StoreRegistry, paths: list[str], **kwargs: object) -> dict:
+    kwargs.setdefault("clearance", "restricted")
     return build_file_context(
         registry.knowledge.document_store,
         registry.knowledge.graph_store,

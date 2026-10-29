@@ -167,13 +167,17 @@ class _Corpus:
         unhelpful: Sequence[str] = (),
     ) -> str:
         pack = self._builder(rate).build(
-            "rotate keys", budget=PackBudget(max_items=max_items, max_tokens=4000)
+            "rotate keys",
+            budget=PackBudget(max_items=max_items, max_tokens=4000),
+            clearance="restricted",
         )
         self.grade(pack.pack_id, rating, helpful, unhelpful)
         return pack.pack_id
 
     def sectioned(self, rate: float, *, rating: float, helpful: Sequence[str]) -> str:
-        pack = self._builder(rate).build_sectioned("rotate keys", sections=_SECTIONS)
+        pack = self._builder(rate).build_sectioned(
+            "rotate keys", sections=_SECTIONS, clearance="restricted"
+        )
         self.grade(pack.pack_id, rating, helpful, [])
         return pack.pack_id
 
@@ -193,10 +197,14 @@ class _Corpus:
             log = SQLiteEventLog(self._tmp_path / f"scratch-{self._scratch_logs}.db")
         builder = self._builder(rate, log)
         if sectioned:
-            pack_id = builder.build_sectioned("rotate keys", sections=_SECTIONS).pack_id
+            pack_id = builder.build_sectioned(
+                "rotate keys", sections=_SECTIONS, clearance="restricted"
+            ).pack_id
         else:
             pack_id = builder.build(
-                "rotate keys", budget=PackBudget(max_items=3, max_tokens=4000)
+                "rotate keys",
+                budget=PackBudget(max_items=3, max_tokens=4000),
+                clearance="restricted",
             ).pack_id
         if log is not self.event_log:
             (row,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)

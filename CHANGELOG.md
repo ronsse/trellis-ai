@@ -4,6 +4,23 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
+  `save_memory` and `save_knowledge` take an optional `sensitivity`
+  (`public` / `internal` / `confidential` / `restricted`); a key can label only
+  up to its own clearance, which comes from two new scopes, `confidential` and
+  `restricted` (`admin` implies both). Packs (flat and sectioned, MCP and REST),
+  MCP `search`, `get_items`, `get_file_context`, REST `/search` and
+  `GET /documents/{id}` withhold a document above the caller's clearance;
+  by-id reads answer as not-found and the withholding note reports reason
+  `sensitivity` as counts only. **An unlabelled store serves every caller
+  identically**, so nothing changes until a document is labelled. A document
+  labelled above `internal` skips memory extraction. `PackBuilder.build` and
+  `build_sectioned` now require a keyword-only `clearance`; the CLI passes
+  `"restricted"`. Not yet covered: REST ingest labelling, the explore document
+  list, graph-node labels, relabelling and the mutation-path deny.
+
 ### Changed
 
 - **The steering text an MCP client reads now teaches the feedback call the

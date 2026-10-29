@@ -87,6 +87,7 @@ from trellis.mcp.auth import (
     HttpSettings,
     TrellisApiKeyVerifier,
     caller_has_scope,
+    current_clearance,
     current_principal_id,
     resolve_http_settings,
     resolve_transport,
@@ -158,9 +159,17 @@ from trellis.retrieve.formatters import (
     index_render_overhead_tokens,
 )
 from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import withholding_from_payload
-from trellis.schemas.classification import lifecycle_state_of
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    SENSITIVITY_ORDER,
+    DataClassification,
+    lifecycle_state_of,
+    sensitivity_of,
+    sensitivity_rank,
+)
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -1289,6 +1298,7 @@ def _flat_context(
         builder = _build_pack_builder(registry)
         pack = builder.build(
             intent,
+            clearance=current_clearance(),
             domain=domain or None,
             session_id=session_id or None,
             run_id=run_id or None,
@@ -1447,6 +1457,7 @@ def _sectioned_context(
         sections = [SectionRequest.model_validate(s) for s in section_specs]
         sectioned_pack = builder.build_sectioned(
             intent,
+            clearance=current_clearance(),
             sections=sections,
             domain=domain or None,
             session_id=session_id or None,
@@ -1792,6 +1803,7 @@ def _resolve_evidence_pointer(
     entity_type: str,
     content: str | None,
     evidence_ref: str | None,
+    label: dict[str, Any] | None = None,
 ) -> tuple[str | None, bool]:
     """Resolve the evidence-document pointer for ``save_knowledge``.
 
@@ -1813,7 +1825,9 @@ def _resolve_evidence_pointer(
       (findable, prunable); a dangling graph pointer is never acceptable.
     """
     if evidence_ref is not None:
-        if registry.knowledge.document_store.get(evidence_ref) is None:
+        # A document above the caller's clearance is "not found": linking an
+        # entity to it must not work, and must not differ from a missing id.
+        if not _readable_document_exists(registry, evidence_ref):
             _record_boundary_rejection(
                 tool="save_knowledge",
                 rejections=[
@@ -1836,7 +1850,11 @@ def _resolve_evidence_pointer(
             document_id = ensure_evidence_document(
                 registry,
                 content,
-                metadata={"entity_name": name, "entity_type": entity_type},
+                metadata={
+                    "entity_name": name,
+                    "entity_type": entity_type,
+                    **(label or {}),
+                },
                 source="mcp:save_knowledge",
             )
         except MutationError as exc:
@@ -1855,6 +1873,19 @@ def _resolve_evidence_pointer(
                     "message": detail,
                 },
             )
+        # Content dedup can resolve to a document that already existed, with
+        # its own label. Above the caller's clearance it cannot be linked or
+        # named, and below the requested label it would keep serving the text
+        # at the old level; neither writes anything (#194). The match test is
+        # exact-hash, so a caller can still learn that identical text exists
+        # by being refused: the residual oracle a content-addressed store has.
+        if not _match_readable(registry, document_id):
+            _raise_invalid_params(
+                "content matches an existing document this credential cannot "
+                "read; nothing was written",
+                data={"field": "content"},
+            )
+        _refuse_label_below_request(registry, document_id, label or {})
         return (
             document_id,
             False,
@@ -2015,6 +2046,7 @@ def save_knowledge(
     content: str | None = None,
     evidence_ref: str | None = None,
     supersedes: str | None = None,
+    sensitivity: str | None = None,
 ) -> str:
     """Create an entity in the knowledge graph, optionally linking it.
 
@@ -2057,12 +2089,26 @@ def save_knowledge(
             superseded by something else) is left unchanged and named in the
             reply. Refused, with nothing written, if the id is unknown, a
             document, archived, or already superseded by something else.
+        sensitivity: Optional label for the evidence document created from
+            ``content`` (see ``save_memory``). The entity itself carries no
+            label, so keep sensitive prose in ``content``, not in ``name`` or
+            ``properties``. Not valid with ``evidence_ref``: relabelling an
+            existing document is not supported here.
     """
     if not name or not name.strip():
         _raise_invalid_params(
             "name must not be empty",
             data={"field": "name"},
         )
+    if sensitivity is not None and (
+        evidence_ref is not None or not (content or "").strip()
+    ):
+        _raise_invalid_params(
+            "sensitivity labels the evidence document created from content; "
+            "supply content and no evidence_ref",
+            data={"field": "sensitivity"},
+        )
+    evidence_label = _stamp_sensitivity(None, sensitivity, tool="save_knowledge")
 
     registry = _get_registry()
 
@@ -2080,6 +2126,7 @@ def save_knowledge(
         entity_type=entity_type,
         content=content,
         evidence_ref=evidence_ref,
+        label=evidence_label,
     )
     # The stamps go on once their successor exists, and before the entity:
     # a failure between the two then leaves the old version withheld behind
@@ -2140,14 +2187,109 @@ def save_knowledge(
 # ---------------------------------------------------------------------------
 
 
+def _stamp_sensitivity(
+    metadata: dict[str, Any] | None, sensitivity: str | None, *, tool: str
+) -> dict[str, Any]:
+    """The metadata to store, carrying the caller's ``sensitivity`` label (#194).
+
+    No label leaves the bag untouched: an unlabelled save is byte-identical to
+    one before this parameter existed. A label above the caller's own
+    clearance is refused, since the caller could then store content they cannot
+    read back. A raw ``data_classification`` in ``metadata`` is refused for the
+    same reason: it would be a second, unchecked way to write the label.
+    """
+    stamped = dict(metadata or {})
+    if DATA_CLASSIFICATION_KEY in stamped:
+        _raise_invalid_params(
+            f"metadata may not set {DATA_CLASSIFICATION_KEY!r}; use the "
+            "sensitivity parameter",
+            data={"field": f"metadata.{DATA_CLASSIFICATION_KEY}", "tool": tool},
+        )
+    if sensitivity is None:
+        return stamped
+    if sensitivity not in SENSITIVITY_ORDER:
+        _raise_invalid_params(
+            f"sensitivity must be one of {list(SENSITIVITY_ORDER)}, "
+            f"got {sensitivity!r}",
+            data={"field": "sensitivity", "tool": tool},
+        )
+    clearance = current_clearance()
+    if sensitivity_rank(sensitivity) > sensitivity_rank(clearance):  # type: ignore[arg-type]
+        _raise_invalid_params(
+            f"sensitivity {sensitivity!r} is above this credential's clearance "
+            f"({clearance!r}); nothing was written. A key needs the "
+            f"{sensitivity!r} (or admin) scope to label content that high.",
+            data={"field": "sensitivity", "tool": tool, "clearance": clearance},
+        )
+    stamped[DATA_CLASSIFICATION_KEY] = DataClassification(
+        sensitivity=sensitivity,  # type: ignore[arg-type]
+        classified_by=["caller"],
+    ).model_dump(mode="json")
+    return stamped
+
+
+def _match_readable(registry: StoreRegistry, doc_id: str) -> bool:
+    """Whether the caller may read document ``doc_id`` (a missing one is fine)."""
+    store = registry.knowledge.document_store
+    doc = store.get(doc_id)
+    if doc is None:
+        return True
+    return DocumentClearance(store, current_clearance()).permits(
+        doc_id, doc.get("metadata")
+    )
+
+
+def _readable_document_exists(registry: StoreRegistry, doc_id: str) -> bool:
+    """Whether ``doc_id`` exists and the caller may read it."""
+    store = registry.knowledge.document_store
+    doc = store.get(doc_id)
+    return doc is not None and DocumentClearance(store, current_clearance()).permits(
+        doc_id, doc.get("metadata")
+    )
+
+
+def _refuse_label_below_request(
+    registry: StoreRegistry, doc_id: str, metadata: dict[str, Any]
+) -> None:
+    """Refuse a labelled save that an existing, lower-labelled match would swallow.
+
+    Dedup returns the existing document and stores nothing, so the content
+    would stay served at the old label. Relabelling is a separate operation.
+    An unlabelled save is never refused: it asked for no label.
+    """
+    if DATA_CLASSIFICATION_KEY not in metadata:
+        return
+    doc = registry.knowledge.document_store.get(doc_id)
+    if doc is None:
+        return
+    requested = sensitivity_of(metadata)
+    if sensitivity_rank(sensitivity_of(doc.get("metadata"))) < sensitivity_rank(
+        requested
+    ):
+        _raise_invalid_params(
+            f"an identical or near-identical document already exists at a lower "
+            f"sensitivity than {requested!r}; nothing was written and its label "
+            "is unchanged (relabelling is not supported here)",
+            data={"field": "sensitivity"},
+        )
+
+
+def _append_note(reply: str, note: str | None) -> str:
+    """``reply`` with a skipped-step ``note`` on its own line, if there is one."""
+    return f"{reply}\n{note}" if note else reply
+
+
 def _emit_memory_stored_and_enrich(
     registry: StoreRegistry,
     stored_id: str,
     content: str,
     metadata: dict[str, Any],
     chash: str,
-) -> None:
-    """Emit required acceptance, then run best-effort enrichment outside lock."""
+) -> str | None:
+    """Emit required acceptance, then run best-effort enrichment outside lock.
+
+    Returns a note for the write response when a step was skipped on purpose.
+    """
     try:
         registry.operational.event_log.emit(
             EventType.MEMORY_STORED,
@@ -2174,7 +2316,18 @@ def _emit_memory_stored_and_enrich(
     # Feature-flagged tiered extraction (TRELLIS_ENABLE_MEMORY_EXTRACTION=1).
     # Runs AliasMatch + LLM residue via the governed MutationExecutor.
     # Never blocks save_memory success — failures are logged and swallowed.
-    memory_extractor = _get_memory_extractor(registry)
+    # Not on a labelled document: the entity names it would mint land in the
+    # graph, which carries no label in this slice, so labelled content would
+    # reach callers without the clearance as derived text (#194).
+    label = sensitivity_of(metadata)
+    note: str | None = None
+    labelled = sensitivity_rank(label) > sensitivity_rank("internal")
+    memory_extractor = None if labelled else _get_memory_extractor(registry)
+    if labelled:
+        note = (
+            f"Note: memory extraction skipped; the document is labelled {label!r} "
+            "and extracted entities would not carry the label."
+        )
     if memory_extractor is not None:
         run_memory_extraction(
             registry,
@@ -2190,6 +2343,7 @@ def _emit_memory_stored_and_enrich(
     run_embed_on_ingest(
         registry, stored_id, content, metadata, source=SAVE_MEMORY_SURFACE
     )
+    return note
 
 
 def _check_memory_supersedes(
@@ -2308,6 +2462,7 @@ def save_memory(
     metadata: dict[str, Any] | None = None,
     doc_id: str | None = None,
     supersedes: str | None = None,
+    sensitivity: str | None = None,
 ) -> str:
     """Store a document in the experience graph memory.
 
@@ -2326,6 +2481,11 @@ def save_memory(
             with nothing written, if the id is unknown, a graph entity, part
             of a chunked document, archived, or already superseded by another
             document.
+        sensitivity: Optional label (``public``, ``internal``,
+            ``confidential``, ``restricted``). Readers whose key lacks that
+            clearance are never served the document, and memory extraction is
+            skipped for anything above ``internal``. A key can only label up
+            to its own clearance (the ``confidential`` / ``restricted`` scope).
     """
     if not content or not content.strip():
         _record_boundary_rejection(
@@ -2341,7 +2501,7 @@ def save_memory(
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
     registry = _get_registry()
-    metadata = dict(metadata or {})
+    metadata = _stamp_sensitivity(metadata, sensitivity, tool="save_memory")
     executor = build_curate_executor(registry, evidence_embed="none")
 
     chash = content_hash(content)
@@ -2368,11 +2528,16 @@ def save_memory(
     with _save_memory_lock:
         # Dedup stage 1: exact content hash match.
         existing = registry.knowledge.document_store.get_by_hash(chash)
+        # A match above the caller's clearance is no match: answering "already
+        # exists" would confirm a guess about content they may not read (#194).
+        if existing is not None and not _match_readable(registry, existing["doc_id"]):
+            existing = None
         # Refused before any write, and checked against the exact match
         # too: that match, not a new row, is then the successor.
         _check_memory_supersedes(registry, supersedes, doc_id=doc_id, existing=existing)
         if existing is not None:
             existing_id = existing["doc_id"]
+            _refuse_label_below_request(registry, existing_id, metadata)
             logger.debug(
                 "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
             )
@@ -2386,8 +2551,11 @@ def save_memory(
                     content,
                     exclude_ids={supersedes} if supersedes is not None else None,
                 )
+                if match is not None and not _match_readable(registry, match[0]):
+                    match = None
                 if match is not None:
                     match_id, similarity = match
+                    _refuse_label_below_request(registry, match_id, metadata)
                     logger.debug(
                         "save_memory_dedup_fuzzy",
                         match_id=match_id,
@@ -2439,8 +2607,10 @@ def save_memory(
         # against a target this call is about to stamp.
         reply = _supersede_saved_memory(registry, stored_id, supersedes)
 
-    _emit_memory_stored_and_enrich(registry, stored_id, content, metadata, chash)
-    return reply
+    return _append_note(
+        reply,
+        _emit_memory_stored_and_enrich(registry, stored_id, content, metadata, chash),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2560,6 +2730,10 @@ def _gather_reconcile_candidate(
     match_id, similarity = matches[0]
     doc = document_store.get(match_id)
     if doc is None:
+        return None
+    if not DocumentClearance(document_store, current_clearance()).permits(
+        match_id, doc.get("metadata")
+    ):
         return None
     return ReconcileCandidate(
         doc_id=match_id, content=doc["content"], similarity=float(similarity)
@@ -2819,14 +2993,19 @@ def _save_memory_reconciled(
     # -- Phase A: gather under the lock --------------------------------------
     with _save_memory_lock:
         existing = document_store.get_by_hash(chash)
+        if existing is not None and not _match_readable(registry, existing["doc_id"]):
+            existing = None
         if existing is not None:
             existing_id = existing["doc_id"]
+            _refuse_label_below_request(registry, existing_id, metadata)
             logger.debug(
                 "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
             )
             return f"Memory already exists: {existing_id}"
 
         candidate = _gather_reconcile_candidate(registry, document_store, content)
+        if candidate is not None:
+            _refuse_label_below_request(registry, candidate.doc_id, metadata)
         if candidate is None:
             # No near match: an unambiguous ADD — no model call, no verdict.
             # Store under the lock exactly as the deterministic tier would.
@@ -2840,8 +3019,12 @@ def _save_memory_reconciled(
             )
 
     if candidate is None:
-        _emit_memory_stored_and_enrich(registry, clean_id, content, clean_meta, chash)
-        return f"Memory saved: {clean_id}"
+        note = _emit_memory_stored_and_enrich(
+            registry, clean_id, content, clean_meta, chash
+        )
+        return (
+            f"Memory saved: {clean_id}\n{note}" if note else f"Memory saved: {clean_id}"
+        )
 
     # -- Phase B: verdict OUTSIDE the lock (never serialize saves on a model) -
     # _compute_reconcile_outcome is internally exhaustive (client build, model
@@ -2908,12 +3091,14 @@ def _save_memory_reconciled(
         )
 
     # Everything but NOOP persisted a doc → MEMORY_STORED + enrichment.
+    enrich_note: str | None = None
     if stored_id is not None:
-        _emit_memory_stored_and_enrich(
+        enrich_note = _emit_memory_stored_and_enrich(
             registry, stored_id, content, stored_meta or metadata, chash
         )
 
-    return _reconcile_result_message(outcome, candidate, stored_id)
+    message = _reconcile_result_message(outcome, candidate, stored_id)
+    return f"{message}\n{enrich_note}" if enrich_note else message
 
 
 # ---------------------------------------------------------------------------
@@ -3034,6 +3219,12 @@ def _render_fetched_item(
     """
     doc = registry.knowledge.document_store.get(item_id)
     if doc is not None:
+        # Above the caller's clearance answers exactly as not-found: no other
+        # kind is tried, so the reply cannot say the document exists (#194).
+        if not DocumentClearance(
+            registry.knowledge.document_store, current_clearance()
+        ).permits(item_id, doc.get("metadata")):
+            return None
         return "document", doc.get("content", "")
 
     node = registry.knowledge.graph_store.get_node(item_id)
@@ -3192,6 +3383,7 @@ def get_file_context(
         registry.knowledge.graph_store,
         cleaned,
         include_unconfirmed=include_unconfirmed,
+        clearance=current_clearance(),
     )
     result = format_file_context_as_markdown(file_context, max_tokens=max_tokens)
     try:

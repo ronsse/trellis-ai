@@ -243,7 +243,9 @@ class TestBuildPackBuilder:
             {"parent_doc_id": "parent-noise"},
         )
 
-        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
 
         assert chunk_id not in {item.item_id for item in pack.items}
 
@@ -252,7 +254,7 @@ class TestBuildPackBuilder:
         builder = build_pack_builder(registry, surface="test")
         registry.knowledge.document_store.put("d1", "a canary rollout runbook body")
 
-        pack = builder.build("canary rollout")
+        pack = builder.build("canary rollout", clearance="restricted")
 
         assert pack.pack_id
         from trellis.stores.base.event_log import EventType
@@ -267,7 +269,7 @@ class TestBuildPackBuilder:
         builder = build_pack_builder(registry, surface="test", project="delta-proj")
         registry.knowledge.document_store.put("d1", "a canary rollout runbook body")
 
-        builder.build("canary rollout")
+        builder.build("canary rollout", clearance="restricted")
 
         from trellis.stores.base.event_log import EventType
 
@@ -303,7 +305,9 @@ class TestBuildPackBuilder:
             )
         )
 
-        pack = build_pack_builder(registry, surface="test").build("anything")
+        pack = build_pack_builder(registry, surface="test").build(
+            "anything", clearance="restricted"
+        )
 
         assert [a.message for a in pack.advisories] == ["prefer the canary path"]
 
@@ -463,7 +467,7 @@ class TestGraphSeedingWiring:
         graph.upsert_edge("domain:fincore", "act:1", "relates_to")
 
         pack = build_pack_builder(registry, surface="test").build(
-            "what happened in fincore"
+            "what happened in fincore", clearance="restricted"
         )
 
         graph_items = [i for i in pack.items if "graph_selection" in (i.metadata or {})]
@@ -484,7 +488,9 @@ class TestGraphSeedingWiring:
             "act:1", "activity", {"name": "some unrelated activity", "desc": "y" * 60}
         )
 
-        pack = build_pack_builder(registry, surface="test").build("zzzz qqqq")
+        pack = build_pack_builder(registry, surface="test").build(
+            "zzzz qqqq", clearance="restricted"
+        )
 
         graph_items = [i for i in pack.items if "graph_selection" in (i.metadata or {})]
         assert graph_items
@@ -557,7 +563,9 @@ class TestFilterLegacyAdvisoriesWiring:
             "filter_legacy_advisories", False
         )
 
-        pack = build_pack_builder(registry, surface="test").build("q")
+        pack = build_pack_builder(registry, surface="test").build(
+            "q", clearance="restricted"
+        )
 
         messages = {a.message for a in pack.advisories}
         assert messages == {"legacy row, pre-#394", "post-repair row"}
@@ -573,7 +581,9 @@ class TestFilterLegacyAdvisoriesWiring:
         )
         monkeypatch.setenv(FILTER_LEGACY_ADVISORIES_ENV, "true")
 
-        pack = build_pack_builder(registry, surface="test").build("q")
+        pack = build_pack_builder(registry, surface="test").build(
+            "q", clearance="restricted"
+        )
 
         messages = {a.message for a in pack.advisories}
         assert messages == {"post-repair row"}
@@ -603,7 +613,9 @@ class TestClassPriorWiring:
             metadata={"document_form": "conversation"},
         )
 
-        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
 
         assert [item.item_id for item in pack.items] == ["d1"]
 
@@ -627,7 +639,9 @@ class TestClassPriorWiring:
             "class_prior_mode", "withhold"
         )
 
-        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
 
         assert pack.items == []
         rejected = pack.retrieval_report.rejected_items
@@ -650,7 +664,9 @@ class TestClassPriorWiring:
         )
         monkeypatch.setenv(CLASS_PRIOR_MODE_ENV, "off")
 
-        pack = build_pack_builder(registry, surface="test").build("canary rollout")
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
 
         assert [item.item_id for item in pack.items] == ["d1"]
 
@@ -715,7 +731,7 @@ class TestClassPriorWiring:
         assert outcome.doc_id == parent_id
 
         pack = build_pack_builder(registry, surface="test").build(
-            "canary rollout runbook detail"
+            "canary rollout runbook detail", clearance="restricted"
         )
 
         rejected_reasons = {
