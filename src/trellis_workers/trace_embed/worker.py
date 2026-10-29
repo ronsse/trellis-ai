@@ -39,7 +39,10 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.document_write import TOMBSTONE_OVERWRITE_CODE
+from trellis.core.document_write import (
+    TOMBSTONE_OVERWRITE_CODE,
+    is_redaction_tombstone,
+)
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mutate.commands import CommandStatus
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from trellis.schemas.trace import Trace
+    from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.trace import TraceStore
     from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
@@ -406,6 +410,7 @@ def run_trace_embed_pass(
             trace,
             executor=executor,
             vector_store=vector_store,
+            document_store=registry.knowledge.document_store,
             dry_run=dry_run,
             include_step_errors=include_step_errors,
             report=report,
@@ -447,6 +452,7 @@ def _process_one(
     *,
     executor: MutationExecutor,
     vector_store: VectorStore,
+    document_store: DocumentStore,
     dry_run: bool,
     include_step_errors: bool,
     report: TraceEmbedReport,
@@ -454,10 +460,13 @@ def _process_one(
     """Handle one trace. ``True`` iff it ends the pass confirmed embedded.
 
     A dry run returns ``False`` for anything it *would* have written: nothing
-    was confirmed, so the cursor must not move past it. The one exception is
-    a trace classified ``skipped_invalid`` below -- a dry run reports that
-    row the same way a real pass would, because the row can never be
-    embedded, dry run or not.
+    was confirmed, so the cursor must not move past it. The exceptions are a
+    trace classified ``skipped_invalid`` below and one whose summary id was
+    redacted -- a dry run reports those rows the same way a real pass would,
+    because neither can ever be embedded, dry run or not. The redaction
+    check is a single read of the summary row through ``document_store``,
+    the one thing a dry run needs to know that the real write would have
+    told it; it still writes nothing.
 
     A trace whose stored id holds a NUL byte or lone surrogate is classified
     before anything is rendered or sent to the executor: the same hazard
@@ -503,8 +512,15 @@ def _process_one(
         return False
 
     if dry_run:
-        report.embedded += 1
-        return False
+        stored = document_store.get(trace_summary_doc_id(trace.trace_id))
+        redacted = stored is not None and is_redaction_tombstone(stored)
+        if redacted:
+            # What the live pass does with the write seam's refusal below,
+            # cursor included: the row can never be embedded.
+            report.skipped_redacted += 1
+        else:
+            report.embedded += 1
+        return redacted
 
     result = executor.execute(
         build_trace_summary_command(
