@@ -3742,11 +3742,13 @@ own gate judges it: by its own label, and a chunk by its parent's too). The
 served items are the same with and without that successor among the candidates;
 the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
 count it as a sensitivity withholding, as for any hidden candidate. A served
-document's own supersession pointers are dropped from the served copy when they
+document's own reconcile pointers are dropped from the served copy when they
 name a document the caller cannot read: `lifecycle.superseded_by` (on a loser,
-naming its successor) and `supersedes_doc_id` (on a successor, naming its
-loser; written by the reconcile SUPERSEDE path and by session capture). Both
-are single id strings, and there is no other metadata key that stores one. The
+naming its successor), `supersedes_doc_id` (on a successor, naming its loser)
+and `updates_doc_id` (on an UPDATE addendum, naming the candidate it
+annotates); the last two are written by the reconcile-on-write path and by
+session capture. All three are single id strings, and there is no other
+metadata key that stores one. The
 drop applies to every surface that serves stored metadata: flat and sectioned
 packs, `GET /api/v1/documents/{id}`, the rows of `GET /api/v1/documents` (the
 list and `?q=`), and `GET /api/v1/search`. The store judges the named id, so the
@@ -3757,7 +3759,13 @@ ids its rows name. The stored record is never rewritten, and a reader of
 everything (`restricted`, `admin`, auth off) does no reads and sees the record
 as stored. The loser's `lifecycle.state` stays `superseded`, so such a caller
 can tell that some document it cannot read supersedes this one, though not
-which. A malformed pointer (anything but a non-empty string) is left as stored.
+which; likewise the `reconciliation` marker (`supersede` or `update`) stays when
+its pointer is dropped, so a reader can tell a hidden counterpart exists but not
+which. The concealment is itself an existence answer: a caller that can write a
+document carrying a guessed pointer id and read it back learns, from whether the
+id survives, whether a document by that id exists above its clearance. That is
+nothing beyond the accepted 409 posture on `POST /api/v1/documents` below. A
+malformed pointer (anything but a non-empty string) is left as stored.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is

@@ -4173,9 +4173,11 @@ paths:
         the store, not only with the page.
 
 
-        A row whose ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a
+        A row whose ``lifecycle.superseded_by``, ``supersedes_doc_id`` or
 
-        document the key may not read is served without that id.
+        ``updates_doc_id`` names a document the key may not read is served without
+
+        that id.
 
 
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
@@ -4344,11 +4346,11 @@ paths:
 
         A document labelled above the caller''s clearance answers 404, exactly
 
-        as a missing one does. A document whose ``lifecycle.superseded_by`` or
+        as a missing one does. A document whose ``lifecycle.superseded_by``,
 
-        ``supersedes_doc_id`` names a document the caller may not read is served
+        ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
 
-        without that id.'
+        not read is served without that id.'
       operationId: get_document_api_v1_documents__doc_id__get
       parameters:
       - in: path
@@ -6573,9 +6575,9 @@ paths:
 
         results (so a page can come back shorter than ``limit``). A row whose
 
-        ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a document the
+        ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
 
-        caller may not read is served without that id.
+        names a document the caller may not read is served without that id.
 
 
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
