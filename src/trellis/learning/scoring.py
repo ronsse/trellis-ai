@@ -1342,19 +1342,15 @@ def _document_row_in_place(
     return row.get("content") == expected
 
 
-def _redaction_refusal(
+def _redaction_trace(
     entity_id: str,
     *,
     event_log: EventLog | None,
     document_store: DocumentStore | None,
-) -> dict[str, Any] | None:
-    """A refusal if a redaction already took ``entity_id``, else ``None``.
+) -> bool:
+    """Whether a redaction left a trace on ``entity_id``.
 
-    ``redaction.apply`` purges the node, so the node read in
-    :func:`_pre_write_outcome` finds nothing and a re-run reads the candidate as
-    new: it would write the redacted precedent, its row and its edges back, and
-    serve the redacted text again. Two traces survive the purge, and either one
-    refuses:
+    Two traces survive a purge, and either one answers yes:
 
     * the document row's blank tombstone (:func:`is_redaction_tombstone`),
       which a redaction writes before it purges and which outlives a failed
@@ -1367,27 +1363,49 @@ def _redaction_refusal(
 
     The document row is checked only when a ``document_store`` is passed, and
     the event only when an ``event_log`` is, as for ``already_promoted``; a
-    caller passing neither gets no check from either. An event log that raises
-    propagates, so a log that cannot be read refuses the write by failing it
-    rather than letting a redacted precedent through. The message names the id
-    and never the redacted content.
+    caller passing neither gets no answer from either. An event log that raises
+    propagates. One function for :func:`_redaction_refusal` (the precedent's
+    own id) and :func:`_source_redacted` (its source's), so the two cannot
+    disagree about what a redaction leaves behind.
     """
     from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
 
-    redacted = False
     if document_store is not None:
         row = document_store.get(entity_id)
-        redacted = row is not None and is_redaction_tombstone(row)
-    if not redacted and event_log is not None:
-        redacted = bool(
-            event_log.get_events(
-                event_type=EventType.REDACTION_APPLIED,
-                entity_id=entity_id,
-                limit=1,
-            )
+        if row is not None and is_redaction_tombstone(row):
+            return True
+    if event_log is None:
+        return False
+    return bool(
+        event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED,
+            entity_id=entity_id,
+            limit=1,
         )
-    if not redacted:
+    )
+
+
+def _redaction_refusal(
+    entity_id: str,
+    *,
+    event_log: EventLog | None,
+    document_store: DocumentStore | None,
+) -> dict[str, Any] | None:
+    """A refusal if a redaction already took ``entity_id``, else ``None``.
+
+    ``redaction.apply`` purges the node, so the node read in
+    :func:`_pre_write_outcome` finds nothing and a re-run reads the candidate as
+    new: it would write the redacted precedent, its row and its edges back, and
+    serve the redacted text again. A trace of the redaction refuses
+    (:func:`_redaction_trace`). An event log that raises propagates, so a log
+    that cannot be read refuses the write by failing it rather than letting a
+    redacted precedent through. The message names the id and never the
+    redacted content.
+    """
+    if not _redaction_trace(
+        entity_id, event_log=event_log, document_store=document_store
+    ):
         return None
     return {
         "status": REFUSED_REDACTED,
@@ -1396,6 +1414,166 @@ def _redaction_refusal(
             f"{entity_id} was redacted and will not be promoted again from its "
             "learning candidate; a redaction is final, so promote a new "
             "candidate under a new id if the lesson is still wanted"
+        ),
+    }
+
+
+def _source_redacted(
+    entity_payload: Mapping[str, Any],
+    existing_node: Mapping[str, Any] | None,
+    *,
+    event_log: EventLog | None,
+    document_store: DocumentStore | None,
+) -> bool:
+    """Whether the payload's source document was redacted.
+
+    Redacting a source scrubs the precedents that quote it; it does not purge
+    them, and the ``REDACTION_APPLIED`` event names the source's id, not the
+    precedent's. Three signals, any of which answers yes:
+
+    * the current node's markers, ``name_source`` ``neutral`` or
+      ``source_excerpt_status`` ``source_redacted``. These do not last: a
+      later promotion of a regenerated candidate writes a new version without
+      them, so they cannot be the only signal;
+    * a redaction trace (:func:`_redaction_trace`) on the payload's
+      ``source_item_id``;
+    * the same on that id's parent, when it is a chunk id
+      (:func:`~trellis.ingest_corpus.models.chunk_parent_id`), because a
+      redaction names the document it was asked about and tombstones its
+      chunks with it.
+
+    The traces outlive the node and every version of it, so a candidate first
+    promoted after the redaction, or one that follows a legitimate promotion
+    that erased the markers, is still caught.
+    """
+    from trellis.ingest_corpus.models import chunk_parent_id  # noqa: PLC0415
+
+    node_props = (existing_node or {}).get("properties")
+    if (
+        existing_node is not None
+        and existing_node.get("node_type") == "precedent"
+        and isinstance(node_props, Mapping)
+        and (
+            node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+            or node_props.get("source_excerpt_status") == SOURCE_EXCERPT_REDACTED
+        )
+    ):
+        return True
+    source_item_id = entity_payload["properties"].get("source_item_id")
+    if not isinstance(source_item_id, str) or not source_item_id.strip():
+        return False
+    source_ids = [source_item_id]
+    parent = chunk_parent_id(source_item_id)
+    if parent:
+        source_ids.append(parent)
+    return any(
+        _redaction_trace(source_id, event_log=event_log, document_store=document_store)
+        for source_id in source_ids
+    )
+
+
+def _earlier_source_names(
+    entity_payload: Mapping[str, Any],
+    *,
+    graph_store: GraphStore,
+    event_log: EventLog | None,
+) -> set[str]:
+    """Names this precedent carried earlier that may have held source text.
+
+    Read from the node's earlier versions and from its earlier
+    ``PRECEDENT_PROMOTED`` events, whose ``title`` and ``name_source`` the log
+    keeps for good (a scrub purges the versions, not the log). A name counts by
+    the test the scrub applies (:func:`name_may_hold_source_text`): marked
+    ``source_text``, or unmarked and not the bare-id name. An unmarked event
+    has no ``intent_family`` of its own, so the payload's stands in; the bare-id
+    shape it is compared with is built from that family and the event's
+    ``source_item_id``.
+    """
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    entity_id = entity_payload["entity_id"]
+    properties = entity_payload["properties"]
+    candidates: list[dict[str, Any]] = [
+        dict(version.get("properties") or {})
+        for version in graph_store.get_node_history(entity_id)
+    ]
+    if event_log is not None:
+        for event in event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
+        ):
+            payload = event.payload
+            candidates.append(
+                {
+                    "name": payload.get("title"),
+                    "name_source": payload.get("name_source"),
+                    "intent_family": properties.get("intent_family"),
+                    "source_item_id": payload.get("source_item_id")
+                    or properties.get("source_item_id"),
+                }
+            )
+    return {
+        candidate["name"]
+        for candidate in candidates
+        if isinstance(candidate.get("name"), str)
+        and name_may_hold_source_text(candidate, entity_id)
+    }
+
+
+def _scrubbed_name_refusal(
+    existing_node: Mapping[str, Any] | None,
+    entity_payload: Mapping[str, Any],
+    *,
+    graph_store: GraphStore,
+    event_log: EventLog | None,
+    document_store: DocumentStore | None,
+) -> dict[str, Any] | None:
+    """A refusal if the payload would put redacted source text on a precedent.
+
+    Only when the payload's source was redacted (:func:`_source_redacted`) and
+    its name may hold text from that source, which is either of:
+
+    * the payload itself says so, by the test the scrub applies when it decides
+      what to rename (:func:`name_may_hold_source_text`): a candidate captured
+      before the redaction names the precedent from the source's first line, up
+      to 96 characters;
+    * the name equals one the precedent carried earlier that may have held
+      source text (:func:`_earlier_source_names`). A decisions file's
+      ``promotion_name`` is pre-filled with the derived name, so a file
+      filled in before the redaction restores it as a reviewer's title, which
+      the first test cannot tell from a new one. A new title still writes.
+
+    A candidate regenerated after the redaction, named from a title, a
+    reviewer or the bare id, writes. The excerpt does not come back either way,
+    since the source now reads as withheld. What no signal can catch is a
+    decisions file pre-filled before the redaction, paired with a regenerated
+    candidate for an id that was never promoted before: nothing then records
+    the old name. The message names the id and never the name.
+    """
+    if existing_node is not None and existing_node.get("node_type") != "precedent":
+        return None
+    if not _source_redacted(
+        entity_payload,
+        existing_node,
+        event_log=event_log,
+        document_store=document_store,
+    ):
+        return None
+    entity_id = entity_payload["entity_id"]
+    if not name_may_hold_source_text(
+        {**entity_payload["properties"], "name": entity_payload["name"]}, entity_id
+    ) and entity_payload["name"] not in _earlier_source_names(
+        entity_payload, graph_store=graph_store, event_log=event_log
+    ):
+        return None
+    return {
+        "status": REFUSED_REDACTED,
+        "entity_id": entity_id,
+        "message": (
+            f"{entity_id} was scrubbed by a redaction of its source, and this "
+            "candidate's name was taken from that source; it will not be "
+            "promoted again as it stands. Regenerate the candidate and its "
+            "decisions file, or clear the decision's promotion_name, so the "
+            "name no longer comes from the redacted text, and promote that"
         ),
     }
 
@@ -1456,12 +1634,16 @@ def _pre_write_outcome(
     Three answers exist. A redaction refuses first (:func:`_redaction_refusal`),
     ahead of every graph read, because a purged node reads as absent and would
     pass for a first-time promotion. The other two come from one graph read: a
-    refusal (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
-    last needs a current precedent that holds what the payload would write,
-    has every edge it names (with the properties named), has its document row
-    and has its promotion event. Without an ``event_log`` the event cannot be
-    checked, so nothing is skipped and the write goes ahead; without a
-    ``document_store`` the same holds for a row the promotion would write.
+    refusal and ``already_promoted``. Of the refusals, a name restored over
+    its source's redaction is checked first (:func:`_scrubbed_name_refusal`,
+    also ``refused_redacted``), ahead of the precedent's lifecycle state
+    (:func:`_precedent_reapproval_refusal`), since reinstating it first would
+    only reach the same refusal. ``already_promoted`` needs a current precedent
+    that holds what the payload would write, has every edge it names (with the
+    properties named), has its document row and has its promotion event.
+    Without an ``event_log`` the event cannot be checked, so nothing is skipped
+    and the write goes ahead; without a ``document_store`` the same holds for a
+    row the promotion would write.
 
     One function for the submission and its preview, so a dry run and a real
     run cannot disagree about a row.
@@ -1473,6 +1655,15 @@ def _pre_write_outcome(
     if redacted is not None:
         return redacted
     existing_node = graph_store.get_node(entity_id)
+    scrubbed = _scrubbed_name_refusal(
+        existing_node,
+        entity_payload,
+        graph_store=graph_store,
+        event_log=event_log,
+        document_store=document_store,
+    )
+    if scrubbed is not None:
+        return scrubbed
     refusal = _precedent_reapproval_refusal(existing_node, entity_id)
     if refusal is not None:
         return refusal
@@ -1569,6 +1760,13 @@ def submit_learning_promotion(
     ``REDACTION_APPLIED`` event names the id (:func:`_redaction_refusal`), and
     nothing is written. Pass ``document_store`` and ``event_log`` for the check;
     each guards only its own half, so a caller passing neither gets no refusal.
+    A payload whose *source* was redacted (a tombstone or a
+    ``REDACTION_APPLIED`` event on its ``source_item_id`` or that id's chunk
+    parent, or a scrubbed node) is refused the same way when its name may hold
+    that source's text, or equals a source-derived name the precedent carried
+    earlier (:func:`_scrubbed_name_refusal`). The trace outlives the node's
+    markers, so a candidate captured before the redaction cannot restore the
+    name, whatever was promoted in between.
 
     **A precedent that already holds this promotion is skipped.** When the
     node is current, carries every value the payload would write (bar

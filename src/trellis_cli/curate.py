@@ -861,7 +861,7 @@ def promote_learning(
                         "would_verdict": would_status,
                         "would_exit_code": would_exit,
                         "results": [
-                            {**entry, "would_status": would}
+                            _dry_run_row(entry, would)
                             for entry, would in zip(
                                 plan["results"], previews, strict=True
                             )
@@ -1128,6 +1128,21 @@ def _preview_promotion(
         document_store=document_store,
     )
     return "promoted" if early is None else str(early["status"])
+
+
+def _dry_run_row(entry: dict[str, Any], would: str) -> dict[str, Any]:
+    """A planned row as ``--dry-run`` prints it, with its preview status.
+
+    A row the submission would refuse is printed without its payload's
+    ``name``: a refusal exists to keep that name out of the stores, and the
+    name of a candidate refused after a redaction may be the text the
+    redaction removed. The rest of the payload stays for the reviewer.
+    """
+    row = {**entry, "would_status": would}
+    payload = entry.get("entity_payload")
+    if would.startswith("refused") and isinstance(payload, dict):
+        row["entity_payload"] = {k: v for k, v in payload.items() if k != "name"}
+    return row
 
 
 def _would_promotion_verdict(
