@@ -1087,6 +1087,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Redaction no longer skips the chunks of a document whose own id looks like
+  a minted chunk id, and a caller can no longer name one (#1008).**
+  `is_chunk_doc_id` reads `<x>#chunk-<digits>` as a chunk, and nothing in the
+  id tells a caller-named `x#chunk-5` from one ingest minted. Redacting it
+  blanked only that row: its own `x#chunk-5#chunk-N` rows kept serving the
+  text, the precedent `source_item_id` scrub was skipped, and
+  `documents_tombstoned` named none of it. Two changes.
+  - The evidence funnel (`save_memory`, `POST /documents`,
+    `POST /ingest/evidence`, `execute_mutation` `evidence.ingest`) and
+    `trellis ingest evidence` refuse a caller-chosen document id in the minted
+    chunk shape, with the existing `reserved_document_id` code. Only corpus
+    ingestion writes such ids, through `put_document`, so nothing it does is
+    affected; a name like `notes#chunk-intro`, which is not that shape, still
+    files.
+  - `redaction.apply` cascades from any target, whatever its own id looks like:
+    it blanks the target's `<target>#chunk-N` rows and scrubs precedents
+    sourced from them. A minted chunk has no such children, so redacting one
+    still blanks only itself, at the cost of a few absent-row reads. This is
+    what covers a row named that way before the refusal existed.
 - **An SDK `get_context_for_task` pack that came back empty carries its
   `pack_id` and feedback footer.** The MCP side already renders every empty
   flat pack through the formatter; the SDK helper returned a bare "No relevant
