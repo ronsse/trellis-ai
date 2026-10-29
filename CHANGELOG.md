@@ -95,7 +95,9 @@ All notable changes to Trellis will be documented in this file.
   `lifecycle.superseded_by` is dropped from the served copy when it names a
   document the caller cannot read, in flat and sectioned packs and in
   `GET /api/v1/documents/{id}`; the successor is judged by the store, never by
-  whether it matched the query, and the stored record is not rewritten. A
+  whether it matched the query, and the stored record is not rewritten. The
+  loser's `lifecycle.state` stays `superseded`, so the caller can tell that
+  some document it cannot read supersedes it, though not which. A
   trusted caller, and a store with no labels, see no change. Not changed:
   `GET /api/v1/search` and the rows of `GET /api/v1/documents` still return a
   document's stored metadata. MCP `record_feedback` with

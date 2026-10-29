@@ -3725,7 +3725,9 @@ names a document the caller cannot read, in flat and sectioned packs and in
 `GET /api/v1/documents/{id}`; the store judges it, so the answer does not depend
 on whether the successor matched, and a store error reads as unreadable (a chunk
 successor under a parent-fetch outage reads as unreadable, so the loser is
-still served). `GET /api/v1/search` and the rows of `GET /api/v1/documents`
+still served). The loser's `lifecycle.state` stays `superseded`, so such a
+caller can tell that some document it cannot read supersedes this one, though
+not which. `GET /api/v1/search` and the rows of `GET /api/v1/documents`
 return stored metadata as before. With
 `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
