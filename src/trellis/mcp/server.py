@@ -4315,6 +4315,11 @@ def query_observations(
         detail = _exception_detail(exc)
         return json.dumps({"status": "error", "message": f"Query failed: {detail}"})
 
+    # A node carries no label, so every match is served; what is dropped is an
+    # ``evidence_ref`` naming a document this caller may not read.
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, current_clearance()
+    )
     projected: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row.get("properties", {}))

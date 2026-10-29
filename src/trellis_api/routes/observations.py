@@ -32,6 +32,7 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
 )
+from trellis.retrieve.sensitivity import conceal_node_pointers
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
@@ -130,11 +131,14 @@ def list_observations(
     subject_entity_id: str | None = Query(None),
     observer_agent_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """Query Observation nodes by subject and/or observer.
 
     Filters apply on the graph store's property-level WHERE clause —
-    matches against the same keys the Pydantic schema declares.
+    matches against the same keys the Pydantic schema declares. A node carries
+    no label, so every match is served; one whose ``evidence_ref`` (normally a
+    document id) names a document the caller may not read is served without it.
     """
     registry = get_registry()
     props: dict[str, Any] = {}
@@ -147,6 +151,9 @@ def list_observations(
         node_type=OBSERVATION,
         properties=props or None,
         limit=limit,
+    )
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, request_clearance(ctx)
     )
     return {"observations": [_projected_node(r) for r in rows]}
 
