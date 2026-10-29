@@ -321,6 +321,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A corpus move, a corpus prune and `ingest dbt-manifest` leave a redaction
+  tombstone alone (part of #1034).** `corpus sync` deleted every chunk row of a
+  document it moved or pruned, tombstones included, so the file coming back under
+  its old path wrote the redacted text under the same chunk id with nothing to
+  refuse it. Both now keep a redacted chunk's row, delete the rest as before, and
+  report a `redaction_tombstone` warning naming the chunk and the file's path;
+  `--dry-run --prune` predicts the warning. A redacted *parent* that `--prune`
+  deletes is unchanged. `ingest dbt-manifest` exited `2` with the refusal after
+  the nodes and edges were written when a manifest still described a redacted
+  model; it now skips that description, logs `dbt_description_skipped_redacted`
+  at warning level, indexes the others and exits `0`. The JSON payload gains an
+  always-present `skipped_redacted` count, and the text output a `Skipped
+  (redacted): N` line when `N` is non-zero. No other refusal is skipped. Known
+  gap: a corpus parent brought back with `reingest_redacted` gets its row back
+  but not its chunks, whose tombstones stay and are reported as a
+  `redaction_tombstone` warning on every sync; corpus sync has no flag to
+  re-ingest them.
+
 - **A SQLite vector row of another width no longer fails every semantic query
   (#1058).** `SQLiteVectorStore.upsert` stores a vector of any width, so an
   embedder swap, or a `POST /api/v1/vectors` write at a different width, leaves
