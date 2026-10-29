@@ -24,6 +24,7 @@ from trellis.core.document_write import (
     put_document,
 )
 from trellis.errors import ValidationError
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import CommandStatus, build_curate_executor
 from trellis.mutate import handlers as handlers_module
 from trellis.mutate.evidence_ingest import (
@@ -132,6 +133,66 @@ class TestSeamRefusal:
         _write(document_store, vector_store, NEW_TEXT, reingest_redacted=True)
 
         assert REINGEST_STAMP_KEY not in document_store.get(DOC_ID)["metadata"]
+
+
+class TestChunkIds:
+    """A chunk id is a document id like any other to the seam (#1049).
+
+    Corpus sync skips a tombstoned chunk itself, so nothing above ``put_document``
+    ever reaches the seam with one; a direct write is the only test that fails if
+    the seam stops guarding ``#chunk-`` ids.
+    """
+
+    CHUNK = chunk_doc_id("doc-parent", 3)
+
+    @pytest.fixture
+    def tombstoned_chunk(self, document_store, vector_store):
+        make_tombstone(document_store, vector_store, self.CHUNK)
+        return document_store
+
+    def _chunk_write(self, document_store, vector_store, content: str, **kw: Any):
+        return put_document(
+            document_store,
+            vector_store,
+            self.CHUNK,
+            content,
+            {},
+            preserve_updated_at=False,
+            **kw,
+        )
+
+    def test_an_unflagged_write_over_a_tombstoned_chunk_is_refused(
+        self, tombstoned_chunk, vector_store
+    ) -> None:
+        """Defective subject: skip the guard for ``#chunk-`` ids in
+        ``put_document`` and the redacted chunk is written back."""
+        with pytest.raises(RedactionTombstoneError) as caught:
+            self._chunk_write(tombstoned_chunk, vector_store, NEW_TEXT)
+
+        assert caught.value.code == TOMBSTONE_OVERWRITE_CODE
+        assert is_redaction_tombstone(tombstoned_chunk.get(self.CHUNK))
+        assert vector_store.get(self.CHUNK) is None
+
+    def test_a_flagged_write_over_a_tombstoned_chunk_writes_and_stamps(
+        self, tombstoned_chunk, vector_store
+    ) -> None:
+        self._chunk_write(
+            tombstoned_chunk, vector_store, NEW_TEXT, reingest_redacted=True
+        )
+
+        row = tombstoned_chunk.get(self.CHUNK)
+        assert row["content"] == NEW_TEXT
+        assert REINGEST_STAMP_KEY in row["metadata"]
+
+    def test_a_live_chunk_takes_an_ordinary_write(
+        self, document_store, vector_store
+    ) -> None:
+        self._chunk_write(document_store, vector_store, "first chunk text")
+        self._chunk_write(document_store, vector_store, NEW_TEXT)
+
+        row = document_store.get(self.CHUNK)
+        assert row["content"] == NEW_TEXT
+        assert REINGEST_STAMP_KEY not in row["metadata"]
 
 
 class TestTheTombstoneReadFailsClosed:

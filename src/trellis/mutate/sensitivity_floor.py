@@ -165,9 +165,9 @@ def targeted_document_ids(command: Command) -> list[str]:
         target = args.get("target_id")
         return [target] if isinstance(target, str) and target else []
     if op == Operation.PRECEDENT_PROMOTE:
-        # Only the learning path writes a row, and it rewrites the promoted
-        # precedent's document with no label, so a re-promotion would lower a
-        # restricted row. A trace-sourced promotion (the default
+        # Only the learning path writes a row. A re-promotion keeps the stored
+        # label, but it still rewrites that row's content, which a caller below
+        # the label must not do. A trace-sourced promotion (the default
         # ``entity_type``) names a trace, not a document, and writes none.
         target = command.target_id
         if args.get("entity_type") == "precedent" and is_promoted_precedent_document(

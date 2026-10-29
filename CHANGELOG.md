@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
+  #1044).** `GET /api/v1/analyze` now describes the holdout report's
+  covariate-adjusted secondary fits (brief length, then brief length with agent
+  type): that they are not decisive and what a `not_measurable` fit means. In
+  `trellis analyze holdout`'s text output a refused fit used to stop after its
+  reason, so a reader could not tell a fit with too few tasks from one with
+  none; it now also prints `n_used` and `n_missing_covariate`, and the arm
+  balance R2 when the refusal came after it was computed. JSON is unchanged.
+  Five REST reads took a `limit` with no bounds, so `limit=0`, a negative value
+  or a huge one reached the store unchecked: `GET /search`, `GET /traces`,
+  `GET /proposals`, `GET /schema-evolution/candidates` and `GET /code-proposals`
+  now take `ge=1, le=500` and answer 422 outside it, like the routes beside
+  them. Defaults are unchanged; no SDK method or UI call passes a value over
+  500.
+
 - **`POST /api/v1/evidence` and `POST /api/v1/documents` take
   `reingest_redacted` (part of #1034).** A REST caller had no single-route way to
   bring a redacted id back: the refusal over a tombstone
@@ -1387,6 +1402,23 @@ All notable changes to Trellis will be documented in this file.
   (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
 ### Fixed
+
+- **A falsy non-boolean `evidence.reingest_redacted` is refused on the command
+  door like a truthy one (part of #1049).** `POST /api/v1/commands/batch` and MCP
+  `execute_mutation` build the `evidence.ingest` command without the flag
+  unless it was truthy, so `null`, `0` and `""` read as an absent flag and the
+  write went ahead as an unflagged one, while `"yes"` was refused and both REST
+  routes answered every non-boolean with a 422. The builder now carries any
+  value that is not `False`, so the handler refuses it (`evidence_ingest_shape`,
+  nothing written). Absent and `false` are the unflagged write and keep the
+  derived idempotency key they had; a refused value is part of the digest, so
+  it cannot be answered as a replay of the unflagged write it resembles. Also
+  adds the missing direct test that `put_document` guards a tombstoned
+  `#chunk-` id (corpus sync's own skip would mask a seam that stopped guarding
+  them). Still open under #1049: an unflagged re-put whose derived idempotency
+  key matches an earlier successful write to an id that was later redacted is
+  answered as a duplicate (200 on the REST routes), not refused; nothing is
+  written and the tombstone stays.
 
 - **Small sensitivity-floor follow-ups (#1029, part of).** A re-promotion of a
   precedent (`precedent.promote` over an existing row) no longer drops the row's

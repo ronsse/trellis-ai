@@ -585,8 +585,9 @@ def _seed_precedent(registry: StoreRegistry, level: str | None) -> None:
 
 
 class TestPrecedentPromoteTargetsItsRow:
-    """``precedent.promote`` rewrites the promoted precedent's document row (and
-    drops its label), so the row is a write target like any other."""
+    """``precedent.promote`` rewrites the promoted precedent's document row (the
+    label is kept, the content is not), so the row is a write target like any
+    other."""
 
     def test_the_learning_path_names_the_precedent_row(self) -> None:
         assert targeted_document_ids(_promote()) == [PRECEDENT_ID]
