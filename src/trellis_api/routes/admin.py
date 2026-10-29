@@ -1197,7 +1197,7 @@ def _load_learning_candidates() -> tuple[Path, dict[str, Any]]:
 
 @router.get("/proposals", response_model=TunerProposalListResponse)
 def list_pending_proposals(
-    limit: int = Query(100, description="Max proposals to return"),
+    limit: int = Query(100, ge=1, le=500, description="Max proposals to return"),
 ) -> TunerProposalListResponse:
     """List pending tuner proposals awaiting a human approve / reject.
 
@@ -1569,7 +1569,9 @@ def promote_learning_candidates(
 
 @router.get("/schema-evolution/candidates", response_model=SchemaEvolutionListResponse)
 def list_schema_evolution_candidates(
-    limit: int = Query(200, description="Max WELL_KNOWN_CANDIDATE events to scan"),
+    limit: int = Query(
+        200, ge=1, le=500, description="Max WELL_KNOWN_CANDIDATE events to scan"
+    ),
 ) -> SchemaEvolutionListResponse:
     """List the latest ``WELL_KNOWN_CANDIDATE`` event per ``candidate_id``.
 
@@ -1679,7 +1681,9 @@ def draft_schema_evolution_adr(
 
 @router.get("/code-proposals", response_model=CodeProposalListResponse)
 def list_code_proposals(
-    limit: int = Query(50, description="Max PROPOSAL_DRAFTED events to return"),
+    limit: int = Query(
+        50, ge=1, le=500, description="Max PROPOSAL_DRAFTED events to return"
+    ),
 ) -> CodeProposalListResponse:
     """List recent ``PROPOSAL_DRAFTED`` events with their markdown preview.
 
