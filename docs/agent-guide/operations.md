@@ -1157,8 +1157,10 @@ Creates entities for models, seeds, snapshots, sources, and tests. Creates `depe
 **JSON output:**
 
 ```json
-{"status": "ingested", "nodes": 12, "edges": 8, "documents": 9, "embedded": 9}
+{"status": "ingested", "nodes": 12, "edges": 8, "documents": 9, "embedded": 9, "skipped_redacted": 0}
 ```
+
+`skipped_redacted` is always present. It counts descriptions whose `dbt:<id>` document was redacted: a write over a redaction tombstone is refused (see `trellis curate redact`), so the description is skipped, not counted in `documents` and not embedded, and the run still exits `0` with the other descriptions indexed. A warning-level `dbt_description_skipped_redacted` log line names the document id, and the text arm prints `Skipped (redacted): N` only when `N` is non-zero.
 
 An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded. When every write is refused or fails, the command exits by the map for the first one (`3` for a policy refusal, `2` for any other refusal, `5` for a failure) with `"status": "error"` and its `message` beside the counts; descriptions are still indexed, so `documents` can be non-zero. A batch that wrote anything exits `0`.
 
@@ -1435,7 +1437,16 @@ Scope boundaries, stated plainly:
   never writes over a tombstone: it skips the row (or chunk) and reports a
   `{"kind": "redaction_tombstone", "path", "doc_id"}` warning, and a file that
   shrinks keeps a redacted chunk's row (with the same warning) rather than
-  deleting it as an orphan. `worker embed-traces` reports a redacted trace
+  deleting it as an orphan. A move (a file renamed to a new path) and
+  `--prune` do the same: they delete the document's other chunks and its
+  parent row, keep a redacted chunk's row and report the warning, and
+  `--dry-run --prune` predicts it. A redacted *parent* that `--prune` deletes
+  is not covered. A parent brought back with `reingest_redacted` gets its row
+  back but not its chunks: their tombstones stay, sync reports each as a
+  `redaction_tombstone` warning on every run, and corpus sync has no flag to
+  re-ingest them (#1039). `trellis ingest dbt-manifest` skips a description whose
+  `dbt:<id>` row is redacted and counts it as `skipped_redacted`.
+  `worker embed-traces` reports a redacted trace
   summary as `skipped_redacted` and moves its watermark past it; `--dry-run`
   reads the summary row to report the same count (and the same `embedded`) the
   live pass will, and the text output prints a `redacted:` line when it is

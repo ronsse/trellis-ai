@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -1396,3 +1397,163 @@ def test_an_unreadable_path_exits_2_and_says_why(
         assert shape.message_fragment in payload["message"]
     else:
         assert shape.message_fragment in " ".join(plain(result.output).split())
+
+
+class TestIngestDbtManifestLeavesATombstoneAlone:
+    """A redacted dbt description is a known state, not a failure (#1034).
+
+    ``put_document`` refuses a write over a redaction tombstone, and the
+    helper let that refusal escape after the nodes and edges were already
+    written, so a manifest that still described a redacted model died with a
+    traceback mid-ingest.
+    """
+
+    _REDACTED = "dbt:model.p.stg_orders"
+    _LIVE = "dbt:source.p.raw.orders"
+
+    @staticmethod
+    def _manifest(tmp_path: Path) -> str:
+        f = tmp_path / "manifest.json"
+        f.write_text(json.dumps(_SAMPLE_DBT_MANIFEST))
+        return str(f)
+
+    @classmethod
+    def _redact(cls) -> None:
+        from tests.redaction_tombstone import make_tombstone
+        from trellis.core.vector_metadata import resolve_vector_store
+        from trellis_cli.stores import _get_registry
+
+        registry = _get_registry()
+        make_tombstone(
+            registry.knowledge.document_store,
+            resolve_vector_store(registry),
+            cls._REDACTED,
+        )
+
+    @pytest.fixture
+    def embed_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """The doc ids the embed hook was reached for, in order."""
+        calls: list[str] = []
+
+        def _hook(registry: Any, doc_id: str, *args: Any, **kwargs: Any) -> None:
+            calls.append(doc_id)
+
+        monkeypatch.setattr(ingest_cli, "run_embed_on_ingest", _hook)
+        return calls
+
+    def test_a_redacted_description_is_skipped_and_the_rest_index(
+        self, tmp_path: Path, embed_calls: list[str]
+    ) -> None:
+        """Defective subject: drop the ``except`` in ``_index_dbt_descriptions``
+        and the command exits 2 with a ``redaction_tombstone_overwrite`` error."""
+        from trellis.core.document_write import is_redaction_tombstone
+        from trellis_cli.stores import get_document_store
+
+        runner.invoke(app, ["admin", "init"])
+        self._redact()
+        path = self._manifest(tmp_path)
+
+        result = runner.invoke(
+            app, ["ingest", "dbt-manifest", path, "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "ingested"
+        assert payload["nodes"] == 2
+        assert payload["documents"] == 1
+        assert payload["skipped_redacted"] == 1
+        docs = get_document_store()
+        assert docs.get(self._LIVE)["content"] == "Raw orders table"
+        row = docs.get(self._REDACTED)
+        assert row["content"] == ""
+        assert is_redaction_tombstone(row)
+        # The skipped id never reaches the embed hook, and the live one does.
+        assert embed_calls == [self._LIVE]
+
+    def test_a_second_run_changes_nothing(
+        self, tmp_path: Path, embed_calls: list[str]
+    ) -> None:
+        from trellis_cli.stores import get_document_store
+
+        runner.invoke(app, ["admin", "init"])
+        self._redact()
+        path = self._manifest(tmp_path)
+        first = runner.invoke(app, ["ingest", "dbt-manifest", path, "--format", "json"])
+        before = get_document_store().get(self._REDACTED)
+
+        second = runner.invoke(
+            app, ["ingest", "dbt-manifest", path, "--format", "json"]
+        )
+
+        assert first.exit_code == second.exit_code == 0
+        a = json.loads(first.stdout.strip())
+        b = json.loads(second.stdout.strip())
+        assert (a["documents"], a["skipped_redacted"]) == (1, 1)
+        assert (b["documents"], b["skipped_redacted"]) == (1, 1)
+        assert get_document_store().get(self._REDACTED) == before
+
+    def test_text_output_reports_the_skip_only_when_there_is_one(
+        self, tmp_path: Path, embed_calls: list[str]
+    ) -> None:
+        runner.invoke(app, ["admin", "init"])
+        path = self._manifest(tmp_path)
+        clean = runner.invoke(app, ["ingest", "dbt-manifest", path])
+        assert clean.exit_code == 0
+        clean_lines = [line.strip() for line in plain(clean.stdout).splitlines()]
+        assert "Documents: 2" in clean_lines
+        assert not any(line.startswith("Skipped") for line in clean_lines)
+
+        self._redact()
+        skipped = runner.invoke(app, ["ingest", "dbt-manifest", path])
+
+        # The exit code is the same as the JSON surface's, and as the clean run's.
+        as_json = runner.invoke(
+            app, ["ingest", "dbt-manifest", path, "--format", "json"]
+        )
+        assert skipped.exit_code == as_json.exit_code == clean.exit_code == 0
+        lines = [line.strip() for line in plain(skipped.stdout).splitlines()]
+        assert "Documents: 1" in lines
+        assert "Skipped (redacted): 1" in lines
+
+    def test_the_key_is_present_and_zero_when_nothing_is_redacted(
+        self, tmp_path: Path, embed_calls: list[str]
+    ) -> None:
+        runner.invoke(app, ["admin", "init"])
+        result = runner.invoke(
+            app,
+            ["ingest", "dbt-manifest", self._manifest(tmp_path), "--format", "json"],
+        )
+
+        payload = json.loads(result.stdout.strip())
+        assert payload["skipped_redacted"] == 0
+        assert payload["documents"] == 2
+        assert sorted(embed_calls) == sorted([self._LIVE, self._REDACTED])
+
+    def test_a_reserved_stamp_refusal_still_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the overwrite cause is a known state; the other one is a bug."""
+        from trellis.core.document_write import (
+            STAMP_RESERVED_CODE,
+            RedactionTombstoneError,
+        )
+
+        def _refuse(*args: Any, **kwargs: Any) -> None:
+            message = "reserved"
+            raise RedactionTombstoneError(message, code=STAMP_RESERVED_CODE)
+
+        runner.invoke(app, ["admin", "init"])
+        monkeypatch.setattr(ingest_cli, "put_document", _refuse)
+
+        result = runner.invoke(
+            app,
+            ["ingest", "dbt-manifest", self._manifest(tmp_path), "--format", "json"],
+        )
+
+        # Not skipped: the boundary renders it as the structured error it is.
+        assert result.exit_code == 2
+        payload = json.loads(result.stdout.strip())
+        assert payload["status"] == "error"
+        assert payload["error_code"] == STAMP_RESERVED_CODE
+        assert "skipped_redacted" not in payload
