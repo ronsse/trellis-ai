@@ -341,6 +341,23 @@ All notable changes to Trellis will be documented in this file.
   A row holding one of these values leaves the packs it was in; it surfaces in
   `trellis analyze health` through the malformed-row count.
 
+- **`POST /api/v1/vectors` takes a stored document's content and role, not the
+  caller's (part of #1057).** A row at an id that names a stored document already
+  took that document's label, lifecycle, tags, importance and `evidence_ref`, but
+  every other key was the caller's. The semantic axis builds the pack item from
+  the row: the excerpt from `metadata.content`, and the rest of the metadata
+  spread into the item. A key with only `ingest` could therefore upsert a row at
+  a document it can read with a forged `content` (the document was served with
+  that excerpt) or with `node_role: structural` (the document was withheld from
+  every pack), and because the upsert replaces the document's own row, the forged
+  copy was its only semantic copy. The row now carries `content` as the document's
+  content cut to the embed path's excerpt length, `doc_id` as the id, and
+  `node_role`, `node_type`, `agent_id`, `document_form` and `excerpt` as the
+  document's own, removed where the document has none. A chunk id takes its own
+  stored chunk document's. A row `build_vector_row` built for the stored document
+  is stored byte for byte as before; an id that names no document is stored as
+  sent; every other key is unchanged.
+
 - **`GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` omit evidence
   pointers to documents the caller cannot read.** Follows #1063, which left these
   two routes. A node served by either could still name a document a
