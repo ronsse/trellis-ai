@@ -438,3 +438,84 @@ class TestRedactedSummaryIsNotOverwritten:
         assert second.embedded == 3
         assert second.skipped_redacted == 0
         assert second.failed == 0
+
+    def test_a_dry_run_agrees_with_the_live_pass_on_a_redacted_summary(
+        self, registry, watermark_path
+    ) -> None:
+        """A dry run that never looked at the summary row counted it as would-embed.
+
+        It must report the rows the live pass will, or the number an operator
+        reads before a run overstates what the run does by the count of
+        redacted summaries. It is a read: the row, the vector rows and the
+        cursor are exactly as they were.
+
+        Defective subject: revert the dry-run branch in ``_process_one`` to
+        ``report.embedded += 1; return False``, or return ``False`` after the
+        ``skipped_redacted`` count.
+        """
+        traces = seed_traces(registry, 3)
+        doc_id = self._tombstone(registry, traces[1])
+        documents = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        row_before = documents.get(doc_id)
+        vectors_before = vectors.count()
+
+        dry = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+
+        assert documents.get(doc_id) == row_before
+        assert vectors.count() == vectors_before
+        assert not watermark_path.exists()
+
+        live = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        assert dry.skipped_redacted == live.skipped_redacted == 1
+        assert dry.embedded == live.embedded == 2
+        assert dry.scanned == live.scanned == 3
+        assert dry.failed == live.failed == 0
+        assert dry.watermark_after == dry.watermark_before
+
+    def test_a_dry_run_counts_an_ordinary_row_as_would_embed(
+        self, registry, watermark_path
+    ) -> None:
+        """Paired: the redaction check does not turn every dry-run row into a skip."""
+        seed_traces(registry, 2)
+
+        dry = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+
+        assert dry.embedded == 2
+        assert dry.skipped_redacted == 0
+
+    def test_a_dry_run_holds_the_cursor_exactly_where_the_live_pass_does(
+        self, registry
+    ) -> None:
+        """The return value is the cursor's say, and a dry run never saves it.
+
+        So it is unobservable through ``run_trace_embed_pass``'s report, and is
+        asserted on the per-trace decision itself: a redacted summary lets the
+        frontier move past it in both modes, an ordinary would-embed row does
+        not in a dry run.
+        """
+        from unittest.mock import MagicMock
+
+        from trellis_workers.trace_embed.worker import TraceEmbedReport, _process_one
+
+        traces = seed_traces(registry, 2)
+        self._tombstone(registry, traces[0])
+
+        def decide(trace, *, dry_run: bool) -> bool:
+            return _process_one(
+                trace,
+                executor=MagicMock(),
+                vector_store=registry.knowledge.vector_store,
+                document_store=registry.knowledge.document_store,
+                dry_run=dry_run,
+                include_step_errors=False,
+                report=TraceEmbedReport(dry_run=dry_run),
+            )
+
+        assert decide(traces[0], dry_run=True) is True
+        assert decide(traces[1], dry_run=True) is False
