@@ -25,6 +25,7 @@ from trellis.retrieve.sensitivity import (
     partition_by_clearance,
     refuse_overwrite,
     withheld_ids,
+    withheld_ids_metadata,
 )
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.retrieve.withholding import withholding_from_payload
@@ -249,6 +250,15 @@ class TestBuildersApplyTheGate:
         pack = builder.build("deploy checklist", clearance="internal")
         assert pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY] == ["secret-doc"]
         assert SENSITIVITY_WITHHELD_IDS_KEY not in pack.metadata["withholding"]
+
+    def test_a_pack_that_withheld_nothing_carries_no_ids_key(self) -> None:
+        """Absent, not empty: a held-out pack must stay like one that found nothing."""
+        builder = PackBuilder(strategies=[_strategy("keyword", [_item("open-doc")])])
+        assert (
+            SENSITIVITY_WITHHELD_IDS_KEY
+            not in builder.build("deploy checklist", clearance="internal").metadata
+        )
+        assert withheld_ids_metadata([]) == {}
 
     def test_an_unlabelled_store_gives_every_clearance_the_same_pack(self) -> None:
         pool = [_item("a"), _item("b"), _item("c")]

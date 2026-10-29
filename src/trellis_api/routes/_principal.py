@@ -128,4 +128,4 @@ def refuse_document_overwrite(
             metadata=metadata,
         )
     except OverwriteRefusedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=exc.message) from exc

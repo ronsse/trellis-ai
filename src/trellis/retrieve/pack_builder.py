@@ -93,9 +93,8 @@ from trellis.retrieve.parent_verdicts import (
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
-    SENSITIVITY_WITHHELD_IDS_KEY,
     partition_by_clearance,
-    withheld_ids,
+    withheld_ids_metadata,
 )
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
@@ -1403,7 +1402,7 @@ class PackBuilder:
             # must read it the same way for both.
             metadata={
                 "withholding": withholding.as_telemetry(),
-                SENSITIVITY_WITHHELD_IDS_KEY: withheld_ids(rejected),
+                **withheld_ids_metadata(rejected),
             },
         )
 
@@ -1851,7 +1850,7 @@ class PackBuilder:
             assembled_at=utc_now(),
             metadata={
                 "withholding": withholding.as_telemetry(),
-                SENSITIVITY_WITHHELD_IDS_KEY: withheld_ids(rejected),
+                **withheld_ids_metadata(rejected),
             },
         )
 

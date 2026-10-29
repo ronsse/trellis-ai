@@ -130,7 +130,15 @@ class DocumentClearance:
 
 
 class OverwriteRefusedError(ValueError):
-    """A write at an existing document id that the caller may not make."""
+    """A write at an existing document id that the caller may not make.
+
+    ``message`` is text Trellis wrote (the id and a fixed sentence), so a
+    surface can show it without the sanitizing a foreign exception needs.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 def refuse_overwrite(
@@ -180,6 +188,17 @@ def withheld_ids(rejected: Iterable[RejectedItem]) -> list[str]:
     return sorted(
         {r.item_id for r in rejected if r.reason == SENSITIVITY_REJECTION_REASON}
     )
+
+
+def withheld_ids_metadata(rejected: Iterable[RejectedItem]) -> dict[str, list[str]]:
+    """The pack-metadata entry naming what the gate withheld, or ``{}`` for none.
+
+    Absent rather than empty when nothing was withheld, so a pack that found
+    nothing and a held-out pack (:mod:`trellis.core.pack_holdout`) carry the same
+    metadata keys and stay indistinguishable.
+    """
+    ids = withheld_ids(rejected)
+    return {SENSITIVITY_WITHHELD_IDS_KEY: ids} if ids else {}
 
 
 def conceal_withheld_ids(
@@ -238,4 +257,5 @@ __all__ = [
     "permits",
     "refuse_overwrite",
     "withheld_ids",
+    "withheld_ids_metadata",
 ]

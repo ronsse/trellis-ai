@@ -2676,7 +2676,7 @@ def _store_new_memory(
                 metadata=metadata,
             )
         except OverwriteRefusedError as exc:
-            _raise_invalid_params(str(exc), data={"field": "doc_id"})
+            _raise_invalid_params(exc.message, data={"field": "doc_id"})
     command = build_evidence_ingest_command(
         doc_id=doc_id,
         content=content,
