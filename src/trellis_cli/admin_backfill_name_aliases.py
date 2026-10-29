@@ -68,7 +68,10 @@ def register(app: Typer) -> None:
         effective_max = max_nodes if max_nodes is not None else graph.count_nodes() + 1
         report = backfill_name_aliases(
             graph,
-            build_curate_executor(_get_registry()),
+            build_curate_executor(
+                _get_registry(),
+                clearance="restricted",  # trusted: operator CLI
+            ),
             max_nodes=effective_max,
         )
         truncated = report.truncated

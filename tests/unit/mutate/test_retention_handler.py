@@ -100,7 +100,7 @@ class TestRegistration:
     def test_executor_no_longer_rejects_the_verb(self, registry: StoreRegistry) -> None:
         """The gap this closes: every command used to be REJECTED."""
         _put_doc(registry, "d1", signal_quality="noise")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True})
         )
         assert result.status == CommandStatus.SUCCESS
@@ -109,7 +109,7 @@ class TestRegistration:
     def test_args_schema_requires_criteria_and_reason(
         self, registry: StoreRegistry
     ) -> None:
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(operation=Operation.RETENTION_PRUNE, args={})
         )
         assert result.status == CommandStatus.REJECTED
@@ -226,7 +226,7 @@ class TestEntityResolution:
 class TestArchival:
     def test_dry_run_writes_nothing(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=True)
         )
         assert result.status == CommandStatus.SUCCESS
@@ -239,7 +239,7 @@ class TestArchival:
     ) -> None:
         """Destructive-by-default is wrong for a predicate-driven batch."""
         _put_doc(registry, "noisy", signal_quality="noise")
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_PRUNE,
                 args={"criteria": {"noise_documents": True}, "reason": "r"},
@@ -251,7 +251,7 @@ class TestArchival:
 
     def test_apply_archives_the_document(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
         assert result.status == CommandStatus.SUCCESS
@@ -264,7 +264,7 @@ class TestArchival:
     ) -> None:
         """Archival is not deletion — the content must survive."""
         _put_doc(registry, "noisy", signal_quality="noise", title="Keep me")
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
         doc = registry.knowledge.document_store.get("noisy")
@@ -276,7 +276,7 @@ class TestArchival:
         self, registry: StoreRegistry
     ) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, reason="job-desc noise", dry_run=False)
         )
         doc = registry.knowledge.document_store.get("noisy")
@@ -286,7 +286,7 @@ class TestArchival:
     def test_rerun_is_a_no_op(self, registry: StoreRegistry) -> None:
         """Already-archived items are filtered during resolution."""
         _put_doc(registry, "noisy", signal_quality="noise")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
         assert report.candidates == []
@@ -304,7 +304,7 @@ class TestArchival:
                 EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED,
             },
         )
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
         )
         node = graph.get_node(node_id)
@@ -316,7 +316,7 @@ class TestArchival:
 class TestAuditTrail:
     def test_emits_retention_pruned(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
         events = registry.operational.event_log.get_events(
@@ -333,7 +333,7 @@ class TestAuditTrail:
     def test_dry_run_also_emits_flagged(self, registry: StoreRegistry) -> None:
         """A preview must be as auditable as the real thing."""
         _put_doc(registry, "noisy", signal_quality="noise")
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=True)
         )
         events = registry.operational.event_log.get_events(
@@ -470,7 +470,7 @@ class TestRestore:
 
     def test_round_trip_restores_the_document(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
 
         doc = registry.knowledge.document_store.get("noisy")
@@ -508,7 +508,7 @@ class TestRestore:
             for i in builder.build(intent="wombat", clearance="restricted").items
         )
 
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": ["target"], "reason": "restored"},
@@ -523,7 +523,7 @@ class TestRestore:
         self, registry: StoreRegistry
     ) -> None:
         _put_doc(registry, "plain")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": ["plain", "nonexistent"], "reason": "corrective"},
@@ -538,7 +538,7 @@ class TestRestore:
 
     def test_emits_restored_event_with_ids(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         executor.execute(
             Command(
@@ -590,7 +590,7 @@ class TestRestore:
         )
         assert len(graph.get_node_history(node_id)) == 1
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={
@@ -636,7 +636,7 @@ class TestRestore:
         )
         assert len(graph.get_node_history(node_id)) == 1
 
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         prune_result = executor.execute(
             _prune(
                 {"lifecycle_states": ["deprecated"], "older_than_days": 0},
@@ -693,7 +693,7 @@ class TestRestorePrecedentHistory:
     ) -> None:
         graph = registry.knowledge.graph_store
         precedent_id = self._node(registry, {"name": "Pooling pattern"})
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         demote_result = executor.execute(
             Command(
@@ -740,7 +740,7 @@ class TestRestorePrecedentHistory:
         graph = registry.knowledge.graph_store
         archived = {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
         precedent_id = self._node(registry, {"name": "Minted archived", **archived})
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         result = executor.execute(
             Command(
@@ -773,7 +773,7 @@ class TestRestorePrecedentHistory:
         actually succeeded.
         """
         graph = registry.knowledge.graph_store
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         def demoted_then_pruned(name: str) -> str:
             precedent_id = self._node(registry, {"name": name})
@@ -853,7 +853,7 @@ class TestRestorePrecedentHistory:
         nothing at all still rejects — "some ids were merely skipped"
         does not turn a wholly-unactioned batch into a reported success.
         """
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         refused_id = self._node(
             registry,
             {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}},
@@ -915,7 +915,7 @@ class TestNodePurgedMidCommand:
         unconfirmed = {EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED}
         purged = self._node(registry, {"name": "Purged Mint", **unconfirmed})
         kept = self._node(registry, {"name": "Kept Mint", **unconfirmed})
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         prune = _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
 
         with rival_inside_first_read(
@@ -942,7 +942,7 @@ class TestNodePurgedMidCommand:
         archived = {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
         purged = self._node(registry, {"name": "Purged", **archived})
         kept = self._node(registry, {"name": "Kept", **archived})
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         restore = Command(
             operation=Operation.RETENTION_RESTORE,
             args={"item_ids": [purged, kept], "reason": "corrective"},
@@ -981,7 +981,7 @@ class TestRetentionRacingAnotherWrite:
         node_id = graph.upsert_node(
             node_id=None, node_type="person", properties={"name": "M", **unconfirmed}
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         update = Command(
             operation=Operation.ENTITY_UPDATE,
             args={"entity_id": node_id, "properties": {"note": "kept"}},
@@ -1008,7 +1008,7 @@ class TestRetentionRacingAnotherWrite:
             node_type="person",
             properties={"name": "Raced", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}},
         )
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         def restore() -> Command:
             return Command(
@@ -1077,7 +1077,7 @@ class TestANodeThatNeverSettlesFailsTheRun:
         seen = self._only_the_first_node_settles(registry, monkeypatch)
         prune = _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
 
-        result = build_curate_executor(registry).execute(prune)
+        result = build_curate_executor(registry, clearance="restricted").execute(prune)
 
         assert result.status == CommandStatus.FAILED
         [unsettled] = mints - {seen[0]}
@@ -1107,7 +1107,9 @@ class TestANodeThatNeverSettlesFailsTheRun:
             args={"item_ids": [first, second], "reason": "corrective"},
         )
 
-        result = build_curate_executor(registry).execute(restore)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            restore
+        )
 
         assert result.status == CommandStatus.FAILED
         assert seen == [first] + [second] * 5
@@ -1150,7 +1152,7 @@ class TestVectorRowSync:
         _put_doc(registry, "noisy", signal_quality="noise")
         self._embed(registry, "noisy")
 
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
 
@@ -1165,7 +1167,7 @@ class TestVectorRowSync:
         _put_doc(registry, "noisy", signal_quality="noise")
         self._embed(registry, "noisy")
 
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
 
@@ -1191,7 +1193,7 @@ class TestVectorRowSync:
     def test_restore_clears_the_vector_row_stamp(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "noisy", signal_quality="noise")
         self._embed(registry, "noisy")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         executor.execute(
             Command(
@@ -1206,7 +1208,7 @@ class TestVectorRowSync:
     def test_missing_vector_row_is_not_an_error(self, registry: StoreRegistry) -> None:
         """Un-embedded documents must still be archivable."""
         _put_doc(registry, "never_embedded", signal_quality="noise")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
         assert result.status == CommandStatus.SUCCESS
@@ -1264,7 +1266,7 @@ class TestVectorRowSyncOnGraphNodeRestore:
         )
         self._embed(registry, node_id)
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": [node_id], "reason": "re-evaluated, still in use"},
@@ -1303,7 +1305,7 @@ class TestRestoreIsDurable:
         self, registry: StoreRegistry
     ) -> None:
         _put_doc(registry, "rescued", signal_quality="noise")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         executor.execute(
             Command(
@@ -1322,7 +1324,7 @@ class TestRestoreIsDurable:
         self, registry: StoreRegistry
     ) -> None:
         _put_doc(registry, "rescued", signal_quality="noise")
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         executor.execute(
             Command(
@@ -1359,7 +1361,7 @@ class TestVectorResyncBackfill:
             "old", [0.1, 0.2, 0.3], {"excerpt": "stale snapshot"}
         )
 
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
 
@@ -1373,7 +1375,7 @@ class TestVectorResyncBackfill:
     ) -> None:
         _put_doc(registry, "old", signal_quality="noise", lifecycle_state="archived")
         registry.knowledge.vector_store.upsert("old", [0.1, 0.2, 0.3], {})
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
         events = registry.operational.event_log.get_events(
@@ -1385,7 +1387,7 @@ class TestVectorResyncBackfill:
         """An already-correct row is left alone, so a re-run reports zero."""
         _put_doc(registry, "noisy", signal_quality="noise")
         registry.knowledge.vector_store.upsert("noisy", [0.1, 0.2, 0.3], {})
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         executor.execute(_prune({"noise_documents": True}, dry_run=False))
         events = registry.operational.event_log.get_events(
@@ -1396,7 +1398,7 @@ class TestVectorResyncBackfill:
     def test_dry_run_resyncs_nothing(self, registry: StoreRegistry) -> None:
         _put_doc(registry, "old", signal_quality="noise", lifecycle_state="archived")
         registry.knowledge.vector_store.upsert("old", [0.1, 0.2, 0.3], {})
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=True)
         )
         row = registry.knowledge.vector_store.get("old")
@@ -1445,7 +1447,7 @@ class TestArchiveAndRestorePreserveRecency:
         )
 
         clock["now"] = now
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True}, dry_run=False)
         )
 
@@ -1479,7 +1481,7 @@ class TestArchiveAndRestorePreserveRecency:
         before = docs.get("stale")["updated_at"]
 
         clock["now"] = now
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": ["stale"], "reason": "prune over-selected"},
@@ -1515,7 +1517,7 @@ class TestArchiveAndRestorePreserveRecency:
 
         clock["now"] = now
         docs.put("new-doc", body, {})
-        build_curate_executor(registry).execute(
+        build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": ["old-doc"], "reason": "prune over-selected"},
@@ -1710,7 +1712,7 @@ class TestLifecycleStateReachability:
         self, registry: StoreRegistry
     ) -> None:
         """A report nobody can read is the silence it was meant to replace."""
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"lifecycle_states": [ARCHIVED_STATE]})
         )
 
@@ -1729,7 +1731,7 @@ class TestLifecycleStateReachability:
     ) -> None:
         """Empty is a claim, not an absence: every state reached the gate."""
         _put_doc(registry, "noisy", signal_quality="noise")
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             _prune({"noise_documents": True, "lifecycle_states": ["deprecated"]})
         )
 
@@ -1805,7 +1807,7 @@ class TestTheRestoredGuardIsProvenanceIndependent:
         Not a fix test: it passes against the un-fixed code, because the
         thing it refutes is a sentence, not a behaviour.
         """
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         node_id = registry.knowledge.graph_store.upsert_node(
             node_id="e1", node_type="concept", properties={"name": "thing"}
         )
@@ -1837,7 +1839,7 @@ class TestTheRestoredGuardIsProvenanceIndependent:
         is writable by something other than retention, which is exactly what
         the old comment denied.
         """
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         node_id = registry.knowledge.graph_store.upsert_node(
             node_id="e2", node_type="concept", properties={"name": "thing"}
         )

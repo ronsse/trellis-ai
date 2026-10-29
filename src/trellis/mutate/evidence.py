@@ -30,6 +30,7 @@ import structlog
 from trellis.errors import MutationError
 
 if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +40,7 @@ def ensure_evidence_document(
     registry: StoreRegistry,
     content: str,
     *,
+    clearance: Sensitivity,
     metadata: dict[str, Any] | None = None,
     source: str = "mcp:save_knowledge",
 ) -> str:
@@ -61,6 +63,10 @@ def ensure_evidence_document(
         content: The evidence prose to store. Must be non-empty.
         metadata: Optional document metadata (tags, source, domain, ...).
         source: Audit identifier for the embed hook / logs.
+        clearance: The caller's document clearance (#194), required with no
+            default: it decides whether the label this document carries is
+            within the caller's reach, so a caller that cannot name one must
+            say ``"restricted"`` out loud.
 
     Returns:
         The evidence document's id — new, or the existing id on a content-hash
@@ -96,7 +102,7 @@ def ensure_evidence_document(
         requested_by=source,
         derive_idempotency=False,
     )
-    result = build_curate_executor(registry).execute(command)
+    result = build_curate_executor(registry, clearance=clearance).execute(command)
     if result.status is not CommandStatus.SUCCESS or result.created_id is None:
         message = f"Evidence document was not stored: {result.message}"
         raise MutationError(

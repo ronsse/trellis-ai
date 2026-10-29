@@ -13,10 +13,18 @@ Two layers, one predicate (:class:`~trellis.retrieve.sensitivity.DocumentClearan
   command before a handler runs. It reads only the target document's label and
   refuses above clearance, which is what the handlers cannot see for a verb
   they were never taught about.
-* **Handlers.** ``evidence.ingest`` and ``classification.set`` run
-  :func:`~trellis.retrieve.sensitivity.refuse_overwrite` / :func:`refuse_relabel`
-  themselves, because they decide the label being *written*, which Stage 2
-  cannot know (a cleared caller may not silently downgrade, #1023).
+* **Handlers.** ``evidence.ingest`` and ``classification.set`` decide the label
+  being *written*, which Stage 2 cannot know, so they run
+  :func:`refuse_written_label` themselves (one rule for all three doors: a
+  caller may not write a label above its own clearance), and ``evidence.ingest``
+  also runs :func:`~trellis.retrieve.sensitivity.refuse_overwrite` (a cleared
+  caller may not silently downgrade, #1023).
+
+``classification.set`` is the one verb Stage 2 does not guard: its handler reads
+the target through :func:`visible_document`, so a document above the caller's
+clearance answers exactly as a missing one (``target_not_found``), the way every
+read surface does. A Stage-2 refusal would tell a key that cannot read a
+document that it exists.
 
 **Transparent by default.** A ``"restricted"`` clearance (trusted-local: the
 CLI, stdio MCP, auth off, an admin key) reads nothing and refuses nothing. A
@@ -72,22 +80,52 @@ def refuse_above_clearance(
         raise OverwriteRefusedError(msg)
 
 
-def refuse_relabel(
+def visible_row(
+    document_store: DocumentStore,
+    row: dict[str, Any] | None,
+    *,
+    clearance: Sensitivity,
+) -> dict[str, Any] | None:
+    """``row`` itself, or ``None`` when it is absent *or above* ``clearance``.
+
+    The one predicate for "answer as if it were not there", shared by every
+    caller that must not tell a key that a document it may not read exists. A
+    chunk row is judged by the higher of its own label and its parent's.
+    """
+    if row is None or clearance == "restricted":
+        return row
+    if not DocumentClearance(document_store, clearance).permits(
+        str(row["doc_id"]), row.get("metadata")
+    ):
+        return None
+    return row
+
+
+def visible_document(
     document_store: DocumentStore,
     doc_id: str,
-    new_sensitivity: Sensitivity,
+    *,
+    clearance: Sensitivity,
+) -> dict[str, Any] | None:
+    """The stored row for ``doc_id``, or ``None`` when absent or above ``clearance``."""
+    return visible_row(document_store, document_store.get(doc_id), clearance=clearance)
+
+
+def refuse_written_label(
+    doc_id: str,
+    sensitivity: Sensitivity,
     *,
     clearance: Sensitivity,
 ) -> None:
-    """Refuse relabelling ``doc_id`` unless ``clearance`` covers old *and* new label.
+    """Refuse writing ``sensitivity`` onto ``doc_id`` above the caller's clearance.
 
-    A caller may not touch a document it cannot read, and may not assign a
-    label above its own clearance either: that would put the document out of
-    its own reach, an escalation it could not undo. Lowering a label it clears
-    is allowed, which is what relabelling is for.
+    A caller may not assign a label above its own clearance: that would put the
+    document out of its own reach, an escalation it could not undo. The rule is
+    the same for a new document and an existing one, and for ``save_memory``,
+    ``evidence.ingest`` and ``classification.set`` alike, so the three cannot
+    disagree. It names neither label and reads no stored row.
     """
-    refuse_above_clearance(document_store, doc_id, clearance=clearance)
-    if not permits(clearance, new_sensitivity):
+    if not permits(clearance, sensitivity):
         msg = (
             "this credential's clearance does not cover the label requested "
             f"for document {doc_id!r}; nothing was written"
@@ -110,9 +148,9 @@ def targeted_document_ids(command: Command) -> list[str]:
         evidence = args.get("evidence")
         doc_id = evidence.get("doc_id") if isinstance(evidence, dict) else None
         return [doc_id] if isinstance(doc_id, str) and doc_id else []
-    if op == Operation.CLASSIFICATION_SET:
-        doc_id = args.get("doc_id")
-        return [doc_id] if isinstance(doc_id, str) and doc_id else []
+    # ``classification.set`` is deliberately absent: its handler reads the target
+    # through :func:`visible_document` and answers an above-clearance document as
+    # not found, which a Stage-2 refusal would contradict.
     if op == Operation.RETENTION_RESTORE:
         item_ids = args.get("item_ids")
         if not isinstance(item_ids, list):
@@ -158,6 +196,8 @@ __all__ = [
     "SENSITIVITY_FLOOR_POLICY_ID",
     "SensitivityFloor",
     "refuse_above_clearance",
-    "refuse_relabel",
+    "refuse_written_label",
     "targeted_document_ids",
+    "visible_document",
+    "visible_row",
 ]

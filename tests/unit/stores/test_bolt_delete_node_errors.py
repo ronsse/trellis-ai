@@ -271,7 +271,9 @@ class TestThroughTheExecutor:
             args={"target_id": node_id, "reason": "synthetic purge failure"},
         )
 
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status == CommandStatus.FAILED
         assert node_id in result.message

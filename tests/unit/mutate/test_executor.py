@@ -1353,7 +1353,7 @@ class TestBuildCurateExecutor:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         trace = Trace(
             source=TraceSource.AGENT,
             intent="round-trip",
@@ -1389,7 +1389,9 @@ class TestSQLiteDriverError:
         registry.knowledge.graph_store._conn.execute("PRAGMA query_only = ON")
         command = _cmd(args={"entity_type": "service", "name": "syn-entity"})
 
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status == CommandStatus.FAILED, result.message
         events = registry.operational.event_log

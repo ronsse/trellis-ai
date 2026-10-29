@@ -69,7 +69,7 @@ def promote_through_executor(
     }
     if domain is not None:
         args["domain"] = domain
-    result = build_curate_executor(registry).execute(
+    result = build_curate_executor(registry, clearance="restricted").execute(
         Command(
             operation=Operation.PRECEDENT_PROMOTE,
             args=args,

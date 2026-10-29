@@ -3034,7 +3034,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline |
-| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). Refused (`policy_violation`, nothing written) unless the caller's clearance covers both the stored label and the requested one. A missing document is `target_not_found`; a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
+| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations
@@ -3711,20 +3711,38 @@ stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
 
-The same clearance governs writes. `classification.set` (CLI `trellis curate
-classify-sensitivity`, REST `POST /api/v1/documents/{doc_id}/sensitivity`)
-relabels a document, and is refused unless the caller's clearance covers both
-the old label and the new one. Any other mutation aimed at a document above the
-caller's clearance (`evidence.ingest` at that id, `retention.restore`,
-`redaction.apply`, `precedent.demote`/`precedent.reinstate`) is denied at Stage
-2 as a `policy_violation`, recorded as a `MUTATION_REJECTED` event. An
-`evidence.ingest` at an id that already names a document applies the same rule
-as `save_memory`/`save_knowledge`: a key cannot overwrite a document above its
-clearance, and no write may lower a stored label (relabel with
-`classification.set`). That check lives in the handler, so `POST
-/api/v1/commands/batch` and MCP `execute_mutation` are covered too. A
-trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
-never refused.
+The same clearance governs writes, under one rule: **a key cannot write a label
+above its own clearance, and cannot touch a document it may not read.**
+
+- `classification.set` (CLI `trellis curate classify-sensitivity`, REST `POST
+  /api/v1/documents/{doc_id}/sensitivity`) relabels a document. A document above
+  the caller's clearance answers `target_not_found`, in the same words as a
+  missing one, so a key cannot learn that it exists by trying to relabel it. The
+  new label must be within the caller's clearance too (`policy_violation`,
+  nothing written). Any cleared key with the `mutate` scope may lower a label it
+  can read; the scope is not `admin`.
+- `evidence.ingest` refuses a label above the caller's clearance, on a new id
+  and an existing one, in the words `classification.set` uses. At an id that
+  already names a document it also refuses to overwrite one above the caller's
+  clearance and to lower a stored label (relabel with `classification.set`),
+  as `save_memory`/`save_knowledge` do. These checks live in the handler, so
+  `POST /api/v1/commands/batch`, `POST /api/v1/documents` and MCP
+  `execute_mutation` are covered, and so is every trusted caller (the CLI,
+  workers, extractors), for whom they are transparent while no document carries
+  a label.
+- MCP `save_memory(supersedes=)` and `save_knowledge(supersedes=)` stamp their
+  target, so they are writes to it: a target above the caller's clearance is
+  answered as a missing one and left unchanged.
+- `retention.restore`, `redaction.apply`, `precedent.demote` and
+  `precedent.reinstate` aimed at a document above the caller's clearance are
+  denied at Stage 2 as a `policy_violation`, recorded as a `MUTATION_REJECTED`
+  event. That answer differs from the one for a missing id, so these four, and
+  an `evidence.ingest` overwrite, tell a key that the document exists; the read
+  side's by-id not-found parity does not extend to them.
+
+A trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
+never refused. The clearance is a required keyword of `build_curate_executor`,
+so a surface that forgets to name one fails at the call.
 
 ### Managing keys
 

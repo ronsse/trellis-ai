@@ -86,7 +86,7 @@ class TestEvidenceIngestViaBatch:
     def test_a_key_below_the_label_cannot_overwrite_at_the_same_label(
         self, client, registry
     ):
-        """No downgrade here, so only the clearance check can refuse."""
+        """No downgrade here: refused because the label is out of reach."""
         registry.knowledge.document_store.put("doc", BODY, label("confidential"))
         [result] = _batch(
             client, _headers(registry, MUTATE), _ingest("doc", "confidential")
@@ -110,6 +110,30 @@ class TestEvidenceIngestViaBatch:
         [result] = _batch(client, headers, _ingest("doc", written))
         assert result["status"] == "success", result
         assert _level(registry, "doc") == written
+
+    def test_a_key_cannot_raise_a_label_above_its_own_clearance(self, client, registry):
+        """The stored label is within reach; the label being written is not."""
+        registry.knowledge.document_store.put("doc", BODY, {"title": "t"})
+        [result] = _batch(
+            client, _headers(registry, MUTATE), _ingest("doc", "restricted")
+        )
+        assert result["status"] == "rejected"
+        assert _level(registry, "doc") == "internal"
+
+    def test_a_key_cannot_create_a_document_above_its_own_clearance(
+        self, client, registry
+    ):
+        [result] = _batch(
+            client, _headers(registry, MUTATE), _ingest("fresh", "restricted")
+        )
+        assert result["status"] == "rejected"
+        assert registry.knowledge.document_store.get("fresh") is None
+
+    def test_a_restricted_key_may_create_a_restricted_document(self, client, registry):
+        headers = _headers(registry, MUTATE_RESTRICTED)
+        [result] = _batch(client, headers, _ingest("fresh", "restricted"))
+        assert result["status"] == "success", result
+        assert _level(registry, "fresh") == "restricted"
 
     def test_an_unlabelled_overwrite_by_the_lowest_key_still_works(
         self, client, registry
@@ -193,6 +217,53 @@ class TestClassificationViaBatchAndRoute:
         assert "restricted" not in resp.text
         assert _level(registry, "doc") == "restricted"
 
+    def test_the_route_answers_a_hidden_document_as_a_missing_one(
+        self, client, registry
+    ):
+        registry.knowledge.document_store.put("hidden", BODY, label("restricted"))
+        headers = _headers(registry, MUTATE_CONFIDENTIAL)
+        answers = {}
+        for doc_id in ("hidden", "absent"):
+            resp = client.post(
+                f"/api/v1/documents/{doc_id}/sensitivity",
+                json={"sensitivity": "internal"},
+                headers=headers,
+            )
+            answers[doc_id] = (resp.status_code, resp.text.replace(doc_id, "<id>"))
+        assert answers["hidden"] == answers["absent"]
+        assert answers["hidden"][0] == 400
+        assert _level(registry, "hidden") == "restricted"
+
+    def test_the_documents_route_cannot_create_a_document_above_the_key(
+        self, client, registry
+    ):
+        resp = client.post(
+            "/api/v1/documents",
+            json={
+                "doc_id": "fresh",
+                "content": BODY,
+                "metadata": label("restricted"),
+            },
+            headers=_headers(registry, MUTATE),
+        )
+        assert resp.status_code == 400, resp.text
+        assert registry.knowledge.document_store.get("fresh") is None
+
+    def test_the_documents_route_lets_a_restricted_key_create_one(
+        self, client, registry
+    ):
+        resp = client.post(
+            "/api/v1/documents",
+            json={
+                "doc_id": "fresh",
+                "content": BODY,
+                "metadata": label("restricted"),
+            },
+            headers=_headers(registry, MUTATE_RESTRICTED),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _level(registry, "fresh") == "restricted"
+
     def test_the_route_refuses_a_value_outside_the_vocabulary(self, client, registry):
         registry.knowledge.document_store.put("doc", BODY, {"title": "t"})
         resp = client.post(
@@ -211,3 +282,34 @@ class TestClassificationViaBatchAndRoute:
         )
         assert resp.status_code == 403
         assert _level(registry, "doc") == "internal"
+
+
+class TestPrecedentRoutesHonourClearance:
+    """Demote and reinstate name a document; the key's clearance reaches Stage 2."""
+
+    @pytest.mark.parametrize("verb", ["demote", "reinstate"])
+    def test_a_key_below_the_label_is_refused_before_the_handler_runs(
+        self, client, registry, verb
+    ):
+        registry.knowledge.document_store.put("prec", BODY, label("restricted"))
+        before = registry.knowledge.document_store.get("prec")
+        resp = client.post(
+            f"/api/v1/precedents/prec/{verb}",
+            json={"reason": "stale"},
+            headers=_headers(registry, MUTATE_CONFIDENTIAL),
+        )
+        assert resp.status_code == 400
+        assert "clearance" in resp.text
+        assert registry.knowledge.document_store.get("prec") == before
+
+    @pytest.mark.parametrize("verb", ["demote", "reinstate"])
+    def test_a_cleared_key_gets_past_the_floor(self, client, registry, verb):
+        """Refused for another reason (no such precedent), not for clearance."""
+        registry.knowledge.document_store.put("prec", BODY, label("restricted"))
+        resp = client.post(
+            f"/api/v1/precedents/prec/{verb}",
+            json={"reason": "stale"},
+            headers=_headers(registry, MUTATE_RESTRICTED),
+        )
+        assert resp.status_code == 400
+        assert "clearance" not in resp.text

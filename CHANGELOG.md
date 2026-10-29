@@ -10,17 +10,22 @@ All notable changes to Trellis will be documented in this file.
   #1023).** A new governed `classification.set` operation relabels a document
   as a metadata-only write (`updated_at` preserved, vector row re-mirrored); the
   CLI gains `trellis curate classify-sensitivity <doc_id> --sensitivity
-  <level>` and REST gains `POST /api/v1/documents/{doc_id}/sensitivity`. A
-  relabel needs clearance for both the old and the new label, so a `mutate` key
-  without `restricted` cannot relabel or lower a restricted document. Every
-  mutation whose target is a document above the caller's clearance is denied at
-  Stage 2 (`policy_violation`, `MUTATION_REJECTED`). `evidence.ingest` now runs
-  the `save_memory` overwrite rule in its handler, so `POST
-  /api/v1/commands/batch` and MCP `execute_mutation` can no longer overwrite
-  a document above the caller's clearance or lower its label. The clearance is
-  carried on the executor (`build_curate_executor(..., clearance=)`, default
-  `"restricted"`), not on the command; an unlabelled store, and every
-  trusted-local caller, behave exactly as before.
+  <level>` and REST gains `POST /api/v1/documents/{doc_id}/sensitivity`. One
+  rule: a key cannot write a label above its own clearance and cannot touch a
+  document it may not read. A relabel of a document above the caller's
+  clearance answers `target_not_found`, as a missing one does; one to a label
+  above it is a `policy_violation`. `evidence.ingest` refuses a label above the
+  caller's clearance (new id or existing), and, at an existing id, the
+  `save_memory` overwrite rule, in its handler, so `POST /api/v1/commands/batch`,
+  `POST /api/v1/documents` and MCP `execute_mutation` can no longer overwrite
+  a document above the caller's clearance, lower its label or raise one past
+  the key. `retention.restore`, `redaction.apply` and `precedent.demote` /
+  `reinstate` aimed at such a document are denied at Stage 2 (`policy_violation`,
+  `MUTATION_REJECTED`). MCP `save_memory(supersedes=)` and
+  `save_knowledge(supersedes=)` no longer stamp a document above the caller's
+  clearance: the target answers as missing. The clearance rides on the executor,
+  not the command, and is a required keyword of `build_curate_executor`; an
+  unlabelled store, and every trusted-local caller, behave exactly as before.
 
 - **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
   `save_memory` and `save_knowledge` take an optional `sensitivity`

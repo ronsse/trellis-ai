@@ -51,8 +51,8 @@ if TYPE_CHECKING:
 def build_curate_executor(
     registry: StoreRegistry,
     *,
+    clearance: Sensitivity,
     evidence_embed: EvidenceEmbedMode = "soft",
-    clearance: Sensitivity = "restricted",
 ) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with the default curate handlers.
 
@@ -90,8 +90,10 @@ def build_curate_executor(
 
     **``clearance`` is the caller's document clearance (#194).** A credentialed
     surface passes what its token allows to read (``current_clearance()`` on
-    MCP, ``request_clearance(ctx)`` on REST); the default ``"restricted"`` is
-    trusted-local and clears everything. It reaches Stage 2, which refuses a
+    MCP, ``request_clearance(ctx)`` on REST); a trusted-local caller (the CLI, a
+    worker, an extractor hook) says ``"restricted"``, which clears everything.
+    It has no default, so a surface that forgets to name one fails at the call
+    rather than silently running at full clearance. It reaches Stage 2, which refuses a
     command aimed at a document above it, and the handlers that decide a
     document's label. It rides the executor, not the :class:`Command`, so a
     caller cannot name its own clearance in a payload.

@@ -48,7 +48,7 @@ class TestKnowledgePlaneOnlyExecutor:
     def test_entity_and_link_create_end_to_end(
         self, kp_registry: StoreRegistry
     ) -> None:
-        executor = build_curate_executor(kp_registry)
+        executor = build_curate_executor(kp_registry, clearance="restricted")
 
         id_a = _create_entity(executor, "events")
         id_b = _create_entity(executor, "users")
@@ -80,7 +80,7 @@ class TestKnowledgePlaneOnlyExecutor:
         self, kp_registry: StoreRegistry
     ) -> None:
         """#211 + #196: opt-in dangling edge works with no operational plane."""
-        executor = build_curate_executor(kp_registry)
+        executor = build_curate_executor(kp_registry, clearance="restricted")
         id_a = _create_entity(executor, "src")
 
         link = executor.execute(

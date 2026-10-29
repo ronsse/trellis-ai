@@ -43,7 +43,7 @@ def _execute(
         args["properties"] = properties
     if operation == Operation.ENTITY_CREATE:
         args["entity_type"] = "Concept"
-    result = build_curate_executor(registry).execute(
+    result = build_curate_executor(registry, clearance="restricted").execute(
         Command(
             operation=operation,
             args=args,

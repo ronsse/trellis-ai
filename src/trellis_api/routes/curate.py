@@ -46,13 +46,12 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
-def _execute_command(
-    cmd: Command, *, clearance: Sensitivity = "restricted"
-) -> CommandResponse:
+def _execute_command(cmd: Command, *, clearance: Sensitivity) -> CommandResponse:
     """Execute a command through the mutation pipeline.
 
-    ``clearance`` is the caller's document clearance, for the routes whose
-    target is a document (#194); the default is trusted-local.
+    ``clearance`` is the caller's document clearance (#194). It has no default,
+    so a route that forgets to name one fails at the call; a route whose command
+    touches no document says ``"restricted"`` and why.
     """
     result = build_curate_executor(get_registry(), clearance=clearance).execute(cmd)
     # Both FAILED (unexpected handler errors) and REJECTED (handler-raised
@@ -99,7 +98,7 @@ def promote(
         ),
         requested_by=requested_by,
     )
-    return _execute_command(cmd)
+    return _execute_command(cmd, clearance=request_clearance(ctx))
 
 
 @router.post(
@@ -222,12 +221,12 @@ def set_document_sensitivity(
 
     A metadata-only write through ``classification.set``: the content and the
     row's ``updated_at`` are untouched, and the document's vector row is
-    re-synced so a semantic hit carries the new label. Refused with 400 unless
-    the caller's clearance covers both the document's current label and the
-    requested one, so a key without ``restricted`` cannot relabel or lower a
-    restricted document, nor push one above its own reach. A missing
-    document, a chunk id (it reads its parent's label) and a value outside
-    the vocabulary are refused too. Re-applying the stored label is a no-op.
+    re-synced so a semantic hit carries the new label. A document above the
+    caller's clearance answers 400 exactly as a missing one does, so a key
+    cannot learn it exists by trying to relabel it; a requested label above the
+    caller's clearance is refused too, so a key cannot push a document out of
+    its own reach. A chunk id (it reads its parent's label) and a value outside
+    the vocabulary are refused. Re-applying the stored label is a no-op.
 
     ``requested_by`` is derived from the authenticated principal when one is
     present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
@@ -267,7 +266,10 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:link",
     )
-    response = _execute_command(cmd)
+    response = _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: a link names no document
+    )
     return {
         "status": "ok",
         "edge_id": response.created_id,
@@ -292,7 +294,10 @@ def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:entity",
     )
-    response = _execute_command(cmd)
+    response = _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: an entity write names no document
+    )
     return {
         "status": "ok",
         "node_id": response.created_id,
@@ -336,7 +341,7 @@ def create_document(
         requested_by="api:create-document",
         idempotency_key=body.get("idempotency_key"),
     )
-    response = _execute_command(command)
+    response = _execute_command(command, clearance=request_clearance(ctx))
     stored_id = response.created_id or command.target_id
     if (
         response.status == CommandStatus.DUPLICATE
@@ -364,7 +369,10 @@ def record_feedback(req: FeedbackRequest) -> CommandResponse:
         target_id=req.target_id,
         requested_by="api:feedback",
     )
-    return _execute_command(cmd)
+    return _execute_command(
+        cmd,
+        clearance="restricted",  # trusted: feedback names no document
+    )
 
 
 @router.post("/packs/{pack_id}/feedback", response_model=PackFeedbackResponse)

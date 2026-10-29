@@ -1756,7 +1756,7 @@ def save_experience(trace_json: str) -> str:
     # Stamped before ingest: a stored trace is immutable.
     trace = _stamp_trace_project(trace)
     registry = _get_registry()
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(registry, clearance=current_clearance())
     # Read before the write: the handler answers a stored trace_id as a
     # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
@@ -1860,6 +1860,7 @@ def _resolve_evidence_pointer(
                     **(label or {}),
                 },
                 source="mcp:save_knowledge",
+                clearance=current_clearance(),
             )
         except MutationError as exc:
             # ensure_evidence_document wraps a non-SUCCESS evidence.ingest
@@ -1916,7 +1917,11 @@ def _plan_knowledge_supersedes(
     if supersedes is None:
         return None
     plan = _supersession.plan_entity_supersession(
-        registry, supersedes, content=content, evidence_ref=evidence_ref
+        registry,
+        supersedes,
+        content=content,
+        evidence_ref=evidence_ref,
+        clearance=current_clearance(),
     )
     if isinstance(plan, _supersession.Refusal):
         _record_boundary_rejection(tool="save_knowledge", rejections=[plan.row()])
@@ -1977,6 +1982,7 @@ def _apply_knowledge_supersedes(
         node_id=supersedes,
         successor=successor,
         requested_by="mcp:save_knowledge",
+        clearance=current_clearance(),
     )
     _raise_if_supersede_failed(
         error, target=supersedes, supersedes=supersedes, successor=successor, applied=[]
@@ -1995,6 +2001,7 @@ def _apply_knowledge_supersedes(
         doc_id=plan.t_doc,
         successor=successor,
         requested_by="mcp:save_knowledge",
+        clearance=current_clearance(),
     )
     _raise_if_supersede_failed(
         error,
@@ -2145,7 +2152,7 @@ def save_knowledge(
         props["evidence_ref"] = evidence_ref
     document_ids = [evidence_ref] if evidence_ref is not None else None
 
-    executor = build_curate_executor(registry)
+    executor = build_curate_executor(registry, clearance=current_clearance())
     create_result = executor.execute(
         Command(
             operation=Operation.ENTITY_CREATE,
@@ -2366,7 +2373,11 @@ def _check_memory_supersedes(
     if supersedes is None:
         return
     refusal = _supersession.check_memory_target(
-        registry, supersedes, doc_id=doc_id, existing=existing
+        registry,
+        supersedes,
+        doc_id=doc_id,
+        existing=existing,
+        clearance=current_clearance(),
     )
     if refusal is None:
         return
@@ -2392,6 +2403,7 @@ def _memory_exists_response(
         doc_id=supersedes,
         successor=existing_id,
         requested_by=SAVE_MEMORY_SURFACE,
+        clearance=current_clearance(),
     )
     if error is not None:
         _raise_mutation_failed(
@@ -2450,6 +2462,7 @@ def _supersede_saved_memory(
         doc_id=supersedes,
         successor=stored_id,
         requested_by=SAVE_MEMORY_SURFACE,
+        clearance=current_clearance(),
     )
     if error is not None:
         return (
@@ -4217,7 +4230,7 @@ def record_observation(
             target_type=OBSERVATION,
             requested_by="mcp:record_observation",
         )
-        executor = build_curate_executor(_get_registry())
+        executor = build_curate_executor(_get_registry(), clearance=current_clearance())
         result = executor.execute(command)
     # GRACEFUL-DEGRADATION: MCP tool surface — never raises to the
     # client; execution failure is logged + surfaced as a structured

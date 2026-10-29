@@ -1353,7 +1353,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         precedent_id = graph_store.upsert_node(
             node_id=None, node_type="precedent", properties={"name": "reapprove test"}
@@ -1408,7 +1408,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         # Deprecated, not current: "current" and "archived" are both
         # unselectable by retention.prune's lifecycle_states criterion (one
@@ -1516,7 +1516,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         event_log = registry.operational.event_log
         entity_id = "precedent://learning/reapprove-identical"
@@ -1568,7 +1568,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         event_log = registry.operational.event_log
         entity_id = "precedent://learning/reapprove-changed"
@@ -1624,7 +1624,7 @@ class TestSubmitPromotion:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         graph_store = registry.knowledge.graph_store
         entity_id = "precedent://learning/reapprove-reinstated"
         payload = self._entity_payload(entity_id=entity_id)
@@ -1701,7 +1701,7 @@ class TestPromotionVisibleToGetLessons:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir()
         registry = StoreRegistry(stores_dir=stores_dir)
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
 
         candidate = {
             "candidate_id": "source_analysis:abc123",

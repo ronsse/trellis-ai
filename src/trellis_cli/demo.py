@@ -1170,7 +1170,10 @@ def _run_extractor_on_fixture(
         dispatcher.dispatch(raw_input, source_hint=source_hint),
     )
     batch = result_to_batch(result, requested_by=f"cli:demo-load:{source_hint}")
-    results = build_curate_executor(registry).execute_batch(batch)
+    results = build_curate_executor(
+        registry,
+        clearance="restricted",  # trusted: operator CLI
+    ).execute_batch(batch)
     failures = [
         r for r in results if r.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
     ]

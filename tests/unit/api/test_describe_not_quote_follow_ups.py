@@ -408,7 +408,7 @@ def test_ingest_bulk_sanitizes_every_item_result_message(
     # check but fails the clean-message checks.
     monkeypatch.setattr(
         "trellis_api.routes.ingest.build_curate_executor",
-        lambda _registry: _StubBulkExecutor(
+        lambda _registry, **_kwargs: _StubBulkExecutor(
             [
                 _rejected(Operation.ENTITY_CREATE),
                 _rejected(Operation.LINK_CREATE, message=_CLEAN_REJECTED_MESSAGE),
@@ -450,7 +450,9 @@ def test_ingest_bulk_success_message_with_a_long_name_is_verbatim(
     message = f"Entity created: {_LONG_NAME}"
     monkeypatch.setattr(
         "trellis_api.routes.ingest.build_curate_executor",
-        lambda _registry: _StubBulkExecutor(_success(Operation.ENTITY_CREATE, message)),
+        lambda _registry, **_kwargs: _StubBulkExecutor(
+            _success(Operation.ENTITY_CREATE, message)
+        ),
     )
 
     resp = client.post(

@@ -4316,17 +4316,17 @@ paths:
 
         row''s ``updated_at`` are untouched, and the document''s vector row is
 
-        re-synced so a semantic hit carries the new label. Refused with 400 unless
+        re-synced so a semantic hit carries the new label. A document above the
 
-        the caller''s clearance covers both the document''s current label and the
+        caller''s clearance answers 400 exactly as a missing one does, so a key
 
-        requested one, so a key without ``restricted`` cannot relabel or lower a
+        cannot learn it exists by trying to relabel it; a requested label above the
 
-        restricted document, nor push one above its own reach. A missing
+        caller''s clearance is refused too, so a key cannot push a document out of
 
-        document, a chunk id (it reads its parent''s label) and a value outside
+        its own reach. A chunk id (it reads its parent''s label) and a value outside
 
-        the vocabulary are refused too. Re-applying the stored label is a no-op.
+        the vocabulary are refused. Re-applying the stored label is a no-op.
 
 
         ``requested_by`` is derived from the authenticated principal when one is

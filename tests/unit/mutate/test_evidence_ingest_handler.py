@@ -45,7 +45,7 @@ class TestEvidenceCommandPreparation:
         assert command.args["evidence"]["doc_id"] == command.target_id
         assert command.idempotency_key
 
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         assert executor.execute(command).status is CommandStatus.SUCCESS
         assert executor.execute(command).status is CommandStatus.DUPLICATE
         assert registry.knowledge.document_store.count() == 1
@@ -53,7 +53,7 @@ class TestEvidenceCommandPreparation:
     def test_changed_content_for_same_id_is_a_new_operation(
         self, registry: StoreRegistry
     ) -> None:
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         first = build_evidence_ingest_command(
             doc_id="doc-1",
             content="first body",
@@ -75,7 +75,7 @@ class TestEvidenceCommandPreparation:
     def test_identical_content_with_different_ids_stays_distinct(
         self, registry: StoreRegistry
     ) -> None:
-        executor = build_curate_executor(registry)
+        executor = build_curate_executor(registry, clearance="restricted")
         commands = [
             build_evidence_ingest_command(
                 doc_id=doc_id,
@@ -127,7 +127,9 @@ class TestEvidenceIngestHandler:
             metadata={"source": "test"},
             requested_by="test:evidence",
         )
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status is CommandStatus.SUCCESS
         assert result.created_id == "doc-1"
@@ -161,7 +163,9 @@ class TestEvidenceIngestHandler:
             requested_by="test:evidence",
         )
 
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status is CommandStatus.SUCCESS
         assert registry.knowledge.document_store.get("doc-soft") is not None
@@ -231,7 +235,9 @@ class TestEvidenceIngestHandler:
             requested_by="api:ingest-evidence",
         )
 
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status is CommandStatus.SUCCESS
         stored = registry.knowledge.document_store.get("evidence-1")
@@ -247,7 +253,9 @@ class TestEvidenceIngestHandler:
             requested_by="test:evidence",
         )
 
-        result = build_curate_executor(registry).execute(command)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            command
+        )
 
         assert result.status is CommandStatus.REJECTED
         assert registry.knowledge.document_store.get("doc-empty") is None

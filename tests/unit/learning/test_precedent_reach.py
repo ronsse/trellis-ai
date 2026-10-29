@@ -129,7 +129,7 @@ def _promote(registry: StoreRegistry, candidate: dict[str, Any]) -> str:
         document_store=registry.knowledge.document_store,
     )
     outcome = submit_learning_promotion(
-        build_curate_executor(registry),
+        build_curate_executor(registry, clearance="restricted"),
         payloads["entity_payload"],
         payloads["edge_payloads"],
         requested_by="test:promote-learning",

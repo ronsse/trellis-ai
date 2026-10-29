@@ -8,13 +8,15 @@ was reached.
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.ingest_corpus.models import chunk_doc_id
-from trellis.mutate import build_curate_executor
+from trellis.mcp import supersession
+from trellis.mutate import build_curate_executor, ensure_evidence_document
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import create_curate_handlers
@@ -22,8 +24,9 @@ from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.mutate.policy_source import build_policy_gate
 from trellis.mutate.sensitivity_floor import (
     SensitivityFloor,
-    refuse_relabel,
+    refuse_written_label,
     targeted_document_ids,
+    visible_document,
 )
 from trellis.retrieve.sensitivity import OverwriteRefusedError
 from trellis.schemas.classification import (
@@ -33,6 +36,7 @@ from trellis.schemas.classification import (
 )
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis_api.routes.curate import _execute_command
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -212,8 +216,40 @@ class TestClassificationSetHandler:
             _set("doc", "internal")
         )
         assert result.status == CommandStatus.REJECTED
-        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert result.metadata["rejection_reason"] == "target_not_found"
         assert _stored_level(registry, "doc") == "restricted"
+
+    def test_a_document_above_clearance_answers_exactly_as_a_missing_one(
+        self, registry: StoreRegistry
+    ) -> None:
+        """No reason, message or event tells the two apart (modulo the id)."""
+        _put(registry, "hidden", "restricted")
+        executor = _handlers_only(registry, "confidential")
+
+        present = executor.execute(_set("hidden", "internal"))
+        missing = executor.execute(_set("absent", "internal"))
+
+        assert present.status == missing.status == CommandStatus.REJECTED
+        assert present.metadata["rejection_reason"] == "target_not_found"
+        assert present.metadata == missing.metadata
+        assert present.message.replace("hidden", "absent") == missing.message
+        assert present.warnings == missing.warnings
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, limit=10
+        )
+        assert len(events) == 2
+        assert {e.payload["message"].replace("hidden", "absent") for e in events} == {
+            missing.message
+        }
+
+    def test_a_chunk_of_a_parent_above_clearance_also_answers_as_missing(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "parent", "restricted")
+        chunk = chunk_doc_id("parent", 0)
+        registry.knowledge.document_store.put(chunk, BODY, {})
+        result = _handlers_only(registry, "internal").execute(_set(chunk, "internal"))
+        assert result.metadata["rejection_reason"] == "target_not_found"
 
     def test_a_caller_cannot_assign_a_label_above_its_own_clearance(
         self, registry: StoreRegistry
@@ -244,20 +280,31 @@ class TestClassificationSetHandler:
         )
         low = _handlers_only(registry, "confidential").execute(_set("doc", "internal"))
         assert low.status == CommandStatus.REJECTED
+        assert low.metadata["rejection_reason"] == "target_not_found"
         high = _handlers_only(registry, "restricted").execute(_set("doc", "internal"))
         assert high.status == CommandStatus.SUCCESS, high.message
         assert _stored_level(registry, "doc") == "internal"
 
-    def test_refuse_relabel_names_neither_label(self, registry: StoreRegistry) -> None:
-        _put(registry, "doc", "restricted")
+    def test_refuse_written_label_names_no_label(self) -> None:
         with pytest.raises(OverwriteRefusedError) as refused:
-            refuse_relabel(
-                registry.knowledge.document_store,
-                "doc",
-                "internal",
-                clearance="internal",
-            )
+            refuse_written_label("doc", "restricted", clearance="internal")
         assert "restricted" not in str(refused.value)
+        assert "internal" not in str(refused.value)
+
+    def test_refuse_written_label_permits_a_label_within_clearance(self) -> None:
+        refuse_written_label("doc", "confidential", clearance="confidential")
+        refuse_written_label("doc", "internal", clearance="confidential")
+
+    def test_visible_document_hides_above_clearance_and_missing_alike(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "hidden", "restricted")
+        _put(registry, "open", "internal")
+        store = registry.knowledge.document_store
+        assert visible_document(store, "hidden", clearance="confidential") is None
+        assert visible_document(store, "absent", clearance="confidential") is None
+        assert visible_document(store, "open", clearance="internal") is not None
+        assert visible_document(store, "hidden", clearance="restricted") is not None
 
 
 class TestEvidenceIngestHandlerRefusesOverwrite:
@@ -275,10 +322,10 @@ class TestEvidenceIngestHandlerRefusesOverwrite:
         assert stored["content"] == BODY
         assert _stored_level(registry, "doc") == "restricted"
 
-    def test_the_clearance_arm_refuses_alone_when_the_same_label_is_written(
+    def test_a_caller_below_the_stored_label_cannot_rewrite_at_the_same_label(
         self, registry: StoreRegistry
     ) -> None:
-        """No downgrade here, so only the clearance check can refuse."""
+        """No downgrade here: refused because the label is out of reach."""
         _put(registry, "doc", "confidential")
         result = _handlers_only(registry, "internal").execute(
             _ingest("doc", "confidential")
@@ -309,6 +356,62 @@ class TestEvidenceIngestHandlerRefusesOverwrite:
         assert result.status == CommandStatus.SUCCESS, result.message
         assert _stored_level(registry, "doc") == written
 
+    def test_the_written_label_cannot_exceed_clearance_on_an_existing_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The stored label is within reach, so only the written-label arm refuses."""
+        _put(registry, "doc", "internal")
+        result = _handlers_only(registry, "confidential").execute(
+            _ingest("doc", "restricted")
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        stored = registry.knowledge.document_store.get("doc")
+        assert stored is not None
+        assert stored["content"] == BODY
+        assert _stored_level(registry, "doc") == "internal"
+
+    def test_the_written_label_cannot_exceed_clearance_on_a_new_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        result = _handlers_only(registry, "confidential").execute(
+            _ingest("fresh", "restricted")
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert registry.knowledge.document_store.get("fresh") is None
+
+    def test_a_label_within_clearance_is_written_on_a_new_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        result = _handlers_only(registry, "confidential").execute(
+            _ingest("fresh", "confidential")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert _stored_level(registry, "fresh") == "confidential"
+
+    def test_ingest_and_classification_set_refuse_a_label_in_the_same_words(
+        self, registry: StoreRegistry
+    ) -> None:
+        """One rule, one message, whichever operation carries the label."""
+        _put(registry, "doc", "internal")
+        executor = _handlers_only(registry, "confidential")
+        via_ingest = executor.execute(_ingest("doc", "restricted"))
+        via_set = executor.execute(_set("doc", "restricted"))
+        assert via_ingest.message == via_set.message
+        assert via_ingest.message == (
+            "this credential's clearance does not cover the label requested "
+            "for document 'doc'; nothing was written"
+        )
+
+    def test_a_trusted_caller_may_write_any_label(
+        self, registry: StoreRegistry
+    ) -> None:
+        result = _handlers_only(registry, "restricted").execute(
+            _ingest("fresh", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+
     def test_a_new_document_id_is_written(self, registry: StoreRegistry) -> None:
         result = _handlers_only(registry, "internal").execute(_ingest("fresh", None))
         assert result.status == CommandStatus.SUCCESS, result.message
@@ -326,7 +429,6 @@ class TestStageTwoFloor:
         "command",
         [
             _ingest("doc", None),
-            _set("doc", "internal"),
             Command(
                 operation=Operation.RETENTION_RESTORE,
                 args={"item_ids": ["doc"], "reason": "r"},
@@ -366,6 +468,22 @@ class TestStageTwoFloor:
         )
         assert len(rejected) == 1
         assert "restricted" not in result.message
+
+    def test_classification_set_is_left_to_its_handler(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Stage 2 would answer ``policy_violation`` for a present document and
+        the handler ``target_not_found`` for a missing one; the handler alone
+        decides, so both read as not found."""
+        _put(registry, "doc", "restricted")
+        assert targeted_document_ids(_set("doc", "internal")) == []
+        executor, recorder = _gate_only(
+            registry, Operation.CLASSIFICATION_SET, "confidential"
+        )
+        assert executor.execute(_set("doc", "internal")).status == (
+            CommandStatus.SUCCESS
+        )
+        assert recorder.calls == 1
 
     def test_a_cleared_caller_reaches_the_handler(
         self, registry: StoreRegistry
@@ -442,6 +560,33 @@ class TestStageTwoFloor:
             (Operation.LABEL_ADD, {"target_id": "doc", "label": "l"}),
         ):
             assert targeted_document_ids(Command(operation=operation, args=args)) == []
+
+
+class TestClearanceHasNoDefault:
+    """A caller that forgets to name its clearance fails at the call.
+
+    A default of ``"restricted"`` would make every surface that never thought
+    about the floor run at full clearance, silently. ``PackBuilder.build`` pins
+    the same shape for the read side.
+    """
+
+    @pytest.mark.parametrize(
+        "function",
+        [
+            build_curate_executor,
+            ensure_evidence_document,
+            _execute_command,
+            supersession.supersede_document,
+            supersession.supersede_entity,
+            supersession.check_memory_target,
+            supersession.plan_entity_supersession,
+        ],
+        ids=lambda f: f.__name__,
+    )
+    def test_clearance_is_a_required_keyword(self, function: Any) -> None:
+        parameter = inspect.signature(function).parameters["clearance"]
+        assert parameter.default is inspect.Parameter.empty
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 class TestDefaultPostureIsTransparent:

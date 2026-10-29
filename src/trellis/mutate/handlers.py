@@ -55,7 +55,8 @@ from trellis.mutate.retention import (
 )
 from trellis.mutate.sensitivity_floor import (
     SENSITIVITY_FLOOR_POLICY_ID,
-    refuse_relabel,
+    refuse_written_label,
+    visible_document,
 )
 from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
@@ -145,16 +146,25 @@ class EvidenceIngestHandler:
         self._empty_error_code = empty_error_code
         self._clearance = clearance
 
-    def _refuse_overwrite(self, doc_id: str, metadata: dict[str, Any]) -> None:
-        """The REST and MCP save surfaces' overwrite rule, run where the write is.
+    def _enforce_clearance(self, doc_id: str, metadata: dict[str, Any]) -> None:
+        """The save surfaces' write rules, run where the write is.
 
         Run here so the generic doors (``POST /commands/batch``,
-        ``execute_mutation``) are covered too (#1023). A write at an existing id
-        replaces the row, label included: refuse it when the stored label is
-        above this caller's clearance or above the label being written. A
-        trusted caller (``clearance="restricted"``) still may not lower a label.
+        ``execute_mutation``) are covered too (#1023). Two refusals, both
+        before any write:
+
+        * the label being written is above this caller's clearance, for a new
+          document and an existing one alike (the rule ``classification.set``
+          and ``save_memory`` apply, in the same words);
+        * a write at an existing id would replace the row, label included, and
+          the stored label is above this caller's clearance or above the label
+          being written. A trusted caller (``clearance="restricted"``) still may
+          not lower a label.
         """
         try:
+            refuse_written_label(
+                doc_id, sensitivity_of(metadata), clearance=self._clearance
+            )
             refuse_overwrite(
                 self._registry.knowledge.document_store,
                 doc_id,
@@ -212,7 +222,7 @@ class EvidenceIngestHandler:
             doc_id=doc_id,
             registry=self._registry,
         )
-        self._refuse_overwrite(doc_id, metadata)
+        self._enforce_clearance(doc_id, metadata)
         # Through the seam even though both embed modes below rebuild the
         # whole row: ``run_embed_on_ingest`` is gated on
         # ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with that
@@ -303,10 +313,14 @@ class ClassificationSetHandler:
     label. A chunk reads its parent's label (``effective_sensitivity``), so
     relabelling the parent relabels every chunk with no write to them.
 
-    Refused unless ``clearance`` covers the higher of the old and the new
-    label (:func:`~trellis.mutate.sensitivity_floor.refuse_relabel`): a caller
-    cannot relabel what it cannot read, nor push a document above its own
-    clearance. Re-applying the stored label is a no-op.
+    A document above ``clearance`` answers exactly as a missing one
+    (``target_not_found``, via
+    :func:`~trellis.mutate.sensitivity_floor.visible_document`), so a key that
+    cannot read it cannot learn it exists by trying to relabel it.
+    The new label must be within ``clearance`` too
+    (:func:`~trellis.mutate.sensitivity_floor.refuse_written_label`), so a caller
+    cannot push a document out of its own reach. Re-applying the stored label is
+    a no-op.
     """
 
     def __init__(
@@ -329,7 +343,7 @@ class ClassificationSetHandler:
             raise ValidationError(msg, errors=[msg], code="classification_set_shape")
 
         document_store = self._registry.knowledge.document_store
-        existing = document_store.get(doc_id)
+        existing = visible_document(document_store, doc_id, clearance=self._clearance)
         if existing is None:
             msg = f"document {doc_id!r} not found"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
@@ -343,11 +357,10 @@ class ClassificationSetHandler:
             )
             raise ValidationError(msg, errors=[msg], code="classification_set_chunk")
         try:
-            refuse_relabel(
-                document_store,
+            refuse_written_label(
                 doc_id,
-                sensitivity,
-                clearance=self._clearance,  # type: ignore[arg-type]
+                sensitivity,  # type: ignore[arg-type]
+                clearance=self._clearance,
             )
         except OverwriteRefusedError as exc:
             raise PolicyViolationError(

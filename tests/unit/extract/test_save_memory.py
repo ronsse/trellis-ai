@@ -208,7 +208,7 @@ class TestGovernedWritePath:
             {"doc_id": "mem-1", "text": "shipped it with @Alice"},
             source_hint="save_memory",
         )
-        results = build_curate_executor(registry).execute_batch(
+        results = build_curate_executor(registry, clearance="restricted").execute_batch(
             result_to_batch(result, requested_by="mcp:save_memory")
         )
 

@@ -172,7 +172,9 @@ def _fake_batch(
         return results
 
     executor.execute_batch.side_effect = _execute_batch
-    monkeypatch.setattr(extract_cli, "build_curate_executor", lambda _reg: executor)
+    monkeypatch.setattr(
+        extract_cli, "build_curate_executor", lambda _reg, **_kw: executor
+    )
     return executor
 
 
