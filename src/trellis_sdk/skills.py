@@ -37,25 +37,37 @@ def get_context_for_task(
         max_tokens: Token budget for the response.
 
     Returns:
-        Markdown string summarizing relevant context. When the pack has
-        items it carries the pack's ``pack_id`` and a feedback footer: pass
-        that ``pack_id`` to ``client.record_feedback`` together with the
-        item ids the model cites, or the feedback cannot be attributed.
+        Markdown string summarizing relevant context. It carries the pack's
+        ``pack_id`` and a feedback footer, empty pack included: pass that
+        ``pack_id`` to ``client.record_feedback`` together with the item ids
+        the model cites, or the feedback cannot be attributed.
     """
     pack = client.assemble_pack(
         intent, domain=domain, max_items=20, max_tokens=max_tokens
     )
     items = pack.get("items", [])
+    pack_id = pack.get("pack_id")
     withholding = withholding_from_payload(pack.get("withholding"))
     if not items:
         message = f"No relevant context found for: {intent}"
+        if pack_id:
+            # An empty pack is still a served pack, and "nothing relevant" is
+            # a verdict worth grading: it needs the same header and footer.
+            return format_pack_as_markdown(
+                [],
+                intent,
+                max_tokens=max_tokens,
+                pack_id=pack_id,
+                withholding=withholding,
+                empty_text=message,
+            )
         note = format_withholding_note(withholding)
         return f"{message}\n\n{note}" if note else message
     return format_pack_as_markdown(
         items,
         intent,
         max_tokens=max_tokens,
-        pack_id=pack.get("pack_id"),
+        pack_id=pack_id,
         withholding=withholding,
     )
 

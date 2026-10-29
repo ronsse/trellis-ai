@@ -1106,6 +1106,19 @@ All notable changes to Trellis will be documented in this file.
     sourced from them. A minted chunk has no such children, so redacting one
     still blanks only itself, at the cost of a few absent-row reads. This is
     what covers a row named that way before the refusal existed.
+- **An SDK `get_context_for_task` pack that came back empty carries its
+  `pack_id` and feedback footer.** The MCP side already renders every empty
+  flat pack through the formatter; the SDK helper returned a bare "No relevant
+  context found" line, so a caller could not grade the pack that said so. The
+  empty reply now has the same header (`pack_id`, then any withholding note)
+  and the same `record_feedback(pack_id=..., rating=...)` footer as a served
+  pack. A reply with no `pack_id` in it is unchanged: there is nothing to cite.
+
+- **Two README loose ends.** `skills/README.md` drops the "preview" banner the
+  `SKILL.md` files already lost. `tests/unit/mcp/test_readme_tool_count.py` pins
+  the tool count the README states (the architecture diagram and the MCP
+  paragraph) to the tools the server registers, deprecated ones included; the
+  count itself was already right.
 
 - **Class-prior chunk scope and replay: a caller-named `#chunk-` id is no
   chunk, a chunk whose row is gone still resolves, and a pointer replays at
