@@ -244,8 +244,9 @@ def apply_supersessions(
     ``CaptureReport.supersessions_failed`` and warned about rather than
     discarded (#407). The warning's ``kind`` follows the reason returned: a
     vanished target is ``supersede_target_missing``, and a promoted
-    precedent's row, which the seam refuses to stamp, is
-    ``supersede_target_protected`` (#994). The sweep's own candidates come
+    precedent's row or a redaction tombstone, which the seam refuses to
+    stamp, is ``supersede_target_protected`` (#994, #1039). The sweep's own
+    candidates come
     from :func:`_load_existing`, which reads only the capture id prefix, so
     the second is not reachable from a sweep today; it is mapped here so a
     wider loader cannot report a protected target as missing.
@@ -310,7 +311,8 @@ def _withdraw_supersede_claim(
     """Strip an unapplied ``supersedes_doc_id`` off a written successor.
 
     The marker is rewritten to the one *reason* maps to — ``stale_recheck`` for
-    a vanished target, ``target_protected`` for a precedent's row — through the
+    a vanished target, ``target_protected`` for a precedent's row or a
+    redaction tombstone — through the
     same :func:`~trellis.mcp.reconcile.marker_for_fallback` ``mcp.server``
     uses for a verdict it declined to apply. ``stale_recheck`` is also the
     queue a later reconciliation sweep reads, which is why a protected target

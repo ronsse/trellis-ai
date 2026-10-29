@@ -3868,6 +3868,27 @@ document carrying a guessed pointer id and read it back learns, from whether the
 id survives, whether a document by that id exists above its clearance. That is
 nothing beyond the accepted 409 posture on `POST /api/v1/documents` below. A
 malformed pointer (anything but a non-empty string) is left as stored.
+A graph node names a document id the same way, in three places: `document_ids`,
+and in its properties the string `evidence_ref` (`save_knowledge` fills both with
+the same id) and `lifecycle.superseded_by` (`supersede_entity` stamps it with the
+successor's evidence document). A node is served whole, since it carries no
+label, but without any id the caller may not read in any of them: on `GET
+/api/v1/graph/history` (every version), MCP `get_graph` (the root and each
+neighbour), MCP `get_items` on an entity id, and the entities `build_file_context`
+returns. A pointer key is removed rather than blanked, `lifecycle.state` and every
+other property stay, and a `document_ids` member that is not a string, a
+`document_ids` that is not a list and an `evidence_ref` that is not a string are
+left as stored. The store judges the ids as above, in one pass over the distinct
+ids the whole response names. Depth,
+neighbours and relationships do not change. A graph-axis pack item spreads its
+node's properties into its `metadata`, so `metadata.evidence_ref` on a pack item
+is a concealed carrier too, on the same footing as the supersession pointers: it
+is dropped from `POST /api/v1/packs` and `/packs/sectioned` for a caller below
+`restricted`, the item is still served in the same position, and supersession
+that resolves through the ref (a loser whose successor a node names) is decided
+before the drop. `GET /api/v1/entities/{id}`, `GET
+/api/v1/graph/search` (and its facets) and an edge's own `evidence_ref` field
+do not conceal yet and serve these ids as stored.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
