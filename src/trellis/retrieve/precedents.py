@@ -141,13 +141,16 @@ def _served_title(
     and judges each by the *current* node, so without that test a source
     redacted, written again and promoted again would hand the older event's
     title back through a node that now reads ``included``; an event the node
-    does not hold falls back to its own marker. A scrubbed node whose marker
-    does not clear its name (none, or ``source_text``) serves the neutral name
-    for every event, held or not.
+    does not hold is judged by its own title as the scrub would judge it
+    (:func:`~trellis.learning.scoring.name_may_hold_source_text`), so an
+    unmarked one fails closed unless it is the bare-id name. A scrubbed node
+    whose marker does not clear its name (none, or ``source_text``) serves the
+    neutral name for every event, held or not.
 
     A promotion title with no marker (promoted before names were marked) is
-    served as promoted: it cannot be told from an ordinary title without the
-    pack data that chose it, and guessing would rename every such precedent.
+    otherwise served as promoted, by a node that holds it or when no node
+    exists: it cannot be told from an ordinary title without the pack data
+    that chose it, and guessing would rename every such precedent.
     ``None`` means serve the title unchanged.
     """
     # Deferred: ``trellis.learning`` imports the retrieve package.
@@ -157,6 +160,7 @@ def _served_title(
         NAME_SOURCES_WITHOUT_SOURCE_TEXT,
         SOURCE_EXCERPT_INCLUDED,
         SOURCE_EXCERPT_REDACTED,
+        name_may_hold_source_text,
         neutral_precedent_name,
     )
 
@@ -176,6 +180,21 @@ def _served_title(
                 return None
         elif status == SOURCE_EXCERPT_INCLUDED and holds_this_title:
             return None
+        if not holds_this_title:
+            # Judge the event's own title as the scrub would: an unmarked one
+            # fails closed unless it is the bare-id name.
+            event_name = {
+                "name": payload.get("title"),
+                "name_source": payload.get("name_source"),
+                "intent_family": props.get("intent_family"),
+                "source_item_id": payload.get("source_item_id")
+                or props.get("source_item_id"),
+            }
+            return (
+                neutral
+                if name_may_hold_source_text(event_name, entity_id or "")
+                else None
+            )
     return neutral if payload.get("name_source") in NAME_SOURCES_FROM_SOURCE else None
 
 

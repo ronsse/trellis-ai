@@ -1215,8 +1215,10 @@ All notable changes to Trellis will be documented in this file.
   event whose text it holds: an `included` node keeps an event's title only when
   `node.name` is that title and its description only when it is the node's own,
   and an older event falls back to what it says about itself, a neutral name for
-  a `source_text` or `item_title` title and the excerpt stripped from its
-  description. The same holds for an `item_title` precedent whose node was
+  a `source_text` or `item_title` title, or for an unmarked one that is not the
+  bare-id name, and the excerpt stripped from its description. So a precedent
+  promoted more than once now lists its older rows under a neutral name, with or
+  without a redaction; the newest row is unchanged. The same holds for an `item_title` precedent whose node was
   replaced by a reviewer's title before the redaction, and an `item_title`
   precedent with no node now lists a neutral name, as a `source_text` one
   already did. A node scrubbed before names were marked still lists a neutral

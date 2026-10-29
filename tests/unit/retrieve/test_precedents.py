@@ -580,9 +580,11 @@ class TestServedTitle:
         assert row["title"] == NEUTRAL_TITLE
         assert "FIRST LINE" not in repr(row)
 
-    def test_a_node_holding_a_different_title_serves_an_unmarked_title_as_promoted(
+    def test_a_node_holding_a_different_title_withholds_an_unmarked_title(
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
     ) -> None:
+        # An unmarked older title may be the redacted source's first line; the
+        # node now holds the re-promotion's title, so it vouches for nothing.
         _promote_event(event_log)
         _node(
             graph_store,
@@ -592,7 +594,24 @@ class TestServedTitle:
 
         (row,) = list_precedents(event_log, graph_store=graph_store)
 
-        assert row["title"] == SOURCE_TITLE
+        assert row["title"] == NEUTRAL_TITLE
+        assert "FIRST LINE" not in repr(row)
+
+    def test_a_node_holding_a_different_title_serves_an_unmarked_bare_id_title(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        _promote_event(
+            event_log, title="Learning: fam :: doc-1", source_item_id="doc-1"
+        )
+        _node(
+            graph_store,
+            name="Learning: fam :: Title of the rewritten source",
+            source_excerpt_status="included",
+        )
+
+        (row,) = list_precedents(event_log, graph_store=graph_store)
+
+        assert row["title"] == "Learning: fam :: doc-1"
 
     @pytest.mark.parametrize("event_marker", ["source_text", "item_title"])
     def test_a_reviewer_named_scrubbed_node_does_not_vouch_for_an_older_title(
