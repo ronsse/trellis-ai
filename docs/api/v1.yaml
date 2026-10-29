@@ -5218,11 +5218,19 @@ paths:
 
         whose source document was redacted, when its name is one the redacted text
 
-        gave it: a candidate or a decision''s ``promotion_name`` kept from before
+        gave it (the source''s text or its own title): a candidate or a decision''s
 
-        the redaction. Regenerate the candidate (and clear that name) to promote
+        ``promotion_name`` kept from before the redaction, or edited from it, since
 
-        it again.'
+        a name that contains an earlier name''s distinctive text is refused too.
+
+        Regenerate the candidate (and clear that name) to promote it again. Once the
+
+        source id was written again with new content, a name derived from that
+
+        content and a reviewer''s own title promote; only a name the precedent
+
+        carried at or before the redaction stays refused.'
       operationId: promote_learning_candidates_api_v1_learning_promotions_post
       requestBody:
         content:

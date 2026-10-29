@@ -86,7 +86,13 @@ def _served_description(
     the excerpt (``source_excerpt_status`` other than ``included``), and a
     missing node, serve the promoted text with the excerpt cut out: a scrub
     that purged the node and failed to re-create it must not hand the
-    excerpt back through this listing. ``None`` means serve it unchanged.
+    excerpt back through this listing.
+
+    A node vouches only for the event whose text it holds. The listing serves
+    a row per promotion, and a source redacted, written again and promoted
+    again leaves the node ``included`` over the *new* excerpt, so an older
+    event's description is not the node's and is stripped like any other.
+    ``None`` means serve it unchanged.
     """
     # Deferred: ``trellis.learning`` imports the retrieve package.
     from trellis.learning.scoring import (  # noqa: PLC0415
@@ -100,7 +106,11 @@ def _served_description(
     if node is not None and status == SOURCE_EXCERPT_REDACTED:
         description = props.get("description")
         return description if isinstance(description, str) else ""
-    if node is not None and status == SOURCE_EXCERPT_INCLUDED:
+    if (
+        node is not None
+        and status == SOURCE_EXCERPT_INCLUDED
+        and props.get("description") == payload.get("description")
+    ):
         return None
     promoted = payload.get("description")
     if not isinstance(promoted, str):
@@ -122,20 +132,35 @@ def _served_title(
     * a node scrubbed before names were marked, whose name was kept, serves a
       neutral one, unless its marker says the name held no source text;
     * a missing node, or one that does not vouch for its excerpt, serves a
-      neutral name when the payload marks its title source-derived.
+      neutral name when the payload marks its title source-derived
+      (``source_text``, or the source's own ``item_title``, which a redaction
+      blanks too).
+
+    A node vouches only for the event whose title it holds
+    (``node.name == payload.title``). The listing serves a row per promotion
+    and judges each by the *current* node, so without that test a source
+    redacted, written again and promoted again would hand the older event's
+    title back through a node that now reads ``included``; an event the node
+    does not hold is judged by its own title as the scrub would judge it
+    (:func:`~trellis.learning.scoring.name_may_hold_source_text`), so an
+    unmarked one fails closed unless it is the bare-id name. A scrubbed node
+    whose marker does not clear its name (none, or ``source_text``) serves the
+    neutral name for every event, held or not.
 
     A promotion title with no marker (promoted before names were marked) is
-    served as promoted: it cannot be told from an ordinary title without the
-    pack data that chose it, and guessing would rename every such precedent.
+    otherwise served as promoted, by a node that holds it or when no node
+    exists: it cannot be told from an ordinary title without the pack data
+    that chose it, and guessing would rename every such precedent.
     ``None`` means serve the title unchanged.
     """
     # Deferred: ``trellis.learning`` imports the retrieve package.
     from trellis.learning.scoring import (  # noqa: PLC0415
         NAME_SOURCE_NEUTRAL,
-        NAME_SOURCE_SOURCE_TEXT,
+        NAME_SOURCES_FROM_SOURCE,
         NAME_SOURCES_WITHOUT_SOURCE_TEXT,
         SOURCE_EXCERPT_INCLUDED,
         SOURCE_EXCERPT_REDACTED,
+        name_may_hold_source_text,
         neutral_precedent_name,
     )
 
@@ -147,11 +172,30 @@ def _served_title(
             name = props.get("name")
             return name if isinstance(name, str) and name else neutral
         status = props.get("source_excerpt_status")
+        holds_this_title = props.get("name") == payload.get("title")
         if status == SOURCE_EXCERPT_REDACTED:
-            return None if marker in NAME_SOURCES_WITHOUT_SOURCE_TEXT else neutral
-        if status == SOURCE_EXCERPT_INCLUDED:
+            if marker not in NAME_SOURCES_WITHOUT_SOURCE_TEXT:
+                return neutral
+            if holds_this_title:
+                return None
+        elif status == SOURCE_EXCERPT_INCLUDED and holds_this_title:
             return None
-    return neutral if payload.get("name_source") == NAME_SOURCE_SOURCE_TEXT else None
+        if not holds_this_title:
+            # Judge the event's own title as the scrub would: an unmarked one
+            # fails closed unless it is the bare-id name.
+            event_name = {
+                "name": payload.get("title"),
+                "name_source": payload.get("name_source"),
+                "intent_family": props.get("intent_family"),
+                "source_item_id": payload.get("source_item_id")
+                or props.get("source_item_id"),
+            }
+            return (
+                neutral
+                if name_may_hold_source_text(event_name, entity_id or "")
+                else None
+            )
+    return neutral if payload.get("name_source") in NAME_SOURCES_FROM_SOURCE else None
 
 
 def list_precedents(

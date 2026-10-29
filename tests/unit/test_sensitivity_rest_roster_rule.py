@@ -13,10 +13,12 @@ rule checks the claim against the module's call graph:
   (``HANDS_REGISTRY``). Handing over means ``registry``, ``knowledge``,
   ``registry.knowledge`` or ``get_registry()`` as a positional or keyword
   argument, and ``getattr`` with a string constant naming a document or vector
-  store counts as naming it. Known limits: a name bound to the registry on
-  another line (``k = registry.knowledge; helper(k)``) is not followed, and
-  ``gated`` shows a clearance call is reached, not that its result is applied;
-  the producers' own tests carry that.
+  store counts as naming it. A local bound to one of those in a plain assignment
+  is followed (``k = registry.knowledge; helper(k)``, also ``registry.operational``,
+  tuple, annotated and ``:=`` forms), in the function that binds it. Known
+  limits: a binding made by ``for``, ``with``, a comprehension or a call's
+  result is not followed, and ``gated`` shows a clearance call is reached, not
+  that its result is applied; the producers' own tests carry that.
 * ``admin-only``: the router is mounted behind ``admin_auth`` in ``app.py``, or
   the decorator carries an admin dependency. Admin clears ``restricted``.
 * ``mutation``: the handler builds the governed ``MutationExecutor``
@@ -256,7 +258,7 @@ def route_names(sources: dict[str, str]) -> set[str]:
 
 
 _DOCUMENT_STORES = frozenset({"document_store", "vector_store"})
-_REGISTRY_ROOTS = frozenset({"registry", "knowledge"})
+_REGISTRY_ROOTS = frozenset({"registry", "knowledge", "operational"})
 
 
 def _chain(expr: ast.expr) -> tuple[ast.expr, list[str]]:
@@ -269,24 +271,76 @@ def _chain(expr: ast.expr) -> tuple[ast.expr, list[str]]:
     return expr, attrs[::-1]
 
 
-def _is_registry_handoff(expr: ast.expr) -> bool:
-    """Whether ``expr`` is the registry, or its whole knowledge bundle.
+def _aliases(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, list[ast.expr]]:
+    """Every expression each local of ``fn`` is bound to in a plain assignment.
 
-    ``registry``, ``knowledge``, ``registry.knowledge``, ``get_registry()`` and
-    ``get_registry().knowledge``: whatever receives one can reach a document
-    store without naming it. ``registry.knowledge.graph_store`` is not one;
-    it hands over a single non-document store. A name bound to the registry
-    on another line is not followed.
+    ``k = registry.knowledge``, ``a = b = x``, ``k: T = x``, ``(k := x)`` and the
+    element-wise tuple form ``k, o = registry.knowledge, registry.operational``.
+    A name bound more than once keeps every binding, since the walk does not
+    know which one reaches a call.
+    """
+    bound: dict[str, list[ast.expr]] = {}
+
+    def bind(target: ast.expr, value: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            bound.setdefault(target.id, []).append(value)
+        elif (
+            isinstance(target, ast.Tuple)
+            and isinstance(value, ast.Tuple)
+            and len(target.elts) == len(value.elts)
+        ):
+            for t, v in zip(target.elts, value.elts, strict=True):
+                bind(t, v)
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                bind(target, node.value)
+        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
+            bind(node.target, node.value)
+    return bound
+
+
+def _is_registry_handoff(
+    expr: ast.expr,
+    aliases: dict[str, list[ast.expr]] | None = None,
+    _seen: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether ``expr`` is the registry, or a whole plane bundle of it.
+
+    ``registry``, ``knowledge``, ``operational``, ``registry.knowledge``,
+    ``registry.operational``, ``get_registry()`` and ``get_registry().knowledge``
+    or ``.operational``: whatever receives one can reach a document store
+    without naming it. ``registry.knowledge.graph_store`` is not one; it hands
+    over a single non-document store. A local in ``aliases`` is the registry
+    wherever one of its bindings is, with the attributes read through it
+    appended, so ``k = registry.knowledge`` makes ``k`` a handoff and
+    ``k.graph_store`` not.
     """
     root, attrs = _chain(expr)
+    if (
+        isinstance(root, ast.Name)
+        and aliases
+        and root.id in aliases
+        and root.id not in _seen
+    ):
+        for binding in aliases[root.id]:
+            extended = binding
+            for attr in attrs:
+                extended = ast.Attribute(value=extended, attr=attr, ctx=ast.Load())
+            if _is_registry_handoff(extended, aliases, _seen | {root.id}):
+                return True
+        return False
     if (
         isinstance(root, ast.Call)
         and isinstance(root.func, ast.Name)
         and root.func.id == "get_registry"
     ):
-        return attrs in ([], ["knowledge"])
+        return attrs in ([], ["knowledge"], ["operational"])
     if isinstance(root, ast.Name) and root.id in _REGISTRY_ROOTS:
-        return attrs == [] or (root.id == "registry" and attrs == ["knowledge"])
+        return attrs == [] or (
+            root.id == "registry" and attrs in (["knowledge"], ["operational"])
+        )
     return False
 
 
@@ -368,8 +422,9 @@ def violations(
             }
             touched = _touched_document_stores(nodes)
             hands_registry = any(
-                _is_registry_handoff(a)
-                for n in nodes
+                _is_registry_handoff(a, _aliases(functions[f]))
+                for f in reached
+                for n in ast.walk(functions[f])
                 if isinstance(n, ast.Call)
                 and not _is_constant_getattr(n)
                 and not (claim == MUTATION and _calls(n, EXECUTOR_CALL))
@@ -427,6 +482,26 @@ def test_every_rest_route_is_rostered_and_its_claim_holds() -> None:
 
 def test_the_known_gaps_only_shrink() -> None:
     assert {k for k, v in ROSTER.items() if v == LEFT_OUT} == KNOWN_GAPS
+
+
+#: Each spelling binds a local to the registry or a plane of it, then hands the
+#: local to a helper. Bodies sit one indent deep inside a route function.
+LOCAL_HANDOFFS = {
+    "knowledge": "k = registry.knowledge\n    return helper(k)",
+    "operational": "o = registry.operational\n    return helper(o)",
+    "keyword": "k = registry.knowledge\n    return helper(store=k)",
+    "get_registry": "r = get_registry()\n    return helper(r)",
+    "get_registry_knowledge": ("k = get_registry().knowledge\n    return helper(k)"),
+    "alias_of_an_alias": "k = registry.knowledge\n    j = k\n    helper(j)",
+    "chained_targets": "a = b = registry.knowledge\n    return helper(b)",
+    "annotated": "k: Any = registry.knowledge\n    return helper(k)",
+    "walrus": "return helper(k := registry.knowledge)\n    helper(k)",
+    "tuple_unpack": "x, k = 1, registry.knowledge\n    return helper(k)",
+    "attribute_of_a_registry_alias": (
+        "r = get_registry()\n    return helper(r.knowledge)"
+    ),
+    "bound_twice": "k = registry.knowledge\n    k = other\n    return helper(k)",
+}
 
 
 class TestTheRuleCatchesADefectiveSubject:
@@ -538,6 +613,62 @@ class TestTheRuleCatchesADefectiveSubject:
     def test_a_free_claim_naming_a_non_document_store_passes(self, body: str) -> None:
         source = f"@router.get('/x')\ndef n():\n    return {body}\n"
         assert violations({"m": source}, {"m:n": FREE}, set()) == []
+
+    @pytest.mark.parametrize("body", LOCAL_HANDOFFS.values(), ids=list(LOCAL_HANDOFFS))
+    def test_a_free_claim_cannot_slip_the_registry_past_the_rule_by_a_local(
+        self, body: str
+    ) -> None:
+        source = f"@router.get('/x')\ndef n():\n    {body}\n"
+        found = violations({"m": source}, {"m:n": FREE}, set())
+        assert any("hands the registry" in f for f in found), found
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "g = registry.knowledge.graph_store\n    return helper(g)",
+            "k = registry.knowledge\n    return helper(k.graph_store)",
+            "k = registry.knowledge\n    return getattr(k, 'graph_store')",
+            "e = registry.operational.event_log\n    return helper(e)",
+            "n = len(registry.knowledge.graph_store.query())\n    return helper(n)",
+            "k = registry.knowledge\n    k = k.graph_store\n    return helper(k.x)",
+        ],
+    )
+    def test_a_local_bound_to_a_non_document_store_passes(self, body: str) -> None:
+        source = f"@router.get('/x')\ndef n():\n    {body}\n"
+        assert violations({"m": source}, {"m:n": FREE}, set()) == []
+
+    def test_a_local_in_a_reached_helper_is_followed(self) -> None:
+        source = (
+            "def dig():\n    k = registry.knowledge\n    return helper(k)\n\n"
+            "@router.get('/x')\ndef n():\n    return dig()\n"
+        )
+        found = violations({"m": source}, {"m:n": FREE}, set())
+        assert any("hands the registry" in f for f in found)
+
+    def test_a_local_is_scoped_to_the_function_that_binds_it(self) -> None:
+        source = (
+            "def dig():\n    k = registry.knowledge\n    return k.graph_store\n\n"
+            "@router.get('/x')\ndef n(k):\n    dig()\n    return helper(k)\n"
+        )
+        assert violations({"m": source}, {"m:n": FREE}, set()) == []
+
+    def test_a_mutation_claim_cannot_hand_a_local_to_another_helper(self) -> None:
+        source = (
+            "@router.post('/x')\ndef w(cmd):\n"
+            "    k = get_registry()\n"
+            "    build_curate_executor(k).execute(cmd)\n"
+            "    return dump_everything(k)\n"
+        )
+        found = violations({"m": source}, {"m:w": MUTATION}, set())
+        assert any("claims mutation but hands the registry" in f for f in found)
+
+    def test_a_mutation_claim_may_give_a_local_to_the_executor(self) -> None:
+        source = (
+            "@router.post('/x')\ndef w(cmd):\n"
+            "    k = get_registry()\n"
+            "    return build_curate_executor(k).execute(cmd)\n"
+        )
+        assert violations({"m": source}, {"m:w": MUTATION}, set()) == []
 
     def test_a_hand_read_registry_handoff_passes(self) -> None:
         source = "@router.get('/x')\ndef n():\n    return helper(registry)\n"
