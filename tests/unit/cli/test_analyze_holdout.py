@@ -24,6 +24,7 @@ from tests.unit.analyze._holdout_fixture import (
     INTENT_MARKER,
     MONDAY,
     HoldoutLog,
+    covariates_payload,
     outcome_payload,
     seed_experiment,
     seed_guardrails,
@@ -161,7 +162,12 @@ def test_rules_the_analysis_cannot_apply_are_printed_in_both_formats(
     assert "population (non_ephemeral): applied. Upstream:" in flat
     assert "pre-treatment (pre_treatment): not applied." in flat
     assert "post-treatment (cut_offs): applied, 1 excluded." in flat
-    assert "residualised permutation (secondary analysis): not applied" in flat
+    # The secondary block is printed even when no join records a covariate.
+    assert (
+        "Secondary (covariate-adjusted, not decisive): brief-length (pre-registered) "
+        "not measurable: no analysed task's join records the covariates" in flat
+    )
+    assert payload["covariate_adjusted"]["status"] == "not_measurable"
 
 
 def test_a_partly_decided_pre_treatment_exclusion_is_printed_in_both_formats(
@@ -622,3 +628,49 @@ def test_the_task_window_is_printed_in_both_formats(log: HoldoutLog) -> None:
     assert "eligible tasks 10 (7.5 per 30 days); analysed 8 (6 per 30 days)" in flat
     assert "whole 60-day window" in flat
     assert "not by the 60-day window" in flat
+
+
+def test_the_covariate_adjusted_block_is_printed_in_both_formats(
+    log: HoldoutLog,
+) -> None:
+    digests = ("0a1b2c3d4e51", "0a1b2c3d4e52")
+    for parent in range(3):
+        for index in range(8):
+            log.task(
+                start=MONDAY + timedelta(hours=3 * index, minutes=parent),
+                parent=f"parent-{parent}",
+                arms=[index % 2 == 1],
+                turns=10 + 3 * parent + (index // 2) + 2 * (index % 2 == 0),
+                covariates=covariates_payload(
+                    brief_chars=100 + 40 * (index // 2) + parent,
+                    agent_type=digests[(index // 2) % 2],
+                ),
+            )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    block = _payload(machine)["covariate_adjusted"]
+    assert block["status"] == "ok"
+    assert [(a["name"], a["preregistered"]) for a in block["adjustments"]] == [
+        ("brief_length", True),
+        ("brief_length_and_agent_type", False),
+    ]
+    assert all(a["n_used"] == 24 for a in block["adjustments"])
+    assert all(a["n_missing_covariate"] == 0 for a in block["adjustments"])
+    flat = _flat(text)
+    first = flat.index(
+        "Secondary (covariate-adjusted, not decisive): brief-length (pre-registered)"
+    )
+    second = flat.index(
+        "Secondary (covariate-adjusted, not decisive): "
+        "brief-length and agent type (exploratory)"
+    )
+    assert first < second
+    assert "served minus withheld" in flat[first:second]
+    assert "24 tasks used, 0 missing a covariate" in flat[second:]
+    for digest in digests:
+        assert digest not in text.stdout
+        assert digest not in machine.stdout
+    assert sum("brief-length" in note for note in _payload(machine)["notes"]) == 1

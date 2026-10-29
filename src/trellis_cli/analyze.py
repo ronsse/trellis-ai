@@ -1804,6 +1804,37 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
     _render_holdout_sessions(report)
 
 
+_ADJUSTMENT_LABELS = {
+    "brief_length": "brief-length (pre-registered)",
+    "brief_length_and_agent_type": "brief-length and agent type (exploratory)",
+}
+
+
+def _render_holdout_secondary(report: HoldoutReport) -> None:
+    """The covariate-adjusted fits, each on a few lines, marked as not decisive."""
+    for adjustment in report.covariate_adjusted.adjustments:
+        label = _ADJUSTMENT_LABELS.get(adjustment.name, adjustment.name)
+        console.print()
+        console.print(
+            f"  [bold]Secondary (covariate-adjusted, not decisive)[/bold]: "
+            f"{escape(label)}"
+        )
+        inference = adjustment.inference
+        if inference is None:
+            console.print(f"    not measurable: {escape(adjustment.reason or '')}")
+            continue
+        if inference.p_value is not None:
+            console.print(
+                f"    served minus withheld {_num(inference.difference)}, 95% CI "
+                f"{_num(inference.ci_low)} to {_num(inference.ci_high)}, "
+                f"two-sided p {_num(inference.p_value, '.4g')}"
+            )
+        console.print(
+            f"    {adjustment.n_used} tasks used, "
+            f"{adjustment.n_missing_covariate} missing a covariate"
+        )
+
+
 def _render_holdout_inference(report: HoldoutReport) -> None:
     inference = report.inference
     console.print()
@@ -1828,6 +1859,7 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
         f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
         "zero weight"
     )
+    _render_holdout_secondary(report)
     power = report.power
     console.print()
     console.print(f"  [bold]Power[/bold] ({escape(power.status)})")

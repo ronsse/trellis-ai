@@ -3427,13 +3427,31 @@ an earlier stop's feedback in a multi-prompt session also excludes a later
 task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
 sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`
-no longer matches the harness's wording. The rule's other half, a first
-retrieval after a commit, is still not applied. `no_retrieval` is split into
+no longer matches the harness's wording. The rule's other half is applied
+from the join's `first_commit_ordinal`: a first retrieval after the session's
+first commit is also excluded, and `pre_treatment_excluded_after_commit` counts
+those. `no_retrieval` is split into
 `never_called`, `errored`, `unparsed` and `empty_answer`, so a transport-failed
-`get_context` no longer reads as never called. Two pre-registered items still
-need fields capture does not record, so the report says so instead of
-guessing: the post-hoc share is `null`, and a note says the
-covariate-residualised permutation is not applied. The guardrails block
+`get_context` no longer reads as never called. The post-hoc share is the
+fraction of decided tasks whose first retrieval came after hook feedback, after
+the first commit or in the last tenth of the session's tool calls; it is `null`
+with its reason when no task carries every position. The report also carries
+the pre-registered covariate-adjusted permutation as a secondary analysis,
+`covariate_adjusted`, which decides nothing and leaves the primary unchanged.
+Capture records two pre-treatment covariates in each join's `covariates` block:
+`brief_chars`, the length of the first user turn it counts as a person's, and
+`agent_type_digest`, a 12-character hash of the sub-agent's type (no text is
+kept). The outcome is regressed on the stratum indicators and `log1p` of the
+brief length (`brief_length`, pre-registered), then again with the agent type's
+indicators (`brief_length_and_agent_type`, exploratory; types with fewer than
+3 tasks are pooled into one level), and the permutation test and bootstrap run
+on the residuals. The arm is never in the fit, the bootstrap holds the fitted
+coefficients fixed, and a task missing a covariate is dropped and counted in
+`n_missing_covariate`, never imputed. An adjustment reads `not_measurable` with
+its reason when no task has the covariates, fewer than 4 residual degrees of
+freedom remain, or no stratum holds both arms; joins written before capture
+recorded the block stay missing until their session is parsed again. The
+guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
 p-value or verdict: PRs created and any commit (each left out when it is the
 primary), log1p commits, tool errors and the re-call rate (tasks whose capture

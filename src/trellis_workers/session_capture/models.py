@@ -142,6 +142,16 @@ class SessionDigest:
     #: by the parser from the outcome tally, in the ordinal space of
     #: :attr:`first_retrieval_ordinal`. A position and never the command.
     first_commit_ordinal: int | None = None
+    #: The character count of the first user record the outcome counts as a
+    #: user turn (see :attr:`OutcomeTally.brief_chars`), or ``None`` when the
+    #: file has none. In a sub-agent's file that is the dispatcher's brief. A
+    #: count and never the text.
+    brief_chars: int | None = None
+    #: A 12-hex-character SHA-256 prefix of the ``agentType`` in a sub-agent
+    #: transcript's ``.meta.json`` sidecar, or ``None`` when there is no
+    #: usable one. A digest rather than the name: the holdout needs only to
+    #: tell one type from another.
+    agent_type_digest: str | None = None
     #: How many Stop or SubagentStop hook feedback messages the transcript
     #: holds, however late. A count rather than a flag so the analysis can
     #: tell "no hook fired" from "the detector matches nothing": see
@@ -247,6 +257,19 @@ class SessionDigest:
             ),
             "first_commit_ordinal": self.first_commit_ordinal,
             "commit_before_first_retrieval": self.commit_before_first_retrieval,
+        }
+
+    def covariates_payload(self) -> dict[str, int | str | None]:
+        """The join's ``covariates``: what was fixed before the session ran.
+
+        ``brief_chars`` is the length of the first user turn and
+        ``agent_type_digest`` an opaque handle for the sub-agent's type, so the
+        pack holdout can adjust its secondary analysis for both. Both are
+        ``None`` when unknown; the holdout never reads that as zero.
+        """
+        return {
+            "brief_chars": self.brief_chars,
+            "agent_type_digest": self.agent_type_digest,
         }
 
     def mark_tool_result(self, use_id: str | None, *, errored: bool) -> None:
