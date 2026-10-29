@@ -405,44 +405,41 @@ def conceal_document_successor(
     return out
 
 
-#: The node property that ``save_knowledge`` writes beside ``document_ids`` when
-#: given an ``evidence_ref``: the same document id, in a second place.
-NODE_EVIDENCE_REF_KEY = "evidence_ref"
+def _node_pointers(node: Mapping[str, Any]) -> set[str]:
+    """Every document id ``node`` names, in ``document_ids`` or its properties.
 
-
-def _node_doc_ids(node: Mapping[str, Any]) -> list[str] | None:
-    """The node's ``document_ids``, or ``None`` when it is not a list of strings.
-
-    A malformed value names nothing and is left as stored, as
-    :func:`_pointer_at` leaves a malformed pointer.
+    The properties are walked as a pack item's metadata is
+    (:func:`_stored_pointers`): the ``evidence_ref`` ``save_knowledge`` writes
+    beside ``document_ids``, and the ``lifecycle.superseded_by`` that
+    ``supersede_entity`` stamps. Only a non-empty string names an id, so a
+    ``document_ids`` that is not a list, and a member that is not a string,
+    name nothing.
     """
     ids = node.get("document_ids")
-    if isinstance(ids, list) and all(isinstance(i, str) for i in ids):
-        return ids
-    return None
-
-
-def _node_pointers(node: Mapping[str, Any]) -> set[str]:
-    """Every document id ``node`` names: ``document_ids`` and ``evidence_ref``."""
-    named = {i for i in _node_doc_ids(node) or () if i}
-    if ref := _pointer_at(node, ("properties", NODE_EVIDENCE_REF_KEY)):
-        named.add(ref)
-    return named
+    named = (
+        {i for i in ids if isinstance(i, str) and i} if isinstance(ids, list) else set()
+    )
+    return named | _stored_pointers(node.get("properties"))
 
 
 def _node_without_pointers(
     node: dict[str, Any], hidden: Collection[str]
 ) -> dict[str, Any]:
-    """``node`` without any ``hidden`` id in ``document_ids`` or ``evidence_ref``.
+    """``node`` without any ``hidden`` id in ``document_ids`` or its properties.
 
     Copy-on-write: ``node`` itself comes back when nothing is dropped, and the
-    stored node (and its ``properties``) is never mutated.
+    stored node (and its ``properties``) is never mutated. A member of
+    ``document_ids`` that is not a string is kept as stored.
     """
-    out = _dropping(node, ("properties", NODE_EVIDENCE_REF_KEY), hidden)
-    ids = _node_doc_ids(out)
-    if ids is not None and any(i in hidden for i in ids):
-        out = {**out, "document_ids": [i for i in ids if i not in hidden]}
-    return out  # type: ignore[no-any-return]
+    props = node.get("properties")
+    shown = _without_pointers(props, hidden) if isinstance(props, dict) else props
+    out = node if shown is props else {**node, "properties": shown}
+    ids = out.get("document_ids")
+    if isinstance(ids, list):
+        kept = [i for i in ids if not (isinstance(i, str) and i in hidden)]
+        if len(kept) != len(ids):
+            out = {**out, "document_ids": kept}
+    return out
 
 
 def conceal_node_pointers(
@@ -453,14 +450,16 @@ def conceal_node_pointers(
     """``nodes`` as a caller at ``clearance`` may be shown them by a graph read.
 
     A node carries no label of its own (#1036), so it is served whole; what it
-    can leak is the id of a document the caller may not read, in two places:
-    its ``document_ids`` and a string ``properties["evidence_ref"]``
+    can leak is the id of a document the caller may not read, in three places:
+    its ``document_ids``, a string ``properties["evidence_ref"]``
     (``save_knowledge`` writes both, the same id, and the document may have
     been labelled up, or the node written by a cleared caller, after the write
-    check). Both drop an unreadable id; the key is removed rather than blanked,
-    and every other property stays. A node's ``document_ids`` that is not a
-    list of strings, and an ``evidence_ref`` that is not a string, are left as
-    stored.
+    check) and the ``properties["lifecycle"]["superseded_by"]`` that
+    ``supersede_entity`` stamps. Each drops an unreadable id; a pointer key is
+    removed rather than blanked, ``lifecycle.state`` and every other property
+    stay, and a ``document_ids`` member that is not a string, an
+    ``evidence_ref`` that is not a string, and a ``document_ids`` that is not a
+    list are left as stored.
 
     The follow-on to :func:`conceal_document_rows` for the pointers a node
     carries, with the same batching (:func:`_unreadable_pointers`): the

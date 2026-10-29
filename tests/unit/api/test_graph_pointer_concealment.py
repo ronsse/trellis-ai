@@ -1,8 +1,9 @@
 """``GET /graph/history`` names no document the key cannot read.
 
 A node carries no label (#1036), so every version is served; the id of a
-document above the caller's clearance, held in a version's ``document_ids`` or
-in its ``evidence_ref`` property, is not. The document itself answers 404 at
+document above the caller's clearance, held in a version's ``document_ids``, in
+its ``evidence_ref`` property or as the ``superseded_by`` of its lifecycle, is
+not. The document itself answers 404 at
 ``GET /documents/{id}``, so an id here would be a name for something the key
 may not touch.
 """
@@ -19,6 +20,7 @@ import trellis_api.app as app_module
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mcp.supersession import supersede_entity
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 
@@ -183,6 +185,63 @@ class TestHistoryConcealsHiddenPointers:
         assert resp.status_code == 200
         assert chunk not in resp.text
         assert resp.json()["versions"][0]["document_ids"] == [OPEN_ID]
+
+
+class TestHistoryConcealsASupersededNodesSuccessor:
+    """``supersede_entity`` stamps ``lifecycle.superseded_by`` with a document id."""
+
+    OLD = "node-old"
+
+    @pytest.fixture(autouse=True)
+    def _stamped(self, registry) -> None:
+        registry.knowledge.graph_store.upsert_node(self.OLD, "entity", {"name": "old"})
+        refused = supersede_entity(
+            registry,
+            node_id=self.OLD,
+            successor=HIDDEN_ID,
+            requested_by="test",
+            clearance="restricted",
+        )
+        assert refused is None, refused
+
+    def _versions(self, client, headers=None) -> list[dict[str, Any]]:
+        resp = client.get(
+            "/api/v1/graph/history",
+            params={"entity_id": self.OLD},
+            headers=headers or {},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["versions"]
+
+    def test_a_key_below_the_label_sees_the_state_and_not_the_successor(
+        self, client, registry, level
+    ):
+        for scopes in _blind(level):
+            versions = self._versions(client, _headers(registry, scopes))
+            assert HIDDEN_ID not in json.dumps(versions), scopes
+            stamped = [v for v in versions if "lifecycle" in v["properties"]]
+            assert stamped, "the stamped version is still served"
+            for version in stamped:
+                assert version["properties"]["lifecycle"]["state"] == "superseded"
+                assert "superseded_by" not in version["properties"]["lifecycle"]
+
+    def test_a_key_that_may_read_the_label_sees_the_successor(
+        self, client, registry, level
+    ):
+        for scopes in _cleared(level):
+            versions = self._versions(client, _headers(registry, scopes))
+            lifecycle = versions[0]["properties"]["lifecycle"]
+            assert lifecycle["superseded_by"] == HIDDEN_ID, scopes
+
+    def test_auth_off_sees_the_node_as_stored(self, client, monkeypatch):
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "off")
+        lifecycle = self._versions(client)[0]["properties"]["lifecycle"]
+        assert lifecycle["superseded_by"] == HIDDEN_ID
+
+    def test_the_stored_node_is_unchanged(self, client, registry):
+        self._versions(client, _headers(registry, ["read"]))
+        stored = registry.knowledge.graph_store.get_node(self.OLD)
+        assert stored["properties"]["lifecycle"]["superseded_by"] == HIDDEN_ID
 
 
 def _pack(client, headers, intent, *, sectioned: bool = False) -> Any:

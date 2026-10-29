@@ -2,8 +2,9 @@
 
 ``get_graph`` (the root and every neighbour), ``get_items`` on an entity id and
 ``get_file_context`` serve a node whole, since a node carries no label (#1036).
-What they drop is a pointer, in ``document_ids`` or the ``evidence_ref``
-property, naming a document above the caller's clearance.
+What they drop is a pointer, in ``document_ids``, the ``evidence_ref`` property
+or the lifecycle's ``superseded_by``, naming a document above the caller's
+clearance.
 
 Ambient state is installed as ``test_sensitivity_surfaces.py`` does it; the
 tools are called unwrapped, so only the clearance decides.
@@ -26,6 +27,7 @@ from tests.unit.mcp.test_sensitivity_surfaces import (
 )
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mcp.supersession import supersede_entity
 
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
@@ -185,3 +187,71 @@ class TestGetFileContext:
             result = get_file_context(["svc/open.py"])
         assert "root claim" in result
         assert HIDDEN not in result
+
+
+class TestSupersededEntity:
+    """``supersede_entity`` stamps ``lifecycle.superseded_by`` with a document id,
+    which the renderers print as a property."""
+
+    @pytest.fixture
+    def stamped(self, seeded: StoreRegistry) -> StoreRegistry:
+        graph = seeded.knowledge.graph_store
+        graph.upsert_node("node-old", "entity", {"name": "old claim"})
+        graph.upsert_node("node-clean", "entity", {"name": "clean claim"})
+        graph.upsert_edge("node-clean", "node-old", "related_to")
+        refused = supersede_entity(
+            seeded,
+            node_id="node-old",
+            successor=HIDDEN,
+            requested_by="test",
+            clearance="restricted",
+        )
+        assert refused is None, refused
+        return seeded
+
+    def test_get_graph_root_shows_the_state_and_not_the_successor(
+        self, stamped: StoreRegistry
+    ) -> None:
+        with as_http(READ):
+            result = get_graph("node-old")
+        assert HIDDEN not in result
+        assert "superseded" in result
+        assert "old claim" in result
+
+    def test_a_superseded_neighbour_shows_no_successor(
+        self, stamped: StoreRegistry
+    ) -> None:
+        with as_http(READ):
+            result = get_graph("node-clean")
+        assert "old claim" in result
+        assert HIDDEN not in result
+
+    def test_get_items_shows_the_state_and_not_the_successor(
+        self, stamped: StoreRegistry
+    ) -> None:
+        with as_http(READ):
+            result = get_items(["node-old"])
+        assert HIDDEN not in result
+        assert "superseded" in result
+
+    @pytest.mark.parametrize(
+        "caller",
+        [lambda: as_http(ADMIN), lambda: as_http(RESTRICTED), as_stdio],
+        ids=["admin", "restricted", "stdio"],
+    )
+    def test_a_restricted_caller_sees_the_successor(
+        self, stamped: StoreRegistry, caller: Any
+    ) -> None:
+        with caller():
+            graph = get_graph("node-old")
+        with caller():
+            items = get_items(["node-old"])
+        assert HIDDEN in graph
+        assert HIDDEN in items
+
+    def test_the_stored_node_is_unchanged(self, stamped: StoreRegistry) -> None:
+        with as_http(READ):
+            get_graph("node-old")
+            get_items(["node-old"])
+        node = stamped.knowledge.graph_store.get_node("node-old")
+        assert node["properties"]["lifecycle"]["superseded_by"] == HIDDEN

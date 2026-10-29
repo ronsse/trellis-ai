@@ -1,8 +1,9 @@
 """A graph node names no document a below-``restricted`` caller may not read.
 
 A node carries no label (#1036), so a graph read serves it whole; what it can
-leak is the id of a document in two places: ``document_ids`` and the string
-``properties["evidence_ref"]`` that ``save_knowledge`` writes beside it. The
+leak is the id of a document in three places: ``document_ids``, the string
+``properties["evidence_ref"]`` that ``save_knowledge`` writes beside it, and the
+``properties["lifecycle"]["superseded_by"]`` that ``supersede_entity`` stamps. The
 helper drops an unreadable id from a copy, judging every id the response names
 in one pass, by the store and never by what else the response holds.
 """
@@ -24,6 +25,7 @@ from trellis.retrieve.sensitivity import (
     conceal_node_pointers,
     conceal_unreadable_successors,
 )
+from trellis.schemas.classification import Lifecycle
 from trellis.schemas.pack import PackItem
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.graph import SQLiteGraphStore
@@ -115,16 +117,22 @@ class TestDocumentIds:
         assert out["document_ids"] == []
         assert "evidence_ref" not in out["properties"]
 
-    @pytest.mark.parametrize(
-        "malformed", ["doc-secret", ["doc-secret", 7], {"doc-secret": 1}, 5, None]
-    )
-    def test_a_document_ids_that_is_not_a_list_of_strings_is_left_as_stored(
+    @pytest.mark.parametrize("malformed", ["doc-secret", {"doc-secret": 1}, 5, None])
+    def test_a_document_ids_that_is_not_a_list_is_left_as_stored(
         self, store: CountingStore, malformed: Any
     ) -> None:
         node = _node(document_ids=malformed)
         (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
         assert out is node
         assert out["document_ids"] == malformed
+
+    def test_a_non_string_member_is_kept_and_the_string_ids_are_still_judged(
+        self, store: CountingStore
+    ) -> None:
+        node = _node(document_ids=["doc-open", 7, "doc-secret", None, ["doc-secret"]])
+        (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+        assert out["document_ids"] == ["doc-open", 7, None, ["doc-secret"]]
+        assert node["document_ids"][2] == "doc-secret"
 
     def test_a_node_with_no_document_ids_key_is_returned_as_is(
         self, store: CountingStore
@@ -476,3 +484,71 @@ class TestPackItemEvidenceRef:
         assert served.item_id == "tool:new"
         assert "evidence_ref" not in served.metadata
         assert node.metadata["evidence_ref"] == "doc-new"
+
+
+def _superseded(successor: str, **properties: Any) -> dict[str, Any]:
+    """A node stamped the way ``supersede_entity`` stamps one."""
+    stamp = Lifecycle(state="superseded", superseded_by=successor)
+    return _node(lifecycle=stamp.model_dump(mode="json"), **properties)
+
+
+class TestSupersededNode:
+    """``lifecycle.superseded_by`` in a node's properties names a document too."""
+
+    def test_an_unreadable_successor_is_dropped_and_the_state_stays(
+        self, store: CountingStore
+    ) -> None:
+        node = _superseded("doc-secret", note="kept")
+        (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+        assert "doc-secret" not in repr(out)
+        assert out["properties"]["lifecycle"]["state"] == "superseded"
+        assert "superseded_by" not in out["properties"]["lifecycle"]
+        assert out["properties"]["note"] == "kept"
+        assert out["properties"]["name"] == "node-1"
+
+    def test_the_stored_node_is_never_mutated(self, store: CountingStore) -> None:
+        node = _superseded("doc-secret")
+        before = copy.deepcopy(node)
+        conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+        assert node == before
+
+    def test_a_readable_successor_is_kept_as_the_same_object(
+        self, store: CountingStore
+    ) -> None:
+        node = _superseded("doc-open")
+        (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+        assert out is node
+
+    def test_a_chunk_successor_is_judged_by_its_parent(
+        self, store: CountingStore
+    ) -> None:
+        chunk = chunk_doc_id("doc-secret", 0)
+        store._inner.put(chunk, "slice", {})
+        (out,) = conceal_node_pointers([_superseded(chunk)], store, "internal")  # type: ignore[arg-type]
+        assert chunk not in repr(out)
+
+    def test_a_restricted_caller_reads_nothing_and_gets_the_same_object(
+        self, store: CountingStore
+    ) -> None:
+        node = _superseded("doc-secret")
+        (out,) = conceal_node_pointers([node], store, "restricted")  # type: ignore[arg-type]
+        assert out is node
+        assert store.reads == []
+
+    def test_all_three_carriers_of_one_id_cost_one_read(
+        self, store: CountingStore
+    ) -> None:
+        node = _superseded("doc-secret", evidence_ref="doc-secret")
+        node["document_ids"] = ["doc-secret"]
+        (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+        assert "doc-secret" not in repr(out)
+        assert store.reads == ["doc-secret"]
+
+    def test_a_malformed_lifecycle_is_left_as_stored(
+        self, store: CountingStore
+    ) -> None:
+        for lifecycle in ("doc-secret", ["doc-secret"], {"superseded_by": 7}, None):
+            node = _node(lifecycle=lifecycle)
+            (out,) = conceal_node_pointers([node], store, "internal")  # type: ignore[arg-type]
+            assert out is node
+        assert store.reads == []
