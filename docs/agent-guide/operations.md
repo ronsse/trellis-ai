@@ -3757,10 +3757,24 @@ above its own clearance, and cannot touch a document it may not read.**
   whether or not the chunk has a row of its own), is a 409 with nothing written.
   The route stores a vector for any id, so it has no "missing document" answer to
   give instead, and an id that names no document is written as before. A raw
-  `data_classification` in a row's `metadata` is a 422 for every caller (a vector
-  row's label is mirrored from its document). A row whose `item_id` is not a
-  string is counted as an error, not coerced to one. A key at `restricted`, auth
-  `off` and a shared secret read no document and are never refused.
+  `data_classification` in a row's `metadata` is a 422 for every caller, auth
+  `off` and `admin` included (a vector row's label is mirrored from its
+  document). A row that is not an object, or whose `metadata` is neither an
+  object nor `null`, is a 422 too. A row whose `item_id` is not a string is
+  counted as an error, not coerced to one. A key at `restricted`, auth `off` and
+  a shared secret are never refused, and the gate reads no document for them.
+- Whatever the caller, a row whose `item_id` names a stored document is written
+  carrying that document's mirrored metadata (`data_classification`,
+  `lifecycle`, `content_tags`, `auto_importance`; the same keys, and the same
+  copy-if-present, remove-if-absent rule, as `sync_vector_metadata`), over
+  anything the row's own `metadata` says. The semantic axis builds a pack item,
+  excerpt included, from this row, so a rewrite that left it unlabelled would
+  serve a restricted document at a lower clearance. A chunk id is mirrored from
+  its own stored document, as the chunk embed path does; the parent's label is
+  not copied onto it but read through the chunk id when the row is served. An id
+  that names no document is written as sent. The trace and memory extraction
+  hooks keep running at `restricted`: they write graph drafts, which target no
+  document.
 - The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
   `/traces`, `/observations` and `/measurements` build their executor at the
   key's clearance, as `/documents` and `/evidence` do, instead of at

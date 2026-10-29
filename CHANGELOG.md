@@ -14,11 +14,21 @@ All notable changes to Trellis will be documented in this file.
   500. `POST /api/v1/vectors` refuses a row whose `item_id` is a document (or a
   chunk of one) above the key's clearance with a 409, judges every row before
   writing any so a refused batch stores nothing, refuses a raw
-  `data_classification` in a row's `metadata` (422), and counts a non-string
-  `item_id` as an error; the route is no longer a known gap in the roster rule.
+  `data_classification` in a row's `metadata` (422, for every caller: `admin` and
+  auth `off` included, since a row's label is its document's and has no other
+  door), and counts a non-string `item_id` as an error; the route is no longer a
+  known gap in the roster rule. A row whose `item_id` names a stored document is
+  written carrying that document's `data_classification`, `lifecycle`,
+  `content_tags` and `auto_importance`, whatever the row's own `metadata` says,
+  so a cleared key re-embedding a restricted or archived document cannot leave a
+  row that serves it at a lower clearance. A row that is not an object (a 500
+  before), or whose `metadata` is neither an object nor `null` (stored as sent,
+  after which every semantic pack failed), is now a 422 with nothing written.
   `POST /links`, `/entities`, `/feedback`, `/traces`, `/observations` and
   `/measurements` build their executor at the key's clearance, not at
-  `restricted`. The `POST /evidence` overwrite refusal keeps naming the document
+  `restricted`; the trace and memory extraction hooks that run after a write are
+  not among them and stay at `restricted`, because graph drafts target no
+  document. The `POST /evidence` overwrite refusal keeps naming the document
   id, and the new `/vectors` refusal does the same; both are documented as the
   accepted posture in the operations guide. A raw `data_classification` in
   `metadata` on `POST /documents` is now a 422 for every caller: a label has one

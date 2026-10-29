@@ -17,8 +17,12 @@ import trellis_api.routes.ingest as ingest_mod
 import trellis_api.routes.observations as observations_mod
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
+from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SemanticSearch
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 
@@ -256,7 +260,12 @@ class TestVectorsWrite:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "upserted": 1, "errors": 0}
-        assert _vector_row(registry, "doc-secret")["metadata"]["title"] == "refreshed"
+        metadata = _vector_row(registry, "doc-secret")["metadata"]
+        assert metadata["title"] == "refreshed"
+        assert (
+            metadata[DATA_CLASSIFICATION_KEY]
+            == label("restricted")[DATA_CLASSIFICATION_KEY]
+        ), "a rewrite must not strip the document's label from its row"
 
     def test_a_chunk_of_a_restricted_parent_is_refused(self, client, registry, seeded):
         chunk_id = chunk_doc_id("doc-secret", 0)
@@ -338,20 +347,236 @@ class TestVectorsWrite:
             client, registry, {}, ("doc-secret", {"metadata": {"title": "t"}})
         )
         assert resp.status_code == 200, resp.text
-        assert _vector_row(registry, "doc-secret")["metadata"]["title"] == "t"
+        metadata = _vector_row(registry, "doc-secret")["metadata"]
+        assert metadata["title"] == "t"
+        assert (
+            metadata[DATA_CLASSIFICATION_KEY]
+            == label("restricted")[DATA_CLASSIFICATION_KEY]
+        ), "auth off is not a way to strip the label from a row"
 
-    def test_a_trusted_caller_reads_no_document(self, client, registry, monkeypatch):
-        """A ``restricted`` caller pays nothing for a gate it cannot trip."""
+    def test_a_trusted_caller_pays_one_read_for_the_mirror_and_none_for_the_gate(
+        self, client, registry, monkeypatch
+    ):
+        """A ``restricted`` caller cannot trip the gate, so the gate reads nothing;
+        the one read is the mirror's, which every caller pays."""
+        store = registry.knowledge.document_store
+        real_get = store.get
+        reads: list[str] = []
 
-        def boom(*_a, **_k):
-            msg = "the document store was read"
-            raise AssertionError(msg)
+        def counting(doc_id):
+            reads.append(doc_id)
+            return real_get(doc_id)
 
-        monkeypatch.setattr(registry.knowledge.document_store, "get", boom)
+        monkeypatch.setattr(store, "get", counting)
         resp = _post_vectors(
             client, registry, _headers(registry, ["admin"]), ("doc-open", {})
         )
         assert resp.status_code == 200, resp.text
+        assert reads == ["doc-open"]
+
+
+def _semantic_pack(registry, clearance):
+    """A pack built from the vector store alone, as the semantic axis builds it."""
+    builder = PackBuilder(
+        strategies=[
+            SemanticSearch(
+                registry.knowledge.vector_store,
+                embedding_fn=lambda _text: _vector(registry),
+            )
+        ],
+        document_store=registry.knowledge.document_store,
+    )
+    return builder.build("failover runbook", clearance=clearance)
+
+
+def _served_ids(pack):
+    return [item.item_id for item in pack.items]
+
+
+ARCHIVED = {"state": "archived", "superseded_by": None}
+
+
+class TestVectorsRewriteKeepsTheDocumentsMirroredMetadata:
+    """The row mirrors its document, so a rewrite may not strip what the
+    semantic axis judges the row by (decision-ledger T-8: a re-put may not lower
+    the stored label)."""
+
+    @pytest.mark.parametrize(
+        "scopes", [["ingest", "restricted"], ["admin"]], ids=["restricted", "admin"]
+    )
+    def test_a_rewrite_of_a_restricted_document_stays_withheld_at_internal(
+        self, client, registry, scopes
+    ):
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, scopes),
+            ("doc-secret", {"metadata": {"title": "t", "content": SECRET[:200]}}),
+        )
+        assert resp.status_code == 200, resp.text
+        row = _vector_row(registry, "doc-secret")
+        assert (
+            row["metadata"][DATA_CLASSIFICATION_KEY]
+            == (label("restricted")[DATA_CLASSIFICATION_KEY])
+        )
+        assert "doc-secret" not in _served_ids(_semantic_pack(registry, "internal"))
+        assert "doc-secret" in _served_ids(_semantic_pack(registry, "restricted"))
+
+    def test_auth_off_rewrite_of_a_restricted_document_stays_withheld(
+        self, client, registry, monkeypatch
+    ):
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "off")
+        resp = _post_vectors(
+            client,
+            registry,
+            {},
+            ("doc-secret", {"metadata": {"content": SECRET[:200]}}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert "doc-secret" not in _served_ids(_semantic_pack(registry, "internal"))
+
+    def test_a_rewrite_of_an_archived_document_stays_archived(self, client, registry):
+        registry.knowledge.document_store.put(
+            "doc-old", OPEN, {"title": "Old", LIFECYCLE_KEY: ARCHIVED}
+        )
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            ("doc-old", {"metadata": {"content": OPEN[:200]}}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, "doc-old")["metadata"][LIFECYCLE_KEY] == ARCHIVED
+        assert "doc-old" not in _served_ids(_semantic_pack(registry, "internal"))
+
+    def test_the_row_takes_every_mirrored_key_from_the_document(self, client, registry):
+        """Present on the document: copied over the caller's. Absent: removed."""
+        tags = {"domain": "ops", "signal_quality": "standard"}
+        registry.knowledge.document_store.put(
+            "doc-tagged", OPEN, {"content_tags": tags, "auto_importance": 0.2}
+        )
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            (
+                "doc-tagged",
+                {
+                    "metadata": {
+                        "content_tags": {"domain": "forged"},
+                        "auto_importance": 0.99,
+                        LIFECYCLE_KEY: ARCHIVED,
+                        "title": "kept",
+                    }
+                },
+            ),
+        )
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("doc-tagged")["metadata"]
+        row = _vector_row(registry, "doc-tagged")["metadata"]
+        assert row["content_tags"] == tags
+        assert row["auto_importance"] == 0.2
+        assert LIFECYCLE_KEY not in row
+        assert row["title"] == "kept", "only the mirrored keys are the document's"
+        assert not vector_metadata_diverges(stored, row)
+
+    def test_a_chunk_row_mirrors_its_own_document_and_is_judged_by_its_parent(
+        self, client, registry
+    ):
+        """A chunk is mirrored as the chunk embed path mirrors it: from its own
+        stored document. Its parent's label is not copied onto it; serving reads
+        the parent through the chunk id, so the row is still withheld."""
+        chunk_id = chunk_doc_id("doc-secret", 0)
+        registry.knowledge.document_store.put(
+            chunk_id, SECRET, {"content_tags": {"domain": "ops"}}
+        )
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest", "restricted"]),
+            (chunk_id, {"metadata": {"content": SECRET[:200]}}),
+        )
+        assert resp.status_code == 200, resp.text
+        row = _vector_row(registry, chunk_id)["metadata"]
+        assert row["content_tags"] == {"domain": "ops"}
+        assert DATA_CLASSIFICATION_KEY not in row
+        assert chunk_id not in _served_ids(_semantic_pack(registry, "internal"))
+
+    def test_an_id_naming_no_document_is_written_as_supplied(self, client, registry):
+        supplied = {"title": "t", "content_tags": {"domain": "ops"}}
+        resp = _post_vectors(
+            client,
+            registry,
+            _headers(registry, ["ingest"]),
+            ("entity:not-a-document", {"metadata": supplied}),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, "entity:not-a-document")["metadata"] == supplied
+
+    def test_a_document_that_cannot_be_read_is_an_error_not_a_stripped_row(
+        self, client, registry, monkeypatch
+    ):
+        """A failed read must not fall through to writing the row unmirrored."""
+
+        def boom(_doc_id):
+            msg = "store down"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry.knowledge.document_store, "get", boom)
+        resp = _post_vectors(
+            client, registry, _headers(registry, ["admin"]), ("doc-secret", {})
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "upserted": 0, "errors": 1}
+        assert _vector_row(registry, "doc-secret") is None
+
+
+class TestVectorsRowShape:
+    """A malformed row is the caller's 422, not a stored poison or a 500."""
+
+    def _post_raw(self, client, registry, rows, scopes=("ingest",)):
+        return client.post(
+            "/api/v1/vectors",
+            json={"vectors": rows},
+            headers=_headers(registry, list(scopes)),
+        )
+
+    @pytest.mark.parametrize("bad", ["x", ["a"], 5, True], ids=repr)
+    def test_metadata_that_is_not_an_object_is_refused_and_nothing_is_written(
+        self, client, registry, bad
+    ):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        resp = self._post_raw(
+            client,
+            registry,
+            [
+                good,
+                {"item_id": "doc-other", "vector": _vector(registry), "metadata": bad},
+            ],
+        )
+        assert resp.status_code == 422, resp.text
+        assert "metadata must be an object" in resp.json()["detail"]
+        assert _vector_row(registry, "doc-open") is None
+        assert _vector_row(registry, "doc-other") is None
+
+    def test_null_metadata_is_stored_as_an_empty_object(self, client, registry):
+        resp = self._post_raw(
+            client,
+            registry,
+            [{"item_id": "entity:n", "vector": _vector(registry), "metadata": None}],
+        )
+        assert resp.status_code == 200, resp.text
+        assert _vector_row(registry, "entity:n")["metadata"] == {}
+
+    @pytest.mark.parametrize("bad", ["x", 5, None, ["a"]], ids=repr)
+    def test_a_row_that_is_not_an_object_is_refused_and_nothing_is_written(
+        self, client, registry, bad
+    ):
+        good = {"item_id": "doc-open", "vector": _vector(registry)}
+        resp = self._post_raw(client, registry, [good, bad])
+        assert resp.status_code == 422, resp.text
+        assert "must be an object" in resp.json()["detail"]
+        assert _vector_row(registry, "doc-open") is None
 
 
 # ── credentialed write routes build their executor at the key's clearance ──

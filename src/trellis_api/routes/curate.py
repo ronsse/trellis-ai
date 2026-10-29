@@ -51,8 +51,9 @@ def _execute_command(cmd: Command, *, clearance: Sensitivity) -> CommandResponse
     """Execute a command through the mutation pipeline.
 
     ``clearance`` is the caller's document clearance (#194). It has no default,
-    so a route that forgets to name one fails at the call; a route whose command
-    touches no document says ``"restricted"`` and why.
+    so a route that forgets to name one fails at the call. A credentialed route
+    passes :func:`request_clearance` of its principal, even when its command
+    names no document, so that a later rule that does cannot be bypassed.
     """
     result = build_curate_executor(get_registry(), clearance=clearance).execute(cmd)
     # Both FAILED (unexpected handler errors) and REJECTED (handler-raised
