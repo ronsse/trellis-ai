@@ -321,6 +321,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Observation reads and entity edges conceal pointers to unreadable
+  documents (follow-up to #1063 and #1072).** `GET /api/v1/observations` and MCP
+  `query_observations` served each observation's `evidence_ref` as stored. It is
+  normally a document id, so a key below a document's label learned the id of a
+  document that `GET /documents/{id}` answers 404 for. Both now take the caller's
+  clearance and drop an `evidence_ref` that names a document the caller may not
+  read; `GET /observations` takes `Depends(authenticate)` like the entity reads,
+  and its roster claim is now `gated`. The edges in the `subgraph` of `GET
+  /api/v1/entities/{id}` were served whole too: a string top-level `evidence_ref`
+  and the pointer paths in an edge's `properties` (`evidence_ref`,
+  `lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`) are dropped on
+  the same terms, in one pass with the entity's and the subgraph's nodes
+  (`conceal_graph_pointers`; `conceal_edge_pointers` for edges alone). A value
+  that is not a string stays as stored, and the stored rows are not changed. No
+  shipped writer puts a document id in an edge today, so this closes a path the
+  schema allows rather than one in use.
+
 - **A document id under `trace-summary:` is refused on every write door
   (#1054).** The trace-embed worker decides a trace is already embedded by
   asking the vector store for a row at `trace-summary:<trace_id>`. #1053 closed
