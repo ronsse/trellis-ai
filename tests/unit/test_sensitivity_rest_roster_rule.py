@@ -19,8 +19,15 @@ rule checks the claim against the module's call graph:
   the producers' own tests carry that.
 * ``admin-only``: the router is mounted behind ``admin_auth`` in ``app.py``, or
   the decorator carries an admin dependency. Admin clears ``restricted``.
-* ``mutation``: the handler builds the governed ``MutationExecutor`` and hands it
-  the registry; the executor's own clearance rule covers it, not this one.
+* ``mutation``: the handler builds the governed ``MutationExecutor``
+  (``build_curate_executor``), and its writes go through it. It keeps every
+  check ``no-document-content`` makes (no document or vector store named, no
+  registry handed to any other helper); the one exemption is the arguments of
+  the ``build_curate_executor(...)`` call itself, which has to be given the
+  registry. The executor has no clearance rule on main yet: the mutation-side
+  rule is a separate PR (#1027), and until it lands this claim is only a
+  statement that the route reads no document content itself, not that the
+  executor withholds one. A later rule can tighten it once the executor does.
 * ``left-out``: a known gap, named in the PR that shipped this rule. The set may
   only shrink.
 
@@ -46,9 +53,9 @@ ADMIN = "admin-only"
 MUTATION = "mutation"
 LEFT_OUT = "left-out"
 
-#: A mutation route's writes go through the governed executor, which owns its
-#: own clearance rule (the mutation-side deny), so the roster only checks that
-#: the route does reach it. A later rule can tighten this claim.
+#: A mutation route builds the governed executor and writes through it. The
+#: executor has no clearance rule on main (PR #1027 adds one), so this names
+#: the one call whose registry argument a ``mutation`` route is excused for.
 EXECUTOR_CALL = "build_curate_executor"
 
 GATE_CALLS = frozenset(
@@ -290,6 +297,11 @@ def _is_constant_getattr(call: ast.Call) -> bool:
     )
 
 
+def _calls(call: ast.Call, name: str) -> bool:
+    """Whether ``call`` is a direct call of the function called ``name``."""
+    return isinstance(call.func, ast.Name) and call.func.id == name
+
+
 def _touched_document_stores(nodes: list[ast.AST]) -> list[str]:
     """Document or vector stores named other than for a bare ``.count``.
 
@@ -349,18 +361,19 @@ def violations(
             hands_registry = any(
                 _is_registry_handoff(a)
                 for n in nodes
-                if isinstance(n, ast.Call) and not _is_constant_getattr(n)
+                if isinstance(n, ast.Call)
+                and not _is_constant_getattr(n)
+                and not (claim == MUTATION and _calls(n, EXECUTOR_CALL))
                 for a in [*n.args, *(k.value for k in n.keywords)]
             )
+            reads_nothing = claim in {FREE, MUTATION}
+            what = "no document content" if claim == FREE else "mutation"
             if claim == GATED and not calls & GATE_CALLS:
                 found.append(f"{key}: claims gated but never reaches a clearance call")
-            elif claim == FREE and touched:
-                found.append(f"{key}: claims no document content but touches {touched}")
-            elif claim == FREE and hands_registry and key not in HANDS_REGISTRY:
-                found.append(
-                    f"{key}: claims no document content but hands the registry "
-                    "to a helper"
-                )
+            elif reads_nothing and touched:
+                found.append(f"{key}: claims {what} but touches {touched}")
+            elif reads_nothing and hands_registry and key not in HANDS_REGISTRY:
+                found.append(f"{key}: claims {what} but hands the registry to a helper")
             elif (
                 claim == ADMIN
                 and module not in admin_modules
@@ -542,6 +555,68 @@ class TestTheRuleCatchesADefectiveSubject:
             "@router.post('/x')\ndef w(cmd):\n    return run(cmd)\n"
         )
         assert violations({"m": helper}, {"m:w": MUTATION}, set()) == []
+
+    @pytest.mark.parametrize(
+        ("shape", "body", "expect"),
+        [
+            (
+                "executor_then_document_read",
+                (
+                    "    build_curate_executor(get_registry()).execute(cmd)\n"
+                    "    return registry.knowledge.document_store.get('a')\n"
+                ),
+                "claims mutation but touches ['document_store']",
+            ),
+            (
+                "executor_then_registry_to_another_helper",
+                (
+                    "    build_curate_executor(get_registry()).execute(cmd)\n"
+                    "    return dump_everything(get_registry())\n"
+                ),
+                "claims mutation but hands the registry to a helper",
+            ),
+            (
+                "executor_in_a_dead_branch",
+                (
+                    "    if False:\n        build_curate_executor(get_registry())\n"
+                    "    return registry.knowledge.vector_store.query([0.0])\n"
+                ),
+                "claims mutation but touches ['vector_store']",
+            ),
+            (
+                "registry_wrapped_inside_the_executor_call",
+                "    return build_curate_executor(dump(get_registry())).execute(cmd)\n",
+                "claims mutation but hands the registry to a helper",
+            ),
+            (
+                "getattr_string_beside_the_executor",
+                (
+                    "    build_curate_executor(get_registry()).execute(cmd)\n"
+                    "    return getattr(registry.knowledge, 'vector_store').get('a')\n"
+                ),
+                "claims mutation but touches ['vector_store']",
+            ),
+        ],
+    )
+    def test_a_mutation_claim_keeps_the_free_checks(
+        self, shape: str, body: str, expect: str
+    ) -> None:
+        source = f"@router.post('/x')\ndef w(cmd):\n{body}"
+        found = violations({"m": source}, {"m:w": MUTATION}, set())
+        assert any(expect in f for f in found), (shape, found)
+
+    def test_the_executor_call_alone_is_the_mutation_exemption(self) -> None:
+        source = (
+            "@router.post('/x')\ndef w(cmd):\n"
+            "    executor = build_curate_executor(get_registry())\n"
+            "    return executor.execute(cmd)\n"
+        )
+        assert violations({"m": source}, {"m:w": MUTATION}, set()) == []
+        keyword = (
+            "@router.post('/x')\ndef w(cmd):\n"
+            "    return build_curate_executor(registry=get_registry()).execute(cmd)\n"
+        )
+        assert violations({"m": keyword}, {"m:w": MUTATION}, set()) == []
 
     def test_the_same_handoff_is_not_free_but_is_a_mutation(self) -> None:
         source = (
