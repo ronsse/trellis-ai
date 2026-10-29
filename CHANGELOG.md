@@ -235,6 +235,45 @@ All notable changes to Trellis will be documented in this file.
   as the latest; a session whose file never changes keeps its older join until a
   watermark reset parses it. `trellis analyze holdout` labels the funnel stage
   "first retrieval after a stop hook's feedback or a commit".
+- **The pack holdout runs its covariate-adjusted secondary analysis, and
+  capture records the two covariates it needs (#1040).** Each join gains a
+  top-level `covariates` block: `brief_chars`, the summed length of the
+  non-harness texts of the first user record the outcome tally counts as a
+  person's turn (no text kept; `None` when there is none), and
+  `agent_type_digest`, a pseudonymous handle, the first 12 hex characters of
+  the SHA-256 of the sub-agent's `agentType` from its sibling
+  `<transcript>.meta.json` (`None` for an absent, unreadable or malformed
+  sidecar, never an error; the sidecar's `description` and `toolUseId` are not
+  read; it is kept to the join payload, which an admin `GET /events` read
+  can return, and no report carries it). The report (`trellis analyze
+  holdout` and its REST payload) gains `covariate_adjusted`: the outcome is
+  regressed, both arms pooled, on the stratum indicators and `log1p(brief_chars)`
+  (`brief_length`, pre-registered), then also on the agent type's indicators
+  (`brief_length_and_agent_type`, exploratory; types with fewer than 3 tasks
+  pool into one level), and the primary's permutation test and bootstrap run on
+  the residuals. The arm is never a column of the fit, so the residuals do not
+  depend on the assignment; the bootstrap holds the fitted coefficients fixed,
+  and the text output says its interval ignores their uncertainty. The result
+  carries its own verdict, `secondary_not_decisive`, never the primary's, and an
+  adjusted run's means are `mean_residual_served` and `mean_residual_withheld`,
+  under no outcome-mean key. Each adjustment also carries
+  `unadjusted_same_subset`, the primary's test on the same tasks' raw outcomes,
+  because a task missing a covariate is dropped and counted
+  (`n_used` of `funnel.analysed`, `n_missing_covariate`), never imputed, so the
+  gap to the primary mixes the adjustment with the subset. `arm_balance_r2` is
+  the share of the arm's within-stratum variance the covariates explain; above
+  0.9 the adjustment reads `not_measurable` (the adjusted difference is not
+  identified), as it does when no task has the covariates, fewer than 4 residual
+  degrees of freedom remain, or no stratum holds both arms. The primary
+  inference, the power simulation and the funnel are unchanged (the secondary
+  analysis draws its own generators after the primary's), the text output prints
+  a "Secondary (covariate-adjusted, not decisive)" block per adjustment, and the
+  report never carries a digest or an id. The note that said the residualised
+  permutation was "not applied" is replaced by one that counts what each
+  adjustment used. A join written before this change has no `covariates` block:
+  until its session is parsed again (a re-parse rewrites the join once) the
+  secondary analysis reads `not_measurable`. A re-parse after a sub-agent's
+  sidecar has gone writes `agent_type_digest: null` over the earlier handle.
 - **`GET /classify/candidates` now requires an admin-scoped key (#1029).** The
   listing serves the keyword and alias text the miners extract from every
   document, hidden ones included, and the payloads carry no document ids, so a

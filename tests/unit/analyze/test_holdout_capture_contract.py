@@ -1,14 +1,16 @@
 """The keys capture writes into a join are the keys the holdout reads.
 
 The core library does not import the workers, so ``trellis.analyze.holdout``
-names the join's ``retrieval_timing`` keys as strings. This parses a
-synthetic transcript with the capture parser, writes the digest's timing
-into a join, and reads it back through the analysis, so renaming a key on
-either side fails here and not silently as ``unknown``.
+names the join's ``retrieval_timing`` and ``covariates`` keys as strings.
+This parses a synthetic transcript with the capture parser, writes the
+digest's timing or covariates into a join, and reads it back through the
+analysis, so renaming a key on either side fails here and not silently as
+``unknown`` or as a missing covariate.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -157,3 +159,66 @@ def test_a_parsed_commit_position_decides_the_commit_half(
     assert report.descriptive.post_hoc_share == pytest.approx(1 / 3)
     pre = next(e for e in report.exclusions if e.name == "pre_treatment")
     assert (pre.applied, pre.excluded, pre.unknown) == (True, 1, 0)
+
+
+def test_parsed_covariates_are_read_by_both_adjustments(
+    log: HoldoutLog, tmp_path: Path
+) -> None:
+    """Sixteen sessions in two parents. Every fourth has no sidecar, so the
+    brief-length fit uses all sixteen and the agent-type fit twelve. The
+    planners are spread over both arms and both parents, so the agent type
+    does not stand in for the arm."""
+    planners = {1, 6, 9, 12}
+    for index in range(16):
+        path = tmp_path / f"s{index}.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("gather what we know about the widget deploy " * (index + 1)),
+                *_served(),
+            ],
+        )
+        if index % 4 != 3:
+            path.with_name(f"s{index}.meta.json").write_text(
+                json.dumps(
+                    {
+                        "agentType": "planner" if index in planners else "reviewer",
+                        "description": "a generic piece of free text",
+                        "toolUseId": "fake-tool-use",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        at = MONDAY + timedelta(hours=index % 8)
+        log.join(
+            f"task-{index}",
+            at=at,
+            pack_ids=[
+                log.pack(at=at - timedelta(minutes=1), withheld=index % 2 == 1, items=2)
+            ],
+            parent=f"parent-{index // 8}",
+            outcome=outcome_payload(turns=5 + index % 5),
+            covariates=parse_session(path).covariates_payload(),
+        )
+    log.sweep()
+
+    report = _analyze(log)
+
+    assert report.funnel.analysed == 16
+    brief, both = report.covariate_adjusted.adjustments
+    assert (brief.name, brief.status, brief.n_used) == ("brief_length", "ok", 16)
+    assert brief.n_missing_covariate == 0
+    assert (both.name, both.status, both.n_used) == (
+        "brief_length_and_agent_type",
+        "ok",
+        12,
+    )
+    assert both.n_missing_covariate == 4
+    # Eight reviewer tasks and four planner tasks: neither is pooled.
+    assert both.agent_type_levels == 2
+    assert both.arm_balance_r2 is not None
+    assert both.arm_balance_r2 < 0.5
+    dumped = report.model_dump_json()
+    assert "reviewer" not in dumped
+    assert "planner" not in dumped
+    assert "generic piece of free text" not in dumped

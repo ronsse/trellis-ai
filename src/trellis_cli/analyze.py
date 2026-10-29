@@ -104,6 +104,7 @@ if TYPE_CHECKING:
         HoldoutGuardrailArm,
         HoldoutHorizon,
         HoldoutReport,
+        HoldoutSecondaryInference,
     )
     from trellis.ops.write_health import ToolWriteStats
 
@@ -1804,6 +1805,48 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
     _render_holdout_sessions(report)
 
 
+_ADJUSTMENT_LABELS = {
+    "brief_length": "brief-length (pre-registered)",
+    "brief_length_and_agent_type": "brief-length and agent type (exploratory)",
+}
+
+
+def _secondary_line(label: str, inference: HoldoutSecondaryInference) -> str:
+    """One secondary test on a line: difference, interval and p."""
+    return (
+        f"    {label}: served minus withheld {_num(inference.difference)}, 95% CI "
+        f"{_num(inference.ci_low)} to {_num(inference.ci_high)}, "
+        f"two-sided p {_num(inference.p_value, '.4g')}"
+    )
+
+
+def _render_holdout_secondary(report: HoldoutReport) -> None:
+    """The covariate-adjusted fits, each on a few lines, marked as not decisive."""
+    for adjustment in report.covariate_adjusted.adjustments:
+        label = _ADJUSTMENT_LABELS.get(adjustment.name, adjustment.name)
+        inference = adjustment.inference
+        unadjusted = adjustment.unadjusted_same_subset
+        caveat = " (CI ignores coefficient uncertainty)" if inference else ""
+        console.print()
+        console.print(
+            f"  [bold]Secondary (covariate-adjusted, not decisive)[/bold]: "
+            f"{escape(label)}{caveat}"
+        )
+        if inference is None:
+            console.print(f"    not measurable: {escape(adjustment.reason or '')}")
+        elif inference.p_value is not None:
+            console.print(_secondary_line("adjusted", inference))
+        if unadjusted is not None and unadjusted.p_value is not None:
+            console.print(_secondary_line("unadjusted, same tasks", unadjusted))
+        if inference is None:
+            continue
+        console.print(
+            f"    {adjustment.n_used} tasks used, "
+            f"{adjustment.n_missing_covariate} missing a covariate; arm "
+            f"balance R2 {_num(adjustment.arm_balance_r2, '.2f')}"
+        )
+
+
 def _render_holdout_inference(report: HoldoutReport) -> None:
     inference = report.inference
     console.print()
@@ -1828,6 +1871,7 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
         f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
         "zero weight"
     )
+    _render_holdout_secondary(report)
     power = report.power
     console.print()
     console.print(f"  [bold]Power[/bold] ({escape(power.status)})")

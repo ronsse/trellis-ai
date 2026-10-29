@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from tests.unit.analyze._holdout_fixture import (
     MONDAY,
     UNTIL,
     HoldoutLog,
+    covariates_payload,
     legacy_timing_payload,
     outcome_payload,
     seed_experiment,
@@ -30,10 +32,14 @@ from tests.unit.analyze._holdout_fixture import (
 )
 from trellis.analyze.holdout import (
     DETECTED_VERDICT,
+    NO_BOTH_ARM_STRATUM,
     NO_EFFECT_VERDICT,
     NO_WITHHELD_ARM,
+    SECONDARY_VERDICT,
     HoldoutAnalysisError,
     HoldoutReport,
+    _arm_balance_r2,
+    _covariates,
     analyze_holdout,
     binomial_two_sided,
     bootstrap_ci,
@@ -1384,3 +1390,899 @@ class TestBinomialAndPower:
         assert 0.0 <= power.power_at_planned_mde <= 1.0
         assert power.mde_at_target_power is not None
         assert power.mde_at_target_power > 0
+
+
+# ---------------------------------------------------------------------------
+# Secondary analysis: covariate-adjusted permutation
+# ---------------------------------------------------------------------------
+
+#: Fake agent-type digests: 12 hex characters, as capture writes them.
+TYPE_A, TYPE_B, TYPE_C, TYPE_D, TYPE_E = (f"0a1b2c3d4e5{n}" for n in "12345")
+
+
+def _write_covariate_tasks(
+    log: HoldoutLog,
+    *,
+    y_of: Any,
+    covariates_of: Any,
+    parents: int = 4,
+    per_parent: int = 12,
+) -> None:
+    """``parents`` strata of ``per_parent`` tasks, arms alternating.
+
+    ``y_of(p, t, withheld, rng)`` is the task's outcome on the log1p turns
+    scale (written exactly: the turns are ``expm1(y)``), ``covariates_of(p, t)``
+    its join's ``covariates`` or ``None``. Task ``t`` of every parent starts
+    ``3 t`` hours into one ISO week, so a parent is one stratum.
+    """
+    rng = random.Random(11)  # noqa: S311 - test RNG, not crypto
+    for p in range(parents):
+        for t in range(per_parent):
+            withheld = t % 2 == 1
+            log.task(
+                start=MONDAY + timedelta(hours=3 * t, minutes=7 * p),
+                parent=f"parent-{p:02d}",
+                arms=[withheld],
+                turns=math.expm1(y_of(p, t, withheld, rng)),
+                covariates=covariates_of(p, t),
+            )
+    log.sweep()
+
+
+def _brief(t: int) -> int:
+    """A brief length that repeats across both arms of every stratum."""
+    return 50 * (t // 2 + 1)
+
+
+def _adjustments(report: HoldoutReport) -> dict[str, Any]:
+    return {a.name: a for a in report.covariate_adjusted.adjustments}
+
+
+def _width(inference: Any) -> float:
+    return inference.ci_high - inference.ci_low
+
+
+class TestCovariateAdjusted:
+    """The secondary analysis: residualise on strata and covariates, then
+    run the primary's test on the residuals. It decides nothing and never
+    changes the primary."""
+
+    def test_the_fit_is_blind_to_the_arm(self, log: HoldoutLog) -> None:
+        """y = 1.0 * served + 0.5 * log1p(brief) + a stratum level, with the
+        brief independent of the arm: adjusting for the brief must leave the
+        effect at about 1.0. A fit that saw the arm would take the effect
+        out of the residuals and read 0."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0
+                + p
+                + (0.0 if withheld else 1.0)
+                + 0.5 * math.log1p(_brief(t))
+                + rng.gauss(0.0, 0.05)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=TYPE_A
+            ),
+        )
+
+        report = _analyze(log)
+
+        brief = _adjustments(report)["brief_length"]
+        assert brief.inference is not None
+        assert brief.inference.status == "ok"
+        assert brief.inference.difference == pytest.approx(1.0, abs=0.05)
+        assert report.inference.difference == pytest.approx(1.0, abs=0.1)
+        assert brief.inference.p_value is not None
+        assert brief.inference.p_value < 0.05
+        assert _width(brief.inference) < _width(report.inference)
+        assert brief.arm_balance_r2 is not None
+        assert brief.arm_balance_r2 < 0.1
+
+    def test_the_two_adjustments_come_in_a_fixed_order_with_their_shape(
+        self, log: HoldoutLog
+    ) -> None:
+        types = (TYPE_A, TYPE_B, TYPE_C)
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + 2.0 * (t // 2 % 3) + rng.gauss(0.0, 0.05)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=types[t // 2 % 3]
+            ),
+        )
+
+        report = _analyze(log)
+
+        block = report.covariate_adjusted
+        assert block.status == "ok"
+        assert [(a.name, a.preregistered) for a in block.adjustments] == [
+            ("brief_length", True),
+            ("brief_length_and_agent_type", False),
+        ]
+        brief, both = block.adjustments
+        assert (brief.n_used, brief.n_missing_covariate) == (48, 0)
+        assert (both.n_used, both.n_missing_covariate) == (48, 0)
+        assert (brief.agent_type_levels, both.agent_type_levels) == (None, 3)
+        # 4 stratum indicators + log1p(brief) [+ two agent-type indicators].
+        assert (brief.df_residual, both.df_residual) == (48 - 5, 48 - 7)
+        # The brief and the type change every two tasks, so within a stratum
+        # neither says which arm a task is in.
+        assert brief.arm_balance_r2 == pytest.approx(0.0, abs=1e-9)
+        assert both.arm_balance_r2 == pytest.approx(0.0, abs=1e-9)
+
+    def test_adjusting_for_a_strong_covariate_narrows_the_interval(
+        self, log: HoldoutLog
+    ) -> None:
+        """Within strata the outcome follows the agent type and not the arm:
+        the exploratory adjustment's interval must be well inside the
+        primary's. Without residualising it would be the primary's."""
+        types = (TYPE_A, TYPE_B, TYPE_C)
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + 2.0 * (t // 2 % 3) + rng.gauss(0.0, 0.1)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=types[t // 2 % 3]
+            ),
+        )
+
+        report = _analyze(log)
+
+        both = _adjustments(report)["brief_length_and_agent_type"]
+        assert both.inference is not None
+        assert report.inference.status == both.inference.status == "ok"
+        assert _width(both.inference) < 0.5 * _width(report.inference)
+        assert both.inference.p_value is not None
+        assert both.inference.p_value > 0.05
+
+    def test_a_missing_or_unusable_covariate_is_dropped_and_counted(
+        self, log: HoldoutLog
+    ) -> None:
+        """Per stratum of 12: tasks 0 and 6 have no brief, 2 and 8 a boolean
+        brief, 3 and 9 a negative one, 1 and 7 no agent type. None of them is
+        read as zero or imputed."""
+
+        def covariates(p: int, t: int) -> dict[str, Any]:
+            brief: Any = _brief(t)
+            agent: Any = TYPE_A
+            match t % 6:
+                case 0:
+                    brief = None
+                case 1:
+                    agent = None
+                case 2:
+                    brief = True
+                case 3:
+                    brief = -5
+            return covariates_payload(brief_chars=brief, agent_type=agent)
+
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=covariates,
+        )
+
+        report = _analyze(log)
+
+        brief, both = report.covariate_adjusted.adjustments
+        assert report.funnel.analysed == 48
+        assert (brief.n_used, brief.n_missing_covariate) == (24, 24)
+        assert (both.n_used, both.n_missing_covariate) == (16, 32)
+        for adjustment in (brief, both):
+            assert adjustment.n_used + adjustment.n_missing_covariate == 48
+            assert adjustment.inference is not None
+        assert report.inference.status == "ok"
+
+    def test_a_task_with_no_covariates_block_is_missing_both(
+        self, log: HoldoutLog
+    ) -> None:
+        """Half the joins predate the block; the other half carry it."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=lambda p, t: (
+                None
+                if p < 2
+                else covariates_payload(brief_chars=_brief(t), agent_type=TYPE_A)
+            ),
+        )
+
+        brief, both = _analyze(log).covariate_adjusted.adjustments
+
+        assert (brief.n_used, brief.n_missing_covariate) == (24, 24)
+        assert (both.n_used, both.n_missing_covariate) == (24, 24)
+
+    def test_no_covariates_anywhere_is_not_measurable_with_one_note(
+        self, log: HoldoutLog
+    ) -> None:
+        seed_experiment(log, effect=1.5, seed=101)
+        log.sweep()
+
+        report = _analyze(log)
+
+        block = report.covariate_adjusted
+        assert block.status == "not_measurable"
+        assert [a.status for a in block.adjustments] == ["not_measurable"] * 2
+        for adjustment in block.adjustments:
+            assert adjustment.reason == (
+                "no analysed task's join records the covariates (joins written "
+                "before capture recorded them)"
+            )
+            assert adjustment.inference is None
+            assert adjustment.n_used == 0
+            assert adjustment.n_missing_covariate == report.funnel.analysed == 120
+        assert sum("brief-length" in note for note in report.notes) == 1
+        assert block.note in report.notes
+        assert "not measurable" in block.note
+        # The primary is untouched by it.
+        assert report.inference.status == "ok"
+
+    def test_no_analysed_task_is_not_measurable_either(self, log: HoldoutLog) -> None:
+        log.task(start=MONDAY, parent=None)
+        log.sweep()
+
+        report = _analyze(log)
+
+        block = report.covariate_adjusted
+        assert report.funnel.analysed == 0
+        assert block.status == "not_measurable"
+        assert {a.reason for a in block.adjustments} == {"no analysed task"}
+
+    def test_the_note_counts_what_each_adjustment_used_and_dropped(
+        self, log: HoldoutLog
+    ) -> None:
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=None if t == 0 else TYPE_A
+            ),
+        )
+
+        report = _analyze(log)
+
+        (note,) = [n for n in report.notes if "brief-length" in n]
+        assert (
+            "brief-length (pre-registered): 48 of 48 analysed tasks used, "
+            "0 lacked a covariate"
+        ) in note
+        assert (
+            "brief-length and agent type (exploratory): 44 of 48 analysed tasks "
+            "used, 4 lacked a covariate"
+        ) in note
+        assert "holds the fitted coefficients fixed" in note
+        assert "unadjusted_same_subset" in note
+
+    @pytest.mark.parametrize(
+        ("third_type_tasks", "levels"),
+        [
+            pytest.param(3, 4, id="three-tasks-keep-their-level"),
+            pytest.param(2, 3, id="two-tasks-are-pooled"),
+        ],
+    )
+    def test_rare_agent_types_pool_into_one_level(
+        self, log: HoldoutLog, third_type_tasks: int, levels: int
+    ) -> None:
+        """Types of 22 and 20 tasks stand alone. A third of 3 stands alone
+        and one of 2 is pooled with the 2- and 1-task types."""
+        assigned = (
+            [TYPE_A] * 22
+            + [TYPE_B] * 20
+            + [TYPE_C] * third_type_tasks
+            + [TYPE_D] * 2
+            + [TYPE_E] * (3 - third_type_tasks + 1)
+        )
+        assert len(assigned) == 48
+        random.Random(5).shuffle(assigned)  # noqa: S311 - test RNG, not crypto
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=assigned[12 * p + t]
+            ),
+        )
+
+        both = _adjustments(_analyze(log))["brief_length_and_agent_type"]
+
+        assert both.agent_type_levels == levels
+        assert both.n_used == 48
+        # 4 strata + log1p(brief) + (levels - 1) agent-type indicators.
+        assert both.df_residual == 48 - (5 + levels - 1)
+
+    def test_too_few_residual_degrees_of_freedom_is_not_measurable(
+        self, log: HoldoutLog
+    ) -> None:
+        """Three strata of three tasks: 9 tasks less a rank of 4 leaves 5 for
+        the brief alone, and the exploratory fit's two agent-type indicators
+        (each type once per stratum, so none is a stratum's copy) leave 3,
+        under the floor of 4."""
+        types = (TYPE_A, TYPE_B, TYPE_C)  # one of each in every stratum
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=100 + 30 * t * (p + 1), agent_type=types[t]
+            ),
+            parents=3,
+            per_parent=3,
+        )
+
+        brief, both = _analyze(log).covariate_adjusted.adjustments
+
+        assert brief.status == "ok"
+        assert brief.df_residual == 5
+        assert both.status == "not_measurable"
+        assert both.reason == (
+            "3 residual degrees of freedom after the fit, fewer than 4"
+        )
+        assert (both.n_used, both.agent_type_levels, both.df_residual) == (9, 3, 3)
+        assert both.inference is None
+
+    def test_a_subset_with_no_stratum_holding_both_arms_is_not_measurable(
+        self, log: HoldoutLog
+    ) -> None:
+        """Every parent's tasks are in one arm, so no stratum has both."""
+        for p in range(4):
+            for t in range(3):
+                log.task(
+                    start=MONDAY + timedelta(hours=3 * t, minutes=7 * p),
+                    parent=f"parent-{p:02d}",
+                    arms=[p % 2 == 1],
+                    turns=10 + t,
+                    covariates=covariates_payload(
+                        brief_chars=100 + 40 * t + p, agent_type=TYPE_A
+                    ),
+                )
+        log.sweep()
+
+        report = _analyze(log)
+
+        assert report.inference.status == NO_BOTH_ARM_STRATUM
+        brief = _adjustments(report)["brief_length"]
+        assert brief.status == "not_measurable"
+        assert brief.reason == NO_BOTH_ARM_STRATUM
+        assert brief.df_residual == 12 - 5
+
+    @pytest.mark.parametrize("effect", [0.0, 1.5], ids=["no-effect", "detected"])
+    def test_a_secondary_never_speaks_in_the_primarys_words(
+        self, log: HoldoutLog, effect: float
+    ) -> None:
+        """Whatever the primary concludes, no secondary result carries its
+        verdict, and the residual means sit under no outcome-mean key."""
+        types = (TYPE_A, TYPE_B, TYPE_C)
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0
+                + p
+                + (0.0 if withheld else effect)
+                + 0.4 * (t // 2 % 3)
+                + rng.gauss(0.0, 0.1)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=types[t // 2 % 3]
+            ),
+        )
+
+        report = _analyze(log)
+
+        assert report.inference.verdict == (
+            DETECTED_VERDICT if effect else NO_EFFECT_VERDICT
+        )
+        secondary = [
+            result
+            for adjustment in report.covariate_adjusted.adjustments
+            for result in (adjustment.inference, adjustment.unadjusted_same_subset)
+        ]
+        assert len(secondary) == 4
+        for result in secondary:
+            assert result is not None
+            assert result.status == "ok"
+            assert result.verdict == SECONDARY_VERDICT
+            assert result.verdict not in {DETECTED_VERDICT, NO_EFFECT_VERDICT}
+        # Neither primary verdict string appears anywhere in the block.
+        block = json.dumps(report.covariate_adjusted.model_dump())
+        assert DETECTED_VERDICT not in block
+        assert NO_EFFECT_VERDICT not in block
+        for adjustment in report.covariate_adjusted.adjustments:
+            adjusted, raw = adjustment.inference, adjustment.unadjusted_same_subset
+            assert adjusted is not None
+            assert raw is not None
+            # An adjusted run's means are residual means, so no outcome-mean
+            # key carries them; the raw run's means are outcome means.
+            assert adjusted.mean_served is None
+            assert adjusted.mean_withheld is None
+            assert adjusted.mean_residual_served is not None
+            assert adjusted.mean_residual_withheld is not None
+            assert adjusted.difference == pytest.approx(
+                adjusted.mean_residual_served - adjusted.mean_residual_withheld
+            )
+            assert abs(adjusted.mean_residual_served) < 1.0
+            assert raw.mean_residual_served is None
+            assert raw.mean_residual_withheld is None
+            assert raw.mean_served == pytest.approx(report.inference.mean_served)
+            assert raw.mean_withheld == pytest.approx(report.inference.mean_withheld)
+            assert raw.mean_served is not None
+            assert raw.mean_served > 2.0
+
+    def test_the_unadjusted_run_is_the_primarys_test_on_the_same_tasks(
+        self, log: HoldoutLog, tmp_path: Path
+    ) -> None:
+        """Only the last two parents carry covariates. Their raw outcomes,
+        tested on their own as a primary, give the figures the adjustment's
+        ``unadjusted_same_subset`` holds, which the full primary does not."""
+
+        def y_of(p: int, t: int, withheld: bool) -> float:
+            return 1.0 + p + 0.6 * (not withheld) + 0.4 * math.sin(17 * p + 5 * t)
+
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: y_of(p, t, withheld),
+            covariates_of=lambda p, t: (
+                None
+                if p < 2
+                else covariates_payload(brief_chars=_brief(t), agent_type=TYPE_A)
+            ),
+        )
+        subset_log = SQLiteEventLog(tmp_path / "subset.db")
+        try:
+            subset = HoldoutLog(subset_log)
+            _write_covariate_tasks(
+                subset,
+                y_of=lambda p, t, withheld, rng: y_of(p + 2, t, withheld),
+                covariates_of=lambda p, t: None,
+                parents=2,
+            )
+            alone = _analyze(subset)
+        finally:
+            subset_log.close()
+
+        report = _analyze(log)
+
+        brief = _adjustments(report)["brief_length"]
+        raw = brief.unadjusted_same_subset
+        assert raw is not None
+        assert (brief.n_used, brief.n_missing_covariate) == (24, 24)
+        assert alone.funnel.analysed == 24
+        assert raw.difference == pytest.approx(alone.inference.difference)
+        assert raw.mean_served == pytest.approx(alone.inference.mean_served)
+        assert raw.mean_withheld == pytest.approx(alone.inference.mean_withheld)
+        assert (raw.strata, raw.strata_both_arms) == (
+            alone.inference.strata,
+            alone.inference.strata_both_arms,
+        )
+        assert alone.inference.p_value is not None
+        assert raw.p_value is not None
+        assert raw.p_value == pytest.approx(alone.inference.p_value, abs=0.06)
+        # It is not the full primary, which tests all 48 tasks.
+        assert report.funnel.analysed == 48
+        assert raw.difference != pytest.approx(report.inference.difference, abs=1e-6)
+        assert raw.strata == 2
+        assert report.inference.strata == 4
+
+    def test_the_covariate_note_says_the_secondary_covers_a_subset(
+        self, log: HoldoutLog
+    ) -> None:
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: 2.0 + p + rng.gauss(0.0, 0.2),
+            covariates_of=lambda p, t: (
+                None
+                if p < 2
+                else covariates_payload(brief_chars=_brief(t), agent_type=TYPE_A)
+            ),
+        )
+
+        report = _analyze(log)
+
+        (note,) = [n for n in report.notes if "brief-length" in n]
+        assert "covers only the analysed tasks that carry its covariates" in note
+        assert "mixes the adjustment with the subset" in note
+        assert "24 of 48 analysed tasks used, 24 lacked a covariate" in note
+
+    def test_the_unadjusted_run_does_not_share_the_primarys_streams(
+        self, log: HoldoutLog
+    ) -> None:
+        """With every task used, the unadjusted run has the primary's
+        difference but resamples from streams of its own: replaying the
+        primary's would give its p-value and interval to the digit."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + 0.12 * (not withheld) + rng.gauss(0.0, 0.3)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=TYPE_A
+            ),
+        )
+
+        report = _analyze(log)
+
+        primary = report.inference
+        raw_results = []
+        for adjustment in report.covariate_adjusted.adjustments:
+            raw = adjustment.unadjusted_same_subset
+            assert raw is not None
+            assert raw.difference == pytest.approx(primary.difference)
+            assert (raw.p_value, raw.ci_low, raw.ci_high) != (
+                primary.p_value,
+                primary.ci_low,
+                primary.ci_high,
+            )
+            raw_results.append(raw)
+        # The two adjustments' unadjusted runs have streams of their own too.
+        first, second = raw_results
+        assert (first.p_value, first.ci_low) != (second.p_value, second.ci_low)
+
+    def test_the_adjusted_and_unadjusted_streams_are_pinned(
+        self, log: HoldoutLog
+    ) -> None:
+        """Children 3 to 6 of the seed drive the adjusted tests and 7 to 10
+        the unadjusted runs. The adjusted figures were taken from the source
+        before the unadjusted runs existed, so appending children moved
+        nothing; the unadjusted ones pin the new streams."""
+        digests = (TYPE_A, TYPE_B, TYPE_C)
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + 0.12 * (not withheld) + rng.gauss(0.0, 0.3)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=digests[t // 2 % 3]
+            ),
+        )
+
+        brief, both = _analyze(log).covariate_adjusted.adjustments
+
+        assert brief.inference is not None
+        assert brief.inference.difference == pytest.approx(0.15477088151950544)
+        assert brief.inference.p_value == pytest.approx(0.074)
+        assert brief.inference.ci_low == pytest.approx(0.01087304586617753)
+        assert brief.inference.ci_high == pytest.approx(0.31758929715456696)
+        assert both.inference is not None
+        assert both.inference.p_value == pytest.approx(0.06)
+        assert both.inference.ci_low == pytest.approx(-0.003682356980984)
+        assert both.inference.ci_high == pytest.approx(0.29491888544439493)
+        assert brief.unadjusted_same_subset is not None
+        assert brief.unadjusted_same_subset.p_value == pytest.approx(0.099)
+        assert brief.unadjusted_same_subset.ci_low == pytest.approx(
+            0.0014142481006423498
+        )
+        assert brief.unadjusted_same_subset.ci_high == pytest.approx(
+            0.31802951358965886
+        )
+        assert both.unadjusted_same_subset is not None
+        assert both.unadjusted_same_subset.p_value == pytest.approx(0.082)
+        assert both.unadjusted_same_subset.ci_low == pytest.approx(0.008144597236544072)
+        assert both.unadjusted_same_subset.ci_high == pytest.approx(0.31441129698486453)
+
+    def test_a_covariate_that_is_the_arm_is_not_measurable(
+        self, log: HoldoutLog
+    ) -> None:
+        """The brief is a function of the arm in every stratum, so the fit
+        has nothing to separate the two: without the gate this reads as an
+        ``ok`` difference of about nothing."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + (0.0 if withheld else 1.5) + rng.gauss(0.0, 0.1)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=300 if t % 2 == 0 else 100, agent_type=TYPE_A
+            ),
+        )
+
+        report = _analyze(log)
+
+        assert report.inference.verdict == DETECTED_VERDICT
+        block = report.covariate_adjusted
+        assert block.status == "not_measurable"
+        for adjustment in block.adjustments:
+            assert adjustment.status == "not_measurable"
+            assert adjustment.inference is None
+            assert adjustment.arm_balance_r2 == pytest.approx(1.0)
+            assert adjustment.reason is not None
+            assert adjustment.reason.startswith(
+                "the covariates explain 1.00 of the arm's within-stratum variance, "
+                "over the 0.9 limit"
+            )
+            assert adjustment.df_residual == 48 - 5
+            # The unadjusted run on the same tasks is still reported.
+            raw = adjustment.unadjusted_same_subset
+            assert raw is not None
+            assert raw.status == "ok"
+            assert raw.difference == pytest.approx(report.inference.difference)
+        assert "not measurable, the covariates explain 1.00" in block.note
+
+    def test_an_agent_type_that_is_the_arm_spares_the_brief_adjustment(
+        self, log: HoldoutLog
+    ) -> None:
+        """Served tasks all one type and withheld tasks all another: the
+        exploratory adjustment is refused and the brief-length one stands."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + (0.0 if withheld else 1.5) + rng.gauss(0.0, 0.1)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=TYPE_B if t % 2 else TYPE_A
+            ),
+        )
+
+        report = _analyze(log)
+
+        brief, both = report.covariate_adjusted.adjustments
+        assert report.covariate_adjusted.status == "ok"
+        assert brief.status == "ok"
+        assert brief.arm_balance_r2 == pytest.approx(0.0, abs=1e-9)
+        assert brief.inference is not None
+        assert brief.inference.difference == pytest.approx(1.5, abs=0.1)
+        assert both.status == "not_measurable"
+        assert both.inference is None
+        assert both.agent_type_levels == 2
+        assert both.arm_balance_r2 == pytest.approx(1.0)
+        assert both.reason is not None
+        assert both.reason.startswith("the covariates explain 1.00 of the arm's")
+        assert both.unadjusted_same_subset is not None
+        assert both.unadjusted_same_subset.status == "ok"
+
+    @pytest.mark.parametrize(
+        ("leak", "refused"),
+        [
+            pytest.param(2.0, False, id="explains-under-the-limit"),
+            pytest.param(4.5, True, id="explains-over-the-limit"),
+        ],
+    )
+    def test_the_arm_balance_limit_sits_at_nine_tenths(
+        self, log: HoldoutLog, leak: float, refused: bool
+    ) -> None:
+        """The brief's log carries ``leak`` times the arm plus a within-pair
+        trend, so it explains about 0.79 (leak 2) or 0.95 (leak 4.5) of the
+        arm's within-stratum variance."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + (0.0 if withheld else 0.3) + rng.gauss(0.0, 0.3)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=round(math.expm1(4 + leak * (t % 2) + 0.3 * (t // 2))),
+                agent_type=TYPE_A,
+            ),
+        )
+
+        brief = _adjustments(_analyze(log))["brief_length"]
+
+        assert brief.arm_balance_r2 is not None
+        if refused:
+            assert 0.9 < brief.arm_balance_r2 < 0.99
+            assert brief.status == "not_measurable"
+        else:
+            assert 0.7 < brief.arm_balance_r2 < 0.9
+            assert brief.status == "ok"
+            assert brief.inference is not None
+
+    def test_the_residual_degrees_of_freedom_floor_is_four(
+        self, log: HoldoutLog, tmp_path: Path
+    ) -> None:
+        """One stratum, the brief alone: six tasks leave 6 - 2 = 4 degrees of
+        freedom, which is enough, and five leave 3, which is not."""
+        results = {}
+        for per_parent in (6, 5):
+            event_log = SQLiteEventLog(tmp_path / f"floor-{per_parent}.db")
+            try:
+                _write_covariate_tasks(
+                    HoldoutLog(event_log),
+                    y_of=lambda p, t, withheld, rng: 2.0 + rng.gauss(0.0, 0.2),
+                    covariates_of=lambda p, t: covariates_payload(
+                        brief_chars=_brief(t), agent_type=TYPE_A
+                    ),
+                    parents=1,
+                    per_parent=per_parent,
+                )
+                results[per_parent] = _adjustments(_analyze(HoldoutLog(event_log)))[
+                    "brief_length"
+                ]
+            finally:
+                event_log.close()
+
+        at_the_floor, under = results[6], results[5]
+        assert (at_the_floor.n_used, at_the_floor.df_residual) == (6, 4)
+        assert at_the_floor.status == "ok"
+        assert at_the_floor.inference is not None
+        assert (under.n_used, under.df_residual) == (5, 3)
+        assert under.status == "not_measurable"
+        assert under.reason == (
+            "3 residual degrees of freedom after the fit, fewer than 4"
+        )
+        assert under.inference is None
+        assert under.unadjusted_same_subset is None
+
+    def test_the_primary_is_the_same_with_and_without_covariates(
+        self, log: HoldoutLog, tmp_path: Path
+    ) -> None:
+        """Same rows, same seed: the primary and the power simulation do not
+        move when the joins carry covariates."""
+        other_log = SQLiteEventLog(tmp_path / "plain.db")
+        try:
+            plain = HoldoutLog(other_log)
+            for target, with_cov in ((log, True), (plain, False)):
+                _write_covariate_tasks(
+                    target,
+                    y_of=lambda p, t, withheld, rng: (
+                        1.0 + p + 0.12 * (not withheld) + rng.gauss(0.0, 0.3)
+                    ),
+                    covariates_of=lambda p, t, on=with_cov: (
+                        covariates_payload(brief_chars=_brief(t), agent_type=TYPE_A)
+                        if on
+                        else None
+                    ),
+                )
+
+            with_covariates = _analyze(log)
+            without = _analyze(plain)
+        finally:
+            other_log.close()
+
+        assert with_covariates.covariate_adjusted.status == "ok"
+        assert without.covariate_adjusted.status == "not_measurable"
+        assert with_covariates.inference == without.inference
+        assert with_covariates.power == without.power
+        assert with_covariates.descriptive == without.descriptive
+
+    def test_the_primary_keeps_its_seeded_streams(self, log: HoldoutLog) -> None:
+        """Children 0 and 1 of the seed drive the primary's permutations and
+        bootstrap. The figures below were taken from the source as it stood
+        before the secondary analysis existed (seed 7, 999 permutations, 400
+        bootstraps); adding children to the spawn must not move them."""
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + 0.12 * (not withheld) + rng.gauss(0.0, 0.3)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=TYPE_A
+            ),
+        )
+
+        inference = _analyze(log).inference
+
+        assert inference.difference == pytest.approx(0.15477088151950508)
+        assert inference.p_value == pytest.approx(0.103)
+        assert inference.ci_low == pytest.approx(0.0017409438710435726)
+        assert inference.ci_high == pytest.approx(0.31136976263984073)
+
+    @pytest.mark.parametrize(
+        ("few", "many"),
+        [(3, 11), (7, 11), (3, 7)],
+        ids=["primary-and-power", "first-secondary-pairs", "primary-in-the-old-seven"],
+    )
+    def test_a_seed_sequence_child_does_not_depend_on_the_child_count(
+        self, few: int, many: int
+    ) -> None:
+        fewer = np.random.SeedSequence(7).spawn(few)
+        more = np.random.SeedSequence(7).spawn(many)
+        for index in range(few):
+            assert (
+                np.random.default_rng(fewer[index]).random(4).tolist()
+                == np.random.default_rng(more[index]).random(4).tolist()
+            )
+
+    def test_no_digest_reaches_the_report(self, log: HoldoutLog) -> None:
+        types = (TYPE_A, TYPE_B, TYPE_C)
+        _write_covariate_tasks(
+            log,
+            y_of=lambda p, t, withheld, rng: (
+                1.0 + p + 2.0 * (t // 2 % 3) + rng.gauss(0.0, 0.1)
+            ),
+            covariates_of=lambda p, t: covariates_payload(
+                brief_chars=_brief(t), agent_type=types[t // 2 % 3]
+            ),
+        )
+
+        dumped = _analyze(log).model_dump_json()
+
+        for digest in types:
+            assert digest not in dumped
+        assert "agent_type_digest" not in dumped
+
+
+class TestReadingTheCovariates:
+    """What the unit takes from the join's ``covariates`` block."""
+
+    @pytest.mark.parametrize(
+        ("block", "expected"),
+        [
+            pytest.param(
+                {"brief_chars": 120, "agent_type_digest": "abc123def456"},
+                (120.0, "abc123def456"),
+                id="usable",
+            ),
+            pytest.param(
+                {"brief_chars": 0, "agent_type_digest": None},
+                (0.0, None),
+                id="zero-is-a-length",
+            ),
+            pytest.param({"brief_chars": 12.0}, (12.0, None), id="float-length"),
+            pytest.param({"brief_chars": None}, (None, None), id="none"),
+            pytest.param({"brief_chars": True}, (None, None), id="bool"),
+            pytest.param({"brief_chars": -1}, (None, None), id="negative"),
+            pytest.param({"brief_chars": float("nan")}, (None, None), id="nan"),
+            pytest.param({"brief_chars": float("inf")}, (None, None), id="inf"),
+            pytest.param({"brief_chars": "120"}, (None, None), id="string-length"),
+            pytest.param({"agent_type_digest": ""}, (None, None), id="empty-digest"),
+            pytest.param({"agent_type_digest": 12}, (None, None), id="int-digest"),
+            pytest.param({"agent_type_digest": ["a"]}, (None, None), id="list-digest"),
+            pytest.param({}, (None, None), id="empty-block"),
+        ],
+    )
+    def test_each_covariate_is_validated_alone(
+        self, block: dict[str, Any], expected: tuple[float | None, str | None]
+    ) -> None:
+        assert _covariates({"covariates": block}) == expected
+
+    @pytest.mark.parametrize("raw", [None, [], "x", 3, True])
+    def test_a_block_that_is_not_an_object_has_neither(self, raw: object) -> None:
+        assert _covariates({"covariates": raw}) == (None, None)
+
+    def test_a_join_without_the_block_has_neither(self) -> None:
+        assert _covariates({}) == (None, None)
+
+
+class TestArmBalanceR2:
+    """The figure is the arm's within-stratum variance a design explains.
+
+    Every fixture above alternates the arms, so each stratum is half served
+    and the within-stratum and total sums of squares coincide. These cases
+    have unequal served shares, where they do not."""
+
+    @staticmethod
+    def _reference(strata: np.ndarray, covariate: np.ndarray, arm: np.ndarray) -> float:
+        """Demean the arm and the covariate inside each stratum, then take
+        the R2 of the one-variable regression through the origin."""
+        a = arm.astype(float).copy()
+        x = covariate.copy()
+        for level in np.unique(strata):
+            rows = strata == level
+            a[rows] -= a[rows].mean()
+            x[rows] -= x[rows].mean()
+        beta = float(x @ a) / float(x @ x)
+        return 1.0 - float(np.sum((a - beta * x) ** 2)) / float(np.sum(a**2))
+
+    def test_unequal_served_shares_use_the_within_stratum_denominator(
+        self,
+    ) -> None:
+        rng = np.random.default_rng(3)
+        strata = np.repeat(np.arange(4), 12)
+        arm = np.zeros(48, dtype=bool)
+        for level, served in enumerate((11, 1, 6, 6)):
+            arm[level * 12 : level * 12 + served] = True
+        covariate = arm.astype(float) + rng.normal(0.0, 0.12, size=48)
+        stratum_columns = (strata[:, None] == np.arange(4)[None, :]).astype(float)
+        design = np.column_stack([stratum_columns, covariate])
+
+        r2 = _arm_balance_r2(design, stratum_columns, arm)
+        total = 1.0 - float(
+            np.sum(
+                (
+                    arm
+                    - design @ np.linalg.lstsq(design, arm.astype(float), rcond=None)[0]
+                )
+                ** 2
+            )
+        ) / float(np.sum((arm - arm.mean()) ** 2))
+
+        assert r2 == pytest.approx(self._reference(strata, covariate, arm), abs=1e-9)
+        assert abs(r2 - total) > 0.01
+
+    def test_an_arm_constant_inside_every_stratum_reads_as_explained(
+        self,
+    ) -> None:
+        strata = np.array([0, 0, 1, 1])
+        arm = np.array([True, True, False, False])
+        stratum_columns = (strata[:, None] == np.arange(2)[None, :]).astype(float)
+        design = np.column_stack([stratum_columns, np.ones(4)])
+
+        assert _arm_balance_r2(design, stratum_columns, arm) == 1.0
