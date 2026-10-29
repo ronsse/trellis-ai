@@ -1775,16 +1775,22 @@ class TestRedactedChunksSurviveMoveAndPrune:
     covered here: the parent row is deleted as before.
     """
 
+    @pytest.fixture(params=["middle", "last"])
+    def position(self, request) -> str:
+        """Which chunk is redacted: an off-by-one over the chunk range spares
+        the middle one and deletes the last."""
+        return request.param
+
     @staticmethod
-    def _chunked_note(registry, vault: Path) -> tuple[str, int, str]:
-        """Sync a chunked note and redact its middle chunk; return the ids."""
+    def _chunked_note(registry, vault: Path, position: str) -> tuple[str, int, str]:
+        """Sync a chunked note and redact one chunk; return the ids."""
         (vault / "long.md").write_text(_long_markdown())
         sync_corpus(registry, vault, source_system="obsidian")
         parent_id = corpus_doc_id("obsidian", "long.md")
         docs = registry.knowledge.document_store
         count = docs.get(parent_id)["metadata"]["chunk_count"]
         assert count >= 3
-        redacted_id = chunk_doc_id(parent_id, 1)
+        redacted_id = chunk_doc_id(parent_id, 1 if position == "middle" else count - 1)
         make_tombstone(docs, registry.knowledge.vector_store, redacted_id)
         return parent_id, count, redacted_id
 
@@ -1792,11 +1798,11 @@ class TestRedactedChunksSurviveMoveAndPrune:
     def _tombstone_warnings(report) -> list[dict[str, Any]]:
         return [w for w in report.warnings if w["kind"] == "redaction_tombstone"]
 
-    def test_a_redacted_chunk_survives_a_move(self, registry, vault):
+    def test_a_redacted_chunk_survives_a_move(self, registry, vault, position):
         """Defective subject: drop the tombstone skip in ``_delete_document_tree``
         and the old chunk row is gone after the rename, so the file coming back
         under its old path writes the redacted text under the same id."""
-        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        parent_id, count, redacted_id = self._chunked_note(registry, vault, position)
         docs = registry.knowledge.document_store
         (vault / "long.md").rename(vault / "sub" / "moved.md")
 
@@ -1820,9 +1826,9 @@ class TestRedactedChunksSurviveMoveAndPrune:
             assert docs.get(chunk_doc_id(new_parent_id, index))["content"] != ""
 
     def test_the_old_path_coming_back_still_does_not_refill_the_chunk(
-        self, registry, vault
+        self, registry, vault, position
     ):
-        _parent_id, _count, redacted_id = self._chunked_note(registry, vault)
+        _parent_id, _count, redacted_id = self._chunked_note(registry, vault, position)
         docs = registry.knowledge.document_store
         (vault / "long.md").rename(vault / "sub" / "moved.md")
         sync_corpus(registry, vault, source_system="obsidian")
@@ -1838,10 +1844,10 @@ class TestRedactedChunksSurviveMoveAndPrune:
             "doc_id": redacted_id,
         } in back.warnings
 
-    def test_a_redacted_chunk_survives_a_prune(self, registry, vault):
+    def test_a_redacted_chunk_survives_a_prune(self, registry, vault, position):
         """Defective subject: drop the tombstone skip in ``_delete_document_tree``
         and the prune deletes the tombstone with the rest of the tree."""
-        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        parent_id, count, redacted_id = self._chunked_note(registry, vault, position)
         docs = registry.knowledge.document_store
         (vault / "long.md").unlink()
 
@@ -1859,11 +1865,11 @@ class TestRedactedChunksSurviveMoveAndPrune:
         ]
 
     def test_a_dry_run_prune_deletes_nothing_and_predicts_the_warning(
-        self, registry, vault
+        self, registry, vault, position
     ):
         """Defective subject: let the dry-run branch call the deleter and rows
         vanish; drop the prediction and the warning is missing from the plan."""
-        parent_id, count, redacted_id = self._chunked_note(registry, vault)
+        parent_id, count, redacted_id = self._chunked_note(registry, vault, position)
         docs = registry.knowledge.document_store
         rows_before = docs.count()
         (vault / "long.md").unlink()

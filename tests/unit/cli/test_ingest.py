@@ -1445,7 +1445,7 @@ class TestIngestDbtManifestLeavesATombstoneAlone:
         self, tmp_path: Path, embed_calls: list[str]
     ) -> None:
         """Defective subject: drop the ``except`` in ``_index_dbt_descriptions``
-        and the command exits 1 on the traceback."""
+        and the command exits 2 with a ``redaction_tombstone_overwrite`` error."""
         from trellis.core.document_write import is_redaction_tombstone
         from trellis_cli.stores import get_document_store
 
