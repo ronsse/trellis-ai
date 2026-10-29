@@ -10,12 +10,14 @@ the store judging the named document, never the query or the candidate pool.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
 
 import trellis.retrieve.sensitivity as sensitivity_mod
+import trellis.retrieve.strategies as strategies_mod
 import trellis_api.app as app_module
 from tests.unit.retrieve.test_sensitivity import _lifecycle, label
 from trellis.auth import generate_api_key
@@ -147,9 +149,31 @@ def _fetch(client, headers, surface) -> tuple[str, dict[str, dict[str, Any]]]:
     return resp.text, {r[key]: r["metadata"] for r in rows}
 
 
-#: Fields two identical pack requests do not share: the id minted per request,
-#: the recency-decayed scores (low digits drift) and the timing.
-_VOLATILE = frozenset({"pack_id", "score_breakdown", "relevance_score", "duration_ms"})
+@pytest.fixture
+def frozen_recency_clock(registry, monkeypatch):
+    """Every recency decay in a pack reads one instant, taken after the seed.
+
+    Recency decay reads the wall clock once per item, not once per request. The
+    fixture's documents are written in a burst, so those with the same token
+    count tie on keyword score to ~1e-10 and order on age alone; the write gaps
+    are a fraction of a millisecond, the same size as the per-item clock
+    skew a busy box adds. Two identical requests can then swap two tied items,
+    and with them the body each carries. A frozen clock removes the skew.
+    """
+    frozen = datetime.now(UTC)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(strategies_mod, "datetime", _Frozen)
+
+
+#: Fields two identical pack requests do not share: the id minted per request
+#: and the timing. Scores are not here: with ``frozen_recency_clock`` they are
+#: exact, so a drift in one is a failure rather than noise.
+_VOLATILE = frozenset({"pack_id", "duration_ms"})
 
 
 def _scrub(node: Any) -> Any:
@@ -272,6 +296,7 @@ class TestNothingChangesForAReaderOfEverything:
                 assert served[doc_id] == stored
         assert "doc-secret" in text
 
+    @pytest.mark.usefixtures("frozen_recency_clock")
     @pytest.mark.parametrize("surface", SURFACES)
     def test_the_response_is_byte_identical_with_the_concealment_removed(
         self, client, registry, headers, monkeypatch, surface
