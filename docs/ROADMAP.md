@@ -88,6 +88,18 @@ open, and its remaining work is tracked in #1029.
   withheld from packs and search for a caller without the clearance (roadmap §3.H.1 (a));
   the mutation-side deny, (b), merged as #1027 on 2026-10-29.
 
+**N4 · Read the pack holdout.** The holdout withholds a share of packs so the effect of
+serving them can be measured, and an experiment nobody reads decides nothing. This gate is
+the read. The withholding rate is an owner setting and is not part of it.
+
+- Acceptance: `trellis analyze holdout --format json` reports `inference.status == "ok"`,
+  with `power.realised_n` at or above `power.planned_n`, or the readout records why not.
+  A non-`ok` `inference.status` names the reason, and when `realised_n` falls short,
+  `funnel` counts the excluded tasks by reason. `ok` means the primary analysis ran, not
+  that it found an effect.
+- Method: [`operations.md` § `trellis analyze holdout`](agent-guide/operations.md#trellis-analyze-holdout).
+  The command is read-only.
+
 ## 4. Next
 
 **X1 · Close the judged → outcome loop.** `memory_op.judged` is roughly 25× denser than
