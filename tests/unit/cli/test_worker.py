@@ -2997,6 +2997,415 @@ class TestEnrichSkipsRedactionTombstones:
         assert older["metadata"]["content_tags"]["classified_mode"] == "enrichment"
 
 
+class TestEnrichScansPastTheNewestWindow:
+    """``worker enrich`` pages past its first window until ``--limit`` are found.
+
+    The selector used to read one page of the newest ``max(limit * 5, limit)``
+    rows and filter it, so once that window held only enriched rows, precedent
+    rows and tombstones it selected nothing however many older documents were
+    never enriched. It now pages newest-first until ``--limit`` candidates are
+    found, the store ends, or ``scan_cap`` rows have been read.
+
+    Defective subjects, each named by the test that fails: read one page only
+    (the older-rows tests); leave ``offset`` at 0 (the older-rows and offset
+    tests); drop the row cap from the loop (the cap test); report ``capped``
+    even when the store ended (the store-ends test); keep reading after
+    ``limit`` is met (the stops-early test); drop the ``seen`` check (the
+    no-duplicates test).
+    """
+
+    _CANNED = json.dumps(
+        {
+            "tags": ["alpha"],
+            "class": "reference",
+            "summary": "A summary.",
+            "importance": 0.6,
+            "tag_confidence": 0.9,
+            "class_confidence": 0.9,
+        }
+    )
+
+    @pytest.fixture(autouse=True)
+    def _small_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A few dozen rows span several pages instead of fitting in one."""
+        monkeypatch.setattr(worker, "_ENRICH_SCAN_PAGE_FLOOR", 4)
+
+    @pytest.fixture
+    def clock(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        return fake_document_clock(monkeypatch)
+
+    @staticmethod
+    def _put(
+        doc_store: Any,
+        clock: dict[str, Any],
+        doc_id: str,
+        *,
+        enriched: bool = False,
+    ) -> None:
+        """Insert one row stamped a second after the previous one."""
+        from datetime import timedelta
+
+        clock["now"] += timedelta(seconds=1)
+        metadata: dict[str, Any] = {"title": doc_id}
+        if enriched:
+            metadata["content_tags"] = {"classified_mode": "enrichment"}
+        doc_store.put(doc_id, f"note {doc_id}", metadata)
+
+    @staticmethod
+    def _spy(
+        monkeypatch: pytest.MonkeyPatch,
+        doc_store: Any,
+        *,
+        after_first_call: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Record every ``list_documents`` call's keywords; return the record."""
+        calls: list[dict[str, Any]] = []
+        real = doc_store.list_documents
+
+        def spy(**kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(kwargs)
+            rows = real(**kwargs)
+            if after_first_call is not None and len(calls) == 1:
+                after_first_call()
+            return rows
+
+        monkeypatch.setattr(doc_store, "list_documents", spy)
+        return calls
+
+    def _older_rows_behind_enriched(
+        self, doc_store: Any, clock: dict[str, Any]
+    ) -> None:
+        for i in range(3):
+            self._put(doc_store, clock, f"old-{i}")
+        for i in range(25):
+            self._put(doc_store, clock, f"new-{i:02d}", enriched=True)
+
+    def test_older_unenriched_rows_behind_the_window_are_selected(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._older_rows_behind_enriched(doc_store, clock)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=2)
+
+        assert [c["doc_id"] for c in selection.candidates] == ["old-2", "old-1"]
+        # Past the old window of ``limit * 5`` rows, in whole pages.
+        assert selection.scanned > 2 * 5
+        assert selection.scanned == 28
+        assert selection.capped is False
+
+    def test_the_older_rows_are_reached_through_the_enrich_command(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any], monkeypatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._older_rows_behind_enriched(doc_store, clock)
+        llm = _CountingLLM(self._CANNED)
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda _consumer, *, command: llm
+        )
+
+        result = runner.invoke(
+            app, ["worker", "enrich", "--limit", "2", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["selected"] == 2
+        assert data["enriched"] == 2
+        assert len(llm.prompts) == 2
+        for doc_id in ("old-2", "old-1"):
+            row = doc_store.get(doc_id)
+            assert row is not None
+            assert row["metadata"]["content_tags"]["classified_mode"] == "enrichment"
+        untouched = doc_store.get("old-0")
+        assert untouched is not None
+        assert "content_tags" not in untouched["metadata"]
+
+    def test_a_window_of_enriched_tombstone_and_precedent_rows_does_not_hide_them(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(3):
+            self._put(doc_store, clock, f"old-{i}")
+        skipped: set[str] = set()
+        for i in range(24):
+            kind = i % 3
+            if kind == 0:
+                doc_id = f"new-{i:02d}"
+                self._put(doc_store, clock, doc_id, enriched=True)
+            elif kind == 1:
+                doc_id = f"gone-{i:02d}"
+                self._put(doc_store, clock, doc_id)
+                _redact_row(doc_store, doc_id)
+                skipped.add(doc_id)
+            else:
+                doc_id = f"precedent://learning/p{i:02d}"
+                self._put(doc_store, clock, doc_id)
+                skipped.add(doc_id)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=3)
+
+        ids = [c["doc_id"] for c in selection.candidates]
+        assert ids == ["old-2", "old-1", "old-0"]
+        assert not skipped & set(ids)
+        assert selection.scanned > 3 * 5
+
+    def test_the_row_cap_binds(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._older_rows_behind_enriched(doc_store, clock)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=1, scan_cap=10)
+
+        assert selection.candidates == []
+        assert selection.scanned == 10
+        assert selection.capped is True
+
+    def test_a_store_of_exactly_the_cap_reads_as_capped(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        """A full last page cannot tell "ended here" from "more behind it"."""
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(10):
+            self._put(doc_store, clock, f"new-{i:02d}", enriched=True)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=1, scan_cap=10)
+
+        assert (selection.scanned, selection.capped) == (10, True)
+
+    def test_a_limit_met_on_the_last_row_the_cap_allows_is_not_capped(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        """Capped means candidates were left unfound, not that the cap was reached."""
+        doc_store = temp_stores.knowledge.document_store
+        self._put(doc_store, clock, "oldest")
+        for i in range(9):
+            self._put(doc_store, clock, f"new-{i}", enriched=True)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=1, scan_cap=10)
+
+        assert [c["doc_id"] for c in selection.candidates] == ["oldest"]
+        assert (selection.scanned, selection.capped) == (10, False)
+
+    def test_a_store_that_ends_is_not_capped(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(7):
+            self._put(doc_store, clock, f"new-{i}", enriched=True)
+
+        selection = worker._scan_enrichment_candidates(
+            doc_store, limit=1, scan_cap=1000
+        )
+
+        assert selection.candidates == []
+        assert selection.scanned == 7
+        assert selection.capped is False
+
+    def test_the_scan_stops_once_limit_is_met(
+        self,
+        temp_stores: StoreRegistry,
+        clock: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(30):
+            self._put(doc_store, clock, f"doc-{i:02d}")
+        calls = self._spy(monkeypatch, doc_store)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=2)
+
+        assert len(calls) == 1
+        assert len(selection.candidates) == 2
+        assert selection.capped is False
+
+    def test_each_page_starts_where_the_last_ended_and_never_passes_the_cap(
+        self,
+        temp_stores: StoreRegistry,
+        clock: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(25):
+            self._put(doc_store, clock, f"new-{i:02d}", enriched=True)
+        calls = self._spy(monkeypatch, doc_store)
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=1, scan_cap=12)
+
+        # ``limit * 5`` is 5, above the patched floor of 4; the last page is
+        # cut to what the cap leaves.
+        assert [(c["offset"], c["limit"]) for c in calls] == [(0, 5), (5, 5), (10, 2)]
+        assert all(c["include_chunks"] is True for c in calls)
+        assert (selection.scanned, selection.capped) == (12, True)
+
+    def test_a_row_written_between_pages_is_not_selected_twice(
+        self,
+        temp_stores: StoreRegistry,
+        clock: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A new newest row shifts the rest down, so the page edge repeats."""
+        doc_store = temp_stores.knowledge.document_store
+        for i in range(3):
+            self._put(doc_store, clock, f"old-{i}")
+        self._put(doc_store, clock, "edge")
+        for i in range(19):
+            self._put(doc_store, clock, f"new-{i:02d}", enriched=True)
+        # ``limit=4`` makes a page 20 rows, so ``edge`` is the last row of the
+        # first page and, once a row is written, the first of the second.
+        self._spy(
+            monkeypatch,
+            doc_store,
+            after_first_call=lambda: self._put(doc_store, clock, "late", enriched=True),
+        )
+
+        selection = worker._scan_enrichment_candidates(doc_store, limit=4)
+
+        ids = [c["doc_id"] for c in selection.candidates]
+        assert len(ids) == len(set(ids))
+        assert set(ids) == {"edge", "old-2", "old-1", "old-0"}
+
+    def test_the_selector_still_returns_a_list(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any]
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._older_rows_behind_enriched(doc_store, clock)
+
+        selected = worker._select_enrichment_candidates(doc_store, limit=2)
+
+        assert isinstance(selected, list)
+        assert [c["doc_id"] for c in selected] == ["old-2", "old-1"]
+
+    def test_a_capped_dry_run_reports_it_in_json_and_exits_zero(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any], monkeypatch
+    ) -> None:
+        self._older_rows_behind_enriched(temp_stores.knowledge.document_store, clock)
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("{}"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "enrich",
+                "--dry-run",
+                "--limit",
+                "1",
+                "--scan-cap",
+                "10",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["selected"] == 0
+        assert data["scanned"] == 10
+        assert data["scan_capped"] is True
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real-run"])
+    def test_a_capped_scan_prints_one_line_in_text_mode_and_exits_zero(
+        self,
+        temp_stores: StoreRegistry,
+        clock: dict[str, Any],
+        monkeypatch,
+        dry_run: bool,
+    ) -> None:
+        self._older_rows_behind_enriched(temp_stores.knowledge.document_store, clock)
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("{}"),
+        )
+        args = ["worker", "enrich", "--limit", "1", "--scan-cap", "10"]
+
+        result = runner.invoke(app, [*args, "--dry-run"] if dry_run else args)
+
+        assert result.exit_code == 0, result.output
+        text = " ".join(plain(result.stdout).split())
+        line = (
+            "scan stopped at the 10-row cap with 0 of 1 candidate(s) found; "
+            "older documents were not examined (raise --scan-cap)"
+        )
+        assert text.count(line) == 1
+        assert text.index(line) < text.index("worker enrich")
+
+    def test_an_uncapped_scan_prints_no_cap_line(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any], monkeypatch
+    ) -> None:
+        self._put(temp_stores.knowledge.document_store, clock, "doc-a")
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("{}"),
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert "scan stopped" not in plain(result.stdout)
+
+    def test_the_real_run_payload_carries_the_scan_keys(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any], monkeypatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._put(doc_store, clock, "doc-a")
+        self._put(doc_store, clock, "doc-b", enriched=True)
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _CountingLLM(self._CANNED),
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["selected"] == 1
+        assert data["scanned"] == 2
+        assert data["scan_capped"] is False
+
+    def test_a_capped_real_run_payload_says_so(
+        self, temp_stores: StoreRegistry, clock: dict[str, Any], monkeypatch
+    ) -> None:
+        self._older_rows_behind_enriched(temp_stores.knowledge.document_store, clock)
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("{}"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "enrich",
+                "--limit",
+                "1",
+                "--scan-cap",
+                "10",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert (data["selected"], data["scanned"], data["scan_capped"]) == (0, 10, True)
+
+    def test_a_zero_scan_cap_is_rejected_by_the_parser(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        result = runner.invoke(app, ["worker", "enrich", "--scan-cap", "0"])
+
+        assert result.exit_code == 2, result.output
+
+
 class TestEnrichedContentTags:
     """``worker enrich``'s write-back must produce a parseable ``ContentTags``.
 

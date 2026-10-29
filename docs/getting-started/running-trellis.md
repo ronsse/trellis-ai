@@ -168,14 +168,14 @@ These distinguish "a human promoted this" from "the system promoted this on its 
 
 ```bash
 trellis worker enrich [--concurrency 3] [--limit 50] \
-  [--confidence-threshold 0.5] [--dry-run] [--format text|json]
+  [--reenrich] [--dry-run] [--scan-cap 20000] [--format text|json]
 ```
 
-Batch-enriches under-tagged documents via the LLM `EnrichmentService`, writing the suggested tags / classification / importance back into each document's `metadata.content_tags`. A document is a candidate when its `content_tags` is missing/empty, **or** it has no `tag_confidence` stamp, **or** that stamp is below `--confidence-threshold`.
+Batch-enriches under-tagged documents via the LLM `EnrichmentService`, writing the suggested tags / classification / importance back into each document's `metadata.content_tags`. A document is a candidate when its `content_tags` is missing/empty, **or** it has never been through this path (`content_tags.classified_mode != "enrichment"`); `--reenrich` takes the already-enriched too. Documents are read newest-first until `--limit` candidates are found or `--scan-cap` rows have been read; `scan_capped: true` in the JSON output means older documents were not examined. Full option table: [operations.md](../agent-guide/operations.md).
 
 This is a data-plane tagging pass (re-running it overwrites tags — reversible), not a tiered self-action; it has no autonomy tier of its own. It does, however, **require a configured, buildable LLM client** — and it checks for one **before** the dry-run branch, so even `worker enrich --dry-run` exits non-zero with an actionable message when no `llm:` block + matching `[llm-openai]` / `[llm-anthropic]` extra is present. It never silently no-ops. Run it off-peak (LLM calls cost money and time).
 
-**What it writes/emits:** updated `metadata.content_tags` (with fresh `classified_at` / `tag_confidence` stamps) via `DocumentStore.put`, and enrichment events through the `EnrichmentService`'s event log.
+**What it writes/emits:** updated `metadata.content_tags` (with a fresh `classified_at` stamp and `classified_mode: enrichment`) via `DocumentStore.put`, and enrichment events through the `EnrichmentService`'s event log.
 
 ---
 
