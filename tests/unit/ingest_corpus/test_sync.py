@@ -962,6 +962,30 @@ class TestPruneKeepsWhatItCannotVerify:
         ]
         assert store.get(orphan_id) is not None
 
+    def test_a_tombstoned_parent_is_withheld_not_pruned(self, registry, vault):
+        """A redaction drops ``source_path``, so the corpus check cannot verify
+        the parent and withholds it. The #1067 guard in ``_prune_vanished`` is
+        for the checks that decide by id, and this pins that it changes nothing
+        here."""
+        sync_corpus(registry, vault, source_system="t")
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("t", "note-a.md")
+        make_tombstone(store, registry.knowledge.vector_store, parent_id)
+        (vault / "note-a.md").unlink()
+
+        report = sync_corpus(registry, vault, source_system="t", prune=True)
+
+        assert report.pruned == []
+        assert report.prune_withheld == [
+            {
+                "doc_id": parent_id,
+                "source_path": None,
+                "detail": "no source_path recorded",
+            }
+        ]
+        assert [w for w in report.warnings if w["kind"] == "redaction_tombstone"] == []
+        assert is_redaction_tombstone(store.get(parent_id))
+
     def test_missing_root_withholds_every_document(self, registry, vault, tmp_path):
         sync_corpus(registry, vault, source_system="t")
         store = registry.knowledge.document_store
@@ -1771,8 +1795,9 @@ class TestRedactedChunksSurviveMoveAndPrune:
     Deleting it loses the tombstone, so the file coming back under the old path
     would write the redacted text under the same chunk id with nothing to refuse
     it. The orphan loop already leaves such a row alone; these two deleters
-    did not. A redacted *parent* is a different case and is deliberately not
-    covered here: the parent row is deleted as before.
+    did not. A redacted *parent* is a different case: a prune keeps it (#1067,
+    ``TestPruneKeepsWhatItCannotVerify``), and a move deletes the old tree
+    as before.
     """
 
     @pytest.fixture(params=["middle", "last"])

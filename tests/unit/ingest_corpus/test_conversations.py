@@ -10,11 +10,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.redaction_tombstone import tombstone_metadata
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.ingest_corpus.conversations import (
     conversation_doc_id,
     read_claude_export,
     sync_conversations,
 )
+from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.embed_ingest_hook import EMBED_ON_INGEST_FLAG
 from trellis.schemas.document_metadata import document_form_of
 from trellis.stores.base.event_log import EventType
@@ -359,3 +362,130 @@ class TestSyncConversations:
         sync_conversations(registry, _write_export(tmp_path, [_CONV_OLD]))
         labels = set(captured["extraction_participant_names"])
         assert labels == {"You", "Claude", "Unknown"}
+
+
+class TestPruneKeepsARedactedConversation:
+    """A conversation prune decides by id alone, and a redacted parent row is
+    not one to delete (#1067).
+
+    The blank parent row is what refuses the redacted text when the
+    conversation comes back in a later export, so deleting it let the next sync
+    write the parent back live.
+    """
+
+    @staticmethod
+    def _long_conversation(uuid: str) -> dict:
+        turn = "We discussed violins and bow rosin at length. " * 300
+        return {
+            "uuid": uuid,
+            "name": "Music gear",
+            "chat_messages": [
+                {"sender": "human", "text": "Tell me about violins."},
+                {"sender": "assistant", "text": turn.strip()},
+            ],
+        }
+
+    @staticmethod
+    def _redact_parent(registry, parent_id: str) -> int:
+        """Blank a parent the way a redaction does: no text, the redacted
+        lifecycle stamp, and only ``chunk_count`` kept. Returns that count."""
+        docs = registry.knowledge.document_store
+        count = docs.get(parent_id)["metadata"]["chunk_count"]
+        put_document(
+            docs,
+            registry.knowledge.vector_store,
+            parent_id,
+            "",
+            {**tombstone_metadata(), "chunk_count": count},
+            preserve_updated_at=False,
+        )
+        assert is_redaction_tombstone(docs.get(parent_id))
+        return count
+
+    @staticmethod
+    def _tombstone_warnings(report) -> list[dict]:
+        return [w for w in report.warnings if w["kind"] == "redaction_tombstone"]
+
+    @pytest.fixture
+    def redacted(self, registry, tmp_path: Path) -> tuple[Path, str, int, str]:
+        """Sync three conversations, redact one parent, then drop it and
+        another from the export. Returns the export path, the redacted parent
+        id, its chunk count and the plain dropped conversation's id."""
+        src = _write_export(
+            tmp_path,
+            [self._long_conversation("redacted-1"), _CONV_OLD, _CONV_NEW_SHAPE],
+        )
+        sync_conversations(registry, src)
+        parent_id = conversation_doc_id("claude-ai", "redacted-1")
+        count = self._redact_parent(registry, parent_id)
+        assert count >= 2
+        _write_export(tmp_path, [_CONV_OLD])
+        return src, parent_id, count, conversation_doc_id("claude-ai", "conv-2")
+
+    def test_prune_keeps_the_tombstoned_parent_and_its_chunks(self, registry, redacted):
+        """Defective subject: drop the tombstone guard in ``_prune_vanished`` and
+        the parent row is deleted with the rest of the tree."""
+        src, parent_id, count, plain_id = redacted
+        docs = registry.knowledge.document_store
+
+        report = sync_conversations(registry, src, prune=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [plain_id]
+        assert is_redaction_tombstone(docs.get(parent_id))
+        for index in range(count):
+            assert docs.get(chunk_doc_id(parent_id, index))["content"] != ""
+        assert docs.get(plain_id) is None
+        assert self._tombstone_warnings(report) == [
+            {"kind": "redaction_tombstone", "path": parent_id, "doc_id": parent_id}
+        ]
+
+    def test_a_dry_run_predicts_the_same_report_and_deletes_nothing(
+        self, registry, redacted
+    ):
+        """Defective subject: apply the guard only outside the dry-run branch
+        and the plan lists the tombstoned parent as pruned and drops the
+        warning."""
+        src, parent_id, _count, plain_id = redacted
+        docs = registry.knowledge.document_store
+        rows_before = docs.count()
+
+        report = sync_conversations(registry, src, prune=True, dry_run=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [plain_id]
+        assert docs.count() == rows_before
+        assert is_redaction_tombstone(docs.get(parent_id))
+        assert self._tombstone_warnings(report) == [
+            {"kind": "redaction_tombstone", "path": parent_id, "doc_id": parent_id}
+        ]
+        # The prediction is the real run's report.
+        real = sync_conversations(registry, src, prune=True)
+        assert real.pruned == report.pruned
+        assert self._tombstone_warnings(real) == self._tombstone_warnings(report)
+
+    def test_the_conversation_coming_back_is_not_written_live(
+        self, registry, redacted, tmp_path: Path
+    ):
+        src, parent_id, _count, _plain_id = redacted
+        docs = registry.knowledge.document_store
+        sync_conversations(registry, src, prune=True)
+
+        _write_export(tmp_path, [self._long_conversation("redacted-1"), _CONV_OLD])
+        back = sync_conversations(registry, src, prune=True)
+
+        assert is_redaction_tombstone(docs.get(parent_id))
+        assert docs.get(parent_id)["content"] == ""
+        # The put guard refuses and warns; it reports the record's own label
+        # as the path, so only the id is pinned.
+        assert [w["doc_id"] for w in self._tombstone_warnings(back)] == [parent_id]
+
+    def test_a_prune_with_no_tombstone_warns_of_nothing(self, registry, tmp_path):
+        src = _write_export(tmp_path, [_CONV_OLD, _CONV_NEW_SHAPE])
+        sync_conversations(registry, src)
+        _write_export(tmp_path, [_CONV_OLD])
+
+        report = sync_conversations(registry, src, prune=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [
+            conversation_doc_id("claude-ai", "conv-2")
+        ]
+        assert self._tombstone_warnings(report) == []

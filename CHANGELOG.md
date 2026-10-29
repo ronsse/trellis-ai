@@ -341,6 +341,22 @@ All notable changes to Trellis will be documented in this file.
   A row holding one of these values leaves the packs it was in; it surfaces in
   `trellis analyze health` through the malformed-row count.
 
+- **A conversation-export prune keeps a parent row that is a redaction tombstone
+  (#1067).** The conversation prune decides by document id alone, so a
+  conversation that left the export had its redacted parent row deleted along
+  with the rest of its tree. The chunk tombstones stayed behind as parentless
+  rows, which are never served, but the parent's own tombstone was gone, so the
+  conversation reappearing in a later export wrote the parent back live.
+  `_prune_vanished` now keeps the whole tree when the parent row it listed is a
+  redaction tombstone: the parent and its chunks stay, the report carries a
+  `redaction_tombstone` warning and no `pruned` entry, and a dry run predicts
+  the same. A parent that is not a tombstone is deleted as before, and corpus
+  sync is unchanged: a redacted corpus parent has no `source_path`, so its
+  prune already withholds it as unverifiable.
+  **Known gap (#1066).** A redaction does not follow the file. Renaming or
+  copying a redacted corpus file re-ingests it live under the new path, so
+  remove or edit the source file when you redact.
+
 - **`reclassify_item` leaves a redaction tombstone alone (#1064).** The batch
   pass (`trellis classify backfill`) already skipped blank rows, so no shipped
   command tagged a redacted row, but a direct call of the public
