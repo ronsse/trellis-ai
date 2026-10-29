@@ -3284,7 +3284,10 @@ def _scrub_precedent_excerpt(
     from the source's first line (``name_source``, see
     :func:`~trellis.learning.scoring.name_may_hold_source_text`), the name:
     that becomes :func:`~trellis.learning.scoring.neutral_precedent_name`,
-    marked ``neutral``. A name that came from a title or a reviewer stays.
+    marked ``neutral``. The source's own title counts too (``item_title``):
+    the redaction blanks the document row's title (:func:`_tombstone_document`),
+    so a precedent name copied from it is the same text. A name that came from
+    a reviewer or is the bare id stays.
 
     Matches how ``redaction.apply`` treats its own target: a purge, not an
     SCD-2 close. A new version would leave the excerpt readable through

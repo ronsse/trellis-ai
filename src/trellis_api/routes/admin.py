@@ -1460,9 +1460,13 @@ def promote_learning_candidates(
     second ``PRECEDENT_PROMOTED`` event. A precedent a redaction already took
     comes back ``refused_redacted`` and is not written back. So does a row
     whose source document was redacted, when its name is one the redacted text
-    gave it: a candidate or a decision's ``promotion_name`` kept from before
-    the redaction. Regenerate the candidate (and clear that name) to promote
-    it again.
+    gave it (the source's text or its own title): a candidate or a decision's
+    ``promotion_name`` kept from before the redaction, or edited from it, since
+    a name that contains an earlier name's distinctive text is refused too.
+    Regenerate the candidate (and clear that name) to promote it again. Once the
+    source id was written again with new content, a name derived from that
+    content and a reviewer's own title promote; only a name the precedent
+    carried at or before the redaction stays refused.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
