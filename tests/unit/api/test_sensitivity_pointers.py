@@ -1,7 +1,8 @@
 """No REST read surface names a supersession id the key cannot read (#1029).
 
-A served loser stores ``lifecycle.superseded_by`` and a served successor stores
-``supersedes_doc_id``; either may name a document above the caller's clearance.
+A served loser stores ``lifecycle.superseded_by``, a served successor stores
+``supersedes_doc_id`` and a served UPDATE addendum stores ``updates_doc_id``; any
+of them may name a document above the caller's clearance.
 Every surface that serves stored metadata drops such an id from the served copy,
 the store judging the named document, never the query or the candidate pool.
 """
@@ -34,6 +35,8 @@ MATCHING = {
     * 4,
     "doc-new-b": "failover runbook, fifth edition: archive the replication slots. " * 4,
     "doc-new-fine": "failover runbook, sixth edition: page the secondary first. " * 4,
+    "doc-upd": "failover runbook, seventh edition: confirm the standby lag. " * 4,
+    "doc-upd-fine": "failover runbook, eighth edition: flush the warm caches. " * 4,
 }
 # What the hidden and readable pointer targets hold. Only ``doc-secret`` matches
 # the query: the others are never candidates, so a pool test could not see them.
@@ -43,13 +46,15 @@ TARGETS = {
     "doc-prior-secret": "unrelated archive note about retired capacity plans",
     "doc-fresh": "unrelated replacement text about cache warming schedules",
     "doc-prior": "unrelated archive note about retired pager rotations",
+    "doc-base-secret": "unrelated annex note about retired storage quotas",
 }
-HIDDEN = ("doc-secret", "doc-newer", "doc-prior-secret")
+HIDDEN = ("doc-secret", "doc-newer", "doc-prior-secret", "doc-base-secret")
 SERVED = tuple(MATCHING)
 
 #: What each row stores. ``doc-old``/``doc-stale`` are losers of a hidden
 #: successor (one matching the query, one not); ``doc-new-a``/``doc-new-b`` are
-#: successors of a hidden loser; ``doc-fine``/``doc-new-fine`` name readable ids.
+#: successors of a hidden loser; ``doc-upd`` is an UPDATE addendum to a hidden
+#: document; ``doc-fine``/``doc-new-fine``/``doc-upd-fine`` name readable ids.
 POINTERS: dict[str, dict[str, Any]] = {
     "doc-old": _lifecycle("superseded", "doc-secret"),
     "doc-stale": _lifecycle("superseded", "doc-newer"),
@@ -60,6 +65,8 @@ POINTERS: dict[str, dict[str, Any]] = {
         "reconciliation": "supersede",
     },
     "doc-new-fine": {"supersedes_doc_id": "doc-prior", "reconciliation": "supersede"},
+    "doc-upd": {"updates_doc_id": "doc-base-secret", "reconciliation": "update"},
+    "doc-upd-fine": {"updates_doc_id": "doc-prior", "reconciliation": "update"},
 }
 SURFACES = ["packs", "sectioned", "document", "list", "list_q", "search"]
 
@@ -140,6 +147,28 @@ def _fetch(client, headers, surface) -> tuple[str, dict[str, dict[str, Any]]]:
     return resp.text, {r[key]: r["metadata"] for r in rows}
 
 
+#: Fields two identical pack requests do not share: the id minted per request,
+#: the recency-decayed scores (low digits drift) and the timing.
+_VOLATILE = frozenset({"pack_id", "score_breakdown", "relevance_score", "duration_ms"})
+
+
+def _scrub(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _scrub(v) for k, v in node.items() if k not in _VOLATILE}
+    if isinstance(node, list):
+        return [_scrub(v) for v in node]
+    return node
+
+
+def _stable(text: str) -> str:
+    """``text`` without ``_VOLATILE`` fields; every other byte is compared as served."""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text  # the by-id surface joins several JSON bodies
+    return json.dumps(_scrub(body), sort_keys=True)
+
+
 def _expected_served(surface: str) -> set[str]:
     """The documents a reader of everything is served on ``surface``.
 
@@ -176,20 +205,23 @@ class TestAHiddenPointerIsDropped:
         for successor in ("doc-new-a", "doc-new-b"):
             assert "supersedes_doc_id" not in served[successor]
             assert served[successor]["reconciliation"] == "supersede"
+        # The UPDATE addendum: the pointer goes, the marker stays.
+        assert "updates_doc_id" not in served["doc-upd"]
+        assert served["doc-upd"]["reconciliation"] == "update"
         # A readable id is still named.
         assert served["doc-fine"]["lifecycle"]["superseded_by"] == "doc-fresh"
         assert served["doc-new-fine"]["supersedes_doc_id"] == "doc-prior"
+        assert served["doc-upd-fine"]["updates_doc_id"] == "doc-prior"
 
     @pytest.mark.parametrize("surface", SURFACES)
     def test_a_target_that_does_not_match_the_query_is_still_concealed(
         self, client, registry, surface
     ):
-        """The store judges: ``doc-newer`` and ``doc-prior-secret`` match nothing."""
+        """The store judges: these three hidden targets match nothing."""
         text, served = _fetch(client, _headers(registry, ["read"]), surface)
-        assert "doc-newer" not in served
-        assert "doc-prior-secret" not in served
-        assert "doc-newer" not in text
-        assert "doc-prior-secret" not in text
+        for hidden in ("doc-newer", "doc-prior-secret", "doc-base-secret"):
+            assert hidden not in served
+            assert hidden not in text
 
     @pytest.mark.parametrize("surface", SURFACES)
     def test_a_store_error_reads_as_unreadable(
@@ -210,8 +242,10 @@ class TestAHiddenPointerIsDropped:
         # is on the metadata of the rows that named them.
         assert served["doc-fine"]["lifecycle"] == {"state": "superseded"}
         assert "supersedes_doc_id" not in served["doc-new-fine"]
+        assert "updates_doc_id" not in served["doc-upd-fine"]
         assert "doc-fresh" not in json.dumps(served["doc-fine"])
         assert "doc-prior" not in json.dumps(served["doc-new-fine"])
+        assert "doc-prior" not in json.dumps(served["doc-upd-fine"])
 
 
 class TestNothingChangesForAReaderOfEverything:
@@ -238,7 +272,7 @@ class TestNothingChangesForAReaderOfEverything:
                 assert served[doc_id] == stored
         assert "doc-secret" in text
 
-    @pytest.mark.parametrize("surface", ["document", "list", "search"])
+    @pytest.mark.parametrize("surface", SURFACES)
     def test_the_response_is_byte_identical_with_the_concealment_removed(
         self, client, registry, headers, monkeypatch, surface
     ):
@@ -265,7 +299,7 @@ class TestNothingChangesForAReaderOfEverything:
             retrieve_mod, "conceal_document_rows", lambda docs, *_a: list(docs)
         )
         without_helper, _ = _fetch(client, headers, surface)
-        assert with_helper == without_helper
+        assert _stable(with_helper) == _stable(without_helper)
 
 
 class TestAnUnlabelledStoreIsUnchanged:
@@ -305,6 +339,7 @@ class TestOneJudgementPerResponse:
     """The distinct ids a response names are judged in one batched call."""
 
     EXPECTED: ClassVar[list[str]] = [
+        "doc-base-secret",
         "doc-fresh",
         "doc-newer",
         "doc-prior",
@@ -353,7 +388,9 @@ class TestOneJudgementPerResponse:
         assert calls == [["doc-secret"]]
         assert gets.count("doc-secret") == 1
 
-    @pytest.mark.parametrize("surface", ["packs", "list", "search"])
+    @pytest.mark.parametrize(
+        "surface", ["packs", "sectioned", "list", "list_q", "search"]
+    )
     def test_a_reader_of_everything_makes_no_call_and_no_read(
         self, client, registry, spies, surface
     ):

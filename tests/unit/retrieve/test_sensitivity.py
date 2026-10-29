@@ -7,6 +7,7 @@ at the collect seam every strategy shares.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -813,17 +814,54 @@ class TestConcealTheReversePointer:
     def _loser_of(item: PackItem) -> Any:
         return (item.metadata or {}).get("supersedes_doc_id")
 
-    def test_the_paths_are_the_two_keys_the_writers_emit(
+    def test_the_paths_are_every_pointer_key_the_writers_emit(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
-        """Run the real writers and demand every pointer key they leave is covered."""
-        from trellis.mcp.reconcile import SUPERSEDES_DOC_KEY, mark_document_superseded
+        """Enumerate the writers' pointer keys explicitly; a new one fails here.
+
+        Each side is pinned to a closed list, not found by a name pattern: the
+        reconcile module's ``*_DOC_KEY`` constants, the key set the session
+        capture writer emits, the id-valued fields of its candidate model and
+        the fields of ``Lifecycle``. A key a writer adds is then a failure to
+        decide on, not a leak that no scan happened to name.
+        """
+        from trellis.mcp import reconcile
+        from trellis.mcp.reconcile import (
+            LIFECYCLE_KEY as RECONCILE_LIFECYCLE_KEY,
+        )
+        from trellis.mcp.reconcile import (
+            RECONCILIATION_KEY,
+            SUPERSEDES_DOC_KEY,
+            UPDATES_DOC_KEY,
+            mark_document_superseded,
+        )
+        from trellis.schemas.classification import Lifecycle
         from trellis_workers.session_capture.capture import _candidate_metadata
         from trellis_workers.session_capture.models import CandidateMemory
 
-        assert ("supersedes_doc_id",) in SUPERSESSION_POINTER_PATHS
+        # The literals in sensitivity.py equal the writers' constants.
         assert SUPERSEDES_DOC_KEY == "supersedes_doc_id"
+        assert UPDATES_DOC_KEY == "updates_doc_id"
+        assert RECONCILE_LIFECYCLE_KEY == LIFECYCLE_KEY
+        assert {n for n in dir(reconcile) if n.endswith("_DOC_KEY")} == {
+            "SUPERSEDES_DOC_KEY",
+            "UPDATES_DOC_KEY",
+        }
+        assert set(SUPERSESSION_POINTER_PATHS) == {
+            (LIFECYCLE_KEY, "superseded_by"),
+            (SUPERSEDES_DOC_KEY,),
+            (UPDATES_DOC_KEY,),
+        }
 
+        # The loser side: ``Lifecycle`` has one id-valued field, and the stamp
+        # writes it under the lifecycle key.
+        assert set(Lifecycle.model_fields) - {
+            "state",
+            "valid_from",
+            "valid_until",
+            "deprecation_reason",
+            "classification_version",
+        } == {"superseded_by"}
         doc_store.put("old-doc", "old", {})
         doc_store.put("new-doc", "new", {})
         assert (
@@ -834,6 +872,17 @@ class TestConcealTheReversePointer:
         )
         stamped = doc_store.get("old-doc")
         assert stamped is not None
+        assert set(stamped["metadata"]) == {LIFECYCLE_KEY}
+        assert stamped["metadata"][LIFECYCLE_KEY]["superseded_by"] == "new-doc"
+
+        # The successor and addendum side: the capture writer's candidate model
+        # has two id-valued fields, and with both set the metadata it emits has
+        # exactly two keys beyond its own bookkeeping.
+        assert {
+            f.name
+            for f in dataclasses.fields(CandidateMemory)
+            if f.name.endswith("_doc_id")
+        } == {UPDATES_DOC_KEY, SUPERSEDES_DOC_KEY}
         candidate = CandidateMemory(
             title="t",
             memory="m",
@@ -844,26 +893,22 @@ class TestConcealTheReversePointer:
             durable=True,
             actionable=True,
             confidence=0.9,
+            updates_doc_id="addendum-target",
             supersedes_doc_id="old-doc",
         )
-
-        def pointer_paths(
-            node: Any, prefix: tuple[str, ...] = ()
-        ) -> set[tuple[str, ...]]:
-            if not isinstance(node, dict):
-                return set()
-            found: set[tuple[str, ...]] = set()
-            for key, value in node.items():
-                here = (*prefix, key)
-                if "supersed" in key and isinstance(value, str):
-                    found.add(here)
-                found |= pointer_paths(value, here)
-            return found
-
-        emitted = pointer_paths(stamped["metadata"]) | pointer_paths(
-            _candidate_metadata(candidate)
-        )
-        assert emitted == set(SUPERSESSION_POINTER_PATHS)
+        bookkeeping = {
+            "session_id",
+            "signal",
+            "memory_type",
+            "capture_title",
+            "distilled",
+            "subagent",
+            RECONCILIATION_KEY,
+        }
+        assert set(_candidate_metadata(candidate)) - bookkeeping == {
+            UPDATES_DOC_KEY,
+            SUPERSEDES_DOC_KEY,
+        }
 
     def test_an_unreadable_loser_is_dropped_and_the_rest_kept(
         self, doc_store: SQLiteDocumentStore
@@ -1002,6 +1047,79 @@ class TestConcealTheReversePointer:
         out = conceal_unreadable_successors([odd, named], doc_store, "internal")
         assert out[0] is odd
         assert self._loser_of(out[1]) is None
+
+
+def _update(target: Any = "base-doc", **extra: Any) -> dict[str, Any]:
+    """An UPDATE addendum's metadata: ``updates_doc_id`` naming the annotated doc."""
+    return {"updates_doc_id": target, "reconciliation": "update", **extra}
+
+
+class TestConcealTheUpdatePointer:
+    """An addendum's ``updates_doc_id`` names the candidate it annotates (#1029)."""
+
+    @staticmethod
+    def _target_of(item: PackItem) -> Any:
+        return (item.metadata or {}).get("updates_doc_id")
+
+    def test_an_unreadable_target_is_dropped_and_the_marker_kept(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("base-doc", "body", label("restricted"))
+        addendum = _item("add-doc", _update(title="Addendum"))
+        (out,) = conceal_unreadable_successors([addendum], doc_store, "internal")
+        assert out.metadata == {"reconciliation": "update", "title": "Addendum"}
+        assert addendum.metadata["updates_doc_id"] == "base-doc"
+
+    def test_a_readable_target_is_still_named(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("base-doc", "body", {})
+        pool = [_item("add-doc", _update())]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert out[0] is pool[0]
+
+    def test_the_store_judges_not_the_pool(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("base-doc", "body", label("confidential"))
+        pool = [_item("add-doc", _update())]
+        assert (
+            self._target_of(
+                conceal_unreadable_successors(pool, doc_store, "internal")[0]
+            )
+            is None
+        )
+        assert (
+            self._target_of(
+                conceal_unreadable_successors(pool, doc_store, "confidential")[0]
+            )
+            == "base-doc"
+        )
+
+    def test_the_three_pointers_are_judged_in_one_call(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        for doc_id in ("base-doc", "old-doc", "succ-doc"):
+            doc_store.put(doc_id, "body", label("restricted"))
+        spied = MagicMock(wraps=doc_store)
+        row = {
+            "doc_id": "mid-doc",
+            "metadata": {
+                **_update(),
+                **_reverse(),
+                **_lifecycle("superseded", "succ-doc"),
+            },
+        }
+        (out,) = conceal_document_rows([row], spied, "internal")
+        assert out["metadata"] == {
+            "reconciliation": "supersede",
+            LIFECYCLE_KEY: {"state": "superseded"},
+        }
+        assert sorted(c.args[0] for c in spied.get.call_args_list) == [
+            "base-doc",
+            "old-doc",
+            "succ-doc",
+        ]
 
 
 class TestConcealDocumentRows:

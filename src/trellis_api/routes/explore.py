@@ -168,8 +168,9 @@ def list_documents(
     The scan still walks past rows the key cannot read, so its cost grows with
     the store, not only with the page.
 
-    A row whose ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a
-    document the key may not read is served without that id.
+    A row whose ``lifecycle.superseded_by``, ``supersedes_doc_id`` or
+    ``updates_doc_id`` names a document the key may not read is served without
+    that id.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -312,9 +313,9 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does. A document whose ``lifecycle.superseded_by`` or
-    ``supersedes_doc_id`` names a document the caller may not read is served
-    without that id.
+    as a missing one does. A document whose ``lifecycle.superseded_by``,
+    ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
+    not read is served without that id.
     """
     registry = get_registry()
     store = registry.knowledge.document_store

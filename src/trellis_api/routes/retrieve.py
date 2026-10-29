@@ -180,8 +180,8 @@ def search(
 
     A document labelled above the caller's clearance is left out of the
     results (so a page can come back shorter than ``limit``). A row whose
-    ``lifecycle.superseded_by`` or ``supersedes_doc_id`` names a document the
-    caller may not read is served without that id.
+    ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
+    names a document the caller may not read is served without that id.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied

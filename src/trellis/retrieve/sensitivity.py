@@ -21,9 +21,10 @@ merged pool after supersession. Supersession itself skips a successor the
 caller cannot read (:func:`reader_for`), so a restricted successor withholds
 no loser the caller may read and a below-clearance pack is the pack built
 without it. A loser so kept still stores its own ``lifecycle.superseded_by``, and a
-readable successor its ``supersedes_doc_id``: :func:`conceal_unreadable_successors`
-drops either from the served copy (and :func:`conceal_document_rows` from a REST
-document row) when the store says the caller cannot read the id it names.
+readable successor its ``supersedes_doc_id`` (and an UPDATE addendum its
+``updates_doc_id``): :func:`conceal_unreadable_successors` drops each from the
+served copy (and :func:`conceal_document_rows` from a REST document row) when the
+store says the caller cannot read the id it names.
 
 **A chunk inherits its parent's label.** A chunk row carries its own metadata
 and none of the parent's later labels, so :func:`effective_sensitivity` takes
@@ -197,18 +198,21 @@ def readable_ids(
     return readable
 
 
-#: Every metadata key path that stores a supersession pointer, i.e. names the
-#: other end of a supersession by document id. Two exist, one per direction,
-#: both a single id string: ``lifecycle.superseded_by`` on a loser (naming its
+#: Every metadata key path that stores a reconcile pointer, i.e. names the other
+#: end of a SUPERSEDE or UPDATE decision by document id. Three exist, each a
+#: single id string: ``lifecycle.superseded_by`` on a loser (naming its
 #: successor; ``Lifecycle``, stamped by ``mark_document_superseded`` and the
-#: ``supersedes=`` save path), and ``supersedes_doc_id`` on a successor (naming
-#: its loser; the reconcile SUPERSEDE write and session capture). The second is
-#: spelled here rather than imported because ``trellis.mcp`` imports this
-#: package; ``tests/unit/retrieve/test_sensitivity.py`` pins it to
-#: ``trellis.mcp.reconcile.SUPERSEDES_DOC_KEY`` and to what the writers emit.
+#: ``supersedes=`` save path), ``supersedes_doc_id`` on a successor (naming its
+#: loser) and ``updates_doc_id`` on an UPDATE addendum (naming the annotated
+#: candidate); the last two are written by the reconcile-on-write path and by
+#: session capture. They are spelled here rather than imported because
+#: ``trellis.mcp`` imports this package; ``tests/unit/retrieve/test_sensitivity.py``
+#: pins them to ``trellis.mcp.reconcile.SUPERSEDES_DOC_KEY`` / ``UPDATES_DOC_KEY``
+#: and to every pointer key the writers emit.
 SUPERSESSION_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
     (LIFECYCLE_KEY, "superseded_by"),
     ("supersedes_doc_id",),
+    ("updates_doc_id",),
 )
 
 
@@ -321,10 +325,12 @@ def conceal_unreadable_successors(
     :func:`~trellis.retrieve.lifecycle.partition_superseded`), and it still
     carries its own stored ``lifecycle.superseded_by`` naming that successor.
     The reverse holds too: a readable successor's ``supersedes_doc_id`` may
-    name a loser the caller cannot read. Either id would reach the caller in
-    the item's metadata, so it is dropped from the served copy
-    (:data:`SUPERSESSION_POINTER_PATHS`). The state stays; the item reads
-    superseded, by nothing the caller may name.
+    name a loser the caller cannot read, and an UPDATE addendum's
+    ``updates_doc_id`` the candidate it annotates. Any such id would reach the
+    caller in the item's metadata, so it is dropped from the served copy
+    (:data:`SUPERSESSION_POINTER_PATHS`). The state and the ``reconciliation``
+    marker stay; the item reads superseded or updated, by nothing the caller
+    may name.
 
     Applies to every item whatever its ``lifecycle.state``, since the id is the
     leak. See :func:`_concealed_bags` for the batching and the no-read cases.
