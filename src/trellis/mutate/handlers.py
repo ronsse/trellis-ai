@@ -3102,6 +3102,16 @@ class _PrecedentScrub:
     vector_lost: bool
 
 
+def _binds_a_name_in(alias: dict[str, Any], name_keys: set[str]) -> bool:
+    """Whether ``alias`` is a ``name`` alias bound for one of ``name_keys``."""
+    if alias["source_system"] != NAME_ALIAS_SOURCE_SYSTEM:
+        return False
+    raw_name = alias.get("raw_name")
+    return alias["raw_id"] in name_keys or (
+        isinstance(raw_name, str) and normalize_entity_name(raw_name) in name_keys
+    )
+
+
 def _scrub_precedent_excerpt(
     registry: StoreRegistry, row: dict[str, Any]
 ) -> _PrecedentScrub | None:
@@ -3124,8 +3134,10 @@ def _scrub_precedent_excerpt(
     :data:`~trellis.learning.scoring.SOURCE_EXCERPT_REDACTED`. Everything
     else on the current version survives: properties, role, document links,
     live edges (provenance included) and aliases. What does not survive is
-    the precedent's own earlier versions (which is the point) and the ids
-    and timestamps of its edge rows.
+    the precedent's own earlier versions (which is the point), the ids and
+    timestamps of its edge rows, and any ``name`` alias bound for a
+    source-derived name, which holds that text as its key. The neutral name
+    is not bound in its place.
 
     Returns ``None`` when no version carries an excerpt or a source-derived
     name (nothing to scrub, and the history is left alone). The precedent's
@@ -3179,7 +3191,20 @@ def _scrub_precedent_excerpt(
         properties["name_source"] = NAME_SOURCE_NEUTRAL
 
     edges = {e["edge_id"]: e for e in graph.get_edges(precedent_id, direction="both")}
-    aliases = graph.get_aliases(precedent_id)
+    # A ``name`` alias is bound for the normalized name, so one bound for a
+    # source-derived name holds that text in raw_id and raw_name. A rename
+    # leaves the old alias, so the names of every version count, not only the
+    # current one. Such an alias is dropped rather than restored.
+    source_name_keys = {
+        normalize_entity_name(p["name"])
+        for p in version_props
+        if isinstance(p.get("name"), str) and name_may_hold_source_text(p, precedent_id)
+    } - {""}
+    aliases = [
+        a
+        for a in graph.get_aliases(precedent_id)
+        if not _binds_a_name_in(a, source_name_keys)
+    ]
 
     scrubbed_document = _rewrite_precedent_document(registry, precedent_id, properties)
     vector_removed = registry.knowledge.vector_store.delete(precedent_id)
