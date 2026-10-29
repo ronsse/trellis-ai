@@ -321,6 +321,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Graph reads omit evidence pointers to documents the caller cannot read.**
+  Follows #1045: the same concealment, for the pointers a graph node carries. A
+  node has no label, but the document ids it names can point at a document a
+  below-`restricted` key may not read: `document_ids`, and in `properties` the
+  `evidence_ref` (`save_knowledge` writes the same id to both) and the
+  `lifecycle.superseded_by` that `supersede_entity` stamps on a superseded
+  entity. `GET /api/v1/graph/history` (every version), MCP `get_graph` (root and
+  neighbours), MCP `get_items` on an entity id and `build_file_context`'s entity
+  entries now drop such an id (the pointer key is removed, `lifecycle.state` and
+  every other property stay), judged by the document store in one pass per
+  response; `restricted`, `admin` and auth off read nothing and see the node as
+  stored. A graph-axis pack item spreads its node's properties into its
+  metadata, so the pack's concealment pass drops `evidence_ref` there too
+  (`POST /api/v1/packs` and `/packs/sectioned`); the items served and their order
+  do not change, only that metadata for a caller below `restricted`.
+  `GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` are not covered yet.
+  Two comments that described `TARGET_PROTECTED` as only a promoted precedent's
+  row now also name a redaction tombstone.
+
 - **Derived tags are no longer written onto a redaction tombstone (part of
   #1034).** `worker enrich` and `classify shadow` read a row, spend a slow model
   call on its text, then write derived metadata back through

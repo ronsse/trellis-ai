@@ -138,7 +138,7 @@ ROSTER: dict[str, str] = {
     "explore:get_event": ADMIN,  # GET /events/{event_id}
     "explore:list_packs": ADMIN,  # GET /packs
     "explore:get_pack": ADMIN,  # GET /packs/{pack_id}
-    "explore:get_node_history": FREE,  # GET /graph/history
+    "explore:get_node_history": GATED,  # GET /graph/history
     "extract:submit_drafts": MUTATION,  # POST /extract/drafts
     "health:healthz": FREE,  # GET /healthz
     "health:readyz": FREE,  # GET /readyz
