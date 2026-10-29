@@ -38,11 +38,14 @@ def format_pack_as_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    empty_text: str = "",
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
     Token-budgeted: stops emitting items once the running budget is
-    exceeded and appends a ``[N more items omitted]`` marker.
+    exceeded and appends a ``[N more items omitted]`` marker. A pack with
+    a ``pack_id`` always ends with the feedback footer, as core's does;
+    ``empty_text`` is the line shown in place of items when there are none.
     """
     lines = [f"# Context for: {intent}"]
     if pack_id:
@@ -51,6 +54,8 @@ def format_pack_as_markdown(
     if note:
         lines.append(note)
     lines.append("")
+    if not items and empty_text:
+        lines.append(empty_text)
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10
     used = 0
     included = 0
@@ -74,9 +79,9 @@ def format_pack_as_markdown(
             break
         lines.append(block)
         used += block_tokens
-        included += 1
+        included += 1  # noqa: SIM113
 
-    if pack_id and included > 0:
+    if pack_id:
         lines.append(
             "\n---\n"
             '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '

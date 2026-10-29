@@ -114,3 +114,36 @@ class TestSaveMemoryRefusesTheReservedPrecedentNamespace:
 
         assert "note-gadgets" in result
         assert temp_registry.knowledge.document_store.get("note-gadgets") is not None
+
+
+class TestSaveMemoryRefusesAMintedChunkId:
+    """``save_memory(doc_id="notes#chunk-5")`` would file a document no reader
+    can tell from a chunk of ``notes`` (#1008).
+
+    Defective subject: drop the ``is_chunk_doc_id`` refusal in
+    ``EvidenceIngestHandler`` and this call stores the row.
+    """
+
+    def test_a_chunk_shaped_doc_id_is_rejected_and_nothing_is_stored(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        with pytest.raises(McpError) as excinfo:
+            save_memory("a generic note about sprockets", doc_id="notes#chunk-5")
+
+        assert "shape of a chunk id" in excinfo.value.error.message
+        assert temp_registry.knowledge.document_store.get("notes#chunk-5") is None
+        assert (
+            temp_registry.knowledge.document_store.get_by_hash(
+                content_hash("a generic note about sprockets")
+            )
+            is None
+        )
+
+    def test_a_named_document_that_only_contains_the_marker_is_accepted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        save_memory("a generic note about cogs", doc_id="notes#chunk-intro")
+
+        assert (
+            temp_registry.knowledge.document_store.get("notes#chunk-intro") is not None
+        )
