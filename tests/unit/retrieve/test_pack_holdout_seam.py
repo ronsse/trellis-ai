@@ -164,7 +164,10 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: ``graph_axis_state`` (#961: ``ran`` / ``failed`` / ``unseeded_fallback_off``
 #: / ``absent``, the same value as the response's ``axes["graph"]``, also
 #: passed outside the swappable telemetry dict so a withheld row carries it
-#: too).
+#: too), and ``malformed_row_skips`` (#1050: ``{strategy: rows}`` a strategy
+#: skipped for unreadable metadata, ``{}`` when none; passed next to
+#: ``strategy_failures`` for the same reason, since a withheld pack still ran
+#: its strategies).
 #: ``_BASE_*_KEYS`` stays an honest historical snapshot of 58be23d4 rather than
 #: being backfilled, so a *later* addition extends this set, not the base one.
 _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
@@ -175,6 +178,7 @@ _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
     "class_prior",
     "parent_verdict_degraded",
     "graph_axis_state",
+    "malformed_row_skips",
 }
 
 #: Keys only the flat payload gained since the snapshot: ``seed_entity_ids``

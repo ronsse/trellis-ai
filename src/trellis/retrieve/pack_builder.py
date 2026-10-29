@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import structlog
 
@@ -105,10 +105,12 @@ from trellis.retrieve.strategies import (
     GRAPH_SEED_IDS_KEY,
     GRAPH_SLICE_PRIORITISED_KEY,
     GRAPH_STRATEGY_NAME,
+    MALFORMED_METADATA_REJECTION_REASON,
     RECENCY_CLOCK_METADATA_KEY,
     EmbedderResolveFailure,
     GraphSearch,
     SearchStrategy,
+    SemanticSearch,
     resolve_graph_axis_state,
 )
 from trellis.retrieve.tier_mapping import TierMapper
@@ -480,25 +482,42 @@ def _strip_graph_seeds(items: Iterable[PackItem]) -> list[PackItem]:
     return out
 
 
+class _StrategyOutput(NamedTuple):
+    """What :func:`_search_strategy` hands the collect loops."""
+
+    items: list[PackItem]
+    #: The graph axis's withheld state; ``None`` for every other strategy.
+    axis_state: str | None
+    #: Placeholders for rows the strategy skipped as malformed.
+    skipped: list[PackItem]
+
+
 def _search_strategy(
     strategy: SearchStrategy,
     intent: str,
     *,
     limit: int,
     filters: dict[str, Any] | None,
-) -> tuple[list[PackItem], str | None]:
-    """One strategy's candidates and, for the graph axis, its withheld state.
+) -> _StrategyOutput:
+    """One strategy's candidates, its withheld state and its skipped rows.
 
     The graph axis alone can answer "nothing, and here is why" (see
-    :class:`~trellis.retrieve.strategies.GraphAnswer`); every other strategy,
-    and any test double, goes through :meth:`SearchStrategy.search` and has no
-    state to report. Both loops call this, so the two cannot disagree about
-    which strategies are asked for it.
+    :class:`~trellis.retrieve.strategies.GraphAnswer`), and the semantic axis
+    alone reports rows it skipped as malformed
+    (:class:`~trellis.retrieve.strategies.StrategyResult`); every other
+    strategy, and any test double, goes through :meth:`SearchStrategy.search`
+    and has neither to report. Both loops call this, so the two cannot
+    disagree about which strategies are asked for them.
     """
     if isinstance(strategy, GraphSearch):
         answer = strategy.search_answer(intent, limit=limit, filters=filters)
-        return answer.items, answer.axis_state
-    return strategy.search(intent, limit=limit, filters=filters), None
+        return _StrategyOutput(answer.items, answer.axis_state, answer.skipped)
+    if isinstance(strategy, SemanticSearch):
+        result = strategy.search_result(intent, limit=limit, filters=filters)
+        return _StrategyOutput(result.items, None, result.skipped)
+    return _StrategyOutput(
+        strategy.search(intent, limit=limit, filters=filters), None, []
+    )
 
 
 def _lift_graph_seeds(items: list[PackItem], into: dict[str, None]) -> list[PackItem]:
@@ -1108,6 +1127,9 @@ class PackBuilder:
         candidates_found = 0
         rejected: list[RejectedItem] = []
         strategy_failures: list[StrategyFailure] = []
+        # Rows each strategy skipped as malformed, for
+        # ``PACK_ASSEMBLED.malformed_row_skips`` (what ``analyze health`` reads).
+        malformed_row_skips: dict[str, int] = {}
         meta_filtered_count = 0
 
         scoped_filters, scoped_tag_filters = self._apply_domain_scope(
@@ -1137,7 +1159,7 @@ class PackBuilder:
         candidates = CandidateIndex(clearance)
         for strategy in self._strategies:
             try:
-                found, axis_state = _search_strategy(
+                found, axis_state, skipped = _search_strategy(
                     strategy,
                     intent,
                     limit=limit_per_strategy,
@@ -1146,6 +1168,9 @@ class PackBuilder:
                 graph_axis_withheld = axis_state or graph_axis_withheld
                 servable = strip_non_servable(found)
                 candidates.add(servable)
+                self._record_skipped_rows(
+                    strategy.name, skipped, candidates, rejected, malformed_row_skips
+                )
                 items, gate_rejected = self._apply_collect_gates(
                     servable,
                     signal_quality_spec=signal_quality_spec,
@@ -1467,6 +1492,7 @@ class PackBuilder:
             self._emit_telemetry(
                 pack,
                 strategy_failures=strategy_failures,
+                malformed_row_skips=malformed_row_skips,
                 seed_entity_ids=list(graph_seed_ids),
                 graph_axis_state=resolve_graph_axis_state(
                     self.strategy_names, strategies_used, graph_axis_withheld
@@ -1532,6 +1558,7 @@ class PackBuilder:
         strategies_used: list[str] = []
         candidates_found = 0
         strategy_failures: list[StrategyFailure] = []
+        malformed_row_skips: dict[str, int] = {}
         # Pool-level rejections, for the withholding summary (#404). Kept
         # separate from the per-section ``RetrievalReport.rejected_items``,
         # which stays the content-floor attribution it already was: a
@@ -1571,7 +1598,7 @@ class PackBuilder:
         candidates = CandidateIndex(clearance)
         for strategy in self._strategies:
             try:
-                found, axis_state = _search_strategy(
+                found, axis_state, skipped = _search_strategy(
                     strategy,
                     intent,
                     limit=limit_per_strategy,
@@ -1580,6 +1607,9 @@ class PackBuilder:
                 graph_axis_withheld = axis_state or graph_axis_withheld
                 servable = strip_non_servable(found)
                 candidates.add(servable)
+                self._record_skipped_rows(
+                    strategy.name, skipped, candidates, rejected, malformed_row_skips
+                )
                 items, gate_rejected = self._apply_collect_gates(
                     servable,
                     signal_quality_spec=signal_quality_spec,
@@ -1924,6 +1954,7 @@ class PackBuilder:
             self._emit_sectioned_telemetry(
                 sectioned_pack,
                 strategy_failures=strategy_failures,
+                malformed_row_skips=malformed_row_skips,
                 graph_axis_state=resolve_graph_axis_state(
                     self.strategy_names, strategies_used, graph_axis_withheld
                 ),
@@ -2052,6 +2083,7 @@ class PackBuilder:
         pack: SectionedPack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        malformed_row_skips: dict[str, int] | None = None,
         graph_axis_state: str,
         meta_filtered_count: int = 0,
         semantic_dedup_rejected_count: int = 0,
@@ -2202,6 +2234,7 @@ class PackBuilder:
                 "strategy_failures": [
                     sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
+                "malformed_row_skips": dict(malformed_row_skips or {}),
                 "meta_filtered_count": meta_filtered_count,
                 "retrieval_phase": retrieval_phase,
                 "refresh": refresh,
@@ -2294,6 +2327,7 @@ class PackBuilder:
         pack: Pack,
         *,
         strategy_failures: list[StrategyFailure] | None = None,
+        malformed_row_skips: dict[str, int] | None = None,
         seed_entity_ids: list[str] | None = None,
         graph_axis_state: str,
         meta_filtered_count: int = 0,
@@ -2559,6 +2593,7 @@ class PackBuilder:
                 "strategy_failures": [
                     sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
+                "malformed_row_skips": dict(malformed_row_skips or {}),
                 "meta_filtered_count": meta_filtered_count,
                 "index_mode": index_mode,
                 "retrieval_phase": retrieval_phase,
@@ -3435,6 +3470,41 @@ class PackBuilder:
         for item in items:
             (dropped if drop_if(item) else kept).append(item)
         return kept, dropped
+
+    @classmethod
+    def _record_skipped_rows(
+        cls,
+        strategy_name: str,
+        skipped: list[PackItem],
+        candidates: CandidateIndex,
+        rejected: list[RejectedItem],
+        malformed_row_skips: dict[str, int],
+    ) -> None:
+        """Record the rows a strategy skipped as malformed (#1050).
+
+        Outside :meth:`_apply_collect_gates` and apart from ``all_items``, so
+        supersession never sees a placeholder: a loser whose successor was
+        skipped is still served, and the successor's id is listed here as
+        ``malformed_metadata``. The placeholder joins ``candidates`` first,
+        because the clearance rules judge a rejected id only through a
+        candidate they were given. Both build loops call this, so they cannot
+        drift. It runs before the collect gates, and the withholding summary
+        is first-reason-wins, so an id also rejected on another axis counts as
+        ``malformed_metadata``.
+        """
+        if not skipped:
+            return
+        candidates.add(strip_non_servable(skipped))
+        rejected.extend(
+            cls._reject(
+                skipped,
+                MALFORMED_METADATA_REJECTION_REASON,
+                strategy_source=strategy_name,
+            )
+        )
+        malformed_row_skips[strategy_name] = malformed_row_skips.get(
+            strategy_name, 0
+        ) + len(skipped)
 
     @staticmethod
     def _reject(
