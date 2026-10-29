@@ -191,7 +191,8 @@ All notable changes to Trellis will be documented in this file.
   the SHA-256 of the sub-agent's `agentType` from its sibling
   `<transcript>.meta.json` (`None` for an absent, unreadable or malformed
   sidecar, never an error; the sidecar's `description` and `toolUseId` are not
-  read; it never leaves the local event log). The report (`trellis analyze
+  read; it is kept to the join payload, which an admin `GET /events` read
+  can return, and no report carries it). The report (`trellis analyze
   holdout` and its REST payload) gains `covariate_adjusted`: the outcome is
   regressed, both arms pooled, on the stratum indicators and `log1p(brief_chars)`
   (`brief_length`, pre-registered), then also on the agent type's indicators

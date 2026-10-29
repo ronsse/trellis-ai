@@ -431,7 +431,7 @@ def _agent_type_digest(path: Path) -> str | None:
     characters of its SHA-256 are returned: enough to tell one type from
     another, and pseudonymous rather than anonymous, since a small known
     vocabulary of types is reversible by trying names. The digest therefore
-    stays in the local event log.
+    stays in the join payload and out of every report.
 
     ``None`` when the sidecar is absent, unreadable, not a JSON object, or
     has no non-empty string ``agentType``. None of those is an error, and the

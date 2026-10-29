@@ -373,7 +373,8 @@ def _record_pack_join(
     user turn (a sub-agent's brief), and ``agent_type_digest``, a SHA-256
     prefix of the type its sidecar names. A count and a pseudonymous handle
     (a short hash of a small vocabulary can be reversed by trying names, so it
-    stays in the local event log), never the text or the name. See
+    stays in the join payload and out of every report), never the text or
+    the name. See
     :meth:`SessionDigest.covariates_payload`.
 
     A transcript with no turn and no tool call gets no join: a blank file or

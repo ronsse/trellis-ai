@@ -266,8 +266,8 @@ class SessionDigest:
         ``agent_type_digest`` a pseudonymous handle for the sub-agent's type,
         so the pack holdout can adjust its secondary analysis for both. The
         digest is a 12-hex SHA-256 of a small vocabulary, which trying names
-        reverses, so it stays in the local event log's join and never reaches
-        a report. Both are ``None`` when unknown; the holdout never reads that
+        reverses, so it is kept to the join payload in the operational event
+        log (which an admin event read can return) and never reaches a report. Both are ``None`` when unknown; the holdout never reads that
         as zero.
         """
         return {

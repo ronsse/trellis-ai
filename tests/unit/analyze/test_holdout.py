@@ -38,6 +38,7 @@ from trellis.analyze.holdout import (
     SECONDARY_VERDICT,
     HoldoutAnalysisError,
     HoldoutReport,
+    _arm_balance_r2,
     _covariates,
     analyze_holdout,
     binomial_two_sided,
@@ -2228,3 +2229,63 @@ class TestReadingTheCovariates:
 
     def test_a_join_without_the_block_has_neither(self) -> None:
         assert _covariates({}) == (None, None)
+
+
+class TestArmBalanceR2:
+    """The figure is the arm's within-stratum variance a design explains.
+
+    Every fixture above alternates the arms, so each stratum is half served
+    and the within-stratum and total sums of squares coincide. These cases
+    have unequal served shares, where they do not."""
+
+    @staticmethod
+    def _reference(
+        strata: np.ndarray, covariate: np.ndarray, arm: np.ndarray
+    ) -> float:
+        """Demean the arm and the covariate inside each stratum, then take
+        the R2 of the one-variable regression through the origin."""
+        a = arm.astype(float).copy()
+        x = covariate.copy()
+        for level in np.unique(strata):
+            rows = strata == level
+            a[rows] -= a[rows].mean()
+            x[rows] -= x[rows].mean()
+        beta = float(x @ a) / float(x @ x)
+        return 1.0 - float(np.sum((a - beta * x) ** 2)) / float(np.sum(a**2))
+
+    def test_unequal_served_shares_use_the_within_stratum_denominator(
+        self,
+    ) -> None:
+        rng = np.random.default_rng(3)
+        strata = np.repeat(np.arange(4), 12)
+        arm = np.zeros(48, dtype=bool)
+        for level, served in enumerate((11, 1, 6, 6)):
+            arm[level * 12 : level * 12 + served] = True
+        covariate = arm.astype(float) + rng.normal(0.0, 0.12, size=48)
+        stratum_columns = (strata[:, None] == np.arange(4)[None, :]).astype(float)
+        design = np.column_stack([stratum_columns, covariate])
+
+        r2 = _arm_balance_r2(design, stratum_columns, arm)
+        total = 1.0 - float(
+            np.sum(
+                (
+                    arm
+                    - design
+                    @ np.linalg.lstsq(design, arm.astype(float), rcond=None)[0]
+                )
+                ** 2
+            )
+        ) / float(np.sum((arm - arm.mean()) ** 2))
+
+        assert r2 == pytest.approx(self._reference(strata, covariate, arm), abs=1e-9)
+        assert abs(r2 - total) > 0.01
+
+    def test_an_arm_constant_inside_every_stratum_reads_as_explained(
+        self,
+    ) -> None:
+        strata = np.array([0, 0, 1, 1])
+        arm = np.array([True, True, False, False])
+        stratum_columns = (strata[:, None] == np.arange(2)[None, :]).astype(float)
+        design = np.column_stack([stratum_columns, np.ones(4)])
+
+        assert _arm_balance_r2(design, stratum_columns, arm) == 1.0

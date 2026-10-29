@@ -3454,13 +3454,17 @@ an id). The exact specification:
   never imputed, so `n_used` of `funnel.analysed` tasks are used, and an
   adjusted figure's gap to the primary mixes the adjustment with the subset.
   `unadjusted_same_subset` is the primary's test run on the same tasks' raw
-  outcomes: the gap between it and the adjusted figure is the adjustment alone.
+  outcomes, so the gap between the two point estimates is the adjustment
+  alone; their p-values and intervals use separate resampling streams and also
+  differ by Monte Carlo noise. It is `null` when the fit is refused for too few
+  residual degrees of freedom or for no stratum holding both arms.
 - **Covariates.** `log1p(brief_chars)` (`brief_length`, pre-registered), and
   that plus the sub-agent type (`brief_length_and_agent_type`, exploratory).
 - **Fit.** Least squares of the outcome on one indicator per stratum (parent
   session x ISO week), the covariates and, for the agent type, one indicator per
   level. Types with fewer than 3 tasks pool into a single level first, and the
-  most common level (ties by sort order) is the reference and is dropped. The
+  most common level (ties broken by digest order, the pooled level last) is the
+  reference and is dropped. The
   arm is never a column of the fit, so the residuals do not depend on the
   assignment.
 - **Test.** The primary's within-stratum permutation test, with its statistic

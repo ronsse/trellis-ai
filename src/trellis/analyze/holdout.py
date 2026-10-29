@@ -503,8 +503,10 @@ class HoldoutAdjustment(TrellisModel):
     ``n_used`` less the design's rank. ``inference`` is the primary's test run
     on the residuals; its bootstrap interval holds the fitted coefficients
     fixed. ``unadjusted_same_subset`` is the same test on the raw outcomes of
-    the same ``n_used`` tasks, so the gap between it and ``inference`` is the
-    adjustment alone, and the gap to the primary also includes the subset.
+    the same ``n_used`` tasks, so the gap between its point estimate and
+    ``inference``'s is the adjustment alone (the p-values and intervals use
+    separate resampling streams and also differ by Monte Carlo noise), and
+    the gap to the primary also includes the subset.
     ``arm_balance_r2`` is the share of the arm's within-stratum variance the
     covariates explain; above 0.9 the adjustment is ``not_measurable``.
     """
@@ -2393,7 +2395,10 @@ def _arm_balance_r2(
     The arm indicator is regressed on the stratum indicators alone and then on
     the whole design; the figure is the drop in residual sum of squares over
     the first. 1.0 means the covariates reproduce the arm inside every
-    stratum, so the adjusted difference has nothing to be estimated from.
+    stratum, so the adjusted difference has nothing to be estimated from. An
+    arm that does not vary inside any stratum reads 1.0 for the same reason;
+    the comparison is against a tolerance because lstsq leaves rounding
+    residue of order 1e-31 where the exact answer is zero.
     """
     arm = served.astype(float)
 
@@ -2402,8 +2407,8 @@ def _arm_balance_r2(
         return float(np.sum((arm - columns @ beta) ** 2))
 
     within = residual_ss(stratum_columns)
-    if within <= 0.0:
-        return 0.0
+    if within <= 1e-9:
+        return 1.0
     return min(1.0, max(0.0, 1.0 - residual_ss(design) / within))
 
 
