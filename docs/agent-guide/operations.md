@@ -3974,8 +3974,11 @@ above its own clearance, and cannot touch a document it may not read.**
   excerpt included, from this row, so a rewrite that left it unlabelled would
   serve a restricted document at a lower clearance. A chunk id is mirrored from
   its own stored document, as the chunk embed path does; the parent's label is
-  not copied onto it but read through the chunk id when the row is served. An id
-  that names no document is written as sent. The trace and memory extraction
+  not copied onto it but read through the chunk id when the row is served. A row
+  at a stored document also takes that document's content (the excerpt a
+  semantic hit serves, cut as the embed path cuts it) and role (`node_role`,
+  `node_type`, `agent_id`, `document_form`, removed where the document has
+  none), not the caller's. An id that names no document is written as sent. The trace and memory extraction
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
 - `POST /api/v1/vectors` also refuses, with a 422 and nothing written, a row
