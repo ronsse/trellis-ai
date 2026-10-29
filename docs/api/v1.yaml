@@ -4115,15 +4115,19 @@ paths:
       description: 'List or search documents, returning previews only.
 
 
-        A document above the key''s clearance is absent: no row, no id, no title,
+        A document above the key''s clearance is absent: no row, id, title or
 
-        and ``total`` does not count it (#194). A key below ``restricted`` is
+        preview, and ``total`` does not count it (#194). A key below ``restricted``
 
-        served from a bounded scan of the store, the way a search is, so a store
+        is served by scanning the store in batches from the start until the page
 
-        of more than :data:`_SEARCH_SCAN_LIMIT` rows reports ``total_exact: false``
+        is filled or the store runs out, so any readable row can be paged to. When
 
-        for such a key.
+        the scan stops early ``total`` is the readable rows seen so far and
+
+        ``total_exact`` is ``false``: counts are approximate below ``restricted``,
+
+        and never include or derive from a row the key cannot read.
 
 
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass

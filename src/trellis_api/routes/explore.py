@@ -63,6 +63,9 @@ _SEARCH_SCAN_LIMIT = 2000
 #: Rows fetched per round trip when a list is filtered by clearance.
 _SCAN_BATCH = 500
 
+#: How far a filtered search may grow its capture past ``_SEARCH_SCAN_LIMIT``.
+_SEARCH_GROWTH_CAP = 32
+
 
 def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored document into a list row: preview, never full content."""
@@ -119,11 +122,13 @@ def list_documents(
 ) -> dict[str, Any]:
     """List or search documents, returning previews only.
 
-    A document above the key's clearance is absent: no row, no id, no title,
-    and ``total`` does not count it (#194). A key below ``restricted`` is
-    served from a bounded scan of the store, the way a search is, so a store
-    of more than :data:`_SEARCH_SCAN_LIMIT` rows reports ``total_exact: false``
-    for such a key.
+    A document above the key's clearance is absent: no row, id, title or
+    preview, and ``total`` does not count it (#194). A key below ``restricted``
+    is served by scanning the store in batches from the start until the page
+    is filled or the store runs out, so any readable row can be paged to. When
+    the scan stops early ``total`` is the readable rows seen so far and
+    ``total_exact`` is ``false``: counts are approximate below ``restricted``,
+    and never include or derive from a row the key cannot read.
 
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -142,24 +147,15 @@ def list_documents(
     store = registry.knowledge.document_store
     gate = DocumentClearance(store, request_clearance(ctx))
     if q:
-        matches = store.search(
-            q, limit=_SEARCH_SCAN_LIMIT, include_chunks=include_chunks
-        )
-        total_exact = len(matches) < _SEARCH_SCAN_LIMIT
-        matches = [m for m in matches if gate.permits(m["doc_id"], m.get("metadata"))]
+        matches, total_exact = _search_readable(store, gate, q, include_chunks)
         total = len(matches)
         docs = matches[offset : offset + limit]
     elif gate.clearance != "restricted":
-        visible, scanned, exhausted = _scan_readable(
-            store, gate, include_chunks=include_chunks
+        matches, total_exact = _list_readable(
+            store, gate, need=offset + limit, include_chunks=include_chunks
         )
-        total_exact = exhausted
-        total = len(visible) + (
-            0
-            if exhausted
-            else max(store.count(include_chunks=include_chunks) - scanned, 0)
-        )
-        docs = visible[offset : offset + limit]
+        total = len(matches)
+        docs = matches[offset : offset + limit]
     else:
         docs = store.list_documents(
             limit=limit, offset=offset, include_chunks=include_chunks
@@ -178,30 +174,58 @@ def list_documents(
     }
 
 
-def _scan_readable(
-    store: Any, gate: DocumentClearance, *, include_chunks: bool
-) -> tuple[list[dict[str, Any]], int, bool]:
-    """Every document the gate permits among the first scan-limit rows.
+def _list_readable(
+    store: Any, gate: DocumentClearance, *, need: int, include_chunks: bool
+) -> tuple[list[dict[str, Any]], bool]:
+    """The documents the gate permits, scanned from the start until ``need``.
 
-    Returns ``(readable rows, rows scanned, whether the store ran out)``.
+    Returns ``(readable rows seen, whether they are every readable row)``.
     ``DocumentStore`` has no label predicate, so the filter runs here, in
-    batches, and a page is cut from the readable rows rather than from the
-    store's: filtering a store page would hand back short pages.
+    batches of :data:`_SCAN_BATCH`; a page is cut from the readable rows, not
+    from the store's, so a hidden row never shortens it. The scan stops once
+    ``need`` readable rows are in hand, so the rows behind them are not
+    counted; the store's own row count is used only to see that the store is
+    spent and is never returned.
     """
     readable: list[dict[str, Any]] = []
     scanned = 0
-    while scanned < _SEARCH_SCAN_LIMIT:
-        want = min(_SCAN_BATCH, _SEARCH_SCAN_LIMIT - scanned)
+    while True:
         batch = store.list_documents(
-            limit=want, offset=scanned, include_chunks=include_chunks
+            limit=_SCAN_BATCH, offset=scanned, include_chunks=include_chunks
         )
         scanned += len(batch)
         readable.extend(
             d for d in batch if gate.permits(d["doc_id"], d.get("metadata"))
         )
-        if len(batch) < want:
-            return readable, scanned, True
-    return readable, scanned, False
+        if len(batch) < _SCAN_BATCH:
+            return readable, True
+        if len(readable) >= need:
+            return readable, scanned >= store.count(include_chunks=include_chunks)
+
+
+def _search_readable(
+    store: Any, gate: DocumentClearance, q: str, include_chunks: bool
+) -> tuple[list[dict[str, Any]], bool]:
+    """The search matches the gate permits, and whether they are all of them.
+
+    ``DocumentStore.search`` has only a ``limit``, so a match capture is cut
+    at a bound and the cut must not depend on rows the key cannot read: a
+    capture that filled up with hidden rows is re-run with a bound twice as
+    large until it holds :data:`_SEARCH_SCAN_LIMIT` readable rows, runs out
+    of matches, or reaches :data:`_SEARCH_GROWTH_CAP` times the base bound.
+    A key that reads everything stops after the first capture, as before.
+    """
+    bound = _SEARCH_SCAN_LIMIT
+    while True:
+        found = store.search(q, limit=bound, include_chunks=include_chunks)
+        readable = [m for m in found if gate.permits(m["doc_id"], m.get("metadata"))]
+        if len(found) < bound:
+            return readable, True
+        if len(readable) >= _SEARCH_SCAN_LIMIT or (
+            bound >= _SEARCH_SCAN_LIMIT * _SEARCH_GROWTH_CAP
+        ):
+            return readable, False
+        bound *= 2
 
 
 @router.get("/documents/{doc_id:path}")

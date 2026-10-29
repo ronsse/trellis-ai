@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+import trellis_api.routes.explore as explore_mod
 from tests.unit.retrieve.test_sensitivity import _lifecycle, label
 from trellis.auth import generate_api_key
 from trellis.ingest_corpus.models import chunk_doc_id
@@ -420,6 +421,68 @@ class TestExploreDocumentList:
             chunk_doc_id("doc-secret", 0), SECRET, {"title": "chunk"}
         )
         resp = self._get(client, _headers(registry, ["read"]), include_chunks="true")
+        assert "doc-secret" not in resp.text
+
+    def _small_window(self, monkeypatch, *, window=10, batch=4):
+        monkeypatch.setattr(explore_mod, "_SEARCH_SCAN_LIMIT", window)
+        monkeypatch.setattr(explore_mod, "_SCAN_BATCH", batch)
+
+    def test_a_partial_scan_counts_only_rows_the_key_can_read(
+        self, client, registry, monkeypatch
+    ):
+        """Stopping early must not turn the store's row count into a total."""
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        for n in range(3):
+            store.put(f"doc-secret-{n}", SECRET, {"title": "S", **label("restricted")})
+        for n in range(20):
+            store.put(f"doc-open-{n}", OPEN, {"title": f"O{n}"})
+        readable = 21
+        body = self._get(client, _headers(registry, ["read"]), limit=5).json()
+        assert body["total_exact"] is False
+        assert 5 <= body["total"] <= readable
+        assert body["count"] == 5
+
+    def test_a_store_that_is_exactly_one_batch_reports_exact(
+        self, client, registry, monkeypatch
+    ):
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        store.put("doc-open-a", OPEN, {"title": "A"})
+        store.put("doc-open-b", OPEN, {"title": "B"})
+        body = self._get(client, _headers(registry, ["read"]), limit=2).json()
+        assert (body["total"], body["total_exact"]) == (3, True)
+
+    def test_a_read_key_pages_past_the_old_window_like_admin(
+        self, client, registry, monkeypatch
+    ):
+        """An unlabelled store reads the same to a read key as to admin."""
+        self._small_window(monkeypatch)
+        store = registry.knowledge.document_store
+        store.delete("doc-secret")
+        for n in range(20):
+            store.put(f"doc-open-{n}", OPEN, {"title": f"O{n}"})
+        paged = {"limit": 5, "offset": 15}
+        read = self._get(client, _headers(registry, ["read"]), **paged).json()
+        admin = self._get(client, _headers(registry, ["admin"]), **paged).json()
+        assert read["count"] == admin["count"] == 5
+        assert [d["doc_id"] for d in read["documents"]] == [
+            d["doc_id"] for d in admin["documents"]
+        ]
+
+    def test_a_search_capture_filled_with_hidden_rows_is_widened(
+        self, client, registry, monkeypatch
+    ):
+        """Exactness depends on rows the key can read, not on hidden ones."""
+        self._small_window(monkeypatch, window=4)
+        store = registry.knowledge.document_store
+        for n in range(4):
+            store.put(f"doc-secret-{n}", SECRET, {"title": "S", **label("restricted")})
+        for n in range(2):
+            store.put(f"doc-open-{n}", SECRET, {"title": f"O{n}"})
+        resp = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert resp.json()["total"] == 2
+        assert resp.json()["total_exact"] is True
         assert "doc-secret" not in resp.text
 
 
