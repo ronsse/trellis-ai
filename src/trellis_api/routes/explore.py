@@ -587,8 +587,8 @@ def get_node_history(
     ``GET /entities/{entity_id:path}`` greedily matches any suffix.
 
     A node carries no label, so every version is served; a version whose
-    ``document_ids`` or ``evidence_ref`` property names a document the caller
-    may not read is served without that id.
+    ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
+    names a document the caller may not read is served without that id.
     """
     registry = get_registry()
     versions = registry.knowledge.graph_store.get_node_history(entity_id)

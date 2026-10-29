@@ -4959,9 +4959,9 @@ paths:
 
         A node carries no label, so every version is served; a version whose
 
-        ``document_ids`` or ``evidence_ref`` property names a document the caller
+        ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
 
-        may not read is served without that id.'
+        names a document the caller may not read is served without that id.'
       operationId: get_node_history_api_v1_graph_history_get
       parameters:
       - description: Node ID to fetch SCD-2 history for
