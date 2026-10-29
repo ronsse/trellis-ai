@@ -132,6 +132,7 @@ DECISION_UNCLASSIFIED = "unclassified"
 #: discipline :mod:`trellis.classify.refresh` uses.
 REASON_NOT_FOUND = "document not found"
 REASON_NO_SIGNAL = "classifier produced no tags"
+REASON_REDACTED = "document redacted while being judged"
 REASON_DRY_RUN = "shadow record would be written (dry-run)"
 REASON_WRITTEN = "shadow record written"
 
@@ -160,7 +161,10 @@ class ShadowOutcome:
 class BatchShadowResult:
     """Counts from a batch shadow pass.
 
-    Every scanned document lands in exactly one bucket.
+    Every scanned document lands in exactly one bucket. ``skipped_redacted``
+    counts documents redacted while the model was judging them: the verdict
+    describes text that no longer exists, so it is dropped rather than written
+    onto the blank row, and it is neither an error nor a judged event.
     """
 
     scanned: int = 0
@@ -168,6 +172,7 @@ class BatchShadowResult:
     skipped_missing_content: int = 0
     skipped_fresh: int = 0
     skipped_no_signal: int = 0
+    skipped_redacted: int = 0
     errors: int = 0
     #: Documents whose content changed while the model was judging them
     #: (#421). A subset of ``written`` — the record landed on the current
@@ -293,6 +298,16 @@ def shadow_classify_item(
         content=content,
         shadow_json=shadow_json,
     )
+    if write.redacted:
+        # Redacted between the read and the write: the verdict was derived
+        # from text that is gone. Dropped, with no judged event, because the
+        # event would record a classification the store does not hold.
+        return ShadowOutcome(
+            item_id=item_id,
+            written=False,
+            reason=REASON_REDACTED,
+            live=live,
+        )
     if not write.written:
         # Deleted between the read and the write. Reusing REASON_NOT_FOUND
         # keeps this in `errors` beside the identical case one branch up: a
@@ -429,6 +444,7 @@ def shadow_classify_stale(
         written=result.written,
         skipped_fresh=result.skipped_fresh,
         skipped_no_signal=result.skipped_no_signal,
+        skipped_redacted=result.skipped_redacted,
         errors=result.errors,
         stale_snapshot=result.stale_snapshot,
         dry_run=dry_run,
@@ -784,6 +800,8 @@ def _tally(result: BatchShadowResult, item_id: str, outcome: ShadowOutcome) -> N
             result.stale_snapshot += 1
     elif outcome.reason == REASON_NO_SIGNAL:
         result.skipped_no_signal += 1
+    elif outcome.reason == REASON_REDACTED:
+        result.skipped_redacted += 1
     else:
         # REASON_NOT_FOUND: the store listed the row then could not read it
         # back (a concurrent delete). A document we were asked to judge and
@@ -829,6 +847,7 @@ __all__ = [
     "COMPARED_FACETS",
     "PROTECTED_LIVE_KEYS",
     "REASON_NO_SIGNAL",
+    "REASON_REDACTED",
     "SHADOW_TAGS_KEY",
     "BatchShadowResult",
     "FacetAgreement",

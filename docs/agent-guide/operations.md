@@ -829,10 +829,12 @@ This is a batch pass only, never an ingest hook. Classify-on-write is determinis
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 999, "written": 964, "skipped_fresh": 0, "skipped_no_signal": 31, "skipped_missing_content": 4, "errors": 0, "stale_snapshot": 0, "dry_run": false, "item_ids_written": ["doc-1", "doc-2"]}
+{"status": "ok", "scanned": 999, "written": 964, "skipped_fresh": 0, "skipped_no_signal": 31, "skipped_missing_content": 4, "skipped_redacted": 0, "errors": 0, "stale_snapshot": 0, "dry_run": false, "item_ids_written": ["doc-1", "doc-2"]}
 ```
 
 `stale_snapshot` ([#421](https://github.com/ronsse/trellis-ai/issues/421)) counts documents another writer changed while the model was judging them. The model call sits between the row's read and its write, so the write re-reads and overlays only the shadow key — the record still lands, on the current content, and every live tag written in the meantime survives. It is a **subset of `written`**, not a failure bucket, so it does not move `status`. A row deleted inside that window is not re-inserted and is counted in `errors`.
+
+`skipped_redacted` counts documents redacted inside the same window. The verdict was derived from text that no longer exists, so it is dropped rather than written onto the blank tombstone: no shadow record, no `MEMORY_OP_JUDGED` event, and not an `error`, so `status` and the exit code do not move. Every scanned document still lands in exactly one bucket. The text summary prints a line for it only when it is non-zero.
 
 ### `trellis classify shadow-report`
 
@@ -1445,7 +1447,10 @@ Scope boundaries, stated plainly:
   re-ingest them (#1039). `trellis ingest dbt-manifest` skips a description whose
   `dbt:<id>` row is redacted and counts it as `skipped_redacted`.
   `worker embed-traces` reports a redacted trace
-  summary as `skipped_redacted` and moves its watermark past it.
+  summary as `skipped_redacted` and moves its watermark past it; `--dry-run`
+  reads the summary row to report the same count (and the same `embedded`) the
+  live pass will, and the text output prints a `redacted:` line when it is
+  non-zero.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
@@ -3695,9 +3700,9 @@ trellis worker enrich [--concurrency N] [--limit N] \
 | `--dry-run` | off | Select + report candidates without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
-**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** when `content_tags.classified_mode != "enrichment"` — i.e. it has never been through this path. `--reenrich` takes the already-enriched too. (This used to select on `content_tags.tag_confidence`, a key `ContentTags` does not define and nothing ever wrote, so the threshold could never skip anything.) A promoted precedent's document row (an id in the `precedent://learning/` namespace) is **never** a candidate, with or without `--reenrich`: its `document_form` and `decision` tag belong to the precedent handlers, and the row is skipped before any model call.
+**Selection predicate.** A document is a candidate when its `metadata.content_tags` is missing/empty, **or** when `content_tags.classified_mode != "enrichment"` — i.e. it has never been through this path. `--reenrich` takes the already-enriched too. (This used to select on `content_tags.tag_confidence`, a key `ContentTags` does not define and nothing ever wrote, so the threshold could never skip anything.) A promoted precedent's document row (an id in the `precedent://learning/` namespace) is **never** a candidate, with or without `--reenrich`: its `document_form` and `decision` tag belong to the precedent handlers, and the row is skipped before any model call. Neither is a redaction tombstone (the blank archived row a redaction leaves): there is nothing to enrich, and it never carries tags, so it would otherwise be selected on every pass and cost a model call each time.
 
-**Concurrency counters in `--format json` (#421).** The candidate page is a snapshot taken before *N* model calls, so the write-back re-reads each row and merges only the keys this path owns. `stale_snapshot` counts rows another writer changed inside that window — those are still enriched, onto their current content, so it is a concurrency signal rather than a failure count. `vanished` counts rows deleted inside the window, which are **skipped** (writing them back would resurrect a deleted document). A standing non-zero `stale_snapshot` means the batch is racing another writer and wants a smaller `--limit`.
+**Concurrency counters in `--format json` (#421).** The candidate page is a snapshot taken before *N* model calls, so the write-back re-reads each row and merges only the keys this path owns. `stale_snapshot` counts rows another writer changed inside that window — those are still enriched, onto their current content, so it is a concurrency signal rather than a failure count. `vanished` counts rows deleted inside the window, which are **skipped** (writing them back would resurrect a deleted document). A standing non-zero `stale_snapshot` means the batch is racing another writer and wants a smaller `--limit`. `skipped_redacted` (always present) counts only rows **redacted inside the window** (a tombstone that already existed at selection time is never selected, so it does not appear here): the tags came from text that is gone, so they are dropped rather than written onto the blank tombstone, and the row is neither `enriched` nor `vanished` and emits no `MEMORY_OP_JUDGED` event. The text summary's "concurrent writes" line prints when it is non-zero.
 
 **Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
 

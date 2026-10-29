@@ -181,6 +181,61 @@ class TestShadowCommand:
         assert result.exit_code == 0, result.output
         assert "2 document(s) were written" in plain(result.output)
 
+    def test_the_redacted_count_reaches_the_operator_without_changing_the_exit(
+        self, cli_env, monkeypatch
+    ) -> None:
+        """A document redacted while being judged is its own key, not an error.
+
+        The library-side bucket is pinned in ``tests/unit/classify/test_shadow.py``;
+        this pins that the CLI forwards it on both surfaces, shows the text
+        line only when it is non-zero, and leaves ``status`` and the exit code
+        where a clean pass puts them.
+        """
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis_cli import classify as classify_cli
+
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        results = iter(
+            [
+                BatchShadowResult(scanned=3, written=2, skipped_redacted=1),
+                BatchShadowResult(scanned=3, written=2, skipped_redacted=1),
+                BatchShadowResult(scanned=2, written=2),
+            ]
+        )
+        monkeypatch.setattr(
+            classify_cli, "shadow_classify_stale", lambda **_kwargs: next(results)
+        )
+
+        payload = _run_json("shadow")
+        assert payload["skipped_redacted"] == 1
+        assert payload["status"] == "ok"
+        assert payload["errors"] == 0
+
+        redacted = runner.invoke(classify_app, ["shadow"])
+        assert redacted.exit_code == 0, redacted.output
+        assert "1 document(s) were redacted while being judged" in plain(
+            redacted.output
+        )
+
+        # Paired: the key is always present, the line only when non-zero.
+        clean = runner.invoke(classify_app, ["shadow"])
+        assert clean.exit_code == 0, clean.output
+        assert "redacted" not in plain(clean.output)
+
+    def test_a_clean_pass_reports_zero_redacted_in_json(
+        self, cli_env, monkeypatch
+    ) -> None:
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis_cli import classify as classify_cli
+
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        monkeypatch.setattr(
+            classify_cli,
+            "shadow_classify_stale",
+            lambda **_kwargs: BatchShadowResult(scanned=1, written=1),
+        )
+        assert _run_json("shadow")["skipped_redacted"] == 0
+
     def test_the_classifier_is_built_for_the_classify_shadow_consumer(
         self, cli_env, monkeypatch
     ) -> None:
