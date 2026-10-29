@@ -1544,11 +1544,32 @@ class SemanticSearch(SearchStrategy):
                 for r in results
                 if _passes_domain_scope(r.get("metadata", {}), domain)
             ][:limit]
+        # Checked once, outside the per-row guard below: a bad registry value
+        # raises ``TypeError`` inside ``_apply_importance`` too, and inside
+        # the guard it would read as a malformed row and silently drop every
+        # row with a nonzero importance from every pack.
+        self._require_numeric_importance_params(importance_params)
         items = []
         for result in results:
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
-            score = _apply_importance(base_score, metadata, **importance_params)
+            # The store's own score is not row metadata, so it is checked
+            # before the guard for the same reason as the params above.
+            self._require_numeric_score(base_score)
+            # A vector row's metadata is caller-supplied (any ``ingest`` key
+            # can write a row that names no stored document, so nothing is
+            # mirrored over it). One malformed value must cost that row, not
+            # the whole axis: the two computations that read caller values
+            # are guarded one row at a time, narrowly, so a bug anywhere
+            # else in this loop still surfaces. ``_apply_importance`` keeps
+            # raising -- the missing-stamp ``ValueError`` is the writer
+            # contract and the keyword axis relies on it; this is the one
+            # caller that has to survive it.
+            try:
+                score = _apply_importance(base_score, metadata, **importance_params)
+            except (ValueError, TypeError) as exc:
+                self._skip_malformed_row(result["item_id"], "auto_importance", exc)
+                continue
             # A vector row has no columns of its own — its recency stamp is
             # inside the metadata snapshot, either the source's (splatted
             # from the document) or ``build_vector_row``'s embed-time
@@ -1561,18 +1582,17 @@ class SemanticSearch(SearchStrategy):
                 half_life_days=half_life,
                 floor=floor,
             )
+            excerpt_field = "content" if "content" in metadata else "excerpt"
+            try:
+                excerpt = self._row_excerpt(metadata.get(excerpt_field, ""))
+            except (ValueError, TypeError) as exc:
+                self._skip_malformed_row(result["item_id"], excerpt_field, exc)
+                continue
             items.append(
                 PackItem(
                     item_id=result["item_id"],
                     item_type="vector",
-                    # Vector metadata is written already-truncated by
-                    # ``build_vector_row``, which is the last place the full
-                    # document is in hand; this only bounds rows from some
-                    # other producer.
-                    excerpt=truncate_excerpt(
-                        metadata.get("content", metadata.get("excerpt", "")),
-                        limit=self._excerpt_max_chars,
-                    ),
+                    excerpt=excerpt,
                     relevance_score=score,
                     metadata={
                         **metadata,
@@ -1586,6 +1606,67 @@ class SemanticSearch(SearchStrategy):
                 )
             )
         return sorted(items, key=lambda x: x.relevance_score, reverse=True)
+
+    @staticmethod
+    def _require_numeric_score(score: Any) -> None:
+        """Raise ``TypeError`` for a store score that is not a number.
+
+        Never skips: the score comes from the vector store, not from the
+        caller's row metadata, so a bad one is a store defect that has to
+        stay loud (``strategy_failures``) rather than be logged per row.
+        """
+        if not isinstance(score, (int, float)):
+            msg = f"semantic row score is {type(score).__name__}, not a number"
+            raise TypeError(msg)
+
+    @staticmethod
+    def _require_numeric_importance_params(params: _ImportanceParams) -> None:
+        """Raise ``TypeError`` for a resolved importance param that is not a number.
+
+        ``ParameterSnapshot.values`` allows a string, so a registry can hand
+        ``importance < "0.8"`` to ``_apply_importance``, which raises. That is
+        a configuration defect and must stay loud, not be skipped per row.
+        """
+        for key, value in params.items():
+            if not isinstance(value, (int, float)):
+                msg = (
+                    f"importance param {key!r} is {type(value).__name__}, not a number"
+                )
+                raise TypeError(msg)
+
+    def _row_excerpt(self, raw: Any) -> str:
+        """Bound a vector row's excerpt source, refusing a non-string.
+
+        Vector metadata is written already-truncated by ``build_vector_row``,
+        which is the last place the full document is in hand; this only
+        bounds rows from some other producer. A non-string would not always
+        raise here -- ``truncate_excerpt`` returns a short list verbatim --
+        and would then fail ``PackItem`` validation outside the guard, so it
+        is refused up front with the same ``TypeError`` a bare ``int`` raises.
+        """
+        if not isinstance(raw, str):
+            msg = f"excerpt source is {type(raw).__name__}, not str"
+            raise TypeError(msg)
+        return truncate_excerpt(raw, limit=self._excerpt_max_chars)
+
+    @staticmethod
+    def _skip_malformed_row(item_id: str, field: str, exc: Exception) -> None:
+        """Record a skipped row where the default CLI shows it.
+
+        Names the field and the exception type, never the value: the value is
+        caller-controlled, and ``str(exc)`` echoes it (``could not convert
+        string to float: ...``). A ``debug`` line would be invisible on the
+        default CLI (``TRELLIS_LOG_LEVEL`` is ``WARNING``), so this is a
+        warning. The strategy returns ``list[PackItem]`` and has no channel
+        to the pack's ``rejected_items``, so the pack itself does not report
+        the skip.
+        """
+        logger.warning(
+            "semantic_row_skipped_malformed_metadata",
+            item_id=item_id,
+            field=field,
+            error_type=type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True)
