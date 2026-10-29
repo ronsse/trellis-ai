@@ -1424,12 +1424,24 @@ Scope boundaries, stated plainly:
   but a class label, so a real tombstone carries no label of its own; the cases
   that remain are a label stamped on a tombstone afterwards and a chunk whose
   parent is labelled. Setting it on an id that was not redacted changes nothing
-  and stamps nothing. Known gap (#1049): an unflagged re-put whose derived
-  idempotency key matches an earlier successful write to an id that was later
-  redacted (same content, metadata and options) is answered as a duplicate (200
-  on the two REST routes)
-  because the idempotency stage runs before the handler's guard; nothing is
-  written and the tombstone stays.
+  and stamps nothing. A replay of an earlier write is refused the same way
+  (#1049): the idempotency stage answers a key it has seen before the handler's
+  guard runs, so an unflagged re-put whose derived key matches an earlier
+  successful write to an id that was later redacted (same content, metadata and
+  options) would have been answered as a duplicate while the row was a
+  tombstone. The executor now asks the handler's optional `replay_refusal`
+  on a hit, in the in-memory cache and the event log alike and never on a miss,
+  and `evidence.ingest` answers with the guard's own predicate, read-only: the
+  replay gets the first write's refusal (`redaction_tombstone_overwrite`, a 400
+  on the two REST routes, `rejected` on the command door, one `mutation.rejected`
+  event). A hook that raises, or answers with anything but nothing or a
+  validation error, fails the command closed (`idempotency_check_failed`); the
+  executor looks the hook up on the handler's type. Only a tombstone is asked: a
+  replay over a live row or an id with no row is still a duplicate, even one
+  whose metadata carries a re-ingest stamp. So is a flagged replay: the flagged key digests the flag,
+  so it replays a write that already put content back, and a replay writes
+  nothing; if the id was redacted again since, the tombstone stays, and putting
+  content back again takes a fresh `idempotency_key`.
   A flagged write stamps the row `reingested_after_redaction` (an ISO time; a
   caller may not set that key, `reingest_stamp_reserved`), and promotion's
   re-ingest exemption (`refused_redacted`) reads the stamp, so a row put back

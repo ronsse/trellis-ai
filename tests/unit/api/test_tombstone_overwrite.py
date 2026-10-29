@@ -64,7 +64,7 @@ def _batch(evidence: dict) -> dict:
             {
                 "operation": "evidence.ingest",
                 "args": {"evidence": evidence},
-                "target_id": DOC_ID,
+                "target_id": evidence.get("doc_id", DOC_ID),
             }
         ]
     }
@@ -251,6 +251,97 @@ def test_commands_batch_treats_a_false_flag_as_the_unflagged_write(
     assert result["status"] == "rejected"
     assert "--reingest-redacted" in result["message"]
     assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
+
+
+# ── a replay of an earlier write over a tombstone (#1049) ───────────────
+
+REPLAYED = "doc-replayed"
+
+
+def _redact(registry: StoreRegistry, doc_id: str) -> None:
+    """Blank ``doc_id`` as a redaction does, after a route wrote it."""
+    put_document(
+        registry.knowledge.document_store,
+        resolve_vector_store(registry),
+        doc_id,
+        "",
+        tombstone_metadata(),
+        preserve_updated_at=False,
+    )
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(doc_id))
+
+
+@BY_ROUTE
+def test_a_replayed_write_over_a_tombstone_is_the_first_write_s_400(
+    client: TestClient, registry: StoreRegistry, route: Route
+) -> None:
+    """The derived idempotency key of an earlier success matches, and the
+    idempotency stage used to answer 200 for it with the tombstone still in
+    place. Each request builds its own executor, so this is the event-log arm.
+    Defective subject: skip the replay hook and the second post answers 200."""
+    store = registry.knowledge.document_store
+    refused = client.post(route.path, json=route.body())
+    assert client.post(route.path, json=route.body(REPLAYED)).status_code == 200
+    _redact(registry, REPLAYED)
+
+    resp = client.post(route.path, json=route.body(REPLAYED))
+
+    assert resp.status_code == refused.status_code == 400, resp.text
+    assert resp.json() == refused.json()
+    assert ORIGINAL_TEXT not in resp.text
+    assert is_redaction_tombstone(store.get(REPLAYED))
+    assert REINGEST_STAMP_KEY not in store.get(REPLAYED)["metadata"]
+
+
+@BY_ROUTE
+def test_a_replayed_write_over_a_live_document_is_still_ok(
+    client: TestClient, registry: StoreRegistry, route: Route
+) -> None:
+    """Only a tombstone changes the answer: nothing was lost, so the replay is
+    the duplicate it always was."""
+    assert client.post(route.path, json=route.body(REPLAYED)).status_code == 200
+
+    resp = client.post(route.path, json=route.body(REPLAYED))
+
+    assert resp.status_code == 200, resp.text
+    assert registry.knowledge.document_store.get(REPLAYED)["content"] == NEW_TEXT
+
+
+@BY_ROUTE
+def test_a_flagged_replay_is_a_duplicate_even_after_a_second_redaction(
+    client: TestClient, registry: StoreRegistry, route: Route
+) -> None:
+    """The flagged key digests the flag, so this replays a write that already
+    put content back; a replay writes nothing, so the row stays a tombstone."""
+    body = route.body(reingest_redacted=True)
+    assert client.post(route.path, json=body).status_code == 200
+    _redact(registry, DOC_ID)
+
+    resp = client.post(route.path, json=body)
+
+    assert resp.status_code == 200, resp.text
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
+
+
+def test_a_replayed_batch_command_over_a_tombstone_is_rejected(
+    client: TestClient, registry: StoreRegistry
+) -> None:
+    refused = client.post(
+        "/api/v1/commands/batch", json=_batch({"doc_id": DOC_ID, "content": NEW_TEXT})
+    ).json()["results"][0]
+    body = _batch({"doc_id": REPLAYED, "content": NEW_TEXT})
+    first = client.post("/api/v1/commands/batch", json=body).json()["results"][0]
+    assert first["status"] == "success", first
+    _redact(registry, REPLAYED)
+
+    resp = client.post("/api/v1/commands/batch", json=body)
+
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["results"][0]
+    assert result["status"] == refused["status"] == "rejected"
+    assert result["message"] == refused["message"]
+    assert "--reingest-redacted" in result["message"]
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(REPLAYED))
 
 
 # ── the flag is no way past the clearance rules ─────────────────────────
