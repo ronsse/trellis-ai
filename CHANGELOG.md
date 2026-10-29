@@ -341,6 +341,21 @@ All notable changes to Trellis will be documented in this file.
   A row holding one of these values leaves the packs it was in; it surfaces in
   `trellis analyze health` through the malformed-row count.
 
+- **`GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` omit evidence
+  pointers to documents the caller cannot read.** Follows #1063, which left these
+  two routes. A node served by either could still name a document a
+  below-`restricted` key may not read, in `document_ids`, in its `evidence_ref`
+  property or as `lifecycle.superseded_by`. Both routes now apply the same
+  `conceal_node_pointers` step: the entity and every node of its `subgraph` (one
+  judgement over all of them), and every search hit's `properties`, are served
+  without such an id; the pointer key is removed, `lifecycle.state` and every
+  other property stay, and `restricted`, `admin` and auth off read nothing and see
+  the node as stored. Nothing else changes: the same nodes, edges, page, `total`
+  and order are served. `GET /api/v1/graph/search/facets` counts nodes per
+  `node_type` and names no property, so it needed no change. An edge's own
+  `evidence_ref` (served in the entity's `subgraph.edges`) is still served as
+  stored.
+
 - **A conversation-export prune keeps a parent row that is a redaction tombstone
   (#1067).** The conversation prune decides by document id alone, so a
   conversation that left the export had its redacted parent row deleted along

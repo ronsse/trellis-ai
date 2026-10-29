@@ -4576,7 +4576,16 @@ paths:
       - curate
   /api/v1/entities/{entity_id}:
     get:
-      description: Get an entity and its neighborhood.
+      description: 'Get an entity and its neighborhood.
+
+
+        A node carries no label, so the entity and every node of the subgraph are
+
+        served; one whose ``document_ids``, ``evidence_ref`` property or
+
+        ``lifecycle.superseded_by`` names a document the caller may not read is
+
+        served without that id. An edge''s own ``evidence_ref`` is served as stored.'
       operationId: get_entity_api_v1_entities__entity_id__get
       parameters:
       - in: path
@@ -4994,7 +5003,16 @@ paths:
       - explore
   /api/v1/graph/search:
     get:
-      description: Search graph nodes by name or type.
+      description: 'Search graph nodes by name or type.
+
+
+        A node carries no label, so every match is served; a hit whose
+
+        ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
+
+        names a document the caller may not read is served without that id.
+
+        ``total`` and the page are unchanged.'
       operationId: search_entities_api_v1_graph_search_get
       parameters:
       - description: A case-insensitive substring of the name, node_id or node_type
