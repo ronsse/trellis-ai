@@ -75,8 +75,14 @@ _SEARCH_GROWTH_CAP = 32
 _MAX_FILTERED_OFFSET = 10_000
 
 
-def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
-    """Shape a stored document into a list row: preview, never full content."""
+def _document_row(doc: dict[str, Any], *, with_rank: bool) -> dict[str, Any]:
+    """Shape a stored document into a list row: preview, never full content.
+
+    ``rank`` is the store's full-text score, computed from term statistics
+    over every document, hidden ones included, so a key that cannot read
+    everything would learn from it whether hidden documents hold a term.
+    It is returned only when ``with_rank`` says the caller reads everything.
+    """
     content = doc.get("content") or ""
     row = {
         "doc_id": doc.get("doc_id"),
@@ -86,7 +92,7 @@ def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
-    if "rank" in doc:
+    if with_rank and "rank" in doc:
         row["rank"] = doc["rank"]
     return row
 
@@ -202,7 +208,8 @@ def list_documents(
         )
         total = store.count(include_chunks=include_chunks)
         total_exact = True
-    rows = [_document_row(d) for d in docs]
+    with_rank = gate.clearance == "restricted"
+    rows = [_document_row(d, with_rank=with_rank) for d in docs]
     return {
         "status": "ok",
         "total": total,

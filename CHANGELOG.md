@@ -23,7 +23,9 @@ All notable changes to Trellis will be documented in this file.
   directly and has no ceiling. A `?q=` total is clipped to 2000, widening the
   capture (to at most 32 times) until it holds 2000 readable matches so one
   hidden match does not move it; past that bound a residual count leak is
-  unavoidable. `POST /evidence` takes an
+  unavoidable. A `?q=` row carries `rank` only for a `restricted` or admin key:
+  the full-text score is computed over every document, so a hidden one holding
+  the term moves it. `POST /evidence` takes an
   optional `sensitivity` under the rules the MCP save tools use (403 above the
   key's clearance, 422 for an unknown label or a raw `data_classification`
   key), through one shared helper. `GET /traces/{id}` answers `evidence_links`

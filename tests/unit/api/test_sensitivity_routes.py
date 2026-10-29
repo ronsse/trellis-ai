@@ -398,6 +398,18 @@ class TestExploreDocumentList:
         assert resp.json()["total"] == 0
         assert "doc-secret" not in resp.text
 
+    def test_a_search_rank_is_withheld_from_a_key_that_cannot_read_everything(
+        self, client, registry
+    ):
+        # The full-text score is computed over every document, so a hidden
+        # one holding the term moves a visible row's rank.
+        registry.knowledge.document_store.put("doc-visible", "zebra field notes", None)
+        read = self._get(client, _headers(registry, ["read"]), q="zebra")
+        assert [d["doc_id"] for d in read.json()["documents"]] == ["doc-visible"]
+        assert "rank" not in read.json()["documents"][0]
+        admin = self._get(client, _headers(registry, ["admin"]), q="zebra")
+        assert all("rank" in d for d in admin.json()["documents"])
+
     def test_admin_sees_the_row_in_the_list_and_the_search(self, client, registry):
         admin = _headers(registry, ["admin"])
         listed = self._get(client, admin)
@@ -709,6 +721,19 @@ class TestSearchScanHelpers:
         with_hidden = _SearchStub(["H0", *readable])
         a, a_exact = explore_mod._search_readable(plain, _Gate(), "q", False)
         b, b_exact = explore_mod._search_readable(with_hidden, _Gate(), "q", False)
+        assert (len(a), a_exact) == (len(b), b_exact) == (2000, False)
+        assert [m["doc_id"] for m in a] == [m["doc_id"] for m in b]
+
+    def test_a_capture_that_runs_out_past_the_window_is_still_clipped(self):
+        # One hidden match pushes the first capture short of the window, so
+        # the second capture runs out of matches holding 2500 readable rows;
+        # unclipped, that count would answer only because a hidden row ranked.
+        readable = [f"R{n}" for n in range(2500)]
+        plain = _SearchStub(readable)
+        with_hidden = _SearchStub(["H0", *readable])
+        a, a_exact = explore_mod._search_readable(plain, _Gate(), "q", False)
+        b, b_exact = explore_mod._search_readable(with_hidden, _Gate(), "q", False)
+        assert len(with_hidden.calls) == 2
         assert (len(a), a_exact) == (len(b), b_exact) == (2000, False)
         assert [m["doc_id"] for m in a] == [m["doc_id"] for m in b]
 
