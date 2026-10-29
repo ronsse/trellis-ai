@@ -95,7 +95,7 @@ dev = [
     # derive them; `scripts/check_tool_pins.py` fails CI on any divergence.
     # Do not write "matches X" here — three such comments were carried
     # verbatim across Dependabot bumps that broke what they asserted (#378).
-    "ruff==0.17.1",
+    "ruff==0.17.2",
     "mypy==2.4.0",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
@@ -110,7 +110,7 @@ llm-openai = [
     "openai>=1.0",
 ]
 llm-anthropic = [
-    "anthropic>=1,<2",
+    "anthropic>=1,<3",
 ]
 neo4j = [
     "neo4j>=5.20",

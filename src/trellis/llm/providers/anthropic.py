@@ -117,11 +117,11 @@ class AnthropicClient:
         sampling parameter, and that roster rots on every release while being
         unfalsifiable here (``base_url`` may point at any gateway).  More
         decisively, it would not work: the parameter is *absent from the
-        Anthropic Python SDK's 1.x signatures*, so passing it raises
-        ``TypeError`` in the client before any model ever sees it.  A branch
-        that kept it for the models that still accept it would therefore be
-        both dead and broken.  Unconditional is the only shape that is correct
-        across both SDK majors and every model.
+        Anthropic Python SDK's 1.x and 2.x signatures* (2.3.0 read), so passing
+        it raises ``TypeError`` in the client before any model ever sees it.  A
+        branch that kept it for the models that still accept it would therefore
+        be both dead and broken.  Unconditional is the only shape that is
+        correct across every SDK major the extra admits and every model.
 
         As of 2026-09-04 the API side is: Claude 4.7 and later — Opus 4.7,
         Opus 4.8, Opus 5, Sonnet 5, Fable/Mythos 5 — return a 400 for any of
