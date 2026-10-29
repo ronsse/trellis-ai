@@ -49,6 +49,7 @@ import yaml
 from rich.markup import escape
 
 from trellis.core.derived_metadata import apply_derived_metadata
+from trellis.core.document_write import is_redaction_tombstone
 from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
@@ -1591,7 +1592,10 @@ def enrich_cmd(
     ``--reenrich`` takes the already-enriched too. The newest ``--limit``
     documents matching the predicate are enriched. A promoted precedent's
     document row is never a candidate, whatever its tags say
-    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`).
+    (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`),
+    and neither is a redaction tombstone
+    (:func:`~trellis.core.document_write.is_redaction_tombstone`): both are
+    skipped before any model call.
 
     This used to select on ``content_tags.tag_confidence``, which does not
     work and cannot: that key is not part of ``ContentTags`` and is never
@@ -1659,6 +1663,9 @@ def enrich_cmd(
                 # racing another writer and the batch wants a smaller --limit.
                 "stale_snapshot": summary.stale_snapshot,
                 "vanished": summary.vanished,
+                # Rows redacted inside the same window: their derived tags
+                # are dropped, not written onto the blank row.
+                "skipped_redacted": summary.skipped_redacted,
                 "vector_rows_synced": summary.vector_rows_synced,
             }
         )
@@ -1667,11 +1674,12 @@ def enrich_cmd(
         f"[bold]worker enrich[/bold] — {summary.enriched}/{len(candidates)} "
         f"document(s) enriched"
     )
-    if summary.stale_snapshot or summary.vanished:
+    if summary.stale_snapshot or summary.vanished or summary.skipped_redacted:
         console.print(
             f"  [yellow]concurrent writes during the LLM window:[/yellow] "
             f"{summary.stale_snapshot} document(s) changed (enriched onto "
-            f"current content), {summary.vanished} deleted (skipped)"
+            f"current content), {summary.vanished} deleted (skipped), "
+            f"{summary.skipped_redacted} redacted (skipped)"
         )
 
 
@@ -1743,6 +1751,14 @@ def _select_enrichment_candidates(
             # row retrievable by intent, reopening the exemption the noise pass,
             # retention and classify refresh already honour. Skipped before
             # anything is read from the row, and so before any LLM call.
+            continue
+        if is_redaction_tombstone(doc):
+            # A tombstone is blank, so there is nothing to enrich, and it never
+            # carries ``content_tags`` (the pass drops tags derived for a row
+            # redacted mid-batch). Without this skip it would be a candidate on
+            # every pass: one model call spent on it each time, and, newest
+            # first, a seat under ``--limit`` taken from a document that can be
+            # enriched.
             continue
         metadata = doc.get("metadata") or {}
         content_tags = metadata.get("content_tags") or {}
@@ -1856,12 +1872,17 @@ class BatchEnrichmentResult:
     for the operator, not a failure count; ``enriched`` includes these rows.
     ``vanished`` counts rows deleted inside the same window, which are *not*
     written — a ``put`` would resurrect them.
+    ``skipped_redacted`` counts rows redacted inside that window: also not
+    written, because the derived tags came from text that no longer exists,
+    and not counted as ``enriched`` or ``vanished`` (the row is still there,
+    blank). They emit no judged event either.
     """
 
     enriched: int = 0
     failed: int = 0
     stale_snapshot: int = 0
     vanished: int = 0
+    skipped_redacted: int = 0
     vector_rows_synced: int = 0
 
 
@@ -1954,6 +1975,12 @@ def _run_batch_enrichment(
         )
         if write.content_changed:
             summary.stale_snapshot += 1
+        if write.redacted:
+            # Redacted inside the LLM window: the tags were derived from text
+            # that is gone, so they are dropped rather than written onto the
+            # blank row, and the pass neither counts nor judges it.
+            summary.skipped_redacted += 1
+            continue
         if not write.written:
             # The row was deleted inside the LLM window. Not resurrected: a
             # ``put`` on a missing id inserts, which would undo the delete and
@@ -2005,6 +2032,7 @@ def _run_batch_enrichment(
         failed=summary.failed,
         stale_snapshot=summary.stale_snapshot,
         vanished=summary.vanished,
+        skipped_redacted=summary.skipped_redacted,
         vector_rows_synced=summary.vector_rows_synced,
         vector_store_supplied=vector_store is not None,
     )
@@ -2380,6 +2408,11 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         f"{payload['skipped_empty']} nothing to render  "
         f"{payload['skipped_invalid']} permanently invalid"
     )
+    if payload["skipped_redacted"]:
+        console.print(
+            f"  redacted: {payload['skipped_redacted']} trace(s) skipped "
+            f"because their summary was redacted"
+        )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "
         f"{payload['watermark_after'] or '(none)'}"
