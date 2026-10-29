@@ -80,12 +80,9 @@ HANDS_REGISTRY = frozenset(
     }
 )
 
-#: ``GET /classify/candidates`` mines keywords from every document, so it shows
-#: derived text a below-clearance key should not see. Left out of the gate for
-#: now, like graph entity names; remove the entry when it is gated.
-KNOWN_GAPS = frozenset(
-    {"classify_rules:list_classify_candidates", "ingest:upsert_vectors"}
-)
+#: Routes left out of the gate for now, like graph entity names; remove an
+#: entry when it is gated.
+KNOWN_GAPS = frozenset({"ingest:upsert_vectors"})
 
 ROSTER: dict[str, str] = {
     "admin:health": ADMIN,  # GET /health
@@ -112,7 +109,7 @@ ROSTER: dict[str, str] = {
     "admin:run_admin_job": ADMIN,  # POST /admin/jobs/{name}/run
     "analyze:list_analyze_reports": ADMIN,  # GET /analyze
     "analyze:get_analyze_report": ADMIN,  # GET /analyze/{report}
-    "classify_rules:list_classify_candidates": LEFT_OUT,  # GET /classify/candidates
+    "classify_rules:list_classify_candidates": ADMIN,  # GET /classify/candidates
     "classify_rules:mine_classify_candidates": ADMIN,  # POST /classify/candidates/mine
     "classify_rules:apply_classify_rule": ADMIN,  # POST /classify/rules
     "classify_rules:revoke_classify_rule": ADMIN,  # DELETE /classify/rules/{kind}/{key}

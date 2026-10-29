@@ -8073,7 +8073,11 @@
                 }
                 totalEl.textContent = `${rows.length} open candidate${rows.length === 1 ? '' : 's'} (${data.count ?? all.length} total mined)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Failed to load candidates: ${escHtml(err.message)}</td></tr>`;
+                // The listing is admin-scoped (its text is mined from every
+                // document); the rules table beside it is not. A read key is
+                // routine, so a 403 dims to a note rather than reading red.
+                const cls = isAdminScopeError(err) ? 'text-dim' : 'text-danger';
+                tbody.innerHTML = `<tr><td colspan="7" class="${cls}">${escHtml(loadFailureText(err, 'Candidates'))}</td></tr>`;
             }
         }
 

@@ -8,7 +8,8 @@ never re-inits ``_registry`` out from under the fixture).
 Covers the governed Apply/Revoke review flow end to end: overlay
 precedence with no restart required, revoke-works and revoke-refused (both
 a genuinely-unknown key and a config.yaml-sourced one), the audit event's
-actor/metrics, non-admin 403 on every write route, ``GET /candidates``
+actor/metrics, non-admin 403 on every write route and on ``GET /candidates``
+(its text is mined from every document), ``GET /candidates``
 never invoking a miner, and a dismissed candidate dropping out of the open
 listing.
 """
@@ -316,6 +317,64 @@ class TestListCandidates:
 
         body = client.get("/api/v1/classify/candidates").json()
         assert body["candidates"][0]["status"] == "applied"
+
+
+class TestListCandidatesIsAdminOnly:
+    """The listing serves keyword and alias text mined from every document.
+
+    The payloads carry no document ids, so a read key's clearance cannot
+    filter them per row; the route is admin-scoped instead (#1029).
+    """
+
+    def test_read_key_is_403_and_sees_no_candidate_text(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _emit_tag_keyword_candidate(registry, keyword="zebracrossing")
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.get("/api/v1/classify/candidates", headers={"X-API-Key": token})
+        assert resp.status_code == 403
+        assert "zebracrossing" not in resp.text
+
+    def test_missing_key_is_401(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        assert client.get("/api/v1/classify/candidates").status_code == 401
+
+    def test_admin_key_gets_the_same_rows_as_an_unauthenticated_default_client(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _emit_tag_keyword_candidate(registry, keyword="zebracrossing")
+        before = client.get("/api/v1/classify/candidates")
+        assert before.status_code == 200, before.text
+
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token = _mint(registry, [SCOPE_ADMIN])
+        resp = client.get("/api/v1/classify/candidates", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == before.json()
+        assert resp.json()["candidates"][0]["key"] == "zebracrossing"
+
+    def test_rules_listing_stays_readable_with_a_read_key(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only the candidate text is mined from documents; rules are config."""
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.get("/api/v1/classify/rules", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------
