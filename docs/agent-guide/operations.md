@@ -3520,7 +3520,9 @@ an id). The exact specification:
   covariates, when fewer than 4 residual degrees of freedom remain (tasks used
   less the design's rank), or when no stratum holds both arms. Joins written
   before capture recorded the block stay missing until their session is parsed
-  again.
+  again. A refused fit keeps its `n_used` and `n_missing_covariate`, and the
+  text report prints them under its reason; `arm_balance_r2` is `null` unless
+  the refusal came after it was computed, and the text line omits it then.
 - **Reading the means.** An adjusted run's `mean_residual_served` and
   `mean_residual_withheld` are means of residuals, not of the outcome, and sit
   under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
@@ -3990,12 +3992,12 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 
 | Method | Endpoint | Params/Body | Description |
 |--------|----------|-------------|-------------|
-| GET | `/search` | `?q=...&domain=...&limit=20&include_chunks=false` | Full-text search. `<parent>#chunk-N` fragment rows are **excluded by default** (#396) — they are slices of documents the same search already ranks, and on the reference deployment 56% of rows are chunks. The exclusion is pushed into the store rather than applied to the response, so the result set refills with the documents the fragments were sliced from instead of simply getting shorter — a short result set still means "that is all there is". Pass `include_chunks=true` for the unfiltered set; the applied setting is echoed on the response. |
+| GET | `/search` | `?q=...&domain=...&limit=20&include_chunks=false` | Full-text search; `limit` is 1 to 500, anything else a 422. `<parent>#chunk-N` fragment rows are **excluded by default** (#396) — they are slices of documents the same search already ranks, and on the reference deployment 56% of rows are chunks. The exclusion is pushed into the store rather than applied to the response, so the result set refills with the documents the fragments were sliced from instead of simply getting shorter — a short result set still means "that is all there is". Pass `include_chunks=true` for the unfiltered set; the applied setting is echoed on the response. |
 | POST | `/packs` | `{intent, domain?, max_items?, max_tokens?, run_id?, intent_family?}` | Assemble context pack. `run_id` / `intent_family` ride the `PACK_ASSEMBLED` event so the learning loop can credit the run and bucket the intent instead of falling back to `unknown-run` / `general_context`; `intent_family` is derived from `intent` when omitted. |
 | GET | `/entities/{id}` | — | Get entity with subgraph |
 | GET | `/graph/search` | `?q=...&node_type=...&sort=created_at&order=desc&limit=50&offset=0` | Page current graph nodes, with their `total`. `q` matches a substring of the name, `node_id` or `node_type` in any case (ASCII letters only on SQLite); `%`, `_` and `\` are literal. |
 | GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
-| GET | `/traces` | `?domain=...&limit=20` | List traces |
+| GET | `/traces` | `?domain=...&limit=20` | List traces; `limit` is 1 to 500, anything else a 422 |
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
 | GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
 | GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |

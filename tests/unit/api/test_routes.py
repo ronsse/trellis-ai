@@ -1459,6 +1459,50 @@ def test_precedents_accepts_the_upper_bound(client):
     assert resp.status_code == 200
 
 
+# Every REST read that takes a ``limit`` bounds it to ``ge=1, le=500``, so an
+# out-of-range value is FastAPI's 422 rather than a store scan of whatever the
+# caller typed (``limit=0`` or a negative one reached the store's SQL ``LIMIT``).
+# The defaults are each route's own and stay as they were.
+_BOUNDED_LIMIT_ROUTES = [
+    pytest.param("/api/v1/search", {"q": "anything"}, 20, id="search"),
+    pytest.param("/api/v1/traces", {}, 20, id="traces"),
+    pytest.param("/api/v1/proposals", {}, 100, id="proposals"),
+    pytest.param("/api/v1/schema-evolution/candidates", {}, 200, id="schema-evolution"),
+    pytest.param("/api/v1/code-proposals", {}, 50, id="code-proposals"),
+]
+
+
+@pytest.mark.parametrize(("path", "params", "default"), _BOUNDED_LIMIT_ROUTES)
+@pytest.mark.parametrize("limit", [0, -1, 501])
+def test_a_rest_read_refuses_an_out_of_range_limit(
+    client, path, params, default, limit
+):
+    resp = client.get(path, params={**params, "limit": limit})
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(("path", "params", "default"), _BOUNDED_LIMIT_ROUTES)
+def test_a_rest_read_accepts_the_limit_bounds_and_omission(
+    client, path, params, default
+):
+    for limit in (1, 500):
+        assert client.get(path, params={**params, "limit": limit}).status_code == 200
+    assert client.get(path, params=params).status_code == 200
+
+
+@pytest.mark.parametrize(("path", "params", "default"), _BOUNDED_LIMIT_ROUTES)
+def test_a_rest_read_documents_its_limit_bounds_and_keeps_its_default(
+    client, path, params, default
+):
+    operation = client.get("/openapi.json").json()["paths"][path]["get"]
+    [schema] = [p["schema"] for p in operation["parameters"] if p["name"] == "limit"]
+    assert (schema["minimum"], schema["maximum"], schema["default"]) == (
+        1,
+        500,
+        default,
+    )
+
+
 def test_precedents_does_not_serve_a_mined_candidate(client):
     """The miner once emitted candidates as ``PRECEDENT_PROMOTED``; the
     listing skips those rows and still serves a governed promotion."""

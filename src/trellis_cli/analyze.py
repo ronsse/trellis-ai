@@ -1838,12 +1838,17 @@ def _render_holdout_secondary(report: HoldoutReport) -> None:
             console.print(_secondary_line("adjusted", inference))
         if unadjusted is not None and unadjusted.p_value is not None:
             console.print(_secondary_line("unadjusted, same tasks", unadjusted))
-        if inference is None:
-            continue
+        # A refused fit still says how many tasks it had, which is often why
+        # it was refused. Only its R2 may be absent: the fit is refused for
+        # too few tasks or no two-arm stratum before the R2 is computed.
+        balance = (
+            f"; arm balance R2 {_num(adjustment.arm_balance_r2, '.2f')}"
+            if adjustment.arm_balance_r2 is not None
+            else ""
+        )
         console.print(
             f"    {adjustment.n_used} tasks used, "
-            f"{adjustment.n_missing_covariate} missing a covariate; arm "
-            f"balance R2 {_num(adjustment.arm_balance_r2, '.2f')}"
+            f"{adjustment.n_missing_covariate} missing a covariate{balance}"
         )
 
 
