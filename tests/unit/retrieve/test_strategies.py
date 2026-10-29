@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,7 +30,11 @@ from trellis.retrieve.strategies import (
     _warn_semantic_search_init_failed_once,
     build_strategies,
 )
-from trellis.schemas.outcome import SEMANTIC_SEARCH_COMPONENT_ID
+from trellis.schemas.outcome import (
+    GRAPH_SEARCH_COMPONENT_ID,
+    KEYWORD_SEARCH_COMPONENT_ID,
+    SEMANTIC_SEARCH_COMPONENT_ID,
+)
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
@@ -48,6 +52,43 @@ def _fresh_meta(importance: float) -> dict[str, Any]:
             "importance_scored_at": datetime.now(UTC).isoformat(),
         },
     }
+
+
+#: The malformed ``auto_importance`` shapes every axis must skip one row for,
+#: as ``(metadata, error type)``. The bad row sits beside a sound sibling.
+_MALFORMED_IMPORTANCE: list[Any] = [
+    pytest.param({"auto_importance": "high"}, "ValueError", id="non-numeric-string"),
+    pytest.param({"auto_importance": [1]}, "TypeError", id="list"),
+    pytest.param(
+        {"auto_importance": 0.99}, "ValueError", id="unstamped-above-threshold"
+    ),
+    pytest.param(_fresh_meta(True), "TypeError", id="stamped-true"),
+    pytest.param(_fresh_meta(float("nan")), "ValueError", id="nan"),
+    pytest.param(
+        {
+            "auto_importance": 0.97,
+            "content_tags": {"importance_scored_at": "garbage"},
+        },
+        "ValueError",
+        id="unparseable-stamp-above-threshold",
+    ),
+]
+
+_LOG_KEYS = {"event", "log_level", "item_id", "field", "error_type"}
+
+
+def _raise_scoring_bug(*_args: Any, **_kwargs: Any) -> float:
+    msg = "scoring bug"
+    raise RuntimeError(msg)
+
+
+def _param_registry(
+    store: SQLiteParameterStore, component_id: str, **values: Any
+) -> ParameterRegistry:
+    store.put(
+        ParameterSet(scope=ParameterScope(component_id=component_id), values=values)
+    )
+    return ParameterRegistry(store)
 
 
 class TestApplyImportance:
@@ -166,15 +207,15 @@ class TestApplyImportanceFreshness:
         # Inside horizon → legacy multiplier.
         assert result == pytest.approx(1.7)
 
-    def test_unparseable_stamp_returns_unchanged(self) -> None:
-        """Unparseable stamps are treated as fresh (the higher-level
-        guardrail enforces non-None; format is best-effort)."""
+    def test_unparseable_stamp_above_threshold_raises(self) -> None:
+        """An unusable stamp is a missing one (#1050): it used to be served
+        undecayed, outranking an honestly stamped stale row."""
         meta = {
             "auto_importance": 0.7,
             "content_tags": {"importance_scored_at": "not-a-date"},
         }
-        result = _apply_importance(1.0, meta, now=self._NOW)
-        assert result == pytest.approx(1.7)
+        with pytest.raises(ValueError, match="importance_scored_at is not a"):
+            _apply_importance(1.0, meta, now=self._NOW)
 
     def test_monotonic_in_importance_for_fresh_items(self) -> None:
         """Property: for fresh items, higher importance => higher score."""
@@ -190,6 +231,115 @@ class TestApplyImportanceFreshness:
         assert DEFAULT_IMPORTANCE_DECAY_FLOOR == 0.3
         assert DEFAULT_IMPORTANCE_DECAY_THRESHOLD == 0.5
         assert DEFAULT_RECENCY_HALF_LIFE_DAYS == 30.0
+
+
+class TestApplyImportanceCoercion:
+    """The one coercion rule all three axes share (#1050, decision 3).
+
+    Pinned against ``_apply_importance`` directly: a bool, a non-finite value
+    and an unusable stamp are malformed, and a numeric string is not.
+    """
+
+    _NOW = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
+
+    def _stamped(self, importance: Any, stamp: Any = None) -> dict[str, Any]:
+        return {
+            "auto_importance": importance,
+            "content_tags": {
+                "importance_scored_at": self._NOW.isoformat()
+                if stamp is None
+                else stamp
+            },
+        }
+
+    @pytest.mark.parametrize("value", [True, False], ids=["true", "false"])
+    @pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
+    def test_bool_is_a_type_error(self, value: bool, stamped: bool) -> None:
+        # ``False`` reads as 0.0 and would be a harmless "no boost", and
+        # ``True`` as the maximum; neither is a score.
+        meta = self._stamped(value) if stamped else {"auto_importance": value}
+        with pytest.raises(TypeError, match="bool"):
+            _apply_importance(1.0, meta, now=self._NOW)
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf"), "nan", "inf", "1e400"],
+        ids=["nan", "inf", "-inf", "str-nan", "str-inf", "str-1e400"],
+    )
+    def test_non_finite_is_a_value_error(self, value: Any) -> None:
+        # ``min(1.0, nan)`` is ``1.0``: a non-number used to earn the largest
+        # boost.
+        with pytest.raises(ValueError, match="not finite"):
+            _apply_importance(1.0, self._stamped(value), now=self._NOW)
+
+    @pytest.mark.parametrize("stamp", ["garbage", "", 0], ids=["text", "empty", "zero"])
+    def test_unparseable_stamp_above_threshold_is_a_value_error(
+        self, stamp: Any
+    ) -> None:
+        with pytest.raises(ValueError, match="importance_scored_at is not a"):
+            _apply_importance(1.0, self._stamped(0.95, stamp), now=self._NOW)
+
+    def test_unparseable_flat_alias_stamp_is_a_value_error(self) -> None:
+        meta = {"auto_importance": 0.95, "importance_scored_at": "garbage"}
+        with pytest.raises(ValueError, match="importance_scored_at is not a"):
+            _apply_importance(1.0, meta, now=self._NOW)
+
+    def test_unparseable_stamp_below_threshold_is_still_served(self) -> None:
+        # Below the threshold no stamp is read, so there is nothing to refuse.
+        meta = self._stamped(0.4, "garbage")
+        assert _apply_importance(1.0, meta, now=self._NOW) == pytest.approx(1.4)
+
+    def test_an_honest_stale_stamp_still_decays(self) -> None:
+        stale = (self._NOW - timedelta(days=210)).isoformat()
+        result = _apply_importance(1.0, self._stamped(0.9, stale), now=self._NOW)
+        decay = (
+            DEFAULT_IMPORTANCE_DECAY_FLOOR
+            + (1.0 - DEFAULT_IMPORTANCE_DECAY_FLOOR) * 0.5
+        )
+        assert result == pytest.approx(1.0 + 0.9 * decay)
+
+    def test_numeric_string_is_still_coerced(self) -> None:
+        result = _apply_importance(1.0, self._stamped("0.9"), now=self._NOW)
+        assert result == pytest.approx(1.9)
+
+    def test_negative_still_clamps_to_zero(self) -> None:
+        assert _apply_importance(1.0, {"auto_importance": -0.5}) == 1.0
+
+    @pytest.mark.parametrize(
+        ("value", "error_type"),
+        [("high", ValueError), ([1], TypeError), (None, TypeError)],
+        ids=["string", "list", "null"],
+    )
+    def test_unreadable_value_keeps_its_error_type(
+        self, value: Any, error_type: type[Exception]
+    ) -> None:
+        with pytest.raises(error_type):
+            _apply_importance(1.0, self._stamped(value), now=self._NOW)
+
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            pytest.param({"auto_importance": "zq-caller-value-91"}, id="string"),
+            pytest.param({"auto_importance": ["zq-caller-value-91"]}, id="list"),
+            pytest.param({"auto_importance": float("nan")}, id="nan"),
+            pytest.param({"auto_importance": True}, id="bool"),
+            pytest.param(
+                {
+                    "auto_importance": 0.95,
+                    "importance_scored_at": "zq-caller-value-91",
+                },
+                id="stamp",
+            ),
+        ],
+    )
+    def test_no_message_echoes_the_value(self, meta: dict[str, Any]) -> None:
+        with pytest.raises((ValueError, TypeError)) as caught:
+            _apply_importance(1.0, meta, now=self._NOW)
+        assert "zq-caller-value-91" not in str(caught.value)
+        assert "zq-caller-value-91" not in repr(caught.value)
+        # ``float``'s own message quotes the value, so it must not ride along
+        # as the exception's cause either.
+        assert caught.value.__cause__ is None
 
 
 class TestApplyRecencyDecay:
@@ -335,6 +485,169 @@ class TestKeywordSearch:
             limit=20,
             filters={"tag": "tutorial"},
         )
+
+
+class TestKeywordSearchMalformedRowMetadata:
+    """One document's malformed importance costs that document (#1050)."""
+
+    _EVENT = "keyword_row_skipped_malformed_metadata"
+
+    @staticmethod
+    def _good(doc_id: str = "good") -> dict[str, Any]:
+        return {
+            "doc_id": doc_id,
+            "content": "Data pipelines",
+            "metadata": {"auto_importance": 0.2},
+            "rank": -0.5,
+        }
+
+    @staticmethod
+    def _bad(metadata: dict[str, Any], doc_id: str = "bad") -> dict[str, Any]:
+        # Ranks higher than the sibling, so an accidental serve sorts first.
+        return {"doc_id": doc_id, "content": "x", "metadata": metadata, "rank": -0.99}
+
+    @staticmethod
+    def _strategy(rows: list[dict[str, Any]], **kwargs: Any) -> KeywordSearch:
+        store = MagicMock()
+        store.search.return_value = rows
+        return KeywordSearch(store, **kwargs)
+
+    @pytest.mark.parametrize(("metadata", "error_type"), _MALFORMED_IMPORTANCE)
+    def test_malformed_row_skipped_and_sibling_served(
+        self, metadata: dict[str, Any], error_type: str
+    ) -> None:
+        strategy = self._strategy([self._bad(metadata), self._good()])
+        with capture_logs() as logs:
+            result = strategy.search_result("q")
+
+        assert [i.item_id for i in result.items] == ["good"]
+        warned = [e for e in logs if e["event"] == self._EVENT]
+        assert len(warned) == 1
+        assert warned[0]["item_id"] == "bad"
+        assert warned[0]["field"] == "auto_importance"
+        assert warned[0]["error_type"] == error_type
+        assert warned[0]["log_level"] == "warning"
+        assert set(warned[0]) == _LOG_KEYS  # no value rides along
+        assert [i.item_id for i in result.skipped] == ["bad"]
+        placeholder = result.skipped[0]
+        assert placeholder.item_type == "document"
+        assert placeholder.excerpt == ""
+        assert placeholder.relevance_score == 0.0
+        assert placeholder.metadata["source_strategy"] == "keyword"
+        # ``search`` is the items only: a placeholder never reaches its caller.
+        assert [i.item_id for i in strategy.search("q")] == ["good"]
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            pytest.param({"auto_importance": "zq-caller-value-91"}, id="importance"),
+            pytest.param(
+                {
+                    "auto_importance": 0.97,
+                    "content_tags": {"importance_scored_at": "zq-caller-value-91"},
+                },
+                id="stamp",
+            ),
+        ],
+    )
+    def test_warning_carries_no_caller_value(self, metadata: dict[str, Any]) -> None:
+        with capture_logs() as logs:
+            self._strategy([self._bad(metadata)]).search_result("q")
+
+        warned = [e for e in logs if e["event"] == self._EVENT]
+        assert len(warned) == 1
+        assert "zq-caller-value-91" not in repr(warned[0])
+
+    def test_every_bad_row_skipped_in_one_search(self) -> None:
+        # A bad row first, one in the middle and a good row last: a guard that
+        # stops the loop (``break``) or abandons the search (``return []``)
+        # on the first error would lose a sibling.
+        rows = [
+            self._bad({"auto_importance": "high"}, "b1"),
+            self._good("g1"),
+            self._bad({"auto_importance": [1]}, "b2"),
+            self._good("g2"),
+        ]
+        with capture_logs() as logs:
+            result = self._strategy(rows).search_result("q")
+
+        assert sorted(i.item_id for i in result.items) == ["g1", "g2"]
+        assert [i.item_id for i in result.skipped] == ["b1", "b2"]
+        assert [e["item_id"] for e in logs if e["event"] == self._EVENT] == [
+            "b1",
+            "b2",
+        ]
+
+    def test_a_sibling_scores_as_it_does_without_the_bad_row(self) -> None:
+        with_bad = self._strategy(
+            [self._bad({"auto_importance": "high"}), self._good()]
+        )
+        alone = self._strategy([self._good()])
+
+        assert with_bad.search("q")[0].relevance_score == pytest.approx(
+            alone.search("q")[0].relevance_score
+        )
+
+    def test_well_formed_corpus_skips_nothing(self) -> None:
+        with capture_logs() as logs:
+            result = self._strategy(
+                [self._good("a"), {**self._good("b"), "metadata": _fresh_meta(0.9)}]
+            ).search_result("q")
+
+        assert sorted(i.item_id for i in result.items) == ["a", "b"]
+        assert result.skipped == []
+        assert not [e for e in logs if e["event"] == self._EVENT]
+
+    def test_numeric_string_importance_is_still_served(self) -> None:
+        # ``"0.9"`` is read as 0.9, not malformed: 0.5 * (1 + 0.9).
+        row = {**self._good(), "metadata": _fresh_meta("0.9"), "rank": -0.5}
+        result = self._strategy([row]).search_result("q")
+
+        assert [i.item_id for i in result.items] == ["good"]
+        assert result.items[0].relevance_score == pytest.approx(0.5 * 1.9)
+        assert result.skipped == []
+
+    def test_a_runtime_error_in_the_guarded_call_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The guard catches the two errors a bad value raises and nothing
+        # else, so a bug in the scoring call itself is not read as bad data.
+        monkeypatch.setattr(strategies_module, "_apply_importance", _raise_scoring_bug)
+        with capture_logs() as logs, pytest.raises(RuntimeError, match="scoring bug"):
+            self._strategy([self._good()]).search_result("q")
+        assert not [e for e in logs if e["event"] == self._EVENT]
+
+    def test_non_numeric_rank_still_raises(self) -> None:
+        # The store's rank is not document metadata: a store defect, loud.
+        row = {**self._good(), "rank": "not-a-number"}
+        with capture_logs() as logs, pytest.raises(TypeError):
+            self._strategy([row, self._good("other")]).search_result("q")
+        assert not [e for e in logs if e["event"] == self._EVENT]
+
+    def test_non_mapping_metadata_still_raises(self) -> None:
+        row = {**self._good(), "metadata": "not-a-mapping"}
+        with pytest.raises((AttributeError, TypeError)):
+            self._strategy([row]).search_result("q")
+
+    def test_string_registry_importance_param_still_raises(
+        self, tmp_path: Path
+    ) -> None:
+        # A string threshold raises inside ``_apply_importance`` too. Caught
+        # by the row guard it would drop every row with a nonzero importance
+        # from every pack, silently, so it is checked once before the loop.
+        store = SQLiteParameterStore(tmp_path / "parameters.db")
+        try:
+            registry = _param_registry(
+                store, KEYWORD_SEARCH_COMPONENT_ID, importance_decay_threshold="0.8"
+            )
+            with (
+                capture_logs() as logs,
+                pytest.raises(TypeError, match="decay_threshold"),
+            ):
+                self._strategy([self._good()], registry=registry).search_result("q")
+            assert not [e for e in logs if e["event"] == self._EVENT]
+        finally:
+            store.close()
 
 
 class TestSemanticSearch:
@@ -728,6 +1041,147 @@ class TestGraphSearch:
         strategy.search("", filters={"seed_ids": ["n1"]})
         _, kwargs = graph_store.get_subgraph.call_args
         assert kwargs["edge_types"] is None
+
+
+class TestGraphSearchMalformedRowMetadata:
+    """One node's malformed importance costs that node (#1050)."""
+
+    _EVENT = "graph_row_skipped_malformed_metadata"
+    _SEED: ClassVar[dict[str, Any]] = {"seed_ids": ["g0"]}
+
+    @staticmethod
+    def _node(node_id: str, **props: Any) -> dict[str, Any]:
+        return {
+            "node_id": node_id,
+            "node_type": "service",
+            "properties": {"name": node_id, **props},
+        }
+
+    @staticmethod
+    def _strategy(nodes: list[dict[str, Any]], **kwargs: Any) -> GraphSearch:
+        store = MagicMock()
+        store.get_subgraph.return_value = {"nodes": nodes, "edges": []}
+        return GraphSearch(store, **kwargs)
+
+    @pytest.mark.parametrize(("props", "error_type"), _MALFORMED_IMPORTANCE)
+    def test_malformed_node_skipped_and_siblings_keep_their_scores(
+        self, props: dict[str, Any], error_type: str
+    ) -> None:
+        # The bad node sits between two sound ones. The control run puts a
+        # sound node in the same slot, so every position is the same: a skip
+        # must not shift a sibling's base score.
+        sound = [self._node("g0"), self._node("g1"), self._node("g2")]
+        control = {
+            i.item_id: i.relevance_score
+            for i in self._strategy(sound).search("q", filters=self._SEED)
+        }
+        assert control["g0"] > control["g1"] > control["g2"]  # position order
+
+        nodes = [self._node("g0"), self._node("bad", **props), self._node("g2")]
+        strategy = self._strategy(nodes)
+        with capture_logs() as logs:
+            answer = strategy.search_answer("q", filters=self._SEED)
+
+        assert {i.item_id: i.relevance_score for i in answer.items} == {
+            "g0": control["g0"],
+            "g2": control["g2"],
+        }
+        warned = [e for e in logs if e["event"] == self._EVENT]
+        assert len(warned) == 1
+        assert warned[0]["item_id"] == "bad"
+        assert warned[0]["field"] == "auto_importance"
+        assert warned[0]["error_type"] == error_type
+        assert warned[0]["log_level"] == "warning"
+        assert set(warned[0]) == _LOG_KEYS  # no value rides along
+        assert [i.item_id for i in answer.skipped] == ["bad"]
+        placeholder = answer.skipped[0]
+        assert placeholder.item_type == "entity"
+        assert placeholder.excerpt == ""
+        assert placeholder.relevance_score == 0.0
+        assert placeholder.metadata["source_strategy"] == "graph"
+        assert placeholder.metadata["name"] == "bad"
+        # Neither entry point serves a placeholder.
+        assert "bad" not in {i.item_id for i in answer.items}
+        assert [i.item_id for i in strategy.search("q", filters=self._SEED)] == [
+            "g0",
+            "g2",
+        ]
+
+    def test_warning_carries_no_caller_value(self) -> None:
+        nodes = [self._node("g0"), self._node("bad", auto_importance="zq-caller-91")]
+        with capture_logs() as logs:
+            self._strategy(nodes).search_answer("q", filters=self._SEED)
+
+        warned = [e for e in logs if e["event"] == self._EVENT]
+        assert len(warned) == 1
+        assert "zq-caller-91" not in repr(warned[0])
+
+    def test_every_bad_node_skipped_in_one_search(self) -> None:
+        nodes = [
+            self._node("g0", auto_importance="high"),
+            self._node("g1"),
+            self._node("b2", auto_importance=[1]),
+            self._node("g3"),
+        ]
+        with capture_logs() as logs:
+            answer = self._strategy(nodes).search_answer("q", filters=self._SEED)
+
+        assert sorted(i.item_id for i in answer.items) == ["g1", "g3"]
+        assert [i.item_id for i in answer.skipped] == ["g0", "b2"]
+        assert [e["item_id"] for e in logs if e["event"] == self._EVENT] == [
+            "g0",
+            "b2",
+        ]
+
+    def test_numeric_string_importance_is_still_served(self) -> None:
+        nodes = [self._node("g0", **_fresh_meta("0.9"))]
+        answer = self._strategy(nodes).search_answer("q", filters=self._SEED)
+
+        assert [i.item_id for i in answer.items] == ["g0"]
+        assert answer.skipped == []
+
+    def test_well_formed_graph_skips_nothing(self) -> None:
+        with capture_logs() as logs:
+            answer = self._strategy([self._node("g0"), self._node("g1")]).search_answer(
+                "q", filters=self._SEED
+            )
+
+        assert len(answer.items) == 2
+        assert answer.skipped == []
+        assert not [e for e in logs if e["event"] == self._EVENT]
+
+    def test_a_runtime_error_in_the_guarded_call_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(strategies_module, "_apply_importance", _raise_scoring_bug)
+        with capture_logs() as logs, pytest.raises(RuntimeError, match="scoring bug"):
+            self._strategy([self._node("g0")]).search_answer("q", filters=self._SEED)
+        assert not [e for e in logs if e["event"] == self._EVENT]
+
+    def test_non_mapping_properties_still_raise(self) -> None:
+        node = {**self._node("g0"), "properties": "not-a-mapping"}
+        with pytest.raises((AttributeError, TypeError)):
+            self._strategy([node]).search_answer("q", filters=self._SEED)
+
+    def test_string_registry_importance_param_still_raises(
+        self, tmp_path: Path
+    ) -> None:
+        store = SQLiteParameterStore(tmp_path / "parameters.db")
+        try:
+            registry = _param_registry(
+                store, GRAPH_SEARCH_COMPONENT_ID, importance_decay_threshold="0.8"
+            )
+            nodes = [self._node("g0", auto_importance=0.5)]
+            with (
+                capture_logs() as logs,
+                pytest.raises(TypeError, match="decay_threshold"),
+            ):
+                self._strategy(nodes, registry=registry).search_answer(
+                    "q", filters=self._SEED
+                )
+            assert not [e for e in logs if e["event"] == self._EVENT]
+        finally:
+            store.close()
 
 
 class TestGraphSearchNodeRole:

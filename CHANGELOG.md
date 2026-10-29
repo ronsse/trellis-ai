@@ -321,6 +321,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **One bad document or node no longer fails the keyword or graph axis; one
+  coercion rule for `auto_importance` (closes #1050).** The keyword axis scored
+  a document, and the graph axis a node, with an `auto_importance` that raised
+  (`"high"`, a list, an unstamped value above the decay threshold), and the
+  whole axis failed for every pack until the row was fixed. Each axis now skips
+  that one row, as the semantic axis does: a `keyword_row_skipped_malformed_metadata`
+  or `graph_row_skipped_malformed_metadata` warning names the id, field and
+  error type (never the value), and the row is recorded as `malformed_metadata`
+  in the pack's withheld items and in `PACK_ASSEMBLED.malformed_row_skips`. A
+  bad registry importance parameter and a non-numeric keyword `rank` still raise
+  for the whole axis. The three axes also now agree on what is malformed. A
+  `bool` importance (`True` was served as the maximum boost), a non-finite one
+  (`nan`, `inf`, `"1e400"`, also served as the maximum) and an
+  `importance_scored_at` that is not a timestamp (`"garbage"`, `""`, `0`; it was
+  served undecayed, outranking an honestly stamped stale row) are each now
+  malformed, like a missing stamp. A numeric string such as `"0.9"` is still
+  coerced and served, and below the decay threshold no stamp is read, as before.
+  A row holding one of these values leaves the packs it was in; it surfaces in
+  `trellis analyze health` through the malformed-row count.
+
 - **`reclassify_item` leaves a redaction tombstone alone (#1064).** The batch
   pass (`trellis classify backfill`) already skipped blank rows, so no shipped
   command tagged a redacted row, but a direct call of the public

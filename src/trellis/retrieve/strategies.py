@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -975,6 +976,38 @@ class SearchStrategy(ABC):
         """Execute search and return ranked PackItems."""
 
 
+def _read_importance(metadata: dict[str, Any]) -> float:
+    """Read ``auto_importance`` as a finite float, or raise.
+
+    The one coercion rule all three axes share (they all go through
+    :func:`_apply_importance`). A numeric string (``"0.9"``) is still read as
+    the number it spells. A ``bool`` is refused with ``TypeError``, because
+    ``float(True)`` is a Python accident and not a score; a non-finite value
+    (``nan``, ``inf``, ``"1e400"``) is refused with ``ValueError``, because
+    ``min(1.0, nan)`` would otherwise hand it the largest boost. A value
+    ``float`` cannot read keeps the error type ``float`` raised (``ValueError``
+    for a string, ``TypeError`` for a list or ``None``).
+
+    No message echoes the value: it is caller-controlled, and ``float``'s own
+    message quotes it, so that one is replaced rather than propagated.
+    """
+    raw = metadata.get("auto_importance", 0.0)
+    if isinstance(raw, bool):
+        msg = "auto_importance is a bool, not a number"
+        raise TypeError(msg)
+    msg = f"auto_importance is a {type(raw).__name__} that is not a number"
+    try:
+        importance = float(raw)
+    except ValueError:
+        raise ValueError(msg) from None
+    except TypeError:
+        raise TypeError(msg) from None
+    if not math.isfinite(importance):
+        msg = "auto_importance is not finite"
+        raise ValueError(msg)
+    return importance
+
+
 def _apply_importance(
     base_score: float,
     metadata: dict[str, Any],
@@ -1000,9 +1033,18 @@ def _apply_importance(
     ``auto_importance`` is set above ``decay_threshold`` but
     ``importance_scored_at`` is missing, raises ``ValueError``. There is
     no fallback to ``classified_at`` and no "treat as fresh" path —
-    every code path that writes ``auto_importance`` must also stamp.
+    every code path that writes ``auto_importance`` must also stamp. A stamp
+    :func:`_parse_stamp` cannot read (``"garbage"``, ``""``, ``0``) is the
+    same defect as a missing one and raises the same way: serving it
+    undecayed would outrank an honestly stamped stale row.
+
+    ``auto_importance`` is read by :func:`_read_importance`, which refuses a
+    ``bool`` (``TypeError``) and a non-finite value (``ValueError``). The
+    callers (:class:`KeywordSearch`, :class:`SemanticSearch`,
+    :class:`GraphSearch`) skip the one row that raises ``ValueError`` or
+    ``TypeError`` here; nothing else is caught.
     """
-    importance = float(metadata.get("auto_importance", 0.0))
+    importance = _read_importance(metadata)
     if importance == 0.0:
         # No importance score → no multiplier, no freshness check needed.
         return base_score
@@ -1024,6 +1066,15 @@ def _apply_importance(
             "auto_importance is set but importance_scored_at is missing — "
             "writer path is broken. Every code path that writes "
             "auto_importance must also stamp importance_scored_at "
+            "(see adr-importance-score-freshness.md §3.5). "
+            f"Item metadata keys={sorted(metadata.keys())}"
+        )
+        raise ValueError(msg)
+    if _parse_stamp(raw_stamp) is None:
+        # Names keys only, never the stamp: it is caller-controlled.
+        msg = (
+            "auto_importance is set but importance_scored_at is not a "
+            "timestamp — writer path is broken "
             "(see adr-importance-score-freshness.md §3.5). "
             f"Item metadata keys={sorted(metadata.keys())}"
         )
@@ -1199,8 +1250,9 @@ def _decay_importance_if_stale(
     Mirrors :func:`_apply_recency_decay` but with a no-op grace period:
     inside ``fresh_horizon_days`` the score is returned unchanged; past
     it, the score decays with the same half-life math, capped at
-    ``floor``. Unparseable stamps return the score unchanged (the caller
-    enforces non-None at a higher level).
+    ``floor``. An unparseable stamp returns the score unchanged here, but
+    :func:`_apply_importance`, the one caller, refuses it before it gets this
+    far: an unusable stamp is no better a freshness witness than a missing one.
     """
     ts = _parse_stamp(raw_stamp)
     if ts is None:
@@ -1465,6 +1517,24 @@ class KeywordSearch(SearchStrategy):
         limit: int = 20,
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
+        return self.search_result(query, limit=limit, filters=filters).items
+
+    def search_result(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> StrategyResult:
+        """:meth:`search`, plus the documents it skipped as malformed.
+
+        The same shape as :meth:`SemanticSearch.search_result`, for the same
+        reason: :class:`~trellis.retrieve.pack_builder.PackBuilder` calls this
+        so a skipped document reaches the pack's withheld items and
+        ``PACK_ASSEMBLED.malformed_row_skips``, and a strategy shared across
+        requests can hold no per-request state. ``search`` never returns a
+        placeholder.
+        """
         domain = (filters or {}).get("domain")
         half_life = _resolve_param(
             self._registry,
@@ -1499,11 +1569,32 @@ class KeywordSearch(SearchStrategy):
             store_filters = {k: v for k, v in filters.items() if k != "domain"}
         store_filters = strip_graph_controls(store_filters)
         results = self._store.search(query, limit=limit, filters=store_filters)
-        items = []
+        # Checked once, outside the per-row guard below: a bad registry value
+        # raises ``TypeError`` inside ``_apply_importance`` too, and inside
+        # the guard it would read as a malformed row and silently drop every
+        # row with a nonzero importance from every pack.
+        _require_numeric_importance_params(importance_params)
+        items: list[PackItem] = []
+        skipped: list[PackItem] = []
         for doc in results:
             metadata = doc.get("metadata", {})
+            # The store's own rank is not document metadata, so a bad one
+            # raises here, outside the guard: it is a store defect.
             base_score = abs(doc.get("rank", 0.0))
-            score = _apply_importance(base_score, metadata, **importance_params)
+            # One document's malformed ``auto_importance`` must cost that
+            # document, not the keyword axis for every pack. Only this call is
+            # guarded, and only for the two errors it raises for a bad value,
+            # so a bug anywhere else in the loop still surfaces.
+            try:
+                score = _apply_importance(base_score, metadata, **importance_params)
+            except (ValueError, TypeError) as exc:
+                _skip_malformed_row(self.name, doc["doc_id"], "auto_importance", exc)
+                skipped.append(
+                    _malformed_placeholder(
+                        doc["doc_id"], "document", metadata, self.name
+                    )
+                )
+                continue
             # Source clock first, row clock second — see
             # :func:`resolve_recency_stamp`. The document store's columns are
             # this row's *write* clock; a conversation import's metadata
@@ -1538,7 +1629,10 @@ class KeywordSearch(SearchStrategy):
                     },
                 )
             )
-        return sorted(items, key=lambda x: x.relevance_score, reverse=True)
+        return StrategyResult(
+            items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
+            skipped=skipped,
+        )
 
 
 class SemanticSearch(SearchStrategy):
@@ -1755,8 +1849,8 @@ class GraphAnswer:
 
     items: list[PackItem]
     axis_state: str | None = None
-    #: Placeholders for rows skipped as malformed, as on
-    #: :class:`StrategyResult`. Empty until the graph axis skips a row.
+    #: Placeholders for nodes skipped as malformed, as on
+    #: :class:`StrategyResult`. ``items`` never holds one.
     skipped: list[PackItem] = field(default_factory=list)
 
 
@@ -2428,7 +2522,12 @@ class GraphSearch(SearchStrategy):
                 selection=selection,
             )
 
-        items = []
+        # Checked once, outside the per-node guard below, for the reason it
+        # is on the other two axes: inside it a bad registry value would drop
+        # every node with a nonzero importance from every pack.
+        _require_numeric_importance_params(importance_params)
+        items: list[PackItem] = []
+        skipped: list[PackItem] = []
         for i, node in enumerate(scored):
             props = node.get("properties", {})
             node_type_val = node.get("node_type", "")
@@ -2445,8 +2544,18 @@ class GraphSearch(SearchStrategy):
             if node_role_val == "curated":
                 base_score *= curated_boost
 
-            # Importance boost
-            score = _apply_importance(base_score, props, **importance_params)
+            # Importance boost. One node's malformed ``auto_importance`` costs
+            # that node, not the graph axis. Only this call is guarded, and a
+            # skip is a ``continue``: the base score above comes from ``i``, so
+            # every other node keeps the position (and score) it would have had.
+            try:
+                score = _apply_importance(base_score, props, **importance_params)
+            except (ValueError, TypeError) as exc:
+                _skip_malformed_row(self.name, node["node_id"], "auto_importance", exc)
+                skipped.append(
+                    _malformed_placeholder(node["node_id"], "entity", props, self.name)
+                )
+                continue
 
             # Prefer entities with descriptions — they carry more context
             if props.get("description") or props.get("comment"):
@@ -2537,7 +2646,8 @@ class GraphSearch(SearchStrategy):
                 )
             )
         return GraphAnswer(
-            items=sorted(items, key=lambda x: x.relevance_score, reverse=True)
+            items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
+            skipped=skipped,
         )
 
 
