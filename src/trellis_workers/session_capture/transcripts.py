@@ -37,22 +37,26 @@ Claude Code writes one JSONL file per session under
   line, to tell a commit or a pull request from any other step, the text of
   such a call's result, for pull request URLs, and each record's
   ``timestamp`` and usage. All of it is read in memory and only counts, one
-  duration and two flags survive. See
+  duration and two flags survive, and the position of the first commit among
+  the tool calls (an integer, never the command). See
   :mod:`~trellis_workers.session_capture.outcome`.
 
 * **Hook feedback** is read for one fact, *when* it arrived: a user-record
   text block that opens like a Stop or SubagentStop hook's feedback is
   counted, and the first one is dated by the tool calls made before it. The
   text is matched and dropped. It is what lets the pack holdout tell a
-  retrieval made before the work from one the hook asked for at the end.
+  retrieval made before the work from one the hook asked for at the end. The
+  first commit's position is kept for the same comparison, against the first
+  retrieval's.
   Claude Code writes the hook's feedback as a ``user`` record with
   ``isMeta: true`` and bare-string content opening ``Stop hook feedback:``,
   which :data:`HOOK_FEEDBACK_PATTERN` matches.
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
-flags, the pack ids the session was served, where the first retrieval sat
-among the calls, the session's outcome as counts, and structural signals.
+flags, the pack ids the session was served, where the first retrieval and the
+first commit sat among the calls, the session's outcome as counts, and
+structural signals.
 """
 
 from __future__ import annotations
@@ -439,9 +443,10 @@ def _handle_record(
         _collect_hook_feedback(digest, texts)
         tally.user(record, content, texts)
     elif record_type == _TYPE_ASSISTANT:
+        calls_before = len(digest.tool_calls)
         _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)
-        tally.assistant(record, message)
+        tally.assistant(record, message, calls_before=calls_before)
     else:
         digest.unknown_records += 1
 
@@ -481,6 +486,7 @@ def parse_session(path: Path) -> SessionDigest:
     # Over the whole file, before resolve_thread narrows the turns: the
     # outcome counts what the file did, as its pack ids do.
     digest.outcome = tally.finish()
+    digest.first_commit_ordinal = tally.first_commit_ordinal
 
     # Decide which turns are this transcript's conversation before the signal
     # detectors read them: a mixed file keeps its main thread, a dedicated

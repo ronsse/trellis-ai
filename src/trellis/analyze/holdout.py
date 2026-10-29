@@ -27,13 +27,16 @@ record for 3 h").
 
 **Exclusions.** Usage-limit cut-offs (``outcome.ended_on_error``) are
 post-treatment and excluded unless ``itt``. The pre-treatment exclusion
-drops a task whose first retrieval came after a stop-hook's feedback, read
-from the join's ``retrieval_timing``: a retrieval the hook asked for at the
-end is an afterthought, not a treatment. A join written before capture
-recorded that timing is ``unknown``: it stays in, the funnel counts it, and
-the exclusion reads "partially applied" until every unit is decided. The
-half of the rule about a first retrieval after a commit is still not
-recorded, so it is not applied; the post-hoc share is not measurable.
+drops a task whose first retrieval came after a stop-hook's feedback or
+after the session's first commit, read from the join's ``retrieval_timing``:
+a retrieval made at the end, or after the work was committed, is an
+afterthought, not a treatment. A join that lacks either comparison and
+shows neither is ``unknown``: it stays in, the funnel counts it, and the
+exclusion reads "partially applied" until every unit is decided. A join
+written before capture recorded the first commit's position is one. The
+post-hoc share is the share of the tasks that reached that rule, with every
+position it needs, whose first retrieval came after hook feedback, after
+the first commit or in the last 10% of the session's tool calls.
 
 **Primary statistic.** The stratum-weighted difference in mean outcome,
 served minus withheld, with weights ``n1*n0/(n1+n0)`` over strata of parent
@@ -165,24 +168,16 @@ _TEN_PERCENT = 0.1
 _EMPTY_WINDOW = "the evidence window is empty"
 _NO_ELIGIBLE = "no eligible task"
 
-#: What every pre-treatment note ends on: capture records the position of the
-#: first retrieval against hook feedback, not against a commit.
-_PRE_TREATMENT_COMMITS = (
-    "The rule's other half, a first retrieval made after a commit, is not "
-    "applied: capture does not record commits' positions."
-)
 _PRE_TREATMENT_NOT_APPLIED = (
     "Not applied: no eligible task's join records the first retrieval's "
-    "position against a stop hook's feedback (joins written before capture "
-    "recorded it, or no task reached the rule), so a first retrieval made "
-    "after the work cannot be told apart. "
-) + _PRE_TREATMENT_COMMITS
-_POST_HOC_MISSING = (
-    "the post-hoc rule needs the first ask's position against stop-hook "
-    "feedback, commits and the last 10% of turns, and capture records only "
-    "the stop-hook position, so it cannot compute the rule"
+    "position against both a stop hook's feedback and the first commit "
+    "(joins written before capture recorded them, or no task reached the "
+    "rule), so a first retrieval made after the work cannot be told apart."
 )
-_POST_HOC_NOTE = f"Not measurable from capture rows: {_POST_HOC_MISSING}."
+#: The last tenth of a session's tool calls, as an integer comparison:
+#: ``ordinal / calls > 9 / 10``.
+_LAST_TENTH_NUMERATOR = 9
+_LAST_TENTH_DENOMINATOR = 10
 _NON_EPHEMERAL_NOTE = (
     "Upstream: session capture writes no join for a session in an ephemeral "
     "project, so none reaches this analysis or its counts."
@@ -221,7 +216,9 @@ class HoldoutFunnel(TrellisModel):
     ``no_retrieval`` and are not stages), and ``eligible`` minus
     ``cut_offs_excluded`` and ``outcome_missing`` is ``analysed``.
     ``pre_treatment_excluded`` is the last stage before ``eligible``: tasks
-    whose first retrieval followed a stop hook's feedback.
+    whose first retrieval followed a stop hook's feedback or the session's
+    first commit. ``pre_treatment_excluded_after_commit`` is the part of them
+    that followed a commit, whether or not hook feedback came first too.
     ``eligible_with_unparsed_pack_ids`` is not a stage: it counts the
     eligible tasks whose join reports a pack id the capture could not parse,
     so their first parsed pack may not be their first call.
@@ -233,10 +230,16 @@ class HoldoutFunnel(TrellisModel):
     read) and ``empty_answer`` (a result came back with no pack, as an empty
     answer does). ``pre_treatment_unknown`` is not a stage either: it counts
     the eligible tasks whose join predates ``retrieval_timing`` or lacks a
-    usable value, which the exclusion could not decide and so kept.
+    usable value for either comparison and showed neither, which the
+    exclusion could not decide and so kept.
     ``pre_treatment_hook_feedback_seen`` counts the decided tasks whose
     session held any hook feedback message: zero across a population that
     ran under a stop hook means the capture's pattern matches nothing.
+    ``post_hoc_measured`` counts the tasks that reached the pre-treatment
+    rule, kept or excluded, whose join carries every position the post-hoc
+    share needs, and ``post_hoc_after_work`` those of them whose first
+    retrieval came after hook feedback, after the first commit or in the
+    last 10% of the session's tool calls. Neither is a stage.
     """
 
     joins_scanned: int = 0
@@ -255,9 +258,12 @@ class HoldoutFunnel(TrellisModel):
     empty_first_pack: int = 0
     unfinished: int = 0
     pre_treatment_excluded: int = 0
+    pre_treatment_excluded_after_commit: int = 0
     eligible: int = 0
     pre_treatment_unknown: int = 0
     pre_treatment_hook_feedback_seen: int = 0
+    post_hoc_measured: int = 0
+    post_hoc_after_work: int = 0
     cut_offs_excluded: int = 0
     outcome_missing: int = 0
     analysed: int = 0
@@ -982,37 +988,74 @@ def _count_no_retrieval(payload: Mapping[str, Any], funnel: HoldoutFunnel) -> No
         funnel.no_retrieval_empty_answer += 1
 
 
-def _retrieval_timing(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The join's ``retrieval_timing`` if it decides the pre-treatment rule.
+def _flag(timing: Mapping[str, Any], key: str) -> bool | None:
+    """A timing comparison if it is a real boolean; ``null`` and any other
+    type, like an absent key, is not an answer."""
+    value = timing.get(key)
+    return value if isinstance(value, bool) else None
 
-    It must carry a real boolean for ``hook_feedback_before_first_retrieval``:
-    a join from before capture recorded the timing, or one whose value is
-    ``null`` or any other type, decides nothing. Those keys are written by
-    ``SessionDigest.retrieval_timing_payload``; the core library does not
-    import the workers, so a contract test holds the two together.
-    """
-    timing = payload.get("retrieval_timing")
-    if not isinstance(timing, Mapping):
+
+def _position(value: object) -> int | None:
+    """A 1-based position or count: an integer of at least one, else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         return None
-    if not isinstance(timing.get("hook_feedback_before_first_retrieval"), bool):
-        return None
-    return timing
+    return value
 
 
-def _after_hook_feedback(payload: Mapping[str, Any], funnel: HoldoutFunnel) -> bool:
-    """Whether the unit's first retrieval followed a stop hook's feedback.
+def _post_hoc(
+    timing: Mapping[str, Any], after_hook: bool | None, after_commit: bool | None
+) -> bool | None:
+    """Whether the first retrieval came after the work, or ``None`` if unknown.
 
-    Counts what it could not decide (``pre_treatment_unknown``) and whether
-    the session held any hook feedback at all, so an undecidable join stays
-    eligible and visibly so.
+    After hook feedback, after the first commit, or in the last 10% of the
+    session's tool calls. It needs every position, so a join missing one is
+    not measured: counting only the late ones among the rest would inflate
+    the share. Keys are written by ``SessionDigest.retrieval_timing_payload``;
+    the core library does not import the workers, so a contract test holds
+    the two together.
     """
-    timing = _retrieval_timing(payload)
-    if timing is None:
+    ordinal = _position(timing.get("first_retrieval_ordinal"))
+    calls = _position(timing.get("tool_call_count"))
+    if (
+        after_hook is None
+        or after_commit is None
+        or ordinal is None
+        or calls is None
+        or ordinal > calls
+    ):
+        return None
+    return (
+        after_hook
+        or after_commit
+        or ordinal * _LAST_TENTH_DENOMINATOR > calls * _LAST_TENTH_NUMERATOR
+    )
+
+
+def _pre_treatment_excluded(payload: Mapping[str, Any], funnel: HoldoutFunnel) -> bool:
+    """Whether the unit's first retrieval followed a stop hook's feedback or a commit.
+
+    Either comparison being true decides it. A join that has no real boolean
+    for one comparison and shows neither is undecidable: it is kept, counted
+    as ``pre_treatment_unknown``, never read as passing. Also counts whether
+    the session held any hook feedback at all, and what the post-hoc share
+    needs, so an undecidable join stays eligible and visibly so.
+    """
+    raw = payload.get("retrieval_timing")
+    timing: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    after_hook = _flag(timing, "hook_feedback_before_first_retrieval")
+    after_commit = _flag(timing, "commit_before_first_retrieval")
+    post_hoc = _post_hoc(timing, after_hook, after_commit)
+    if post_hoc is not None:
+        funnel.post_hoc_measured += 1
+        funnel.post_hoc_after_work += post_hoc
+    excluded = after_hook is True or after_commit is True
+    if not excluded and (after_hook is None or after_commit is None):
         funnel.pre_treatment_unknown += 1
         return False
     if (_count(timing.get("hook_feedback_messages")) or 0) > 0:
         funnel.pre_treatment_hook_feedback_seen += 1
-    return timing["hook_feedback_before_first_retrieval"] is True
+    funnel.pre_treatment_excluded_after_commit += after_commit is True
+    return excluded
 
 
 def _finished(join: Event, sweeps: Mapping[str, datetime], settle: timedelta) -> bool:
@@ -1358,7 +1401,7 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
     if not _finished(join, sweeps, settle):
         funnel.unfinished += 1
         return None
-    if _after_hook_feedback(payload, funnel):
+    if _pre_treatment_excluded(payload, funnel):
         funnel.pre_treatment_excluded += 1
         return None
     funnel.eligible += 1
@@ -1595,6 +1638,36 @@ def _sessions(
     )
 
 
+def _post_hoc_share(funnel: HoldoutFunnel) -> tuple[float | None, str]:
+    """The post-hoc share and a note saying what it counts and what it lacks.
+
+    Taken over the tasks that reached the pre-treatment rule, kept and
+    excluded, in both arms: after the exclusion the hook and commit halves
+    would be zero by construction. A task's arm does not move where its first
+    retrieval sat. ``None`` and a reason when no join carried every position.
+    """
+    reached = funnel.eligible + funnel.pre_treatment_excluded
+    measured = funnel.post_hoc_measured
+    if not reached:
+        return None, "no task reached the pre-treatment rule"
+    if not measured:
+        return None, (
+            f"none of the {reached} tasks that reached the pre-treatment rule "
+            "has a join recording the first retrieval's position, the tool-call "
+            "count, hook feedback and the first commit's position (joins "
+            "written before capture recorded the last lack it)"
+        )
+    lacking = reached - measured
+    return funnel.post_hoc_after_work / measured, (
+        f"{funnel.post_hoc_after_work} of {measured} tasks that reached the "
+        "pre-treatment rule, in both arms, made their first retrieval after "
+        "hook feedback, after the first commit or in the last 10% of the "
+        f"session's tool calls; {lacking} lacked a position the rule needs "
+        "and are not counted. Taken before the pre-treatment exclusion, so it "
+        "includes the tasks that exclusion drops."
+    )
+
+
 def _descriptive(
     *,
     units: Sequence[_Unit],
@@ -1603,6 +1676,7 @@ def _descriptive(
     served: npt.NDArray[np.bool_],
     arm_ratio: list[ArmRatioCheck],
     sessions: HoldoutSessions,
+    funnel: HoldoutFunnel,
     options: Mapping[str, Any],
 ) -> HoldoutDescriptive:
     """The [R] re-measure over the eligible and the analysed tasks."""
@@ -1636,6 +1710,7 @@ def _descriptive(
     n_10, n_10_reason = _n_for_ten_percent(
         sd_within, served_mean, log_scale=log_scale, sd_reason=spread_reason
     )
+    post_hoc_share, post_hoc_note = _post_hoc_share(funnel)
     figures: dict[str, tuple[object, str]] = {
         "eligible_per_30d": (eligible_per_30d, _EMPTY_WINDOW),
         "analysed_per_30d": (analysed_per_30d, _EMPTY_WINDOW),
@@ -1649,7 +1724,7 @@ def _descriptive(
         ),
         "top_parent_share": (top_share, _NO_ELIGIBLE),
         "packs_per_task": (packs_per_task, _NO_ELIGIBLE),
-        "post_hoc_share": (None, _POST_HOC_MISSING),
+        "post_hoc_share": (post_hoc_share, post_hoc_note),
         "cut_off_share": (cut_off_share, _NO_ELIGIBLE),
         "cut_off_share_by_arm.served": (
             shares.served,
@@ -1677,8 +1752,8 @@ def _descriptive(
         parents=len(set(parents)),
         packs_per_task=packs_per_task,
         tasks_with_several_packs=sum(unit.packs > 1 for unit in units),
-        post_hoc_share=None,
-        post_hoc_note=_POST_HOC_NOTE,
+        post_hoc_share=post_hoc_share,
+        post_hoc_note=post_hoc_note,
         cut_off_share=cut_off_share,
         cut_off_share_by_arm=shares,
         pr_base_rate_served=pr_base_rate,
@@ -1919,6 +1994,7 @@ def _report(
         served=served,
         arm_ratio=arm_ratio,
         sessions=sessions,
+        funnel=funnel,
         options=options,
     )
 
@@ -2017,25 +2093,27 @@ def _pre_treatment_exclusion(funnel: HoldoutFunnel) -> HoldoutExclusion:
             note=_PRE_TREATMENT_NOT_APPLIED,
         )
     excluded = funnel.pre_treatment_excluded
+    cause = (
+        f"{excluded} tasks whose first retrieval followed a stop hook's "
+        f"feedback or the first commit were excluded "
+        f"({funnel.pre_treatment_excluded_after_commit} after a commit)"
+    )
     if unknown:
         note = (
-            f"Partially applied: {excluded} tasks whose first retrieval followed "
-            f"a stop hook's feedback were excluded; {unknown} eligible tasks have "
-            "joins without the retrieval timing, so the rule could not decide "
-            "them and they stay in. Read the analysis both ways. "
+            f"Partially applied: {cause}; {unknown} eligible tasks have joins "
+            "without the retrieval timing for both comparisons, so the rule "
+            "could not decide them and they stay in. Read the analysis both "
+            "ways."
         )
     else:
-        note = (
-            f"Applied: {excluded} tasks whose first retrieval followed a stop "
-            "hook's feedback were excluded. "
-        )
+        note = f"Applied: {cause}."
     return HoldoutExclusion(
         name="pre_treatment",
         timing="pre-treatment",
         applied=True,
         excluded=excluded,
         unknown=unknown,
-        note=note + _PRE_TREATMENT_COMMITS,
+        note=note,
     )
 
 
@@ -2045,8 +2123,9 @@ def _pre_treatment_notes(funnel: HoldoutFunnel) -> list[str]:
     if funnel.pre_treatment_unknown:
         notes.append(
             f"{funnel.pre_treatment_unknown} eligible tasks have joins that "
-            "record no usable retrieval timing (written before capture kept it): "
-            "the pre-treatment exclusion could not decide them, so they stay in."
+            "record no usable retrieval timing (written before capture kept it, "
+            "or its first commit's position): the pre-treatment exclusion could "
+            "not decide them, so they stay in."
         )
     if _pre_treatment_decided(funnel) and not funnel.pre_treatment_hook_feedback_seen:
         notes.append(

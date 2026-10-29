@@ -12,6 +12,7 @@ import json
 import math
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -22,6 +23,7 @@ from tests.unit.analyze._holdout_fixture import (
     MONDAY,
     UNTIL,
     HoldoutLog,
+    legacy_timing_payload,
     outcome_payload,
     seed_experiment,
     timing_payload,
@@ -654,6 +656,10 @@ class TestExclusions:
         assert pre.note.startswith("Not applied")
         assert report.descriptive.post_hoc_share is None
         assert report.descriptive.post_hoc_note
+        assert report.descriptive.not_measurable["post_hoc_share"] == (
+            report.descriptive.post_hoc_note
+        )
+        assert "none of the 10 tasks" in report.descriptive.post_hoc_note
 
     @staticmethod
     def _seed_timed(
@@ -897,6 +903,303 @@ class TestExclusions:
             "cut_offs",
         ]
         assert sum("brief-length" in note for note in report.notes) == 1
+
+
+class TestCommitHalfAndPostHoc:
+    """The commit half of ``pre_treatment`` and the post-hoc share.
+
+    A first retrieval that came after the session's first commit is an
+    afterthought, as one after a hook's feedback is. The post-hoc share is
+    how much of the sample is that, or in the last tenth of the calls.
+    """
+
+    @staticmethod
+    def _seed(log: HoldoutLog, *timings: dict[str, Any] | None) -> None:
+        """One served-arm task per timing, then one settling sweep."""
+        for hour, timing in enumerate(timings):
+            log.task(start=MONDAY + timedelta(hours=hour), timing=timing)
+        log.sweep()
+
+    def test_a_commit_before_the_first_retrieval_is_excluded_and_counted(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            timing_payload(hook_before=False, commit_before=True),
+            timing_payload(hook_before=False, commit_before=True),
+            timing_payload(hook_before=False, commit_before=False),
+        )
+
+        report = _analyze(log)
+
+        funnel = report.funnel
+        assert funnel.pre_treatment_excluded == 2
+        assert funnel.pre_treatment_excluded_after_commit == 2
+        assert funnel.pre_treatment_unknown == 0
+        assert funnel.eligible == 1
+        assert funnel.analysed == 1
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is True
+        assert (pre.excluded, pre.unknown) == (2, 0)
+        assert pre.note == (
+            "Applied: 2 tasks whose first retrieval followed a stop hook's "
+            "feedback or the first commit were excluded (2 after a commit)."
+        )
+
+    def test_a_commit_after_the_first_retrieval_keeps_the_task(
+        self, log: HoldoutLog
+    ) -> None:
+        # ``commit_before_first_retrieval`` is False: the first commit, if
+        # any, came at or after the retrieval.
+        self._seed(log, timing_payload(hook_before=False, commit_before=False))
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_excluded == 0
+        assert report.funnel.pre_treatment_excluded_after_commit == 0
+        assert report.funnel.eligible == 1
+
+    def test_either_half_alone_excludes_and_both_count_once(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            timing_payload(hook_before=True, commit_before=False),
+            timing_payload(hook_before=False, commit_before=True),
+            timing_payload(hook_before=True, commit_before=True),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_excluded == 3
+        assert report.funnel.pre_treatment_excluded_after_commit == 2
+        assert report.funnel.pre_treatment_unknown == 0
+        assert report.funnel.eligible == 0
+
+    def test_a_join_from_before_commits_were_kept_is_unknown_not_passing(
+        self, log: HoldoutLog
+    ) -> None:
+        """No hook before the retrieval and no commit position: the rule
+        cannot say the commit half passes, so the task stays and is counted."""
+        self._seed(
+            log,
+            legacy_timing_payload(hook_before=False),
+            legacy_timing_payload(hook_before=False),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_unknown == 2
+        assert report.funnel.pre_treatment_excluded == 0
+        assert report.funnel.eligible == 2
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.applied is False
+        assert pre.unknown == 2
+
+    def test_a_legacy_join_after_hook_feedback_is_still_excluded(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            legacy_timing_payload(hook_before=True),
+            legacy_timing_payload(hook_before=False),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_excluded == 1
+        assert report.funnel.pre_treatment_excluded_after_commit == 0
+        assert report.funnel.pre_treatment_unknown == 1
+        pre = next(e for e in report.exclusions if e.name == "pre_treatment")
+        assert pre.note.startswith("Partially applied")
+
+    def test_a_commit_flag_that_is_not_a_boolean_decides_nothing(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            {**timing_payload(hook_before=False), "commit_before_first_retrieval": 1},
+            {
+                **timing_payload(hook_before=False),
+                "commit_before_first_retrieval": "yes",
+            },
+            {
+                **timing_payload(hook_before=False),
+                "commit_before_first_retrieval": None,
+            },
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.pre_treatment_unknown == 3
+        assert report.funnel.pre_treatment_excluded == 0
+        assert report.descriptive.post_hoc_share is None
+
+    def test_the_post_hoc_share_is_the_late_share_of_the_measured_tasks(
+        self, log: HoldoutLog
+    ) -> None:
+        # Five measured as after the work (one per way), five as before it.
+        self._seed(
+            log,
+            timing_payload(hook_before=True),
+            timing_payload(hook_before=False, commit_before=True),
+            timing_payload(hook_before=False, ordinal=10, calls=10),
+            timing_payload(hook_before=True, commit_before=True),
+            timing_payload(hook_before=False, ordinal=19, calls=20),
+            *[timing_payload(hook_before=False) for _ in range(5)],
+        )
+
+        report = _analyze(log)
+
+        funnel = report.funnel
+        assert (funnel.post_hoc_measured, funnel.post_hoc_after_work) == (10, 5)
+        assert report.descriptive.post_hoc_share == pytest.approx(0.5)
+        note = report.descriptive.post_hoc_note
+        assert note.startswith("5 of 10 tasks that reached the pre-treatment rule")
+        assert "0 lacked a position" in note
+        assert "post_hoc_share" not in report.descriptive.not_measurable
+
+    @pytest.mark.parametrize(
+        ("ordinal", "calls", "late"),
+        [
+            (9, 10, False),
+            (10, 10, True),
+            (18, 20, False),
+            (19, 20, True),
+            (1, 1, True),
+            (5, 6, False),
+            (6, 6, True),
+        ],
+    )
+    def test_the_last_tenth_of_the_calls_is_late(
+        self, log: HoldoutLog, ordinal: int, calls: int, late: bool
+    ) -> None:
+        self._seed(log, timing_payload(hook_before=False, ordinal=ordinal, calls=calls))
+
+        report = _analyze(log)
+
+        assert report.funnel.post_hoc_measured == 1
+        assert report.funnel.post_hoc_after_work == int(late)
+        assert report.descriptive.post_hoc_share == (1.0 if late else 0.0)
+        # Lateness alone does not exclude: only a hook or a commit does.
+        assert report.funnel.pre_treatment_excluded == 0
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"first_retrieval_ordinal": None},
+            {"tool_call_count": None},
+            {"first_retrieval_ordinal": 11},
+            {"first_retrieval_ordinal": 0},
+            {"first_retrieval_ordinal": True},
+            {"tool_call_count": "10"},
+        ],
+    )
+    def test_a_position_the_rule_cannot_use_leaves_the_task_unmeasured(
+        self, log: HoldoutLog, override: dict[str, Any]
+    ) -> None:
+        # An ordinal past the count cannot be placed in the last tenth, and
+        # counting it as late or as early would move the share either way.
+        self._seed(
+            log,
+            {**timing_payload(hook_before=False), **override},
+            timing_payload(hook_before=False),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.post_hoc_measured == 1
+        assert report.descriptive.post_hoc_share == 0.0
+        assert "1 lacked a position the rule needs" in report.descriptive.post_hoc_note
+
+    def test_legacy_joins_are_reported_as_lacking_not_as_early(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            timing_payload(hook_before=True),
+            legacy_timing_payload(hook_before=False),
+            legacy_timing_payload(hook_before=False),
+            None,
+        )
+
+        report = _analyze(log)
+
+        # Measured: one, and it was late. The three others are not counted
+        # as early, which would read 1 of 4.
+        assert (report.funnel.post_hoc_measured, report.funnel.post_hoc_after_work) == (
+            1,
+            1,
+        )
+        assert report.descriptive.post_hoc_share == 1.0
+        assert "3 lacked a position the rule needs" in report.descriptive.post_hoc_note
+
+    def test_the_share_counts_the_tasks_the_exclusion_dropped(
+        self, log: HoldoutLog
+    ) -> None:
+        """Every task here is excluded, so none is eligible. A share taken
+        after the exclusion would read zero or nothing; it is taken before."""
+        self._seed(
+            log,
+            timing_payload(hook_before=False, commit_before=True),
+            timing_payload(hook_before=True),
+        )
+
+        report = _analyze(log)
+
+        assert report.funnel.eligible == 0
+        assert report.descriptive.post_hoc_share == 1.0
+
+    def test_both_arms_count_toward_the_share(self, log: HoldoutLog) -> None:
+        for hour, (withheld, timing) in enumerate(
+            [
+                (False, timing_payload(hook_before=True)),
+                (True, timing_payload(hook_before=False)),
+            ]
+        ):
+            log.task(
+                start=MONDAY + timedelta(hours=hour),
+                arms=[withheld],
+                timing=timing,
+            )
+        log.sweep()
+
+        report = _analyze(log)
+
+        assert report.descriptive.post_hoc_share == pytest.approx(0.5)
+
+    def test_no_joined_position_reads_none_with_the_reason(
+        self, log: HoldoutLog
+    ) -> None:
+        self._seed(
+            log,
+            legacy_timing_payload(hook_before=False),
+            legacy_timing_payload(hook_before=False),
+            None,
+        )
+
+        report = _analyze(log)
+
+        assert report.descriptive.post_hoc_share is None
+        assert report.descriptive.not_measurable["post_hoc_share"] == (
+            report.descriptive.post_hoc_note
+        )
+        assert report.descriptive.post_hoc_note.startswith(
+            "none of the 3 tasks that reached the pre-treatment rule"
+        )
+
+    def test_no_task_reaching_the_rule_reads_none_with_the_reason(
+        self, log: HoldoutLog
+    ) -> None:
+        log.task(start=MONDAY, parent=None)
+        log.sweep()
+
+        report = _analyze(log)
+
+        assert report.descriptive.post_hoc_share is None
+        assert (
+            report.descriptive.post_hoc_note == "no task reached the pre-treatment rule"
+        )
 
 
 # ---------------------------------------------------------------------------

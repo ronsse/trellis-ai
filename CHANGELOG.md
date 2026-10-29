@@ -37,6 +37,31 @@ All notable changes to Trellis will be documented in this file.
   - The shipped `retrieve-before-task`, `record-after-task` and `link-evidence`
     skills drop their "preview" status and banner and move to `1.2.0`.
 
+- **The holdout's `pre_treatment` rule now applies its commit half, and
+  `post_hoc_share` is a figure.** The previous change recorded where the first
+  retrieval sat against a stop hook's feedback and left two things unrecorded:
+  the first commit and the last-tenth position. Each `retrieval_timing` now also
+  carries `first_commit_ordinal` (the 1-based position, in the same tool-call
+  numbering as `first_retrieval_ordinal`, of the first `Bash` call that
+  `SessionOutcome.commits` counts, so an errored or unanswered call, a commit
+  named inside `echo` or `grep`, and a `git log --grep` are not it) and
+  `commit_before_first_retrieval`, an integer and a flag, never the command.
+  `trellis analyze holdout` excludes a task whose first retrieval followed the
+  first commit as well as hook feedback (`pre_treatment_excluded`, with
+  `pre_treatment_excluded_after_commit` saying how many were commits). A join
+  with neither comparison true and a missing one is still undecidable, kept and
+  counted in `pre_treatment_unknown`, so every join written before this change
+  reads unknown unless it shows hook feedback first. `post_hoc_share` is the
+  share of tasks that reached the rule, in both arms, whose first retrieval came
+  after hook feedback, after the first commit or in the last 10% of the
+  session's tool calls; a join that lacks any of the positions is left out of
+  both numerator and denominator and counted in the note, and with none
+  measured the figure stays `None` with the reason. A session parsed again after
+  this change gets one extra join for the new keys, which the holdout reads once
+  as the latest; a session whose file never changes keeps its older join until a
+  watermark reset parses it. `trellis analyze holdout` labels the funnel stage
+  "first retrieval after a stop hook's feedback or a commit".
+
 ### Added
 
 - **Trellis ships the loop as text for consumers that read no skill:

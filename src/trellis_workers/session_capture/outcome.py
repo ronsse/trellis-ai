@@ -31,7 +31,10 @@ where anyone with the event log can read it.
 * **Commits and pull requests** are ``Bash`` calls whose command runs
   ``git commit``, ``gh pr create`` or ``gh pr merge`` (see :func:`_steps`) and
   whose result is not an error, each kind counted once per call. ``pr_urls``
-  counts the distinct pull request URLs those results print.
+  counts the distinct pull request URLs those results print. The tally also
+  keeps the position of the first commit among the file's tool calls (see
+  :attr:`OutcomeTally.first_commit_ordinal`): one integer, held at the call and
+  confirmed at its result, so a commit that errored has none.
 * **The wall clock** is the latest readable record ``timestamp`` less the
   earliest; Claude Code's stamps are not monotonic within a file.
 * **The ending** is the state after the last record of the conversation: an
@@ -158,9 +161,14 @@ class OutcomeTally:
     """Builds one transcript's :class:`SessionOutcome`, a record at a time.
 
     Parse-time scaffolding. Until a ``Bash`` call's result arrives it holds
-    what the call's command would make, keyed by the call's use id, and it
-    holds the pull request URLs and record uuids it has seen; all stay in
-    memory, and :meth:`finish` returns nothing of them but counts.
+    what the call's command would make, and where the call sat, keyed by the
+    call's use id, and it holds the pull request URLs and record uuids it has
+    seen; all stay in memory, and :meth:`finish` returns nothing of them but
+    counts.
+
+    :attr:`first_commit_ordinal` is the one position it hands back, outside
+    the :class:`SessionOutcome`: it is read where the pack holdout compares it
+    with the first retrieval's, in the digest's ordinal space.
     """
 
     def __init__(self) -> None:
@@ -171,8 +179,14 @@ class OutcomeTally:
         self._seen: set[str] = set()
         self._made: Counter[str] = Counter()
         self._pr_urls: set[str] = set()
-        #: Use id -> the steps its ``Bash`` command would make.
-        self._pending: dict[str, frozenset[str]] = {}
+        #: Use id -> the steps its ``Bash`` command would make, and the call's
+        #: 1-based position among the file's tool calls.
+        self._pending: dict[str, tuple[frozenset[str], int]] = {}
+        #: The position of the earliest call that made a commit and did not
+        #: error, in the ordinal space of ``SessionDigest.tool_calls``; ``None``
+        #: when no call did. Set at the result, so an unanswered or errored
+        #: commit has none.
+        self.first_commit_ordinal: int | None = None
         #: Per API message, the largest value each token field reached. Keyed
         #: by ``message.id``, or by a counter for a record without one.
         self._usage: dict[str | int, dict[str, int]] = {}
@@ -201,8 +215,17 @@ class OutcomeTally:
         self._seen.add(uuid)
         return True
 
-    def assistant(self, record: dict[str, Any], message: dict[str, Any]) -> None:
-        """Fold one assistant record: its turn, its usage, its ``Bash`` calls."""
+    def assistant(
+        self, record: dict[str, Any], message: dict[str, Any], *, calls_before: int
+    ) -> None:
+        """Fold one assistant record: its turn, its usage, its ``Bash`` calls.
+
+        *calls_before* is how many tool calls the digest held before this
+        record's, so a call's position here is the one the digest gives it. A
+        record written again is skipped below and its calls are not held, but
+        the digest counts them, which is why the position is passed in rather
+        than counted here.
+        """
         if not self._first_sight(record):
             return
         content = message.get("content")
@@ -211,9 +234,12 @@ class OutcomeTally:
             for block in (content if isinstance(content, list) else [])
             if isinstance(block, dict) and block.get("type") == "tool_use"
         ]
-        self._tool_calls += sum(
-            1 for block in uses if isinstance(block.get("name"), str) and block["name"]
-        )
+        named = [
+            block
+            for block in uses
+            if isinstance(block.get("name"), str) and block["name"]
+        ]
+        self._tool_calls += len(named)
         if record.get("isApiErrorMessage"):
             self._state = _API_ERROR
             return
@@ -233,11 +259,14 @@ class OutcomeTally:
                 if isinstance(value, int) and not isinstance(value, bool):
                     recorded[name] = max(value, recorded.get(name, value))
         self._state = _TOOL_USE if uses else _REPLY
-        for block in uses:
-            self._hold(block)
+        for position, block in enumerate(named, calls_before + 1):
+            self._hold(block, position)
 
-    def _hold(self, block: dict[str, Any]) -> None:
-        """Keep what a ``Bash`` call's command would make until it answers."""
+    def _hold(self, block: dict[str, Any], position: int) -> None:
+        """Keep what a ``Bash`` call's command would make until it answers.
+
+        *position* is the call's 1-based place among the file's tool calls.
+        """
         use_id = block.get("id")
         tool_input = block.get("input")
         if not (
@@ -250,7 +279,7 @@ class OutcomeTally:
         command = tool_input.get("command")
         steps = _steps(command) if isinstance(command, str) else frozenset()
         if steps:
-            self._pending[use_id] = steps
+            self._pending[use_id] = (steps, position)
 
     def user(self, record: dict[str, Any], content: Any, texts: list[str]) -> None:
         """Fold one user record: its text, its tool results, what they made.
@@ -273,9 +302,15 @@ class OutcomeTally:
                 self._tool_errors += 1
                 errored_any = True
             use_id = block.get("tool_use_id")
-            steps = self._pending.pop(use_id, None) if isinstance(use_id, str) else None
-            if steps and not errored:
+            held = self._pending.pop(use_id, None) if isinstance(use_id, str) else None
+            if held and not errored:
+                steps, position = held
                 self._made.update(steps)
+                if _COMMIT in steps and (
+                    self.first_commit_ordinal is None
+                    or position < self.first_commit_ordinal
+                ):
+                    self.first_commit_ordinal = position
                 self._pr_urls.update(_PR_URL.findall(_text_of(block.get("content"))))
         if any(not text.startswith(_HARNESS_TEXT) for text in texts):
             self._user_turns += 1
