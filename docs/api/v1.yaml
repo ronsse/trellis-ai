@@ -7109,9 +7109,9 @@ paths:
 
         non-empty vector sets the width the rest must match, and a later batch of
 
-        another width is accepted and breaks every semantic query once both widths are
+        another width is accepted; a query there scores only the rows of its own
 
-        stored). So is an ``item_id``
+        width). So is an ``item_id``
 
         starting ``trace-summary:``, for every caller: that namespace is the
 

@@ -128,14 +128,37 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         top_k: int = 10,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Return the ``top_k`` stored rows most similar to ``vector``.
+
+        Only rows of the query's own width are scored. A cosine between two
+        widths is undefined, and a row of another width reaching ``np.dot``
+        raised ``ValueError`` and failed the whole query (and with it every
+        semantic pack). The width filter runs in SQL, so a row of another
+        width is not read at all.
+
+        The skip is silent while the query returns rows: counting what was
+        skipped is a second full scan of ``vectors`` (there is no index on
+        ``dimensions``), a cost not worth paying on every query. The one case
+        that has to be heard is the degenerate one, a width that matches no
+        stored row, which is what an embedder change that re-embedded nothing
+        produces and would otherwise read as an empty semantic axis. Only when
+        the width-filtered fetch is empty does the query pay for that scan, and
+        if any row of another width passes the same SQL-pushed filters it logs
+        one ``vector_query.width_mismatch`` warning (``query_width`` and
+        ``other_width_rows``, counts only) and returns ``[]``. A list- or
+        dict-valued filter runs Python-side, so it is not applied to that count.
+        """
         query_vec = np.array(vector, dtype=np.float32)
         query_norm = float(np.linalg.norm(query_vec))
         if query_norm == 0.0:
             return []
 
-        # Push metadata filters to SQL where possible
-        where_parts: list[str] = []
-        params: list[Any] = []
+        # Push metadata filters to SQL where possible. The width test comes
+        # first and is not a caller filter: it is what makes the dot product
+        # below well defined. No index backs it, and none is needed — the
+        # brute-force scoring that follows reads every surviving row anyway.
+        where_parts: list[str] = ["dimensions = ?"]
+        params: list[Any] = [int(query_vec.shape[0])]
         complex_filters: dict[str, Any] = {}
 
         if filters:
@@ -148,11 +171,17 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
                 else:
                     complex_filters[key] = value
 
-        sql = "SELECT item_id, vector_blob, metadata_json FROM vectors"
-        if where_parts:
-            sql += " WHERE " + " AND ".join(where_parts)
+        sql = (
+            "SELECT item_id, vector_blob, metadata_json FROM vectors WHERE "
+            + " AND ".join(where_parts)
+        )
 
         rows = self._conn.execute(sql, params).fetchall()
+        if not rows:
+            self._warn_if_width_mismatch(
+                int(query_vec.shape[0]), where_parts[1:], params[1:]
+            )
+            return []
 
         scored: list[dict[str, Any]] = []
         for row in rows:
@@ -213,6 +242,30 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _warn_if_width_mismatch(
+        self, query_width: int, filter_parts: list[str], filter_params: list[Any]
+    ) -> None:
+        """Warn once when a query found nothing of its width but rows of another.
+
+        Called only after the width-filtered fetch came back empty, so the
+        second scan this costs is paid on the degenerate path alone. The count
+        takes the same SQL-pushed filters as the fetch: a filter that matches
+        no row at all is an empty answer, not a width mismatch, and must not
+        read as one. Counts only, never an id or a value.
+        """
+        sql = "SELECT COUNT(*) FROM vectors WHERE dimensions != ?"
+        for part in filter_parts:
+            sql += " AND " + part
+        other = int(
+            self._conn.execute(sql, [query_width, *filter_params]).fetchone()[0]
+        )
+        if other:
+            logger.warning(
+                "vector_query.width_mismatch",
+                query_width=query_width,
+                other_width_rows=other,
+            )
 
     @staticmethod
     def _matches_filters(meta: dict[str, Any], filters: dict[str, Any]) -> bool:
