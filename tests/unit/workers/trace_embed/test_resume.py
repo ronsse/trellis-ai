@@ -318,6 +318,30 @@ class TestPermanentlyInvalidRowDoesNotPinTheWatermark:
             == []
         )
 
+    def test_a_chunk_shaped_summary_id_is_skipped_and_the_cursor_advances(
+        self, registry, watermark_path
+    ) -> None:
+        """Evidence ingest refuses a caller-named id in the minted chunk
+        shape, so a trace id ending ``#chunk-<digits>`` would be refused on
+        every pass and pin the cursor behind it."""
+        from .conftest import make_trace
+
+        bad = make_trace(0).model_copy(update={"trace_id": "t#chunk-3"})
+        good = make_trace(1)
+        for trace in (bad, good):
+            registry.operational.trace_store.append(trace)
+
+        first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert first.embedded == 1
+        assert first.skipped_invalid == 1
+        assert first.failed == 0
+        assert TraceEmbedWatermark(watermark_path).cursor == TraceCursor(
+            created_at=good.created_at, trace_id=good.trace_id
+        )
+
+        second = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert second.scanned == 0
+
     def test_a_hazardous_id_is_never_looked_up_in_the_vector_store(
         self, registry, watermark_path, monkeypatch
     ) -> None:
