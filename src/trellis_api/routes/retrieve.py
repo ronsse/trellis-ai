@@ -19,6 +19,7 @@ from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
     conceal_document_rows,
+    conceal_node_pointers,
     conceal_withheld_ids,
 )
 from trellis.schemas.pack import PackBudget, SectionRequest
@@ -406,9 +407,17 @@ def search_entities(
     order: str = Query("desc", description="Sort order: asc or desc"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
-    """Search graph nodes by name or type."""
-    store = get_registry().knowledge.graph_store
+    """Search graph nodes by name or type.
+
+    A node carries no label, so every match is served; a hit whose
+    ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
+    names a document the caller may not read is served without that id.
+    ``total`` and the page are unchanged.
+    """
+    registry = get_registry()
+    store = registry.knowledge.graph_store
     # Lenient: an unknown sort is created_at, and any order but asc (in any
     # case) descends.
     rows, total = store.search_nodes(
@@ -418,6 +427,9 @@ def search_entities(
         descending=order.lower() != "asc",
         limit=limit,
         offset=offset,
+    )
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, request_clearance(ctx)
     )
     results = [
         {
@@ -468,8 +480,15 @@ def search_entity_facets(
 def get_entity(
     entity_id: str,
     depth: int = Query(1, description="Subgraph traversal depth"),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
-    """Get an entity and its neighborhood."""
+    """Get an entity and its neighborhood.
+
+    A node carries no label, so the entity and every node of the subgraph are
+    served; one whose ``document_ids``, ``evidence_ref`` property or
+    ``lifecycle.superseded_by`` names a document the caller may not read is
+    served without that id. An edge's own ``evidence_ref`` is served as stored.
+    """
     registry = get_registry()
     node = registry.knowledge.graph_store.get_node(entity_id)
     if node is None:
@@ -478,7 +497,17 @@ def get_entity(
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
-    return {"status": "ok", "entity": node, "subgraph": subgraph}
+    # One judgement over the entity and the subgraph's nodes together.
+    node, *neighbours = conceal_node_pointers(
+        [node, *subgraph["nodes"]],
+        registry.knowledge.document_store,
+        request_clearance(ctx),
+    )
+    return {
+        "status": "ok",
+        "entity": node,
+        "subgraph": {**subgraph, "nodes": neighbours},
+    }
 
 
 @router.get("/traces")
