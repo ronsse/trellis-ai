@@ -602,14 +602,42 @@ class TestPrecedentNames:
         assert node["properties"]["name_source"] == "neutral"
         assert node["properties"]["source_excerpt_status"] == "no_document_store"
 
-    def test_a_title_name_survives(self, registry: StoreRegistry) -> None:
+    def test_a_title_name_is_renamed_as_the_row_loses_its_title(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The tombstone blanks the document row's title (``_tombstone_document``),
+        so a name copied from the item's title is the redacted document's text
+        too (#1032). Only a reviewer's name and the bare id stay."""
         _node(registry, "doc-a")
         precedent_id = _promote(registry, "doc-a")
         _redact(registry, "doc-a")
         node = registry.knowledge.graph_store.get_node(precedent_id)
         assert node is not None
-        assert node["properties"]["name"] == "Learning :: doc-a"
-        assert node["properties"]["name_source"] == "item_title"
+        assert node["properties"]["name"] == (
+            f"Learning: asset_generation :: {precedent_id}"
+        )
+        assert node["properties"]["name_source"] == "neutral"
+        assert "doc-a" not in node["properties"]["name"]
+
+    @pytest.mark.parametrize("marker", ["reviewer", "item_id"])
+    def test_a_reviewer_or_bare_id_name_survives(
+        self, registry: StoreRegistry, marker: str
+    ) -> None:
+        _node(registry, "doc-r")
+        precedent_id = _promote(registry, "doc-r")
+        graph = registry.knowledge.graph_store
+        row = graph.get_node(precedent_id)
+        assert row is not None
+        graph.upsert_node(
+            precedent_id,
+            "precedent",
+            {**row["properties"], "name": "Kept name", "name_source": marker},
+        )
+        _redact(registry, "doc-r")
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"]["name"] == "Kept name"
+        assert node["properties"]["name_source"] == marker
 
     def test_an_unmarked_name_fails_closed_unless_it_is_a_bare_id(
         self, registry: StoreRegistry
