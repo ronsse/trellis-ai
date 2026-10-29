@@ -7068,61 +7068,79 @@ paths:
 
         and any refusal in it stores nothing from the batch. A row that is not an
 
-        object, or whose ``metadata`` is neither an object nor ``null``, is a 422. So
+        object, whose ``item_id`` is present but not a string, or whose ``metadata``
 
-        is a ``metadata`` that would break a semantic read: ``content`` that is not a
+        is neither an object nor ``null``, is a 422. So is a ``metadata`` that would
 
-        string, ``auto_importance`` that is not a finite number (a bool is not one),
+        break a semantic read: ``content`` or ``excerpt`` that is not a string,
 
-        or an ``auto_importance`` at or above the importance decay threshold with no
+        ``auto_importance`` that is not a finite number (a bool is not one), or an
+
+        ``auto_importance`` at or above the importance decay threshold with no
 
         ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
 
-        is an ``item_id`` starting ``trace-summary:``, for every caller: that
+        is a ``vector`` that is not a list of finite numbers (a bool is not one)
 
-        namespace is the trace-embed worker''s, and a row there makes it skip the
+        within float32 range, one whose squared length would overflow float32 in the
 
-        trace for good. A row''s ``metadata`` may not carry a raw
+        store''s norm, or one whose length differs from the store''s width (when the
 
-        ``data_classification`` (422), whoever the caller is: a vector row''s label
+        store declares one; the SQLite backend does not, and then the batch''s first
 
-        is mirrored from its document, never set here. A row whose ``item_id`` is a
+        non-empty vector sets the width the rest must match). So is an ``item_id``
 
-        document (or a chunk of one) above the key''s clearance is refused (409):
+        starting ``trace-summary:``, for every caller: that namespace is the
 
-        replacing its vector row would replace what a semantic hit shows and
+        trace-embed worker''s, and a row there makes it skip the trace for good. A
 
-        carries. A row whose ``item_id`` is not a string is counted as an error,
+        row''s ``metadata`` may not carry a raw ``data_classification`` (422), whoever
 
-        since an id the gate cannot read cannot be judged.
+        the caller is: a vector row''s label is mirrored from its document, never set
+
+        here. A row whose ``item_id`` names no stored document may not carry
+
+        ``metadata.lifecycle`` or ``metadata.evidence_ref`` (422): the pack builder
+
+        withholds by id, so those keys would act on whatever item holds that id.
+
+        A row whose ``item_id`` is a document (or a chunk of one) above the key''s
+
+        clearance is refused (409): replacing its vector row would replace what a
+
+        semantic hit shows and carries.
 
 
-        **What is not atomic.** The second pass writes row by row. A row whose
+        **What is not atomic.** The second pass writes row by row. A row with no
 
-        document read or upsert fails is counted in ``errors`` and does not stop
+        ``item_id`` (absent, ``null`` or empty) or no ``vector`` (absent, ``null`` or
 
-        the rest, so a batch can answer ``upserted: 1, errors: 1`` with the first
+        empty) is counted in ``errors`` and stored as nothing. So is a row whose
 
-        row stored. A row with no ``item_id`` or no ``vector`` is counted the same
+        document read or upsert fails, which does not stop the rest: a batch can
 
-        way. Nothing makes the mirror below atomic with a concurrent relabel either:
+        answer ``upserted: 1, errors: 1`` with the first row stored. Nothing makes
 
-        a relabel between the read of the document and the upsert leaves the row
+        the mirror below atomic with a concurrent relabel either: if the relabel''s
 
-        unlabelled until that relabel''s own vector sync runs.
+        own vector sync runs between this route''s read of the document and its upsert,
+
+        this upsert overwrites the synced row, and it stays stale until a later sync
+
+        or ``trellis admin resync-vector-metadata``.
 
 
         When ``item_id`` names a stored document the row is written carrying that
 
-        document''s mirrored metadata (its label and lifecycle among them), for
+        document''s mirrored metadata (its label and lifecycle among them) and its
 
-        every caller, whatever the row''s own ``metadata`` says. For a chunk id
+        ``evidence_ref``, for every caller, whatever the row''s own ``metadata`` says.
 
-        (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk document''s own,
+        For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
 
-        else the parent the id names, whatever the row supplied; for any other id it
+        document''s own, else the parent the id names, whatever the row supplied; for
 
-        is kept as supplied.'
+        any other id it is kept as supplied.'
       operationId: upsert_vectors_api_v1_vectors_post
       requestBody:
         content:

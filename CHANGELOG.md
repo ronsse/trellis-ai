@@ -6,27 +6,6 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **`POST /api/v1/vectors` keeps a chunk's parent, validates metadata value
-  types and reserves the trace-summary ids (part of #1029).** For a chunk id
-  (`<parent>#chunk-<digits>`) the written row's `parent_doc_id` is now the chunk
-  document's own, else the parent the id names, whatever the row supplied;
-  serving trusts that key before the id, so a supplied one could lower a chunk's
-  effective label. Only a `restricted` key or auth `off` can reach the row (a
-  lower key is refused 409 first); a non-chunk id keeps what it supplied. A row
-  is a 422, with nothing written from the batch, when `metadata.content` is not a
-  string, `metadata.auto_importance` is not a finite number (a bool is not one),
-  or `auto_importance` is at or above the importance decay threshold with no
-  `importance_scored_at` (in `metadata` or `metadata.content_tags`): each made
-  `SemanticSearch` raise on every pack that reached the row. An `item_id`
-  starting `trace-summary:` is a 422 for every caller, since a row there made the
-  trace-embed worker skip that trace permanently. The route docstring (and
-  `docs/api/v1.yaml`) now says what is and is not atomic: the first pass is
-  all-or-nothing, the second counts a failed document read or upsert in `errors`
-  while earlier rows have landed, and a relabel between the mirror's read and the
-  upsert leaves the row unlabelled until its own vector sync. The decay threshold
-  checked is the default; one lowered through the parameter registry is not
-  reflected at write time.
-
 - **`POST /api/v1/evidence` and `POST /api/v1/documents` take
   `reingest_redacted` (part of #1034).** A REST caller had no single-route way to
   bring a redacted id back: the refusal over a tombstone
@@ -342,6 +321,43 @@ All notable changes to Trellis will be documented in this file.
   caller catches it, one row at a time. Rejecting such a row at write time is a
   separate change. A non-numeric store score, or a string importance parameter
   in the registry, is not a malformed row and still raises, as before.
+
+- **`POST /api/v1/vectors` keeps a chunk's parent and refuses a row the
+  semantic axis cannot serve or that acts on another item (part of #1029).** The
+  write side of the malformed-row fix above: a refused batch stores nothing, and
+  the caller is told, where before the row was accepted with a 200 and then
+  dropped from every pack. For a chunk id (`<parent>#chunk-<digits>`) the written
+  row's `parent_doc_id` is the chunk document's own, else the parent the id
+  names, whatever the row supplied (serving trusts that key before the id, so a
+  supplied one could lower a chunk's effective label); a non-chunk id keeps what
+  it supplied. A row is a 422 when `metadata.content` or `metadata.excerpt` is
+  not a string (`excerpt` whether or not `content` is present, since serving
+  reads `content`, else `excerpt`), `metadata.auto_importance` is not a finite
+  number (a bool is not one) or is at or above the importance decay threshold
+  with no `importance_scored_at`, or `item_id` is present and not a string (it is
+  now judged in the first pass with the other shape errors, not counted in the
+  second). A `vector` that is present must be a list of finite, non-bool numbers
+  within float32 range whose squared length stays under 1e38 (the store keeps
+  float32: a larger element becomes `inf`, and `[3e38] * 8`, though in range,
+  overflows the norm and scores `NaN`), and whose length equals the store's
+  `dimensions` where the store declares one (pgvector, ArcadeDB, Neo4j); SQLite
+  declares none, so there the first non-empty vector of the batch sets the width
+  the rest must match, and a batch is not checked against rows already stored.
+  An `item_id` starting `trace-summary:` is a 422 for every caller, since a row
+  there made the trace-embed worker skip that trace permanently. A row whose
+  `item_id` names no stored document may not carry `metadata.lifecycle` or
+  `metadata.evidence_ref` (422, any caller): the pack builder withholds by id, so
+  `{"state": "superseded", ...}` there withheld every item holding the id, and an
+  `evidence_ref` made the row the resolution target of another item's
+  `superseded_by`. At a stored document both keys are written from the document,
+  as the other mirrored keys are. The route docstring (and `docs/api/v1.yaml`)
+  states what is and is not atomic: the first pass is all-or-nothing, the second
+  counts a failed document read or upsert in `errors` while earlier rows have
+  landed, and if a relabel's own vector sync runs between this route's document
+  read and its upsert, the upsert overwrites the synced row and it stays stale
+  until a later sync or `trellis admin resync-vector-metadata`. The decay
+  threshold checked is the default; one lowered through the parameter registry is
+  not reflected at write time.
 
 ### Added
 

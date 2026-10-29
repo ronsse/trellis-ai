@@ -3908,7 +3908,9 @@ above its own clearance, and cannot touch a document it may not read.**
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
 - `POST /api/v1/vectors` also refuses, with a 422 and nothing written, a row
-  that would make the semantic axis raise: a `metadata.content` or
+  the semantic axis could not serve (it skips and logs such a row,
+  `semantic_row_skipped_malformed_metadata`, so an accepted one would answer 200
+  and then never appear in a pack): a `metadata.content` or
   `metadata.excerpt` that is not a string (serving reads `content`, else
   `excerpt`, and truncates it; a non-string `excerpt` is refused whether or not
   `content` is present); a `metadata.auto_importance` that is not a finite number

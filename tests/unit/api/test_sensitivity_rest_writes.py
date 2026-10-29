@@ -707,7 +707,7 @@ class TestVectorsKeepAChunksParent:
 
 
 class TestVectorsValueTypes:
-    """A row that makes ``SemanticSearch`` raise is the caller's 422."""
+    """A row ``SemanticSearch`` could not serve is the caller's 422."""
 
     STAMPED = "2026-01-01T00:00:00+00:00"
 

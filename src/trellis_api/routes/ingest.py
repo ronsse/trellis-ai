@@ -396,7 +396,7 @@ def _vector_item_problem(
         return "item_id must be a string"
     metadata = item.get("metadata")
     # ``null`` is stored as ``{}``; anything else that is not an object would
-    # be stored as sent and then break every semantic pack that reads it.
+    # be stored as sent and then be dropped from (or break) every semantic read.
     if metadata is not None and not isinstance(metadata, dict):
         return "metadata must be an object"
     if isinstance(item_id, str) and item_id.startswith(TRACE_SUMMARY_ID_PREFIX):
@@ -414,12 +414,16 @@ def _vector_item_problem(
 
 
 def _vector_metadata_problem(metadata: dict[str, Any]) -> str | None:
-    """Why a supplied vector-row ``metadata`` would break a semantic read, or ``None``.
+    """Why a supplied vector-row ``metadata`` would not survive a semantic read.
 
-    Judged on what the caller sent, whether or not the row's own document will
-    overwrite the key (``auto_importance`` is mirrored), so the answer does not
-    depend on the document store. Mirrors what ``SemanticSearch`` and
-    ``_apply_importance`` demand of a row: ``content`` and ``excerpt`` strings
+    Returns ``None`` for a row that would. Since the semantic axis skips and logs
+    a row it cannot read (``semantic_row_skipped_malformed_metadata``) instead of
+    raising, such a row would be stored, accepted with a 200, and then never
+    served; refusing it here tells the caller. Judged on what the caller sent,
+    whether or not the row's own document will overwrite the key
+    (``auto_importance`` is mirrored), so the answer does not depend on the
+    document store. Mirrors what ``SemanticSearch`` and ``_apply_importance``
+    demand of a row: ``content`` and ``excerpt`` strings
     (serving reads ``content``, else ``excerpt``, and truncates it), and
     ``auto_importance`` a finite number (never a bool), with a stamp for a score at
     or above the decay threshold, in ``content_tags`` or at the top level.
@@ -517,10 +521,11 @@ def upsert_vectors(
             raise HTTPException(
                 status_code=422, detail=f"vectors[{index}] must be an object"
             )
-        # A row that would raise in the semantic axis, that squats on the
-        # trace-embed worker's ids, or that carries a key acting on another item,
-        # is refused here, where the caller can be told, rather than stored for
-        # every pack (or the worker) to trip on.
+        # A row the semantic axis could not serve (it would skip it, or a bad
+        # vector would poison scores), that squats on the trace-embed worker's
+        # ids, or that carries a key acting on another item, is refused here,
+        # where the caller can be told, rather than stored for packs (or the
+        # worker) to trip on.
         problem = _vector_item_problem(item, document_store, width)
         if problem is not None:
             raise HTTPException(status_code=422, detail=f"vectors[{index}].{problem}")
