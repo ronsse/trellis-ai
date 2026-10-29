@@ -323,21 +323,40 @@ All notable changes to Trellis will be documented in this file.
 
 - **Graph reads omit evidence pointers to documents the caller cannot read.**
   Follows #1045: the same concealment, for the pointers a graph node carries. A
-  node has no label, but its `document_ids` and the `evidence_ref` property
-  (`save_knowledge` writes the same id to both) can name a document a
-  below-`restricted` key may not read. `GET /api/v1/graph/history` (every
-  version), MCP `get_graph` (root and neighbours), MCP `get_items` on an entity
-  id and `build_file_context`'s entity entries now drop such an id (the
-  `evidence_ref` key is removed, other properties stay), judged by the document
-  store in one pass per response; `restricted`, `admin` and auth off read
-  nothing and see the node as stored. A graph-axis pack item spreads its node's
-  `evidence_ref` into its metadata, so the pack's concealment pass drops that
-  key too (`POST /api/v1/packs` and `/packs/sectioned`); the items served and
-  their order do not change, only that metadata for a caller below
-  `restricted`. `GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` are
-  not covered yet. Two comments that described
-  `TARGET_PROTECTED` as only a promoted precedent's row now also name a
-  redaction tombstone.
+  node has no label, but the document ids it names can point at a document a
+  below-`restricted` key may not read: `document_ids`, and in `properties` the
+  `evidence_ref` (`save_knowledge` writes the same id to both) and the
+  `lifecycle.superseded_by` that `supersede_entity` stamps on a superseded
+  entity. `GET /api/v1/graph/history` (every version), MCP `get_graph` (root and
+  neighbours), MCP `get_items` on an entity id and `build_file_context`'s entity
+  entries now drop such an id (the pointer key is removed, `lifecycle.state` and
+  every other property stay), judged by the document store in one pass per
+  response; `restricted`, `admin` and auth off read nothing and see the node as
+  stored. A graph-axis pack item spreads its node's properties into its
+  metadata, so the pack's concealment pass drops `evidence_ref` there too
+  (`POST /api/v1/packs` and `/packs/sectioned`); the items served and their order
+  do not change, only that metadata for a caller below `restricted`.
+  `GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` are not covered yet.
+  Two comments that described `TARGET_PROTECTED` as only a promoted precedent's
+  row now also name a redaction tombstone.
+
+- **A corpus move, a corpus prune and `ingest dbt-manifest` leave a redaction
+  tombstone alone (part of #1034).** `corpus sync` deleted every chunk row of a
+  document it moved or pruned, tombstones included, so the file coming back under
+  its old path wrote the redacted text under the same chunk id with nothing to
+  refuse it. Both now keep a redacted chunk's row, delete the rest as before, and
+  report a `redaction_tombstone` warning naming the chunk and the file's path;
+  `--dry-run --prune` predicts the warning. A redacted *parent* that `--prune`
+  deletes is unchanged. `ingest dbt-manifest` exited `2` with the refusal after
+  the nodes and edges were written when a manifest still described a redacted
+  model; it now skips that description, logs `dbt_description_skipped_redacted`
+  at warning level, indexes the others and exits `0`. The JSON payload gains an
+  always-present `skipped_redacted` count, and the text output a `Skipped
+  (redacted): N` line when `N` is non-zero. No other refusal is skipped. Known
+  gap: a corpus parent brought back with `reingest_redacted` gets its row back
+  but not its chunks, whose tombstones stay and are reported as a
+  `redaction_tombstone` warning on every sync; corpus sync has no flag to
+  re-ingest them.
 
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
