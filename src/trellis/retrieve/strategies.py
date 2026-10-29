@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import (
     TYPE_CHECKING,
@@ -1052,6 +1052,81 @@ class _ImportanceParams(TypedDict):
     half_life_days: float
 
 
+#: ``RejectedItem.reason`` for a row a strategy skipped because its stored
+#: metadata could not be read. ``PackBuilder`` writes it at the collect seam,
+#: from the ``skipped`` rows a strategy returns.
+MALFORMED_METADATA_REJECTION_REASON = "malformed_metadata"
+
+
+@dataclass(frozen=True)
+class StrategyResult:
+    """What a strategy that can skip a row returns: its items and its skips.
+
+    ``skipped`` holds one placeholder per row the strategy dropped because
+    its metadata was malformed (:func:`_malformed_placeholder`). The builder
+    records each as a withheld item and never serves it, so a placeholder
+    reaches no caller of ``search()``, which returns ``items`` only.
+    """
+
+    items: list[PackItem]
+    skipped: list[PackItem]
+
+
+def _skip_malformed_row(
+    strategy: str, item_id: str, field: str, exc: Exception
+) -> None:
+    """Record a skipped row where the default CLI shows it.
+
+    Names the field and the exception type, never the value: the value is
+    caller-controlled, and ``str(exc)`` echoes it (``could not convert
+    string to float: ...``). A ``debug`` line would be invisible on the
+    default CLI (``TRELLIS_LOG_LEVEL`` is ``WARNING``), so this is a
+    warning. The durable record is the placeholder the caller appends to
+    :attr:`StrategyResult.skipped`, which lands in the pack's withheld items
+    and ``PACK_ASSEMBLED.malformed_row_skips``.
+    """
+    # The event name is a structlog key, not a message: ``strategy`` is one
+    # of the three fixed strategy names, so the set of events stays closed.
+    logger.warning(
+        f"{strategy}_row_skipped_malformed_metadata",  # noqa: G004
+        item_id=item_id,
+        field=field,
+        error_type=type(exc).__name__,
+    )
+
+
+def _malformed_placeholder(
+    item_id: str, item_type: str, metadata: dict[str, Any], strategy: str
+) -> PackItem:
+    """A ``PackItem`` standing in for a skipped row, so it can be recorded.
+
+    A ``RejectedItem`` carries no metadata, and the clearance rules judge a
+    rejected id only through a candidate they were given (``CandidateIndex``),
+    so the skipped row's own metadata has to travel with it. Empty excerpt and
+    zero score: nothing in it was readable enough to rank or show.
+    """
+    return PackItem(
+        item_id=item_id,
+        item_type=item_type,
+        excerpt="",
+        relevance_score=0.0,
+        metadata={**metadata, "source_strategy": strategy},
+    )
+
+
+def _require_numeric_importance_params(params: _ImportanceParams) -> None:
+    """Raise ``TypeError`` for a resolved importance param that is not a number.
+
+    ``ParameterSnapshot.values`` allows a string, so a registry can hand
+    ``importance < "0.8"`` to ``_apply_importance``, which raises. That is
+    a configuration defect and must stay loud, not be skipped per row.
+    """
+    for key, value in params.items():
+        if not isinstance(value, (int, float)):
+            msg = f"importance param {key!r} is {type(value).__name__}, not a number"
+            raise TypeError(msg)
+
+
 def _resolve_importance_params(
     registry: ParameterRegistry | None,
     component_id: str,
@@ -1495,9 +1570,26 @@ class SemanticSearch(SearchStrategy):
         limit: int = 20,
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
+        return self.search_result(query, limit=limit, filters=filters).items
+
+    def search_result(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> StrategyResult:
+        """:meth:`search`, plus the rows it skipped as malformed.
+
+        :class:`~trellis.retrieve.pack_builder.PackBuilder` calls this so a
+        skipped row reaches the pack's withheld items and
+        ``PACK_ASSEMBLED.malformed_row_skips``. The per-call return value is
+        the channel because a strategy is shared across requests, so it can
+        hold no per-request state; ``search`` never returns a placeholder.
+        """
         if self._embedding_fn is None:
             logger.warning("semantic_search_no_embedding_fn")
-            return []
+            return StrategyResult(items=[], skipped=[])
 
         domain = (filters or {}).get("domain")
         half_life = _resolve_param(
@@ -1548,8 +1640,9 @@ class SemanticSearch(SearchStrategy):
         # raises ``TypeError`` inside ``_apply_importance`` too, and inside
         # the guard it would read as a malformed row and silently drop every
         # row with a nonzero importance from every pack.
-        self._require_numeric_importance_params(importance_params)
-        items = []
+        _require_numeric_importance_params(importance_params)
+        items: list[PackItem] = []
+        skipped: list[PackItem] = []
         for result in results:
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
@@ -1568,7 +1661,14 @@ class SemanticSearch(SearchStrategy):
             try:
                 score = _apply_importance(base_score, metadata, **importance_params)
             except (ValueError, TypeError) as exc:
-                self._skip_malformed_row(result["item_id"], "auto_importance", exc)
+                _skip_malformed_row(
+                    self.name, result["item_id"], "auto_importance", exc
+                )
+                skipped.append(
+                    _malformed_placeholder(
+                        result["item_id"], "vector", metadata, self.name
+                    )
+                )
                 continue
             # A vector row has no columns of its own — its recency stamp is
             # inside the metadata snapshot, either the source's (splatted
@@ -1586,7 +1686,12 @@ class SemanticSearch(SearchStrategy):
             try:
                 excerpt = self._row_excerpt(metadata.get(excerpt_field, ""))
             except (ValueError, TypeError) as exc:
-                self._skip_malformed_row(result["item_id"], excerpt_field, exc)
+                _skip_malformed_row(self.name, result["item_id"], excerpt_field, exc)
+                skipped.append(
+                    _malformed_placeholder(
+                        result["item_id"], "vector", metadata, self.name
+                    )
+                )
                 continue
             items.append(
                 PackItem(
@@ -1605,7 +1710,10 @@ class SemanticSearch(SearchStrategy):
                     },
                 )
             )
-        return sorted(items, key=lambda x: x.relevance_score, reverse=True)
+        return StrategyResult(
+            items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
+            skipped=skipped,
+        )
 
     @staticmethod
     def _require_numeric_score(score: Any) -> None:
@@ -1618,21 +1726,6 @@ class SemanticSearch(SearchStrategy):
         if not isinstance(score, (int, float)):
             msg = f"semantic row score is {type(score).__name__}, not a number"
             raise TypeError(msg)
-
-    @staticmethod
-    def _require_numeric_importance_params(params: _ImportanceParams) -> None:
-        """Raise ``TypeError`` for a resolved importance param that is not a number.
-
-        ``ParameterSnapshot.values`` allows a string, so a registry can hand
-        ``importance < "0.8"`` to ``_apply_importance``, which raises. That is
-        a configuration defect and must stay loud, not be skipped per row.
-        """
-        for key, value in params.items():
-            if not isinstance(value, (int, float)):
-                msg = (
-                    f"importance param {key!r} is {type(value).__name__}, not a number"
-                )
-                raise TypeError(msg)
 
     def _row_excerpt(self, raw: Any) -> str:
         """Bound a vector row's excerpt source, refusing a non-string.
@@ -1649,25 +1742,6 @@ class SemanticSearch(SearchStrategy):
             raise TypeError(msg)
         return truncate_excerpt(raw, limit=self._excerpt_max_chars)
 
-    @staticmethod
-    def _skip_malformed_row(item_id: str, field: str, exc: Exception) -> None:
-        """Record a skipped row where the default CLI shows it.
-
-        Names the field and the exception type, never the value: the value is
-        caller-controlled, and ``str(exc)`` echoes it (``could not convert
-        string to float: ...``). A ``debug`` line would be invisible on the
-        default CLI (``TRELLIS_LOG_LEVEL`` is ``WARNING``), so this is a
-        warning. The strategy returns ``list[PackItem]`` and has no channel
-        to the pack's ``rejected_items``, so the pack itself does not report
-        the skip.
-        """
-        logger.warning(
-            "semantic_row_skipped_malformed_metadata",
-            item_id=item_id,
-            field=field,
-            error_type=type(exc).__name__,
-        )
-
 
 @dataclass(frozen=True)
 class GraphAnswer:
@@ -1681,6 +1755,9 @@ class GraphAnswer:
 
     items: list[PackItem]
     axis_state: str | None = None
+    #: Placeholders for rows skipped as malformed, as on
+    #: :class:`StrategyResult`. Empty until the graph axis skips a row.
+    skipped: list[PackItem] = field(default_factory=list)
 
 
 class GraphSearch(SearchStrategy):
