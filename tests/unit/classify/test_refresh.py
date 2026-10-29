@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,11 +15,13 @@ from trellis.classify.protocol import (
     ClassificationResult,
 )
 from trellis.classify.refresh import (
+    REASON_TOMBSTONE,
     BatchRefreshResult,
     RefreshOutcome,
     reclassify_item,
     reclassify_stale,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.base.vector import VectorStore
 
@@ -800,6 +803,129 @@ class TestReclassifyStale:
             max_age_days=30,
         )
         assert result.skipped_fresh == 1
+
+
+_TOMBSTONE_META: dict[str, Any] = {
+    "keep": "me",
+    LIFECYCLE_KEY: {"state": "archived", "deprecation_reason": "redacted"},
+}
+
+
+class _RedactedAfterListingDocStore(_InMemoryDocStore):
+    """Lists a row with content, then reads it back as a tombstone.
+
+    The window a redaction can land in between ``list_documents`` and the
+    ``get`` inside :func:`reclassify_item`.
+    """
+
+    def list_documents(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        return [
+            {**doc, "content": "text listed before the redaction"}
+            for doc in super().list_documents(limit=limit, offset=offset)
+        ]
+
+
+class TestRedactionTombstone:
+    """A tombstone is never re-tagged, directly or in a batch.
+
+    ``put_document`` lets an unflagged write through when the row it leaves is
+    still a tombstone, so the refusal has to be made here, before the pipeline
+    runs.
+    """
+
+    def _pipeline(self) -> ClassifierPipeline:
+        return ClassifierPipeline(
+            classifiers=[_StubClassifier("stub", tags={"domain": ["refreshed"]})],
+        )
+
+    def test_direct_call_writes_nothing_and_names_the_reason(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "", copy.deepcopy(_TOMBSTONE_META))
+        before = copy.deepcopy(store._docs)
+        events = _CapturingEventLog()
+        vectors = MagicMock(spec=VectorStore)
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+            event_log=events,
+            vector_store=vectors,
+        )
+
+        assert outcome.refreshed is False
+        assert outcome.reason == REASON_TOMBSTONE
+        assert outcome.after is None
+        assert store._docs == before
+        assert events.events == []
+        assert vectors.mock_calls == []
+
+    def test_the_pipeline_never_sees_a_tombstone(self) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "", copy.deepcopy(_TOMBSTONE_META))
+        pipeline = MagicMock(spec=ClassifierPipeline)
+
+        reclassify_item(
+            "doc-1",
+            pipeline=pipeline,
+            document_store=store,
+        )
+
+        pipeline.classify.assert_not_called()
+
+    def test_an_archived_row_with_content_is_still_reclassified(self) -> None:
+        """A tombstone needs both halves; the reason alone is free text."""
+        store = _InMemoryDocStore()
+        store.put("doc-1", "ordinary note", copy.deepcopy(_TOMBSTONE_META))
+
+        outcome = reclassify_item(
+            "doc-1",
+            pipeline=self._pipeline(),
+            document_store=store,
+            include_domain=True,
+        )
+
+        assert outcome.refreshed is True
+        stored = store.get("doc-1")
+        assert stored is not None
+        assert stored["metadata"]["content_tags"]["domain"] == ["refreshed"]
+
+    def test_batch_counts_a_tombstone_as_empty_without_reclassifying(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _InMemoryDocStore()
+        store.put("doc-1", "", copy.deepcopy(_TOMBSTONE_META))
+        store.put("doc-2", "ordinary note", {})
+        spy = MagicMock(
+            return_value=RefreshOutcome(item_id="doc-2", refreshed=False, reason="x")
+        )
+        monkeypatch.setattr("trellis.classify.refresh.reclassify_item", spy)
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        assert result.skipped_missing_content == 1
+        assert [call.args[0] for call in spy.call_args_list] == ["doc-2"]
+
+    def test_a_redaction_between_listing_and_read_is_not_an_error(self) -> None:
+        store = _RedactedAfterListingDocStore()
+        store.put("doc-1", "", copy.deepcopy(_TOMBSTONE_META))
+        before = copy.deepcopy(store._docs)
+
+        result = reclassify_stale(
+            pipeline=self._pipeline(),
+            document_store=store,
+        )
+
+        assert result.scanned == 1
+        assert result.skipped_missing_content == 1
+        assert result.errors == 0
+        assert result.refreshed == 0
+        assert store._docs == before
 
 
 class TestOutcomeAndResultModels:

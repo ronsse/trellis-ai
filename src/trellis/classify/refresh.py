@@ -45,7 +45,7 @@ import structlog
 from trellis.classify.importance import compute_importance
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext
-from trellis.core.document_write import put_document
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.stores.base.event_log import EventType
 
@@ -71,6 +71,7 @@ _STAMP_FIELDS = frozenset({"classified_at", "importance_scored_at"})
 #: :attr:`RefreshOutcome.reason` values. Constants, not free text, so the
 #: batch pass buckets outcomes by identity instead of sniffing prose.
 REASON_NOT_FOUND = "document not found"
+REASON_TOMBSTONE = "redaction tombstone — tags are not written"
 REASON_PRECEDENT = "promoted precedent document row — tags are not refreshed"
 REASON_NO_SIGNAL = "pipeline produced no tags — keeping prior"
 REASON_UNCHANGED = "tags unchanged"
@@ -167,13 +168,15 @@ def reclassify_item(
         return RefreshOutcome(item_id=item_id, refreshed=False, reason=REASON_PRECEDENT)
 
     doc = document_store.get(item_id)
-    if doc is None:
-        logger.debug("reclassify_item_not_found", item_id=item_id)
-        return RefreshOutcome(
-            item_id=item_id,
-            refreshed=False,
-            reason=REASON_NOT_FOUND,
-        )
+    # ``put_document`` lets an unflagged write through when the row it leaves
+    # is still a tombstone, so its own guard cannot refuse this one: tags
+    # derived from a blank row would sit beside the redaction stamp. The batch
+    # pass skips blank rows before it gets here; this is the direct call, and
+    # a redaction that lands between the listing and this read.
+    if doc is None or is_redaction_tombstone(doc):
+        reason = REASON_NOT_FOUND if doc is None else REASON_TOMBSTONE
+        logger.debug("reclassify_item_not_refreshed", item_id=item_id, reason=reason)
+        return RefreshOutcome(item_id=item_id, refreshed=False, reason=reason)
 
     content = doc.get("content", "")
     metadata: dict[str, Any] = dict(doc.get("metadata") or {})
@@ -442,6 +445,10 @@ def _tally(result: BatchRefreshResult, item_id: str, outcome: RefreshOutcome) ->
         result.skipped_unchanged += 1
     elif outcome.reason == REASON_PRECEDENT:
         result.skipped_precedent += 1
+    elif outcome.reason == REASON_TOMBSTONE:
+        # Redacted between the listing and the read: the blank row the batch
+        # pass would have counted here had it been read a moment later.
+        result.skipped_missing_content += 1
     else:
         # REASON_NOT_FOUND: the store listed the row and then could not read
         # it back. Rare (a concurrent delete), but it is a document we were
