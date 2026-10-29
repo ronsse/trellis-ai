@@ -3449,13 +3449,69 @@ an earlier stop's feedback in a multi-prompt session also excludes a later
 task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
 sessions that ran under a stop hook means capture's `HOOK_FEEDBACK_PATTERN`
-no longer matches the harness's wording. The rule's other half, a first
-retrieval after a commit, is still not applied. `no_retrieval` is split into
+no longer matches the harness's wording. The rule's other half is applied
+from the join's `first_commit_ordinal`: a first retrieval after the session's
+first commit is also excluded, and `pre_treatment_excluded_after_commit` counts
+those. `no_retrieval` is split into
 `never_called`, `errored`, `unparsed` and `empty_answer`, so a transport-failed
-`get_context` no longer reads as never called. Two pre-registered items still
-need fields capture does not record, so the report says so instead of
-guessing: the post-hoc share is `null`, and a note says the
-covariate-residualised permutation is not applied. The guardrails block
+`get_context` no longer reads as never called. The post-hoc share is the
+fraction of decided tasks whose first retrieval came after hook feedback, after
+the first commit or in the last tenth of the session's tool calls; it is `null`
+with its reason when no task carries every position.
+
+The report also carries the pre-registered covariate-adjusted permutation as a
+secondary analysis, `covariate_adjusted`. It decides nothing: the primary, the
+power simulation and the funnel do not depend on it, and its own verdict is
+always `secondary_not_decisive`, never the primary's. Capture records the two
+pre-treatment covariates in each join's `covariates` block: `brief_chars`, the
+length of the first user turn it counts as a person's, and `agent_type_digest`,
+a 12-character pseudonymous hash of the sub-agent's type that stays in the
+local event log (no text is kept, and the report carries neither the digest nor
+an id). The exact specification:
+
+- **Outcome.** The primary's outcome (`--outcome`, default `log1p_turns`), one
+  value per analysed task.
+- **Subset.** The analysed tasks whose join carries every covariate the
+  adjustment needs. The rest are dropped, counted in `n_missing_covariate` and
+  never imputed, so `n_used` of `funnel.analysed` tasks are used, and an
+  adjusted figure's gap to the primary mixes the adjustment with the subset.
+  `unadjusted_same_subset` is the primary's test run on the same tasks' raw
+  outcomes, so the gap between the two point estimates is the adjustment
+  alone; their p-values and intervals use separate resampling streams and also
+  differ by Monte Carlo noise. It is `null` when the fit is refused for too few
+  residual degrees of freedom or for no stratum holding both arms.
+- **Covariates.** `log1p(brief_chars)` (`brief_length`, pre-registered), and
+  that plus the sub-agent type (`brief_length_and_agent_type`, exploratory).
+- **Fit.** Least squares of the outcome on one indicator per stratum (parent
+  session x ISO week), the covariates and, for the agent type, one indicator per
+  level. Types with fewer than 3 tasks pool into a single level first, and the
+  most common level (ties broken by digest order, the pooled level last) is the
+  reference and is dropped. The
+  arm is never a column of the fit, so the residuals do not depend on the
+  assignment.
+- **Test.** The primary's within-stratum permutation test, with its statistic
+  and strata, run on the residuals. It is exact under the sharp null because the
+  residuals are the same whichever way the arms are shuffled. The interval is
+  the primary's stratified bootstrap of the residual difference with the fitted
+  coefficients held fixed, so it ignores their uncertainty and is narrower than
+  a refit would give. The text output says so on the Secondary line.
+- **Balance gate.** `arm_balance_r2` is the share of the arm indicator's
+  within-stratum variance the whole design explains (the drop in its residual
+  sum of squares from strata alone to the full design, over the strata-alone
+  figure). Above 0.9 the covariates stand in for the arm, the adjusted
+  difference is not identified, and the adjustment reads `not_measurable` with
+  that reason; `unadjusted_same_subset` is still reported.
+- **Other refusals.** `not_measurable` also when no analysed task has the
+  covariates, when fewer than 4 residual degrees of freedom remain (tasks used
+  less the design's rank), or when no stratum holds both arms. Joins written
+  before capture recorded the block stay missing until their session is parsed
+  again.
+- **Reading the means.** An adjusted run's `mean_residual_served` and
+  `mean_residual_withheld` are means of residuals, not of the outcome, and sit
+  under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
+  the unadjusted run, where they are outcome means.
+
+The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
 p-value or verdict: PRs created and any commit (each left out when it is the
 primary), log1p commits, tool errors and the re-call rate (tasks whose capture
@@ -3741,17 +3797,32 @@ be if the successor did not exist (the successor is judged the way the pack's
 own gate judges it: by its own label, and a chunk by its parent's too). The
 served items are the same with and without that successor among the candidates;
 the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
-count it as a sensitivity withholding, as for any hidden candidate. The served
-loser's own `lifecycle.superseded_by` is dropped from the served copy when it
-names a document the caller cannot read, in flat and sectioned packs and in
-`GET /api/v1/documents/{id}`; the store judges it, so the answer does not depend
-on whether the successor matched, and a store error reads as unreadable (a chunk
-successor under a parent-fetch outage reads as unreadable, so the loser is
-still served). The loser's `lifecycle.state` stays `superseded`, so such a
-caller can tell that some document it cannot read supersedes this one, though
-not which. `GET /api/v1/search` and the rows of `GET /api/v1/documents`
-return stored metadata as before. With
-`TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
+count it as a sensitivity withholding, as for any hidden candidate. A served
+document's own reconcile pointers are dropped from the served copy when they
+name a document the caller cannot read: `lifecycle.superseded_by` (on a loser,
+naming its successor), `supersedes_doc_id` (on a successor, naming its loser)
+and `updates_doc_id` (on an UPDATE addendum, naming the candidate it
+annotates); the last two are written by the reconcile-on-write path and by
+session capture. All three are single id strings, and there is no other
+metadata key that stores one. The
+drop applies to every surface that serves stored metadata: flat and sectioned
+packs, `GET /api/v1/documents/{id}`, the rows of `GET /api/v1/documents` (the
+list and `?q=`), and `GET /api/v1/search`. The store judges the named id, so the
+answer does not depend on whether it matched the query, and a store error reads
+as unreadable (a chunk under a parent-fetch outage reads as unreadable, so the
+pointer is dropped). One store judgement runs per response, over the distinct
+ids its rows name. The stored record is never rewritten, and a reader of
+everything (`restricted`, `admin`, auth off) does no reads and sees the record
+as stored. The loser's `lifecycle.state` stays `superseded`, so such a caller
+can tell that some document it cannot read supersedes this one, though not
+which; likewise the `reconciliation` marker (`supersede` or `update`) stays when
+its pointer is dropped, so a reader can tell a hidden counterpart exists but not
+which. The concealment is itself an existence answer: a caller that can write a
+document carrying a guessed pointer id and read it back learns, from whether the
+id survives, whether a document by that id exists above its clearance. That is
+nothing beyond the accepted 409 posture on `POST /api/v1/documents` below. A
+malformed pointer (anything but a non-empty string) is left as stored.
+With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
 recorded. A trusted-local caller sees every id.

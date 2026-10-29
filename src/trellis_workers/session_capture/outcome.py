@@ -28,6 +28,9 @@ where anyone with the event log can read it.
   its own account: a background task's ``<task-notification>`` and a local
   command's output. A slash command and an interrupt marker are a person's
   doing and count.
+  The first such record's text length is kept as ``brief_chars``: in a
+  sub-agent's file it is the brief the dispatcher wrote, fixed before the
+  session started. The length is all that is kept.
 * **Commits and pull requests** are ``Bash`` calls whose command runs
   ``git commit``, ``gh pr create`` or ``gh pr merge`` (see :func:`_steps`) and
   whose result is not an error, each kind counted once per call. ``pr_urls``
@@ -169,6 +172,9 @@ class OutcomeTally:
     :attr:`first_commit_ordinal` is the one position it hands back, outside
     the :class:`SessionOutcome`: it is read where the pack holdout compares it
     with the first retrieval's, in the digest's ordinal space.
+    :attr:`brief_chars` is the other: the length of the first counted user
+    turn, a pre-treatment covariate the holdout adjusts its secondary
+    analysis by.
     """
 
     def __init__(self) -> None:
@@ -187,6 +193,11 @@ class OutcomeTally:
         #: when no call did. Set at the result, so an unanswered or errored
         #: commit has none.
         self.first_commit_ordinal: int | None = None
+        #: The size, in characters, of the first record counted as a user turn:
+        #: the summed length of its non-harness texts. In a sub-agent's file
+        #: that record is the dispatcher's brief. ``None`` until one is
+        #: counted. A length only; the text is never held.
+        self.brief_chars: int | None = None
         #: Per API message, the largest value each token field reached. Keyed
         #: by ``message.id``, or by a counter for a record without one.
         self._usage: dict[str | int, dict[str, int]] = {}
@@ -312,8 +323,11 @@ class OutcomeTally:
                 ):
                     self.first_commit_ordinal = position
                 self._pr_urls.update(_PR_URL.findall(_text_of(block.get("content"))))
-        if any(not text.startswith(_HARNESS_TEXT) for text in texts):
+        person_texts = [text for text in texts if not text.startswith(_HARNESS_TEXT)]
+        if person_texts:
             self._user_turns += 1
+            if self.brief_chars is None:
+                self.brief_chars = sum(len(text) for text in person_texts)
         if any(text.startswith(_INTERRUPT_MARKER) for text in texts):
             self._state = _INTERRUPT
         elif errored_any:
