@@ -122,6 +122,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **A reconcile pointer the caller cannot read is dropped from every REST read
+  surface, in every direction (#194, part of #1029).** The change before it
+  (#1036) left `GET /api/v1/search` and the rows of `GET /api/v1/documents` (the list and
+  `?q=`) returning a document's stored metadata; they now drop, from the served
+  copy, a `lifecycle.superseded_by` that names a document the key cannot read,
+  and so do packs and `GET /api/v1/documents/{id}` as before. The reverse pointer
+  is covered too: a readable successor's `supersedes_doc_id` (written by the
+  reconcile SUPERSEDE path and by session capture) is dropped when it names a
+  loser the key cannot read, and so is an UPDATE addendum's `updates_doc_id`
+  (the same two writers), which names the candidate it annotates; the
+  `reconciliation` marker stays. Those are the only three metadata keys that
+  store a reconcile pointer, each a single id string; they are one fixed tuple of
+  key paths (`SUPERSESSION_POINTER_PATHS`), pinned by a test that enumerates what
+  the writers emit, so a pointer key a writer adds fails it. The
+  store judges the named id with the read floor's predicate (never whether it
+  matched the query), a store error reads as unreadable, and a response makes one
+  judgement over its distinct ids rather than one per row. `lifecycle.state`
+  is untouched, the stored record is not rewritten, and a `restricted` or admin
+  key, auth off and an unlabelled store see the record exactly as stored.
+
 - **A pack no longer tells a reader about a successor or a served id it cannot
   read (#194, part of #1029).** Supersession withheld a loser whenever its
   declared successor was a candidate, even when the caller's clearance hid that
