@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.mutate.commands import Command, Operation
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
@@ -163,6 +164,16 @@ def targeted_document_ids(command: Command) -> list[str]:
     ):
         target = args.get("target_id")
         return [target] if isinstance(target, str) and target else []
+    if op == Operation.PRECEDENT_PROMOTE:
+        # Only the learning path writes a row, and it rewrites the promoted
+        # precedent's document with no label, so a re-promotion would lower a
+        # restricted row. A trace-sourced promotion (the default
+        # ``entity_type``) names a trace, not a document, and writes none.
+        target = command.target_id
+        if args.get("entity_type") == "precedent" and is_promoted_precedent_document(
+            target
+        ):
+            return [str(target)]
     return []
 
 

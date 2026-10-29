@@ -3734,12 +3734,14 @@ above its own clearance, and cannot touch a document it may not read.**
 - MCP `save_memory(supersedes=)` and `save_knowledge(supersedes=)` stamp their
   target, so they are writes to it: a target above the caller's clearance is
   answered as a missing one and left unchanged.
-- `retention.restore`, `redaction.apply`, `precedent.demote` and
-  `precedent.reinstate` aimed at a document above the caller's clearance are
-  denied at Stage 2 as a `policy_violation`, recorded as a `MUTATION_REJECTED`
-  event. That answer differs from the one for a missing id, so these four, and
-  an `evidence.ingest` overwrite, tell a key that the document exists; the read
-  side's by-id not-found parity does not extend to them.
+- `retention.restore`, `redaction.apply`, `precedent.demote`,
+  `precedent.reinstate` and a learning-path `precedent.promote`
+  (`entity_type="precedent"`, which rewrites the precedent's document row)
+  aimed at a document above the caller's clearance are denied at Stage 2 as a
+  `policy_violation`, recorded as a `MUTATION_REJECTED` event. That answer
+  differs from the one for a missing id, so these five, and an `evidence.ingest`
+  overwrite, tell a key that the document exists; the read side's by-id
+  not-found parity does not extend to them.
 
 A trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
 never refused. The clearance is a required keyword of `build_curate_executor`,

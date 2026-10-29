@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.retrieve.test_sensitivity import label
 from trellis.core.hashing import content_hash
+from trellis.errors import MutationError
 from trellis.mutate import ensure_evidence_document
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -70,3 +72,28 @@ class TestEnsureEvidenceDocument:
     def test_empty_content_raises(self, registry: StoreRegistry) -> None:
         with pytest.raises(ValueError, match="content must not be empty"):
             ensure_evidence_document(registry, "   ", clearance="restricted")
+
+    def test_a_label_above_the_callers_clearance_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The clearance reaches the executor: a caller may not mint a document
+        labelled above its own reach, and nothing is stored."""
+        with pytest.raises(MutationError, match="not stored"):
+            ensure_evidence_document(
+                registry,
+                "restricted prose",
+                metadata=label("restricted"),
+                clearance="internal",
+            )
+        assert registry.knowledge.document_store.count() == 0
+
+    def test_a_label_within_the_callers_clearance_is_stored(
+        self, registry: StoreRegistry
+    ) -> None:
+        doc_id = ensure_evidence_document(
+            registry,
+            "restricted prose",
+            metadata=label("restricted"),
+            clearance="restricted",
+        )
+        assert registry.knowledge.document_store.get(doc_id) is not None

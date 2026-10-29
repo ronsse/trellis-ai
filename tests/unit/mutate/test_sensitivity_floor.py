@@ -562,6 +562,106 @@ class TestStageTwoFloor:
             assert targeted_document_ids(Command(operation=operation, args=args)) == []
 
 
+PRECEDENT_ID = "precedent://learning/p1"
+
+
+def _promote(
+    target_id: str | None = PRECEDENT_ID, entity_type: str = "precedent"
+) -> Command:
+    return Command(
+        operation=Operation.PRECEDENT_PROMOTE,
+        target_id=target_id,
+        target_type="precedent",
+        args={"title": "t", "description": "d", "entity_type": entity_type},
+        requested_by="tester",
+    )
+
+
+def _seed_precedent(registry: StoreRegistry, level: str | None) -> None:
+    registry.knowledge.graph_store.upsert_node(
+        PRECEDENT_ID, "precedent", {"name": "seal keys", "description": "rotate"}
+    )
+    _put(registry, PRECEDENT_ID, level)
+
+
+class TestPrecedentPromoteTargetsItsRow:
+    """``precedent.promote`` rewrites the promoted precedent's document row (and
+    drops its label), so the row is a write target like any other."""
+
+    def test_the_learning_path_names_the_precedent_row(self) -> None:
+        assert targeted_document_ids(_promote()) == [PRECEDENT_ID]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # A trace-sourced promotion writes no row.
+            _promote(entity_type="trace"),
+            # Outside the namespace the handler writes no row either.
+            _promote(target_id="entity-1"),
+            _promote(target_id=None),
+        ],
+        ids=["trace_sourced", "outside_namespace", "no_target"],
+    )
+    def test_a_promotion_that_writes_no_row_names_no_target(
+        self, command: Command
+    ) -> None:
+        assert targeted_document_ids(command) == []
+
+    def test_a_caller_below_the_label_is_denied_before_the_handler(
+        self, registry: StoreRegistry
+    ) -> None:
+        _seed_precedent(registry, "restricted")
+        executor, recorder = _gate_only(
+            registry, Operation.PRECEDENT_PROMOTE, "confidential"
+        )
+
+        result = executor.execute(_promote())
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "policy_violation"
+        assert recorder.calls == 0, "the handler must never be reached"
+        assert "restricted" not in result.message
+
+    def test_the_label_survives_a_refused_promotion(
+        self, registry: StoreRegistry
+    ) -> None:
+        """End to end, with the real handler behind the real gate."""
+        _seed_precedent(registry, "restricted")
+        before = registry.knowledge.document_store.get(PRECEDENT_ID)
+
+        result = build_curate_executor(registry, clearance="confidential").execute(
+            _promote()
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert registry.knowledge.document_store.get(PRECEDENT_ID) == before
+        assert _stored_level(registry, PRECEDENT_ID) == "restricted"
+        assert not registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, limit=10
+        )
+
+    def test_a_cleared_caller_may_promote(self, registry: StoreRegistry) -> None:
+        _seed_precedent(registry, "restricted")
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _promote()
+        )
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+
+    def test_an_unlabelled_precedent_is_promoted_at_the_default_clearance(
+        self, registry: StoreRegistry
+    ) -> None:
+        """An unlabelled row reads as ``internal``, the floor of a credentialed key."""
+        _seed_precedent(registry, None)
+
+        result = build_curate_executor(registry, clearance="internal").execute(
+            _promote()
+        )
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+
+
 class TestClearanceHasNoDefault:
     """A caller that forgets to name its clearance fails at the call.
 

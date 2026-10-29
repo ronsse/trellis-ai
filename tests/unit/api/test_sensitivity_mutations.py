@@ -313,3 +313,69 @@ class TestPrecedentRoutesHonourClearance:
         )
         assert resp.status_code == 400
         assert "clearance" not in resp.text
+
+
+class TestPrecedentPromoteViaBatch:
+    """``precedent.promote`` rewrites the promoted precedent's document row, so a
+    key that may not read that row may not promote over it (and so lower its
+    label, which an internal key could then read back)."""
+
+    PID = "precedent://learning/p1"
+
+    def _seed(self, registry, level):
+        registry.knowledge.graph_store.upsert_node(
+            self.PID, "precedent", {"name": "seal keys", "description": "rotate"}
+        )
+        registry.knowledge.document_store.put(self.PID, BODY, label(level))
+
+    @staticmethod
+    def _promote(pid):
+        return {
+            "operation": "precedent.promote",
+            "target_id": pid,
+            "target_type": "precedent",
+            "args": {"title": "t", "description": "d", "entity_type": "precedent"},
+        }
+
+    def test_a_mutate_key_cannot_lower_a_restricted_precedent_row(
+        self, client, registry
+    ):
+        self._seed(registry, "restricted")
+        before = registry.knowledge.document_store.get(self.PID)
+        [result] = _batch(client, _headers(registry, MUTATE), self._promote(self.PID))
+        assert result["status"] == "rejected", result
+        assert "clearance" in result["message"]
+        assert registry.knowledge.document_store.get(self.PID) == before
+        assert _level(registry, self.PID) == "restricted"
+        read = client.get(
+            f"/api/v1/documents/{self.PID}",
+            headers=_headers(registry, [*MUTATE, "read"]),
+        )
+        assert read.status_code == 404
+
+    def test_a_key_below_the_label_but_above_internal_is_refused_too(
+        self, client, registry
+    ):
+        self._seed(registry, "restricted")
+        [result] = _batch(
+            client, _headers(registry, MUTATE_CONFIDENTIAL), self._promote(self.PID)
+        )
+        assert result["status"] == "rejected", result
+        assert _level(registry, self.PID) == "restricted"
+
+    def test_a_restricted_mutate_key_may_promote(self, client, registry):
+        self._seed(registry, "restricted")
+        [result] = _batch(
+            client, _headers(registry, MUTATE_RESTRICTED), self._promote(self.PID)
+        )
+        assert result["status"] == "success", result
+
+    def test_an_unlabelled_precedent_is_promoted_by_the_lowest_key(
+        self, client, registry
+    ):
+        registry.knowledge.graph_store.upsert_node(
+            self.PID, "precedent", {"name": "seal keys", "description": "rotate"}
+        )
+        registry.knowledge.document_store.put(self.PID, BODY, {"title": "t"})
+        [result] = _batch(client, _headers(registry, MUTATE), self._promote(self.PID))
+        assert result["status"] == "success", result

@@ -19,9 +19,9 @@ All notable changes to Trellis will be documented in this file.
   `save_memory` overwrite rule, in its handler, so `POST /api/v1/commands/batch`,
   `POST /api/v1/documents` and MCP `execute_mutation` can no longer overwrite
   a document above the caller's clearance, lower its label or raise one past
-  the key. `retention.restore`, `redaction.apply` and `precedent.demote` /
-  `reinstate` aimed at such a document are denied at Stage 2 (`policy_violation`,
-  `MUTATION_REJECTED`). MCP `save_memory(supersedes=)` and
+  the key. `retention.restore`, `redaction.apply`, `precedent.demote` /
+  `reinstate` and a learning-path `precedent.promote` aimed at such a document
+  are denied at Stage 2 (`policy_violation`, `MUTATION_REJECTED`). MCP `save_memory(supersedes=)` and
   `save_knowledge(supersedes=)` no longer stamp a document above the caller's
   clearance: the target answers as missing. The clearance rides on the executor,
   not the command, and is a required keyword of `build_curate_executor`; an
