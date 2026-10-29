@@ -50,6 +50,7 @@ KNOWN_REJECTION_REASONS = (
     "session_dedup",
     "semantic_dedup",
     "content_floor",
+    "malformed_metadata",
 )
 
 #: Finding thresholds — operator-facing, not tuning knobs.

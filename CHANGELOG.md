@@ -373,6 +373,26 @@ All notable changes to Trellis will be documented in this file.
   separate change. A non-numeric store score, or a string importance parameter
   in the registry, is not a malformed row and still raises, as before.
 
+- **A skipped malformed row is recorded in the pack and counted by
+  `analyze health` (part of #1050).** The semantic axis skip from #1029 now
+  leaves a durable record. A flat pack lists the row in `rejected_items` with
+  `reason: malformed_metadata`, `strategy_source: semantic` and `item_type:
+  vector`; both pack shapes count it in the Withheld note; and
+  `PACK_ASSEMBLED.malformed_row_skips` (`{strategy: rows}`, `{}` on a clean
+  build, kept on a held-out pack) is tallied by `trellis analyze health` under
+  `serve.malformed_rows`, which turns `status` to `warn` while a pack in the
+  window skipped one. This supersedes the sentence above that the skip is not
+  listed in the pack's withheld items. A strategy hands the rows back through
+  the new `SemanticSearch.search_result()`; `search()` still returns items only,
+  so no strategy double or other caller sees a placeholder. A skipped row never
+  takes part in supersession, so a loser whose successor was skipped is still
+  served. A skipped row labelled above the caller's clearance has its id
+  concealed like any other withheld candidate. Counts and strategy names
+  only: neither the pack nor health carries a row value. Because the semantic
+  axis now hands its skipped rows back, `analyze pack-telemetry`'s semantic
+  `yield_rate` and `rejection_reason_counts`, and the pack observations'
+  `selection_efficiency`, count them as returned and not selected; a drop in
+  those after an upgrade is that accounting, not a retrieval regression.
 - **`POST /api/v1/vectors` keeps a chunk's parent, refuses a row the semantic
   axis cannot serve, and refuses the `lifecycle` / `evidence_ref` pointer keys at
   ids naming no stored document (part of #1029).** The
