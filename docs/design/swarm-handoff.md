@@ -8,7 +8,7 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (program-level guidance where
 > it governs an item — **not** the live source for every open issue's requirements).
 >
-> Last updated 2026-09-21. **This file carries mechanism, not status** — no `main` pin, no
+> Last updated 2026-10-29. **This file carries mechanism, not status** — no `main` pin, no
 > merged-PR roster, no issue count. §1 names the command that answers each of those, because
 > every time one was written down here it was wrong within days.
 
@@ -331,64 +331,17 @@ reflects the close" that GitHub had already closed — a caveat that survives it
 subject is worse than none, because it spends an agent's attention on work that no longer
 exists. Ask `gh issue list --state open`; it is authoritative and costs one call.
 
-### First executable batches *(not exhaustive)*
+### What is open
 
-**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
+As of 2026-10-29 every issue named by the tables that stood here (first batches, owner
+prerequisites, persistent blockers) was closed, except
+[#194](https://github.com/ronsse/trellis-ai/issues/194) (classification enforcement),
+which is in progress. The open set is
+`gh issue list --state open`, and what an issue may be dispatched under is on the issue:
+its labels and its latest owner comment. This file keeps no list, because each list it kept
+went stale.
 
-**Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
-[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** *(#256 staged seam: **shipped as [#537](https://github.com/ronsse/trellis-ai/pull/537), 2026-09-04** — not open work; see the note below.)* Also parallel when
-disjoint: **#369**, **#439**, **#342**, **#514**.
-
-**#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
-label normally means **human authorship only**. Operator instruction on 2026-09-04
-explicitly authorized **this plan's Wave D #256 staged seam** for swarm execution under
-`consensus_authorizes` — **not** a general keystone-label override. Scope limited to
-**reversible in-repo PR1**; excludes publishing, external package release, and credentials.
-Owner review and the adversarial merge gate (§4.1) still apply.
-
-**Status (2026-09-24): the override above is spent.** It authorized one PR and #537 was that PR (`RegistryContext` + `prepare_registry_params`, Bolt setup moved onto the store classes, a synthetic entry-point plugin test, and `tests/unit/test_registry_plugin_boundary_rule.py`); the contract is now in [`adr-plugin-contract.md` § Registry preparation hook](./adr-plugin-contract.md#registry-preparation-hook-store-plugins). The paragraph stays as the authorization record. What remains of #256 — extracting a separate distribution and publishing it — is **owner-only** per the owner's 2026-09-09 comment on the issue (publishing is never an agent's call, §2), so do not dispatch it.
-
-- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
-  **after #514** when `generate_call_sites` exists.
-- **Serialize #360 PR2 with #264 PR-A** — `save_memory` overlap.
-
-**Batch 2 — CI / stores:** #351 is closed, so **#356** no longer waits on it (manifest). **#526** and **#350**
-have no issue dependency — may parallelize if files/workflows disjoint after recheck.
-Coordinate #526/#351/#356 when touching the same CI workflows (collision scheduling only,
-not a serial chain).
-
-**Other valid-now / valid-slice items** (see manifest + roadmap for full roster):
-
-| Issue | Verdict | Note |
-|---|---|---|
-| [#522](https://github.com/ronsse/trellis-ai/issues/522) | closed 2026-09-04 (was `valid-now`) | Rich renders outside #492 handle rule — fixed by [#536](https://github.com/ronsse/trellis-ai/pull/536) |
-| [#523](https://github.com/ronsse/trellis-ai/issues/523) | closed 2026-09-08 (was `valid-now`) | Boundary test message suppression on long `--basetemp` — closed by [#532](https://github.com/ronsse/trellis-ai/pull/532); [#634](https://github.com/ronsse/trellis-ai/pull/634) (2026-09-25) later fixed four boundary tests that still failed at a 40-character basetemp component |
-| [#494](https://github.com/ronsse/trellis-ai/issues/494) | closed 2026-09-21 (was `valid-now`) | Document `retrieve pack --quiet` ids — done in [#576](https://github.com/ronsse/trellis-ai/pull/576) |
-| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only |
-
-All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements
-on each **GitHub issue**; roadmap only where it governs that item.
-
-### Owner prerequisites *(not dispatchable)*
-
-| Issue | Gate | Note |
-|---|---|---|
-| [#257](https://github.com/ronsse/trellis-ai/issues/257) | closed 2026-09-24 (was `owner-only`) | Ingest-normalization ADR — recorded as [`adr-corpus-ingestion.md` §8](./adr-corpus-ingestion.md#8-normalization-boundary-amendment-2026-09-24-257) by [#626](https://github.com/ronsse/trellis-ai/pull/626) |
-| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions line set not agreed — live issue blocks dispatch |
-
-### Persistent blockers
-
-| Issue | Note |
-|---|---|
-| [#371](https://github.com/ronsse/trellis-ai/issues/371) | Behaviorally open — recency feed until a seeding path exists |
-| [#375](https://github.com/ronsse/trellis-ai/issues/375) | Mechanisms refuted; do not dispatch the obvious seeding fix |
-| [#463](https://github.com/ronsse/trellis-ai/issues/463) | blocked-signal — panels agreed on no behavior change now but split on clock semantics; use the brief's stronger evidence and owner gates |
-| [#502](https://github.com/ronsse/trellis-ai/issues/502) | blocked-signal — owner chose defer after the split; decision-ledger F-5 records the trigger and safe default |
-| [#503](https://github.com/ronsse/trellis-ai/issues/503) | blocked-signal — wait for item-scoped advisories |
-| [#208](https://github.com/ronsse/trellis-ai/issues/208) | external — re-home |
-| [#250](https://github.com/ronsse/trellis-ai/issues/250) | blocked-operator |
-| [#201](https://github.com/ronsse/trellis-ai/issues/201) / [#261](https://github.com/ronsse/trellis-ai/issues/261) / [#306](https://github.com/ronsse/trellis-ai/issues/306) | blocked-signal |
-| [#194](https://github.com/ronsse/trellis-ai/issues/194) | blocked-decision — practically depends on **#360**, not #256 |
+### Closed work *(historical)*
 
 **Waves 1, 1b and 2 are closed**, along with A3 and C1. What follows is **historical
 context** — do not dispatch from it without checking the corpus.
