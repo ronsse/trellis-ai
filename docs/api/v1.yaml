@@ -7163,6 +7163,14 @@ paths:
 
         ``evidence_ref``, for every caller, whatever the row''s own ``metadata`` says.
 
+        Its ``content`` (the excerpt a semantic hit serves) is the document''s content,
+
+        cut as the embed path cuts it, and its ``node_role``, ``node_type``,
+
+        ``agent_id``, ``document_form`` and ``excerpt`` are the document''s, or absent
+
+        where the document has none.
+
         For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
 
         document''s own, else the parent the id names, whatever the row supplied; for
