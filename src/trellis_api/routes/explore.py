@@ -24,6 +24,7 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_document_rows,
     conceal_document_successor,
+    conceal_node_pointers,
 )
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
@@ -578,16 +579,24 @@ def get_pack(pack_id: str) -> dict[str, Any]:
 @router.get("/graph/history")
 def get_node_history(
     entity_id: str = Query(..., description="Node ID to fetch SCD-2 history for"),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """All versions of a graph node, newest first (SCD-2 audit trail).
 
     Query param rather than a path segment because
     ``GET /entities/{entity_id:path}`` greedily matches any suffix.
+
+    A node carries no label, so every version is served; a version whose
+    ``document_ids`` or ``evidence_ref`` property names a document the caller
+    may not read is served without that id.
     """
     registry = get_registry()
     versions = registry.knowledge.graph_store.get_node_history(entity_id)
     if not versions:
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
+    versions = conceal_node_pointers(
+        versions, registry.knowledge.document_store, request_clearance(ctx)
+    )
     return {
         "status": "ok",
         "entity_id": entity_id,

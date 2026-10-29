@@ -321,6 +321,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Graph reads omit evidence pointers to documents the caller cannot read.**
+  Follows #1045: the same concealment, for the pointers a graph node carries. A
+  node has no label, but its `document_ids` and the `evidence_ref` property
+  (`save_knowledge` writes the same id to both) can name a document a
+  below-`restricted` key may not read. `GET /api/v1/graph/history` (every
+  version), MCP `get_graph` (root and neighbours), MCP `get_items` on an entity
+  id and `build_file_context`'s entity entries now drop such an id (the
+  `evidence_ref` key is removed, other properties stay), judged by the document
+  store in one pass per response; `restricted`, `admin` and auth off read
+  nothing and see the node as stored. A graph-axis pack item spreads its node's
+  `evidence_ref` into its metadata, so the pack's concealment pass drops that
+  key too (`POST /api/v1/packs` and `/packs/sectioned`); the items served and
+  their order do not change, only that metadata for a caller below
+  `restricted`. `GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` are
+  not covered yet. Two comments that described
+  `TARGET_PROTECTED` as only a promoted precedent's row now also name a
+  redaction tombstone.
+
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
   number (or is above the staleness threshold with no `importance_scored_at`),

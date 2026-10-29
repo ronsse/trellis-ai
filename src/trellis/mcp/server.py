@@ -163,6 +163,7 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     OverwriteRefusedError,
     SensitivityLabelError,
+    conceal_node_pointers,
     readable_ids,
     refuse_overwrite,
     stamp_sensitivity,
@@ -2909,7 +2910,8 @@ def _commit_reconcile_verdict(
         # names. ``STALE_RECHECK``: the target vanished between the under-lock
         # re-verify and this write (``_save_memory_lock`` is process-local, so
         # another process can delete it). ``TARGET_PROTECTED``: the target is
-        # a promoted precedent's row, which reconcile never stamps. Either
+        # a promoted precedent's row or a redaction tombstone, which
+        # reconcile never stamps (#1039). Either
         # way the memory is stored and the supersession is not — so strip the
         # claim from what was just written, mark it with the reason, and hand
         # the caller an outcome downgraded to that same reason, so the marker
@@ -3188,7 +3190,16 @@ def get_graph(
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
-    result = format_subgraph_as_markdown(node, subgraph, max_tokens=max_tokens)
+    # A node carries no label, so the root and every neighbour are served; what
+    # is dropped is a pointer naming a document this caller may not read. One
+    # judgement for the whole response (root first, then the neighbourhood).
+    root, *neighbours = conceal_node_pointers(
+        [node, *subgraph.get("nodes", [])],
+        registry.knowledge.document_store,
+        current_clearance(),
+    )
+    subgraph = {**subgraph, "nodes": neighbours}
+    result = format_subgraph_as_markdown(root, subgraph, max_tokens=max_tokens)
     try:
         track_token_usage(
             registry.operational.event_log,
@@ -3238,6 +3249,11 @@ def _render_fetched_item(
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
+        # The node is served; a pointer to a document above the caller's
+        # clearance is not.
+        (node,) = conceal_node_pointers(
+            [node], registry.knowledge.document_store, current_clearance()
+        )
         return "entity", format_entity_as_markdown(node)
 
     trace = registry.operational.trace_store.get(item_id)

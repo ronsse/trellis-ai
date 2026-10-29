@@ -4954,7 +4954,14 @@ paths:
 
         Query param rather than a path segment because
 
-        ``GET /entities/{entity_id:path}`` greedily matches any suffix.'
+        ``GET /entities/{entity_id:path}`` greedily matches any suffix.
+
+
+        A node carries no label, so every version is served; a version whose
+
+        ``document_ids`` or ``evidence_ref`` property names a document the caller
+
+        may not read is served without that id.'
       operationId: get_node_history_api_v1_graph_history_get
       parameters:
       - description: Node ID to fetch SCD-2 history for
