@@ -41,11 +41,11 @@ ROSTER: dict[str, str] = {
     "get_file_context": GATED,
     "save_memory": GATED,
     "save_knowledge": GATED,
+    "record_feedback": GATED,
     "get_graph": FREE,
     "get_lessons": FREE,
     "query_observations": FREE,
     "record_observation": FREE,
-    "record_feedback": FREE,
     "save_experience": FREE,
     "execute_mutation": FREE,
 }

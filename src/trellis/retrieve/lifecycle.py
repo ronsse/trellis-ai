@@ -52,7 +52,7 @@ from trellis.mutate.retention import ARCHIVED_STATE
 from trellis.schemas.classification import LIFECYCLE_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from trellis.schemas.pack import PackItem
 
@@ -204,6 +204,8 @@ def _on_cycle(start: str, next_of: dict[str, str]) -> bool:
 
 def partition_superseded(
     items: Iterable[PackItem],
+    *,
+    successor_visible: Callable[[PackItem], bool] | None = None,
 ) -> tuple[list[PackItem], list[PackItem]]:
     """Split a collected pool into ``(kept, withheld)`` on declared supersession.
 
@@ -226,14 +228,32 @@ def partition_superseded(
     so its members are kept and one ``supersession_cycle_kept`` warning is
     logged. An item that merely *leads into* a cycle is withheld.
 
+    ``successor_visible`` says whether the *caller* may read an item. An item
+    it refuses is not a successor: a loser the caller can read stays served
+    when the only thing that supersedes it is a document the caller cannot
+    read, so the pack is the one the caller would get had that document never
+    matched. Withholding the loser instead would name the unreadable
+    document's presence (an oracle on its content) and cost the caller the
+    newest version it is allowed to see. An id is refused when *any* of its
+    collected copies is, matching
+    :func:`trellis.retrieve.sensitivity.unreadable_rejected_ids`. ``None``
+    (every candidate is readable, the trusted-local default) changes nothing.
+
     Order is preserved in both halves, for the reason
     ``PackBuilder._partition`` gives: ``withheld`` order becomes the order
     of ``rejected_items`` and of the served record's ``withheld_item_ids``.
     """
     pool = list(items)
-    by_id: set[str] = {item.item_id for item in pool}
+    hidden: set[str] = (
+        set()
+        if successor_visible is None
+        else {item.item_id for item in pool if not successor_visible(item)}
+    )
+    by_id: set[str] = {item.item_id for item in pool} - hidden
     by_evidence: dict[str, str] = {}
     for item in pool:
+        if item.item_id in hidden:
+            continue
         ref = (item.metadata or {}).get(EVIDENCE_REF_KEY)
         if isinstance(ref, str) and ref:
             by_evidence.setdefault(ref, item.item_id)
