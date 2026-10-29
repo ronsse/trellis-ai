@@ -368,16 +368,26 @@ def _record_pack_join(
     ``pre_treatment`` exclusion: a retrieval the hook asked for at the end is
     not a treatment. See :meth:`SessionDigest.retrieval_timing_payload`.
 
+    The payload's ``covariates`` are two pre-treatment facts the holdout's
+    secondary analysis adjusts for: ``brief_chars``, the length of the first
+    user turn (a sub-agent's brief), and ``agent_type_digest``, a SHA-256
+    prefix of the type its sidecar names. A count and a pseudonymous handle
+    (a short hash of a small vocabulary can be reversed by trying names, so it
+    stays in the join payload and out of every report), never the text or
+    the name. See
+    :meth:`SessionDigest.covariates_payload`.
+
     A transcript with no turn and no tool call gets no join: a blank file or
     a workflow journal is not a session, and an empty join there would claim
     one ran without retrieving. Every other parse is compared with the
     session's latest join, outcome included, and writes only on a
     difference, so a judge-outage retry or a watermark reset adds nothing
     while a transcript that grew records its new packs and outcome. A join
-    written before the outcome or the timing existed differs from every new
-    parse, so the session's next parse writes it again with them; a session
-    whose file never changes is not parsed again, and its join keeps reading
-    as ``unknown`` to the holdout until a watermark reset parses it.
+    written before the outcome, the timing or the covariates existed differs
+    from every new parse, so the session's next parse writes it again with
+    them; a session whose file never changes is not parsed again, and its join
+    keeps reading as ``unknown`` to the holdout until a watermark reset parses
+    it.
 
     Not fail-soft, unlike :func:`_emit_sweep_completed`: this runs inside
     the per-session boundary, so a failed write leaves the session
@@ -397,6 +407,7 @@ def _record_pack_join(
         "source_system": source_system,
         "outcome": digest.outcome.to_payload(),
         "retrieval_timing": digest.retrieval_timing_payload(),
+        "covariates": digest.covariates_payload(),
     }
     event_log = registry.operational.event_log
     latest = event_log.get_events(
