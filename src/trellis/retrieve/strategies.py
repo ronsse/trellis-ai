@@ -983,8 +983,11 @@ def _read_importance(metadata: dict[str, Any]) -> float:
     :func:`_apply_importance`). A numeric string (``"0.9"``) is still read as
     the number it spells. A ``bool`` is refused with ``TypeError``, because
     ``float(True)`` is a Python accident and not a score; a non-finite value
-    (``nan``, ``inf``, ``"1e400"``) is refused with ``ValueError``, because
-    ``min(1.0, nan)`` would otherwise hand it the largest boost. A value
+    (``nan``, ``inf``, ``"1e400"``, or an ``int`` past float range such as
+    ``10**400``, which ``float`` rejects with ``OverflowError``) is refused
+    with ``ValueError``, because ``min(1.0, nan)`` would otherwise hand it
+    the largest boost, and an escaped ``OverflowError`` would fail the whole
+    axis rather than skip the row. A value
     ``float`` cannot read keeps the error type ``float`` raised (``ValueError``
     for a string, ``TypeError`` for a list or ``None``).
 
@@ -999,6 +1002,9 @@ def _read_importance(metadata: dict[str, Any]) -> float:
     try:
         importance = float(raw)
     except ValueError:
+        raise ValueError(msg) from None
+    except OverflowError:
+        msg = "auto_importance is not finite"
         raise ValueError(msg) from None
     except TypeError:
         raise TypeError(msg) from None

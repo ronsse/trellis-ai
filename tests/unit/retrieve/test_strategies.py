@@ -64,6 +64,7 @@ _MALFORMED_IMPORTANCE: list[Any] = [
     ),
     pytest.param(_fresh_meta(True), "TypeError", id="stamped-true"),
     pytest.param(_fresh_meta(float("nan")), "ValueError", id="nan"),
+    pytest.param(_fresh_meta(10**400), "ValueError", id="int-past-float-range"),
     pytest.param(
         {
             "auto_importance": 0.97,
@@ -263,8 +264,8 @@ class TestApplyImportanceCoercion:
 
     @pytest.mark.parametrize(
         "value",
-        [float("nan"), float("inf"), float("-inf"), "nan", "inf", "1e400"],
-        ids=["nan", "inf", "-inf", "str-nan", "str-inf", "str-1e400"],
+        [float("nan"), float("inf"), float("-inf"), "nan", "inf", "1e400", 10**400],
+        ids=["nan", "inf", "-inf", "str-nan", "str-inf", "str-1e400", "int-1e400"],
     )
     def test_non_finite_is_a_value_error(self, value: Any) -> None:
         # ``min(1.0, nan)`` is ``1.0``: a non-number used to earn the largest

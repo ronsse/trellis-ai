@@ -333,7 +333,8 @@ All notable changes to Trellis will be documented in this file.
   bad registry importance parameter and a non-numeric keyword `rank` still raise
   for the whole axis. The three axes also now agree on what is malformed. A
   `bool` importance (`True` was served as the maximum boost), a non-finite one
-  (`nan`, `inf`, `"1e400"`, also served as the maximum) and an
+  (`nan`, `inf`, `"1e400"`, also served as the maximum; an integer past float
+  range such as `10**400` failed the whole axis on every one) and an
   `importance_scored_at` that is not a timestamp (`"garbage"`, `""`, `0`; it was
   served undecayed, outranking an honestly stamped stale row) are each now
   malformed, like a missing stamp. A numeric string such as `"0.9"` is still
