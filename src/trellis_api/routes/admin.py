@@ -1456,7 +1456,8 @@ def promote_learning_candidates(
     promoted still landed. A row whose precedent is already current, complete
     and unchanged comes back ``already_promoted`` and is written not at all,
     so re-submitting a decision (or a whole file) adds no version and no
-    second ``PRECEDENT_PROMOTED`` event.
+    second ``PRECEDENT_PROMOTED`` event. A precedent a redaction already took
+    comes back ``refused_redacted`` and is not written back.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
