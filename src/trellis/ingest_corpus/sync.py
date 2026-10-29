@@ -861,7 +861,9 @@ def _prune_vanished(
 
     ``check`` rules on each candidate, and only ``"vanished"`` deletes. A
     candidate whose source could not be checked is kept and listed under
-    ``report.prune_withheld`` (#633).
+    ``report.prune_withheld`` (#633). A vanished candidate whose parent row is a
+    redaction tombstone is kept whole with a ``redaction_tombstone`` warning and
+    is not listed under ``report.pruned`` (#1067).
     """
     doc_store = registry.knowledge.document_store
     vector_store = getattr(registry.knowledge, "vector_store", None)
@@ -888,6 +890,9 @@ def _prune_vanished(
                     "source_path": metadata.get("source_path"),
                     "metadata": metadata,
                     "chunk_count": _chunk_count_of(doc),
+                    # Read off the listed row, so no second ``get`` and no
+                    # document text held for every candidate.
+                    "tombstone": is_redaction_tombstone(doc),
                 }
             )
         if len(page) < _PRUNE_PAGE_SIZE:
@@ -907,6 +912,15 @@ def _prune_vanished(
         if state != "vanished":
             continue
         relpath = _source_path_or(candidate["metadata"], candidate["doc_id"])
+        if candidate["tombstone"]:
+            # The blank parent row is what refuses the redacted text when the
+            # source comes back, so deleting it, as the id-only conversation
+            # check would, lets the next sync write the parent back live
+            # (#1067). Kept whole, dry run included, so the plan matches.
+            report.warnings.append(
+                _redaction_tombstone_warning(relpath, candidate["doc_id"])
+            )
+            continue
         if dry_run:
             # Nothing is deleted, but the plan still says what the real run
             # would leave behind.

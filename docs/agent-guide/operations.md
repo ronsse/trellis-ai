@@ -1454,8 +1454,11 @@ Scope boundaries, stated plainly:
   deleting it as an orphan. A move (a file renamed to a new path) and
   `--prune` do the same: they delete the document's other chunks and its
   parent row, keep a redacted chunk's row and report the warning, and
-  `--dry-run --prune` predicts it. A redacted *parent* that `--prune` deletes
-  is not covered. A parent brought back with `reingest_redacted` gets its row
+  `--dry-run --prune` predicts it. `--prune` also keeps a parent row that is a
+  redaction tombstone, with a `redaction_tombstone` warning and no entry under
+  `pruned` (#1067); `--dry-run --prune` predicts that too. A redaction does not
+  follow the file. Renaming or copying a redacted corpus file re-ingests it live
+  under the new path, so remove or edit the source file when you redact. A parent brought back with `reingest_redacted` gets its row
   back but not its chunks: their tombstones stay, sync reports each as a
   `redaction_tombstone` warning on every run, and corpus sync has no flag to
   re-ingest them (#1039). `trellis ingest dbt-manifest` skips a description whose
@@ -3884,9 +3887,10 @@ and in its properties the string `evidence_ref` (`save_knowledge` fills both wit
 the same id) and `lifecycle.superseded_by` (`supersede_entity` stamps it with the
 successor's evidence document). A node is served whole, since it carries no
 label, but without any id the caller may not read in any of them: on `GET
-/api/v1/graph/history` (every version), MCP `get_graph` (the root and each
-neighbour), MCP `get_items` on an entity id, and the entities `build_file_context`
-returns. A pointer key is removed rather than blanked, `lifecycle.state` and every
+/api/v1/graph/history` (every version), `GET /api/v1/entities/{id}` (the entity
+and every node of its `subgraph`), `GET /api/v1/graph/search` (every hit's
+`properties`), MCP `get_graph` (the root and each neighbour), MCP `get_items` on an
+entity id, and the entities `build_file_context` returns. A pointer key is removed rather than blanked, `lifecycle.state` and every
 other property stay, and a `document_ids` member that is not a string, a
 `document_ids` that is not a list and an `evidence_ref` that is not a string are
 left as stored. The store judges the ids as above, in one pass over the distinct
@@ -3897,9 +3901,12 @@ is a concealed carrier too, on the same footing as the supersession pointers: it
 is dropped from `POST /api/v1/packs` and `/packs/sectioned` for a caller below
 `restricted`, the item is still served in the same position, and supersession
 that resolves through the ref (a loser whose successor a node names) is decided
-before the drop. `GET /api/v1/entities/{id}`, `GET
-/api/v1/graph/search` (and its facets) and an edge's own `evidence_ref` field
-do not conceal yet and serve these ids as stored.
+before the drop. `GET /api/v1/graph/search/facets` counts nodes per `node_type` and
+names no property, so there is nothing in it to conceal, and a concealed pointer
+never removes a node, so its counts and `/graph/search`'s `total` are the same for
+every caller. An edge's own `evidence_ref` field (a top-level field of an edge in
+the `subgraph` of `GET /api/v1/entities/{id}`, not a node property) does not
+conceal yet and is served as stored.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is

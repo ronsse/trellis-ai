@@ -337,6 +337,37 @@ All notable changes to Trellis will be documented in this file.
   moved to `trellis.core.reserved_doc_ids`; `trellis_workers.trace_embed` still
   exports it as `DOC_ID_PREFIX`.
 
+- **`GET /api/v1/entities/{id}` and `GET /api/v1/graph/search` omit evidence
+  pointers to documents the caller cannot read.** Follows #1063, which left these
+  two routes. A node served by either could still name a document a
+  below-`restricted` key may not read, in `document_ids`, in its `evidence_ref`
+  property or as `lifecycle.superseded_by`. Both routes now apply the same
+  `conceal_node_pointers` step: the entity and every node of its `subgraph` (one
+  judgement over all of them), and every search hit's `properties`, are served
+  without such an id; the pointer key is removed, `lifecycle.state` and every
+  other property stay, and `restricted`, `admin` and auth off read nothing and see
+  the node as stored. Nothing else changes: the same nodes, edges, page, `total`
+  and order are served. `GET /api/v1/graph/search/facets` counts nodes per
+  `node_type` and names no property, so it needed no change. An edge's own
+  `evidence_ref` (served in the entity's `subgraph.edges`) is still served as
+  stored.
+
+- **A conversation-export prune keeps a parent row that is a redaction tombstone
+  (#1067).** The conversation prune decides by document id alone, so a
+  conversation that left the export had its redacted parent row deleted along
+  with the rest of its tree. The chunk tombstones stayed behind as parentless
+  rows, which are never served, but the parent's own tombstone was gone, so the
+  conversation reappearing in a later export wrote the parent back live.
+  `_prune_vanished` now keeps the whole tree when the parent row it listed is a
+  redaction tombstone: the parent and its chunks stay, the report carries a
+  `redaction_tombstone` warning and no `pruned` entry, and a dry run predicts
+  the same. A parent that is not a tombstone is deleted as before, and corpus
+  sync is unchanged: a redacted corpus parent has no `source_path`, so its
+  prune already withholds it as unverifiable.
+  **Known gap (#1066).** A redaction does not follow the file. Renaming or
+  copying a redacted corpus file re-ingests it live under the new path, so
+  remove or edit the source file when you redact.
+
 - **`reclassify_item` leaves a redaction tombstone alone (#1064).** The batch
   pass (`trellis classify backfill`) already skipped blank rows, so no shipped
   command tagged a redacted row, but a direct call of the public
