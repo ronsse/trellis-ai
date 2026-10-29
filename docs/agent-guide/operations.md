@@ -3786,6 +3786,55 @@ above its own clearance, and cannot touch a document it may not read.**
   differs from the one for a missing id, so these five, and an `evidence.ingest`
   overwrite, tell a key that the document exists; the read side's by-id
   not-found parity does not extend to them.
+- REST `POST /api/v1/documents` takes an optional `sensitivity` beside `doc_id`,
+  `content` and `metadata`, under the rules `POST /api/v1/evidence` and the MCP
+  save tools use: a label above the key's own clearance is a 403, an unknown
+  label (or one that is not a string) is a 422, and so is a raw
+  `data_classification` key in `metadata` (for every caller, `admin` included:
+  the label has one door). `metadata` must be an object (422 otherwise). Nothing
+  is written on any refusal. The overwrite check compares the label this request
+  writes, so a re-put that omits `sensitivity` over a labelled document is the
+  downgrade it always was.
+- REST `POST /api/v1/vectors` judges every row before it writes any, so a refused
+  batch stores nothing. A row whose `item_id` names a document above the key's
+  clearance, or a chunk of one (a chunk id is judged by its parent's label,
+  whether or not the chunk has a row of its own), is a 409 with nothing written.
+  The route stores a vector for any id, so it has no "missing document" answer to
+  give instead, and an id that names no document is written as before. A raw
+  `data_classification` in a row's `metadata` is a 422 for every caller, auth
+  `off` and `admin` included (a vector row's label is mirrored from its
+  document). A row that is not an object, or whose `metadata` is neither an
+  object nor `null`, is a 422 too. A row whose `item_id` is not a string is
+  counted as an error, not coerced to one. A key at `restricted`, auth `off` and
+  a shared secret are never refused, and the gate reads no document for them.
+- Whatever the caller, a row whose `item_id` names a stored document is written
+  carrying that document's mirrored metadata (`data_classification`,
+  `lifecycle`, `content_tags`, `auto_importance`; the same keys, and the same
+  copy-if-present, remove-if-absent rule, as `sync_vector_metadata`), over
+  anything the row's own `metadata` says. The semantic axis builds a pack item,
+  excerpt included, from this row, so a rewrite that left it unlabelled would
+  serve a restricted document at a lower clearance. A chunk id is mirrored from
+  its own stored document, as the chunk embed path does; the parent's label is
+  not copied onto it but read through the chunk id when the row is served. An id
+  that names no document is written as sent. The trace and memory extraction
+  hooks keep running at `restricted`: they write graph drafts, which target no
+  document.
+- The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
+  `/traces`, `/observations` and `/measurements` build their executor at the
+  key's clearance, as `/documents` and `/evidence` do, instead of at
+  `restricted`. None of those operations names a document, so the floor has
+  nothing to refuse on them today; the clearance is threaded so a later rule
+  that does cannot be bypassed by a route that forgot it.
+- **Accepted posture: the 409 tells a key the document exists.** An
+  `evidence.ingest` overwrite refusal (`POST /api/v1/evidence`,
+  `POST /api/v1/documents`, `POST /api/v1/commands/batch`) and the
+  `POST /api/v1/vectors` refusal name the document id, so a key below a
+  document's label can learn that the id is taken by trying to write it. This is
+  the same posture as the Stage-2 refusals above and is accepted for the same
+  reason: answering as for a fresh id would mean either writing over the
+  document or reporting a success that wrote nothing, and a write that
+  silently does not happen is worse than a refusal that names its target. A
+  document's label, content and metadata are never in the refusal.
 
 A trusted-local caller (stdio, auth `off`, the CLI) holds `restricted` and is
 never refused. The clearance is a required keyword of `build_curate_executor`,
