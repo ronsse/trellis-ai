@@ -993,6 +993,8 @@ trellis ingest evidence <file> [--reingest-redacted] [--format text|json]
 | `file` | **Yes** | Path to evidence JSON file |
 | `--reingest-redacted` | No | Write over an `evidence_id` that was redacted. Without it a write to a redacted id exits `2` (`redaction_tombstone_overwrite`, in text and JSON alike) and the row stays blank; with it the row is written and stamped `reingested_after_redaction` (see `trellis curate redact`) |
 
+An `evidence_id` starting `trace-summary:` exits `2` (`reserved_trace_summary_id`, in text and JSON alike) and nothing is written: that prefix belongs to the trace embed worker.
+
 **Example:**
 
 ```bash
@@ -3113,7 +3115,7 @@ result = executor.execute(cmd)
 
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
-| `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline |
+| `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline. A caller-chosen `evidence.doc_id` may not start with `trace-summary:` (the trace embed worker's namespace: a row there makes the trace it names look already embedded, so its real summary is never written; code `reserved_trace_summary_id`), may not sit in the `precedent://learning/` namespace, and may not be a minted `<x>#chunk-<digits>` chunk id (both `reserved_document_id`). The prefix is exact and case-sensitive. `POST /api/v1/evidence`, `POST /api/v1/documents`, MCP `save_memory` and `trellis ingest evidence` refuse it the same way |
 | `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 

@@ -321,6 +321,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A document id under `trace-summary:` is refused on every write door
+  (#1054).** The trace-embed worker decides a trace is already embedded by
+  asking the vector store for a row at `trace-summary:<trace_id>`. #1053 closed
+  `POST /api/v1/vectors`, but with embed-on-ingest on (`TRELLIS_ENABLE_EMBED_ON_INGEST`)
+  a document written at that id gets a vector row there too, so
+  `POST /api/v1/evidence`, `POST /api/v1/documents`, an `evidence.ingest`
+  command (`POST /api/v1/commands/batch`, MCP `execute_mutation`), MCP
+  `save_memory` and `trellis ingest evidence` each let a caller hide a real
+  trace from the worker for good (`skipped_existing`). `EvidenceIngestHandler`
+  now refuses a `doc_id` starting `trace-summary:` with the new code
+  `reserved_trace_summary_id`, and `trellis ingest evidence` refuses it the same
+  way. The worker's own handler is exempt through a class attribute, not through
+  `requested_by`, which a caller can write into a command. The prefix constant
+  moved to `trellis.core.reserved_doc_ids`; `trellis_workers.trace_embed` still
+  exports it as `DOC_ID_PREFIX`.
+
 - **`worker enrich` scans past its newest-rows window (#1068).** It selected from
   one fixed page of the newest `max(--limit * 5, --limit)` rows and reported zero
   candidates once that page held only enriched rows, promoted-precedent rows and
