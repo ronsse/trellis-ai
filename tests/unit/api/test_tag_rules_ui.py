@@ -217,8 +217,31 @@ def test_candidates_fetch_failure_renders_visible_error() -> None:
     )
     catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
     assert "tbody.innerHTML" in catch_block
-    assert "err.message" in catch_block
+    # ``loadFailureText`` carries ``err.message`` for every non-403 failure.
+    assert "loadFailureText(err, " in catch_block
     assert "text-danger" in catch_block  # pass 6: replaces color:var(--danger)
+
+
+def test_candidates_403_dims_to_an_admin_scope_note_not_a_red_failure() -> None:
+    """``GET /classify/candidates`` is admin-scoped, so a read key 403s on it.
+
+    That is routine (most keys are read-scoped), so the catch dims it through
+    the shared helper rather than reporting "Failed to load" in red. The rules
+    table beside it stays read-scoped and keeps its plain error.
+    """
+    page = _page()
+    body = _function_body(
+        page,
+        "async function loadTagRuleCandidates() {",
+        "\n        function renderTagCandidateRow(c) {",
+    )
+    catch_block = _between(body, "} catch (err) {", "\n            }\n        }")
+    assert "isAdminScopeError(err) ? 'text-dim' : 'text-danger'" in catch_block
+    assert "loadFailureText(err, 'Candidates')" in catch_block
+    # The tab is not an admin-only view: the rules table still loads for a
+    # read key, so the nav must not badge it.
+    admin_views = _between(page, "const ADMIN_ONLY_VIEWS = [", "];")
+    assert "tagrules" not in admin_views
 
 
 def test_rules_fetch_failure_renders_visible_error() -> None:

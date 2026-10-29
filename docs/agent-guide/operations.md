@@ -950,12 +950,12 @@ it. `effective-rules` is read-only parity for `GET /api/v1/classify/rules`
 effective keyword/alias row by `source` (`default`, `config`, `overlay`).
 
 **REST** (`src/trellis_api/routes/classify_rules.py`; admin scope
-(`SCOPE_ADMIN`) on every write, read scope on the two `GET`s, mirroring
+(`SCOPE_ADMIN`) on every write and on the candidate listing, read scope on `GET /classify/rules`, mirroring
 `policies.py`'s mixed-scope mounting):
 
 | Method & path | Scope | Description |
 |---|---|---|
-| `GET /classify/candidates` | read | List mined candidates (`?limit=`). No `status` filter server-side — filter client-side on `status == "open"`. |
+| `GET /classify/candidates` | admin | List mined candidates (`?limit=`). No `status` filter server-side — filter client-side on `status == "open"`. Admin because the keyword and alias text is mined from every document, hidden ones included, and carries no document ids to filter a read key by; a read key gets `403`. |
 | `POST /classify/candidates/mine` | admin | Run the tag-keyword / domain-alias miners inline and emit candidate events — reuses the same analyzer functions `tag-candidates` / `domain-candidates` call, not a reimplementation. Body: `{"kinds": ["tag_keyword", "domain_alias"], "scan_limit": null, "use_recommended_defaults": true}`. |
 | `POST /classify/candidates/{candidate_id}/dismiss` | admin | Mark one candidate dismissed (no body). `404` if no such candidate. |
 | `POST /classify/rules` | admin | Apply one candidate. Body is `ClassifyRuleApplyRequest`: `kind`, `key`, `target`, `source_event_id` (required — the candidate's `source_event_id`, **not** its `candidate_id`), optional `support`/`precision`/`lift`. |
