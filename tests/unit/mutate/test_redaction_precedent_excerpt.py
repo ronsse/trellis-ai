@@ -40,6 +40,7 @@ from trellis.stores.registry import StoreRegistry
 
 COPIED_TEXT = "ZEBRA-QUOKKA confidential sentence copied from the source"
 NAME_TEXT = "NARWHAL-OKAPI first line of the source"
+TITLE_TEXT = "WALRUS-HERON title the source document carried"
 EXPECTED_KEYS = {
     "target_id",
     "target_kind",
@@ -69,9 +70,11 @@ def _candidate(item_id: str, *, secret: str = COPIED_TEXT) -> dict[str, Any]:
         "intent_family": "asset_generation",
         "recommendation_type": "promote_guidance",
         "item_id": item_id,
-        "precedent_name": f"Learning :: {item_id}",
-        # A title the item carried: holds no text from the source body.
-        "precedent_name_source": "item_title",
+        # The bare-id name holds no text from the source. (A title the item
+        # carried does: redaction blanks the row's title, so the scrub renames
+        # it, see ``test_a_title_name_is_renamed_as_the_row_loses_its_title``.)
+        "precedent_name": f"Learning: asset_generation :: {item_id}",
+        "precedent_name_source": "item_id",
         "precedent_properties": {
             "intent_family": "asset_generation",
             "source_item_id": item_id,
@@ -93,16 +96,25 @@ def _promote(
     *,
     body: str = COPIED_TEXT,
     source_named: bool = False,
+    title_named: bool = False,
 ) -> str:
     """Store ``item_id`` as a document and promote a precedent from it.
 
     ``source_named`` promotes a title-less candidate, so its name is the
     first line of ``body``, derived by the real readable-name fallback.
+    ``title_named`` promotes one named from the item's title, as the analyzer
+    does when the document carries one.
     """
     knowledge = registry.knowledge
     if knowledge.document_store.get(item_id) is None:
         knowledge.document_store.put(item_id, body, {})
     candidate = _candidate(item_id)
+    if title_named:
+        candidate.update(
+            title=TITLE_TEXT,
+            precedent_name=f"Learning: asset_generation :: {TITLE_TEXT}",
+            precedent_name_source="item_title",
+        )
     if source_named:
         candidate.update(
             title=None,
@@ -196,7 +208,7 @@ class TestDocumentTarget:
         assert props["source_item_id"] == "doc-a"
         assert props["success_rate"] == 0.9
         assert props["later_edit"] is True
-        assert props["name"] == "Learning :: doc-a"
+        assert props["name"] == "Learning: asset_generation :: doc-a"
         assert payload["scrubbed_precedent_ids"] == [precedent_id]
         assert payload["scrubbed_precedent_count"] == 1
         assert COPIED_TEXT not in repr(payload)
@@ -708,7 +720,8 @@ class TestPrecedentNames:
         so a name copied from the item's title is the redacted document's text
         too (#1032). Only a reviewer's name and the bare id stay."""
         _node(registry, "doc-a")
-        precedent_id = _promote(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", title_named=True)
+        assert TITLE_TEXT in _everything_stored(registry, precedent_id)
         _redact(registry, "doc-a")
         node = registry.knowledge.graph_store.get_node(precedent_id)
         assert node is not None
@@ -716,7 +729,7 @@ class TestPrecedentNames:
             f"Learning: asset_generation :: {precedent_id}"
         )
         assert node["properties"]["name_source"] == "neutral"
-        assert "doc-a" not in node["properties"]["name"]
+        assert TITLE_TEXT not in _everything_stored(registry, precedent_id)
 
     @pytest.mark.parametrize("marker", ["reviewer", "item_id"])
     def test_a_reviewer_or_bare_id_name_survives(

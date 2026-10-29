@@ -1383,11 +1383,12 @@ Scope boundaries, stated plainly:
   `neutral`. The rest of the precedent stays; `get_lessons` serves the node's
   text, not the immutable promotion event's. Promotion records how the name
   was derived as `name_source` (`source_text`, `item_title`, `item_id`,
-  `reviewer`) on the node and in the `PRECEDENT_PROMOTED` payload; a title, a
-  bare id and a reviewer's rewrite of either hold no source text and are kept. A
-  name with no marker (promoted before it existed) fails closed: the scrub
-  renames it unless it is already a bare-id name, so a title-derived name may
-  be renamed too. The ids ride the payload as `scrubbed_precedent_ids`
+  `reviewer`) on the node and in the `PRECEDENT_PROMOTED` payload; a bare id and
+  a reviewer's rewrite of either hold no source text and are kept. A name
+  copied from the item's title is renamed like one copied from its text,
+  because the redaction blanks the document row's title too. A name with no
+  marker (promoted before it existed) fails closed: the scrub renames it
+  unless it is already a bare-id name. The ids ride the payload as `scrubbed_precedent_ids`
   (absent when none). Only a graph node can be a target, so this reaches a
   document that has one; a document with none is refused like any missing
   target. The lookup reads every precedent, page by page, before anything is
@@ -1643,7 +1644,7 @@ candidate gets one entry in `results`:
 | `promoted_incomplete` | failed | the entity was written but an edge or the event was not; `get_lessons` may not show it |
 | `entity_failed` | failed | the entity write did not land; no edge was tried |
 | `refused_demoted`, `refused_archived`, `refused_not_current` | refused | a precedent already exists in that lifecycle state; re-approval would erase it, so nothing is written |
-| `refused_redacted` | refused | a redaction already took this precedent id (its document row is a redaction tombstone, or a `REDACTION_APPLIED` event names the id); re-promoting it would serve the redacted text again, so nothing is written. A redaction is final: promote a new candidate under a new id if the lesson is still wanted. It is also the answer when the precedent's *source document* was redacted (the precedent survives, scrubbed: neutral name, `source_excerpt_status` `source_redacted`; the source counts as redacted by a tombstone or a `REDACTION_APPLIED` event on the row's `source_item_id` or its chunk parent) and the name may hold that source's text: a candidate captured before the redaction, or a decisions file's `promotion_name` kept from before it (the review template pre-fills the derived name), would write the old name back. Regenerate the candidate **and** the decisions file, or clear the decision's `promotion_name`, and promote that; a new title you write still goes through |
+| `refused_redacted` | refused | a redaction already took this precedent id (its document row is a redaction tombstone, or a `REDACTION_APPLIED` event names the id); re-promoting it would serve the redacted text again, so nothing is written. A redaction is final: promote a new candidate under a new id if the lesson is still wanted. It is also the answer when the precedent's *source document* was redacted (the precedent survives, scrubbed: neutral name, `source_excerpt_status` `source_redacted`; the source counts as redacted by a tombstone or a `REDACTION_APPLIED` event on the row's `source_item_id` or its chunk parent) and the name may hold that source's text (the source text or the item's title): a candidate captured before the redaction, or a decisions file's `promotion_name` kept from before it (the review template pre-fills the derived name) or edited from it (a name that contains the earlier name's distinctive text is refused too), would write the old name back. Regenerate the candidate **and** the decisions file, or clear the decision's `promotion_name`, and promote that; a new title you write still goes through. If the source id was then written again with new content, a name derived from that content and a reviewer's title promote; only a name the precedent carried at or before the redaction stays refused. The message names the precedent id and never the name |
 | `missing_candidate` | refused | the approved id is not in `--candidates` |
 | `skipped_non_promotable` | refused | the candidate's `recommendation_type` is not `promote_precedent` or `promote_guidance` |
 

@@ -1497,17 +1497,35 @@ def _redactable_source_ids(entity_payload: Mapping[str, Any]) -> list[str]:
     return [source_item_id, parent] if parent else [source_item_id]
 
 
-def _source_reingested(
+def _moment(value: object) -> datetime | None:
+    """``value`` as an aware datetime, or ``None`` when it is not one.
+
+    A store hands a timestamp back as a ``datetime`` or as its ISO string, and
+    a naive one is UTC.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _reingested_after(
     entity_payload: Mapping[str, Any],
     *,
     event_log: EventLog | None,
     document_store: DocumentStore | None,
-) -> bool:
-    """Whether the payload's source was redacted and then written again.
+) -> datetime | None:
+    """When the payload's source was last redacted, if it was written again since.
 
     ``put_document`` does not check for a tombstone, so a redacted id can come
-    back with new content. All of these must hold, so that a state that merely
-    looks like it never reads as a re-ingest:
+    back with new content. The answer is the time of the latest
+    ``REDACTION_APPLIED`` event naming the source, and only when all of these
+    hold, so that a state that merely looks like a re-ingest never reads as
+    one:
 
     * the source's own document row is there and is not a redaction tombstone;
     * no id the redaction named (:func:`_redactable_source_ids`) is still a
@@ -1517,28 +1535,34 @@ def _source_reingested(
       proves nothing, and a node's scrub markers with no event are not enough
       to call the row new.
 
-    Without a ``document_store`` or an ``event_log`` the answer is no, which
-    is the cautious one: it keeps the refusal.
+    ``None`` otherwise, and without a ``document_store`` or an ``event_log``,
+    which is the cautious answer: it keeps the refusal.
     """
     from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
 
     source_ids = _redactable_source_ids(entity_payload)
     if not source_ids or document_store is None or event_log is None:
-        return False
+        return None
     row = document_store.get(source_ids[0])
     if row is None or is_redaction_tombstone(row):
-        return False
+        return None
     for named_id in source_ids[1:]:
         named = document_store.get(named_id)
         if named is not None and is_redaction_tombstone(named):
-            return False
-    return any(
-        event_log.get_events(
-            event_type=EventType.REDACTION_APPLIED, entity_id=source_id, limit=1
-        )
-        for source_id in source_ids
-    )
+            return None
+    redacted_at: datetime | None = None
+    for source_id in source_ids:
+        for event in event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED,
+            entity_id=source_id,
+            limit=1,
+            order="desc",
+        ):
+            moment = _moment(event.occurred_at)
+            if moment is not None and (redacted_at is None or moment > redacted_at):
+                redacted_at = moment
+    return redacted_at
 
 
 def _earlier_source_names(
@@ -1546,6 +1570,7 @@ def _earlier_source_names(
     *,
     graph_store: GraphStore,
     event_log: EventLog | None,
+    before: datetime | None = None,
 ) -> set[str]:
     """Names this precedent carried earlier that may have held source text.
 
@@ -1557,19 +1582,31 @@ def _earlier_source_names(
     has no ``intent_family`` of its own, so the payload's stands in; the bare-id
     shape it is compared with is built from that family and the event's
     ``source_item_id``.
+
+    ``before`` is the moment the source was redacted, given once it was written
+    again (:func:`_reingested_after`): a name the precedent took on after that
+    came from the new content, so only a version or an event at or before it
+    counts. A version or event with a timestamp that cannot be read counts.
     """
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    def in_time(moment: object) -> bool:
+        parsed = _moment(moment)
+        return before is None or parsed is None or parsed <= before
 
     entity_id = entity_payload["entity_id"]
     properties = entity_payload["properties"]
     candidates: list[dict[str, Any]] = [
         dict(version.get("properties") or {})
         for version in graph_store.get_node_history(entity_id)
+        if in_time(version.get("valid_from"))
     ]
     if event_log is not None:
         for event in event_log.get_events(
             event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
         ):
+            if not in_time(event.occurred_at):
+                continue
             payload = event.payload
             candidates.append(
                 {
@@ -1651,16 +1688,18 @@ def _scrubbed_name_refusal(
     **Which signal wins.** The source's own row decides whether the first test
     applies. While the source is blank or gone (a tombstone, or a redaction
     event with no row) both tests refuse. Once it was written again after the
-    redaction (:func:`_source_reingested`), a name derived from the *current*
+    redaction (:func:`_reingested_after`), a name derived from the *current*
     content, and a reviewer's title, no longer refuse on the first test: only
-    the second does, so a name from before the redaction stays refused. A
-    regenerated candidate yields the same name every time, so without this the
-    refusal's own remedy could never work. What neither test can catch, with
-    the source re-written or not: a pre-redaction name that this precedent never
-    carried (a stale decisions file paired with a regenerated candidate for an
-    id never promoted before, or, once the source is re-written, a stale
-    candidate for one) since nothing records the old name. The message names the
-    id and never the name.
+    the second does, over the names the precedent carried at or before the
+    redaction, so a name from before it stays refused and one it took on since
+    does not (a re-run of that promotion is ``already_promoted``, not a
+    refusal). A regenerated candidate yields the same name every time, so
+    without this the refusal's own remedy could never work. What neither test
+    can catch, with the source re-written or not: a pre-redaction name that
+    this precedent never carried (a stale decisions file paired with a
+    regenerated candidate for an id never promoted before, or, once the source
+    is re-written, a stale candidate for one), since nothing records the old
+    name. The message names the id and never the name.
     """
     if existing_node is not None and existing_node.get("node_type") != "precedent":
         return None
@@ -1673,15 +1712,22 @@ def _scrubbed_name_refusal(
         return None
     entity_id = entity_payload["entity_id"]
     name = entity_payload["name"]
-    holds_source_text = name_may_hold_source_text(
-        {**entity_payload["properties"], "name": name}, entity_id
-    ) and not _source_reingested(
+    reingested_after = _reingested_after(
         entity_payload, event_log=event_log, document_store=document_store
+    )
+    holds_source_text = (
+        name_may_hold_source_text(
+            {**entity_payload["properties"], "name": name}, entity_id
+        )
+        and reingested_after is None
     )
     if not holds_source_text and not _restores_earlier_name(
         name,
         _earlier_source_names(
-            entity_payload, graph_store=graph_store, event_log=event_log
+            entity_payload,
+            graph_store=graph_store,
+            event_log=event_log,
+            before=reingested_after,
         ),
     ):
         return None

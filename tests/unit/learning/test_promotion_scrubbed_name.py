@@ -585,10 +585,12 @@ def _redact_id(stores: _Stores, target_id: str) -> None:
     assert result.status == CommandStatus.SUCCESS, result.message
 
 
-def _re_ingest(stores: _Stores, item_id: str = SOURCE_ID) -> None:
+def _re_ingest(
+    stores: _Stores, item_id: str = SOURCE_ID, first_line: str = FRESH_TEXT
+) -> None:
     """Write the redacted id again with new content: ``put_document`` does not
     look for a tombstone, so this is all a re-ingest is."""
-    stores.documents.put(item_id, f"{FRESH_TEXT}\n\nNewly written body text", {})
+    stores.documents.put(item_id, f"{first_line}\n\nNewly written body text", {})
 
 
 def _named_from_current(stores: _Stores, item_id: str = SOURCE_ID) -> dict[str, Any]:
@@ -621,6 +623,33 @@ def test_a_name_from_the_current_content_promotes_after_a_re_ingest(
     assert stores.submit(copy.deepcopy(candidate))["status"] == "already_promoted"
 
 
+def test_a_name_taken_after_a_re_ingest_is_stale_once_the_source_is_redacted_again(
+    stores: _Stores,
+) -> None:
+    """The cutoff is the latest redaction, not the first."""
+    stores.redact_source()
+    _re_ingest(stores)
+    first = _named_from_current(stores)
+    assert stores.submit(first)["status"] == "promoted"
+    entity_id = precedent_entity_id_for_candidate(first["candidate_id"])
+    # The first redaction deleted the source's graph node, which a second one
+    # needs to find.
+    stores.graph.upsert_node(SOURCE_ID, "CreativeWork", {"name": SOURCE_ID})
+    _redact_id(stores, SOURCE_ID)
+    later_text = "Quartz harbor opening of the second rewrite"
+    _re_ingest(stores, first_line=later_text)
+
+    stale = stores.submit(copy.deepcopy(first))
+    fresh_candidate = _candidate(SOURCE_ID)
+    _apply_readable_name_fallback(fresh_candidate, stores.documents)
+    fresh = stores.submit(fresh_candidate)
+
+    assert stale["status"] == REFUSED_REDACTED
+    assert FRESH_TEXT not in stores.everything_stored(entity_id)
+    assert fresh["status"] == "promoted", fresh
+    assert later_text in stores.graph.get_node(entity_id)["properties"]["name"]
+
+
 def test_a_scrubbed_precedent_takes_a_current_content_name_after_a_re_ingest(
     stores: _Stores,
 ) -> None:
@@ -643,10 +672,14 @@ def test_a_reviewer_title_promotes_after_a_re_ingest(stores: _Stores) -> None:
     _re_ingest(stores)
     title = "Reuse the rewritten opening"
 
-    outcome = stores.submit_planned(_named_from_current(stores), title)
+    candidate = _named_from_current(stores)
+
+    outcome = stores.submit_planned(candidate, title)
 
     assert outcome["status"] == "promoted", outcome
-    node = stores.graph.get_node(outcome["entity_id"])
+    node = stores.graph.get_node(
+        precedent_entity_id_for_candidate(candidate["candidate_id"])
+    )
     assert node["properties"]["name"] == title
 
 
