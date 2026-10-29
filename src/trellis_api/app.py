@@ -276,8 +276,9 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     #                                   (route-level deps in
     #                                   routes/policies.py)
     #   settings                     -> admin (both GET and PUT/POST)
-    #   classify_rules               -> read on the two GET routes, plus
-    #                                   admin on mine/apply/revoke/dismiss
+    #   classify_rules               -> read on GET /classify/rules, plus
+    #                                   admin on the candidate list and
+    #                                   mine/apply/revoke/dismiss
     #                                   (route-level deps in
     #                                   routes/classify_rules.py)
     #

@@ -23,8 +23,8 @@ documents it:
 - ``ROUTE_OVERRIDE_ROSTER`` -- the *additional* scope a handful of specific
   routes require on top of their router's baseline (observations' two
   POSTs, explore's four pack-telemetry GETs, policies' POST/DELETE,
-  classify's mine/apply/revoke/dismiss), hand-read from each route's own
-  ``dependencies=[Depends(require_scope(...))]`` kwarg in its route
+  classify's candidate list and mine/apply/revoke/dismiss), hand-read from
+  each route's own ``dependencies=[Depends(require_scope(...))]`` kwarg in its route
   module.
 
 ``UNAUTHENTICATED_ROUTERS`` names the two router tags with no scope
@@ -96,6 +96,7 @@ ROUTE_OVERRIDE_ROSTER: dict[tuple[str, str], frozenset[str]] = {
     ("GET", "/api/v1/packs/{pack_id}"): frozenset({SCOPE_ADMIN}),
     ("POST", "/api/v1/policies"): frozenset({SCOPE_ADMIN}),
     ("DELETE", "/api/v1/policies/{policy_id}"): frozenset({SCOPE_ADMIN}),
+    ("GET", "/api/v1/classify/candidates"): frozenset({SCOPE_ADMIN}),
     ("POST", "/api/v1/classify/candidates/mine"): frozenset({SCOPE_ADMIN}),
     ("POST", "/api/v1/classify/rules"): frozenset({SCOPE_ADMIN}),
     ("DELETE", "/api/v1/classify/rules/{kind}/{key}"): frozenset({SCOPE_ADMIN}),
