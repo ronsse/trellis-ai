@@ -234,7 +234,10 @@ def _list_readable(
     ``DocumentStore`` has no label predicate, so the filter runs here, over
     batches of :data:`_SCAN_BATCH` read from the start; the page is cut from
     the readable rows, not the store's, so a hidden row never shortens it.
-    Only the page is kept, so memory grows with ``limit``. The scan stops at
+    Only the page is kept, so the page's memory grows with ``limit``. With
+    ``include_chunks=true`` the gate's parent-verdict cache also holds one
+    metadata dict per distinct chunk parent scanned, hidden parents included,
+    and the offset ceiling does not bound those. The scan stops at
     the first readable row past the page and reports ``offset + limit + 1``
     as an inexact total; a store that runs out first reports its exact
     readable count. Neither the store's own row count nor anything about a

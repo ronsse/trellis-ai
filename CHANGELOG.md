@@ -1187,6 +1187,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Small sensitivity-floor follow-ups (#1029, part of).** A re-promotion of a
+  precedent (`precedent.promote` over an existing row) no longer drops the row's
+  stored `data_classification` label: the row's metadata is rebuilt from the
+  node, which holds no label, so a labelled precedent read as `internal` again;
+  the stored label is now carried over verbatim, onto the vector row too when
+  embedding is on. `DocumentStore.list_documents` orders by `created_at DESC`
+  then `doc_id DESC` on both backends (it had no tiebreaker), so an
+  OFFSET-paged scan, such as `GET /documents` below `restricted`, no longer
+  repeats or skips rows that share a timestamp. The Memories tab disables Next
+  when the next page would sit past the offset ceiling that a key below
+  `restricted` is refused (400), instead of offering a click that fails. The
+  REST roster rule now follows a local bound to the registry or a plane of it
+  (`k = registry.knowledge; helper(k)`), also `registry.operational`; no route
+  was newly flagged. The `GET /documents` docstring no longer says the scan's
+  memory grows only with `limit`: with `include_chunks=true` the parent-verdict
+  cache holds one entry per distinct chunk parent scanned.
+
 - **A redaction scrub of a precedent drops the name alias of its source-text
   name (#1030).** `entity.create` binds a `name` alias whose `raw_id` and
   `raw_name` are the name, and the scrub restored aliases verbatim, so
