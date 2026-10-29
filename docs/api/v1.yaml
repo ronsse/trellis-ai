@@ -5041,7 +5041,9 @@ paths:
 
         so re-submitting a decision (or a whole file) adds no version and no
 
-        second ``PRECEDENT_PROMOTED`` event.'
+        second ``PRECEDENT_PROMOTED`` event. A precedent a redaction already took
+
+        comes back ``refused_redacted`` and is not written back.'
       operationId: promote_learning_candidates_api_v1_learning_promotions_post
       requestBody:
         content:

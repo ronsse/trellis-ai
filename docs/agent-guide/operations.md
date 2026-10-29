@@ -1643,6 +1643,7 @@ candidate gets one entry in `results`:
 | `promoted_incomplete` | failed | the entity was written but an edge or the event was not; `get_lessons` may not show it |
 | `entity_failed` | failed | the entity write did not land; no edge was tried |
 | `refused_demoted`, `refused_archived`, `refused_not_current` | refused | a precedent already exists in that lifecycle state; re-approval would erase it, so nothing is written |
+| `refused_redacted` | refused | a redaction already took this precedent id (its document row is a redaction tombstone, or a `REDACTION_APPLIED` event names the id); re-promoting it would serve the redacted text again, so nothing is written. A redaction is final: promote a new candidate under a new id if the lesson is still wanted |
 | `missing_candidate` | refused | the approved id is not in `--candidates` |
 | `skipped_non_promotable` | refused | the candidate's `recommendation_type` is not `promote_precedent` or `promote_guidance` |
 
@@ -1697,7 +1698,7 @@ a real run would reach, named so it cannot be read as one:
 The preview reads, and never writes. It sees a refusal the planner decides
 (`missing_candidate`, `skipped_non_promotable`) and one an existing
 precedent's lifecycle state decides (`refused_demoted`, `refused_archived`,
-`refused_not_current`). It cannot see a policy-gate refusal or a write that
+`refused_not_current`), or a redaction decides (`refused_redacted`). It cannot see a policy-gate refusal or a write that
 fails, so a preview of `ok` can still become `refused` or `failed`.
 
 ### `trellis curate review-ready`
