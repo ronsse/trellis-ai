@@ -1452,8 +1452,11 @@ Scope boundaries, stated plainly:
   deleting it as an orphan. A move (a file renamed to a new path) and
   `--prune` do the same: they delete the document's other chunks and its
   parent row, keep a redacted chunk's row and report the warning, and
-  `--dry-run --prune` predicts it. A redacted *parent* that `--prune` deletes
-  is not covered. A parent brought back with `reingest_redacted` gets its row
+  `--dry-run --prune` predicts it. `--prune` also keeps a parent row that is a
+  redaction tombstone, with a `redaction_tombstone` warning and no entry under
+  `pruned` (#1067); `--dry-run --prune` predicts that too. A redaction does not
+  follow the file. Renaming or copying a redacted corpus file re-ingests it live
+  under the new path, so remove or edit the source file when you redact. A parent brought back with `reingest_redacted` gets its row
   back but not its chunks: their tombstones stay, sync reports each as a
   `redaction_tombstone` warning on every run, and corpus sync has no flag to
   re-ingest them (#1039). `trellis ingest dbt-manifest` skips a description whose
