@@ -166,6 +166,15 @@ All notable changes to Trellis will be documented in this file.
   as the latest; a session whose file never changes keeps its older join until a
   watermark reset parses it. `trellis analyze holdout` labels the funnel stage
   "first retrieval after a stop hook's feedback or a commit".
+- **`GET /classify/candidates` now requires an admin-scoped key (#1029).** The
+  listing serves the keyword and alias text the miners extract from every
+  document, hidden ones included, and the payloads carry no document ids, so a
+  read key's clearance cannot filter them row by row. Before, any read key could
+  read it; now it answers `403`, like the mine, dismiss, apply and revoke routes
+  beside it. `GET /classify/rules` stays read-scoped. The explorer's Tag rules
+  tab shows the dimmed "needs an admin-scoped key" note for a read key instead
+  of a red "Failed to load". The `trellis classify` miners are unchanged: they
+  read the local stores directly.
 
 ### Added
 
