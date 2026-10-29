@@ -20,7 +20,10 @@ who lacks the scope. A *malformed* label reads ``restricted``
 merged pool after supersession. Supersession itself skips a successor the
 caller cannot read (:func:`reader_for`), so a restricted successor withholds
 no loser the caller may read and a below-clearance pack is the pack built
-without it.
+without it. A loser so kept still stores its own ``lifecycle.superseded_by``,
+which :func:`conceal_unreadable_successors` drops from the served copy (and
+:func:`conceal_document_successor` from a by-id document read) when the store
+says the caller cannot read the successor.
 
 **A chunk inherits its parent's label.** A chunk row carries its own metadata
 and none of the parent's later labels, so :func:`effective_sensitivity` takes
@@ -48,6 +51,7 @@ import structlog
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
     SENSITIVITY_ORDER,
     DataClassification,
     sensitivity_of,
@@ -191,6 +195,101 @@ def readable_ids(
         if gate.permits(item_id, (doc or {}).get("metadata")):
             readable.append(item_id)
     return readable
+
+
+def _stored_successor(metadata: Mapping[str, Any] | None) -> str | None:
+    """The id ``metadata["lifecycle"]["superseded_by"]`` names, in any state.
+
+    Only a non-empty string names an id; a missing, empty or malformed value
+    names nothing and is left as stored.
+    """
+    record = (metadata or {}).get(LIFECYCLE_KEY)
+    if not isinstance(record, dict):
+        return None
+    successor = record.get("superseded_by")
+    return successor if isinstance(successor, str) and successor else None
+
+
+def _without_successor(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of ``metadata`` whose lifecycle record has no ``superseded_by``.
+
+    Copy-on-write: the stored bag, and a pool's shared one, are never mutated.
+    The record keeps its ``state`` and every other key.
+    """
+    record = metadata[LIFECYCLE_KEY]
+    return {
+        **metadata,
+        LIFECYCLE_KEY: {k: v for k, v in record.items() if k != "superseded_by"},
+    }
+
+
+def _unreadable_successors(
+    document_store: DocumentStore, named: Collection[str], clearance: Sensitivity
+) -> set[str]:
+    """The ids in ``named`` that a caller at ``clearance`` may not read.
+
+    Judged by the store, as :func:`readable_ids` judges a by-id read (a chunk
+    by its parent, a store error as unreadable), and never by whether the id is
+    in a pack's candidate pool: a pool test would answer only for a document
+    that matched the query, which is an oracle on what matched.
+    """
+    return set(named) - set(readable_ids(document_store, sorted(named), clearance))
+
+
+def conceal_unreadable_successors(
+    items: Iterable[PackItem],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[PackItem]:
+    """``items`` with every ``lifecycle.superseded_by`` the caller cannot read dropped.
+
+    A loser whose successor is above the caller's clearance is served (see
+    :func:`~trellis.retrieve.lifecycle.partition_superseded`), and it still
+    carries its own stored record naming that successor. The id would reach the
+    caller in the item's metadata, so it is dropped from the served copy. The
+    state stays; the item reads superseded, by nothing the caller may name.
+
+    Applies to every item whatever its ``lifecycle.state``, since the id is the
+    leak. ``restricted`` does no reads and returns the items as they are, as
+    does a builder with no document store (no label to judge, so no verdict, the
+    parent cache's own rule). An item that names a readable successor, or none,
+    is passed through unchanged rather than copied.
+    """
+    pool = list(items)
+    if clearance == "restricted" or document_store is None:
+        return pool
+    named = {s for item in pool if (s := _stored_successor(item.metadata))}
+    if not named:
+        return pool
+    hidden = _unreadable_successors(document_store, named, clearance)
+    if not hidden:
+        return pool
+    return [
+        item.model_copy(update={"metadata": _without_successor(item.metadata)})
+        if _stored_successor(item.metadata) in hidden
+        else item
+        for item in pool
+    ]
+
+
+def conceal_document_successor(
+    doc: dict[str, Any], document_store: DocumentStore, clearance: Sensitivity
+) -> dict[str, Any]:
+    """``doc`` as a caller at ``clearance`` may be shown it by a by-id read.
+
+    The same drop as :func:`conceal_unreadable_successors`, for a stored
+    document the caller already passed the read gate for: its own
+    ``lifecycle.superseded_by`` may name a successor the caller may not read.
+    Returns ``doc`` itself when nothing is dropped, else a copy.
+    """
+    successor = _stored_successor(doc.get("metadata"))
+    if (
+        successor is None
+        or clearance == "restricted"
+        or not _unreadable_successors(document_store, {successor}, clearance)
+    ):
+        return doc
+    return {**doc, "metadata": _without_successor(doc["metadata"])}
 
 
 class OverwriteRefusedError(ValueError):
@@ -458,6 +557,8 @@ __all__ = [
     "OverwriteRefusedError",
     "SensitivityLabelError",
     "conceal_withheld_ids",
+    "conceal_document_successor",
+    "conceal_unreadable_successors",
     "concealed_ids_metadata",
     "effective_sensitivity",
     "partition_by_clearance",

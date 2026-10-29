@@ -87,18 +87,25 @@ All notable changes to Trellis will be documented in this file.
   successor; the loser was dropped, counted under `superseded`, and a caller
   could tell a hidden document existed and matched. A successor the caller
   cannot read, judged as the pack's own gate judges it (its own label, and a
-  chunk's parent's), no longer counts as one: the loser is served and
-  the pack, its rejected rows and its withholding note are those of a pack
-  built without the successor. A trusted caller, and a store with no labels,
-  see no change. MCP `record_feedback` with `TRELLIS_REQUIRE_PACK_ATTRIBUTION`
-  or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on returned the pack's served ids,
-  and a count of them, to any caller that named the pack id; each id is now
-  judged against the caller's clearance first, as `get_items` judges a by-id
-  read. An id that fails is neither named nor counted, and a pack that served
-  only such ids reads as an unknown pack, which the check lets through. An id
-  whose label cannot be read is treated as unreadable. Not changed: a served
-  loser's own stored `superseded_by` still shows in its metadata and in
-  `GET /api/v1/documents`.
+  chunk's parent's), no longer counts as one: the loser is served. The served
+  items are the same with and without an unreadable successor among the
+  candidates. The pack's counters (`candidates_found`, `total`,
+  `by_reason.sensitivity`) still count that successor as a sensitivity
+  withholding, as for any hidden candidate. A served loser's own stored
+  `lifecycle.superseded_by` is dropped from the served copy when it names a
+  document the caller cannot read, in flat and sectioned packs and in
+  `GET /api/v1/documents/{id}`; the successor is judged by the store, never by
+  whether it matched the query, and the stored record is not rewritten. A
+  trusted caller, and a store with no labels, see no change. Not changed:
+  `GET /api/v1/search` and the rows of `GET /api/v1/documents` still return a
+  document's stored metadata. MCP `record_feedback` with
+  `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on
+  returned the pack's served ids, and a count of them, to any caller that named
+  the pack id; each id is now judged against the caller's clearance first, as
+  `get_items` judges a by-id read. An id that fails is neither named nor
+  counted, and a pack that served only such ids reads as an unknown pack, which
+  the check lets through. An id whose label cannot be read is treated as
+  unreadable.
 - **The steering text an MCP client reads now teaches the feedback call the
   learning loop can join.** The server `instructions`, the pack footer and the
   per-client setup snippets said "call `record_feedback`" without item ids,

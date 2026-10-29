@@ -23,6 +23,8 @@ from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
     OverwriteRefusedError,
+    conceal_document_successor,
+    conceal_unreadable_successors,
     conceal_withheld_ids,
     concealed_ids_metadata,
     partition_by_clearance,
@@ -625,6 +627,170 @@ class TestReadableIds:
         broken: Any = _Broken()
         assert readable_ids(broken, ["a", chunk_doc_id("p", 0)], "internal") == []
         assert readable_ids(broken, ["a"], "restricted") == ["a"]
+
+
+class TestConcealUnreadableSuccessors:
+    """A served loser's stored ``superseded_by`` is dropped when unreadable (#1029).
+
+    The store judges the successor, as a by-id read does, so the answer does not
+    depend on whether the successor matched the query.
+    """
+
+    @staticmethod
+    def _loser(successor: Any = "succ-doc", state: str = "superseded") -> PackItem:
+        return _item("loser-doc", _lifecycle(state, successor))
+
+    @staticmethod
+    def _successor_of(item: PackItem) -> Any:
+        return (item.metadata or {}).get(LIFECYCLE_KEY, {}).get("superseded_by")
+
+    def test_an_unreadable_successor_is_dropped_and_the_state_kept(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        loser = self._loser()
+        (out,) = conceal_unreadable_successors([loser], doc_store, "internal")
+        assert out.metadata[LIFECYCLE_KEY] == {"state": "superseded"}
+        assert out.item_id == "loser-doc"
+        assert out.excerpt == loser.excerpt
+
+    def test_it_is_copy_on_write(self, doc_store: SQLiteDocumentStore) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        shared = _lifecycle("superseded", "succ-doc")
+        loser = _item("loser-doc", shared)
+        other = _item("other-doc", shared)
+        out = conceal_unreadable_successors([loser, other], doc_store, "internal")
+        assert shared[LIFECYCLE_KEY]["superseded_by"] == "succ-doc"
+        assert self._successor_of(loser) == self._successor_of(other) == "succ-doc"
+        assert [self._successor_of(i) for i in out] == [None, None]
+
+    def test_the_store_judges_not_the_pool(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """The successor is not among the items at all, and is still judged."""
+        doc_store.put("succ-doc", "body", label("confidential"))
+        pool = [self._loser(), _item("other-doc")]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert [self._successor_of(i) for i in out] == [None, None]
+        kept = conceal_unreadable_successors(pool, doc_store, "confidential")
+        assert [self._successor_of(i) for i in kept] == ["succ-doc", None]
+
+    def test_a_chunk_successor_is_judged_by_its_parent(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("parent", "classified body", label("restricted"))
+        chunk_id = chunk_doc_id("parent", 0)
+        doc_store.put(chunk_id, "slice", {})
+        (out,) = conceal_unreadable_successors(
+            [self._loser(chunk_id)], doc_store, "internal"
+        )
+        assert self._successor_of(out) is None
+
+    @pytest.mark.parametrize("state", ["superseded", "archived", "current"])
+    def test_the_id_is_dropped_whatever_the_state(
+        self, doc_store: SQLiteDocumentStore, state: str
+    ) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        (out,) = conceal_unreadable_successors(
+            [self._loser(state=state)], doc_store, "internal"
+        )
+        assert out.metadata[LIFECYCLE_KEY] == {"state": state}
+
+    def test_a_store_error_reads_as_unreadable(self) -> None:
+        class _Broken:
+            def get(self, _doc_id: str) -> dict[str, Any]:
+                msg = "store down"
+                raise RuntimeError(msg)
+
+        broken: Any = _Broken()
+        (out,) = conceal_unreadable_successors([self._loser()], broken, "internal")
+        assert self._successor_of(out) is None
+
+    def test_restricted_reads_nothing_and_changes_nothing(self) -> None:
+        store = MagicMock()
+        pool = [self._loser(), _item("other-doc")]
+        out = conceal_unreadable_successors(pool, store, "restricted")
+        assert out == pool
+        assert all(a is b for a, b in zip(out, pool, strict=True))
+        store.get.assert_not_called()
+
+    def test_an_unlabelled_store_changes_nothing_at_any_clearance(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("succ-doc", "body", {})
+        pool = [self._loser(), _item("other-doc")]
+        for clearance in ("internal", "confidential", "restricted"):
+            out = conceal_unreadable_successors(pool, doc_store, clearance)  # type: ignore[arg-type]
+            assert all(a is b for a, b in zip(out, pool, strict=True))
+
+    def test_a_successor_with_no_row_is_no_verdict(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        (out,) = conceal_unreadable_successors([self._loser()], doc_store, "internal")
+        assert self._successor_of(out) == "succ-doc"
+
+    def test_no_store_means_no_verdict(self) -> None:
+        pool = [self._loser()]
+        out = conceal_unreadable_successors(pool, None, "internal")
+        assert out[0] is pool[0]
+
+    @pytest.mark.parametrize("value", [None, "", 7, ["succ-doc"], {"id": "succ-doc"}])
+    def test_a_value_that_names_no_id_is_left_as_stored(
+        self, doc_store: SQLiteDocumentStore, value: Any
+    ) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        pool = [self._loser(value)]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert out[0] is pool[0]
+
+    def test_an_item_with_no_lifecycle_record_is_passed_through(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        pool = [_item("plain"), _item("bad", {LIFECYCLE_KEY: "oops"})]
+        out = conceal_unreadable_successors(pool, doc_store, "internal")
+        assert all(a is b for a, b in zip(out, pool, strict=True))
+
+    def test_a_document_read_drops_an_unreadable_successor(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        doc_store.put("loser-doc", "old", _lifecycle("superseded", "succ-doc"))
+        stored = doc_store.get("loser-doc")
+        assert stored is not None
+        out = conceal_document_successor(stored, doc_store, "internal")
+        assert out["metadata"][LIFECYCLE_KEY] == {"state": "superseded"}
+        assert out["content"] == "old"
+        assert stored["metadata"][LIFECYCLE_KEY]["superseded_by"] == "succ-doc"
+        assert conceal_document_successor(stored, doc_store, "restricted") is stored
+
+    def test_a_document_read_keeps_a_readable_successor(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("succ-doc", "body", {})
+        doc_store.put("loser-doc", "old", _lifecycle("superseded", "succ-doc"))
+        stored = doc_store.get("loser-doc")
+        assert stored is not None
+        assert conceal_document_successor(stored, doc_store, "internal") is stored
+
+    def test_a_flat_and_a_sectioned_build_drop_it_end_to_end(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        doc_store.put("succ-doc", "body", label("restricted"))
+        pool = [self._loser(), _item("other-doc")]
+        flat = PackBuilder(
+            strategies=[_strategy("keyword", pool)], document_store=doc_store
+        ).build("deploy checklist", clearance="internal")
+        sectioned = PackBuilder(
+            strategies=[_strategy("keyword", pool)], document_store=doc_store
+        ).build_sectioned(
+            "deploy checklist",
+            clearance="internal",
+            sections=[SectionRequest(name="All")],
+        )
+        served = [*flat.items, *(i for s in sectioned.sections for i in s.items)]
+        assert [i.item_id for i in served] == ["loser-doc", "other-doc"] * 2
+        assert [self._successor_of(i) for i in served] == [None] * 4
+        assert self._successor_of(pool[0]) == "succ-doc", "the pool's item is unchanged"
 
 
 class TestConcealedIdsMetadata:

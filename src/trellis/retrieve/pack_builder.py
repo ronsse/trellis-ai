@@ -94,6 +94,7 @@ from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
     CandidateIndex,
+    conceal_unreadable_successors,
     concealed_ids_metadata,
     partition_by_clearance,
     reader_for,
@@ -1223,6 +1224,11 @@ class PackBuilder:
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A loser kept above still carries its stored ``superseded_by``: drop
+        # an id the caller cannot read from the served copy (#1029).
+        all_items = conceal_unreadable_successors(
+            all_items, self._document_store, clearance
+        )
 
         # The class-level serving prior runs after supersession is resolved,
         # not inside the per-strategy loop above: applying it earlier let a
@@ -1637,6 +1643,11 @@ class PackBuilder:
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A kept loser's stored ``superseded_by`` is dropped when the caller
+        # cannot read the successor — see build() (#1029).
+        all_items = conceal_unreadable_successors(
+            all_items, self._document_store, clearance
+        )
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected, class_prior_forms = (
