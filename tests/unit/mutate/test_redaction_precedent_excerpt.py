@@ -649,6 +649,29 @@ class TestPrecedentNames:
         assert current is not None
         assert current["properties"]["name"] == "Reviewed title"
 
+    def test_a_source_name_alias_matches_on_its_key_or_its_raw_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        # The binding ENTITY_CREATE writes has raw_id == normalize(raw_name),
+        # so it cannot tell the two halves of the match apart. Here one alias
+        # carries only the key and another only a raw name that normalizes
+        # to it; each half alone must drop its alias.
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", body=self.BODY, source_named=True)
+        old_name = f"Learning: asset_generation :: {NAME_TEXT}"
+        old_key = normalize_entity_name(old_name)
+        graph.upsert_alias(precedent_id, "name", old_key, raw_name=None)
+        graph.upsert_alias(precedent_id, "name", "legacy-key", raw_name=old_name)
+        by_id = {a["raw_id"]: a["raw_name"] for a in graph.get_aliases(precedent_id)}
+        assert by_id == {old_key: None, "legacy-key": old_name}
+
+        _redact(registry, "doc-a")
+
+        assert graph.get_aliases(precedent_id, "name") == []
+        assert graph.resolve_alias("name", old_key) is None
+        assert graph.resolve_alias("name", "legacy-key") is None
+
     def test_a_name_alone_is_scrubbed_when_no_excerpt_was_copied(
         self, registry: StoreRegistry
     ) -> None:
