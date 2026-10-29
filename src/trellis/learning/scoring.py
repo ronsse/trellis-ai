@@ -1286,31 +1286,95 @@ def _promotion_content_unchanged(
     )
 
 
+def _edge_holds(
+    present: Sequence[Mapping[str, Any]], expected: Mapping[str, Any]
+) -> bool:
+    """Whether one of the edges at a ``(target, kind)`` carries ``expected``.
+
+    The node's rule applies: a key the edge has and the payload lacks does not
+    count, and a missing key reads as ``None``, so a backend that drops null
+    properties still matches.
+    """
+    return any(
+        all(
+            (edge.get("properties") or {}).get(key) == value
+            for key, value in expected.items()
+        )
+        for edge in present
+    )
+
+
+def _document_row_in_place(
+    entity_payload: Mapping[str, Any], *, document_store: DocumentStore | None
+) -> bool:
+    """Whether the precedent's document row is there with the text it would get.
+
+    ``PRECEDENT_PROMOTE`` writes the row beside the event, and keyword and
+    semantic retrieval serve that row, never the node, so a precedent without
+    one is unreachable by its own title. It writes one only for an id in the
+    promoted-precedent namespace and only when the name and description give it
+    text (``_write_precedent_document``); where it would write none, none is
+    expected. The text is compared as well as the row's presence, because a
+    retry after a changed description whose row write failed leaves the old row
+    and a node that already matches. Without a ``document_store`` the row cannot
+    be checked, which reads as missing.
+
+    A redaction's blank tombstone counts as in place: a redaction that blanked
+    the row and then failed to purge the node must not be undone by a re-run
+    writing the redacted text back.
+    """
+    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
+
+    properties = entity_payload["properties"]
+    expected = precedent_document_content(
+        entity_payload["name"], properties.get("description")
+    )
+    if not expected or not is_promoted_precedent_document(entity_payload["entity_id"]):
+        return True
+    if document_store is None:
+        return False
+    row = document_store.get(entity_payload["entity_id"])
+    if row is None:
+        return False
+    return is_redaction_tombstone(row) or row.get("content") == expected
+
+
 def _promotion_is_complete(
-    entity_id: str,
+    entity_payload: Mapping[str, Any],
     edge_payloads: Sequence[Mapping[str, Any]],
     *,
     graph_store: GraphStore,
     event_log: EventLog,
+    document_store: DocumentStore | None,
 ) -> bool:
-    """Whether every edge and the ``PRECEDENT_PROMOTED`` event are in place.
+    """Whether every edge, the document row and the promote event are in place.
 
-    A promotion whose edge or event did not land is ``promoted_incomplete``,
-    and running it again is how it is mended; skipping it as "already there"
-    would leave it half-written for good. The event is the one
-    ``get_lessons`` reads, and a miner's candidate row is not a promotion
+    A promotion whose edge, row or event did not land is
+    ``promoted_incomplete``, and running it again is how it is mended; skipping
+    it as "already there" would leave it half-written for good. An edge counts
+    only with the properties the payload names, so an edge whose sole change is
+    a property is written again. The event is the one ``get_lessons`` reads,
+    and a miner's candidate row is not a promotion
     (:func:`~trellis.retrieve.precedents.is_miner_candidate_event`).
     """
     from trellis.retrieve.precedents import is_miner_candidate_event  # noqa: PLC0415
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
 
-    present = {
-        (edge.get("target_id"), edge.get("edge_type"))
-        for edge in graph_store.get_edges(entity_id, direction="outgoing")
-    }
-    if any(
-        (edge["target_id"], edge["edge_kind"]) not in present for edge in edge_payloads
+    entity_id = entity_payload["entity_id"]
+    present: dict[tuple[Any, Any], list[Mapping[str, Any]]] = {}
+    for edge in graph_store.get_edges(entity_id, direction="outgoing"):
+        present.setdefault((edge.get("target_id"), edge.get("edge_type")), []).append(
+            edge
+        )
+    if not all(
+        _edge_holds(
+            present.get((edge["target_id"], edge["edge_kind"]), []),
+            edge["properties"],
+        )
+        for edge in edge_payloads
     ):
+        return False
+    if not _document_row_in_place(entity_payload, document_store=document_store):
         return False
     events = event_log.get_events(
         event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
@@ -1324,15 +1388,17 @@ def _pre_write_outcome(
     *,
     graph_store: GraphStore,
     event_log: EventLog | None,
+    document_store: DocumentStore | None,
 ) -> dict[str, Any] | None:
     """The outcome a submission answers before its first write, or ``None``.
 
     Two answers exist, both reached from one graph read: a refusal
     (:func:`_precedent_reapproval_refusal`) and ``already_promoted``. The
     second needs a current precedent that holds what the payload would write,
-    has every edge it names and has its promotion event. Without an
-    ``event_log`` the event cannot be checked, so nothing is skipped and the
-    write goes ahead.
+    has every edge it names (with the properties named), has its document row
+    and has its promotion event. Without an ``event_log`` the event cannot be
+    checked, so nothing is skipped and the write goes ahead; without a
+    ``document_store`` the same holds for a row the promotion would write.
 
     One function for the submission and its preview, so a dry run and a real
     run cannot disagree about a row.
@@ -1348,7 +1414,11 @@ def _pre_write_outcome(
         or existing_node.get("node_type") != "precedent"
         or not _promotion_content_unchanged(existing_node, entity_payload)
         or not _promotion_is_complete(
-            entity_id, edge_payloads, graph_store=graph_store, event_log=event_log
+            entity_payload,
+            edge_payloads,
+            graph_store=graph_store,
+            event_log=event_log,
+            document_store=document_store,
         )
     ):
         return None
@@ -1367,6 +1437,7 @@ def preview_learning_promotion(
     *,
     graph_store: GraphStore,
     event_log: EventLog | None,
+    document_store: DocumentStore | None,
 ) -> dict[str, Any] | None:
     """The refusal or ``already_promoted`` outcome a submission would answer.
 
@@ -1376,7 +1447,11 @@ def preview_learning_promotion(
     only once the executor runs.
     """
     return _pre_write_outcome(
-        entity_payload, edge_payloads, graph_store=graph_store, event_log=event_log
+        entity_payload,
+        edge_payloads,
+        graph_store=graph_store,
+        event_log=event_log,
+        document_store=document_store,
     )
 
 
@@ -1388,6 +1463,7 @@ def submit_learning_promotion(
     requested_by: str,
     graph_store: GraphStore,
     event_log: EventLog | None = None,
+    document_store: DocumentStore | None = None,
 ) -> dict[str, Any]:
     """Submit one approved promotion through the governed pipeline.
 
@@ -1419,13 +1495,16 @@ def submit_learning_promotion(
 
     **A precedent that already holds this promotion is skipped.** When the
     node is current, carries every value the payload would write (bar
-    ``approved_at``), has each edge named and has its ``PRECEDENT_PROMOTED``
-    event, the answer is ``"already_promoted"`` and nothing is written: no new
-    SCD-2 version, no second event. This is what makes running a decisions
-    file again safe after a run that landed some rows and refused others. A
-    changed payload, a missing edge or a missing event still writes, which is
-    also how a ``promoted_incomplete`` row is mended. Pass ``event_log`` for
-    this: without one the event cannot be checked and nothing is skipped.
+    ``approved_at``), has each edge named with its properties, has its document
+    row and has its ``PRECEDENT_PROMOTED`` event, the answer is
+    ``"already_promoted"`` and nothing is written: no new SCD-2 version, no
+    second event. This is what makes running a decisions file again safe after
+    a run that landed some rows and refused others. A changed payload, a
+    missing or changed edge, a missing document row or a missing event still
+    writes, which is also how a ``promoted_incomplete`` row is mended. Pass
+    ``event_log`` and ``document_store`` for this: without an ``event_log`` the
+    event cannot be checked, and without a ``document_store`` the row cannot
+    be, so nothing is skipped.
 
     After the entity + edges land, a governed ``PRECEDENT_PROMOTE`` is
     submitted so the promotion emits a ``PRECEDENT_PROMOTED`` event and
@@ -1436,7 +1515,11 @@ def submit_learning_promotion(
     from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
 
     early = _pre_write_outcome(
-        entity_payload, edge_payloads, graph_store=graph_store, event_log=event_log
+        entity_payload,
+        edge_payloads,
+        graph_store=graph_store,
+        event_log=event_log,
+        document_store=document_store,
     )
     if early is not None:
         return early

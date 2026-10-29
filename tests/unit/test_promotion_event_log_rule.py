@@ -1,4 +1,6 @@
-"""Every production call of ``submit_learning_promotion`` passes ``event_log=`` (#996).
+"""Every production call of ``submit_learning_promotion`` wires its stores (#996).
+
+Both ``event_log=`` and ``document_store=`` are passed, and not as ``None``.
 
 #983 made a re-run of a promotion file skip a row whose precedent already holds
 it, and #995 shipped that. The skip needs the event log to check that the
@@ -10,11 +12,17 @@ second promote event, which is the defect #983 removed. A caller that leaves the
 argument out raises nothing and reports ``promoted``, so the only thing that can
 notice it is a scan. All four production calls pass it today.
 
+``document_store=`` is the same shape of argument. The skip also checks that the
+precedent's document row is in place, which it can only do with the store;
+without one a row the promotion would write reads as missing, so every re-run
+writes again. The rule below holds for both keywords.
+
 One invariant, derived by AST over ``src/`` rather than from a list of known
 call sites (this repo has shipped rosters that rotted):
 
     Every call of ``submit_learning_promotion`` in ``src/`` passes
-    ``event_log=`` with a value that is statically not ``None``.
+    ``event_log=`` and ``document_store=``, each with a value that is
+    statically not ``None``.
 
 The predicate is the one :mod:`tests.unit.test_policy_gate_rule` uses for
 ``MutationExecutor(event_log=...)`` (#551), the same defect in a sibling
@@ -40,6 +48,8 @@ import ast
 import inspect
 from pathlib import Path
 
+import pytest
+
 from tests.ast_rules import (
     assert_hand_read_floor,
     assert_scan_is_not_vacuous,
@@ -57,6 +67,9 @@ _SUBJECT = "submit_learning_promotion"
 #: The keyword that lets the function check the promote event.
 _LOG_KWARG = "event_log"
 
+#: The keyword that lets the function check the precedent's document row.
+_STORE_KWARG = "document_store"
+
 
 def _src_root() -> Path:
     root = Path(__file__).resolve().parents[2] / "src"
@@ -64,12 +77,12 @@ def _src_root() -> Path:
     return root
 
 
-def _log_is_wired(node: ast.Call) -> bool:
-    """Is ``event_log=`` supplied here with a value that is statically not ``None``?"""
+def _is_wired(node: ast.Call, kwarg: str) -> bool:
+    """Is ``kwarg=`` supplied here with a value that is statically not ``None``?"""
     if any(kw.arg is None for kw in node.keywords):
         return False
     for kw in node.keywords:
-        if kw.arg != _LOG_KWARG:
+        if kw.arg != kwarg:
             continue
         return not any(
             isinstance(sub, ast.Constant) and sub.value is None
@@ -92,14 +105,18 @@ def _promotion_calls(tree: ast.AST) -> list[ast.Call]:
     return calls_to_any(construction_names(_SUBJECT, tree), tree)
 
 
-def unlogged_promotions(root: Path | None = None) -> list[str]:
-    """Calls under *root* that leave the re-run skip unable to check its event."""
+def unwired_promotions(kwarg: str, root: Path | None = None) -> list[str]:
+    """Calls under *root* that leave the re-run skip unable to check something.
+
+    ``kwarg`` is ``event_log`` (the promote event) or ``document_store`` (the
+    precedent's document row).
+    """
     found: list[str] = []
     for py_file, tree in iter_modules(root if root is not None else _src_root()):
         found.extend(
             f"{py_file.name}:{node.lineno}: {_snippet(node)}"
             for node in _promotion_calls(tree)
-            if not _log_is_wired(node)
+            if not _is_wired(node, kwarg)
         )
     return found
 
@@ -139,7 +156,7 @@ def bare_references(root: Path | None = None) -> list[str]:
 
 
 def test_every_promotion_call_in_src_passes_the_event_log() -> None:
-    violations = unlogged_promotions()
+    violations = unwired_promotions(_LOG_KWARG)
     assert not violations, (
         "submit_learning_promotion called without event_log= cannot check "
         "the PRECEDENT_PROMOTED event, so it skips nothing and writes every "
@@ -149,12 +166,24 @@ def test_every_promotion_call_in_src_passes_the_event_log() -> None:
     )
 
 
+def test_every_promotion_call_in_src_passes_the_document_store() -> None:
+    violations = unwired_promotions(_STORE_KWARG)
+    assert not violations, (
+        "submit_learning_promotion called without document_store= cannot "
+        "check the precedent's document row, so it skips nothing and writes "
+        "every row again on a re-run (#983, #996), and a legacy precedent "
+        "with no row is never given one. Pass "
+        "document_store=registry.knowledge.document_store.\n  "
+        + "\n  ".join(violations)
+    )
+
+
 def test_nothing_in_src_hands_the_function_on_unreadably() -> None:
     references = bare_references()
     assert not references, (
         "submit_learning_promotion is referenced somewhere other than a "
         "call, so a call to it may pass or omit event_log= where the scan "
-        "cannot see. Call it directly, or widen unlogged_promotions to follow "
+        "cannot see. Call it directly, or widen unwired_promotions to follow "
         "the reference and re-argue the rule.\n  " + "\n  ".join(references)
     )
 
@@ -190,8 +219,9 @@ def test_the_scan_finds_the_sites_it_is_meant_to_police() -> None:
     )
 
 
+@pytest.mark.parametrize("kwarg", [_LOG_KWARG, _STORE_KWARG])
 def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
-    tmp_path: Path,
+    tmp_path: Path, kwarg: str
 ) -> None:
     """The shared half of the guard, run through the shipped predicate.
 
@@ -202,9 +232,11 @@ def test_the_scan_sees_every_shape_in_the_shared_evasion_roster(
     not a call.
     """
     assert_scan_is_not_vacuous(
-        lambda root: [int(v.split(":")[1]) for v in unlogged_promotions(root=root)],
+        lambda root: [
+            int(v.split(":")[1]) for v in unwired_promotions(kwarg, root=root)
+        ],
         subject=_SUBJECT,
-        kwarg=_LOG_KWARG,
+        kwarg=kwarg,
         tmp_path=tmp_path,
         live_population=_population(),
         floor=_PROMOTION_FLOOR,
@@ -288,15 +320,62 @@ def test_the_scan_catches_every_known_evasion(tmp_path: Path) -> None:
     refs = [i for i, line in enumerate(lines, 1) if line.endswith("# REF")]
     assert len(expected) == 6, "the corpus lost a flagged line"
 
-    reported = sorted(int(v.split(":")[1]) for v in unlogged_promotions(root=tmp_path))
+    reported = sorted(
+        int(v.split(":")[1]) for v in unwired_promotions(_LOG_KWARG, root=tmp_path)
+    )
     assert reported == expected, (
-        f"unlogged_promotions reported {reported}, expected {expected}; "
+        f"unwired_promotions reported {reported}, expected {expected}; "
         f"missing={sorted(set(expected) - set(reported))} "
         f"spurious={sorted(set(reported) - set(expected))}"
     )
 
     found = sorted(int(v.split(":")[1]) for v in bare_references(root=tmp_path))
     assert found == refs, f"bare_references reported {found}, expected {refs}"
+
+
+_STORE_CORPUS = """
+from trellis.learning import submit_learning_promotion
+
+
+def omitted(ex, p, e, g, log):
+    return submit_learning_promotion(ex, p, e, graph_store=g, event_log=log)  # FLAG
+
+
+def explicit_none(ex, p, e, g, log):
+    return submit_learning_promotion(  # FLAG
+        ex, p, e, graph_store=g, event_log=log, document_store=None
+    )
+
+
+def conditional_none(ex, p, e, g, log, docs, flag):
+    return submit_learning_promotion(  # FLAG
+        ex, p, e, graph_store=g, event_log=log,
+        document_store=docs if flag else None,
+    )
+
+
+def ok_inline(ex, p, e, g, log, reg):
+    return submit_learning_promotion(
+        ex, p, e, graph_store=g, event_log=log,
+        document_store=reg.knowledge.document_store,
+    )
+"""
+
+
+def test_the_document_store_scan_flags_an_omitted_or_none_store(
+    tmp_path: Path,
+) -> None:
+    text = _STORE_CORPUS.lstrip("\n")
+    (tmp_path / "corpus.py").write_text(text, encoding="utf-8")
+    expected = [
+        i for i, line in enumerate(text.splitlines(), 1) if line.endswith("# FLAG")
+    ]
+    assert len(expected) == 3, "the corpus lost a flagged line"
+
+    reported = sorted(
+        int(v.split(":")[1]) for v in unwired_promotions(_STORE_KWARG, root=tmp_path)
+    )
+    assert reported == expected
 
 
 class TestTheRulePremiseStillHolds:
@@ -323,3 +402,21 @@ class TestTheRulePremiseStillHolds:
             "event_log is no longer keyword-only, so a caller can pass it "
             "positionally and this scan reads it as omitted"
         )
+
+    def test_the_document_store_parameter_is_keyword_only_and_defaults_to_none(
+        self,
+    ) -> None:
+        parameter = inspect.signature(submit_learning_promotion).parameters.get(
+            _STORE_KWARG
+        )
+        assert parameter is not None, (
+            f"submit_learning_promotion has no {_STORE_KWARG} parameter; the "
+            f"AST rule is matching a keyword that no longer exists"
+        )
+        assert parameter.default is None, (
+            "submit_learning_promotion now defaults document_store. If the "
+            "default is a real store, omission is no longer dangerous and the "
+            "document_store half of this rule should be re-argued; if the "
+            "parameter became required, the type checker has taken its job."
+        )
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

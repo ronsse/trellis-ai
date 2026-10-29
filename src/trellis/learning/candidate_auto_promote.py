@@ -917,7 +917,9 @@ def run_candidate_auto_promotion(
     ``document_store`` is read-only here: a committed promotion embeds a
     bounded excerpt of its source document (see
     :func:`~trellis.learning.scoring.build_learning_promotion_payloads`),
-    and with ``None`` it simply carries none.
+    and with ``None`` it simply carries none. It is also what lets a re-run
+    check that a promoted precedent's own document row is in place, so a
+    row without one is written again rather than skipped.
 
     Raises:
         ValueError: If the effective mode is ``"commit"`` but no
@@ -1017,6 +1019,7 @@ def run_candidate_auto_promotion(
             requested_by=requested_by,
             graph_store=graph_store,
             event_log=event_log,
+            document_store=document_store,
         )
         if submission.get("status") == "promoted":
             promotions_committed += 1
