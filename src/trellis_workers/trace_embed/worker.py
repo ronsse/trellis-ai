@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.document_write import TOMBSTONE_OVERWRITE_CODE
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mutate.commands import CommandStatus
@@ -119,6 +120,14 @@ class TraceEmbedReport:
     #: every retry, so holding the watermark behind it forever would
     #: re-reject the same row every pass without ever making progress.
     skipped_invalid: int = 0
+    #: Rows whose summary id was redacted (#1034): the write seam refuses an
+    #: unflagged write over a redaction tombstone, and this worker carries no
+    #: re-ingest flag because bringing a redacted id back is the owner's
+    #: decision. The refusal is the same on every retry, so the pass advances
+    #: past the row (see ``_process_one``) instead of pinning the watermark.
+    #: Not part of ``status`` or the CLI exit code: a redaction honoured is
+    #: the pass doing its job, not a gap in it.
+    skipped_redacted: int = 0
     failed: int = 0
     stopped_early: bool = False
     #: More traces remained after ``max_scan`` cut this pass. Reported, not
@@ -148,6 +157,7 @@ class TraceEmbedReport:
             "skipped_existing": self.skipped_existing,
             "skipped_empty": self.skipped_empty,
             "skipped_invalid": self.skipped_invalid,
+            "skipped_redacted": self.skipped_redacted,
             "failed": self.failed,
             "stopped_early": self.stopped_early,
             "more_remaining": self.more_remaining,
@@ -459,7 +469,12 @@ def _process_one(
     already-embedded trace does. A trace whose summary id would have the
     minted chunk shape (a ``trace_id`` ending ``#chunk-<digits>``) is
     classified the same way: evidence ingest refuses that id on every
-    attempt. Every other non-``SUCCESS`` result from the
+    attempt. A summary id that was redacted is refused by the write seam
+    (``redaction_tombstone_overwrite``, #1034) on every retry too, so it is
+    counted under ``skipped_redacted`` and returns ``True`` as well: holding
+    the cursor behind it would rescan the same oldest rows every pass, embed
+    nothing newer and eventually trip ``TraceEmbedScanLimitError``. Every
+    other non-``SUCCESS`` result from the
     executor is a plain failure: it holds the cursor, because nothing about
     it says the next attempt cannot succeed.
     """
@@ -500,7 +515,14 @@ def _process_one(
             created_at=trace.created_at.isoformat(),
         )
     )
-    if result.status is not CommandStatus.SUCCESS:
+    if result.status is CommandStatus.SUCCESS:
+        report.embedded += 1
+    elif (
+        result.status is CommandStatus.REJECTED
+        and result.metadata.get("rejection_reason") == TOMBSTONE_OVERWRITE_CODE
+    ):
+        report.skipped_redacted += 1
+    else:
         report.failed += 1
         report.failures.append(
             {
@@ -516,8 +538,6 @@ def _process_one(
             message=result.message,
         )
         return False
-
-    report.embedded += 1
     return True
 
 
@@ -532,6 +552,7 @@ def summarize(
         total.skipped_existing += r.skipped_existing
         total.skipped_empty += r.skipped_empty
         total.skipped_invalid += r.skipped_invalid
+        total.skipped_redacted += r.skipped_redacted
         total.failed += r.failed
         total.failures.extend(r.failures)
     return total.to_dict()

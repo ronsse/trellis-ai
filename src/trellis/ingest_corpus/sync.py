@@ -62,7 +62,7 @@ from trellis.classify.ingest import (
     classify_for_ingest,
     classify_on_ingest_enabled,
 )
-from trellis.core.document_write import put_document
+from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.hashing import content_hash
 from trellis.core.path_presence import (
     UnknownFileIdentity,
@@ -346,6 +346,7 @@ def sync_records(
         report.warnings.extend(record.warnings)
         outcome = _plan_record(
             doc_store,
+            report,
             doc_id=record.doc_id,
             source_key=record.source_key,
             content=record.content,
@@ -402,8 +403,14 @@ def sync_records(
     return report
 
 
+def _redaction_tombstone_warning(path: str, doc_id: str) -> dict[str, Any]:
+    """The report entry for a row the sync left alone because it is redacted."""
+    return {"kind": "redaction_tombstone", "path": path, "doc_id": doc_id}
+
+
 def _plan_record(
     doc_store: DocumentStore,
+    report: CorpusSyncReport,
     *,
     doc_id: str,
     source_key: str,
@@ -412,11 +419,21 @@ def _plan_record(
     current_ids: set[str],
     detect_moves: bool,
 ) -> FileOutcome:
-    """Decide new / update / skip / move for one record."""
+    """Decide new / update / skip / move for one record.
+
+    A row that is a redaction tombstone is **skipped, with a warning on
+    ``report``**, whatever the source says. Its blanked content never matches
+    the file's hash, so without this it planned as ``update`` and wrote the
+    redacted text straight back (#1034). Bringing the id back is a deliberate
+    act (``reingest_redacted`` on ``put_document``); a sync does not make it.
+    """
     chash = content_hash(content)
 
     existing = doc_store.get(doc_id)
     if existing is not None:
+        if is_redaction_tombstone(existing):
+            report.warnings.append(_redaction_tombstone_warning(source_key, doc_id))
+            return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
         if existing.get("content_hash") == chash:
             return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
         return FileOutcome(relpath=source_key, doc_id=doc_id, action="update")
@@ -540,11 +557,20 @@ def _apply_record(
             key: metadata[key] for key in CLASSIFY_METADATA_KEYS if key in metadata
         },
         mirror=mirror,
+        report=report,
     )
     for index in range(len(spans), old_chunk_count):
-        _delete_doc_and_vector(
-            doc_store, vector_store, chunk_doc_id(outcome.doc_id, index)
-        )
+        orphan_id = chunk_doc_id(outcome.doc_id, index)
+        # A redacted chunk is not an orphan to clean up: deleting its row loses
+        # the tombstone, and the file growing back would write the redacted
+        # text under the same id with nothing to refuse it (#1034).
+        orphan = doc_store.get(orphan_id)
+        if orphan is not None and is_redaction_tombstone(orphan):
+            report.warnings.append(
+                _redaction_tombstone_warning(outcome.relpath, orphan_id)
+            )
+            continue
+        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
     if not spans:
         run_embed_on_ingest(
             registry, outcome.doc_id, text, metadata, source=requested_by
@@ -613,6 +639,7 @@ def _write_chunks(
     requested_by: str,
     inherited_tags: dict[str, Any],
     mirror: _VectorMirrorTally,
+    report: CorpusSyncReport,
 ) -> int:
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
@@ -668,6 +695,11 @@ def _write_chunks(
     stale in content, excerpt and embedding as well, and freshening its tags
     alone would pair new tags with an old excerpt — a row that is internally
     inconsistent rather than merely old. ``reindex-vectors`` owns that case.
+
+    **A chunk whose stored row is a redaction tombstone is skipped, with a
+    warning on ``report``** (#1034). A redaction can name a chunk without its
+    parent, so the parent's own skip (:func:`_plan_record`) does not cover it,
+    and a blanked chunk always reads as changed text.
     """
     doc_store = registry.knowledge.document_store
     # Resolved here rather than passed in: `_apply_record` and
@@ -682,6 +714,9 @@ def _write_chunks(
         # One read serves all three staleness checks and the merge below —
         # do not split it into a second doc_store.get.
         existing = doc_store.get(cid)
+        if existing is not None and is_redaction_tombstone(existing):
+            report.warnings.append(_redaction_tombstone_warning(relpath, cid))
+            continue
         stored = _stored_metadata(existing)
         content_changed = existing is None or existing.get(
             "content_hash"

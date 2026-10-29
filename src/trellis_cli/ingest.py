@@ -12,7 +12,7 @@ import typer
 from rich.markup import escape
 
 from trellis.classify.ingest import classify_metadata_on_write
-from trellis.core.document_write import put_document
+from trellis.core.document_write import RedactionTombstoneError, put_document
 from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
@@ -213,6 +213,14 @@ def ingest_trace(
 @ingest_app.command("evidence")
 def ingest_evidence(
     file: str = typer.Argument(..., help="Path to evidence JSON file"),
+    reingest_redacted: bool = typer.Option(
+        False,
+        "--reingest-redacted",
+        help=(
+            "Write over a document id that a redaction blanked. Without it "
+            "the write is refused, so a redaction is not undone by accident."
+        ),
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
@@ -255,17 +263,27 @@ def ingest_evidence(
 
     # Persist to document store
     registry = _get_registry()
-    put_document(
-        registry.knowledge.document_store,
-        resolve_vector_store(registry),
-        evidence.evidence_id,
-        evidence.content or "",
-        {
-            "evidence_type": evidence.evidence_type,
-            "source_origin": evidence.source_origin,
-        },
-        preserve_updated_at=False,
-    )
+    try:
+        put_document(
+            registry.knowledge.document_store,
+            resolve_vector_store(registry),
+            evidence.evidence_id,
+            evidence.content or "",
+            {
+                "evidence_type": evidence.evidence_type,
+                "source_origin": evidence.source_origin,
+            },
+            preserve_updated_at=False,
+            reingest_redacted=reingest_redacted,
+        )
+    except RedactionTombstoneError as exc:
+        # Refused before anything was written; the id is still a tombstone.
+        _fail(
+            exc.message,
+            output_format,
+            error_type="ValidationError",
+            code=exc.code,
+        )
 
     if output_format == "json":
         emit_json(

@@ -76,6 +76,7 @@ rest of option B would buy, and #360 for the half that is still open.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -85,12 +86,71 @@ from trellis.core.vector_metadata import (
     VectorSyncOutcome,
     sync_vector_metadata_outcome,
 )
+from trellis.errors import ValidationError
+from trellis.schemas.classification import LIFECYCLE_KEY
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
+
+# The ``deprecation_reason`` a redaction's blanked document row carries.
+# ``retention.restore`` reads it back to recognise the tombstone
+# (:func:`is_redaction_tombstone`), and :func:`put_document` refuses to write
+# over one.
+REDACTION_TOMBSTONE_REASON = "redacted"
+
+#: The metadata key a flagged write over a tombstone stamps on the row: the ISO
+#: UTC time the redacted id was deliberately written again. Reserved to this
+#: module: :func:`put_document` refuses a bag that carries a value the stored
+#: row does not already hold, so only a flagged overwrite can mint one.
+REINGEST_STAMP_KEY = "reingested_after_redaction"
+
+#: ``RedactionTombstoneError.code`` for a write over a tombstone with no flag.
+TOMBSTONE_OVERWRITE_CODE = "redaction_tombstone_overwrite"
+#: ``RedactionTombstoneError.code`` for a bag that carries a re-ingest stamp the
+#: stored row does not.
+STAMP_RESERVED_CODE = "reingest_stamp_reserved"
+
+TOMBSTONE_OVERWRITE_MESSAGE = (
+    "the document was redacted and a write over it was refused; writing the "
+    "id again is deliberate, so set reingest_redacted (`trellis ingest "
+    "evidence --reingest-redacted`, or `execute_mutation` with "
+    "evidence.reingest_redacted=true)"
+)
+STAMP_RESERVED_MESSAGE = (
+    f"metadata.{REINGEST_STAMP_KEY} is reserved; it is written only by a "
+    "write that sets reingest_redacted over a redaction tombstone"
+)
+
+
+class RedactionTombstoneError(ValidationError):
+    """A write was refused because of a redaction tombstone.
+
+    Two causes, told apart by ``code``: a content write over a tombstone with
+    no ``reingest_redacted`` (:data:`TOMBSTONE_OVERWRITE_CODE`), and a bag that
+    carries the reserved re-ingest stamp (:data:`STAMP_RESERVED_CODE`). A
+    :class:`~trellis.errors.ValidationError`, so the executor reports it as a
+    structured rejection under ``code`` and every surface that already
+    reports a rejected write reports this one.
+    """
+
+
+def is_redaction_tombstone(doc: dict[str, Any]) -> bool:
+    """Whether a document row is the blank archived row a redaction leaves.
+
+    Both halves are required. The reason alone is a free-text field that
+    ``retention.archive`` and ``retention.prune`` take from the caller, so an
+    ordinary archived note whose reason reads "redacted" must stay
+    restorable; a tombstone is also empty (a redaction writes it blank).
+    """
+    record = (doc.get("metadata") or {}).get(LIFECYCLE_KEY)
+    return (
+        isinstance(record, dict)
+        and record.get("deprecation_reason") == REDACTION_TOMBSTONE_REASON
+        and not doc.get("content")
+    )
 
 
 @dataclass(frozen=True)
@@ -107,6 +167,44 @@ class DocumentWriteResult:
     mirror: VectorSyncOutcome
 
 
+def _guard_tombstone(
+    stored: dict[str, Any] | None,
+    content: str,
+    metadata: dict[str, Any],
+    *,
+    reingest_redacted: bool,
+) -> dict[str, Any]:
+    """The bag to write: refuses a forged stamp and an unflagged overwrite.
+
+    ``stored`` is the row read once before the write. Returns ``metadata``
+    itself unless this is a flagged overwrite, where it is a copy carrying the
+    stamp, so the caller hands that one object to both planes.
+    """
+    held = (stored or {}).get("metadata")
+    held_bag: dict[str, Any] = held if isinstance(held, dict) else {}
+    if REINGEST_STAMP_KEY in metadata and (
+        REINGEST_STAMP_KEY not in held_bag
+        or metadata[REINGEST_STAMP_KEY] != held_bag[REINGEST_STAMP_KEY]
+    ):
+        raise RedactionTombstoneError(STAMP_RESERVED_MESSAGE, code=STAMP_RESERVED_CODE)
+    # An unflagged write passes only when the row it leaves is still a
+    # tombstone (a second redaction, a metadata write that keeps the lifecycle
+    # stamp). A blank write that drops the stamp, or one that replaces it with
+    # another state, would unmark the row, and the next unflagged write would
+    # then pass the guard as if nothing had been redacted.
+    if (
+        stored is None
+        or not is_redaction_tombstone(stored)
+        or is_redaction_tombstone({"content": content, "metadata": metadata})
+    ):
+        return metadata
+    if not reingest_redacted:
+        raise RedactionTombstoneError(
+            TOMBSTONE_OVERWRITE_MESSAGE, code=TOMBSTONE_OVERWRITE_CODE
+        )
+    return {**metadata, REINGEST_STAMP_KEY: datetime.now(UTC).isoformat()}
+
+
 def put_document(
     document_store: DocumentStore,
     vector_store: VectorStore | None,
@@ -115,6 +213,7 @@ def put_document(
     metadata: dict[str, Any],
     *,
     preserve_updated_at: bool,
+    reingest_redacted: bool = False,
 ) -> DocumentWriteResult:
     """Write a document row and mirror it onto the vector row.
 
@@ -162,12 +261,45 @@ def put_document(
             forces a declaration; it cannot check that the declaration is
             right, which is left to the caller's own recency test where one
             exists.
+        reingest_redacted: Say that this write is meant to bring a redacted id
+            back. **The default is the safe answer**, unlike
+            ``preserve_updated_at``: a content write over a redaction
+            tombstone (:func:`is_redaction_tombstone`) is refused with a
+            :class:`RedactionTombstoneError` unless this is set, because a
+            redaction is only as good as the next write to its id (#1034; a
+            corpus re-sync did exactly that). An unflagged write passes only
+            if the row it writes is still a tombstone: a second redaction, or
+            a metadata write that keeps the blank content and the lifecycle
+            stamp. A blank write that drops or replaces the stamp would
+            unmark the row, so it is refused like a content write. The check
+            is read-then-write, not atomic: a redaction that lands between
+            the ``get`` and the ``put`` can still be overwritten, and a
+            failing ``get`` fails the write closed. When set over a
+            tombstone, the row is written with
+            ``metadata[REINGEST_STAMP_KEY]`` = now, the provenance promotion
+            reads (:func:`trellis.learning.scoring._reingested_after`); a
+            bag that already carries that key with a value the stored row does
+            not hold is refused, so an ordinary write cannot forge it. The
+            stamp is not carried forward: a write that rebuilds the bag drops
+            it, and a re-redaction clears it. Setting this on a row that is
+            not a tombstone changes nothing.
 
     Returns:
         A :class:`DocumentWriteResult`. Never raises for a mirror failure;
         a *document*-store failure propagates, because that write is the
         authoritative one and a caller must not read a lost write as done.
+
+    Raises:
+        RedactionTombstoneError: The write is over a tombstone without
+            ``reingest_redacted``, or the bag carries a re-ingest stamp the
+            stored row does not. Raised before anything is written.
     """
+    metadata = _guard_tombstone(
+        document_store.get(doc_id),
+        content,
+        metadata,
+        reingest_redacted=reingest_redacted,
+    )
     document_store.put(
         doc_id, content, metadata, preserve_updated_at=preserve_updated_at
     )
@@ -187,4 +319,13 @@ def put_document(
     return DocumentWriteResult(doc_id=doc_id, mirror=outcome)
 
 
-__all__ = ["DocumentWriteResult", "put_document"]
+__all__ = [
+    "REDACTION_TOMBSTONE_REASON",
+    "REINGEST_STAMP_KEY",
+    "STAMP_RESERVED_CODE",
+    "TOMBSTONE_OVERWRITE_CODE",
+    "DocumentWriteResult",
+    "RedactionTombstoneError",
+    "is_redaction_tombstone",
+    "put_document",
+]
