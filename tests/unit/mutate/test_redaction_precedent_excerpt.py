@@ -31,8 +31,10 @@ from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import RedactionApplyHandler, create_curate_handlers
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.retrieve.precedents import list_precedents
+from trellis.retrieve.strategies import NamespaceSeedExtractor
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -147,7 +149,13 @@ def _redact(registry: StoreRegistry, target_id: str) -> dict[str, Any]:
 
 def _everything_stored(registry: StoreRegistry, node_id: str) -> str:
     graph = registry.knowledge.graph_store
-    return repr([graph.get_node(node_id), graph.get_node_history(node_id)])
+    return repr(
+        [
+            graph.get_node(node_id),
+            graph.get_node_history(node_id),
+            graph.get_aliases(node_id),
+        ]
+    )
 
 
 def _two_versions(registry: StoreRegistry, precedent_id: str) -> None:
@@ -572,6 +580,74 @@ class TestPrecedentNames:
         everything = _everything_stored(registry, precedent_id)
         assert NAME_TEXT not in everything
         assert COPIED_TEXT not in everything
+
+    def test_the_source_name_alias_goes_with_the_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        # ENTITY_CREATE binds a ``name`` alias whose raw_id and raw_name are
+        # the name, so the alias holds the source text the rename removes.
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", body=self.BODY, source_named=True)
+        graph.upsert_alias(precedent_id, "ext", "ext-1", raw_name="External label")
+        old_name = f"Learning: asset_generation :: {NAME_TEXT}"
+        old_key = normalize_entity_name(old_name)
+        assert [a["raw_name"] for a in graph.get_aliases(precedent_id, "name")] == [
+            old_name
+        ]
+        resolved = graph.resolve_alias("name", old_key)
+        assert resolved is not None
+        assert resolved["entity_id"] == precedent_id
+
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.REDACTION_APPLY,
+                args={"target_id": "doc-a", "reason": "owner request"},
+            )
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert NAME_TEXT not in _everything_stored(registry, precedent_id)
+        assert NAME_TEXT.lower() not in repr(graph.get_aliases(precedent_id)).lower()
+        assert graph.resolve_alias("name", old_key) is None
+        # Not the discriminating line: seeding already skips an alias whose
+        # node was renamed. Pinned so a change to that check cannot reopen it.
+        assert NamespaceSeedExtractor(graph).extract(old_name) == []
+        # An alias from another system carries no source-derived name.
+        assert [
+            (a["source_system"], a["raw_id"]) for a in graph.get_aliases(precedent_id)
+        ] == [("ext", "ext-1")]
+
+    def test_an_earlier_source_name_alias_goes_when_the_name_has_changed(
+        self, registry: StoreRegistry
+    ) -> None:
+        # A rename binds the new name and leaves the old alias, so the alias
+        # of a source-derived name outlives the version that held the name.
+        graph = registry.knowledge.graph_store
+        _node(registry, "doc-a")
+        precedent_id = _promote(registry, "doc-a", body=self.BODY, source_named=True)
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        graph.upsert_node(
+            precedent_id,
+            node["node_type"],
+            {**node["properties"], "name": "Reviewed title", "name_source": "reviewer"},
+            document_ids=node.get("document_ids") or None,
+        )
+        graph.upsert_alias(
+            precedent_id, "name", "reviewed title", raw_name="Reviewed title"
+        )
+        assert len(graph.get_aliases(precedent_id, "name")) == 2
+
+        _redact(registry, "doc-a")
+
+        assert NAME_TEXT not in _everything_stored(registry, precedent_id)
+        assert [a["raw_name"] for a in graph.get_aliases(precedent_id, "name")] == [
+            "Reviewed title"
+        ]
+        current = graph.get_node(precedent_id)
+        assert current is not None
+        assert current["properties"]["name"] == "Reviewed title"
 
     def test_a_name_alone_is_scrubbed_when_no_excerpt_was_copied(
         self, registry: StoreRegistry

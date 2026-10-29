@@ -1139,6 +1139,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A redaction scrub of a precedent drops the name alias of its source-text
+  name (#1030).** `entity.create` binds a `name` alias whose `raw_id` and
+  `raw_name` are the name, and the scrub restored aliases verbatim, so
+  `get_aliases` and `resolve_alias("name", ...)` kept answering with the first
+  line of the redacted document after the node itself had been renamed. The
+  scrub now drops a `name` alias bound for any version's source-derived name
+  (the same `name_may_hold_source_text` test it applies to the name; a rename
+  leaves the earlier alias in place, so every version counts). Aliases bound
+  for a title or a reviewer's name, and aliases from other systems, are
+  restored as before. The neutral name is not bound in its place, and a
+  precedent scrubbed before this change keeps whatever alias it already has:
+  once renamed it no longer matches, so a re-run finds nothing to key on.
+
 - **`promote-learning` no longer writes a redacted precedent back (#1019).**
   `redaction.apply` purges a promoted precedent's node, so a re-run of
   `trellis curate promote-learning`, `review-ready --approve`,
