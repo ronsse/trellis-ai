@@ -128,14 +128,31 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         top_k: int = 10,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Return the ``top_k`` stored rows most similar to ``vector``.
+
+        Only rows of the query's own width are scored. A cosine between two
+        widths is undefined, and a row of another width reaching ``np.dot``
+        raised ``ValueError`` and failed the whole query (and with it every
+        semantic pack). The width filter runs in SQL, so a row of another
+        width is not read at all.
+
+        The skip is silent, on purpose: counting what was skipped is a second
+        full scan of ``vectors`` (there is no index on ``dimensions``), a cost
+        paid on every query to report a state that is not an error, so no
+        per-query warning reports it. A query whose width matches no stored
+        row returns ``[]``.
+        """
         query_vec = np.array(vector, dtype=np.float32)
         query_norm = float(np.linalg.norm(query_vec))
         if query_norm == 0.0:
             return []
 
-        # Push metadata filters to SQL where possible
-        where_parts: list[str] = []
-        params: list[Any] = []
+        # Push metadata filters to SQL where possible. The width test comes
+        # first and is not a caller filter: it is what makes the dot product
+        # below well defined. No index backs it, and none is needed — the
+        # brute-force scoring that follows reads every surviving row anyway.
+        where_parts: list[str] = ["dimensions = ?"]
+        params: list[Any] = [int(query_vec.shape[0])]
         complex_filters: dict[str, Any] = {}
 
         if filters:
@@ -148,9 +165,10 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
                 else:
                     complex_filters[key] = value
 
-        sql = "SELECT item_id, vector_blob, metadata_json FROM vectors"
-        if where_parts:
-            sql += " WHERE " + " AND ".join(where_parts)
+        sql = (
+            "SELECT item_id, vector_blob, metadata_json FROM vectors WHERE "
+            + " AND ".join(where_parts)
+        )
 
         rows = self._conn.execute(sql, params).fetchall()
 

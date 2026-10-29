@@ -321,6 +321,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A SQLite vector row of another width no longer fails every semantic query
+  (#1058).** `SQLiteVectorStore.upsert` stores a vector of any width, so an
+  embedder swap, or a `POST /api/v1/vectors` write at a different width, leaves
+  rows of two widths in one store. `query` scored every row, and one row whose
+  width differed from the query's raised `ValueError` out of the dot product:
+  a semantic-only build failed with `PackAssemblyError`, and a multi-strategy
+  build lost its semantic axis (recorded under `strategy_failures`). `query` now
+  scores only rows of the query's own width, filtered in SQL so the others are
+  not read. The skip is silent: counting the skipped rows is a second full scan
+  of `vectors`, so no per-query warning reports it, and a query whose width
+  matches no stored row returns `[]`. Rows of a single width rank exactly as
+  before.
+
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
   number (or is above the staleness threshold with no `importance_scored_at`),

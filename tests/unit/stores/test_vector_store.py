@@ -94,3 +94,104 @@ def test_upsert_refuses_a_non_finite_metadata_value(
         vector_store.upsert("v1", [1.0, 0.0], {"score": float("inf")})
     assert vector_store.get("v1") is None
     assert vector_store.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Rows of more than one width in one store
+# ---------------------------------------------------------------------------
+
+_WIDE = 8
+
+
+def _wide(*lead: float) -> list[float]:
+    """An 8-wide vector whose first components are ``lead``."""
+    return [*lead, *([0.0] * (_WIDE - len(lead)))]
+
+
+@pytest.fixture
+def mixed_store(vector_store: SQLiteVectorStore) -> SQLiteVectorStore:
+    """Three 8-wide rows and two 3-wide rows, interleaved on insert."""
+    vector_store.upsert("w1", _wide(1.0), {"cat": "x"})
+    vector_store.upsert("n1", [1.0, 0.0, 0.0], {"cat": "x"})
+    vector_store.upsert("w2", _wide(0.9, 0.1), {"cat": "y"})
+    vector_store.upsert("n2", [0.0, 1.0, 0.0], {"cat": "y"})
+    vector_store.upsert("w3", _wide(0.0, 0.0, 1.0), {"cat": "x"})
+    return vector_store
+
+
+def test_query_scores_only_rows_of_the_query_width(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    results = mixed_store.query(_wide(1.0), top_k=10)
+
+    assert [r["item_id"] for r in results] == ["w1", "w2", "w3"]
+    assert results[0]["score"] > results[1]["score"] > results[2]["score"]
+
+
+def test_a_narrow_query_returns_the_narrow_rows(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    results = mixed_store.query([1.0, 0.0, 0.0], top_k=10)
+
+    assert [r["item_id"] for r in results] == ["n1", "n2"]
+
+
+def test_a_mixed_store_ranks_one_width_as_a_store_of_only_that_width_does(
+    mixed_store: SQLiteVectorStore, tmp_path: Path
+) -> None:
+    alone = SQLiteVectorStore(tmp_path / "alone.db")
+    try:
+        alone.upsert("w1", _wide(1.0), {"cat": "x"})
+        alone.upsert("w2", _wide(0.9, 0.1), {"cat": "y"})
+        alone.upsert("w3", _wide(0.0, 0.0, 1.0), {"cat": "x"})
+
+        assert mixed_store.query(_wide(1.0, 0.2), top_k=2) == alone.query(
+            _wide(1.0, 0.2), top_k=2
+        )
+    finally:
+        alone.close()
+
+
+def test_a_query_of_a_width_no_row_has_returns_nothing(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    assert mixed_store.query([1.0, 0.0, 0.0, 0.0, 0.0], top_k=10) == []
+
+
+def test_a_store_holding_only_another_width_returns_nothing(
+    vector_store: SQLiteVectorStore,
+) -> None:
+    vector_store.upsert("n1", [1.0, 0.0, 0.0])
+    vector_store.upsert("n2", [0.0, 1.0, 0.0])
+
+    assert vector_store.query(_wide(1.0), top_k=10) == []
+
+
+def test_the_width_test_composes_with_scalar_and_complex_filters(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    # A scalar filter is pushed to SQL beside the width test; a list value is
+    # not, so it runs Python-side over the rows the width test let through.
+    scalar = mixed_store.query(_wide(1.0), top_k=10, filters={"cat": "x"})
+    assert [r["item_id"] for r in scalar] == ["w1", "w3"]
+
+    mixed_store.upsert("w4", _wide(0.5, 0.5), {"tags": ["a", "b"]})
+    mixed_store.upsert("n3", [0.5, 0.5, 0.0], {"tags": ["a", "b"]})
+    complex_ = mixed_store.query(_wide(1.0), top_k=10, filters={"tags": ["a", "b"]})
+    assert [r["item_id"] for r in complex_] == ["w4"]
+
+
+def test_replacing_a_row_at_another_width_moves_it_between_queries(
+    mixed_store: SQLiteVectorStore,
+) -> None:
+    mixed_store.upsert("w2", [0.9, 0.1, 0.0])
+
+    assert [r["item_id"] for r in mixed_store.query(_wide(1.0), top_k=10)] == [
+        "w1",
+        "w3",
+    ]
+    assert {r["item_id"] for r in mixed_store.query([1.0, 0.0, 0.0], top_k=10)} == {
+        "n1",
+        "n2",
+        "w2",
+    }
