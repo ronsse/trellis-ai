@@ -1087,6 +1087,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`promote-learning`: a re-run no longer skips a precedent whose edge
+  properties or document row differ (#996).** The #983 skip counted a row
+  complete when each named edge existed and the promote event was there, so an
+  edge whose only change was a property, and a legacy precedent with its event
+  but no document row, were reported `already_promoted` and left as they were.
+  The completeness check now compares the edge's properties (the node's rule:
+  a key the edge gained later is not compared, a missing key reads as `None`)
+  and requires the precedent's document row, with the text its name and
+  description give it, wherever `precedent.promote` writes one: an id in the
+  `precedent://learning/` namespace. A missing or stale row, or a changed edge
+  property, is written again, which restores the row. The check needs
+  `document_store=`, a new optional argument of `submit_learning_promotion` and
+  `preview_learning_promotion`, and without one a row the promotion would write
+  cannot be checked, so nothing is skipped. `promote-learning` (and its
+  `--dry-run` preview), `review-ready --approve`, `POST /learning/promotions`
+  and `auto-promote-candidates` pass it, and the call-site rule that pins
+  `event_log=` now pins `document_store=` too.
 - **Redaction no longer skips the chunks of a document whose own id looks like
   a minted chunk id, and a caller can no longer name one (#1008).**
   `is_chunk_doc_id` reads `<x>#chunk-<digits>` as a chunk, and nothing in the
