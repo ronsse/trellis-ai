@@ -141,6 +141,15 @@ All notable changes to Trellis will be documented in this file.
   as the latest; a session whose file never changes keeps its older join until a
   watermark reset parses it. `trellis analyze holdout` labels the funnel stage
   "first retrieval after a stop hook's feedback or a commit".
+- **`GET /classify/candidates` now requires an admin-scoped key (#1029).** The
+  listing serves the keyword and alias text the miners extract from every
+  document, hidden ones included, and the payloads carry no document ids, so a
+  read key's clearance cannot filter them row by row. Before, any read key could
+  read it; now it answers `403`, like the mine, dismiss, apply and revoke routes
+  beside it. `GET /classify/rules` stays read-scoped. The explorer's Tag rules
+  tab shows the dimmed "needs an admin-scoped key" note for a read key instead
+  of a red "Failed to load". The `trellis classify` miners are unchanged: they
+  read the local stores directly.
 
 ### Added
 
@@ -1187,6 +1196,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Small sensitivity-floor follow-ups (#1029, part of).** A re-promotion of a
+  precedent (`precedent.promote` over an existing row) no longer drops the row's
+  stored `data_classification` label: the row's metadata is rebuilt from the
+  node, which holds no label, so a labelled precedent read as `internal` again;
+  the stored label is now carried over verbatim, onto the vector row too when
+  embedding is on. `DocumentStore.list_documents` orders by `created_at DESC`
+  then `doc_id DESC` on both backends (it had no tiebreaker), so an
+  OFFSET-paged scan, such as `GET /documents` below `restricted`, no longer
+  repeats or skips rows that share a timestamp. The Memories tab disables Next
+  when the next page would sit past the offset ceiling that a key below
+  `restricted` is refused (400), instead of offering a click that fails. The
+  REST roster rule now follows a local bound to the registry or a plane of it
+  (`k = registry.knowledge; helper(k)`), also `registry.operational`; no route
+  was newly flagged. The `GET /documents` docstring no longer says the scan's
+  memory grows only with `limit`: with `include_chunks=true` the parent-verdict
+  cache holds one entry per distinct chunk parent scanned.
+
 - **A write over a redaction tombstone must be explicit (#1034).** A redacted
   document keeps its id as a blank archived row, and nothing stopped a later
   write from filling it again: `trellis corpus sync` did it on every run over an
@@ -1200,13 +1226,13 @@ All notable changes to Trellis will be documented in this file.
   stamps the row `reingested_after_redaction`. The guard reads the row, then
   writes: it is not atomic, so a redaction that lands between the two can still
   be overwritten, and a `get` that fails now fails the write closed
-  (deliberate; before, the write went ahead unchecked). A caller-supplied stamp is refused
-  (`reingest_stamp_reserved`). Promotion's re-ingest exemption (`refused_redacted`)
-  now needs that stamp, so a row put back by a raw write is no longer read as
-  the owner's re-ingest. The flag is `trellis ingest evidence
-  --reingest-redacted` and `evidence.reingest_redacted` on `evidence.ingest`;
-  MCP `save_memory`, `POST /api/v1/documents` and the dbt docs load carry none and
-  are refused. Corpus sync skips a tombstoned row or chunk and reports a
+  (deliberate; before, the write went ahead unchecked). A caller-supplied stamp
+  is refused (`reingest_stamp_reserved`). Promotion's re-ingest exemption
+  (`refused_redacted`) now needs that stamp, so a row put back by a raw write
+  is no longer read as the owner's re-ingest. The flag is `trellis ingest
+  evidence --reingest-redacted` and `evidence.reingest_redacted` on
+  `evidence.ingest`; MCP `save_memory`, `POST /api/v1/documents` and the dbt
+  docs load carry none and are refused. Corpus sync skips a tombstoned row or chunk and reports a
   `redaction_tombstone` warning instead of writing, and a file that shrinks no
   longer deletes a redacted chunk as an orphan (the file growing back would have
   recreated it with the redacted text). The refusals degrade cleanly on the

@@ -11,12 +11,15 @@ with no REST route, no UI, no audit trail. This module is the governed
 ``Operation.CLASSIFY_RULE_REVOKE`` (:mod:`trellis.mutate.handlers`).
 
 Mounted with the read scope only (see ``trellis_api/app.py``), same mixed-scope
-shape as ``policies.py`` / ``observations.py``: ``GET /classify/candidates``
-and ``GET /classify/rules`` are read-scoped; the four write/action routes
-(``POST /classify/candidates/mine``, ``POST /classify/rules``,
+shape as ``policies.py`` / ``observations.py``: ``GET /classify/rules`` is
+read-scoped; the other five routes (``GET /classify/candidates``,
+``POST /classify/candidates/mine``, ``POST /classify/rules``,
 ``DELETE /classify/rules/{kind}/{key}``, ``POST
 /classify/candidates/{id}/dismiss``) are individually elevated to admin via
 ``dependencies=[Depends(require_scope(SCOPE_ADMIN))]`` on the route itself.
+The candidate listing is admin because its payloads (``keyword``, ``alias``,
+``canonical``, ``notes``) are mined from every document, hidden ones included,
+and carry no document ids a read-time clearance filter could join on.
 
 ``GET /classify/candidates`` never mines — it only reads events an earlier
 CLI or ``POST /classify/candidates/mine`` run already emitted, deduped to
@@ -296,7 +299,10 @@ def _list_candidates(
     return rows
 
 
-@router.get("/classify/candidates")
+@router.get(
+    "/classify/candidates",
+    dependencies=[Depends(require_scope(SCOPE_ADMIN))],
+)
 def list_classify_candidates(
     limit: int = Query(
         _DEFAULT_EVENT_SCAN_LIMIT,

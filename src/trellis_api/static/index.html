@@ -5622,6 +5622,9 @@
         //  MEMORIES (documents)
         // ============================================================
         let memOffset = 0;
+        // Mirrors _MAX_FILTERED_OFFSET in routes/explore.py: a key below the
+        // restricted scope gets a 400 for a list offset above it.
+        const MEM_FILTERED_OFFSET_CEILING = 10000;
 
         // The tagging pipeline writes the 4 retrieval-shaping facets to
         // metadata.content_tags (adr-terminology.md); `tags` is not a key
@@ -5689,7 +5692,11 @@
                 document.getElementById('mem-page-info').textContent =
                     `${fmtNum(memOffset + 1, 0)}–${fmtNum(memOffset + docs.length, 0)} of ${totalLabel}`;
                 document.getElementById('mem-prev').disabled = memOffset === 0;
-                document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
+                // An inexact total is the below-restricted list; its next page
+                // would sit past the ceiling and the server would refuse it.
+                const pastCeiling = !q && data.total_exact === false
+                    && memOffset + limit > MEM_FILTERED_OFFSET_CEILING;
+                document.getElementById('mem-next').disabled = memOffset + docs.length >= total || pastCeiling;
             } catch (err) {
                 body.innerHTML = `<tr><td colspan="5" class="text-danger" style="text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
             }
@@ -8073,7 +8080,11 @@
                 }
                 totalEl.textContent = `${rows.length} open candidate${rows.length === 1 ? '' : 's'} (${data.count ?? all.length} total mined)`;
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-danger">Failed to load candidates: ${escHtml(err.message)}</td></tr>`;
+                // The listing is admin-scoped (its text is mined from every
+                // document); the rules table beside it is not. A read key is
+                // routine, so a 403 dims to a note rather than reading red.
+                const cls = isAdminScopeError(err) ? 'text-dim' : 'text-danger';
+                tbody.innerHTML = `<tr><td colspan="7" class="${cls}">${escHtml(loadFailureText(err, 'Candidates'))}</td></tr>`;
             }
         }
 
