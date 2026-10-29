@@ -17,11 +17,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from tests.document_recency import fake_document_clock
+from tests.redaction_tombstone import make_tombstone
 from trellis.classify.feedback import apply_noise_tags
 from trellis.classify.ingest import (
     CLASSIFY_METADATA_KEYS,
     CLASSIFY_ON_INGEST_FLAG,
 )
+from trellis.core.document_write import is_redaction_tombstone
 from trellis.core.vector_metadata import (
     MIRRORED_METADATA_KEYS,
     vector_metadata_diverges,
@@ -1634,3 +1636,87 @@ class TestChunkRefreshPreservesRecency:
         # ...and an update of the content must move the row's own clock.
         assert after["updated_at"] == t1.isoformat()
         assert after["updated_at"] != t0.isoformat()
+
+
+class TestRedactionTombstones:
+    """A sync must not undo a redaction (#1034).
+
+    A tombstone's blanked content never matches its file's hash, so an
+    unchanged file planned as an update and wrote the redacted text back.
+    """
+
+    def test_an_unchanged_file_does_not_resurrect_a_redacted_note(
+        self, registry, vault
+    ):
+        """Defective subject: drop the ``_plan_record`` skip and the note's
+        text is written back by the next sync."""
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        docs = registry.knowledge.document_store
+        make_tombstone(docs, registry.knowledge.vector_store, doc_id)
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert is_redaction_tombstone(docs.get(doc_id))
+        assert docs.get(doc_id)["content"] == ""
+        assert {
+            "kind": "redaction_tombstone",
+            "path": "note-a.md",
+            "doc_id": doc_id,
+        } in report.warnings
+        assert report.counts()["ingested"] == 0
+        assert report.counts()["updated"] == 0
+
+    def test_an_edited_file_does_not_resurrect_a_redacted_note(self, registry, vault):
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        docs = registry.knowledge.document_store
+        make_tombstone(docs, registry.knowledge.vector_store, doc_id)
+        (vault / "note-a.md").write_text("Alpha content, edited after the redaction.\n")
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert is_redaction_tombstone(docs.get(doc_id))
+        assert [w["kind"] for w in report.warnings] == ["redaction_tombstone"]
+
+    def test_the_other_notes_still_sync(self, registry, vault):
+        sync_corpus(registry, vault, source_system="obsidian")
+        make_tombstone(
+            registry.knowledge.document_store,
+            registry.knowledge.vector_store,
+            corpus_doc_id("obsidian", "note-a.md"),
+        )
+        (vault / "sub" / "note-b.md").write_text("Beta content, revised.\n")
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert report.counts()["updated"] == 1
+        assert (
+            "revised"
+            in registry.knowledge.document_store.get(
+                corpus_doc_id("obsidian", "sub/note-b.md")
+            )["content"]
+        )
+
+    def test_a_redacted_chunk_is_skipped_when_its_parent_is_rewritten(
+        self, registry, vault
+    ):
+        """A redaction can name a chunk without its parent, so the parent's own
+        skip does not cover it."""
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        chunk_id = chunk_doc_id(parent_id, 0)
+        docs = registry.knowledge.document_store
+        make_tombstone(docs, registry.knowledge.vector_store, chunk_id)
+        (vault / "long.md").write_text(_long_markdown() + "\n\nA closing paragraph.\n")
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert is_redaction_tombstone(docs.get(chunk_id))
+        assert not is_redaction_tombstone(docs.get(parent_id))
+        assert {
+            "kind": "redaction_tombstone",
+            "path": "long.md",
+            "doc_id": chunk_id,
+        } in report.warnings

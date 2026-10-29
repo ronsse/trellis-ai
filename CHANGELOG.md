@@ -1187,6 +1187,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A write over a redaction tombstone must be explicit (#1034).** A redacted
+  document keeps its id as a blank archived row, and nothing stopped a later
+  write from filling it again: `trellis corpus sync` did it on every run over an
+  unchanged vault, because the blanked row never matched its file's hash.
+  `put_document` now refuses a non-blank write to a tombstone
+  (`redaction_tombstone_overwrite`; a blank write still passes) unless the
+  keyword-only `reingest_redacted` is set, and a flagged write stamps the row
+  `reingested_after_redaction`. A caller-supplied stamp is refused
+  (`reingest_stamp_reserved`). Promotion's re-ingest exemption (`refused_redacted`)
+  now needs that stamp, so a row put back by a raw write is no longer read as
+  the owner's re-ingest. The flag is `trellis ingest evidence
+  --reingest-redacted` and `evidence.reingest_redacted` on `evidence.ingest`;
+  MCP `save_memory`, `POST /api/v1/documents` and the dbt docs load carry none and
+  are refused. Corpus sync skips a tombstoned row or chunk and reports a
+  `redaction_tombstone` warning instead of writing. A command that does not set
+  the flag keeps its bytes and idempotency key.
+
 - **A redaction scrub of a precedent drops the name alias of its source-text
   name (#1030).** `entity.create` binds a `name` alias whose `raw_id` and
   `raw_name` are the name, and the scrub restored aliases verbatim, so
