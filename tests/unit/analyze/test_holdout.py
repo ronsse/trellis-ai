@@ -2239,9 +2239,7 @@ class TestArmBalanceR2:
     have unequal served shares, where they do not."""
 
     @staticmethod
-    def _reference(
-        strata: np.ndarray, covariate: np.ndarray, arm: np.ndarray
-    ) -> float:
+    def _reference(strata: np.ndarray, covariate: np.ndarray, arm: np.ndarray) -> float:
         """Demean the arm and the covariate inside each stratum, then take
         the R2 of the one-variable regression through the origin."""
         a = arm.astype(float).copy()
@@ -2270,8 +2268,7 @@ class TestArmBalanceR2:
             np.sum(
                 (
                     arm
-                    - design
-                    @ np.linalg.lstsq(design, arm.astype(float), rcond=None)[0]
+                    - design @ np.linalg.lstsq(design, arm.astype(float), rcond=None)[0]
                 )
                 ** 2
             )

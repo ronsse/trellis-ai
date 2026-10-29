@@ -165,6 +165,8 @@ NO_BOTH_ARM_STRATUM = "no stratum with both arms"
 
 _DAY_SECONDS = 86_400
 _RATE_TOLERANCE = 1e-9
+#: Below this within-stratum sum of squares the arm is taken not to vary.
+_ARM_SS_TOLERANCE = 1e-9
 #: Cap on one permutation block's cells, so memory stays flat at any N.
 _BLOCK_CELLS = 2_000_000
 #: Shifts tried when searching for the MDE at the target power.
@@ -2407,7 +2409,7 @@ def _arm_balance_r2(
         return float(np.sum((arm - columns @ beta) ** 2))
 
     within = residual_ss(stratum_columns)
-    if within <= 1e-9:
+    if within <= _ARM_SS_TOLERANCE:
         return 1.0
     return min(1.0, max(0.0, 1.0 - residual_ss(design) / within))
 
