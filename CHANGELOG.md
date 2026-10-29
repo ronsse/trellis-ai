@@ -36,6 +36,11 @@ All notable changes to Trellis will be documented in this file.
     rather than `trellis admin serve`, which mounts no MCP.
   - The shipped `retrieve-before-task`, `record-after-task` and `link-evidence`
     skills drop their "preview" status and banner and move to `1.2.0`.
+- **The `[llm-anthropic]` extra now admits the Anthropic SDK 2.x** (`anthropic>=1,<3`).
+  The adapter's request and response shapes were re-measured against 2.3.0:
+  `messages.create` still takes no sampling parameter, and the usage object still
+  carries both cache counters. The dev toolchain moves to `ruff==0.17.2`, mirrored
+  in `.pre-commit-config.yaml`.
 
 - **The holdout's `pre_treatment` rule now applies its commit half, and
   `post_hoc_share` is a figure.** The previous change recorded where the first
