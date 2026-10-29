@@ -321,6 +321,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`reclassify_item` leaves a redaction tombstone alone (#1064).** The batch
+  pass (`trellis classify backfill`) already skipped blank rows, so no shipped
+  command tagged a redacted row, but a direct call of the public
+  `reclassify_item` read the blank row, ran the pipeline over it and wrote the
+  result back: `put_document` lets an unflagged write through when the row it
+  leaves is still a tombstone, so the facets and `auto_importance` landed beside
+  the lifecycle stamp. `reclassify_item` now returns an unrefreshed outcome with
+  the new `REASON_TOMBSTONE` before it builds a context or runs the pipeline,
+  writing nothing and emitting no `TAGS_REFRESHED` event. In a batch, a row
+  redacted between the listing and the read is counted under
+  `skipped_missing_content`, as a blank row listed as blank already was, rather
+  than under `errors`.
+
 - **Graph reads omit evidence pointers to documents the caller cannot read.**
   Follows #1045: the same concealment, for the pointers a graph node carries. A
   node has no label, but the document ids it names can point at a document a
