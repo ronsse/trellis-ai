@@ -24,6 +24,7 @@ from trellis_api.routes._principal import (
     refuse_document_overwrite,
     request_clearance,
     resolve_requested_by,
+    stamp_request_sensitivity,
 )
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
@@ -251,7 +252,10 @@ def set_document_sensitivity(
 
 
 @router.post("/links")
-def create_link(req: LinkRequest) -> dict[str, Any]:
+def create_link(
+    req: LinkRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Create a graph edge between two entities."""
     cmd = Command(
         operation=Operation.LINK_CREATE,
@@ -266,10 +270,7 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:link",
     )
-    response = _execute_command(
-        cmd,
-        clearance="restricted",  # trusted: a link names no document
-    )
+    response = _execute_command(cmd, clearance=request_clearance(ctx))
     return {
         "status": "ok",
         "edge_id": response.created_id,
@@ -279,7 +280,10 @@ def create_link(req: LinkRequest) -> dict[str, Any]:
 
 
 @router.post("/entities")
-def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
+def create_entity(
+    req: EntityCreateRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Create an entity node in the knowledge graph."""
     args: dict[str, Any] = {
         "entity_type": req.entity_type,
@@ -294,10 +298,7 @@ def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
         target_type="entity",
         requested_by="api:entity",
     )
-    response = _execute_command(
-        cmd,
-        clearance="restricted",  # trusted: an entity write names no document
-    )
+    response = _execute_command(cmd, clearance=request_clearance(ctx))
     return {
         "status": "ok",
         "node_id": response.created_id,
@@ -313,7 +314,14 @@ def create_document(
 ) -> dict[str, Any]:
     """Write a document to the document store for FTS retrieval.
 
-    Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...}}``
+    Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...},
+    "sensitivity": "..."}``
+
+    An optional ``sensitivity`` labels the stored document, under the rules of
+    ``POST /evidence`` and MCP ``save_memory``: the key needs that clearance
+    itself (403 otherwise), and an unknown label, or a raw
+    ``data_classification`` in ``metadata``, is a 422. Nothing is written in
+    either case.
 
     A ``doc_id`` that already exists is refused (409) when the stored
     document's label is above the key's clearance, or above the label this
@@ -325,14 +333,20 @@ def create_document(
     # ``or {}`` not ``.get(..., {})``: an explicit ``"metadata": null`` is a
     # shape real clients send, and every consumer below wants a mapping.
     metadata = body.get("metadata") or {}
+    sensitivity = body.get("sensitivity")
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(status_code=400, detail="content is required")
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=422, detail="metadata must be an object")
+    if sensitivity is not None and not isinstance(sensitivity, str):
+        raise HTTPException(status_code=422, detail="sensitivity must be a string")
+    metadata = stamp_request_sensitivity(metadata, sensitivity, ctx=ctx)
     if isinstance(doc_id, str) and doc_id:
         refuse_document_overwrite(
             get_registry().knowledge.document_store,
             doc_id,
             ctx=ctx,
-            metadata=metadata if isinstance(metadata, dict) else None,
+            metadata=metadata,
         )
     command = build_evidence_ingest_command(
         doc_id=doc_id,
@@ -356,7 +370,10 @@ def create_document(
 
 
 @router.post("/feedback", response_model=CommandResponse)
-def record_feedback(req: FeedbackRequest) -> CommandResponse:
+def record_feedback(
+    req: FeedbackRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> CommandResponse:
     """Record feedback on a trace or precedent."""
     args: dict[str, object] = {"target_id": req.target_id, "rating": req.rating}
     if req.comment:
@@ -369,10 +386,7 @@ def record_feedback(req: FeedbackRequest) -> CommandResponse:
         target_id=req.target_id,
         requested_by="api:feedback",
     )
-    return _execute_command(
-        cmd,
-        clearance="restricted",  # trusted: feedback names no document
-    )
+    return _execute_command(cmd, clearance=request_clearance(ctx))
 
 
 @router.post("/packs/{pack_id}/feedback", response_model=PackFeedbackResponse)

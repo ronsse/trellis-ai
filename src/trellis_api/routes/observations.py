@@ -36,7 +36,8 @@ from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
 from trellis_api.app import get_registry
-from trellis_api.auth import require_scope
+from trellis_api.auth import AuthContext, authenticate, require_scope
+from trellis_api.routes._principal import request_clearance
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 logger = structlog.get_logger(__name__)
@@ -84,7 +85,10 @@ def _projected_node(node: dict[str, Any]) -> dict[str, Any]:
     dependencies=[Depends(require_scope(SCOPE_MUTATE))],
     responses={422: _BODY_422},
 )
-def record_observation(body: dict[str, Any]) -> dict[str, Any]:
+def record_observation(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Record an :class:`Observation` through the governed pipeline.
 
     Body shape: the full Observation Pydantic payload (see
@@ -100,10 +104,7 @@ def record_observation(body: dict[str, Any]) -> dict[str, Any]:
             detail=f"Invalid observation: {describe_validation_error(exc)}",
         ) from exc
 
-    executor = build_curate_executor(
-        get_registry(),
-        clearance="restricted",  # trusted: a graph-node write
-    )
+    executor = build_curate_executor(get_registry(), clearance=request_clearance(ctx))
     result = executor.execute(
         Command(
             operation=Operation.OBSERVATION_RECORD,
@@ -156,7 +157,10 @@ def list_observations(
     dependencies=[Depends(require_scope(SCOPE_MUTATE))],
     responses={422: _BODY_422},
 )
-def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
+def record_measurement(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Record a :class:`Measurement` through the governed pipeline."""
     try:
         meas = Measurement.model_validate(body)
@@ -166,10 +170,7 @@ def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
             detail=f"Invalid measurement: {describe_validation_error(exc)}",
         ) from exc
 
-    executor = build_curate_executor(
-        get_registry(),
-        clearance="restricted",  # trusted: a graph-node write
-    )
+    executor = build_curate_executor(get_registry(), clearance=request_clearance(ctx))
     result = executor.execute(
         Command(
             operation=Operation.MEASUREMENT_RECORD,

@@ -34,6 +34,7 @@ from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
     refuse_document_overwrite,
+    refuse_vector_write,
     request_clearance,
     resolve_requested_by,
     stamp_request_sensitivity,
@@ -73,7 +74,10 @@ router = APIRouter()
 
 
 @router.post("/traces", response_model=IngestResponse, responses={422: _BODY_422})
-def ingest_trace(body: dict[str, Any]) -> IngestResponse:
+def ingest_trace(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> IngestResponse:
     """Ingest a trace through the governed mutation pipeline."""
     try:
         trace = Trace.model_validate(body)
@@ -84,10 +88,7 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
         ) from exc
 
     registry = get_registry()
-    executor = build_curate_executor(
-        registry,
-        clearance="restricted",  # trusted: a trace write names no document
-    )
+    executor = build_curate_executor(registry, clearance=request_clearance(ctx))
     # Read before the write: the handler answers a stored trace_id as a
     # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
@@ -203,10 +204,21 @@ def ingest_evidence(
 
 
 @router.post("/vectors", responses={422: _BODY_422})
-def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
+def upsert_vectors(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Batch upsert vectors into the vector store.
 
     Body: ``{"vectors": [{"item_id": "...", "vector": [...], "metadata": {...}}, ...]}``
+
+    Every row is judged before any is written, so a refused batch stores
+    nothing. A row's ``metadata`` may not carry a raw ``data_classification``
+    (422): a vector row's label is mirrored from its document, never set here.
+    A row whose ``item_id`` is a document (or a chunk of one) above the key's
+    clearance is refused (409): replacing its vector row would replace what a
+    semantic hit shows and carries. A row whose ``item_id`` is not a string is
+    counted as an error, since an id the gate cannot read cannot be judged.
     """
     vectors = body.get("vectors", [])
     if not isinstance(vectors, list):
@@ -217,13 +229,23 @@ def upsert_vectors(body: dict[str, Any]) -> dict[str, Any]:
     if vector_store is None:
         raise HTTPException(status_code=501, detail="Vector store not configured")
 
+    document_store = registry.knowledge.document_store
+    for item in vectors:
+        item_id = item.get("item_id")
+        metadata = item.get("metadata", {})
+        # A raw label is refused whoever the caller is, as on ``/evidence``.
+        if isinstance(metadata, dict):
+            stamp_request_sensitivity(metadata, None, ctx=ctx)
+        if item_id and isinstance(item_id, str):
+            refuse_vector_write(document_store, item_id, ctx=ctx)
+
     upserted = 0
     errors = 0
     for item in vectors:
         item_id = item.get("item_id")
         vector = item.get("vector")
         metadata = item.get("metadata", {})
-        if not item_id or not vector:
+        if not item_id or not vector or not isinstance(item_id, str):
             errors += 1
             continue
         try:

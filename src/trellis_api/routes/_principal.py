@@ -23,6 +23,7 @@ from trellis.auth import clearance_of
 from trellis.core.elision import elide_text
 from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis.retrieve.sensitivity import (
+    DocumentClearance,
     OverwriteRefusedError,
     SensitivityLabelError,
     refuse_overwrite,
@@ -134,6 +135,41 @@ def refuse_document_overwrite(
         )
     except OverwriteRefusedError as exc:
         raise HTTPException(status_code=409, detail=exc.message) from exc
+
+
+def refuse_vector_write(
+    document_store: DocumentStore,
+    item_id: str,
+    *,
+    ctx: AuthContext,
+) -> None:
+    """Raise 409 when a vector write would touch a document above clearance (#1029).
+
+    A vector row mirrors its document's label and carries the excerpt a
+    semantic hit shows, so replacing the row of a document the key may not read
+    is a write to that document's retrieval, whether or not it stores any text.
+    ``item_id`` is judged as every read surface judges a document id: a chunk id
+    by the higher of its own label and its parent's, whether or not its own row
+    exists, and an unreadable parent as above clearance. An id that names no
+    document at all is no verdict (the route stores vectors for ids that are not
+    documents). The route has no "missing document" answer to give, so the
+    refusal is the overwrite refusal (409) and, like it, tells a key that the id
+    exists.
+    """
+    clearance = request_clearance(ctx)
+    if clearance == "restricted":
+        return
+    existing = document_store.get(item_id)
+    if not DocumentClearance(document_store, clearance).permits(
+        item_id, existing.get("metadata") if existing is not None else None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"document {item_id!r} is above this credential's clearance; "
+                "nothing was written"
+            ),
+        )
 
 
 def stamp_request_sensitivity(

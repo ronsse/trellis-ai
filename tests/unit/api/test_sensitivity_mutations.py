@@ -242,11 +242,11 @@ class TestClassificationViaBatchAndRoute:
             json={
                 "doc_id": "fresh",
                 "content": BODY,
-                "metadata": label("restricted"),
+                "sensitivity": "restricted",
             },
             headers=_headers(registry, MUTATE),
         )
-        assert resp.status_code == 400, resp.text
+        assert resp.status_code == 403, resp.text
         assert registry.knowledge.document_store.get("fresh") is None
 
     def test_the_documents_route_lets_a_restricted_key_create_one(
@@ -257,7 +257,7 @@ class TestClassificationViaBatchAndRoute:
             json={
                 "doc_id": "fresh",
                 "content": BODY,
-                "metadata": label("restricted"),
+                "sensitivity": "restricted",
             },
             headers=_headers(registry, MUTATE_RESTRICTED),
         )

@@ -64,7 +64,12 @@ LEFT_OUT = "left-out"
 EXECUTOR_CALL = "build_curate_executor"
 
 GATE_CALLS = frozenset(
-    {"request_clearance", "refuse_document_overwrite", "stamp_request_sensitivity"}
+    {
+        "request_clearance",
+        "refuse_document_overwrite",
+        "refuse_vector_write",
+        "stamp_request_sensitivity",
+    }
 )
 
 #: Hand read: a ``no-document-content`` route that passes the registry to a
@@ -83,9 +88,7 @@ HANDS_REGISTRY = frozenset(
 #: ``GET /classify/candidates`` mines keywords from every document, so it shows
 #: derived text a below-clearance key should not see. Left out of the gate for
 #: now, like graph entity names; remove the entry when it is gated.
-KNOWN_GAPS = frozenset(
-    {"classify_rules:list_classify_candidates", "ingest:upsert_vectors"}
-)
+KNOWN_GAPS = frozenset({"classify_rules:list_classify_candidates"})
 
 ROSTER: dict[str, str] = {
     "admin:health": ADMIN,  # GET /health
@@ -139,7 +142,7 @@ ROSTER: dict[str, str] = {
     "health:readyz": FREE,  # GET /readyz
     "ingest:ingest_trace": FREE,  # POST /traces
     "ingest:ingest_evidence": GATED,  # POST /evidence
-    "ingest:upsert_vectors": LEFT_OUT,  # POST /vectors
+    "ingest:upsert_vectors": GATED,  # POST /vectors
     "ingest:ingest_bulk": FREE,  # POST /ingest/bulk
     "mutations:execute_batch": MUTATION,  # POST /commands/batch
     "observations:record_observation": MUTATION,  # POST /observations

@@ -6,6 +6,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The sensitivity floor covers the REST write routes it missed (#194; part of
+  #1029).** `POST /api/v1/documents` takes an optional `sensitivity`
+  (403 above the key's clearance, 422 for an unknown label, a non-string one or
+  a raw `data_classification` in `metadata`, nothing written), through the helper
+  `POST /evidence` uses; a non-object `metadata` is now a 422 where it was a
+  500. `POST /api/v1/vectors` refuses a row whose `item_id` is a document (or a
+  chunk of one) above the key's clearance with a 409, judges every row before
+  writing any so a refused batch stores nothing, refuses a raw
+  `data_classification` in a row's `metadata` (422), and counts a non-string
+  `item_id` as an error; the route is no longer a known gap in the roster rule.
+  `POST /links`, `/entities`, `/feedback`, `/traces`, `/observations` and
+  `/measurements` build their executor at the key's clearance, not at
+  `restricted`. The `POST /evidence` overwrite refusal keeps naming the document
+  id, and the new `/vectors` refusal does the same; both are documented as the
+  accepted posture in the operations guide. A raw `data_classification` in
+  `metadata` on `POST /documents` is now a 422 for every caller: a label has one
+  door, `sensitivity`.
 - **A document's `sensitivity` label is enforced on writes (#194, part 2; closes
   #1023).** A new governed `classification.set` operation relabels a document
   as a metadata-only write (`updated_at` preserved, vector row re-mirrored); the
