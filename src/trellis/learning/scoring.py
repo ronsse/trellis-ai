@@ -43,6 +43,7 @@ from trellis.schemas.classification import (
     lifecycle_state_of,
 )
 from trellis.schemas.parameters import ParameterScope
+from trellis.schemas.well_known import normalize_entity_name
 
 if TYPE_CHECKING:
     from trellis.mutate import MutationExecutor
@@ -133,8 +134,11 @@ NAME_SOURCE_REVIEWER = "reviewer"
 #: :func:`neutral_precedent_name`. Set on the node only.
 NAME_SOURCE_NEUTRAL = "neutral"
 
-#: Markers that name no source text: a scrub keeps the name, and the
-#: precedent listing serves the promoted title.
+#: Markers the precedent listing serves as promoted on a node that a scrub left
+#: its name on. A scrub itself no longer keeps an ``item_title`` name: the
+#: redaction blanks the source's title, so :func:`name_may_hold_source_text`
+#: counts it as source-derived. ``item_title`` stays here only for a node
+#: scrubbed before that, which the listing still serves as promoted.
 NAME_SOURCES_WITHOUT_SOURCE_TEXT = frozenset(
     {NAME_SOURCE_ITEM_TITLE, NAME_SOURCE_ITEM_ID, NAME_SOURCE_REVIEWER}
 )
@@ -1061,10 +1065,25 @@ def neutral_precedent_name(entity_id: str, intent_family: object = None) -> str:
     return f"Learning: {family} :: {entity_id}" if family else entity_id or "precedent"
 
 
+#: The markers that name text copied from the source document. Shared with
+#: :func:`~trellis.retrieve.precedents.list_precedents`, which serves a neutral
+#: name for an event it marks with one of them when no node vouches for it.
+NAME_SOURCES_FROM_SOURCE = frozenset({NAME_SOURCE_SOURCE_TEXT, NAME_SOURCE_ITEM_TITLE})
+
+#: A distinctive part shorter than this does not refuse a longer name that
+#: merely contains it (:func:`_restores_earlier_name`): a short fragment appears
+#: in unrelated titles, and refusing on it would refuse almost any new title.
+_MIN_DISTINCTIVE_NAME_CHARS = 8
+
+
 def name_may_hold_source_text(properties: Mapping[str, Any], entity_id: str) -> bool:
     """Whether a precedent node's ``name`` may hold text from its source.
 
-    A marked name answers for itself. An unmarked one (promoted before names
+    A marked name answers for itself: the source's first line
+    (``source_text``) and the source's own title (``item_title``) both come
+    from the document, and a redaction blanks both its text and its title
+    (``_tombstone_document``), so a name copied from either is source text.
+    An unmarked one (promoted before names
     were marked) cannot be told from a title the item carried without the
     pack data that chose it, so it fails closed: it may hold source text
     unless it is already a bare-id name. A redaction renames such a name;
@@ -1074,7 +1093,7 @@ def name_may_hold_source_text(properties: Mapping[str, Any], entity_id: str) -> 
     """
     marker = properties.get("name_source")
     if marker is not None:
-        return bool(marker == NAME_SOURCE_SOURCE_TEXT)
+        return bool(marker in NAME_SOURCES_FROM_SOURCE)
     name = properties.get("name")
     if not isinstance(name, str) or not name.strip():
         return False
@@ -1446,8 +1465,6 @@ def _source_redacted(
     promoted after the redaction, or one that follows a legitimate promotion
     that erased the markers, is still caught.
     """
-    from trellis.ingest_corpus.models import chunk_parent_id  # noqa: PLC0415
-
     node_props = (existing_node or {}).get("properties")
     if (
         existing_node is not None
@@ -1459,17 +1476,95 @@ def _source_redacted(
         )
     ):
         return True
-    source_item_id = entity_payload["properties"].get("source_item_id")
-    if not isinstance(source_item_id, str) or not source_item_id.strip():
-        return False
-    source_ids = [source_item_id]
-    parent = chunk_parent_id(source_item_id)
-    if parent:
-        source_ids.append(parent)
     return any(
         _redaction_trace(source_id, event_log=event_log, document_store=document_store)
-        for source_id in source_ids
+        for source_id in _redactable_source_ids(entity_payload)
     )
+
+
+def _redactable_source_ids(entity_payload: Mapping[str, Any]) -> list[str]:
+    """The ids a redaction of the payload's source would have named.
+
+    The payload's ``source_item_id`` and, when that is a chunk id
+    (:func:`~trellis.ingest_corpus.models.chunk_parent_id`), its parent: a
+    redaction names the document it was asked about and tombstones its chunks
+    with it. Empty when the payload names no source.
+    """
+    from trellis.ingest_corpus.models import chunk_parent_id  # noqa: PLC0415
+
+    source_item_id = entity_payload["properties"].get("source_item_id")
+    if not isinstance(source_item_id, str) or not source_item_id.strip():
+        return []
+    parent = chunk_parent_id(source_item_id)
+    return [source_item_id, parent] if parent else [source_item_id]
+
+
+def _moment(value: object) -> datetime | None:
+    """``value`` as an aware datetime, or ``None`` when it is not one.
+
+    A store hands a timestamp back as a ``datetime`` or as its ISO string, and
+    a naive one is UTC.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _reingested_after(
+    entity_payload: Mapping[str, Any],
+    *,
+    event_log: EventLog | None,
+    document_store: DocumentStore | None,
+) -> datetime | None:
+    """When the payload's source was last redacted, if it was written again since.
+
+    ``put_document`` does not check for a tombstone, so a redacted id can come
+    back with new content. The answer is the time of the latest
+    ``REDACTION_APPLIED`` event naming the source, and only when all of these
+    hold, so that a state that merely looks like a re-ingest never reads as
+    one:
+
+    * the source's own document row is there and is not a redaction tombstone;
+    * no id the redaction named (:func:`_redactable_source_ids`) is still a
+      tombstone, so a chunk row left behind by a parent that is still blank
+      does not count;
+    * a ``REDACTION_APPLIED`` event names one of those ids. A live row alone
+      proves nothing, and a node's scrub markers with no event are not enough
+      to call the row new.
+
+    ``None`` otherwise, and without a ``document_store`` or an ``event_log``,
+    which is the cautious answer: it keeps the refusal.
+    """
+    from trellis.mutate.handlers import is_redaction_tombstone  # noqa: PLC0415
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    source_ids = _redactable_source_ids(entity_payload)
+    if not source_ids or document_store is None or event_log is None:
+        return None
+    row = document_store.get(source_ids[0])
+    if row is None or is_redaction_tombstone(row):
+        return None
+    for named_id in source_ids[1:]:
+        named = document_store.get(named_id)
+        if named is not None and is_redaction_tombstone(named):
+            return None
+    redacted_at: datetime | None = None
+    for source_id in source_ids:
+        for event in event_log.get_events(
+            event_type=EventType.REDACTION_APPLIED,
+            entity_id=source_id,
+            limit=1,
+            order="desc",
+        ):
+            moment = _moment(event.occurred_at)
+            if moment is not None and (redacted_at is None or moment > redacted_at):
+                redacted_at = moment
+    return redacted_at
 
 
 def _earlier_source_names(
@@ -1477,6 +1572,7 @@ def _earlier_source_names(
     *,
     graph_store: GraphStore,
     event_log: EventLog | None,
+    before: datetime | None = None,
 ) -> set[str]:
     """Names this precedent carried earlier that may have held source text.
 
@@ -1488,19 +1584,31 @@ def _earlier_source_names(
     has no ``intent_family`` of its own, so the payload's stands in; the bare-id
     shape it is compared with is built from that family and the event's
     ``source_item_id``.
+
+    ``before`` is the moment the source was redacted, given once it was written
+    again (:func:`_reingested_after`): a name the precedent took on after that
+    came from the new content, so only a version or an event at or before it
+    counts. A version or event with a timestamp that cannot be read counts.
     """
     from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    def in_time(moment: object) -> bool:
+        parsed = _moment(moment)
+        return before is None or parsed is None or parsed <= before
 
     entity_id = entity_payload["entity_id"]
     properties = entity_payload["properties"]
     candidates: list[dict[str, Any]] = [
         dict(version.get("properties") or {})
         for version in graph_store.get_node_history(entity_id)
+        if in_time(version.get("valid_from"))
     ]
     if event_log is not None:
         for event in event_log.get_events(
             event_type=EventType.PRECEDENT_PROMOTED, entity_id=entity_id
         ):
+            if not in_time(event.occurred_at):
+                continue
             payload = event.payload
             candidates.append(
                 {
@@ -1519,6 +1627,48 @@ def _earlier_source_names(
     }
 
 
+#: A name cut at its cap ends in the excerpt marker; a reviewer or an earlier
+#: tool may have typed the three-dot form instead.
+_TRAILING_ELLIPSIS_RE = re.compile(r"\s*(?:…|\.\.\.)\s*$")
+
+
+def _distinctive_name(name: str) -> str:
+    """The part of a precedent name that carries its source's text, normalised.
+
+    A derived name is ``Learning: <intent family> :: <text>``; the text after
+    that prefix is what identifies it, and a reviewer who edits the name keeps
+    it while changing the prefix. A name without the prefix is its own text.
+    A trailing ellipsis (``…`` or ``...``) is dropped: a first line cut at the
+    name cap ends in one, and a reviewer who completes the sentence has kept
+    the text without it. Normalised as
+    :func:`~trellis.schemas.well_known.normalize_entity_name` does (trimmed,
+    whitespace collapsed, case-folded), so a change of case or spacing does not
+    hide it.
+    """
+    head, separator, tail = name.partition(" :: ")
+    text = tail if separator and head.startswith("Learning:") else name
+    return normalize_entity_name(_TRAILING_ELLIPSIS_RE.sub("", text))
+
+
+def _restores_earlier_name(name: str, earlier: set[str]) -> bool:
+    """Whether ``name`` is, or carries, a name the precedent held earlier.
+
+    Equal to one of them, or containing the distinctive part
+    (:func:`_distinctive_name`) of one, which catches a stale name touched up
+    with an added suffix or a new prefix. A distinctive part under
+    :data:`_MIN_DISTINCTIVE_NAME_CHARS` normalised characters counts only on
+    exact equality, so an empty or one-word earlier name cannot refuse every
+    title that happens to contain it.
+    """
+    if name in earlier:
+        return True
+    key = normalize_entity_name(name)
+    return any(
+        len(part) >= _MIN_DISTINCTIVE_NAME_CHARS and part in key
+        for part in map(_distinctive_name, earlier)
+    )
+
+
 def _scrubbed_name_refusal(
     existing_node: Mapping[str, Any] | None,
     entity_payload: Mapping[str, Any],
@@ -1530,24 +1680,35 @@ def _scrubbed_name_refusal(
     """A refusal if the payload would put redacted source text on a precedent.
 
     Only when the payload's source was redacted (:func:`_source_redacted`) and
-    its name may hold text from that source, which is either of:
+    its name may hold text from that source, by either of two tests:
 
     * the payload itself says so, by the test the scrub applies when it decides
       what to rename (:func:`name_may_hold_source_text`): a candidate captured
-      before the redaction names the precedent from the source's first line, up
-      to 96 characters;
-    * the name equals one the precedent carried earlier that may have held
-      source text (:func:`_earlier_source_names`). A decisions file's
-      ``promotion_name`` is pre-filled with the derived name, so a file
-      filled in before the redaction restores it as a reviewer's title, which
-      the first test cannot tell from a new one. A new title still writes.
+      before the redaction names the precedent from the source's first line,
+      up to 96 characters, or from its title;
+    * the name is, or contains, one the precedent carried earlier that may have
+      held source text (:func:`_restores_earlier_name`, over
+      :func:`_earlier_source_names`). A decisions file's ``promotion_name`` is
+      pre-filled with the derived name, so a file filled in before the
+      redaction restores it as a reviewer's title, which the first test cannot
+      tell from a new one; an edit of that name keeps its text. A new title
+      still writes.
 
-    A candidate regenerated after the redaction, named from a title, a
-    reviewer or the bare id, writes. The excerpt does not come back either way,
-    since the source now reads as withheld. What no signal can catch is a
-    decisions file pre-filled before the redaction, paired with a regenerated
-    candidate for an id that was never promoted before: nothing then records
-    the old name. The message names the id and never the name.
+    **Which signal wins.** The source's own row decides whether the first test
+    applies. While the source is blank or gone (a tombstone, or a redaction
+    event with no row) both tests refuse. Once it was written again after the
+    redaction (:func:`_reingested_after`), a name derived from the *current*
+    content, and a reviewer's title, no longer refuse on the first test: only
+    the second does, over the names the precedent carried at or before the
+    redaction, so a name from before it stays refused and one it took on since
+    does not (a re-run of that promotion is ``already_promoted``, not a
+    refusal). A regenerated candidate yields the same name every time, so
+    without this the refusal's own remedy could never work. What neither test
+    can catch, with the source re-written or not: a pre-redaction name that
+    this precedent never carried (a stale decisions file paired with a
+    regenerated candidate for an id never promoted before, or, once the source
+    is re-written, a stale candidate for one), since nothing records the old
+    name. The message names the id and never the name.
     """
     if existing_node is not None and existing_node.get("node_type") != "precedent":
         return None
@@ -1559,21 +1720,35 @@ def _scrubbed_name_refusal(
     ):
         return None
     entity_id = entity_payload["entity_id"]
-    if not name_may_hold_source_text(
-        {**entity_payload["properties"], "name": entity_payload["name"]}, entity_id
-    ) and entity_payload["name"] not in _earlier_source_names(
-        entity_payload, graph_store=graph_store, event_log=event_log
+    name = entity_payload["name"]
+    reingested_after = _reingested_after(
+        entity_payload, event_log=event_log, document_store=document_store
+    )
+    holds_source_text = (
+        name_may_hold_source_text(
+            {**entity_payload["properties"], "name": name}, entity_id
+        )
+        and reingested_after is None
+    )
+    if not holds_source_text and not _restores_earlier_name(
+        name,
+        _earlier_source_names(
+            entity_payload,
+            graph_store=graph_store,
+            event_log=event_log,
+            before=reingested_after,
+        ),
     ):
         return None
     return {
         "status": REFUSED_REDACTED,
         "entity_id": entity_id,
         "message": (
-            f"{entity_id} was scrubbed by a redaction of its source, and this "
-            "candidate's name was taken from that source; it will not be "
-            "promoted again as it stands. Regenerate the candidate and its "
-            "decisions file, or clear the decision's promotion_name, so the "
-            "name no longer comes from the redacted text, and promote that"
+            f"{entity_id} cannot be promoted as it stands: its source was "
+            "redacted, and this candidate's name may hold text from that "
+            "source. Regenerate the candidate and its decisions file, and name "
+            "it in the decision's promotion_name if its title came from the "
+            "redacted document, then promote that"
         ),
     }
 
@@ -2148,6 +2323,7 @@ __all__ = [
     "LEARNING_PROMOTE_SUCCESS_KEY",
     "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
+    "NAME_SOURCES_FROM_SOURCE",
     "NAME_SOURCES_WITHOUT_SOURCE_TEXT",
     "NAME_SOURCE_NEUTRAL",
     "NAME_SOURCE_SOURCE_TEXT",
