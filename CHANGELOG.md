@@ -319,6 +319,24 @@ All notable changes to Trellis will be documented in this file.
   of a red "Failed to load". The `trellis classify` miners are unchanged: they
   read the local stores directly.
 
+### Fixed
+
+- **A malformed vector row no longer breaks the semantic axis (part of
+  #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
+  number (or is above the staleness threshold with no `importance_scored_at`),
+  or whose `content` / `excerpt` is not a string, and serves the rest. Before,
+  one such row, which any `ingest` key can write through `POST /api/v1/vectors`
+  for an id that names no document, raised while the pack item was built: a
+  single-strategy builder failed and a multi-strategy pack lost its whole
+  semantic axis. Each skip logs `semantic_row_skipped_malformed_metadata` at
+  `WARNING` with the item id, the field and the exception type, never the value.
+  The skip is not listed in the pack's withheld items: a strategy returns items
+  only and has no channel to them. `_apply_importance` still raises on a missing
+  stamp (the writer contract the keyword axis relies on); only the semantic
+  caller catches it, one row at a time. Rejecting such a row at write time is a
+  separate change. A non-numeric store score, or a string importance parameter
+  in the registry, is not a malformed row and still raises, as before.
+
 ### Added
 
 - **Trellis ships the loop as text for consumers that read no skill:
