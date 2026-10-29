@@ -1458,7 +1458,11 @@ def promote_learning_candidates(
     and unchanged comes back ``already_promoted`` and is written not at all,
     so re-submitting a decision (or a whole file) adds no version and no
     second ``PRECEDENT_PROMOTED`` event. A precedent a redaction already took
-    comes back ``refused_redacted`` and is not written back.
+    comes back ``refused_redacted`` and is not written back. So does a row
+    whose source document was redacted, when its name is one the redacted text
+    gave it: a candidate or a decision's ``promotion_name`` kept from before
+    the redaction. Regenerate the candidate (and clear that name) to promote
+    it again.
     """
     try:
         _, candidates_payload = _load_learning_candidates()
