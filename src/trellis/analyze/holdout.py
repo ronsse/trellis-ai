@@ -174,8 +174,8 @@ _PRE_TREATMENT_NOT_APPLIED = (
     "(joins written before capture recorded them, or no task reached the "
     "rule), so a first retrieval made after the work cannot be told apart."
 )
-#: The last tenth of a session's tool calls, as an integer comparison:
-#: ``ordinal / calls > 9 / 10``.
+#: The last tenth of a session's tool calls, as an integer comparison on the
+#: calls made before the retrieval: ``(ordinal - 1) / calls >= 9 / 10``.
 _LAST_TENTH_NUMERATOR = 9
 _LAST_TENTH_DENOMINATOR = 10
 _NON_EPHEMERAL_NOTE = (
@@ -1007,8 +1007,10 @@ def _post_hoc(
 ) -> bool | None:
     """Whether the first retrieval came after the work, or ``None`` if unknown.
 
-    After hook feedback, after the first commit, or in the last 10% of the
-    session's tool calls. It needs every position, so a join missing one is
+    After hook feedback, after the first commit, or with at least 90% of the
+    session's tool calls before it. Counting the calls before the retrieval,
+    not its own position, keeps a short session whose only call is the
+    retrieval from reading as late. It needs every position, so a join missing one is
     not measured: counting only the late ones among the rest would inflate
     the share. Keys are written by ``SessionDigest.retrieval_timing_payload``;
     the core library does not import the workers, so a contract test holds
@@ -1027,7 +1029,7 @@ def _post_hoc(
     return (
         after_hook
         or after_commit
-        or ordinal * _LAST_TENTH_DENOMINATOR > calls * _LAST_TENTH_NUMERATOR
+        or (ordinal - 1) * _LAST_TENTH_DENOMINATOR >= calls * _LAST_TENTH_NUMERATOR
     )
 
 

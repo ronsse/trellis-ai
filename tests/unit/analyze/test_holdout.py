@@ -1066,9 +1066,10 @@ class TestCommitHalfAndPostHoc:
             (10, 10, True),
             (18, 20, False),
             (19, 20, True),
-            (1, 1, True),
+            (1, 1, False),
             (5, 6, False),
-            (6, 6, True),
+            (6, 6, False),
+            (2, 2, False),
         ],
     )
     def test_the_last_tenth_of_the_calls_is_late(
