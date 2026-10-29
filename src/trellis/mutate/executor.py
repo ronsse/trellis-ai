@@ -225,6 +225,21 @@ class CommandHandler(Protocol):
         """
         ...
 
+    # Optional, not declared here so a handler without them still conforms:
+    # ``policy_scope_commands(command) -> list[Command]``, asked in Stage 2
+    # for what a command reaches beyond its own target.
+    #
+    # ``replay_refusal(command) -> ValidationError | None``, asked in Stage 3
+    # and only when the command's idempotency key was already seen (the
+    # in-memory cache or the event log). A handler whose write can be refused
+    # for a reason that arises *after* the first success (a redaction
+    # tombstone over the document that write put) returns the refusal it
+    # would have raised, so the replay is REJECTED instead of answered as a
+    # duplicate of a write that is no longer in place. It reads and never
+    # writes, and it is not asked on a miss, where ``handle`` runs and
+    # refuses for itself. A hook that raises fails the command closed
+    # (``idempotency_check_failed``), never as a duplicate.
+
 
 class MutationExecutor:
     """Executes commands through the governed write pipeline.
@@ -391,30 +406,8 @@ class MutationExecutor:
             # carries a stable ``reason`` (defaulting to "handler_validate"
             # if the handler didn't supply one via ValidationError.code).
             log.warning("handler_rejected", errors=exc.errors)
-            reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
-            summary = summarize_exception(exc)
-            audit = self._emit_rejection(
-                command,
-                reason=reason,
-                message=summary["message"],
-                policy_warnings=policy_warnings,
-                policy_scope_unevaluated=scope_unevaluated,
-                error_type=summary["error_type"],
-                error_code=summary["error_code"],
-                constraint=summary.get("constraint"),
-                cause=summary.get("cause"),
-            )
-            return CommandResult(
-                command_id=command.command_id,
-                status=CommandStatus.REJECTED,
-                operation=command.operation,
-                message=str(exc),
-                warnings=[
-                    *policy_warnings,
-                    *_handler_warnings(command),
-                    *_audit_warnings(audit),
-                ],
-                metadata={"rejection_reason": reason},
+            return self._validation_rejection(
+                command, exc, policy_warnings, scope_unevaluated
             )
         except PolicyViolationError as exc:
             # Handlers may evaluate row-level policies that the gate
@@ -587,6 +580,48 @@ class MutationExecutor:
                 *_handler_warnings(command),
                 *_audit_warnings(audit),
             ],
+        )
+
+    def _validation_rejection(
+        self,
+        command: Command,
+        exc: ValidationError,
+        policy_warnings: list[str],
+        scope_unevaluated: str | None,
+    ) -> CommandResult:
+        """The REJECTED result, and its ``mutation.rejected`` event, for a
+        :class:`ValidationError` refusal.
+
+        One body for the two places that produce one: a handler's ``handle``
+        raising it (Stage 4) and a handler's ``replay_refusal`` returning it
+        (Stage 3), so the audit event, the ``rejection_reason`` and the warnings
+        are the same whichever stage refused, and a reader of the event log
+        (``trellis analyze health``) or of a REST status needs no second case.
+        """
+        reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
+        summary = summarize_exception(exc)
+        audit = self._emit_rejection(
+            command,
+            reason=reason,
+            message=summary["message"],
+            policy_warnings=policy_warnings,
+            policy_scope_unevaluated=scope_unevaluated,
+            error_type=summary["error_type"],
+            error_code=summary["error_code"],
+            constraint=summary.get("constraint"),
+            cause=summary.get("cause"),
+        )
+        return CommandResult(
+            command_id=command.command_id,
+            status=CommandStatus.REJECTED,
+            operation=command.operation,
+            message=str(exc),
+            warnings=[
+                *policy_warnings,
+                *_handler_warnings(command),
+                *_audit_warnings(audit),
+            ],
+            metadata={"rejection_reason": reason},
         )
 
     def _check_policy(
@@ -820,11 +855,23 @@ class MutationExecutor:
         ``policy_warnings`` and ``scope_unevaluated`` are threaded in rather
         than recomputed: both results are outcomes reachable after Stage 2, so
         they carry them like every other one.
+
+        A hit is answered DUPLICATE unless the handler says the replay is
+        refused (:meth:`_replay_refused`), asked on a hit in both arms below
+        and never on a miss. Only a refusal the handler can see, such as a
+        redaction tombstone over the id the first write put, changes the
+        answer: a handler without a ``replay_refusal`` gets the DUPLICATE it
+        always did.
         """
         if not command.idempotency_key:
             return None
 
         if command.idempotency_key in self._seen_idempotency_keys:
+            refused = self._replay_refused(
+                command, log, policy_warnings, scope_unevaluated
+            )
+            if refused is not None:
+                return refused
             # Refresh recency so hot keys aren't evicted ahead of cold ones.
             self._seen_idempotency_keys.move_to_end(command.idempotency_key)
             message = f"Duplicate command: {command.idempotency_key}"
@@ -850,46 +897,21 @@ class MutationExecutor:
         # Check persisted events for cross-restart deduplication. The read
         # fails closed: running the handler without an answer could write
         # the command twice, which is what this stage exists to prevent. It
-        # catches what ``_emit_event`` catches from the same event log. The
-        # CommandResult names the exception's type only, not its text, as
-        # the typed store errors' CommandResult does (#702, #713); the
-        # audit event carries ``summarize_exception``'s sanitized summary
-        # instead, same as the typed and panic paths, so the stored event
-        # names more than the driver's class (the owner's requirement).
-        # Neither carries a traceback; if the rejection event cannot be
-        # written either, ``_emit_event`` logs that failure without one
-        # too, since this one is its context. The key is not recorded, so
-        # a retry once the event log recovers runs.
+        # catches what ``_emit_event`` catches from the same event log, and
+        # answers as :meth:`_idempotency_check_failed` describes.
         try:
             persisted = self._event_log.has_idempotency_key(command.idempotency_key)
         except _audit_emit_failure_classes() as exc:
-            result_message = f"Idempotency check failed: {type(exc).__name__}"
-            log.error(  # noqa: TRY400 — no traceback on purpose; see above
-                "idempotency_check_failed",
-                key=command.idempotency_key,
-                error_type=type(exc).__name__,
-            )
-            summary = summarize_exception(exc)
-            audit = self._emit_rejection(
-                command,
-                reason="idempotency_check_failed",
-                message=f"Idempotency check failed: {summary['message']}",
-                policy_warnings=policy_warnings,
-                policy_scope_unevaluated=scope_unevaluated,
-                error_type=summary["error_type"],
-                error_code=summary["error_code"],
-                constraint=summary.get("constraint"),
-                cause=summary.get("cause"),
-            )
-            return CommandResult(
-                command_id=command.command_id,
-                status=CommandStatus.FAILED,
-                operation=command.operation,
-                message=result_message,
-                warnings=[*policy_warnings, *_audit_warnings(audit)],
+            return self._idempotency_check_failed(
+                command, log, exc, policy_warnings, scope_unevaluated
             )
 
         if persisted:
+            refused = self._replay_refused(
+                command, log, policy_warnings, scope_unevaluated
+            )
+            if refused is not None:
+                return refused
             self._record_idempotency_key(command.idempotency_key)
             message = f"Duplicate command (persisted): {command.idempotency_key}"
             log.info("duplicate_command_persisted", key=command.idempotency_key)
@@ -909,6 +931,93 @@ class MutationExecutor:
             )
 
         return None
+
+    def _idempotency_check_failed(
+        self,
+        command: Command,
+        log: structlog.stdlib.BoundLogger,
+        exc: BaseException,
+        policy_warnings: list[str],
+        scope_unevaluated: str | None,
+    ) -> CommandResult:
+        """The FAILED result for a Stage 3 read that raised instead of answering.
+
+        Both the event log's ``has_idempotency_key`` and a handler's
+        ``replay_refusal`` end here, so neither failing can read as a duplicate
+        or let the handler run. The CommandResult names the exception's type
+        only, not its text, as the typed store errors' CommandResult does
+        (#702, #713); the audit event carries ``summarize_exception``'s
+        sanitized summary instead, same as the typed and panic paths, so the
+        stored event names more than the driver's class (the owner's
+        requirement). Neither carries a traceback; if the rejection event
+        cannot be written either, ``_emit_event`` logs that failure without
+        one too, since this one is its context. The key is not recorded, so a
+        retry once the read recovers runs.
+        """
+        result_message = f"Idempotency check failed: {type(exc).__name__}"
+        # No traceback on purpose (see the docstring).
+        log.error(
+            "idempotency_check_failed",
+            key=command.idempotency_key,
+            error_type=type(exc).__name__,
+        )
+        summary = summarize_exception(exc)
+        audit = self._emit_rejection(
+            command,
+            reason="idempotency_check_failed",
+            message=f"Idempotency check failed: {summary['message']}",
+            policy_warnings=policy_warnings,
+            policy_scope_unevaluated=scope_unevaluated,
+            error_type=summary["error_type"],
+            error_code=summary["error_code"],
+            constraint=summary.get("constraint"),
+            cause=summary.get("cause"),
+        )
+        return CommandResult(
+            command_id=command.command_id,
+            status=CommandStatus.FAILED,
+            operation=command.operation,
+            message=result_message,
+            warnings=[*policy_warnings, *_audit_warnings(audit)],
+        )
+
+    def _replay_refused(
+        self,
+        command: Command,
+        log: structlog.stdlib.BoundLogger,
+        policy_warnings: list[str],
+        scope_unevaluated: str | None,
+    ) -> CommandResult | None:
+        """The REJECTED result for a replay its handler refuses, else ``None``.
+
+        Asked of the handler through an optional ``replay_refusal`` method, as
+        Stage 2 asks for ``policy_scope_commands``, because only the handler
+        knows a reason the write would be refused now that did not hold when its
+        key first succeeded. A duplicate says the write is in place; over a
+        redaction tombstone it is not, and "ok" would be a lie about nothing
+        having been written. The refusal goes out as a handler's own does
+        (:meth:`_validation_rejection`), so the event and the status are
+        the ones a first write gets.
+
+        Called only on a hit, so a miss pays nothing. A hook that raises fails
+        closed (:meth:`_idempotency_check_failed`): not a duplicate, and the
+        handler does not run.
+        """
+        ask = getattr(self._handlers.get(command.operation), "replay_refusal", None)
+        if not callable(ask):
+            return None
+        try:
+            refusal = ask(command)
+        except _audit_emit_failure_classes() as exc:
+            return self._idempotency_check_failed(
+                command, log, exc, policy_warnings, scope_unevaluated
+            )
+        if refusal is None:
+            return None
+        log.warning("replay_refused", key=command.idempotency_key, reason=refusal.code)
+        return self._validation_rejection(
+            command, refusal, policy_warnings, scope_unevaluated
+        )
 
     def _emit_rejection(
         self,
