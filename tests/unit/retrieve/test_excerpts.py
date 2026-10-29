@@ -565,13 +565,13 @@ class TestPackBuilderContentFloor:
                 _floor_item("real", _SUBSTANTIVE_EXCERPT, score=0.6),
             ],
         )
-        pack = PackBuilder(strategies=[strategy]).build("q")
+        pack = PackBuilder(strategies=[strategy]).build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["real", "stub"]
 
     def test_terse_but_real_item_is_still_served(self) -> None:
         """The floor demotes; it must never silently delete short content."""
         strategy = _strategy("kw", [_floor_item("gotcha", _TERSE_BUT_REAL, score=0.5)])
-        pack = PackBuilder(strategies=[strategy]).build("q")
+        pack = PackBuilder(strategies=[strategy]).build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["gotcha"]
         assert pack.items[0].score_breakdown["content_floor_penalty"] == (
             DEFAULT_CONTENT_FLOOR_PENALTY
@@ -592,7 +592,7 @@ class TestPackBuilderContentFloor:
                 "kw", [_floor_item("gotcha", _TERSE_BUT_REAL, score=0.5)]
             )
             pack = PackBuilder(strategies=[strategy], content_floor=floor).build(
-                "q", budget=budget
+                "q", budget=budget, clearance="restricted"
             )
             return [item.item_id for item in pack.items]
 
@@ -611,7 +611,7 @@ class TestPackBuilderContentFloor:
             strategies=[strategy],
             content_floor=ContentFloorConfig(mode="exclude"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["real"]
         reasons = {r.item_id: r.reason for r in pack.retrieval_report.rejected_items}
         assert reasons == {"stub": "content_floor"}
@@ -627,7 +627,7 @@ class TestPackBuilderContentFloor:
         builder = PackBuilder(
             strategies=[strategy], content_floor=ContentFloorConfig(mode="off")
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["stub", "real"]
         assert pack.items[0].relevance_score == 1.0
 
@@ -645,7 +645,9 @@ class TestContentFloorTelemetry:
                     _floor_item("real", _SUBSTANTIVE_EXCERPT, score=0.6),
                 ],
             )
-            PackBuilder(strategies=[strategy], event_log=event_log).build("q")
+            PackBuilder(strategies=[strategy], event_log=event_log).build(
+                "q", clearance="restricted"
+            )
             payload = event_log.get_events(limit=10)[0].payload
             floor = payload["content_floor"]
             assert floor["mode"] == "penalize"
@@ -675,7 +677,7 @@ class TestContentFloorTelemetry:
                 event_log=event_log,
                 content_floor=ContentFloorConfig(mode="exclude"),
             )
-            builder.build("q")
+            builder.build("q", clearance="restricted")
             payload = event_log.get_events(limit=10)[0].payload
             assert payload["content_floor"]["excluded_item_ids"] == ["stub"]
             rejected = payload["rejected_items"]
@@ -705,7 +707,9 @@ class TestContentFloorTelemetry:
             content_floor=ContentFloorConfig(mode="exclude"),
         )
         sectioned = builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all", max_items=5, max_tokens=5000)]
+            "q",
+            sections=[SectionRequest(name="all", max_items=5, max_tokens=5000)],
+            clearance="restricted",
         )
         section = sectioned.sections[0]
         assert [item.item_id for item in section.items] == ["real"]
@@ -728,6 +732,7 @@ class TestContentFloorTelemetry:
             builder.build_sectioned(
                 "q",
                 sections=[SectionRequest(name="all", max_items=5, max_tokens=5000)],
+                clearance="restricted",
             )
             payload = event_log.get_events(limit=10)[0].payload
             assert payload["content_floor"]["penalized_item_ids"] == ["stub"]

@@ -23,6 +23,9 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.schemas.classification import (
+    Sensitivity,
+)
 from trellis.stores.base.api_key import ApiKeyRecord
 
 if TYPE_CHECKING:
@@ -42,8 +45,21 @@ SCOPE_MUTATE = "mutate"
 #: other scopes — see :func:`scopes_satisfy`.
 SCOPE_ADMIN = "admin"
 
+#: Clearance scopes (#194): not a surface, a ceiling on the sensitivity a
+#: caller may read or label. ``restricted`` implies ``confidential``; a key with
+#: neither reads documents up to ``internal``. ``admin`` holds both.
+SCOPE_CONFIDENTIAL = "confidential"
+SCOPE_RESTRICTED = "restricted"
+
 ALL_SCOPES: frozenset[str] = frozenset(
-    {SCOPE_READ, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_ADMIN}
+    {
+        SCOPE_READ,
+        SCOPE_INGEST,
+        SCOPE_MUTATE,
+        SCOPE_ADMIN,
+        SCOPE_CONFIDENTIAL,
+        SCOPE_RESTRICTED,
+    }
 )
 
 #: Leading marker on every Trellis API token. Lets log scrubbers and
@@ -64,7 +80,24 @@ def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
     if required not in ALL_SCOPES:
         msg = f"Unknown scope {required!r}; known scopes: {sorted(ALL_SCOPES)}"
         raise ValueError(msg)
+    if required == SCOPE_CONFIDENTIAL and SCOPE_RESTRICTED in granted:
+        return True
     return required in granted or SCOPE_ADMIN in granted
+
+
+def clearance_of(scopes: Iterable[str]) -> Sensitivity:
+    """The highest document sensitivity a credential's ``scopes`` may read.
+
+    ``admin`` or ``restricted`` gives ``restricted``; ``confidential`` gives
+    ``confidential``; anything else gives ``internal``. There is no ``public``
+    tier, so a caller never sees less than unlabelled content.
+    """
+    granted = frozenset(scopes)
+    if SCOPE_ADMIN in granted or SCOPE_RESTRICTED in granted:
+        return "restricted"
+    if SCOPE_CONFIDENTIAL in granted:
+        return "confidential"
+    return "internal"
 
 
 def hash_secret(secret: str) -> str:

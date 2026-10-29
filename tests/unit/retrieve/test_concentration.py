@@ -243,7 +243,9 @@ def test_pack_assembled_carries_parent_concentration(event_log: Any) -> None:
         strategies=[_FixedStrategy([_chunk(0), _chunk(1), _standalone(5)])],
         event_log=event_log,
     )
-    builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+    builder.build(
+        intent="loader retries", budget=PackBudget(max_items=10), clearance="restricted"
+    )
 
     payload = _assembled_payload(event_log)["parent_concentration"]
     assert payload["groups"] == 1
@@ -257,7 +259,9 @@ def test_concentration_present_on_a_clean_pack(event_log: Any) -> None:
         strategies=[_FixedStrategy([_standalone(i) for i in range(3)])],
         event_log=event_log,
     )
-    builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+    builder.build(
+        intent="loader retries", budget=PackBudget(max_items=10), clearance="restricted"
+    )
 
     payload = _assembled_payload(event_log)["parent_concentration"]
     assert payload["groups"] == 0
@@ -268,7 +272,9 @@ def test_concentration_does_not_change_what_is_served(event_log: Any) -> None:
     """The measurement is inert: the same pack, item for item."""
     items = [_chunk(i) for i in range(4)] + [_standalone(9)]
     builder = PackBuilder(strategies=[_FixedStrategy(items)], event_log=event_log)
-    pack = builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+    pack = builder.build(
+        intent="loader retries", budget=PackBudget(max_items=10), clearance="restricted"
+    )
 
     assert [item.item_id for item in pack.items] == [item.item_id for item in items]
 
@@ -283,7 +289,9 @@ def test_extras_demoted_by_disclosure_are_not_counted_as_bodies(
         event_log=event_log,
         disclosure=DisclosureConfig(body_items=2),
     )
-    builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+    builder.build(
+        intent="loader retries", budget=PackBudget(max_items=10), clearance="restricted"
+    )
 
     payload = _assembled_payload(event_log)["parent_concentration"]
     assert payload["extra_servings"] == 3

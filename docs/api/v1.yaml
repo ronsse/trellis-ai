@@ -4205,7 +4205,16 @@ paths:
       description: 'Write a document to the document store for FTS retrieval.
 
 
-        Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...}}``'
+        Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...}}``
+
+
+        A ``doc_id`` that already exists is refused (409) when the stored
+
+        document''s label is above the key''s clearance, or above the label this
+
+        write carries: a re-put replaces the row, so it must not destroy or
+
+        downgrade content the caller may not read.'
       operationId: create_document_api_v1_documents_post
       requestBody:
         content:
@@ -4237,7 +4246,12 @@ paths:
       - curate
   /api/v1/documents/{doc_id}:
     get:
-      description: Get a single document with full content and metadata.
+      description: 'Get a single document with full content and metadata.
+
+
+        A document labelled above the caller''s clearance answers 404, exactly
+
+        as a missing one does.'
       operationId: get_document_api_v1_documents__doc_id__get
       parameters:
       - in: path
@@ -4599,7 +4613,12 @@ paths:
       - explore
   /api/v1/evidence:
     post:
-      description: Ingest evidence.
+      description: 'Ingest evidence.
+
+
+        An ``evidence_id`` that already names a labelled document is refused (409):
+
+        the write carries no label, so it would replace the row and downgrade it.'
       operationId: ingest_evidence_api_v1_evidence_post
       requestBody:
         content:
@@ -6371,6 +6390,11 @@ paths:
   /api/v1/search:
     get:
       description: 'Full-text search across documents.
+
+
+        A document labelled above the caller''s clearance is left out of the
+
+        results (so a page can come back shorter than ``limit``).
 
 
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass

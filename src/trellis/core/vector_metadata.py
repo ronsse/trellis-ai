@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from trellis.errors import ConfigError
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
 
 if TYPE_CHECKING:
     from trellis.stores.base.vector import VectorStore
@@ -88,10 +88,18 @@ logger = structlog.get_logger(__name__)
 #:   at the collect seam, which reads ``item.metadata``: on the semantic axis
 #:   that *is* the vector row's snapshot, so an archival not mirrored here
 #:   keeps serving the item (#337).
+#:
+#: And the sensitivity label:
+#:
+#: * ``data_classification`` — read by the read gate at the collect seam
+#:   (:mod:`trellis.retrieve.sensitivity`), which on the semantic axis reads the
+#:   vector row's snapshot. A label written after the row was embedded is
+#:   resynced from here (#194).
 MIRRORED_METADATA_KEYS: tuple[str, ...] = (
     "content_tags",
     "auto_importance",
     LIFECYCLE_KEY,
+    DATA_CLASSIFICATION_KEY,
 )
 
 

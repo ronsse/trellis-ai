@@ -19,7 +19,7 @@ from trellis.core.vector_metadata import (
     vector_metadata_diverges,
 )
 from trellis.errors import ConfigError
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
 
@@ -49,13 +49,28 @@ class TestSyncedKeys:
         in ``mutate.handlers``, and a writer had to pick one. Merging them
         (#360) makes this tuple the whole answer to "what does a document
         write carry onto its vector row", so pinning it is pinning that the
-        two failures share one mechanism rather than two.
+        two failures share one mechanism rather than two. The sensitivity
+        label (#194) joins them: the read gate reads the row's snapshot on the
+        semantic axis, so a label written after embedding must be resyncable.
         """
         assert MIRRORED_METADATA_KEYS == (
             "content_tags",
             "auto_importance",
             LIFECYCLE_KEY,
+            DATA_CLASSIFICATION_KEY,
         )
+
+    def test_a_label_written_after_embedding_resyncs(
+        self, store: SQLiteVectorStore
+    ) -> None:
+        _seed(store)
+        label = {"sensitivity": "restricted", "classified_by": ["test"]}
+
+        assert sync_vector_metadata(store, "doc1", {DATA_CLASSIFICATION_KEY: label})
+
+        row = store.get("doc1")
+        assert row is not None
+        assert row["metadata"][DATA_CLASSIFICATION_KEY] == label
 
     def test_row_owned_keys_are_left_alone(self, store: SQLiteVectorStore) -> None:
         """``content`` / ``doc_id`` / ``created_at`` belong to the row.

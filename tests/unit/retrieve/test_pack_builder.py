@@ -40,7 +40,7 @@ def _item(item_id: str, score: float, excerpt: str = "text") -> PackItem:
 class TestPackBuilder:
     def test_build_with_no_strategies(self) -> None:
         builder = PackBuilder()
-        pack = builder.build("test query")
+        pack = builder.build("test query", clearance="restricted")
         assert pack.intent == "test query"
         assert pack.items == []
         assert pack.retrieval_report.queries_run == 0
@@ -48,7 +48,7 @@ class TestPackBuilder:
     def test_build_with_single_strategy(self) -> None:
         s = _make_strategy("keyword", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("search")
+        pack = builder.build("search", clearance="restricted")
         assert len(pack.items) == 2
         assert pack.items[0].item_id == "d1"
         assert pack.retrieval_report.queries_run == 1
@@ -58,7 +58,7 @@ class TestPackBuilder:
         s1 = _make_strategy("keyword", [_item("d1", 0.9)])
         s2 = _make_strategy("semantic", [_item("v1", 0.85)])
         builder = PackBuilder(strategies=[s1, s2])
-        pack = builder.build("search")
+        pack = builder.build("search", clearance="restricted")
         assert len(pack.items) == 2
         assert pack.retrieval_report.queries_run == 2
 
@@ -70,14 +70,14 @@ class TestPackBuilder:
         s1 = _make_strategy("keyword", [_item("d1", 0.7, excerpt=body)])
         s2 = _make_strategy("semantic", [_item("d1", 0.9, excerpt=body)])
         builder = PackBuilder(strategies=[s1, s2])
-        pack = builder.build("search")
+        pack = builder.build("search", clearance="restricted")
         assert len(pack.items) == 1
         assert pack.items[0].relevance_score == 0.9
 
     def test_sorted_by_relevance(self) -> None:
         s = _make_strategy("kw", [_item("a", 0.3), _item("b", 0.9), _item("c", 0.6)])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         scores = [item.relevance_score for item in pack.items]
         assert scores == sorted(scores, reverse=True)
 
@@ -85,7 +85,11 @@ class TestPackBuilder:
         items = [_item(f"d{i}", 1.0 - i * 0.1) for i in range(10)]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", budget=PackBudget(max_items=3, max_tokens=100000))
+        pack = builder.build(
+            "q",
+            budget=PackBudget(max_items=3, max_tokens=100000),
+            clearance="restricted",
+        )
         assert len(pack.items) == 3
 
     def test_budget_max_tokens(self) -> None:
@@ -94,12 +98,16 @@ class TestPackBuilder:
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
         # Budget of 100 tokens, each item ~26 tokens, so ~3-4 items fit
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=100), clearance="restricted"
+        )
         assert len(pack.items) < 20
 
     def test_domain_and_agent_id(self) -> None:
         builder = PackBuilder()
-        pack = builder.build("q", domain="platform", agent_id="agent-1")
+        pack = builder.build(
+            "q", domain="platform", agent_id="agent-1", clearance="restricted"
+        )
         assert pack.domain == "platform"
         assert pack.agent_id == "agent-1"
 
@@ -107,7 +115,7 @@ class TestPackBuilder:
         s1 = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.8)])
         s2 = _make_strategy("sem", [_item("v1", 0.7)])
         builder = PackBuilder(strategies=[s1, s2])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.retrieval_report.candidates_found == 3
         assert pack.retrieval_report.items_selected == 3
         assert pack.retrieval_report.strategies_used == ["kw", "sem"]
@@ -116,7 +124,7 @@ class TestPackBuilder:
         builder = PackBuilder()
         s = _make_strategy("kw", [_item("d1", 0.5)])
         builder.add_strategy(s)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert len(pack.items) == 1
 
     def test_strategy_failure_continues(self) -> None:
@@ -124,25 +132,25 @@ class TestPackBuilder:
         bad = _make_strategy("bad", [])
         bad.search.side_effect = RuntimeError("oops")
         builder = PackBuilder(strategies=[bad, good])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert len(pack.items) == 1  # good strategy still works
 
     def test_filters_passed_to_strategies(self) -> None:
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", filters={"domain": "platform"})
+        builder.build("q", filters={"domain": "platform"}, clearance="restricted")
         call_kwargs = s.search.call_args
         assert call_kwargs[1]["filters"] == {"domain": "platform"}
 
     def test_pack_has_assembled_at(self) -> None:
         builder = PackBuilder()
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.assembled_at is not None
 
     def test_budget_preserved_in_pack(self) -> None:
         budget = PackBudget(max_items=5, max_tokens=1000)
         builder = PackBuilder()
-        pack = builder.build("q", budget=budget)
+        pack = builder.build("q", budget=budget, clearance="restricted")
         assert pack.budget.max_items == 5
         assert pack.budget.max_tokens == 1000
 
@@ -155,6 +163,7 @@ class TestPackBuilder:
                 "domain": {"in": ["data-pipeline"]},
                 "signal_quality": {"in": ["high", "standard"]},
             },
+            clearance="restricted",
         )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
@@ -171,6 +180,7 @@ class TestPackBuilder:
             "q",
             filters={"category": "tutorial"},
             tag_filters={"domain": {"in": ["api"]}},
+            clearance="restricted",
         )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
@@ -183,7 +193,9 @@ class TestPackBuilder:
         old enumerated allowlist would silently miss it)."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", tag_filters={"domain": {"in": ["api"]}})
+        builder.build(
+            "q", tag_filters={"domain": {"in": ["api"]}}, clearance="restricted"
+        )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
         assert filters["content_tags"]["signal_quality"] == {
@@ -194,7 +206,11 @@ class TestPackBuilder:
         """When signal_quality is explicitly provided, no default exclusion."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", tag_filters={"signal_quality": {"in": ["noise"]}})
+        builder.build(
+            "q",
+            tag_filters={"signal_quality": {"in": ["noise"]}},
+            clearance="restricted",
+        )
         call_kwargs = s.search.call_args
         filters = call_kwargs[1]["filters"]
         assert filters["content_tags"]["signal_quality"] == {"in": ["noise"]}
@@ -203,7 +219,7 @@ class TestPackBuilder:
         """When tag_filters is None, no content_tags key added to filters."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         call_kwargs = s.search.call_args
         assert call_kwargs[1]["filters"] is None
 
@@ -212,7 +228,7 @@ class TestPackBuilder:
         both the scalar hint and the content_tags facet (#262)."""
         s = _make_strategy("kw", [])
         builder = PackBuilder(strategies=[s])
-        builder.build("q", domain="infra")
+        builder.build("q", domain="infra", clearance="restricted")
         filters = s.search.call_args[1]["filters"]
         assert filters["domain"] == "infra"
         assert filters["content_tags"]["domain"] == {"in": ["infra"]}
@@ -226,6 +242,7 @@ class TestPackBuilder:
             domain="infra",
             filters={"domain": "explicit"},
             tag_filters={"domain": {"in": ["explicit"]}},
+            clearance="restricted",
         )
         filters = s.search.call_args[1]["filters"]
         assert filters["domain"] == "explicit"
@@ -279,7 +296,7 @@ class TestBuildDomainScopeGraphAxis:
         from trellis.retrieve.strategies import GraphSearch
 
         builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(self._nodes()))])
-        pack = builder.build("q", domain="infra")
+        pack = builder.build("q", domain="infra", clearance="restricted")
         ids = {item.item_id for item in pack.items}
         assert "n-mismatch" not in ids
         assert "n-plain" in ids
@@ -289,7 +306,7 @@ class TestBuildDomainScopeGraphAxis:
         from trellis.retrieve.strategies import GraphSearch
 
         builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(self._nodes()))])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         ids = {item.item_id for item in pack.items}
         assert ids == {"n-mismatch", "n-plain", "n-match"}
 
@@ -319,7 +336,7 @@ class TestBuildDomainScopeGraphAxis:
             },
         ]
         builder = PackBuilder(strategies=[GraphSearch(_FakeGraphStore(nodes))])
-        pack = builder.build("q", domain="infra")
+        pack = builder.build("q", domain="infra", clearance="restricted")
         ids = {item.item_id for item in pack.items}
         assert "n-facet-mismatch" not in ids
         assert "n-facet-match" in ids
@@ -339,7 +356,7 @@ class TestBuildDomainScopeGraphAxis:
         builder = PackBuilder(
             strategies=[s], content_floor=ContentFloorConfig(mode="off")
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         assert [item.rank for item in pack.items] == [1, 2]
         assert [item.included for item in pack.items] == [True, True]
@@ -385,7 +402,7 @@ class TestClassPriorGate:
             strategies=[strategy],
             content_floor=ContentFloorConfig(mode="off"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["c1", "m1"]
         assert pack.retrieval_report.rejected_items == []
 
@@ -411,7 +428,7 @@ class TestClassPriorGate:
                 content_floor=ContentFloorConfig(mode="off"),
                 event_log=event_log,
             )
-            builder.build("q")
+            builder.build("q", clearance="restricted")
             events = event_log.get_events(limit=10)
             assert len(events) == 1
             injected = events[0].payload["injected_items"]
@@ -464,7 +481,7 @@ class TestClassPriorGate:
             class_prior_config=config,
             content_floor=ContentFloorConfig(mode="off"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         served_ids = [item.item_id for item in pack.items]
         assert served_ids == ["m1"]
@@ -489,7 +506,7 @@ class TestClassPriorGate:
             class_prior_config=config,
             content_floor=ContentFloorConfig(mode="off"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["m1"]
         assert pack.retrieval_report.rejected_items == []
 
@@ -505,7 +522,7 @@ class TestClassPriorGate:
             class_prior_config=config,
             content_floor=ContentFloorConfig(mode="off"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [item.item_id for item in pack.items] == ["c1"]
         assert pack.retrieval_report.rejected_items == []
 
@@ -545,7 +562,7 @@ class TestClassPriorGate:
             class_prior_config=config,
             content_floor=ContentFloorConfig(mode="off"),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         assert [item.item_id for item in pack.items] == []
         reasons = {
@@ -649,7 +666,7 @@ def _build_pool(
     """Run ``builder``; return served ids, served ``strategy_source`` by id,
     and the ``class_prior`` rejection count by ``strategy_source``."""
     if kind == "flat":
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served = pack.items
         rows = [
             r
@@ -662,7 +679,7 @@ def _build_pool(
             by_strategy[key] = by_strategy.get(key, 0) + 1
     else:
         pack = builder.build_sectioned(
-            intent="q", sections=[SectionRequest(name="all")]
+            intent="q", sections=[SectionRequest(name="all")], clearance="restricted"
         )
         served = pack.sections[0].items
         by_strategy = {
@@ -820,7 +837,7 @@ class TestClassPriorGroupingSurvivesCopies:
         pack = PackBuilder(
             strategies=[_make_strategy("keyword", items)],
             content_floor=ContentFloorConfig(mode="off"),
-        ).build("q")
+        ).build("q", clearance="restricted")
         assert [i.strategy_source for i in pack.items] == [None, None]
 
     def test_stamp_defers_to_a_declared_source_and_never_mutates(self) -> None:
@@ -883,6 +900,7 @@ class TestBuildSectioned:
                 ),
                 SectionRequest(name="tactical", retrieval_affinities=["reference"]),
             ],
+            clearance="restricted",
         )
         assert len(pack.sections) == 2
         section_names = [s.name for s in pack.sections]
@@ -897,6 +915,7 @@ class TestBuildSectioned:
         pack = builder.build_sectioned(
             intent="test",
             sections=[SectionRequest(name="all", max_items=3, max_tokens=50000)],
+            clearance="restricted",
         )
         assert len(pack.sections[0].items) <= 3
 
@@ -931,6 +950,7 @@ class TestBuildSectioned:
         pack = builder.build_sectioned(
             intent="test",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
         assert len(pack.sections) == 1
         served_ids = [item.item_id for item in pack.sections[0].items]
@@ -1009,7 +1029,7 @@ class TestBuildSectioned:
             class_prior_config=config,
             content_floor=ContentFloorConfig(mode="off"),
         )
-        flat_pack = flat_builder.build("q")
+        flat_pack = flat_builder.build("q", clearance="restricted")
         served_ids = {item.item_id for item in flat_pack.items}
         assert served_ids == {"mem", "conv", "mem2"}
         served_conv = next(i for i in flat_pack.items if i.item_id == "conv")
@@ -1034,6 +1054,7 @@ class TestBuildSectioned:
         sectioned_pack = sectioned_builder.build_sectioned(
             intent="q",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
         sect_served_ids = {item.item_id for item in sectioned_pack.sections[0].items}
         assert sect_served_ids == {"mem", "conv", "mem2"}
@@ -1075,6 +1096,7 @@ class TestBuildSectioned:
         pack = builder.build_sectioned(
             intent="test",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
 
         served_ids = [
@@ -1117,6 +1139,7 @@ class TestBuildSectioned:
                     name="patterns", retrieval_affinities=["technical_pattern"]
                 ),
             ],
+            clearance="restricted",
         )
         # Item should appear in exactly one section
         total = sum(len(s.items) for s in pack.sections)
@@ -1133,6 +1156,7 @@ class TestBuildSectioned:
             sections=[
                 SectionRequest(name="traces", retrieval_affinities=["operational"]),
             ],
+            clearance="restricted",
         )
         assert pack.sections[0].items == []
 
@@ -1144,6 +1168,7 @@ class TestBuildSectioned:
         pack = builder.build_sectioned(
             intent="test",
             sections=[SectionRequest(name="mySection")],
+            clearance="restricted",
         )
         for item in pack.sections[0].items:
             assert "mySection" in (item.selection_reason or "")
@@ -1170,7 +1195,7 @@ class TestStructuralFiltering:
             _role_item("cluster1", 0.8, "curated"),
         ]
         builder = PackBuilder(strategies=[_make_strategy("graph", items)])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         item_ids = [i.item_id for i in pack.items]
         assert "col1" not in item_ids
         assert "e1" in item_ids
@@ -1182,7 +1207,7 @@ class TestStructuralFiltering:
             _role_item("col1", 0.85, "structural"),
         ]
         builder = PackBuilder(strategies=[_make_strategy("graph", items)])
-        pack = builder.build("q", include_structural=True)
+        pack = builder.build("q", include_structural=True, clearance="restricted")
         item_ids = [i.item_id for i in pack.items]
         assert "col1" in item_ids
         assert "e1" in item_ids
@@ -1191,7 +1216,7 @@ class TestStructuralFiltering:
         """Filter must carry include_structural into per-strategy filters."""
         strategy = _make_strategy("graph", [])
         builder = PackBuilder(strategies=[strategy])
-        builder.build("q", include_structural=True)
+        builder.build("q", include_structural=True, clearance="restricted")
         # Inspect the filters kwarg passed to the strategy
         call_kwargs = strategy.search.call_args.kwargs
         assert call_kwargs["filters"]["include_structural"] is True
@@ -1199,7 +1224,7 @@ class TestStructuralFiltering:
     def test_default_strategy_filters_exclude_structural_flag(self) -> None:
         strategy = _make_strategy("graph", [])
         builder = PackBuilder(strategies=[strategy])
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         call_kwargs = strategy.search.call_args.kwargs
         # Default path should not inject include_structural (keeps behaviour
         # for strategies that don't understand the flag).
@@ -1216,6 +1241,7 @@ class TestStructuralFiltering:
         pack = builder.build_sectioned(
             intent="q",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
         all_ids = [i.item_id for s in pack.sections for i in s.items]
         assert "col1" not in all_ids
@@ -1246,7 +1272,7 @@ class TestStrategySourcePromotion:
     def test_strategy_source_promoted_from_metadata(self) -> None:
         s = _make_strategy("kw", [_strategy_item("d1", 0.9, "keyword")])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.items[0].strategy_source == "keyword"
 
     def test_explicit_strategy_source_not_overridden(self) -> None:
@@ -1260,13 +1286,13 @@ class TestStrategySourcePromotion:
         )
         s = _make_strategy("kw", [item])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.items[0].strategy_source == "custom"
 
     def test_no_metadata_source_strategy_leaves_none(self) -> None:
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.items[0].strategy_source is None
 
 
@@ -1277,7 +1303,7 @@ class TestRejectionTracking:
         s1 = _make_strategy("kw", [_strategy_item("d1", 0.7, "keyword")])
         s2 = _make_strategy("sem", [_strategy_item("d1", 0.9, "semantic")])
         builder = PackBuilder(strategies=[s1, s2])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         rejected = pack.retrieval_report.rejected_items
         assert len(rejected) == 1
@@ -1291,7 +1317,7 @@ class TestRejectionTracking:
             _role_item("col1", 0.85, "structural"),
         ]
         builder = PackBuilder(strategies=[_make_strategy("graph", items)])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         rejected = pack.retrieval_report.rejected_items
         structural_rejected = [r for r in rejected if r.reason == "structural_filter"]
@@ -1302,7 +1328,11 @@ class TestRejectionTracking:
         items = [_item(f"d{i}", 1.0 - i * 0.1) for i in range(5)]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", budget=PackBudget(max_items=2, max_tokens=100000))
+        pack = builder.build(
+            "q",
+            budget=PackBudget(max_items=2, max_tokens=100000),
+            clearance="restricted",
+        )
 
         rejected = pack.retrieval_report.rejected_items
         max_items_rejected = [r for r in rejected if r.reason == "max_items"]
@@ -1322,7 +1352,9 @@ class TestRejectionTracking:
         ]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=50))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=50), clearance="restricted"
+        )
 
         rejected = pack.retrieval_report.rejected_items
         token_rejected = [r for r in rejected if r.reason == "token_budget"]
@@ -1334,7 +1366,7 @@ class TestRejectionTracking:
         s1 = _make_strategy("kw", [_strategy_item("d1", 0.7, "keyword")])
         s2 = _make_strategy("sem", [_strategy_item("d1", 0.9, "semantic")])
         builder = PackBuilder(strategies=[s1, s2])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         rejected = pack.retrieval_report.rejected_items
         assert rejected[0].strategy_source == "keyword"
@@ -1352,7 +1384,11 @@ class TestRejectionTracking:
             _item("d2", 0.7, excerpt="z" * 200),  # 51 tokens
         ]
         builder = PackBuilder(strategies=[_make_strategy("kw", items)])
-        pack = builder.build("q", budget=PackBudget(max_items=1, max_tokens=100_000))
+        pack = builder.build(
+            "q",
+            budget=PackBudget(max_items=1, max_tokens=100_000),
+            clearance="restricted",
+        )
 
         priced = {
             r.item_id: r.estimated_tokens
@@ -1370,7 +1406,9 @@ class TestRejectionTracking:
             _item("d1", 0.8, excerpt="y" * 200),  # 51 tokens
         ]
         builder = PackBuilder(strategies=[_make_strategy("kw", items)])
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=30))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=30), clearance="restricted"
+        )
 
         (rejected,) = pack.retrieval_report.rejected_items
         assert rejected.reason == "token_budget"
@@ -1381,7 +1419,7 @@ class TestRejectionTracking:
     def test_a_gate_that_is_not_a_budget_cut_leaves_the_row_unpriced(self) -> None:
         s1 = _make_strategy("kw", [_strategy_item("d1", 0.7, "keyword")])
         s2 = _make_strategy("sem", [_strategy_item("d1", 0.9, "semantic")])
-        pack = PackBuilder(strategies=[s1, s2]).build("q")
+        pack = PackBuilder(strategies=[s1, s2]).build("q", clearance="restricted")
 
         (rejected,) = pack.retrieval_report.rejected_items
         assert rejected.reason == "dedup"
@@ -1399,7 +1437,7 @@ class TestRejectionTracking:
         s = _make_strategy("kw", items)
         s_dup = _make_strategy("sem", [_strategy_item("d0", 0.5, "semantic")])
         PackBuilder(strategies=[s, s_dup], event_log=log).build(
-            "q", budget=PackBudget(max_items=2, max_tokens=22)
+            "q", budget=PackBudget(max_items=2, max_tokens=22), clearance="restricted"
         )
 
         (event,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
@@ -1424,7 +1462,7 @@ class TestBudgetTrace:
         ]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         trace = pack.retrieval_report.budget_trace
         assert len(trace) == 2
@@ -1443,7 +1481,9 @@ class TestBudgetTrace:
         ]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=30))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=30), clearance="restricted"
+        )
 
         trace = pack.retrieval_report.budget_trace
         assert len(trace) == 2
@@ -1454,7 +1494,7 @@ class TestBudgetTrace:
 
     def test_budget_trace_empty_when_no_items(self) -> None:
         builder = PackBuilder()
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.retrieval_report.budget_trace == []
 
 
@@ -1503,7 +1543,7 @@ class TestAdvisoryDelivery:
 
     def test_no_advisory_store_returns_empty(self) -> None:
         builder = PackBuilder()
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.advisories == []
 
     def test_advisories_attached_to_flat_pack(self, tmp_path: Path) -> None:
@@ -1512,7 +1552,7 @@ class TestAdvisoryDelivery:
         store.put(_make_advisory(scope="platform"))
 
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q", domain="platform")
+        pack = builder.build("q", domain="platform", clearance="restricted")
         # Should get both global and platform-scoped advisories
         assert len(pack.advisories) == 2
 
@@ -1522,7 +1562,7 @@ class TestAdvisoryDelivery:
         store.put(_make_advisory(scope="data"))
 
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q", domain="platform")
+        pack = builder.build("q", domain="platform", clearance="restricted")
         # "data" scope should not match "platform" domain
         assert len(pack.advisories) == 1
         assert pack.advisories[0].scope == "global"
@@ -1536,6 +1576,7 @@ class TestAdvisoryDelivery:
         pack = builder.build_sectioned(
             "q",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
         assert len(pack.advisories) == 1
 
@@ -1545,7 +1586,7 @@ class TestAdvisoryDelivery:
         store.put(_make_advisory(scope="platform"))
 
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")  # no domain
+        pack = builder.build("q", clearance="restricted")  # no domain
         # Only global advisories match when no domain specified
         assert len(pack.advisories) == 1
         assert pack.advisories[0].scope == "global"
@@ -1557,7 +1598,7 @@ class TestAdvisoryDelivery:
         store.put(_make_advisory(scope="global", confidence=0.5))
 
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         # Only the 0.5 confidence advisory should be delivered
         assert len(pack.advisories) == 1
         assert pack.advisories[0].confidence == 0.5
@@ -1606,7 +1647,7 @@ class TestAdvisoryCap:
         for advisory in _graded_advisories(12):
             store.put(advisory)
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         cap = PackBuilder._ADVISORY_MAX_COUNT
         assert _served_ids(pack) == [f"adv-{i:02d}" for i in range(cap)]
@@ -1618,7 +1659,7 @@ class TestAdvisoryCap:
 
         s = _make_strategy("kw", [_item("d1", 0.9)])
         pack = PackBuilder(strategies=[s], advisory_store=store).build_sectioned(
-            "q", sections=[SectionRequest(name="all")]
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
         )
 
         cap = PackBuilder._ADVISORY_MAX_COUNT
@@ -1630,7 +1671,7 @@ class TestAdvisoryCap:
         for advisory in _graded_advisories(3):
             store.put(advisory)
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         assert _served_ids(pack) == ["adv-00", "adv-01", "adv-02"]
 
@@ -1661,7 +1702,7 @@ class TestAdvisoryCap:
                 )
             )
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         # sample_size descending, then advisory_id ascending inside 40/40.
         assert _served_ids(pack) == ["lead", "tie-b", "tie-d", "tie-c", "tie-a"]
@@ -1688,8 +1729,12 @@ class TestAdvisoryCap:
         for advisory in reversed(tied):
             backward.put(advisory)
 
-        from_forward = _served_ids(PackBuilder(advisory_store=forward).build("q"))
-        from_backward = _served_ids(PackBuilder(advisory_store=backward).build("q"))
+        from_forward = _served_ids(
+            PackBuilder(advisory_store=forward).build("q", clearance="restricted")
+        )
+        from_backward = _served_ids(
+            PackBuilder(advisory_store=backward).build("q", clearance="restricted")
+        )
         assert from_forward == from_backward
 
     def test_provenance_is_stamped_only_from_served_advisories(
@@ -1715,7 +1760,9 @@ class TestAdvisoryCap:
             )
         s = _make_strategy("kw", [_item(f"d{i}", 0.9 - i * 0.01) for i in range(6)])
 
-        pack = PackBuilder(strategies=[s], advisory_store=store).build("q")
+        pack = PackBuilder(strategies=[s], advisory_store=store).build(
+            "q", clearance="restricted"
+        )
 
         stamped = {
             item.item_id: item.injected_advisory_ids
@@ -1753,7 +1800,7 @@ class TestAdvisoryCap:
         s = _make_strategy("kw", [_item(f"d{i}", 0.9 - i * 0.01) for i in range(6)])
 
         pack = PackBuilder(strategies=[s], advisory_store=store).build_sectioned(
-            "q", sections=[SectionRequest(name="all")]
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
         )
 
         items = [item for section in pack.sections for item in section.items]
@@ -1788,7 +1835,9 @@ class TestAdvisoryCapTelemetry:
             store.put(advisory)
         log = SQLiteEventLog(tmp_path / "events.db")
 
-        PackBuilder(advisory_store=store, event_log=log).build("q")
+        PackBuilder(advisory_store=store, event_log=log).build(
+            "q", clearance="restricted"
+        )
 
         payload = self._pack_payload(log)
         assert len(payload["advisory_ids"]) == PackBuilder._ADVISORY_MAX_COUNT
@@ -1805,7 +1854,9 @@ class TestAdvisoryCapTelemetry:
         s = _make_strategy("kw", [_item("d1", 0.9)])
         PackBuilder(
             strategies=[s], advisory_store=store, event_log=log
-        ).build_sectioned("q", sections=[SectionRequest(name="all")])
+        ).build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         payload = self._pack_payload(log)
         assert len(payload["advisory_ids"]) == PackBuilder._ADVISORY_MAX_COUNT
@@ -1824,7 +1875,9 @@ class TestAdvisoryCapTelemetry:
             store.put(advisory)
         log = SQLiteEventLog(tmp_path / "events.db")
 
-        PackBuilder(advisory_store=store, event_log=log).build("q")
+        PackBuilder(advisory_store=store, event_log=log).build(
+            "q", clearance="restricted"
+        )
 
         payload = self._pack_payload(log)
         assert payload["advisories_matched"] == 3
@@ -1878,7 +1931,7 @@ class TestAdvisoryExploreSlot:
         """
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         assert "adv-05" in _served_ids(pack)
 
@@ -1886,7 +1939,7 @@ class TestAdvisoryExploreSlot:
         """Reserved *within* the cap, so #392's token budget is unchanged."""
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         assert len(pack.advisories) == PackBuilder._ADVISORY_MAX_COUNT
 
@@ -1896,7 +1949,7 @@ class TestAdvisoryExploreSlot:
         """Ranks 1-4 are never given up to exploration."""
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         assert _served_ids(pack) == [
             "adv-00",
@@ -1916,7 +1969,7 @@ class TestAdvisoryExploreSlot:
         """
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids=set()))
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         cap = PackBuilder._ADVISORY_MAX_COUNT
         assert _served_ids(pack) == [f"adv-{i:02d}" for i in range(cap)]
@@ -1933,12 +1986,16 @@ class TestAdvisoryExploreSlot:
         store = self._store(
             tmp_path, self._scored_ladder(12, stale_ids={"adv-05", "adv-06"})
         )
-        first = _served_ids(PackBuilder(advisory_store=store).build("q"))
+        first = _served_ids(
+            PackBuilder(advisory_store=store).build("q", clearance="restricted")
+        )
 
         scored = self._store(
             tmp_path / "next", self._scored_ladder(12, stale_ids={"adv-06"})
         )
-        second = _served_ids(PackBuilder(advisory_store=scored).build("q"))
+        second = _served_ids(
+            PackBuilder(advisory_store=scored).build("q", clearance="restricted")
+        )
 
         assert "adv-05" in first
         assert "adv-06" not in first
@@ -1963,7 +2020,7 @@ class TestAdvisoryExploreSlot:
         )
         store = self._store(tmp_path, rows)
 
-        pack = PackBuilder(advisory_store=store).build("q")
+        pack = PackBuilder(advisory_store=store).build("q", clearance="restricted")
 
         assert "newborn" in _served_ids(pack)
 
@@ -1981,7 +2038,9 @@ class TestAdvisoryExploreSlot:
         rows = self._scored_ladder(12, stale_ids={"adv-07"})
         assert all(r.fitness_scored_at is not None for r in rows)
 
-        pack = PackBuilder(advisory_store=self._store(tmp_path, rows)).build("q")
+        pack = PackBuilder(advisory_store=self._store(tmp_path, rows)).build(
+            "q", clearance="restricted"
+        )
 
         assert "adv-07" in _served_ids(pack)
 
@@ -2003,15 +2062,21 @@ class TestAdvisoryExploreSlot:
         forward = self._store(tmp_path / "f", tied)
         backward = self._store(tmp_path / "b", list(reversed(tied)))
 
-        assert _served_ids(PackBuilder(advisory_store=forward).build("q")) == (
-            _served_ids(PackBuilder(advisory_store=backward).build("q"))
+        assert _served_ids(
+            PackBuilder(advisory_store=forward).build("q", clearance="restricted")
+        ) == (
+            _served_ids(
+                PackBuilder(advisory_store=backward).build("q", clearance="restricted")
+            )
         )
 
     def test_flat_payload_names_the_explored_ids(self, tmp_path: Path) -> None:
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
         log = SQLiteEventLog(tmp_path / "events.db")
 
-        PackBuilder(advisory_store=store, event_log=log).build("q")
+        PackBuilder(advisory_store=store, event_log=log).build(
+            "q", clearance="restricted"
+        )
 
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
         assert payload["advisories_explored"] == ["adv-05"]
@@ -2023,7 +2088,9 @@ class TestAdvisoryExploreSlot:
         s = _make_strategy("kw", [_item("d1", 0.9)])
         PackBuilder(
             strategies=[s], advisory_store=store, event_log=log
-        ).build_sectioned("q", sections=[SectionRequest(name="all")])
+        ).build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
 
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
         assert payload["advisories_explored"] == ["adv-05"]
@@ -2041,7 +2108,9 @@ class TestAdvisoryExploreSlot:
         store = self._store(tmp_path, self._scored_ladder(12, stale_ids=set()))
         log = SQLiteEventLog(tmp_path / "events.db")
 
-        PackBuilder(advisory_store=store, event_log=log).build("q")
+        PackBuilder(advisory_store=store, event_log=log).build(
+            "q", clearance="restricted"
+        )
 
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
         assert payload["advisories_explored"] == []
@@ -2051,7 +2120,9 @@ class TestAdvisoryExploreSlot:
         store = self._store(tmp_path, self._scored_ladder(3, stale_ids={"adv-02"}))
         log = SQLiteEventLog(tmp_path / "events.db")
 
-        pack = PackBuilder(advisory_store=store, event_log=log).build("q")
+        pack = PackBuilder(advisory_store=store, event_log=log).build(
+            "q", clearance="restricted"
+        )
 
         assert _served_ids(pack) == ["adv-00", "adv-01", "adv-02"]
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
@@ -2077,7 +2148,7 @@ class TestAdvisoryProvenance:
         """No advisories configured → field stays empty (preserves prior behavior)."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert all(item.injected_advisory_ids == [] for item in pack.items)
 
     def test_advisory_without_entity_id_does_not_stamp_items(
@@ -2088,7 +2159,7 @@ class TestAdvisoryProvenance:
         store.put(_make_advisory(scope="global", category=AdvisoryCategory.APPROACH))
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert len(pack.advisories) == 1
         assert pack.items[0].injected_advisory_ids == []
 
@@ -2103,7 +2174,7 @@ class TestAdvisoryProvenance:
         store.put(advisory)
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         d1 = next(i for i in pack.items if i.item_id == "d1")
         d2 = next(i for i in pack.items if i.item_id == "d2")
@@ -2121,7 +2192,7 @@ class TestAdvisoryProvenance:
         store.put(advisory)
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.items[0].injected_advisory_ids == [advisory.advisory_id]
 
     def test_multiple_advisories_target_same_item(self, tmp_path: Path) -> None:
@@ -2143,7 +2214,7 @@ class TestAdvisoryProvenance:
         store.put(a2)
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         # Both advisory IDs present; order is stable but not guaranteed
         # (advisory_store sort order is implementation-detail).
         assert set(pack.items[0].injected_advisory_ids) == {"adv-1", "adv-2"}
@@ -2152,7 +2223,7 @@ class TestAdvisoryProvenance:
         """No advisory store at all → field stays empty (default-empty contract)."""
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s])  # no advisory_store
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.advisories == []
         assert pack.items[0].injected_advisory_ids == []
 
@@ -2168,7 +2239,7 @@ class TestAdvisoryProvenance:
         )
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.items[0].injected_advisory_ids == []
 
     def test_sectioned_pack_stamps_per_item_advisory_provenance(
@@ -2187,6 +2258,7 @@ class TestAdvisoryProvenance:
         pack = builder.build_sectioned(
             "q",
             sections=[SectionRequest(name="all")],
+            clearance="restricted",
         )
         assert len(pack.advisories) == 1
         # Find the stamped item across all sections.
@@ -2213,7 +2285,7 @@ class TestAdvisoryProvenance:
             builder = PackBuilder(
                 strategies=[s], advisory_store=store, event_log=event_log
             )
-            builder.build("q")
+            builder.build("q", clearance="restricted")
             events = event_log.get_events(limit=10)
             assert len(events) == 1
             payload = events[0].payload
@@ -2244,8 +2316,8 @@ class TestSessionDedup:
         """Without session_id, repeated builds return the same items."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        first = builder.build("q")
-        second = builder.build("q")
+        first = builder.build("q", clearance="restricted")
+        second = builder.build("q", clearance="restricted")
         assert {i.item_id for i in first.items} == {"d1", "d2"}
         assert {i.item_id for i in second.items} == {"d1", "d2"}
 
@@ -2255,10 +2327,10 @@ class TestSessionDedup:
         """Second build in same session drops items served in first build."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        first = builder.build("q", session_id="sess-A")
+        first = builder.build("q", session_id="sess-A", clearance="restricted")
         assert {i.item_id for i in first.items} == {"d1", "d2"}
 
-        second = builder.build("q", session_id="sess-A")
+        second = builder.build("q", session_id="sess-A", clearance="restricted")
         assert second.items == []
 
     def test_session_dedup_tracks_rejections(
@@ -2267,8 +2339,8 @@ class TestSessionDedup:
         """Session-deduped items appear in RejectedItem list with reason."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        builder.build("q", session_id="sess-B")
-        second = builder.build("q", session_id="sess-B")
+        builder.build("q", session_id="sess-B", clearance="restricted")
+        second = builder.build("q", session_id="sess-B", clearance="restricted")
         reasons = {r.reason for r in second.retrieval_report.rejected_items}
         assert "session_dedup" in reasons
         deduped_ids = {
@@ -2284,8 +2356,8 @@ class TestSessionDedup:
         """Items served to session A are still available for session B."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        builder.build("q", session_id="sess-A")
-        other = builder.build("q", session_id="sess-B")
+        builder.build("q", session_id="sess-A", clearance="restricted")
+        other = builder.build("q", session_id="sess-B", clearance="restricted")
         assert {i.item_id for i in other.items} == {"d1", "d2"}
 
     def test_session_id_recorded_on_pack(
@@ -2294,7 +2366,7 @@ class TestSessionDedup:
         """session_id is recorded on the returned Pack."""
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        pack = builder.build("q", session_id="sess-C")
+        pack = builder.build("q", session_id="sess-C", clearance="restricted")
         assert pack.session_id == "sess-C"
 
     def test_session_id_in_pack_assembled_event(
@@ -2305,7 +2377,7 @@ class TestSessionDedup:
 
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        builder.build("q", session_id="sess-D")
+        builder.build("q", session_id="sess-D", clearance="restricted")
         events = session_event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
         )
@@ -2316,8 +2388,8 @@ class TestSessionDedup:
         """Without an event log, session_id is recorded but no dedup runs."""
         s = _make_strategy("kw", [_item("d1", 0.9)])
         builder = PackBuilder(strategies=[s])  # no event_log
-        first = builder.build("q", session_id="sess-E")
-        second = builder.build("q", session_id="sess-E")
+        first = builder.build("q", session_id="sess-E", clearance="restricted")
+        second = builder.build("q", session_id="sess-E", clearance="restricted")
         assert len(first.items) == 1
         assert len(second.items) == 1  # no dedup without event log
 
@@ -2329,6 +2401,7 @@ class TestSessionDedup:
             "q",
             sections=[SectionRequest(name="all")],
             session_id="sess-F",
+            clearance="restricted",
         )
         assert len(first.all_items) == 2
 
@@ -2336,6 +2409,7 @@ class TestSessionDedup:
             "q",
             sections=[SectionRequest(name="all")],
             session_id="sess-F",
+            clearance="restricted",
         )
         assert second.all_items == []
 
@@ -2351,6 +2425,7 @@ class TestSessionDedup:
             "q",
             sections=[SectionRequest(name="all")],
             session_id="sess-G",
+            clearance="restricted",
         )
         assert pack.session_id == "sess-G"
         events = session_event_log.get_events(
@@ -2368,8 +2443,9 @@ class TestSessionDedup:
             "q",
             sections=[SectionRequest(name="all")],
             session_id="sess-H",
+            clearance="restricted",
         )
-        flat = builder.build("q", session_id="sess-H")
+        flat = builder.build("q", session_id="sess-H", clearance="restricted")
         assert flat.items == []
 
 
@@ -2421,10 +2497,10 @@ class TestSessionDeltaPacks:
         """(a) Same id + unchanged content within window → suppressed."""
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="v1")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        first = builder.build("q", session_id="sess-same")
+        first = builder.build("q", session_id="sess-same", clearance="restricted")
         assert {i.item_id for i in first.items} == {"d1"}
         # Second call: identical content → still suppressed.
-        second = builder.build("q", session_id="sess-same")
+        second = builder.build("q", session_id="sess-same", clearance="restricted")
         assert second.items == []
 
     def test_same_id_changed_content_reserved(
@@ -2433,12 +2509,12 @@ class TestSessionDeltaPacks:
         """(b) Same id + CHANGED content → eligible for re-serving."""
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="original")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        first = builder.build("q", session_id="sess-change")
+        first = builder.build("q", session_id="sess-change", clearance="restricted")
         assert {i.item_id for i in first.items} == {"d1"}
 
         # Same id, superseded content — content hash no longer matches.
         s.search.return_value = [_item("d1", 0.9, excerpt="superseded content")]
-        second = builder.build("q", session_id="sess-change")
+        second = builder.build("q", session_id="sess-change", clearance="restricted")
         assert [i.item_id for i in second.items] == ["d1"]
         assert second.items[0].excerpt == "superseded content"
 
@@ -2457,7 +2533,7 @@ class TestSessionDeltaPacks:
         # hash, so we cannot tell it changed → suppress by id (no KeyError).
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="different now")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        pack = builder.build("q", session_id="sess-thin")
+        pack = builder.build("q", session_id="sess-thin", clearance="restricted")
         assert pack.items == []
 
     def test_refresh_bypasses_session_dedup(
@@ -2466,18 +2542,20 @@ class TestSessionDeltaPacks:
         """refresh=True re-serves previously-served items for that call only."""
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        builder.build("q", session_id="sess-refresh")
+        builder.build("q", session_id="sess-refresh", clearance="restricted")
 
         # Default path still suppresses.
-        deduped = builder.build("q", session_id="sess-refresh")
+        deduped = builder.build("q", session_id="sess-refresh", clearance="restricted")
         assert deduped.items == []
 
         # refresh=True bypasses the served-set subtraction.
-        refreshed = builder.build("q", session_id="sess-refresh", refresh=True)
+        refreshed = builder.build(
+            "q", session_id="sess-refresh", refresh=True, clearance="restricted"
+        )
         assert {i.item_id for i in refreshed.items} == {"d1", "d2"}
 
         # And it is scoped to that call only — the next default call dedups.
-        after = builder.build("q", session_id="sess-refresh")
+        after = builder.build("q", session_id="sess-refresh", clearance="restricted")
         assert after.items == []
 
     def test_refresh_bypasses_sectioned_session_dedup(
@@ -2487,10 +2565,16 @@ class TestSessionDeltaPacks:
         s = _make_strategy("kw", [_item("d1", 0.9), _item("d2", 0.7)])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
         builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-r"
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-r",
+            clearance="restricted",
         )
         deduped = builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-r"
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-r",
+            clearance="restricted",
         )
         assert deduped.all_items == []
         refreshed = builder.build_sectioned(
@@ -2498,6 +2582,7 @@ class TestSessionDeltaPacks:
             sections=[SectionRequest(name="all")],
             session_id="sess-sec-r",
             refresh=True,
+            clearance="restricted",
         )
         assert {i.item_id for i in refreshed.all_items} == {"d1", "d2"}
 
@@ -2508,11 +2593,17 @@ class TestSessionDeltaPacks:
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="original")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
         builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-c"
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-c",
+            clearance="restricted",
         )
         s.search.return_value = [_item("d1", 0.9, excerpt="new content")]
         second = builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-c"
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-c",
+            clearance="restricted",
         )
         assert [i.item_id for i in second.all_items] == ["d1"]
 
@@ -2522,7 +2613,7 @@ class TestSessionDeltaPacks:
         """Flat PACK_ASSEMBLED payload records per-item content hashes."""
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="hash me")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        builder.build("q", session_id="sess-flat-h")
+        builder.build("q", session_id="sess-flat-h", clearance="restricted")
         events = session_event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
         )
@@ -2536,7 +2627,10 @@ class TestSessionDeltaPacks:
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="sec hash")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
         builder.build_sectioned(
-            "q", sections=[SectionRequest(name="all")], session_id="sess-sec-h"
+            "q",
+            sections=[SectionRequest(name="all")],
+            session_id="sess-sec-h",
+            clearance="restricted",
         )
         events = session_event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
@@ -2560,7 +2654,10 @@ class TestSessionDeltaPacks:
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
         # 60-minute window (default) excludes the 120-minute-old serve.
         pack = builder.build(
-            "q", session_id="sess-win", session_dedup_window_minutes=60
+            "q",
+            session_id="sess-win",
+            session_dedup_window_minutes=60,
+            clearance="restricted",
         )
         assert {i.item_id for i in pack.items} == {"d1"}
 
@@ -2579,7 +2676,10 @@ class TestSessionDeltaPacks:
         s = _make_strategy("kw", [_item("d1", 0.9, excerpt="text")])
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
         pack = builder.build(
-            "q", session_id="sess-win2", session_dedup_window_minutes=60
+            "q",
+            session_id="sess-win2",
+            session_dedup_window_minutes=60,
+            clearance="restricted",
         )
         assert pack.items == []
 
@@ -2613,7 +2713,7 @@ class TestSessionDeltaPacks:
             "kw", [_item("d1", 0.9, excerpt="text"), _item("d2", 0.7, excerpt="text")]
         )
         builder = PackBuilder(strategies=[s], event_log=session_event_log)
-        pack = builder.build("q", session_id="sess-cap")
+        pack = builder.build("q", session_id="sess-cap", clearance="restricted")
         # d2 (newest, within cap) suppressed; d1 (beyond cap) re-served.
         assert {i.item_id for i in pack.items} == {"d1"}
 
@@ -2649,7 +2749,7 @@ class TestSemanticDedup:
             ],
         )
         builder = PackBuilder(strategies=[s])  # no config → disabled
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         # Both items pass through (distinct item_ids, same excerpt).
         assert {i.item_id for i in pack.items} == {"a", "b"}
 
@@ -2668,7 +2768,7 @@ class TestSemanticDedup:
             strategies=[s],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
 
         # Higher-scoring wins, loser rejected with reason=semantic_dedup.
         assert [i.item_id for i in pack.items] == ["winner"]
@@ -2693,7 +2793,7 @@ class TestSemanticDedup:
             strategies=[s],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert {i.item_id for i in pack.items} == {"a", "b"}
 
     def test_short_excerpts_below_entropy_pass_through(self) -> None:
@@ -2712,7 +2812,7 @@ class TestSemanticDedup:
             strategies=[s],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         # Both kept — entropy filter prevents a false-positive dedup.
         assert {i.item_id for i in pack.items} == {"a", "b"}
 
@@ -2733,7 +2833,7 @@ class TestSemanticDedup:
             strategies=[s],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [i.item_id for i in pack.items] == ["top"]
         rejected_ids = {r.item_id for r in pack.retrieval_report.rejected_items}
         assert "low" in rejected_ids
@@ -2766,8 +2866,10 @@ class TestSemanticDedup:
             semantic_dedup=SemanticDedupConfig(threshold=0.3),
         )
 
-        strict_ids = {i.item_id for i in strict.build("q").items}
-        loose_ids = {i.item_id for i in loose.build("q").items}
+        strict_ids = {
+            i.item_id for i in strict.build("q", clearance="restricted").items
+        }
+        loose_ids = {i.item_id for i in loose.build("q", clearance="restricted").items}
         # Strict may or may not catch this specific pair depending on
         # shingle overlap — what matters is that loose catches at least
         # as much as strict.
@@ -2789,7 +2891,7 @@ class TestSemanticDedup:
             event_log=event_log,
             semantic_dedup=SemanticDedupConfig(),
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         from trellis.stores.base.event_log import EventType
 
@@ -2803,7 +2905,7 @@ class TestSemanticDedup:
         event_log = SQLiteEventLog(tmp_path / "events.db")
         s = _make_strategy("kw", [_item("a", 0.9, excerpt=self._LONG_EXCERPT)])
         builder = PackBuilder(strategies=[s], event_log=event_log)
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         from trellis.stores.base.event_log import EventType
 
@@ -2826,7 +2928,9 @@ class TestSemanticDedup:
             strategies=[s],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        pack = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
         section_items = {i.item_id for i in pack.sections[0].items}
         assert section_items == {"winner"}
 
@@ -2856,7 +2960,9 @@ class TestSemanticDedup:
                 event_log=event_log,
                 semantic_dedup=SemanticDedupConfig(),
             )
-            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            builder.build_sectioned(
+                "q", sections=[SectionRequest(name="all")], clearance="restricted"
+            )
 
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
             assert len(events) == 1
@@ -2874,7 +2980,9 @@ class TestSemanticDedup:
         try:
             s = _make_strategy("kw", [_item("a", 0.9, excerpt=self._LONG_EXCERPT)])
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            builder.build_sectioned(
+                "q", sections=[SectionRequest(name="all")], clearance="restricted"
+            )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
             assert events[0].payload["semantic_dedup_enabled"] is False
             assert events[0].payload["semantic_dedup_rejected"] == 0
@@ -2945,7 +3053,9 @@ class TestF14CrossSourceDedup:
             ],
         )
         builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
-        pack = builder.build("how does the staging pipeline promote a build")
+        pack = builder.build(
+            "how does the staging pipeline promote a build", clearance="restricted"
+        )
 
         # Exactly one copy survives, and it is the higher-relevance
         # save_memory doc (relevance-order winner rule).
@@ -2970,7 +3080,7 @@ class TestF14CrossSourceDedup:
             ],
         )
         builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert [i.item_id for i in pack.items] == ["corpus-copy"]
 
     def test_distinct_fact_is_not_over_suppressed(self) -> None:
@@ -2993,7 +3103,7 @@ class TestF14CrossSourceDedup:
             ],
         )
         builder = PackBuilder(strategies=[s], semantic_dedup=SemanticDedupConfig())
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert {i.item_id for i in pack.items} == {"pipeline", "backups"}
 
     def test_strip_frontmatter_helper_is_targeted(self) -> None:
@@ -3022,7 +3132,7 @@ class TestEvaluatorHook:
     def test_no_evaluator_is_default(self) -> None:
         s = _make_strategy("s", [_item("a", 0.5)])
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert "quality_report" not in pack.metadata
 
     def test_evaluator_result_attaches_to_pack_metadata(self) -> None:
@@ -3044,7 +3154,7 @@ class TestEvaluatorHook:
 
         s = _make_strategy("s", [_item("a", 0.6, excerpt="widget guide")])
         builder = PackBuilder(strategies=[s], evaluator=evaluator)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         quality = pack.metadata["quality_report"]
         assert quality["scenario_name"] == "fixture"
         assert quality["dimensions"]["completeness"] == 1.0
@@ -3052,7 +3162,7 @@ class TestEvaluatorHook:
     def test_evaluator_returning_none_leaves_metadata_unchanged(self) -> None:
         s = _make_strategy("s", [_item("a", 0.5)])
         builder = PackBuilder(strategies=[s], evaluator=lambda _pack: None)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert "quality_report" not in pack.metadata
 
     def test_evaluator_exception_is_swallowed(self) -> None:
@@ -3062,7 +3172,7 @@ class TestEvaluatorHook:
 
         s = _make_strategy("s", [_item("a", 0.5)])
         builder = PackBuilder(strategies=[s], evaluator=boom)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert "quality_report" not in pack.metadata
         assert len(pack.items) == 1
 
@@ -3091,7 +3201,7 @@ class TestEvaluatorHook:
             builder = PackBuilder(
                 strategies=[s], evaluator=evaluator, event_log=event_log
             )
-            pack = builder.build("q")
+            pack = builder.build("q", clearance="restricted")
             events = event_log.get_events(
                 event_type=EventType.PACK_QUALITY_SCORED, limit=10
             )
@@ -3116,7 +3226,7 @@ class TestEvaluatorHook:
                 evaluator=lambda _p: None,
                 event_log=event_log,
             )
-            builder.build("q")
+            builder.build("q", clearance="restricted")
             events = event_log.get_events(
                 event_type=EventType.PACK_QUALITY_SCORED, limit=10
             )
@@ -3154,7 +3264,9 @@ class TestPackBuilderTokenBudget:
         items = [_item(f"d{i}", 1.0 - i * 0.01, excerpt="x" * 100) for i in range(20)]
         s = _make_strategy("kw", items)
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=100), clearance="restricted"
+        )
         # Each item is 26 tokens (100//4+1), so 3 fit in a budget of 100.
         assert len(pack.items) == 3
 
@@ -3163,7 +3275,9 @@ class TestPackBuilderTokenBudget:
         s = _make_strategy("kw", items)
         # With a counter that reports 10 tokens per item, 10 items fit in 100.
         builder = PackBuilder(strategies=[s], token_counter=_FixedTokenCounter(10))
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=100), clearance="restricted"
+        )
         assert len(pack.items) == 10
 
     def test_safety_margin_shrinks_effective_budget(self) -> None:
@@ -3175,7 +3289,9 @@ class TestPackBuilderTokenBudget:
             token_counter=_FixedTokenCounter(10),
             token_budget_safety_margin=0.2,
         )
-        pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=50, max_tokens=100), clearance="restricted"
+        )
         assert len(pack.items) == 8
 
     def test_invalid_safety_margin_raises(self) -> None:
@@ -3197,7 +3313,11 @@ class TestPackBuilderTokenBudget:
                 token_counter=_FixedTokenCounter(10, name="fixed_10"),
                 token_budget_safety_margin=0.1,
             )
-            builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
+            builder.build(
+                "q",
+                budget=PackBudget(max_items=10, max_tokens=100),
+                clearance="restricted",
+            )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             payload = events[0].payload
@@ -3227,7 +3347,11 @@ class TestPackBuilderTokenBudget:
                 token_counter=_FixedTokenCounter(5, name="under"),
                 token_budget_validator=_FixedTokenCounter(8, name="real"),
             )
-            builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
+            builder.build(
+                "q",
+                budget=PackBudget(max_items=10, max_tokens=100),
+                clearance="restricted",
+            )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             payload = events[0].payload
             assert payload["token_counter"] == "under"  # noqa: S105
@@ -3259,7 +3383,11 @@ class TestPackBuilderTokenBudget:
                 event_log=event_log,
                 token_budget_validator=_BrokenValidator(),
             )
-            pack = builder.build("q", budget=PackBudget(max_items=10, max_tokens=100))
+            pack = builder.build(
+                "q",
+                budget=PackBudget(max_items=10, max_tokens=100),
+                clearance="restricted",
+            )
             assert len(pack.items) == 1
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             payload = events[0].payload
@@ -3280,7 +3408,9 @@ class TestPackBuilderTokenBudget:
         builder = PackBuilder(
             strategies=[s], token_counter=_FixedTokenCounter(42, name="fx")
         )
-        pack = builder.build("q", budget=PackBudget(max_items=5, max_tokens=1000))
+        pack = builder.build(
+            "q", budget=PackBudget(max_items=5, max_tokens=1000), clearance="restricted"
+        )
         assert pack.items[0].estimated_tokens == 42
 
     def test_sectioned_telemetry_includes_token_fields(self, tmp_path: Path) -> None:
@@ -3302,6 +3432,7 @@ class TestPackBuilderTokenBudget:
                     SectionRequest(name="a", max_items=5, max_tokens=200),
                     SectionRequest(name="b", max_items=5, max_tokens=300),
                 ],
+                clearance="restricted",
             )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
@@ -3376,7 +3507,7 @@ class TestMetaActivityFilter:
             [_meta_activity_item("meta-1"), _item("d1", 0.9)],
         )
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         item_ids = [item.item_id for item in pack.items]
         assert "meta-1" not in item_ids
         assert "d1" in item_ids
@@ -3392,7 +3523,7 @@ class TestMetaActivityFilter:
             [_meta_activity_item("meta-1"), _item("d1", 0.9)],
         )
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q", include_meta=True)
+        pack = builder.build("q", include_meta=True, clearance="restricted")
         item_ids = [item.item_id for item in pack.items]
         assert "meta-1" in item_ids
         assert "d1" in item_ids
@@ -3407,7 +3538,7 @@ class TestMetaActivityFilter:
             ],
         )
         builder = PackBuilder(strategies=[s])
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         item_ids = [item.item_id for item in pack.items]
         assert "real-1" in item_ids
         assert "meta-1" not in item_ids
@@ -3428,7 +3559,7 @@ class TestMetaActivityFilter:
                 ],
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            pack = builder.build("q")
+            pack = builder.build("q", clearance="restricted")
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
             # Two of each population: a count that happened to equal the
@@ -3455,7 +3586,7 @@ class TestMetaActivityFilter:
                 ],
             )
             builder = PackBuilder(strategies=[s], event_log=event_log)
-            pack = builder.build("q", include_meta=True)
+            pack = builder.build("q", include_meta=True, clearance="restricted")
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert events[0].payload["meta_filtered_count"] == 0
             assert len(pack.items) == 4
@@ -3481,6 +3612,7 @@ class TestMetaActivityFilter:
             pack = builder.build_sectioned(
                 "q",
                 sections=[SectionRequest(name="default", max_items=5, max_tokens=200)],
+                clearance="restricted",
             )
             events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
             assert len(events) == 1
@@ -3551,7 +3683,7 @@ class TestAttributionTelemetry:
             strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
             event_log=session_event_log,
         )
-        pack = builder.build("validate the pii convention")
+        pack = builder.build("validate the pii convention", clearance="restricted")
         assert pack.intent_family == "validation_diagnostics"
         payload = self._pack_payload(session_event_log)
         assert payload["intent_family"] == "validation_diagnostics"
@@ -3565,7 +3697,10 @@ class TestAttributionTelemetry:
             event_log=session_event_log,
         )
         pack = builder.build(
-            "generate sql", run_id="run-7", intent_family="custom_family"
+            "generate sql",
+            run_id="run-7",
+            intent_family="custom_family",
+            clearance="restricted",
         )
         assert (pack.run_id, pack.intent_family) == ("run-7", "custom_family")
         payload = self._pack_payload(session_event_log)
@@ -3581,7 +3716,7 @@ class TestAttributionTelemetry:
             strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
             event_log=session_event_log,
         )
-        builder.build("zzz")
+        builder.build("zzz", clearance="restricted")
         payload = self._pack_payload(session_event_log)
         assert payload["intent_family"] == "general_context"
 
@@ -3602,7 +3737,7 @@ class TestAttributionTelemetry:
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["title"] == "Deploy checklist"
         assert injected["category"] == "procedure"
@@ -3619,7 +3754,7 @@ class TestAttributionTelemetry:
             strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
             event_log=session_event_log,
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert "title" not in injected
         assert "category" not in injected
@@ -3652,7 +3787,7 @@ class TestAttributionTelemetry:
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["domain"] == ["finance", "tax"]
         assert injected["signal_quality"] == "low"
@@ -3672,7 +3807,7 @@ class TestAttributionTelemetry:
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["domain"] == ["finance"]
 
@@ -3697,7 +3832,7 @@ class TestAttributionTelemetry:
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["title"] == "node-name"
         assert "category" not in injected
@@ -3721,7 +3856,7 @@ class TestAttributionTelemetry:
         builder = PackBuilder(
             strategies=[_make_strategy("kw", [item])], event_log=session_event_log
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
         injected = self._pack_payload(session_event_log)["injected_items"][0]
         assert injected["title"] == "Worktree venv resolves to prod"
 
@@ -3736,6 +3871,7 @@ class TestAttributionTelemetry:
             "generate sql",
             sections=[SectionRequest(name="All")],
             run_id="run-9",
+            clearance="restricted",
         )
         assert pack.run_id == "run-9"
         payload = self._pack_payload(session_event_log)
@@ -3750,7 +3886,7 @@ class TestAttributionTelemetry:
             event_log=session_event_log,
             project="delta-proj",
         )
-        builder.build("generate sql")
+        builder.build("generate sql", clearance="restricted")
         assert self._pack_payload(session_event_log)["project"] == "delta-proj"
 
     def test_project_rides_the_sectioned_payload(
@@ -3761,7 +3897,11 @@ class TestAttributionTelemetry:
             event_log=session_event_log,
             project="delta-proj",
         )
-        builder.build_sectioned("generate sql", sections=[SectionRequest(name="All")])
+        builder.build_sectioned(
+            "generate sql",
+            sections=[SectionRequest(name="All")],
+            clearance="restricted",
+        )
         assert self._pack_payload(session_event_log)["project"] == "delta-proj"
 
     def test_project_key_is_present_and_none_by_default(
@@ -3772,7 +3912,7 @@ class TestAttributionTelemetry:
             strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
             event_log=session_event_log,
         )
-        builder.build("generate sql")
+        builder.build("generate sql", clearance="restricted")
         payload = self._pack_payload(session_event_log)
         assert "project" in payload
         assert payload["project"] is None
@@ -3817,6 +3957,7 @@ class TestIndexMode:
             "q",
             budget=PackBudget(max_items=2, max_tokens=100_000),
             index_mode=True,
+            clearance="restricted",
         )
         cut = [
             r for r in pack.retrieval_report.rejected_items if r.reason == "max_items"
@@ -3833,26 +3974,37 @@ class TestIndexMode:
 
     def test_admits_far_more_items_under_the_same_token_budget(self) -> None:
         budget = PackBudget(max_items=50, max_tokens=600)
-        full = self._builder(20).build("q", budget=budget)
-        index = self._builder(20).build("q", budget=budget, index_mode=True)
+        full = self._builder(20).build("q", budget=budget, clearance="restricted")
+        index = self._builder(20).build(
+            "q", budget=budget, index_mode=True, clearance="restricted"
+        )
         assert len(index.items) > len(full.items)
         assert len(index.items) == 20
 
     def test_max_items_still_caps_first(self) -> None:
         pack = self._builder(20).build(
-            "q", budget=PackBudget(max_items=5, max_tokens=100_000), index_mode=True
+            "q",
+            budget=PackBudget(max_items=5, max_tokens=100_000),
+            index_mode=True,
+            clearance="restricted",
         )
         assert len(pack.items) == 5
 
     def test_token_budget_is_still_enforced_on_index_lines(self) -> None:
         pack = self._builder(200).build(
-            "q", budget=PackBudget(max_items=200, max_tokens=60), index_mode=True
+            "q",
+            budget=PackBudget(max_items=200, max_tokens=60),
+            index_mode=True,
+            clearance="restricted",
         )
         assert 0 < len(pack.items) < 200
 
     def test_items_keep_their_excerpts_and_read_cost(self) -> None:
         pack = self._builder(3).build(
-            "q", budget=PackBudget(max_items=10, max_tokens=100_000), index_mode=True
+            "q",
+            budget=PackBudget(max_items=10, max_tokens=100_000),
+            index_mode=True,
+            clearance="restricted",
         )
         for item in pack.items:
             assert item.excerpt.strip() == self._BODY.strip()
@@ -3868,6 +4020,7 @@ class TestIndexMode:
             "q",
             budget=PackBudget(max_items=10, max_tokens=100_000),
             index_mode=True,
+            clearance="restricted",
         )
         event = self._pack_event(session_event_log)
         assert pack.pack_id
@@ -3880,13 +4033,15 @@ class TestIndexMode:
     def test_payload_marks_the_index_serve(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        self._builder(2, session_event_log).build("q", index_mode=True)
+        self._builder(2, session_event_log).build(
+            "q", index_mode=True, clearance="restricted"
+        )
         assert self._pack_payload(session_event_log)["index_mode"] is True
 
     def test_payload_defaults_to_false_for_a_normal_serve(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        self._builder(2, session_event_log).build("q")
+        self._builder(2, session_event_log).build("q", clearance="restricted")
         assert self._pack_payload(session_event_log)["index_mode"] is False
 
     def test_budget_trace_records_the_charge_that_actually_ran(
@@ -3896,6 +4051,7 @@ class TestIndexMode:
             "q",
             budget=PackBudget(max_items=10, max_tokens=100_000),
             index_mode=True,
+            clearance="restricted",
         )
         trace = self._pack_payload(session_event_log)["budget_trace"]
         assert trace
@@ -3917,7 +4073,10 @@ class TestIndexMode:
                 event_log=event_log,
                 token_budget_validator=_MultiplierTokenCounter(1.0, name="real"),
             ).build(
-                "q", budget=PackBudget(max_items=50, max_tokens=600), index_mode=True
+                "q",
+                budget=PackBudget(max_items=50, max_tokens=600),
+                index_mode=True,
+                clearance="restricted",
             )
             payload = self._pack_payload(event_log)
             assert payload["token_total_validated"] == payload["token_total_estimated"]
@@ -3929,9 +4088,13 @@ class TestIndexMode:
         self, session_event_log: SQLiteEventLog
     ) -> None:
         builder = self._builder(3, session_event_log)
-        first = builder.build("q", session_id="s1", index_mode=True)
+        first = builder.build(
+            "q", session_id="s1", index_mode=True, clearance="restricted"
+        )
         assert first.items
-        second = builder.build("q", session_id="s1", index_mode=True)
+        second = builder.build(
+            "q", session_id="s1", index_mode=True, clearance="restricted"
+        )
         assert second.items == []
 
 
@@ -3965,7 +4128,7 @@ class TestRetrievalPhaseAndRefresh:
     def test_flat_payload_always_carries_both_keys_with_defaults(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        self._builder(session_event_log).build("q")
+        self._builder(session_event_log).build("q", clearance="restricted")
         payload = self._pack_payload(session_event_log)
         assert payload["retrieval_phase"] is None
         assert payload["refresh"] is False
@@ -3974,19 +4137,25 @@ class TestRetrievalPhaseAndRefresh:
     def test_flat_each_allowed_value_round_trips(
         self, session_event_log: SQLiteEventLog, phase: str
     ) -> None:
-        self._builder(session_event_log).build("q", retrieval_phase=phase)
+        self._builder(session_event_log).build(
+            "q", retrieval_phase=phase, clearance="restricted"
+        )
         assert self._pack_payload(session_event_log)["retrieval_phase"] == phase
 
     def test_flat_unknown_value_is_refused(self) -> None:
         with pytest.raises(ValueError, match="retrieval_phase"):
-            self._builder().build("q", retrieval_phase="before_lunch")
+            self._builder().build(
+                "q", retrieval_phase="before_lunch", clearance="restricted"
+            )
 
     def test_flat_unknown_value_is_refused_not_silently_stored(
         self, session_event_log: SQLiteEventLog
     ) -> None:
         # The build must raise before anything is emitted.
         with pytest.raises(ValueError, match="retrieval_phase"):
-            self._builder(session_event_log).build("q", retrieval_phase="later")
+            self._builder(session_event_log).build(
+                "q", retrieval_phase="later", clearance="restricted"
+            )
         events = session_event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
         )
@@ -3995,7 +4164,9 @@ class TestRetrievalPhaseAndRefresh:
     def test_flat_refresh_true_is_recorded_true(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        self._builder(session_event_log).build("q", refresh=True)
+        self._builder(session_event_log).build(
+            "q", refresh=True, clearance="restricted"
+        )
         assert self._pack_payload(session_event_log)["refresh"] is True
 
     def test_flat_keys_survive_a_withheld_pack(
@@ -4005,7 +4176,7 @@ class TestRetrievalPhaseAndRefresh:
         # retrieval_phase/refresh are passed outside it, like index_mode,
         # so they must still be the caller's values, not dropped/reset.
         self._builder(session_event_log, holdout_rate=1.0).build(
-            "q", retrieval_phase="post_hoc", refresh=True
+            "q", retrieval_phase="post_hoc", refresh=True, clearance="restricted"
         )
         payload = self._pack_payload(session_event_log)
         assert payload["holdout"] is True
@@ -4021,7 +4192,9 @@ class TestRetrievalPhaseAndRefresh:
     def test_sectioned_payload_always_carries_both_keys_with_defaults(
         self, session_event_log: SQLiteEventLog
     ) -> None:
-        self._builder(session_event_log).build_sectioned("q", sections=self._SECTIONS)
+        self._builder(session_event_log).build_sectioned(
+            "q", sections=self._SECTIONS, clearance="restricted"
+        )
         payload = self._pack_payload(session_event_log)
         assert payload["retrieval_phase"] is None
         assert payload["refresh"] is False
@@ -4031,21 +4204,24 @@ class TestRetrievalPhaseAndRefresh:
         self, session_event_log: SQLiteEventLog, phase: str
     ) -> None:
         self._builder(session_event_log).build_sectioned(
-            "q", sections=self._SECTIONS, retrieval_phase=phase
+            "q", sections=self._SECTIONS, retrieval_phase=phase, clearance="restricted"
         )
         assert self._pack_payload(session_event_log)["retrieval_phase"] == phase
 
     def test_sectioned_unknown_value_is_refused(self) -> None:
         with pytest.raises(ValueError, match="retrieval_phase"):
             self._builder().build_sectioned(
-                "q", sections=self._SECTIONS, retrieval_phase="before_lunch"
+                "q",
+                sections=self._SECTIONS,
+                retrieval_phase="before_lunch",
+                clearance="restricted",
             )
 
     def test_sectioned_refresh_true_is_recorded_true(
         self, session_event_log: SQLiteEventLog
     ) -> None:
         self._builder(session_event_log).build_sectioned(
-            "q", sections=self._SECTIONS, refresh=True
+            "q", sections=self._SECTIONS, refresh=True, clearance="restricted"
         )
         assert self._pack_payload(session_event_log)["refresh"] is True
 
@@ -4053,7 +4229,11 @@ class TestRetrievalPhaseAndRefresh:
         self, session_event_log: SQLiteEventLog
     ) -> None:
         self._builder(session_event_log, holdout_rate=1.0).build_sectioned(
-            "q", sections=self._SECTIONS, retrieval_phase="mid_task", refresh=True
+            "q",
+            sections=self._SECTIONS,
+            retrieval_phase="mid_task",
+            refresh=True,
+            clearance="restricted",
         )
         payload = self._pack_payload(session_event_log)
         assert payload["holdout"] is True
@@ -4090,7 +4270,7 @@ class TestLatencyTelemetry:
     ) -> None:
         self._fake_clock(monkeypatch, 100.0, 100.25)
         s = _make_strategy("kw", [_item("d1", 0.9)])
-        pack = PackBuilder(strategies=[s]).build("q")
+        pack = PackBuilder(strategies=[s]).build("q", clearance="restricted")
         assert pack.retrieval_report.duration_ms == 250
 
     def test_build_payload_carries_duration_ms(
@@ -4100,7 +4280,9 @@ class TestLatencyTelemetry:
         log = SQLiteEventLog(tmp_path / "events.db")
         try:
             s = _make_strategy("kw", [_item("d1", 0.9)])
-            PackBuilder(strategies=[s], event_log=log).build("q")
+            PackBuilder(strategies=[s], event_log=log).build(
+                "q", clearance="restricted"
+            )
             payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
                 0
             ].payload
@@ -4114,7 +4296,9 @@ class TestLatencyTelemetry:
         self._fake_clock(monkeypatch, 50.0, 50.5)
         s = _make_strategy("kw", [_item("d1", 0.9)])
         pack = PackBuilder(strategies=[s]).build_sectioned(
-            "q", sections=[SectionRequest(name="a"), SectionRequest(name="b")]
+            "q",
+            sections=[SectionRequest(name="a"), SectionRequest(name="b")],
+            clearance="restricted",
         )
         assert [sec.retrieval_report.duration_ms for sec in pack.sections] == [
             500,
@@ -4129,7 +4313,7 @@ class TestLatencyTelemetry:
         try:
             s = _make_strategy("kw", [_item("d1", 0.9)])
             PackBuilder(strategies=[s], event_log=log).build_sectioned(
-                "q", sections=[SectionRequest(name="all")]
+                "q", sections=[SectionRequest(name="all")], clearance="restricted"
             )
             payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
                 0
@@ -4153,7 +4337,7 @@ class TestLatencyTelemetry:
         self._fake_clock(monkeypatch, 1000.0, 1000.4)
         s = _make_strategy("kw", [_item("d1", 0.9)])
         pack = PackBuilder(strategies=[s], holdout_rate=1.0).build_sectioned(
-            "q", sections=[SectionRequest(name="a")]
+            "q", sections=[SectionRequest(name="a")], clearance="restricted"
         )
         assert pack.sections[0].retrieval_report.duration_ms == 400
 
@@ -4178,7 +4362,7 @@ class TestLatencyTelemetry:
         try:
             s = _make_strategy("kw", [_item("d1", 0.9)])
             pack = PackBuilder(strategies=[s], holdout_rate=1.0, event_log=log).build(
-                "q"
+                "q", clearance="restricted"
             )
             assert pack.retrieval_report.duration_ms == 600
             payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
@@ -4259,7 +4443,7 @@ class TestLegacyAdvisoryFilter:
     ) -> None:
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served_ids = {a.advisory_id for a in pack.advisories}
         assert served_ids == {"adv-post-1", "adv-post-2"}
 
@@ -4268,7 +4452,9 @@ class TestLegacyAdvisoryFilter:
     ) -> None:
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        pack = builder.build_sectioned(
+            "q", sections=[SectionRequest(name="all")], clearance="restricted"
+        )
         served_ids = {a.advisory_id for a in pack.advisories}
         assert served_ids == {"adv-post-1", "adv-post-2"}
 
@@ -4279,7 +4465,7 @@ class TestLegacyAdvisoryFilter:
         monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, value)
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served_ids = {a.advisory_id for a in pack.advisories}
         assert served_ids == {"legacy-1", "legacy-2", "adv-post-1", "adv-post-2"}
 
@@ -4290,7 +4476,7 @@ class TestLegacyAdvisoryFilter:
         monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, value)
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served_ids = {a.advisory_id for a in pack.advisories}
         assert served_ids == {"adv-post-1", "adv-post-2"}
 
@@ -4304,7 +4490,7 @@ class TestLegacyAdvisoryFilter:
         monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, "disabled")
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served_ids = {a.advisory_id for a in pack.advisories}
         assert served_ids == {"adv-post-1", "adv-post-2"}
 
@@ -4316,9 +4502,13 @@ class TestLegacyAdvisoryFilter:
         """
         store = self._mixed_store(tmp_path)
         builder = PackBuilder(advisory_store=store)
-        on = {a.advisory_id for a in builder.build("q").advisories}
+        on = {
+            a.advisory_id for a in builder.build("q", clearance="restricted").advisories
+        }
         monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, "off")
-        off = {a.advisory_id for a in builder.build("q").advisories}
+        off = {
+            a.advisory_id for a in builder.build("q", clearance="restricted").advisories
+        }
         assert {"adv-post-1", "adv-post-2"} <= on
         assert {"adv-post-1", "adv-post-2"} <= off
 
@@ -4329,7 +4519,7 @@ class TestLegacyAdvisoryFilter:
         try:
             store = self._mixed_store(tmp_path)
             builder = PackBuilder(advisory_store=store, event_log=log)
-            builder.build("q")
+            builder.build("q", clearance="restricted")
             payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
                 0
             ].payload
@@ -4350,7 +4540,9 @@ class TestLegacyAdvisoryFilter:
         try:
             store = self._mixed_store(tmp_path)
             builder = PackBuilder(advisory_store=store, event_log=log)
-            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            builder.build_sectioned(
+                "q", sections=[SectionRequest(name="all")], clearance="restricted"
+            )
             payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
                 0
             ].payload
@@ -4367,7 +4559,7 @@ class TestLegacyAdvisoryFilter:
         unconditionally.
         """
         builder = PackBuilder()
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         assert pack.advisories == []
 
     def test_is_legacy_advisory_keys_on_evidence_confidence_alone(
@@ -4425,7 +4617,7 @@ class TestLegacyAdvisoryFilter:
             )
 
         builder = PackBuilder(advisory_store=store)
-        pack = builder.build("q")
+        pack = builder.build("q", clearance="restricted")
         served_ids = {a.advisory_id for a in pack.advisories}
 
         assert len(served_ids) == PackBuilder._ADVISORY_MAX_COUNT

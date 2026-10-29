@@ -106,7 +106,7 @@ def _seed_stamped_meta(registry: StoreRegistry, count: int = 3) -> list[str]:
 
 def _build(registry: StoreRegistry) -> object:
     builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
-    return builder.build("caching", budget=_BUDGET)
+    return builder.build("caching", budget=_BUDGET, clearance="restricted")
 
 
 class TestNeitherRoleReachesThePack:

@@ -176,7 +176,9 @@ class TestFactoryDefaultOff:
     ) -> None:
         _seed_payroll(registry)
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         assert _graph_items(pack.items) == []
         assert pack.retrieval_report.graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
@@ -189,7 +191,9 @@ class TestFactoryDefaultOff:
         _seed_payroll(registry)
 
         pack = build_pack_builder(registry, surface="test").build_sectioned(
-            BLIND_INTENT, sections=[SectionRequest(name="a"), SectionRequest(name="b")]
+            BLIND_INTENT,
+            sections=[SectionRequest(name="a"), SectionRequest(name="b")],
+            clearance="restricted",
         )
 
         assert _graph_items([i for s in pack.sections for i in s.items]) == []
@@ -205,9 +209,9 @@ class TestFactoryDefaultOff:
         axis = GraphSearch(registry.knowledge.graph_store, recency_fallback=False)
         builder = PackBuilder(strategies=[axis], holdout_rate=1.0)
 
-        flat = builder.build(BLIND_INTENT)
+        flat = builder.build(BLIND_INTENT, clearance="restricted")
         sectioned = builder.build_sectioned(
-            BLIND_INTENT, sections=[SectionRequest(name="a")]
+            BLIND_INTENT, sections=[SectionRequest(name="a")], clearance="restricted"
         )
 
         assert flat.retrieval_report.graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
@@ -223,7 +227,9 @@ class TestOptIn:
         _seed_payroll(registry)
         monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "1")
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         graph_items = _graph_items(pack.items)
         assert graph_items
@@ -241,7 +247,9 @@ class TestOptIn:
             "graph_recency_fallback", True
         )
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         assert _graph_items(pack.items)
         assert pack.retrieval_report.graph_axis is None
@@ -256,7 +264,9 @@ class TestOptIn:
         )
         monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "0")
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         assert _graph_items(pack.items) == []
         assert pack.retrieval_report.graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
@@ -309,7 +319,9 @@ class TestOptIn:
         )
         monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "enabled")
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         assert _graph_items(pack.items) == []
         assert pack.retrieval_report.graph_axis == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
@@ -329,7 +341,9 @@ class TestSeededPathsUnchanged:
     ) -> None:
         _seed_payroll(registry)
 
-        pack = build_pack_builder(registry, surface="test").build(NAMED_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            NAMED_INTENT, clearance="restricted"
+        )
 
         graph_items = _graph_items(pack.items)
         assert graph_items
@@ -346,6 +360,7 @@ class TestSeededPathsUnchanged:
         pack = build_pack_builder(registry, surface="test").build_sectioned(
             BLIND_INTENT,
             sections=[SectionRequest(name="a", entity_ids=["domain:payroll"])],
+            clearance="restricted",
         )
 
         graph_items = _graph_items([i for s in pack.sections for i in s.items])
@@ -376,7 +391,9 @@ class TestAxesBlock:
     def test_withheld_is_reported_and_the_axis_still_counts_as_ran(
         self, registry: StoreRegistry
     ) -> None:
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
         builder = build_pack_builder(registry, surface="test")
 
         axes = describe_axes(
@@ -496,7 +513,7 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
         builder = build_pack_builder(registry, surface="test")
 
-        pack = builder.build(BLIND_INTENT)
+        pack = builder.build(BLIND_INTENT, clearance="restricted")
 
         row = _assembled(registry, pack.pack_id)
         assert row["graph_axis_state"] == GRAPH_AXIS_UNSEEDED_FALLBACK_OFF
@@ -509,7 +526,7 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
         builder = build_pack_builder(registry, surface="test")
 
-        pack = builder.build(NAMED_INTENT)
+        pack = builder.build(NAMED_INTENT, clearance="restricted")
 
         row = _assembled(registry, pack.pack_id)
         assert row["graph_axis_state"] == "ran"
@@ -521,7 +538,9 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
         monkeypatch.setenv(GRAPH_RECENCY_FALLBACK_ENV, "1")
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         assert _assembled(registry, pack.pack_id)["graph_axis_state"] == "ran"
 
@@ -532,7 +551,9 @@ class TestPackAssembledRecordsTheAxis:
         builder = build_pack_builder(registry, surface="test")
 
         pack = builder.build_sectioned(
-            BLIND_INTENT, sections=[SectionRequest(name="a"), SectionRequest(name="b")]
+            BLIND_INTENT,
+            sections=[SectionRequest(name="a"), SectionRequest(name="b")],
+            clearance="restricted",
         )
 
         row = _assembled(registry, pack.pack_id)
@@ -547,6 +568,7 @@ class TestPackAssembledRecordsTheAxis:
         pack = build_pack_builder(registry, surface="test").build_sectioned(
             BLIND_INTENT,
             sections=[SectionRequest(name="a", entity_ids=["domain:payroll"])],
+            clearance="restricted",
         )
 
         assert _assembled(registry, pack.pack_id)["graph_axis_state"] == "ran"
@@ -558,7 +580,7 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
 
         pack = build_pack_builder(registry, surface="test").build_sectioned(
-            BLIND_INTENT, sections=[]
+            BLIND_INTENT, sections=[], clearance="restricted"
         )
 
         assert pack.sections == []
@@ -573,7 +595,9 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
         monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
 
-        pack = build_pack_builder(registry, surface="test").build(BLIND_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            BLIND_INTENT, clearance="restricted"
+        )
 
         row = _assembled(registry, pack.pack_id)
         assert row["holdout"] is True
@@ -586,7 +610,7 @@ class TestPackAssembledRecordsTheAxis:
         monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
 
         pack = build_pack_builder(registry, surface="test").build_sectioned(
-            BLIND_INTENT, sections=[SectionRequest(name="a")]
+            BLIND_INTENT, sections=[SectionRequest(name="a")], clearance="restricted"
         )
 
         row = _assembled(registry, pack.pack_id)
@@ -600,7 +624,9 @@ class TestPackAssembledRecordsTheAxis:
         _seed_payroll(registry)
         monkeypatch.setenv(HOLDOUT_RATE_ENV, "1.0")
 
-        pack = build_pack_builder(registry, surface="test").build(NAMED_INTENT)
+        pack = build_pack_builder(registry, surface="test").build(
+            NAMED_INTENT, clearance="restricted"
+        )
 
         row = _assembled(registry, pack.pack_id)
         assert row["holdout"] is True
@@ -630,10 +656,12 @@ class TestPackAssembledRecordsTheAxis:
 
         if sectioned:
             pack = builder.build_sectioned(
-                BLIND_INTENT, sections=[SectionRequest(name="a")]
+                BLIND_INTENT,
+                sections=[SectionRequest(name="a")],
+                clearance="restricted",
             )
         else:
-            pack = builder.build(BLIND_INTENT)
+            pack = builder.build(BLIND_INTENT, clearance="restricted")
 
         row = _assembled(registry, pack.pack_id)
         assert row["graph_axis_state"] == "failed"
@@ -648,11 +676,13 @@ class TestPackAssembledRecordsTheAxis:
 
         if sectioned:
             pack = builder.build_sectioned(
-                BLIND_INTENT, sections=[SectionRequest(name="a")]
+                BLIND_INTENT,
+                sections=[SectionRequest(name="a")],
+                clearance="restricted",
             )
             report = pack.sections[0].retrieval_report
         else:
-            pack = builder.build(BLIND_INTENT)
+            pack = builder.build(BLIND_INTENT, clearance="restricted")
             report = pack.retrieval_report
 
         row = _assembled(registry, pack.pack_id)

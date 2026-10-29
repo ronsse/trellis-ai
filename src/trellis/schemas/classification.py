@@ -343,6 +343,12 @@ def shadow_verdict(record: Mapping[str, Any] | None) -> str | None:
 
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 
+#: Metadata key a document's :class:`DataClassification` record lives under.
+DATA_CLASSIFICATION_KEY = "data_classification"
+
+#: ``Sensitivity`` values, lowest to highest. The position is the rank.
+SENSITIVITY_ORDER: tuple[Sensitivity, ...] = get_args(Sensitivity)
+
 LifecycleState = Literal[
     "draft",
     "current",
@@ -360,9 +366,13 @@ class DataClassification(TrellisModel):
     and *compliance*, not retrieval ranking. Policy code is typed against this
     schema; it must never reach into ``ContentTags.custom`` for these values.
 
-    Defined so the shape is stable before any consumer ships;
-    no classifier populates it and no policy gate enforces it yet.
-    See ``docs/design/adr-tag-vocabulary-split.md``.
+    Written by the ``sensitivity`` parameter of the save surfaces
+    (``classified_by=["caller"]``) under :data:`DATA_CLASSIFICATION_KEY`, and
+    read back by :func:`sensitivity_of`. :mod:`trellis.retrieve.sensitivity`
+    withholds a document above the caller's clearance on every surface that
+    returns document content. No classifier populates it, and graph nodes
+    carry no label yet. See ``docs/design/adr-tag-vocabulary-split.md`` and
+    ``docs/design/adr-rest-api-security-model.md`` (Layer D).
     """
 
     sensitivity: Sensitivity = "internal"
@@ -380,9 +390,10 @@ class Lifecycle(TrellisModel):
     while lifecycle captures "is this current, deprecated, or superseded".
     A ``signal_quality="high"`` document can still be ``state="deprecated"``.
 
-    Defined so the shape is stable before any consumer ships;
-    no classifier populates it and no policy gate enforces it yet.
-    See ``docs/design/adr-tag-vocabulary-split.md``.
+    Written by retention (``archived``), reconcile (``superseded``) and
+    precedent demotion (``demoted``); the retrieval gates in
+    :mod:`trellis.retrieve.lifecycle` withhold those states from a pack. No
+    classifier populates it. See ``docs/design/adr-tag-vocabulary-split.md``.
     """
 
     state: LifecycleState = "current"
@@ -419,3 +430,30 @@ def lifecycle_state_of(bag: Mapping[str, Any] | None) -> LifecycleState:
     if isinstance(state, str) and state in LIFECYCLE_STATE_VALUES:
         return state  # type: ignore[return-value]
     return "current"
+
+
+def sensitivity_rank(sensitivity: Sensitivity) -> int:
+    """Position in :data:`SENSITIVITY_ORDER`; a higher rank is more sensitive."""
+    return SENSITIVITY_ORDER.index(sensitivity)
+
+
+def sensitivity_of(bag: Mapping[str, Any] | None) -> Sensitivity:
+    """The ``DataClassification.sensitivity`` stamped in a metadata bag.
+
+    Missing reads as ``"internal"``, the schema default, so an unlabelled
+    store is served exactly as before. A record that is **present** but
+    malformed (not a mapping, no ``sensitivity``, or a value outside the
+    vocabulary) reads as ``"restricted"``: it is a label someone meant to
+    write and could not be parsed, and serving it would leak by typo. This is
+    the opposite of :func:`lifecycle_state_of`, deliberately: a bad lifecycle
+    record must never hide content, and a bad classification record must
+    never expose it.
+    """
+    if not isinstance(bag, Mapping) or DATA_CLASSIFICATION_KEY not in bag:
+        return "internal"
+    record = bag[DATA_CLASSIFICATION_KEY]
+    if isinstance(record, Mapping):
+        value = record.get("sensitivity")
+        if isinstance(value, str) and value in SENSITIVITY_ORDER:
+            return value  # type: ignore[return-value]
+    return "restricted"

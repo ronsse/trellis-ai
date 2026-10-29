@@ -116,6 +116,7 @@ def pack(
     registry = _get_registry()
     builder = build_pack_builder(registry, surface="cli.retrieve")
     pack_result = builder.build(
+        clearance="restricted",  # the CLI reads the store directly: trusted-local
         intent=intent,
         domain=domain or None,
         agent_id=agent or None,
@@ -502,6 +503,7 @@ def file_context(
         get_graph_store(),
         paths,
         include_unconfirmed=include_unconfirmed,
+        clearance="restricted",  # the CLI reads the store directly: trusted-local
     )
     entries: list[dict[str, Any]] = result["paths"]
     truncated = bool(result["graph_scan_truncated"])

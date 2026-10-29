@@ -177,7 +177,9 @@ def _build(disclosure: DisclosureConfig | None, *, max_tokens: int = 3000) -> An
         disclosure=disclosure,
     )
     return builder.build(
-        "deploy", budget=PackBudget(max_items=50, max_tokens=max_tokens)
+        "deploy",
+        budget=PackBudget(max_items=50, max_tokens=max_tokens),
+        clearance="restricted",
     )
 
 
@@ -278,7 +280,11 @@ def test_the_pack_assembled_payload_writes_walk_tokens_only_when_set(
             strategies=[_FixedStrategy([_item(i) for i in range(30)])],
             disclosure=disclosure,
             event_log=log,
-        ).build("deploy", budget=PackBudget(max_items=50, max_tokens=3000))
+        ).build(
+            "deploy",
+            budget=PackBudget(max_items=50, max_tokens=3000),
+            clearance="restricted",
+        )
         (event,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)
         trace = event.payload["budget_trace"]
 
@@ -309,7 +315,10 @@ def test_index_mode_is_exempt() -> None:
         disclosure=DisclosureConfig(body_items=2),
     )
     pack = builder.build(
-        "deploy", budget=PackBudget(max_items=50, max_tokens=3000), index_mode=True
+        "deploy",
+        budget=PackBudget(max_items=50, max_tokens=3000),
+        index_mode=True,
+        clearance="restricted",
     )
 
     assert not any(i.selection_reason == POINTER_SELECTION_REASON for i in pack.items)

@@ -295,6 +295,7 @@ def test_pack_builder_against_neo4j_graph(registry: Any, executor: Any) -> None:
         intent="catalog services",
         domain="platform",
         budget=PackBudget(max_items=5, max_tokens=2000),
+        clearance="restricted",
     )
 
     item_ids = {item.item_id for item in pack.items}
@@ -384,6 +385,7 @@ def test_vector_upsert_and_semantic_pack(
         intent="tune postgres autovacuum for oltp workloads",
         domain="platform",
         budget=PackBudget(max_items=5, max_tokens=2000),
+        clearance="restricted",
     )
 
     assert any(item.item_id == "doc-postgres-tuning" for item in pack.items), (

@@ -180,7 +180,11 @@ class TestLookupPackBodiedItemIds:
             event_log=event_log,
             disclosure=DisclosureConfig(body_items=2),
         )
-        pack = builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+        pack = builder.build(
+            intent="loader retries",
+            budget=PackBudget(max_items=10),
+            clearance="restricted",
+        )
 
         payload = _assembled_payload(event_log)
         served = payload["injected_item_ids"]
@@ -212,6 +216,7 @@ class TestLookupPackBodiedItemIds:
             intent="loader retries",
             budget=PackBudget(max_items=10),
             index_mode=True,
+            clearance="restricted",
         )
 
         payload = _assembled_payload(event_log)
@@ -312,7 +317,11 @@ class TestLookupPackBodiedItemIds:
             event_log=event_log,
             disclosure=DisclosureConfig(body_items=3),
         )
-        pack = builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+        pack = builder.build(
+            intent="loader retries",
+            budget=PackBudget(max_items=10),
+            clearance="restricted",
+        )
 
         served = lookup_pack_item_ids(event_log, pack.pack_id)
         bodied = lookup_pack_bodied_item_ids(event_log, pack.pack_id)

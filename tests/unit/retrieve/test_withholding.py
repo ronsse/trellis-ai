@@ -163,7 +163,7 @@ class TestWithheldMeansAbsent:
                 _strategy("semantic", [_item("d1", score=0.9)]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rejected = pack.retrieval_report.rejected_items
         assert [r.reason for r in rejected] == ["dedup"], (
@@ -192,7 +192,7 @@ class TestWithheldMeansAbsent:
                 _strategy("semantic", [_item("d1", score=0.7)]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["d1"]
         assert _summary(pack)["total"] == 0
@@ -262,7 +262,7 @@ class TestTheTwoSilentGatesAreRecorded:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("keep"), _archived("gone")])]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["keep"]
         rejected = pack.retrieval_report.rejected_items
@@ -275,7 +275,7 @@ class TestTheTwoSilentGatesAreRecorded:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("keep"), _noisy("gone")])]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["keep"]
         rejected = pack.retrieval_report.rejected_items
@@ -293,6 +293,7 @@ class TestTheTwoSilentGatesAreRecorded:
         pack = builder.build(
             "deploy checklist",
             tag_filters={"signal_quality": {"in": ["noise"]}},
+            clearance="restricted",
         )
         assert [i.item_id for i in pack.items] == ["n1"]
         assert _summary(pack)["total"] == 0
@@ -311,7 +312,7 @@ class TestTheTwoSilentGatesAreRecorded:
                 _strategy("semantic", [_noisy("gone")]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         rejected = pack.retrieval_report.rejected_items
         assert [(r.item_id, r.strategy_source) for r in rejected] == [
             ("gone", "semantic")
@@ -329,7 +330,7 @@ class TestTheTwoSilentGatesAreRecorded:
             },
         )
         builder = PackBuilder(strategies=[_strategy("keyword", [both])])
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert _summary(pack)["by_reason"] == {ARCHIVED_REJECTION_REASON: 1}
 
 
@@ -351,7 +352,7 @@ class TestTheDemotedGateIsRecorded:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("keep"), _demoted("gone")])]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["keep"]
         rejected = pack.retrieval_report.rejected_items
@@ -375,7 +376,7 @@ class TestTheDemotedGateIsRecorded:
             },
         )
         builder = PackBuilder(strategies=[_strategy("keyword", [both])])
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert _summary(pack)["by_reason"] == {NOISE_REJECTION_REASON: 1}
 
 
@@ -388,7 +389,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
             strategies=[_strategy("keyword", [_item("keep"), _noisy("gone")])],
             event_log=log,
         )
-        builder.build("deploy checklist")
+        builder.build("deploy checklist", clearance="restricted")
 
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=1)[
             0
@@ -408,7 +409,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("keep")])], event_log=log
         )
-        builder.build("deploy checklist")
+        builder.build("deploy checklist", clearance="restricted")
 
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=1)[
             0
@@ -434,6 +435,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
         pack = builder.build_sectioned(
             "deploy checklist",
             sections=[SectionRequest(name="tactical", max_items=5, max_tokens=500)],
+            clearance="restricted",
         )
 
         assert pack.metadata["withholding"]["by_reason"] == {
@@ -456,6 +458,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
         pack = builder.build_sectioned(
             "deploy checklist",
             sections=[SectionRequest(name="tactical", max_items=2, max_tokens=5000)],
+            clearance="restricted",
         )
         assert pack.total_items == 2
         assert pack.metadata["withholding"]["by_reason"] == {"max_items": 3}
@@ -472,6 +475,7 @@ class TestTheSummaryReachesThePackAndTheEvent:
                 SectionRequest(name="a", max_items=5, max_tokens=5000),
                 SectionRequest(name="b", max_items=5, max_tokens=5000),
             ],
+            clearance="restricted",
         )
         assert pack.metadata["withholding"]["total"] == 0
 
@@ -722,7 +726,7 @@ class TestWithheldContentIsNotCopiedIntoAServedSurface:
             ],
             event_log=log,
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rendered = format_pack_as_markdown(
             [
@@ -825,7 +829,9 @@ class TestExistingConsumersStillHold:
             strategies=[_strategy("keyword", [_item("keep"), _noisy("gone")])]
         )
         pack = builder.build(
-            "deploy checklist", budget=PackBudget(max_items=10, max_tokens=5000)
+            "deploy checklist",
+            budget=PackBudget(max_items=10, max_tokens=5000),
+            clearance="restricted",
         )
         assert [b.item_id for b in pack.retrieval_report.budget_trace] == ["keep"]
 
@@ -931,7 +937,9 @@ class TestSectionRoutingIsAGate:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("d0"), _item("d1"), _item("d2")])]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_patterns()], clearance="restricted"
+        )
 
         assert pack.total_items == 0
         summary = _summary(pack)
@@ -951,7 +959,9 @@ class TestSectionRoutingIsAGate:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("d0"), _item("d1")])]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_patterns()], clearance="restricted"
+        )
 
         rendered = format_sectioned_pack_as_markdown(
             [{"name": s.name, "items": []} for s in pack.sections],
@@ -971,7 +981,9 @@ class TestSectionRoutingIsAGate:
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("d0"), _item("d1")])]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_patterns()], clearance="restricted"
+        )
 
         summary = _summary(pack)
         assert summary["by_reason"] == {}
@@ -1006,6 +1018,7 @@ class TestSectionRoutingIsAGate:
                 ),
                 _patterns(),
             ],
+            clearance="restricted",
         )
 
         assert pack.total_items == 2
@@ -1043,6 +1056,7 @@ class TestSectionRoutingIsAGate:
                 ),
                 _patterns(max_items=1),
             ],
+            clearance="restricted",
         )
 
         assert pack.total_items == 1
@@ -1082,6 +1096,7 @@ class TestSectionRoutingIsAGate:
                     max_tokens=5000,
                 ),
             ],
+            clearance="restricted",
         )
 
         summary = _summary(pack)
@@ -1105,7 +1120,9 @@ class TestSectionRoutingIsAGate:
                 )
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_patterns()], clearance="restricted"
+        )
 
         summary = _summary(pack)
         assert pack.total_items == 1
@@ -1124,7 +1141,9 @@ class TestSectionRoutingIsAGate:
                 )
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_patterns()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_patterns()], clearance="restricted"
+        )
 
         note = format_withholding_note(withholding_from_payload(_summary(pack)))
         assert "**Withheld:** 2 items" in note
@@ -1195,7 +1214,7 @@ class TestSectionRoutingIsAGate:
         """``build`` has no sections; the field must stay 0 rather than
         acquire a meaning it does not have."""
         builder = PackBuilder(strategies=[_strategy("keyword", [_item("d0")])])
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert pack.metadata["withholding"]["section_filtered"] == 0
 
 
@@ -1223,7 +1242,9 @@ class TestTheSectionedPathRecordsWhatItRemoved:
                 )
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_wildcard()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_wildcard()], clearance="restricted"
+        )
 
         assert pack.total_items == 2
         assert _summary(pack)["by_reason"] == {"structural_filter": 2}
@@ -1243,7 +1264,9 @@ class TestTheSectionedPathRecordsWhatItRemoved:
                 )
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_wildcard()])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_wildcard()], clearance="restricted"
+        )
 
         assert pack.total_items == 2
         assert _summary(pack)["by_reason"] == {"meta_activity_filter": 2}
@@ -1261,6 +1284,7 @@ class TestTheSectionedPathRecordsWhatItRemoved:
                 "deploy checklist",
                 sections=[_wildcard(max_items=2)],
                 session_id="sess-A",
+                clearance="restricted",
             )
             assert first.total_items == 2
 
@@ -1268,6 +1292,7 @@ class TestTheSectionedPathRecordsWhatItRemoved:
                 "deploy checklist",
                 sections=[_wildcard()],
                 session_id="sess-A",
+                clearance="restricted",
             )
             assert second.total_items == 2
             assert _summary(second)["by_reason"] == {"session_dedup": 2}
@@ -1287,6 +1312,7 @@ class TestTheSectionedPathRecordsWhatItRemoved:
         pack = builder.build_sectioned(
             "deploy checklist",
             sections=[_wildcard(max_items=2)],
+            clearance="restricted",
         )
         assert pack.total_items == 2
         assert _summary(pack)["by_reason"] == {"max_items": 3}
@@ -1317,6 +1343,7 @@ class TestTheSectionedPathRecordsWhatItRemoved:
         pack = builder.build_sectioned(
             "deploy checklist",
             sections=[_wildcard(max_items=10, max_tokens=55)],
+            clearance="restricted",
         )
         assert pack.total_items == 2
         assert _summary(pack)["by_reason"] == {"token_budget": 2}
@@ -1350,7 +1377,7 @@ class TestTheSectionedPathRecordsWhatItRemoved:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rows = {
             r.item_id: r
@@ -1418,7 +1445,9 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
                 )
             ]
         )
-        pack = builder.build("deploy checklist", budget=PackBudget(max_items=1))
+        pack = builder.build(
+            "deploy checklist", budget=PackBudget(max_items=1), clearance="restricted"
+        )
 
         rows = self._rows(pack, "max_items")
         assert sorted(rows) == ["ent", "pre"], (
@@ -1444,7 +1473,9 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
             ]
         )
         pack = builder.build(
-            "deploy checklist", budget=PackBudget(max_items=10, max_tokens=20)
+            "deploy checklist",
+            budget=PackBudget(max_items=10, max_tokens=20),
+            clearance="restricted",
         )
 
         rows = self._rows(pack, "token_budget")
@@ -1473,7 +1504,7 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
                 _strategy("semantic", [_typed("d1", "document", 0.90)]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rows = self._rows(pack, "dedup")
         assert list(rows) == ["d1"]
@@ -1497,7 +1528,7 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
                 _strategy("semantic", [_typed("d1", "entity", 0.40)]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rows = self._rows(pack, "dedup")
         assert list(rows) == ["d1"]
@@ -1526,7 +1557,7 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
             ],
             semantic_dedup=SemanticDedupConfig(),
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rows = self._rows(pack, "semantic_dedup")
         assert list(rows) == ["loser"]
@@ -1552,7 +1583,7 @@ class TestEveryRejectionRowCarriesTheRejectedItemsOwnFields:
             ],
             content_floor=ContentFloorConfig(mode="exclude"),
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         rows = self._rows(pack, CONTENT_FLOOR_REJECTION_REASON)
         assert sorted(rows) == ["bare", "thin"]

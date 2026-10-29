@@ -4,6 +4,33 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Retrieval honours a document's `sensitivity` label (#194, part 1).** MCP
+  `save_memory` and `save_knowledge` take an optional `sensitivity`
+  (`public` / `internal` / `confidential` / `restricted`); a key can label only
+  up to its own clearance, which comes from two new scopes, `confidential` and
+  `restricted` (`admin` implies both). Packs (flat and sectioned, MCP and REST),
+  MCP `search`, `get_items`, `get_file_context`, REST `/search` and
+  `GET /documents/{id}` withhold a document above the caller's clearance;
+  by-id reads answer as not-found and the withholding note reports reason
+  `sensitivity` as counts only. **An unlabelled store serves every caller
+  identically**, so nothing changes until a document is labelled. A document
+  labelled above `internal` skips memory extraction. `PackBuilder.build` and
+  `build_sectioned` now require a keyword-only `clearance`; the CLI passes
+  `"restricted"`. A REST pack response shows a caller below `restricted` the
+  `sensitivity` count but neither the ids in `withheld_item_ids` nor the
+  `sensitivity` rows of `rejected_items` (a per-query id and score for a
+  document it may not read); the `PACK_ASSEMBLED` event keeps both for its
+  admin readers. A caller-chosen `doc_id` that already names a document is
+  refused (MCP `save_memory`: invalid params; REST `POST /documents` and
+  `POST /evidence`: 409) when its label is above the key's clearance or above
+  the label the write carries, so a re-put can neither destroy a document the
+  caller cannot read nor silently lower its label; `data_classification` is now
+  mirrored onto the vector row. Not yet covered: REST ingest labelling, the
+  explore document list, graph-node labels, relabelling, the generic
+  `/mutations` evidence-ingest door and the mutation-path deny.
+
 ### Changed
 
 - **The steering text an MCP client reads now teaches the feedback call the

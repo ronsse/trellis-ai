@@ -118,7 +118,7 @@ def _build(
     """Every served item of a sectioned pack, by id."""
     builder = build_pack_builder(registry, surface="test")
     sections = sections or [SectionRequest(name="all", entity_ids=entity_ids or [])]
-    pack = builder.build_sectioned(intent, sections=sections)
+    pack = builder.build_sectioned(intent, sections=sections, clearance="restricted")
     return {item.item_id: item for s in pack.sections for item in s.items}
 
 
@@ -246,10 +246,12 @@ class TestAPackThatNamesNothingIsUnchanged:
         builder.build_sectioned(
             "anything",
             sections=[SectionRequest(name="a"), SectionRequest(name="b")],
+            clearance="restricted",
         )
         builder.build_sectioned(
             "anything",
             sections=[SectionRequest(name="a", entity_ids=["x"])],
+            clearance="restricted",
         )
 
         assert seen[0] is None
@@ -498,6 +500,7 @@ class TestTheControlKeyNeverReachesADocumentStore:
         pack = builder.build_sectioned(
             "reconcile the ledger",
             sections=[SectionRequest(name="all", entity_ids=[ENTITY])],
+            clearance="restricted",
         )
 
         served = {i.item_id for s in pack.sections for i in s.items}

@@ -136,7 +136,7 @@ def _axis(registry: StoreRegistry, name: str) -> Any:
 def _served(registry: StoreRegistry, axis: str, item_id: str = NODE_ID) -> bool:
     """Whether a pack built from one axis alone serves ``item_id``."""
     pack = PackBuilder(strategies=[_axis(registry, axis)]).build(
-        TITLE, limit_per_strategy=10
+        TITLE, limit_per_strategy=10, clearance="restricted"
     )
     return item_id in {i.item_id for i in pack.items}
 
@@ -1144,7 +1144,7 @@ class TestShadowPassOnlyAddsItsOwnKeyToAPromotedPrecedent:
         assert after["metadata"]["content_tags"]["content_type"] == "decision"
 
         pack = PackBuilder(strategies=[_axis(registry, "keyword")]).build(
-            TITLE, limit_per_strategy=10
+            TITLE, limit_per_strategy=10, clearance="restricted"
         )
         served = [i for i in strip_non_servable(pack.items) if i.item_id == NODE_ID]
         assert served

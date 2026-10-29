@@ -311,7 +311,9 @@ def _builder(
 
 def _build(builder: PackBuilder) -> Any:
     return builder.build(
-        intent=INTENT, budget=PackBudget(max_items=25, max_tokens=100_000)
+        intent=INTENT,
+        budget=PackBudget(max_items=25, max_tokens=100_000),
+        clearance="restricted",
     )
 
 
@@ -517,6 +519,7 @@ class TestPackBuilderChunkScope:
         pack = _builder(doc_store, _withhold(CHUNKS)).build_sectioned(
             intent=INTENT,
             sections=[SectionRequest(name="s", max_items=25, max_tokens=100_000)],
+            clearance="restricted",
         )
 
         served = {i.item_id for s in pack.sections for i in s.items}
