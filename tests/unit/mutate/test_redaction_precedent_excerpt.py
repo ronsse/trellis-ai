@@ -599,7 +599,7 @@ class TestPrecedentNames:
         assert resolved is not None
         assert resolved["entity_id"] == precedent_id
 
-        result = build_curate_executor(registry).execute(
+        result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.REDACTION_APPLY,
                 args={"target_id": "doc-a", "reason": "owner request"},
