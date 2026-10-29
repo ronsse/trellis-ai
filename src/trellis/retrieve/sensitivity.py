@@ -216,6 +216,19 @@ SUPERSESSION_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
 )
 
 
+#: The metadata key path that names a document id without being a reconcile
+#: pointer: ``evidence_ref``, which the graph axis lifts from a node's
+#: ``properties`` into the pack item's metadata (``save_knowledge`` writes the
+#: node's evidence document id there). Kept apart from
+#: :data:`SUPERSESSION_POINTER_PATHS` because that tuple is pinned to the
+#: reconcile writers' keys; every concealing walk covers both.
+EVIDENCE_POINTER_PATHS: tuple[tuple[str, ...], ...] = (("evidence_ref",),)
+
+_CONCEALED_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
+    SUPERSESSION_POINTER_PATHS + EVIDENCE_POINTER_PATHS
+)
+
+
 def _pointer_at(
     metadata: Mapping[str, Any] | None, path: tuple[str, ...]
 ) -> str | None:
@@ -234,10 +247,14 @@ def _pointer_at(
 
 
 def _stored_pointers(metadata: Mapping[str, Any] | None) -> set[str]:
-    """Every id ``metadata`` names at a :data:`SUPERSESSION_POINTER_PATHS` path."""
+    """Every id ``metadata`` names at a concealed pointer path.
+
+    Those are :data:`SUPERSESSION_POINTER_PATHS` and
+    :data:`EVIDENCE_POINTER_PATHS`.
+    """
     return {
         pointer
-        for path in SUPERSESSION_POINTER_PATHS
+        for path in _CONCEALED_POINTER_PATHS
         if (pointer := _pointer_at(metadata, path))
     }
 
@@ -268,7 +285,7 @@ def _without_pointers(
 ) -> Mapping[str, Any]:
     """``metadata`` with every pointer that names a ``hidden`` id dropped."""
     out: Any = metadata
-    for path in SUPERSESSION_POINTER_PATHS:
+    for path in _CONCEALED_POINTER_PATHS:
         out = _dropping(out, path, hidden)
     return out  # type: ignore[no-any-return]
 
@@ -332,6 +349,13 @@ def conceal_unreadable_successors(
     marker stay; the item reads superseded or updated, by nothing the caller
     may name.
 
+    A graph-axis item carries one more: the node's ``evidence_ref`` property is
+    spread into the item's metadata (:data:`EVIDENCE_POINTER_PATHS`) and names
+    its evidence document. It is dropped on the same terms, in the same batch.
+    Supersession is resolved over the pool first (``partition_superseded``
+    reads ``evidence_ref`` itself), so which items are served, and in what
+    order, does not change; only the served copy's metadata does.
+
     Applies to every item whatever its ``lifecycle.state``, since the id is the
     leak. See :func:`_concealed_bags` for the batching and the no-read cases.
     An item that names readable ids, or none, is passed through unchanged
@@ -379,6 +403,84 @@ def conceal_document_successor(
     """
     (out,) = conceal_document_rows([doc], document_store, clearance)
     return out
+
+
+def _node_pointers(node: Mapping[str, Any]) -> set[str]:
+    """Every document id ``node`` names, in ``document_ids`` or its properties.
+
+    The properties are walked as a pack item's metadata is
+    (:func:`_stored_pointers`): the ``evidence_ref`` ``save_knowledge`` writes
+    beside ``document_ids``, and the ``lifecycle.superseded_by`` that
+    ``supersede_entity`` stamps. Only a non-empty string names an id, so a
+    ``document_ids`` that is not a list, and a member that is not a string,
+    name nothing.
+    """
+    ids = node.get("document_ids")
+    named = (
+        {i for i in ids if isinstance(i, str) and i} if isinstance(ids, list) else set()
+    )
+    return named | _stored_pointers(node.get("properties"))
+
+
+def _node_without_pointers(
+    node: dict[str, Any], hidden: Collection[str]
+) -> dict[str, Any]:
+    """``node`` without any ``hidden`` id in ``document_ids`` or its properties.
+
+    Copy-on-write: ``node`` itself comes back when nothing is dropped, and the
+    stored node (and its ``properties``) is never mutated. A member of
+    ``document_ids`` that is not a string is kept as stored.
+    """
+    props = node.get("properties")
+    shown = _without_pointers(props, hidden) if isinstance(props, dict) else props
+    out = node if shown is props else {**node, "properties": shown}
+    ids = out.get("document_ids")
+    if isinstance(ids, list):
+        kept = [i for i in ids if not (isinstance(i, str) and i in hidden)]
+        if len(kept) != len(ids):
+            out = {**out, "document_ids": kept}
+    return out
+
+
+def conceal_node_pointers(
+    nodes: Iterable[dict[str, Any]],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[dict[str, Any]]:
+    """``nodes`` as a caller at ``clearance`` may be shown them by a graph read.
+
+    A node carries no label of its own (#1036), so it is served whole; what it
+    can leak is the id of a document the caller may not read, in three places:
+    its ``document_ids``, a string ``properties["evidence_ref"]``
+    (``save_knowledge`` writes both, the same id, and the document may have
+    been labelled up, or the node written by a cleared caller, after the write
+    check) and the ``properties["lifecycle"]["superseded_by"]`` that
+    ``supersede_entity`` stamps. Each drops an unreadable id; a pointer key is
+    removed rather than blanked, ``lifecycle.state`` and every other property
+    stay, and a ``document_ids`` member that is not a string, an
+    ``evidence_ref`` that is not a string, and a ``document_ids`` that is not a
+    list are left as stored.
+
+    The follow-on to :func:`conceal_document_rows` for the pointers a node
+    carries, with the same batching (:func:`_unreadable_pointers`): the
+    distinct ids named across *all* the nodes are judged in one pass, so a
+    response costs one store read per distinct id however many nodes name it,
+    and none when no node names one. A node that names only readable ids, or
+    none, comes back as the same object. ``restricted`` does no reads, and a
+    missing store leaves every node as it is.
+    """
+    pool = list(nodes)
+    if clearance == "restricted" or document_store is None:
+        return pool
+    named: set[str] = set()
+    for node in pool:
+        named |= _node_pointers(node)
+    if not named:
+        return pool
+    hidden = _unreadable_pointers(document_store, named, clearance)
+    if not hidden:
+        return pool
+    return [_node_without_pointers(node, hidden) for node in pool]
 
 
 class OverwriteRefusedError(ValueError):
@@ -639,6 +741,7 @@ def stamp_sensitivity(
 
 
 __all__ = [
+    "EVIDENCE_POINTER_PATHS",
     "SENSITIVITY_REJECTION_REASON",
     "SENSITIVITY_WITHHELD_IDS_KEY",
     "CandidateIndex",
@@ -648,6 +751,7 @@ __all__ = [
     "SensitivityLabelError",
     "conceal_document_rows",
     "conceal_document_successor",
+    "conceal_node_pointers",
     "conceal_withheld_ids",
     "conceal_unreadable_successors",
     "concealed_ids_metadata",
