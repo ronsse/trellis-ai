@@ -104,7 +104,8 @@ def chunk_parent_id(doc_id: str) -> str | None:
     ``notes``; a reader that acts on that (the class prior's chunk scope
     withholds by the parent's form) would act on a document that is no
     chunk's child. An id that is exactly ``<x>#chunk-<digits>`` is still read
-    as a chunk: nothing in the id tells it from a minted one.
+    as a chunk: nothing in the id tells it from a minted one, which is why a
+    caller may not name a document that way (:func:`reserved_chunk_doc_id_message`).
     """
     parent, separator, index = doc_id.rpartition(CHUNK_ID_SEPARATOR)
     if parent and separator and index.isascii() and index.isdigit():
@@ -115,6 +116,23 @@ def chunk_parent_id(doc_id: str) -> str | None:
 def is_chunk_doc_id(doc_id: str) -> bool:
     """``True`` iff *doc_id* has the shape of a chunk id :func:`chunk_doc_id` mints."""
     return chunk_parent_id(doc_id) is not None
+
+
+def reserved_chunk_doc_id_message(field: str, doc_id: str) -> str:
+    """The refusal text for a caller-chosen ``doc_id`` in the minted chunk shape.
+
+    Only corpus ingestion writes ``<parent>#chunk-<digits>`` rows, and every
+    reader takes that shape for a chunk, so a document a caller named that way
+    is read as a fragment of another (#1008): left out of whole-document
+    listings and skipped by every reader that rolls a chunk up to its parent.
+    ``field`` names where the caller supplied it (``evidence.doc_id``,
+    ``evidence_id``).
+    """
+    return (
+        f"{field} {doc_id!r} has the shape of a chunk id "
+        f"(<parent>{CHUNK_ID_SEPARATOR}<digits>), which only corpus ingestion "
+        "writes; name the document without that suffix"
+    )
 
 
 @dataclass

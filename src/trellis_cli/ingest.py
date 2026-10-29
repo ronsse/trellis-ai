@@ -31,6 +31,10 @@ from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
     trace_already_ingested,
 )
+from trellis.ingest_corpus.models import (
+    is_chunk_doc_id,
+    reserved_chunk_doc_id_message,
+)
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
@@ -233,6 +237,14 @@ def ingest_evidence(
     if is_promoted_precedent_document(evidence.evidence_id):
         _fail(
             reserved_document_id_message("evidence_id", evidence.evidence_id),
+            output_format,
+            error_type="ValidationError",
+            code=RESERVED_DOCUMENT_ID_CODE,
+        )
+    # And the one it makes for a minted chunk id (#1008).
+    if is_chunk_doc_id(evidence.evidence_id):
+        _fail(
+            reserved_chunk_doc_id_message("evidence_id", evidence.evidence_id),
             output_format,
             error_type="ValidationError",
             code=RESERVED_DOCUMENT_ID_CODE,

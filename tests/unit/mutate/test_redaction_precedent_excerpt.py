@@ -387,6 +387,104 @@ class TestCallerNamedTarget:
         assert {p: _everything_stored(registry, p) for p in untouched} == before
 
 
+class TestTargetNamedLikeAMintedChunk:
+    """A document named ``x#chunk-5`` is a parent whatever its id looks like (#1008).
+
+    ``is_chunk_doc_id`` cannot tell that id from a chunk ingest minted, so a
+    redaction that took it for one blanked only the row itself, left every
+    ``x#chunk-5#chunk-N`` serving the text, skipped the precedent scrub, and
+    reported neither. Ingest now refuses such an id, but a row named so before
+    that refusal is still stored, and these tests write one directly.
+
+    Defective subject: restore the ``is_chunk_doc_id`` guards in
+    ``_tombstone_redacted_documents`` and ``_precedents_sourced_from`` and
+    all but the last test here fail.
+    """
+
+    TARGET = "notes#chunk-5"
+
+    def _store(self, registry: StoreRegistry) -> None:
+        # ``chunk_count`` of 3 with chunk 1 absent: the declared count bridges
+        # the gap, as it does for any parent.
+        _put_doc(registry, self.TARGET, chunk_count=3)
+        _put_doc(registry, self.TARGET + "#chunk-0")
+        _put_doc(registry, self.TARGET + "#chunk-2")
+
+    def test_no_child_row_keeps_content_and_the_result_names_each(
+        self, registry: StoreRegistry
+    ) -> None:
+        _node(registry, self.TARGET)
+        self._store(registry)
+        registry.knowledge.vector_store.upsert(self.TARGET + "#chunk-0", [0.1, 0.2])
+        assert _served(registry) == [
+            self.TARGET,
+            self.TARGET + "#chunk-0",
+            self.TARGET + "#chunk-2",
+        ]
+
+        payload = _redact(registry, self.TARGET)
+
+        assert payload["documents_tombstoned"] == [
+            self.TARGET + "#chunk-0",
+            self.TARGET + "#chunk-2",
+            self.TARGET,
+        ]
+        assert _served(registry) == []
+        documents = registry.knowledge.document_store
+        for doc_id in payload["documents_tombstoned"]:
+            row = documents.get(doc_id)
+            assert row is not None
+            assert COPIED_TEXT not in repr(row)
+        assert registry.knowledge.vector_store.get(self.TARGET + "#chunk-0") is None
+
+    def test_it_scrubs_precedents_sourced_from_itself_and_its_chunks(
+        self, registry: StoreRegistry
+    ) -> None:
+        _node(registry, self.TARGET)
+        own = _promote(registry, self.TARGET)
+        child = _promote(registry, self.TARGET + "#chunk-0")
+        untouched = [
+            _promote(registry, "notes"),
+            _promote(registry, "notes#chunk-50"),
+            _promote(registry, "notes#chunk-6"),
+        ]
+        before = {p: _everything_stored(registry, p) for p in untouched}
+
+        payload = _redact(registry, self.TARGET)
+
+        assert sorted(payload["scrubbed_precedent_ids"]) == sorted([own, child])
+        for precedent_id in (own, child):
+            assert COPIED_TEXT not in _everything_stored(registry, precedent_id)
+        assert {p: _everything_stored(registry, p) for p in untouched} == before
+
+    def test_siblings_sharing_the_prefix_keep_their_text(
+        self, registry: StoreRegistry
+    ) -> None:
+        _node(registry, self.TARGET)
+        self._store(registry)
+        siblings = ("notes", "notes#chunk-4", "notes#chunk-50", "notes#chunk-5x")
+        for doc_id in siblings:
+            _put_doc(registry, doc_id)
+
+        _redact(registry, self.TARGET)
+
+        assert _served(registry) == sorted(siblings)
+
+    def test_a_minted_chunk_target_still_blanks_only_itself(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A real chunk has no children, so cascading from it reaches nothing."""
+        _node(registry, "notes#chunk-1")
+        for index in range(3):
+            _put_doc(registry, f"notes#chunk-{index}", chunk_count=3)
+        _put_doc(registry, "notes", chunk_count=3)
+
+        payload = _redact(registry, "notes#chunk-1")
+
+        assert payload["documents_tombstoned"] == ["notes#chunk-1"]
+        assert _served(registry) == ["notes", "notes#chunk-0", "notes#chunk-2"]
+
+
 class TestNothingToScrub:
     def test_no_precedents_leaves_the_payload_as_it_was(
         self, registry: StoreRegistry
