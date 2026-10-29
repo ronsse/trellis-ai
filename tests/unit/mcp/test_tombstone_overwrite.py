@@ -13,9 +13,13 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
-from tests.redaction_tombstone import make_tombstone
+from tests.redaction_tombstone import make_tombstone, tombstone_metadata
 from tests.unit.mcp.conftest import unwrap_tool
-from trellis.core.document_write import REINGEST_STAMP_KEY, is_redaction_tombstone
+from trellis.core.document_write import (
+    REINGEST_STAMP_KEY,
+    is_redaction_tombstone,
+    put_document,
+)
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.stores.registry import StoreRegistry
 
@@ -85,3 +89,30 @@ def test_execute_mutation_with_the_flag_writes_and_stamps(
     row = tombstone.knowledge.document_store.get(DOC_ID)
     assert row["content"] == NEW_TEXT
     assert REINGEST_STAMP_KEY in row["metadata"]
+
+
+def test_a_replayed_execute_mutation_over_a_tombstone_is_rejected(
+    temp_registry: StoreRegistry,
+) -> None:
+    """The derived key of an earlier success matches the replay, which the
+    idempotency stage used to answer ``duplicate`` with the tombstone still in
+    place (#1049). Defective subject: skip the replay hook and it still does."""
+    args = {"evidence": {"doc_id": "memory-replayed", "content": NEW_TEXT}}
+    first = json.loads(execute_mutation(operation="evidence.ingest", args=args))
+    assert first["status"] == "success", first
+    put_document(
+        temp_registry.knowledge.document_store,
+        resolve_vector_store(temp_registry),
+        "memory-replayed",
+        "",
+        tombstone_metadata(),
+        preserve_updated_at=False,
+    )
+
+    replay = json.loads(execute_mutation(operation="evidence.ingest", args=args))
+
+    assert replay["status"] == "rejected", replay
+    assert "reingest-redacted" in replay["message"]
+    assert is_redaction_tombstone(
+        temp_registry.knowledge.document_store.get("memory-replayed")
+    )

@@ -16,6 +16,8 @@ from pydantic import ValidationError as PydanticValidationError
 # ``trellis.learning.scoring`` and retention restore import them from here.
 from trellis.core.document_write import (
     REDACTION_TOMBSTONE_REASON,
+    RedactionTombstoneError,
+    _guard_tombstone,
     is_redaction_tombstone,
     put_document,
 )
@@ -190,6 +192,58 @@ class EvidenceIngestHandler:
             raise PolicyViolationError(
                 exc.message, policy_id=SENSITIVITY_FLOOR_POLICY_ID
             ) from exc
+
+    def replay_refusal(self, command: Command) -> ValidationError | None:
+        """The tombstone refusal this write would get now, for a replayed key.
+
+        The executor asks only when the command's idempotency key was already
+        seen, and answers DUPLICATE otherwise (see ``CommandHandler``). A
+        duplicate says the write is in place, which it is not once the id the
+        first write put has since been redacted: nothing is written and the
+        tombstone stays, so the caller is told the refusal rather than "ok".
+        Read-only.
+
+        Only a row that is a tombstone is asked. Over a live row, or an id with
+        no row, nothing was lost and the replay is the duplicate it was, so the
+        guard's stamp check (which refuses a forged stamp on any write) is not
+        run there: a replay of a write that carried the row's own stamp, after
+        a later write dropped it, is still a true duplicate. Over a tombstone
+        the answer is :func:`~trellis.core.document_write._guard_tombstone`'s
+        own, run over the stored row and this command's content and metadata,
+        so the two cannot disagree about what a tombstone is or what a write
+        over one may carry, in either refusal code
+        (``tests/unit/mutate/test_replay_refusal.py`` pins it).
+
+        A flagged command is never refused here: its key digests the flag, so it
+        replays a write that already put content back over the tombstone, and
+        a replay writes nothing. If that row was redacted again afterwards the
+        replay is still a DUPLICATE with the tombstone in place; the flag says
+        a deliberate write is allowed, not that a replay of one repeats it. A
+        command ``handle`` would refuse for its shape, and a malformed one, are
+        left to the executor's DUPLICATE as before. A store read that raises
+        propagates, and the executor fails the command closed.
+        """
+        evidence = command.args.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("reingest_redacted") is True:
+            return None
+        doc_id = evidence.get("doc_id")
+        content = evidence.get("content")
+        if not isinstance(doc_id, str) or not doc_id or not isinstance(content, str):
+            return None
+        stored = self._registry.knowledge.document_store.get(doc_id)
+        if stored is None or not is_redaction_tombstone(stored):
+            return None
+        metadata = evidence.get("metadata")
+        try:
+            _guard_tombstone(
+                stored,
+                content,
+                dict(metadata) if isinstance(metadata, dict) else {},
+                reingest_redacted=False,
+            )
+        except RedactionTombstoneError as exc:
+            return exc
+        return None
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         evidence = command.args.get("evidence")
