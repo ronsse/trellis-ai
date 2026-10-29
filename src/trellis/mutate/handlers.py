@@ -85,13 +85,24 @@ def _evidence_document_id(value: object) -> str:
     A promoted precedent's document row is written by the promote handler
     alone. Letting a caller choose an id in that namespace would let it exempt
     its own memory from noise demotion and retention (see
-    :mod:`trellis.core.precedent_document`).
+    :mod:`trellis.core.precedent_document`). A chunk id is written by corpus
+    ingestion alone: an id in the minted ``<x>#chunk-<digits>`` shape cannot be
+    told from one afterwards, so a caller may not choose it (#1008).
     """
     if not isinstance(value, str) or not value:
         msg = "evidence.doc_id must be a non-empty string"
         raise ValidationError(msg, code="evidence_ingest_shape")
     if is_promoted_precedent_document(value):
         msg = reserved_document_id_message("evidence.doc_id", value)
+        raise ValidationError(msg, code=RESERVED_DOCUMENT_ID_CODE)
+    # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
+    from trellis.ingest_corpus.models import (  # noqa: PLC0415
+        is_chunk_doc_id,
+        reserved_chunk_doc_id_message,
+    )
+
+    if is_chunk_doc_id(value):
+        msg = reserved_chunk_doc_id_message("evidence.doc_id", value)
         raise ValidationError(msg, code=RESERVED_DOCUMENT_ID_CODE)
     return value
 
@@ -495,11 +506,11 @@ def _rewrite_precedent_document(
 
 # The ``deprecation_reason`` a redaction's blanked document row carries.
 # ``retention.restore`` reads it back to recognise the tombstone
-# (:func:`_is_redaction_tombstone`).
+# (:func:`is_redaction_tombstone`).
 REDACTION_TOMBSTONE_REASON = "redacted"
 
 
-def _is_redaction_tombstone(doc: dict[str, Any]) -> bool:
+def is_redaction_tombstone(doc: dict[str, Any]) -> bool:
     """Whether a document row is the blank archived row a redaction leaves.
 
     Both halves are required. The reason alone is a free-text field that
@@ -580,10 +591,12 @@ def _tombstone_redacted_documents(
     graph node whose id is a document id (memory extraction mints one per
     document, and a promoted precedent has one). Documents a node merely links
     through ``document_ids`` are not touched, since one may back many
-    entities. A chunk target blanks only that chunk; a parent also blanks its
-    ``<parent>#chunk-N`` fragments, found from the parent's ``chunk_count``
-    and then probed past it until an id is missing, because chunks are
-    separate rows that serve the same text.
+    entities. The target's ``<target>#chunk-N`` fragments go with it, found
+    from its ``chunk_count`` and then probed past it until an id is missing,
+    because chunks are separate rows that serve the same text. That holds
+    whatever the target's own id looks like: a document named ``x#chunk-5``
+    has chunks of its own that nothing in its id gives away (#1008), and a
+    minted chunk, having none, costs a few absent-row reads.
 
     Chunks go first and the parent last: the parent's ``chunk_count`` is how a
     re-run after a partial failure finds the chunks, so it must outlive them.
@@ -595,29 +608,23 @@ def _tombstone_redacted_documents(
     log names it apart (``documents_vector_deleted_not_blanked``).
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
-    from trellis.ingest_corpus.models import (  # noqa: PLC0415
-        chunk_doc_id,
-        is_chunk_doc_id,
-    )
+    from trellis.ingest_corpus.models import chunk_doc_id  # noqa: PLC0415
 
     document_store = registry.knowledge.document_store
     tombstoned: list[str] = []
     vector_gone: set[str] = set()
     try:
-        if not is_chunk_doc_id(target_id):
-            parent = document_store.get(target_id)
-            declared = ((parent or {}).get("metadata") or {}).get("chunk_count")
-            index = 0
-            while True:
-                chunk_id = chunk_doc_id(target_id, index)
-                exists = _tombstone_document(
-                    registry, chunk_id, vector_gone=vector_gone
-                )
-                if exists:
-                    tombstoned.append(chunk_id)
-                elif not isinstance(declared, int) or index >= declared:
-                    break
-                index += 1
+        parent = document_store.get(target_id)
+        declared = ((parent or {}).get("metadata") or {}).get("chunk_count")
+        index = 0
+        while True:
+            chunk_id = chunk_doc_id(target_id, index)
+            exists = _tombstone_document(registry, chunk_id, vector_gone=vector_gone)
+            if exists:
+                tombstoned.append(chunk_id)
+            elif not isinstance(declared, int) or index >= declared:
+                break
+            index += 1
         if _tombstone_document(registry, target_id, vector_gone=vector_gone):
             tombstoned.append(target_id)
     except Exception:
@@ -3003,20 +3010,17 @@ def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str
     purged: a partial scan never reaches success.
 
     A precedent's ``source_item_id`` names a document or one of its
-    ``<parent>#chunk-N`` fragments. A parent target matches itself and its
-    chunks (the chunk id must start with ``<target>#chunk-``, so a sibling
-    document sharing a prefix does not match); a chunk target matches only
-    that chunk. Returns the matching rows.
+    ``<parent>#chunk-N`` fragments. A target matches itself and its chunks
+    (the chunk id must start with ``<target>#chunk-``, so a sibling document
+    sharing a prefix does not match), whatever its own id looks like: a
+    document named ``x#chunk-5`` has chunks ``x#chunk-5#chunk-N`` (#1008), and
+    a minted chunk, having none, matches only itself. Returns the matching
+    rows.
     """
     # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
-    from trellis.ingest_corpus.models import (  # noqa: PLC0415
-        CHUNK_ID_SEPARATOR,
-        is_chunk_doc_id,
-    )
+    from trellis.ingest_corpus.models import CHUNK_ID_SEPARATOR  # noqa: PLC0415
 
-    chunk_prefix = (
-        None if is_chunk_doc_id(target_id) else f"{target_id}{CHUNK_ID_SEPARATOR}"
-    )
+    chunk_prefix = f"{target_id}{CHUNK_ID_SEPARATOR}"
     matched: list[dict[str, Any]] = []
     offset = 0
     first_total: int | None = None
@@ -3043,9 +3047,7 @@ def _precedents_sourced_from(graph: GraphStore, target_id: str) -> list[dict[str
             source = (row.get("properties") or {}).get("source_item_id")
             if not isinstance(source, str) or not source:
                 continue
-            if source == target_id or (
-                chunk_prefix and source.startswith(chunk_prefix)
-            ):
+            if source == target_id or source.startswith(chunk_prefix):
                 matched.append(row)
         offset += len(rows)
         if not rows or offset >= total:
@@ -4370,7 +4372,7 @@ class RetentionRestoreHandler:
             raise ValidationError(
                 msg, errors=[msg], code="retention_restore_precedent_node_missing"
             )
-        if _is_redaction_tombstone(doc):
+        if is_redaction_tombstone(doc):
             msg = (
                 f"retention.restore will not un-archive {item_id}: it is the "
                 "blank row a redaction left, so there is no content to "

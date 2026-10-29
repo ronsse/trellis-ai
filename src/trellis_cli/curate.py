@@ -839,7 +839,10 @@ def promote_learning(
         # returns ``0`` whatever it previews.
         previews = [
             _preview_promotion(
-                entry, registry.knowledge.graph_store, registry.operational.event_log
+                entry,
+                registry.knowledge.graph_store,
+                registry.operational.event_log,
+                registry.knowledge.document_store,
             )
             for entry in plan["results"]
         ]
@@ -909,6 +912,7 @@ def promote_learning(
             requested_by="cli:promote-learning",
             graph_store=registry.knowledge.graph_store,
             event_log=registry.operational.event_log,
+            document_store=registry.knowledge.document_store,
         )
         submission_results.append(
             settle_promotion(
@@ -1103,7 +1107,9 @@ def _report_run_without_results(
     return exit_code
 
 
-def _preview_promotion(entry: dict[str, Any], graph_store: Any, event_log: Any) -> str:
+def _preview_promotion(
+    entry: dict[str, Any], graph_store: Any, event_log: Any, document_store: Any
+) -> str:
     """The status a real run would give a planned row, if its writes landed.
 
     Read-only. A row the planner could not ready keeps its own status; a
@@ -1119,6 +1125,7 @@ def _preview_promotion(entry: dict[str, Any], graph_store: Any, event_log: Any) 
         entry["edge_payloads"],
         graph_store=graph_store,
         event_log=event_log,
+        document_store=document_store,
     )
     return "promoted" if early is None else str(early["status"])
 
@@ -1185,6 +1192,7 @@ def _approve_candidates(
             requested_by=REVIEW_READY_REQUESTED_BY,
             graph_store=registry.knowledge.graph_store,
             event_log=registry.operational.event_log,
+            document_store=registry.knowledge.document_store,
         )
         outcomes.append(
             settle_promotion(

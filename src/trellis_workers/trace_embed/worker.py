@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
+from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
@@ -455,14 +456,19 @@ def _process_one(
     watermark on this row forever and re-attempt the same row every pass
     without ever making progress. Counted under ``skipped_invalid`` and
     returns ``True`` so the cursor moves past it, the same way an
-    already-embedded trace does. Every other non-``SUCCESS`` result from the
+    already-embedded trace does. A trace whose summary id would have the
+    minted chunk shape (a ``trace_id`` ending ``#chunk-<digits>``) is
+    classified the same way: evidence ingest refuses that id on every
+    attempt. Every other non-``SUCCESS`` result from the
     executor is a plain failure: it holds the cursor, because nothing about
     it says the next attempt cannot succeed.
     """
     # Before the vector-store lookup, not after it: a backend that binds the
     # id as a SQL parameter (Postgres refuses a NUL in a text value) would
     # raise on the lookup itself and fail the whole pass.
-    if contains_nul_or_lone_surrogate(trace.trace_id):
+    if contains_nul_or_lone_surrogate(trace.trace_id) or is_chunk_doc_id(
+        trace_summary_doc_id(trace.trace_id)
+    ):
         report.skipped_invalid += 1
         return True
 

@@ -192,6 +192,41 @@ def test_dry_run_previews_the_skip(tmp_path: Path) -> None:
     assert _writes("landed") == (1, 1)
 
 
+def _document_row(candidate_id: str, *, delete: bool = False) -> bool:
+    """Whether the candidate's precedent has a document row; optionally drop it."""
+    registry = curate_cli._get_registry()
+    try:
+        entity_id = precedent_entity_id_for_candidate(candidate_id)
+        present = registry.knowledge.document_store.get(entity_id) is not None
+        if delete:
+            registry.knowledge.document_store.delete(entity_id)
+        return present
+    finally:
+        registry.close()
+
+
+def test_a_precedent_with_no_document_row_is_previewed_and_mended(
+    tmp_path: Path,
+) -> None:
+    """The row is part of "complete" for the preview and the real run alike (#996)."""
+    candidates = [_candidate("landed")]
+    decisions = [("landed", True)]
+    _run(tmp_path, candidates, decisions)
+    assert _document_row("landed", delete=True)
+
+    code, data, _ = _run(tmp_path, candidates, decisions, dry_run=True)
+    assert code == EXIT_OK
+    assert data["results"][0]["would_status"] == "promoted"
+
+    code, data, _ = _run(tmp_path, candidates, decisions)
+    assert code == EXIT_OK
+    assert [r["status"] for r in data["results"]] == ["promoted"]
+    assert _document_row("landed")
+
+    code, data, _ = _run(tmp_path, candidates, decisions)
+    assert [r["status"] for r in data["results"]] == ["already_promoted"]
+
+
 def test_a_changed_rationale_is_still_written(tmp_path: Path) -> None:
     """Skipped only when the write would add nothing: new content still lands."""
     candidates = [_candidate("landed")]

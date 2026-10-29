@@ -947,7 +947,7 @@ class TestRestoreRefusesARedactionTombstone:
     the purge fails the row is already a blank archived tombstone beside a
     live node, and restore marked it ``current``.
 
-    Defective subject: drop the ``_is_redaction_tombstone`` branch of
+    Defective subject: drop the ``is_redaction_tombstone`` branch of
     ``RetentionRestoreHandler._refuse_unrestorable_row``.
     """
 

@@ -414,6 +414,50 @@ class TestIngestEvidence:
             == (payload["message"])
         )
 
+    def test_ingest_evidence_refuses_a_minted_chunk_shaped_id(
+        self, tmp_path: Path
+    ) -> None:
+        """A document so named is read as a chunk of another (#1008).
+
+        Defective subject: drop the ``is_chunk_doc_id`` check in
+        ``ingest_evidence`` and the exit code is 0 with a row written.
+        """
+        from trellis.errors import ValidationError
+        from trellis.mutate.handlers import _evidence_document_id
+        from trellis_cli.stores import get_document_store
+
+        f = tmp_path / "chunk-shaped.json"
+        f.write_text(
+            json.dumps(
+                {
+                    "evidence_id": "notes#chunk-5",
+                    "evidence_type": "snippet",
+                    "content": "a note filed under an id that looks like a chunk",
+                    "source_origin": "trace",
+                }
+            )
+        )
+
+        text = runner.invoke(app, ["ingest", "evidence", str(f)])
+        as_json = runner.invoke(app, ["ingest", "evidence", str(f), "--format", "json"])
+
+        assert text.exit_code == 2
+        assert "shape of a chunk id" in plain(text.stdout)
+        assert as_json.exit_code == text.exit_code
+        payload = json.loads(as_json.stdout.strip())
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ValidationError"
+        assert payload["code"] == "reserved_document_id"
+        assert get_document_store().get("notes#chunk-5") is None
+        # One code and message with the handler's, bar the field name.
+        with pytest.raises(ValidationError) as excinfo:
+            _evidence_document_id("notes#chunk-5")
+        assert excinfo.value.code == payload["code"]
+        assert (
+            str(excinfo.value).replace("evidence.doc_id", "evidence_id")
+            == (payload["message"])
+        )
+
     def test_ingest_evidence_invalid(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.json"
         f.write_text(json.dumps({"bad": "data"}))

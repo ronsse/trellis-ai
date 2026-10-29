@@ -1506,6 +1506,7 @@ def promote_learning_candidates(
                 requested_by="api:review.promote-learning",
                 graph_store=registry.knowledge.graph_store,
                 event_log=registry.operational.event_log,
+                document_store=registry.knowledge.document_store,
             )
         )
         outcomes.append({"candidate_id": entry["candidate_id"], **outcome})
