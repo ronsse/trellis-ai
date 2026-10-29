@@ -3959,10 +3959,9 @@ above its own clearance, and cannot touch a document it may not read.**
   do). SQLite declares none and the store interface has no way to ask what width
   its rows hold, so there the first non-empty vector of the batch sets the width
   the rest must match and a batch is not checked against rows already stored: a
-  later batch of another width is accepted on SQLite, and once two widths are
-  stored every semantic query raises. A semantic-only build then fails with
-  `PackAssemblyError`, and a multi-strategy build silently drops the semantic
-  axis from every pack. Only a missing, `null` or empty-list `vector` is not
+  later batch of another width is accepted on SQLite. A query there scores only
+  the rows of its own width and skips the rest (#1058), logging one
+  `vector_query.width_mismatch` warning when no row of its width is left. Only a missing, `null` or empty-list `vector` is not
   judged (the second pass counts it in `errors`); `0`, `false`, `""` and `{}`
   are not lists and are a 422.
 - A row whose `item_id` names no stored document (a chunk id with no chunk

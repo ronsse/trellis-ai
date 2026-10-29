@@ -354,7 +354,8 @@ All notable changes to Trellis will be documented in this file.
   `COUNT(*)` over the rows of other widths that pass the same SQL-pushed
   filters. If it finds any it logs one `vector_query.width_mismatch` warning
   with `query_width` and `other_width_rows`, counts only. Rows of a single
-  width rank exactly as before.
+  width rank exactly as before. This supersedes the `POST /api/v1/vectors`
+  entry's note that once two widths are stored every semantic query raises.
 
 - **A malformed vector row no longer breaks the semantic axis (part of
   #1029).** `SemanticSearch` skips a row whose `auto_importance` is not a
