@@ -78,7 +78,7 @@ def test_the_funnel_refuses_a_caller_named_summary_id(
 ) -> None:
     result = _ingest(registry, doc_id)
 
-    assert result.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
+    assert result.status is CommandStatus.REJECTED
     assert result.metadata.get("rejection_reason") == RESERVED_TRACE_SUMMARY_ID_CODE
     assert "trace embed worker" in result.message
     assert registry.knowledge.document_store.get(doc_id) is None
@@ -101,7 +101,7 @@ def test_a_forged_worker_requested_by_does_not_clear_the_refusal(
     """``requested_by`` is a string the caller writes; it must not be the key."""
     result = _ingest(registry, "trace-summary:abc", requested_by=REQUESTED_BY)
 
-    assert result.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
+    assert result.status is CommandStatus.REJECTED
     assert registry.knowledge.document_store.get("trace-summary:abc") is None
 
 
