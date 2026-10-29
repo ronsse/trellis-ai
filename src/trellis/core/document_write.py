@@ -118,7 +118,8 @@ TOMBSTONE_OVERWRITE_MESSAGE = (
     "id again is deliberate, so set reingest_redacted (`trellis ingest "
     "evidence --reingest-redacted`, `execute_mutation` with "
     "evidence.reingest_redacted=true, or `reingest_redacted: true` in the "
-    "body of POST /evidence or POST /documents)"
+    "body of POST /api/v1/evidence or POST /api/v1/documents, which needs the "
+    "mutate scope)"
 )
 STAMP_RESERVED_MESSAGE = (
     f"metadata.{REINGEST_STAMP_KEY} is reserved; it is written only by a "

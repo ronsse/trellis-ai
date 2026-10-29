@@ -89,7 +89,7 @@ ROUTES = [
         "evidence",
         "/api/v1/evidence",
         "evidence_id",
-        ("read", "ingest"),
+        ("read", "ingest", "mutate"),
         {"evidence_type": "snippet", "source_origin": "test"},
     ),
     Route("documents", "/api/v1/documents", "doc_id", ("mutate",), {}),
@@ -107,8 +107,9 @@ def test_an_unflagged_write_over_a_tombstone_is_a_400_naming_the_field(
 
     assert resp.status_code == 400, resp.text
     assert "--reingest-redacted" in resp.text
-    assert "`reingest_redacted: true` in the body of POST /evidence" in resp.text
-    assert "POST /documents" in resp.text
+    assert "`reingest_redacted: true` in the body of POST /api/v1/evidence" in resp.text
+    assert "POST /api/v1/documents" in resp.text
+    assert "mutate scope" in resp.text
     assert ORIGINAL_TEXT not in resp.text
     assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
 
@@ -259,8 +260,9 @@ def _headers(registry: StoreRegistry, scopes: list[str]) -> dict[str, str]:
 def test_a_flagged_write_by_a_key_below_the_label_is_still_refused(
     keyed: TestClient, registry: StoreRegistry, route: Route, doc_id: str
 ) -> None:
-    """Defective subject: skip ``refuse_document_overwrite`` for a flagged
-    write and the flag becomes a way to overwrite what the key cannot read."""
+    """The route's overwrite check answers first (409). Skip it for a flagged
+    write and the handler's own clearance check still refuses (400), so this
+    pins the route's answer, not the only barrier."""
     store = registry.knowledge.document_store
     held = store.get(doc_id)
 
@@ -273,6 +275,50 @@ def test_a_flagged_write_by_a_key_below_the_label_is_still_refused(
     assert resp.status_code == 409, resp.text
     assert store.get(doc_id) == held
     assert is_redaction_tombstone(store.get(doc_id))
+
+
+@pytest.mark.parametrize(
+    ("scopes", "status"),
+    [(["read", "ingest"], 403), (["read", "ingest", "mutate"], 200)],
+    ids=["ingest-only", "ingest-and-mutate"],
+)
+def test_the_flag_on_post_evidence_needs_the_mutate_scope(
+    keyed: TestClient, registry: StoreRegistry, scopes: list[str], status: int
+) -> None:
+    """Undoing a redaction is not an ingest: an ``ingest``-only key, which
+    capture hooks and sync jobs hold, may not set the flag. Defective subject:
+    drop the scope check and the ingest-only key rewrites the tombstone and
+    mints the stamp promotion trusts."""
+    store = registry.knowledge.document_store
+    evidence = ROUTES[0]
+
+    resp = keyed.post(
+        evidence.path,
+        json=evidence.body(reingest_redacted=True),
+        headers=_headers(registry, scopes),
+    )
+
+    assert resp.status_code == status, resp.text
+    row = store.get(DOC_ID)
+    if status == 403:
+        assert "mutate scope" in resp.text
+        assert is_redaction_tombstone(row)
+    else:
+        assert row["content"] == NEW_TEXT
+        assert REINGEST_STAMP_KEY in row["metadata"]
+
+
+def test_an_ingest_only_key_without_the_flag_is_the_tombstone_refusal(
+    keyed: TestClient, registry: StoreRegistry
+) -> None:
+    """The scope check is on the flag alone: unflagged, the key gets the 400."""
+    evidence = ROUTES[0]
+    resp = keyed.post(
+        evidence.path, json=evidence.body(), headers=_headers(registry, ["ingest"])
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert is_redaction_tombstone(registry.knowledge.document_store.get(DOC_ID))
 
 
 @BY_ROUTE

@@ -333,6 +333,8 @@ def create_document(
     redacted ``doc_id`` back (#1034), under the rules of ``POST /evidence``:
     without it a write to one is refused (400) and nothing is written, and a
     value that is not a boolean is a 422. It is no way past the clearance rule above.
+    A reused ``idempotency_key`` answers as the write it first named, so a
+    flagged retry needs a fresh one.
     """
     doc_id = body.get("doc_id")
     content = body.get("content", "")

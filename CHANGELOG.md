@@ -13,10 +13,16 @@ All notable changes to Trellis will be documented in this file.
   routes cannot take. Both routes now accept an optional boolean
   `reingest_redacted` in the body and pass it to the governed `evidence.ingest`
   command, which writes the row and stamps `reingested_after_redaction` as the
-  CLI's flagged path does. Absent or false is the write it was, byte for byte; a
-  value that is not a boolean is a 422 with nothing written (on
+  CLI's flagged path does. Setting it needs the `mutate` scope on both routes
+  (on `POST /evidence`, an `ingest`-only key that sets it is a 403 with nothing
+  written), the bar `POST /commands/batch` already set, so the flag gives no
+  key a way back it lacked. Absent is the write it was, byte for byte, and
+  false is the same as absent; a value that is not a boolean is a 422 with nothing written (on
   `POST /documents` a non-boolean `reingest_redacted` used to be ignored). The
-  refusal message now also names the field. The flag does not bypass the
+  refusal message now also names the field. A reused `idempotency_key` answers
+  as the write it first named, so a flagged retry needs a fresh one. A chunk id
+  never reaches the flag: the reserved-shape check refuses it (400) for every
+  key. The flag does not bypass the
   clearance rules: a flagged write over a labelled tombstone, or a tombstoned
   chunk of a labelled parent, by a key that may not read it is still the overwrite
   refusal (409), and a cleared key must still carry the label. A real tombstone

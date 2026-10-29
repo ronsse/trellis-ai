@@ -1404,7 +1404,12 @@ Scope boundaries, stated plainly:
   `evidence.ingest` (MCP `execute_mutation`, `POST /api/v1/commands/batch`), or
   a boolean `reingest_redacted` in the body of `POST /api/v1/evidence` or
   `POST /api/v1/documents` (a non-boolean is a 422, nothing written; the refusal
-  without it is a 400 whose message names these ways). The flag is no way past
+  without it is a 400 whose message names these ways). Each REST way needs the
+  `mutate` scope: an `ingest`-only key that sets the flag on
+  `POST /api/v1/evidence` is a 403 with nothing written. A reused
+  `idempotency_key` answers as the write it first named, so a flagged retry
+  needs a fresh one, and a chunk id never reaches the flag on either route (the
+  reserved-shape check refuses it, 400, for every key). The flag is no way past
   the clearance rules: a key that may not read a labelled document, or a
   tombstoned chunk of one, still gets the overwrite refusal (409), and the write
   must still carry the document's label. A redaction blanks every metadata key
