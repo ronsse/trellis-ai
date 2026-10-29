@@ -7,6 +7,7 @@ never reach the digest.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -1901,3 +1902,161 @@ class TestSessionOutcome:
         digest = parse_session(path)
         for fragment in ("git commit", "fake change", "fake-owner", "pull/101"):
             assert fragment not in repr(digest)
+
+
+class TestCovariates:
+    """Two facts fixed before a session ran, for the holdout's secondary
+    analysis: the length of the first counted user turn (a sub-agent's brief)
+    and a digest of its type, read from the sidecar next to its transcript.
+    Counts and an opaque handle: the brief, the type's name and the sidecar's
+    free text are never kept."""
+
+    _TYPE = "fixture-reviewer"
+    _DESCRIPTION = "Compare the gadget manifests against the sprocket baseline"
+    _TOOL_USE_ID = "toolu_fixture_0042"
+
+    @staticmethod
+    def _brief_turn(*texts: str, **flags: Any) -> dict[str, Any]:
+        record = prompt("", at=None, sidechain=True, **flags)
+        record["message"]["content"] = [text_block(text) for text in texts]
+        return record
+
+    def _agent(
+        self,
+        tmp_path: Path,
+        records: list[dict[str, Any]] | None = None,
+        *,
+        sidecar: str | bytes | None = None,
+    ) -> Path:
+        path = tmp_path / "agent-a1b2c3.jsonl"
+        write_transcript(
+            path,
+            records
+            if records is not None
+            else [self._brief_turn("Review the widget module.")],
+        )
+        if isinstance(sidecar, str):
+            path.with_name("agent-a1b2c3.meta.json").write_text(
+                sidecar, encoding="utf-8"
+            )
+        elif sidecar is not None:
+            path.with_name("agent-a1b2c3.meta.json").write_bytes(sidecar)
+        return path
+
+    def _meta(self, **overrides: Any) -> str:
+        meta = {
+            "agentType": self._TYPE,
+            "description": self._DESCRIPTION,
+            "spawnDepth": 1,
+            "toolUseId": self._TOOL_USE_ID,
+        }
+        return json.dumps({**meta, **overrides})
+
+    def test_the_brief_is_the_first_counted_user_turn(self, tmp_path: Path) -> None:
+        """A leading ``isMeta`` record, a compaction summary and a record of
+        harness text alone are not the brief, and a later prompt is not
+        either. Only the brief's own texts are summed: the harness text
+        beside them is not."""
+        brief = "Review the widget module and list what changed."
+        records = [
+            self._brief_turn("meta text " * 40, isMeta=True),
+            self._brief_turn("summary text " * 30, isCompactSummary=True),
+            self._brief_turn("<task-notification>done</task-notification>"),
+            self._brief_turn("<local-command-stdout>ok</local-command-stdout>", brief),
+            self._brief_turn("a second prompt, longer than the first " * 5),
+        ]
+        digest = parse_session(self._agent(tmp_path, records))
+
+        assert digest.brief_chars == len(brief)
+        assert digest.covariates_payload()["brief_chars"] == len(brief)
+
+    def test_a_brief_of_several_texts_is_their_summed_length(
+        self, tmp_path: Path
+    ) -> None:
+        records = [self._brief_turn("first part", "and the second part")]
+        digest = parse_session(self._agent(tmp_path, records))
+
+        assert digest.brief_chars == len("first part") + len("and the second part")
+
+    def test_a_file_with_no_counted_user_turn_has_no_brief(
+        self, tmp_path: Path
+    ) -> None:
+        records = [
+            self._brief_turn("meta only", isMeta=True),
+            assistant_turn("Nothing was asked."),
+        ]
+        digest = parse_session(self._agent(tmp_path, records))
+
+        assert digest.brief_chars is None
+        assert digest.covariates_payload() == {
+            "brief_chars": None,
+            "agent_type_digest": None,
+        }
+
+    def test_the_type_is_a_digest_and_nothing_else_of_the_sidecar_survives(
+        self, tmp_path: Path
+    ) -> None:
+        digest = parse_session(self._agent(tmp_path, sidecar=self._meta()))
+
+        expected = hashlib.sha256(self._TYPE.encode()).hexdigest()[:12]
+        assert digest.agent_type_digest == expected
+        assert digest.covariates_payload()["agent_type_digest"] == expected
+        kept = repr(digest) + json.dumps(digest.covariates_payload())
+        assert self._TYPE not in kept
+        assert self._TOOL_USE_ID not in kept
+        # Short words could match the temp path the digest also names.
+        for word in (w for w in self._DESCRIPTION.split() if len(w) > 5):
+            assert word not in kept
+
+    def test_the_sidecar_is_found_by_the_transcripts_own_name(
+        self, tmp_path: Path
+    ) -> None:
+        path = self._agent(tmp_path)
+        (tmp_path / "agent-other.meta.json").write_text(self._meta(), encoding="utf-8")
+        (tmp_path / "agent-a1b2c3.json").write_text(self._meta(), encoding="utf-8")
+
+        assert parse_session(path).agent_type_digest is None
+
+    @pytest.mark.parametrize(
+        "sidecar",
+        [
+            pytest.param(None, id="absent"),
+            pytest.param("{not json", id="malformed"),
+            pytest.param("", id="empty"),
+            pytest.param(b"\xff\xfe\x00garbage", id="not-utf8"),
+            pytest.param("[1, 2, 3]", id="list"),
+            pytest.param('"agent"', id="string"),
+            pytest.param("null", id="null"),
+            pytest.param("[" * 100_000, id="too-deep"),
+            pytest.param('{"description": "no type"}', id="no-agent-type"),
+            pytest.param('{"agentType": 7}', id="int-agent-type"),
+            pytest.param('{"agentType": ["a"]}', id="list-agent-type"),
+            pytest.param('{"agentType": null}', id="null-agent-type"),
+            pytest.param('{"agentType": ""}', id="empty-agent-type"),
+            pytest.param('{"agentType": "\\ud800"}', id="unencodable-agent-type"),
+        ],
+    )
+    def test_a_sidecar_that_gives_no_type_is_never_an_error(
+        self, tmp_path: Path, sidecar: str | bytes | None
+    ) -> None:
+        digest = parse_session(self._agent(tmp_path, sidecar=sidecar))
+
+        assert digest.agent_type_digest is None
+        assert digest.user_texts == ["Review the widget module."]
+        assert digest.malformed_lines == 0
+
+    def test_a_sidecar_that_is_a_directory_is_never_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        path = self._agent(tmp_path)
+        path.with_name("agent-a1b2c3.meta.json").mkdir()
+
+        assert parse_session(path).agent_type_digest is None
+
+    def test_a_main_session_has_a_brief_and_no_type(self, tmp_path: Path) -> None:
+        path = tmp_path / "sess-fake-0001.jsonl"
+        write_transcript(path, [user_turn("please fix the deploy")])
+        digest = parse_session(path)
+
+        assert digest.brief_chars == len("please fix the deploy")
+        assert digest.agent_type_digest is None

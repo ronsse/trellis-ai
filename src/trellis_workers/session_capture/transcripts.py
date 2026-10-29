@@ -52,15 +52,31 @@ Claude Code writes one JSONL file per session under
   ``isMeta: true`` and bare-string content opening ``Stop hook feedback:``,
   which :data:`HOOK_FEEDBACK_PATTERN` matches.
 
+* **Two pre-treatment covariates** let the holdout's secondary analysis
+  adjust for what was fixed before the session ran. The length of the first
+  counted user turn is kept as a count (``brief_chars``; the text is not).
+  A sub-agent's ``agent-<id>.jsonl`` has a sibling ``agent-<id>.meta.json``
+  object, and :func:`_agent_type_digest` reads it for its ``agentType`` alone:
+  the sidecar's ``description`` is free text the dispatcher wrote and its
+  ``toolUseId`` an id, so neither is read into anything, kept or logged. Only
+  a 12-character SHA-256 prefix of the type survives, so the join holds a
+  pseudonymous handle that lets the holdout tell one type from another and
+  no name. It is pseudonymous, not anonymous: a small known vocabulary of
+  types is reversible by trying names, so the digest stays in the local event
+  log and never reaches a report. A missing, unreadable or malformed sidecar
+  gives ``None``, never an error. A session parsed again after its sidecar
+  has gone gets a new join with ``None``, which shadows the earlier one.
+
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
 flags, the pack ids the session was served, where the first retrieval and the
-first commit sat among the calls, the session's outcome as counts, and
-structural signals.
+first commit sat among the calls, the session's outcome as counts, the two
+covariates above, and structural signals.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -405,6 +421,34 @@ def _collect_tool_names(digest: SessionDigest, content: Any) -> None:
                 )
 
 
+def _agent_type_digest(path: Path) -> str | None:
+    """A short digest of the ``agentType`` in *path*'s sibling ``.meta.json``.
+
+    Claude Code writes ``agent-<id>.meta.json`` beside a sub-agent's
+    ``agent-<id>.jsonl``: an object with ``agentType``, ``description``,
+    ``spawnDepth`` and ``toolUseId``. Only ``agentType`` is picked out; the
+    rest is parsed along with it and dropped unread. The first 12 hex
+    characters of its SHA-256 are returned: enough to tell one type from
+    another, and pseudonymous rather than anonymous, since a small known
+    vocabulary of types is reversible by trying names. The digest therefore
+    stays in the join payload and out of every report.
+
+    ``None`` when the sidecar is absent, unreadable, not a JSON object, or
+    has no non-empty string ``agentType``. None of those is an error, and the
+    warning, were there one, would name no content.
+    """
+    sidecar = path.with_name(path.stem + ".meta.json")
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        agent_type = meta.get("agentType") if isinstance(meta, dict) else None
+        if not isinstance(agent_type, str) or not agent_type:
+            return None
+        return hashlib.sha256(agent_type.encode()).hexdigest()[:12]
+    except (OSError, ValueError, RecursionError):
+        # Absent, unreadable, not JSON, or a string that cannot be encoded.
+        return None
+
+
 def _handle_record(
     record: dict[str, Any], digest: SessionDigest, tally: OutcomeTally
 ) -> None:
@@ -487,6 +531,8 @@ def parse_session(path: Path) -> SessionDigest:
     # outcome counts what the file did, as its pack ids do.
     digest.outcome = tally.finish()
     digest.first_commit_ordinal = tally.first_commit_ordinal
+    digest.brief_chars = tally.brief_chars
+    digest.agent_type_digest = _agent_type_digest(path)
 
     # Decide which turns are this transcript's conversation before the signal
     # detectors read them: a mixed file keeps its main thread, a dedicated

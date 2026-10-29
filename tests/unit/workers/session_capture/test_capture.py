@@ -7,6 +7,7 @@ already-running event loop.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1331,14 +1332,19 @@ def _pack_session(
 
 
 def _joins(
-    registry: MagicMock, *, outcome: bool = False, timing: bool = False
+    registry: MagicMock,
+    *,
+    outcome: bool = False,
+    timing: bool = False,
+    covariates: bool = False,
 ) -> dict[str, list[dict]]:
     """Every join event's payload, per session, oldest first.
 
-    The session outcome and the retrieval timing ride the same payload.
-    These tests are about pack ids and retrieval counts, so each is left out
-    unless *outcome* or *timing* asks for it; :class:`TestSessionOutcomeJoin`
-    and :class:`TestRetrievalTimingJoin` assert them.
+    The session outcome, the retrieval timing and the covariates ride the
+    same payload. These tests are about pack ids and retrieval counts, so each
+    is left out unless *outcome*, *timing* or *covariates* asks for it;
+    :class:`TestSessionOutcomeJoin`, :class:`TestRetrievalTimingJoin` and
+    :class:`TestCovariatesJoin` assert them.
     """
     joins: dict[str, list[dict]] = {}
     for event in registry.operational.event_log.get_events(
@@ -1349,6 +1355,8 @@ def _joins(
             payload.pop("outcome", None)
         if not timing:
             payload.pop("retrieval_timing", None)
+        if not covariates:
+            payload.pop("covariates", None)
         joins.setdefault(event.entity_id, []).append(payload)
     return joins
 
@@ -1983,3 +1991,97 @@ class TestRetrievalTimingJoin:
         old, new = _joins(registry, outcome=True, timing=True)["sess-timed-0001"]
         assert "first_commit_ordinal" not in old["retrieval_timing"]
         assert new == written
+
+
+class TestCovariatesJoin:
+    """The join carries two pre-treatment covariates, for the holdout's
+    secondary analysis. They are part of the payload the "write only on a
+    difference" rule compares, so a join written before they existed is
+    written again by the session's next parse and by no other."""
+
+    _BRIEF = "Summarise the fixture module and report back."
+    _TYPE = "fixture-reviewer"
+
+    def _agent(self, root: Path) -> Path:
+        path = root / "proj" / "sess-cov-0001" / "subagents" / "agent-cv1.jsonl"
+        brief = user_turn(self._BRIEF, "sess-cov-0001")
+        reply = assistant_turn("Done.")
+        for record in (brief, reply):
+            record["isSidechain"] = True
+        write_transcript(path, [brief, reply])
+        path.with_name("agent-cv1.meta.json").write_text(
+            json.dumps({"agentType": self._TYPE, "description": "generic words"}),
+            encoding="utf-8",
+        )
+        return path
+
+    @staticmethod
+    def _expected() -> dict:
+        return {
+            "brief_chars": len(TestCovariatesJoin._BRIEF),
+            "agent_type_digest": hashlib.sha256(
+                TestCovariatesJoin._TYPE.encode()
+            ).hexdigest()[:12],
+        }
+
+    def test_the_join_carries_the_covariates(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        self._agent(root)
+
+        _sweep(registry, root, tmp_path / "wm.json")
+
+        (join,) = _joins(registry, covariates=True)["agent-cv1"]
+        assert join["covariates"] == self._expected()
+        assert self._TYPE not in json.dumps(join)
+        assert self._BRIEF not in json.dumps(join)
+
+    def test_a_join_from_before_the_covariates_is_rewritten_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-parsing a session after the covariates existed adds one join,
+        and a second re-parse adds none."""
+        root = tmp_path / "projects"
+        self._agent(root)
+        current = _registry(tmp_path / "current")
+        _sweep(current, root, tmp_path / "wm-current.json")
+        (written,) = _joins(current, outcome=True, timing=True, covariates=True)[
+            "agent-cv1"
+        ]
+        legacy = {k: v for k, v in written.items() if k != "covariates"}
+
+        registry = _registry(tmp_path / "legacy")
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SESSION_PACKS,
+            source="worker:session-capture",
+            entity_id="agent-cv1",
+            entity_type="capture_session",
+            payload=legacy,
+        )
+
+        first = _sweep(registry, root, tmp_path / "wm-1.json")
+        second = _sweep(registry, root, tmp_path / "wm-2.json")
+
+        assert first.pack_joins_recorded == 1
+        assert second.pack_joins_recorded == 0
+        assert second.pack_joins_unchanged == 1
+        old, new = _joins(registry, outcome=True, timing=True, covariates=True)[
+            "agent-cv1"
+        ]
+        assert "covariates" not in old
+        # Only the covariates differed: the rewrite is the current parse, whole.
+        assert new == written
+
+    def test_a_join_that_already_has_the_covariates_is_not_rewritten(
+        self, tmp_path: Path
+    ) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        self._agent(root)
+
+        first = _sweep(registry, root, tmp_path / "wm-1.json")
+        second = _sweep(registry, root, tmp_path / "wm-2.json")
+
+        assert (first.pack_joins_recorded, second.pack_joins_recorded) == (1, 0)
+        assert second.pack_joins_unchanged == 1
+        assert len(_joins(registry, covariates=True)["agent-cv1"]) == 1

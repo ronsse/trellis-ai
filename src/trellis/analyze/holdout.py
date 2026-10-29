@@ -47,6 +47,24 @@ each stratum's arm counts; the confidence interval is a percentile
 interval from a stratified bootstrap that resamples tasks within each
 stratum, arm labels attached, and recomputes the weights per replicate.
 
+**Secondary analysis.** Two covariate-adjusted fits sit beside the primary
+and never replace it: the outcome is regressed, both arms pooled, on the
+stratum indicators and a covariate set, and the within-stratum permutation
+test and stratified bootstrap run on the residuals. The first adjusts for
+``log1p`` of the task's brief length (the pre-registered covariate) and the
+second, exploratory, adds the sub-agent's type. Both come from the join's
+``covariates`` block, which capture writes. The fit never contains the arm,
+so the residuals do not depend on the assignment and the permutation test is
+exact under the sharp null. A task missing a covariate is dropped from that
+adjustment and counted, never imputed. The bootstrap holds the fitted
+coefficients fixed, so its interval ignores their uncertainty. The fit
+is refused (``not_measurable``) when the covariates explain more than 0.9 of
+the arm's within-stratum variance, because the adjusted difference is then
+not identified. Each adjustment covers only the tasks that carry its
+covariates, so it also reports the primary's test on those same tasks
+(``unadjusted_same_subset``), and its verdict is never the primary's. See
+:func:`_adjustment`.
+
 **Power** re-runs the prestudy's simulation at the realised N: stratified
 bootstraps of the analysed outcomes, with any estimated effect removed,
 random arms at the analysed rate (the planned 50/50 when no rate in (0, 1)
@@ -147,6 +165,8 @@ NO_BOTH_ARM_STRATUM = "no stratum with both arms"
 
 _DAY_SECONDS = 86_400
 _RATE_TOLERANCE = 1e-9
+#: Below this within-stratum sum of squares the arm is taken not to vary.
+_ARM_SS_TOLERANCE = 1e-9
 #: Cap on one permutation block's cells, so memory stays flat at any N.
 _BLOCK_CELLS = 2_000_000
 #: Shifts tried when searching for the MDE at the target power.
@@ -182,10 +202,30 @@ _NON_EPHEMERAL_NOTE = (
     "Upstream: session capture writes no join for a session in an ephemeral "
     "project, so none reaches this analysis or its counts."
 )
-_COVARIATE_NOTE = (
-    "Covariate-residualised permutation (secondary analysis): not applied, "
-    "because capture records no brief-length field."
+#: The join's covariate block and its two keys, written by
+#: ``SessionDigest.covariates_payload`` (``tests/unit/analyze/
+#: test_holdout_capture_contract.py`` keeps the two sides joined).
+_COVARIATES_KEY = "covariates"
+_BRIEF_CHARS_KEY = "brief_chars"
+_AGENT_TYPE_KEY = "agent_type_digest"
+#: An agent type with fewer tasks than this, in an adjustment's subset, is
+#: pooled with the other rare ones before its indicators are built.
+_MIN_LEVEL_TASKS = 3
+#: An adjustment with fewer residual degrees of freedom is not measured.
+_MIN_RESIDUAL_DF = 4
+#: An adjustment whose covariates explain more of the arm's within-stratum
+#: variance than this is not measured: the arm is nearly a function of them,
+#: so the residuals carry no arm contrast and the test reads a null.
+_MAX_ARM_R2 = 0.9
+#: The verdict of every secondary result. It is never the primary's.
+SECONDARY_VERDICT = "secondary_not_decisive"
+_NOT_MEASURABLE = "not_measurable"
+_NO_COVARIATES = (
+    "no analysed task's join records the covariates (joins written before "
+    "capture recorded them)"
 )
+_BRIEF_LENGTH = "brief_length"
+_BRIEF_LENGTH_AND_AGENT_TYPE = "brief_length_and_agent_type"
 
 
 class HoldoutAnalysisError(ValueError):
@@ -428,6 +468,72 @@ class HoldoutInference(TrellisModel):
     tasks_in_one_arm_strata: int
 
 
+class HoldoutSecondaryInference(TrellisModel):
+    """A secondary test: the primary's machinery and none of its verdict.
+
+    ``verdict`` is always :data:`SECONDARY_VERDICT`, so nothing here reads as a
+    detection or a null. An adjusted result carries ``mean_residual_served``
+    and ``mean_residual_withheld`` (the arms' mean residuals, which are not
+    outcome means and sit under no outcome-mean key); the unadjusted run on
+    the same tasks carries the outcome means in ``mean_served`` and
+    ``mean_withheld``. The other arm's pair is ``None``.
+    """
+
+    status: str
+    verdict: str
+    mean_served: float | None
+    mean_withheld: float | None
+    mean_residual_served: float | None
+    mean_residual_withheld: float | None
+    difference: float | None
+    ci_low: float | None
+    ci_high: float | None
+    p_value: float | None
+    permutations: int
+    bootstraps: int
+    strata: int
+    strata_both_arms: int
+
+
+class HoldoutAdjustment(TrellisModel):
+    """One covariate-adjusted fit of the secondary analysis, or why it has none.
+
+    ``n_used + n_missing_covariate`` is the number of analysed tasks; a task
+    lacking a covariate the adjustment needs is dropped, never imputed.
+    ``agent_type_levels`` counts the levels after rare ones are pooled and is
+    ``None`` for an adjustment that has no agent type. ``df_residual`` is
+    ``n_used`` less the design's rank. ``inference`` is the primary's test run
+    on the residuals; its bootstrap interval holds the fitted coefficients
+    fixed. ``unadjusted_same_subset`` is the same test on the raw outcomes of
+    the same ``n_used`` tasks, so the gap between its point estimate and
+    ``inference``'s is the adjustment alone (the p-values and intervals use
+    separate resampling streams and also differ by Monte Carlo noise), and
+    the gap to the primary also includes the subset.
+    ``arm_balance_r2`` is the share of the arm's within-stratum variance the
+    covariates explain; above 0.9 the adjustment is ``not_measurable``.
+    """
+
+    name: str
+    preregistered: bool
+    status: str
+    reason: str | None
+    n_used: int
+    n_missing_covariate: int
+    agent_type_levels: int | None
+    df_residual: int | None
+    arm_balance_r2: float | None
+    inference: HoldoutSecondaryInference | None
+    unadjusted_same_subset: HoldoutSecondaryInference | None
+
+
+class HoldoutCovariateAdjusted(TrellisModel):
+    """The secondary, covariate-adjusted analysis. It decides nothing."""
+
+    status: str
+    note: str
+    adjustments: list[HoldoutAdjustment]
+
+
 class HoldoutPower(TrellisModel):
     """Achieved power at the realised N against the planned figures."""
 
@@ -501,6 +607,7 @@ class HoldoutReport(TrellisModel):
     exclusions: list[HoldoutExclusion]
     descriptive: HoldoutDescriptive
     inference: HoldoutInference
+    covariate_adjusted: HoldoutCovariateAdjusted
     power: HoldoutPower
     guardrails: HoldoutGuardrails
     scan: ScanCoverage
@@ -863,6 +970,12 @@ class _Unit:
     both_arms: bool
     cut_off: bool
     outcome: Mapping[str, Any]
+    #: The brief's length in characters, and a pseudonymous handle for the
+    #: sub-agent's type, from the join's ``covariates``; ``None`` when the
+    #: join lacks one or holds an unusable value. The handle is only compared
+    #: for equality and never reaches the report.
+    brief_chars: float | None = None
+    agent_type: str | None = None
 
 
 @dataclass
@@ -1414,6 +1527,7 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         for p in pack_ids
         if p in packs and HOLDOUT_KEY in (packs[p].payload or {})
     }
+    brief_chars, agent_type = _covariates(payload)
     return _Unit(
         parent=parent,
         stratum=f"{parent}|{_iso_week(first_at)}",
@@ -1422,6 +1536,24 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         both_arms=len(arms) == _PAIR,
         cut_off=outcome.get("ended_on_error") is True,
         outcome=outcome,
+        brief_chars=brief_chars,
+        agent_type=agent_type,
+    )
+
+
+def _covariates(payload: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    """The join's brief length and agent-type handle; ``None`` for an unusable one.
+
+    A join written before capture recorded the block has neither. A bool, a
+    negative or non-finite number, or a digest that is not a non-empty string
+    is unusable, and is never read as zero.
+    """
+    raw = payload.get(_COVARIATES_KEY)
+    block: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    digest = block.get(_AGENT_TYPE_KEY)
+    return (
+        _count(block.get(_BRIEF_CHARS_KEY)),
+        digest if isinstance(digest, str) and digest else None,
     )
 
 
@@ -2000,11 +2132,19 @@ def _report(
         options=options,
     )
 
+    # Children 0-2 are the primary's and the power simulation's, in the order
+    # they have always had. 3-6 are the two adjustments' (a permutation and a
+    # bootstrap stream each) and 7-10 the unadjusted runs on their subsets;
+    # a child's stream does not depend on how many are spawned, so appending
+    # to the end moves no existing figure.
     rngs = [
         np.random.default_rng(s)
-        for s in np.random.SeedSequence(options["seed"]).spawn(3)
+        for s in np.random.SeedSequence(options["seed"]).spawn(11)
     ]
     inference = _inference(y, served, strata, rngs[0], rngs[1], options)
+    covariate_adjusted = _covariate_adjusted(
+        analysed, y, served, strata, rngs[3:], options
+    )
     power = _power(
         y,
         served,
@@ -2025,6 +2165,7 @@ def _report(
         scan,
         options["settle_hours"],
         sessions,
+        covariate_adjusted.note,
     )
     return HoldoutReport(
         window_days=options["days"],
@@ -2062,6 +2203,7 @@ def _report(
         ],
         descriptive=descriptive,
         inference=inference,
+        covariate_adjusted=covariate_adjusted,
         power=power,
         guardrails=_guardrails(units, analysed, options["outcome"]),
         scan=scan,
@@ -2197,6 +2339,281 @@ def _inference(
     )
 
 
+def _agent_type_columns(types: Sequence[str]) -> tuple[npt.NDArray[np.float64], int]:
+    """Indicator columns for *types*, rare levels pooled, one level left out.
+
+    A type with fewer than :data:`_MIN_LEVEL_TASKS` tasks joins one pooled
+    level with the other rare ones. The reference level, the most common
+    (the first in order on a tie), has no column: the stratum indicators
+    already span the constant, so the choice moves no residual. Returns the
+    columns and the number of levels after pooling.
+    """
+    counts = Counter(types)
+    # A real type sorts before the pooled level, whatever the handle says.
+    levels = [(0, t) if counts[t] >= _MIN_LEVEL_TASKS else (1, "") for t in types]
+    sizes = Counter(levels)
+    reference = max(sorted(sizes), key=lambda level: sizes[level])
+    kept = [level for level in sorted(sizes) if level != reference]
+    columns = np.array(
+        [[level == other for other in kept] for level in levels], dtype=float
+    ).reshape(len(levels), len(kept))
+    return columns, len(sizes)
+
+
+def _secondary(
+    inference: HoldoutInference, *, residual: bool
+) -> HoldoutSecondaryInference:
+    """*inference* as a secondary result: its figures, a verdict of its own.
+
+    ``residual`` says the means are of residuals, so they go under the
+    residual keys and the outcome-mean keys stay ``None``.
+    """
+    means = (inference.mean_served, inference.mean_withheld)
+    return HoldoutSecondaryInference(
+        status=inference.status,
+        verdict=SECONDARY_VERDICT,
+        mean_served=None if residual else means[0],
+        mean_withheld=None if residual else means[1],
+        mean_residual_served=means[0] if residual else None,
+        mean_residual_withheld=means[1] if residual else None,
+        difference=inference.difference,
+        ci_low=inference.ci_low,
+        ci_high=inference.ci_high,
+        p_value=inference.p_value,
+        permutations=inference.permutations,
+        bootstraps=inference.bootstraps,
+        strata=inference.strata,
+        strata_both_arms=inference.strata_both_arms,
+    )
+
+
+def _arm_balance_r2(
+    design: npt.NDArray[np.float64],
+    stratum_columns: npt.NDArray[np.float64],
+    served: npt.NDArray[np.bool_],
+) -> float:
+    """Share of the arm's within-stratum variance that *design* explains.
+
+    The arm indicator is regressed on the stratum indicators alone and then on
+    the whole design; the figure is the drop in residual sum of squares over
+    the first. 1.0 means the covariates reproduce the arm inside every
+    stratum, so the adjusted difference has nothing to be estimated from. An
+    arm that does not vary inside any stratum reads 1.0 for the same reason;
+    the comparison is against a tolerance because lstsq leaves rounding
+    residue of order 1e-31 where the exact answer is zero.
+    """
+    arm = served.astype(float)
+
+    def residual_ss(columns: npt.NDArray[np.float64]) -> float:
+        beta = np.linalg.lstsq(columns, arm, rcond=None)[0]
+        return float(np.sum((arm - columns @ beta) ** 2))
+
+    within = residual_ss(stratum_columns)
+    if within <= _ARM_SS_TOLERANCE:
+        return 1.0
+    return min(1.0, max(0.0, 1.0 - residual_ss(design) / within))
+
+
+def _adjustment(
+    name: str,
+    *,
+    preregistered: bool,
+    with_agent_type: bool,
+    analysed: Sequence[_Unit],
+    y: npt.NDArray[np.float64],
+    served: npt.NDArray[np.bool_],
+    strata: npt.NDArray[np.str_],
+    rngs: Sequence[np.random.Generator],
+    options: Mapping[str, Any],
+) -> HoldoutAdjustment:
+    """The primary analysis on residuals from a treatment-blind covariate fit.
+
+    The subset is the analysed tasks that carry every covariate the
+    adjustment needs; the rest are counted in ``n_missing_covariate``. The
+    outcome is regressed, both arms pooled, on the stratum indicators and the
+    covariates (``log1p`` of the brief length, plus the agent type's
+    indicators when asked) by least squares. The arm is never a column, so
+    the residuals do not depend on the assignment and the within-stratum
+    permutation test of them is exact under the sharp null. The bootstrap
+    holds the fitted coefficients fixed instead of refitting, so its interval
+    ignores their uncertainty: this is a secondary analysis, and its verdict
+    is :data:`SECONDARY_VERDICT`, never the primary's. A missing covariate is
+    dropped and counted, never imputed.
+
+    *rngs* are four generators: the adjusted test's permutation and
+    bootstrap, then those of the unadjusted run on the same tasks that
+    ``unadjusted_same_subset`` holds. The fit is refused when it has fewer
+    than :data:`_MIN_RESIDUAL_DF` residual degrees of freedom, when no stratum
+    holds both arms, or when the covariates explain more than
+    :data:`_MAX_ARM_R2` of the arm's within-stratum variance.
+    """
+    keep = np.array(
+        [
+            unit.brief_chars is not None
+            and (not with_agent_type or unit.agent_type is not None)
+            for unit in analysed
+        ],
+        dtype=bool,
+    )
+    used = int(keep.sum())
+    missing = len(analysed) - used
+
+    def not_measurable(
+        reason: str,
+        levels: int | None = None,
+        df: int | None = None,
+        r2: float | None = None,
+        unadjusted: HoldoutSecondaryInference | None = None,
+    ) -> HoldoutAdjustment:
+        return HoldoutAdjustment(
+            name=name,
+            preregistered=preregistered,
+            status=_NOT_MEASURABLE,
+            reason=reason,
+            n_used=used,
+            n_missing_covariate=missing,
+            agent_type_levels=levels,
+            df_residual=df,
+            arm_balance_r2=r2,
+            inference=None,
+            unadjusted_same_subset=unadjusted,
+        )
+
+    if not analysed:
+        return not_measurable("no analysed task")
+    if not used:
+        return not_measurable(_NO_COVARIATES)
+    kept = [unit for unit, ok in zip(analysed, keep, strict=True) if ok]
+    y_used, served_used, strata_used = y[keep], served[keep], strata[keep]
+    codes = _codes(strata_used)
+    stratum_columns = np.eye(int(codes.max()) + 1)[codes]
+    columns = [stratum_columns]
+    columns.append(
+        np.array([math.log1p(unit.brief_chars or 0.0) for unit in kept])[:, None]
+    )
+    levels: int | None = None
+    if with_agent_type:
+        indicators, levels = _agent_type_columns(
+            [unit.agent_type or "" for unit in kept]
+        )
+        columns.append(indicators)
+    design = np.hstack(columns)
+    beta, _, rank, _ = np.linalg.lstsq(design, y_used, rcond=None)
+    df_residual = used - int(rank)
+    if df_residual < _MIN_RESIDUAL_DF:
+        return not_measurable(
+            f"{df_residual} residual degrees of freedom after the fit, "
+            f"fewer than {_MIN_RESIDUAL_DF}",
+            levels,
+            df_residual,
+        )
+    in_stratum = np.bincount(codes)
+    served_in_stratum = np.bincount(codes, weights=served_used.astype(float))
+    if not ((served_in_stratum > 0) & (served_in_stratum < in_stratum)).any():
+        return not_measurable(NO_BOTH_ARM_STRATUM, levels, df_residual)
+    unadjusted = _secondary(
+        _inference(y_used, served_used, strata_used, rngs[2], rngs[3], options),
+        residual=False,
+    )
+    r2 = _arm_balance_r2(design, stratum_columns, served_used)
+    if r2 > _MAX_ARM_R2:
+        return not_measurable(
+            f"the covariates explain {r2:.2f} of the arm's within-stratum "
+            f"variance, over the {_MAX_ARM_R2:.1f} limit, so the adjusted "
+            "difference is not identified",
+            levels,
+            df_residual,
+            r2,
+            unadjusted,
+        )
+    inference = _inference(
+        y_used - design @ beta, served_used, strata_used, rngs[0], rngs[1], options
+    )
+    return HoldoutAdjustment(
+        name=name,
+        preregistered=preregistered,
+        status="ok",
+        reason=None,
+        n_used=used,
+        n_missing_covariate=missing,
+        agent_type_levels=levels,
+        df_residual=df_residual,
+        arm_balance_r2=r2,
+        inference=_secondary(inference, residual=True),
+        unadjusted_same_subset=unadjusted,
+    )
+
+
+def _covariate_note(adjustments: Sequence[HoldoutAdjustment], analysed: int) -> str:
+    """What the secondary analysis computed, and how many tasks it had to drop."""
+    parts = []
+    for adjustment in adjustments:
+        label = "brief-length" + (
+            "" if adjustment.name == _BRIEF_LENGTH else " and agent type"
+        )
+        label += " (pre-registered)" if adjustment.preregistered else " (exploratory)"
+        if adjustment.inference is None:
+            parts.append(f"{label}: not measurable, {adjustment.reason}")
+        else:
+            parts.append(
+                f"{label}: {adjustment.n_used} of {analysed} analysed tasks used, "
+                f"{adjustment.n_missing_covariate} lacked a covariate"
+            )
+    return (
+        "Covariate-adjusted permutation (secondary analysis, not decisive): the "
+        "outcome is residualised on the stratum indicators and the covariate, "
+        "arm left out of the fit, then tested within strata as the primary is; "
+        "the bootstrap interval holds the fitted coefficients fixed and ignores "
+        "their uncertainty. Each adjustment covers only the analysed tasks that "
+        "carry its covariates, so its gap to the primary mixes the adjustment "
+        "with the subset; unadjusted_same_subset is the primary's test on "
+        "those same tasks. " + "; ".join(parts) + "."
+    )
+
+
+def _covariate_adjusted(
+    analysed: Sequence[_Unit],
+    y: npt.NDArray[np.float64],
+    served: npt.NDArray[np.bool_],
+    strata: npt.NDArray[np.str_],
+    rngs: Sequence[np.random.Generator],
+    options: Mapping[str, Any],
+) -> HoldoutCovariateAdjusted:
+    """The two adjustments, brief length first.
+
+    *rngs* are eight generators: the first four are the adjusted tests'
+    (a permutation and a bootstrap each), the last four the unadjusted runs'.
+    """
+    adjustments = [
+        _adjustment(
+            name,
+            preregistered=preregistered,
+            with_agent_type=with_agent_type,
+            analysed=analysed,
+            y=y,
+            served=served,
+            strata=strata,
+            rngs=[
+                *rngs[2 * index : 2 * index + 2],
+                *rngs[4 + 2 * index : 6 + 2 * index],
+            ],
+            options=options,
+        )
+        for index, (name, preregistered, with_agent_type) in enumerate(
+            [
+                (_BRIEF_LENGTH, True, False),
+                (_BRIEF_LENGTH_AND_AGENT_TYPE, False, True),
+            ]
+        )
+    ]
+    measured = any(a.inference is not None for a in adjustments)
+    return HoldoutCovariateAdjusted(
+        status="ok" if measured else _NOT_MEASURABLE,
+        note=_covariate_note(adjustments, len(analysed)),
+        adjustments=adjustments,
+    )
+
+
 def _power(
     y: npt.NDArray[np.float64],
     served: npt.NDArray[np.bool_],
@@ -2257,6 +2674,7 @@ def _notes(
     scan: ScanCoverage,
     settle_hours: float,
     sessions: HoldoutSessions,
+    covariate_note: str,
 ) -> list[str]:
     notes: list[str] = []
     keyed = sum(HOLDOUT_KEY in (e.payload or {}) for e in rows.window)
@@ -2320,7 +2738,7 @@ def _notes(
         notes.append("Simulated power stays below the target across the shifts tried.")
     if scan.truncated and scan.note:
         notes.append(scan.note)
-    notes.append(_COVARIATE_NOTE)
+    notes.append(covariate_note)
     return notes
 
 
@@ -2338,11 +2756,14 @@ __all__ = [
     "NO_WITHHELD_ARM",
     "OUTCOMES",
     "POWER_PERMUTATIONS",
+    "SECONDARY_VERDICT",
     "TARGET_POWER",
     "ArmCounts",
     "ArmRatioCheck",
     "ArmShares",
+    "HoldoutAdjustment",
     "HoldoutAnalysisError",
+    "HoldoutCovariateAdjusted",
     "HoldoutDescriptive",
     "HoldoutExclusion",
     "HoldoutFunnel",
@@ -2353,6 +2774,7 @@ __all__ = [
     "HoldoutInference",
     "HoldoutPower",
     "HoldoutReport",
+    "HoldoutSecondaryInference",
     "HoldoutRows",
     "HoldoutSessions",
     "analytic_mde",
