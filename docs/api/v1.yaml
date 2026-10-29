@@ -7081,30 +7081,93 @@ paths:
         Body: ``{"vectors": [{"item_id": "...", "vector": [...], "metadata": {...}}, ...]}``
 
 
-        Every row is judged before any is written, so a refused batch stores
+        **What is judged before any write.** Every row is checked in a first pass
 
-        nothing. A row that is not an object, or whose ``metadata`` is neither an
+        and any refusal in it stores nothing from the batch. A row that is not an
 
-        object nor ``null``, is a 422. A row''s ``metadata`` may not carry a raw
+        object, whose ``item_id`` is present but not a string, or whose ``metadata``
 
-        ``data_classification`` (422), whoever the caller is: a vector row''s label
+        is neither an object nor ``null``, is a 422. So is a ``metadata`` that would
 
-        is mirrored from its document, never set here. A row whose ``item_id`` is a
+        break a semantic read: ``content`` or ``excerpt`` that is not a string,
 
-        document (or a chunk of one) above the key''s clearance is refused (409):
+        ``auto_importance`` that is not a finite number (a bool is not one), or an
 
-        replacing its vector row would replace what a semantic hit shows and
+        ``auto_importance`` at or above the importance decay threshold with no
 
-        carries. A row whose ``item_id`` is not a string is counted as an error,
+        ``importance_scored_at`` (in ``metadata`` or ``metadata.content_tags``). So
 
-        since an id the gate cannot read cannot be judged.
+        is a ``vector`` that is present and not a list of finite numbers (a bool is
+
+        not one) within float32 range, one whose squared length would overflow float32
+
+        in the store''s norm, one whose float32 norm is zero (all zeros, or too small
+
+        to survive float32), or one whose length differs from the store''s width (when
+
+        the store declares one; the SQLite backend does not, and then the batch''s first
+
+        non-empty vector sets the width the rest must match, and a later batch of
+
+        another width is accepted and breaks every semantic query once both widths are
+
+        stored). So is an ``item_id``
+
+        starting ``trace-summary:``, for every caller: that namespace is the
+
+        trace-embed worker''s, and a row there makes it skip the trace for good. A
+
+        row''s ``metadata`` may not carry a raw ``data_classification`` (422), whoever
+
+        the caller is: a vector row''s label is mirrored from its document, never set
+
+        here. A row whose ``item_id`` names no stored document may not carry
+
+        ``metadata.lifecycle`` or ``metadata.evidence_ref`` (422): the pack builder
+
+        withholds by id, so those keys would act on whatever item holds that id.
+
+        Those two pointer keys are the only metadata refused at such an id; every
+
+        other key is stored as sent. A row whose ``item_id`` is a document (or a chunk
+
+        of one) above the key''s
+
+        clearance is refused (409): replacing its vector row would replace what a
+
+        semantic hit shows and carries.
+
+
+        **What is not atomic.** The second pass writes row by row. A row with no
+
+        ``item_id`` (absent, ``null`` or empty) or no ``vector`` (absent, ``null`` or
+
+        empty) is counted in ``errors`` and stored as nothing. So is a row whose
+
+        document read or upsert fails, which does not stop the rest: a batch can
+
+        answer ``upserted: 1, errors: 1`` with the first row stored. Nothing makes
+
+        the mirror below atomic with a concurrent relabel either: if the relabel''s
+
+        own vector sync runs between this route''s read of the document and its upsert,
+
+        this upsert overwrites the synced row, and it stays stale until a later sync
+
+        or ``trellis admin resync-vector-metadata``.
 
 
         When ``item_id`` names a stored document the row is written carrying that
 
-        document''s mirrored metadata (its label and lifecycle among them), for
+        document''s mirrored metadata (its label and lifecycle among them) and its
 
-        every caller, whatever the row''s own ``metadata`` says.'
+        ``evidence_ref``, for every caller, whatever the row''s own ``metadata`` says.
+
+        For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
+
+        document''s own, else the parent the id names, whatever the row supplied; for
+
+        any other id it is kept as supplied.'
       operationId: upsert_vectors_api_v1_vectors_post
       requestBody:
         content:
