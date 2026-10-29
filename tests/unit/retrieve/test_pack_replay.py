@@ -1151,7 +1151,9 @@ def test_builder_dedup_row_feeds_replay_still_served_by_other_axis(
         content_floor=ContentFloorConfig(mode="off"),
         class_prior_config=ClassPriorConfig(mode="off", axes=frozenset({"keyword"})),
     )
-    off_pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    off_pack = builder.build(
+        "q", budget=PackBudget(max_items=50, max_tokens=100_000), clearance="restricted"
+    )
     assert [item.item_id for item in off_pack.items] == ["conv"]
     rejected = off_pack.retrieval_report.rejected_items
     assert [(r.item_id, r.reason, r.strategy_source) for r in rejected] == [
@@ -1196,7 +1198,9 @@ def test_builder_noise_rejected_other_axis_copy_does_not_block_removal(
         content_floor=ContentFloorConfig(mode="off"),
         class_prior_config=ClassPriorConfig(mode="off", axes=frozenset({"keyword"})),
     )
-    off_pack = builder.build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    off_pack = builder.build(
+        "q", budget=PackBudget(max_items=50, max_tokens=100_000), clearance="restricted"
+    )
     assert [item.item_id for item in off_pack.items] == ["conv"]
     rejected = off_pack.retrieval_report.rejected_items
     assert [(r.item_id, r.reason, r.strategy_source) for r in rejected] == [
@@ -1251,7 +1255,7 @@ def test_chunk_scope_replay_prices_what_serving_withholds_on_the_semantic_axis(
         event_log=log,
         content_floor=ContentFloorConfig(mode="off"),
         class_prior_config=ClassPriorConfig(mode="off", axes=axes),
-    ).build(intent, budget=budget)
+    ).build(intent, budget=budget, clearance="restricted")
     served_by_axis = {i.item_id: i.strategy_source for i in off_pack.items}
     assert served_by_axis == {"conv": "keyword", fresh: "semantic", old: "semantic"}
     [row] = [
@@ -1275,7 +1279,7 @@ def test_chunk_scope_replay_prices_what_serving_withholds_on_the_semantic_axis(
             content_floor=ContentFloorConfig(mode="off"),
             class_prior_config=config,
         )
-        .build(intent, budget=budget)
+        .build(intent, budget=budget, clearance="restricted")
         .retrieval_report.rejected_items
         if r.reason == "class_prior"
     }
@@ -1327,7 +1331,7 @@ def test_chunk_scope_replay_agrees_with_serving_on_caller_ids_and_missing_rows(
         event_log=log,
         content_floor=ContentFloorConfig(mode="off"),
         class_prior_config=ClassPriorConfig(mode="off", axes=axes),
-    ).build(intent, budget=budget)
+    ).build(intent, budget=budget, clearance="restricted")
     served = {i.item_id for i in off_pack.items}
     assert served == {"conv", minted, named, row_gone}
     for item_id in served:
@@ -1342,7 +1346,7 @@ def test_chunk_scope_replay_agrees_with_serving_on_caller_ids_and_missing_rows(
             content_floor=ContentFloorConfig(mode="off"),
             class_prior_config=config,
         )
-        .build(intent, budget=budget)
+        .build(intent, budget=budget, clearance="restricted")
         .retrieval_report.rejected_items
         if r.reason == "class_prior"
     }
@@ -1913,7 +1917,9 @@ def test_a_real_builder_pack_reproduces_and_refills(tmp_path: Path) -> None:
     ]
     probe = PackBuilder(
         strategies=strategies, content_floor=ContentFloorConfig(mode="off")
-    ).build("q", budget=PackBudget(max_items=50, max_tokens=100_000))
+    ).build(
+        "q", budget=PackBudget(max_items=50, max_tokens=100_000), clearance="restricted"
+    )
     per_item = probe.items[0].estimated_tokens or 0
     assert per_item > 0
 
@@ -1925,7 +1931,9 @@ def test_a_real_builder_pack_reproduces_and_refills(tmp_path: Path) -> None:
     )
     # Room for three items: g1, g2 and the best semantic one are served.
     pack = builder.build(
-        "q", budget=PackBudget(max_items=50, max_tokens=per_item * 3 + 5)
+        "q",
+        budget=PackBudget(max_items=50, max_tokens=per_item * 3 + 5),
+        clearance="restricted",
     )
     served = [item.item_id for item in pack.items]
     assert served == ["g1", "g2", "s1"]
@@ -2082,7 +2090,7 @@ def _build_logged(
         event_log=log,
         content_floor=ContentFloorConfig(mode="off"),
         **builder_kwargs,
-    ).build("q", budget=budget, index_mode=index_mode)
+    ).build("q", budget=budget, index_mode=index_mode, clearance="restricted")
     event = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=5)[0]
     return event.payload.get("pack_id") or event.entity_id, event.payload
 
@@ -2887,7 +2895,11 @@ def test_a_real_pack_under_a_safety_margin_walks_the_effective_budget(
     semantic = _axis_strategy("semantic", [item("s1", 0.9, 90, "semantic")])
     probe = PackBuilder(
         strategies=[graph, semantic], content_floor=ContentFloorConfig(mode="off")
-    ).build("q", budget=PackBudget(max_items=50, max_tokens=1_000_000))
+    ).build(
+        "q",
+        budget=PackBudget(max_items=50, max_tokens=1_000_000),
+        clearance="restricted",
+    )
     tokens = {i.item_id: i.estimated_tokens for i in probe.items}
     # s1 fits the nominal budget and not the 20%-reserved one, and g1 + s1
     # fits neither, so the real pack serves g1 alone.

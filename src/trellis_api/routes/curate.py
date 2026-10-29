@@ -20,7 +20,10 @@ from trellis.mutate import (
 from trellis.mutate.handlers import precedent_already_demoted_message
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import resolve_requested_by
+from trellis_api.routes._principal import (
+    refuse_document_overwrite,
+    resolve_requested_by,
+)
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     CommandResponse,
@@ -247,10 +250,18 @@ def create_entity(req: EntityCreateRequest) -> dict[str, Any]:
 
 
 @router.post("/documents")
-def create_document(body: dict[str, Any]) -> dict[str, Any]:
+def create_document(
+    body: dict[str, Any],
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Write a document to the document store for FTS retrieval.
 
     Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...}}``
+
+    A ``doc_id`` that already exists is refused (409) when the stored
+    document's label is above the key's clearance, or above the label this
+    write carries: a re-put replaces the row, so it must not destroy or
+    downgrade content the caller may not read.
     """
     doc_id = body.get("doc_id")
     content = body.get("content", "")
@@ -259,6 +270,13 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
     metadata = body.get("metadata") or {}
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(status_code=400, detail="content is required")
+    if isinstance(doc_id, str) and doc_id:
+        refuse_document_overwrite(
+            get_registry().knowledge.document_store,
+            doc_id,
+            ctx=ctx,
+            metadata=metadata if isinstance(metadata, dict) else None,
+        )
     command = build_evidence_ingest_command(
         doc_id=doc_id,
         content=content,

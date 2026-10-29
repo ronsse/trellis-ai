@@ -87,7 +87,7 @@ class TestEnforcedForEveryStrategy:
             _item("d1", {"title": "T", SHADOW_TAGS_KEY: {"domain": ["secret"]}})
         ]
 
-        pack = PackBuilder(strategies=[leaky]).build("anything")
+        pack = PackBuilder(strategies=[leaky]).build("anything", clearance="restricted")
         assert pack.items, "fixture must retrieve, else the test is vacuous"
         assert SHADOW_TAGS_KEY not in pack.items[0].metadata
         assert "secret" not in str(pack.model_dump(mode="json"))

@@ -20,9 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
-from trellis_api.auth import require_scope
+from trellis_api.auth import AuthContext, authenticate, require_scope
+from trellis_api.routes._principal import request_clearance
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 router = APIRouter()
@@ -154,10 +156,22 @@ def list_documents(
 
 
 @router.get("/documents/{doc_id:path}")
-def get_document(doc_id: str) -> dict[str, Any]:
-    """Get a single document with full content and metadata."""
+def get_document(
+    doc_id: str,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
+    """Get a single document with full content and metadata.
+
+    A document labelled above the caller's clearance answers 404, exactly
+    as a missing one does.
+    """
     registry = get_registry()
-    doc = registry.knowledge.document_store.get(doc_id)
+    store = registry.knowledge.document_store
+    doc = store.get(doc_id)
+    if doc is not None and not DocumentClearance(store, request_clearance(ctx)).permits(
+        doc_id, doc.get("metadata")
+    ):
+        doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
     return {"status": "ok", "document": doc}

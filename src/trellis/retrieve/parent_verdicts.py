@@ -94,6 +94,10 @@ class ParentVerdictCache:
         #: unreadable row cannot switch the check off for the whole pack.
         #: The caller reports the condition once per build, not per chunk.
         self.degraded = False
+        #: Parent ids whose fetch raised. A miss for these is an outage, not
+        #: an absence, which the sensitivity gate must tell apart: it fails
+        #: closed on an unreadable parent and open on a missing one.
+        self.failed_parent_ids: set[str] = set()
 
     def resolve(self, item: PackItem) -> dict[str, Any] | None:
         """The parent document's metadata for ``item``, or ``None``.
@@ -134,12 +138,25 @@ class ParentVerdictCache:
                 parent_id=parent_id,
             )
             self.degraded = True
+            self.failed_parent_ids.add(parent_id)
             self._cache[parent_id] = None
             return None
         metadata = parent_doc.get("metadata") if parent_doc else None
         resolved = metadata if isinstance(metadata, dict) else None
         self._cache[parent_id] = resolved
         return resolved
+
+    def unreadable(self, item: PackItem) -> bool:
+        """Whether ``item`` is a chunk whose parent fetch raised, not one missing.
+
+        Only meaningful after :meth:`resolve` has run for ``item``.
+        """
+        from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+        return (
+            is_chunk_doc_id(item.item_id)
+            and resolve_parent_id(item) in self.failed_parent_ids
+        )
 
 
 def parent_document_form(item: PackItem, cache: ParentVerdictCache) -> str | None:

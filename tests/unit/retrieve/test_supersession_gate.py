@@ -146,7 +146,7 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
             ],
             event_log=log,
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert "new" in _served(pack)
         assert "old" not in _served(pack)
@@ -174,7 +174,7 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
                 _strategy("keyword", [_loser("old", "elsewhere", 0.90), *_unrelated()])
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["old", "u-doc", "u-ent"]
         assert _summary(pack)["total"] == 0
@@ -195,7 +195,7 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
                 ),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["new", "u-doc", "u-ent"]
         assert _rows(pack) == [("old", SUPERSEDED, "keyword")]
@@ -210,7 +210,7 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
                 _strategy("graph", [_node("new-node", 0.60, evidence_ref="new-doc")]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["new-node", "u"]
         assert _rows(pack) == [("old", SUPERSEDED, "keyword")]
@@ -233,7 +233,7 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
                 ),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["new", "u-ent"]
         assert sorted(_rows(pack)) == [
@@ -261,7 +261,7 @@ class TestAMalformedStampNeverHides:
                 )
             ]
         )
-        return builder.build("deploy checklist")
+        return builder.build("deploy checklist", clearance="restricted")
 
     def test_malformed_stamps_are_served(self) -> None:
         cases: list[dict[str, Any]] = [
@@ -312,7 +312,7 @@ class TestChainsAndCycles:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["c", "u"]
         # Order of rows follows the pool, so the served record is stable.
@@ -339,7 +339,7 @@ class TestChainsAndCycles:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert sorted(_served(pack)) == ["b", "u"]
         assert _rows(pack) == [("a", SUPERSEDED, "keyword")]
 
@@ -360,7 +360,7 @@ class TestChainsAndCycles:
             ]
         )
         with capture_logs() as logs:
-            pack = builder.build("deploy checklist")
+            pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["a", "b", "u"]
         assert _summary(pack)["total"] == 0
@@ -385,7 +385,7 @@ class TestChainsAndCycles:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert sorted(_served(pack)) == ["a", "b", "c", "u"]
 
     def test_a_tail_into_a_cycle_is_withheld(self) -> None:
@@ -404,7 +404,7 @@ class TestChainsAndCycles:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         assert sorted(_served(pack)) == ["a", "b", "u"]
         assert _rows(pack) == [("d", SUPERSEDED, "keyword")]
 
@@ -427,7 +427,9 @@ class TestTheSectionedPath:
             ],
             event_log=log,
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_SECTION])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_SECTION], clearance="restricted"
+        )
 
         assert sorted(_served_sectioned(pack)) == ["new", "u-doc", "u-ent"]
         assert _summary(pack)["by_reason"] == {SUPERSEDED: 1}
@@ -442,7 +444,9 @@ class TestTheSectionedPath:
                 _strategy("keyword", [_loser("old", "elsewhere", 0.9), *_unrelated()])
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_SECTION])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_SECTION], clearance="restricted"
+        )
         assert sorted(_served_sectioned(pack)) == ["old", "u-doc", "u-ent"]
         assert _summary(pack)["total"] == 0
 
@@ -464,7 +468,9 @@ class TestTheSectionedPath:
                 ),
             ]
         )
-        pack = builder.build_sectioned("deploy checklist", sections=[_SECTION])
+        pack = builder.build_sectioned(
+            "deploy checklist", sections=[_SECTION], clearance="restricted"
+        )
 
         assert sorted(_served_sectioned(pack)) == ["new", "u-ent"]
         assert _summary(pack)["by_reason"] == {SUPERSEDED: 1}
@@ -486,7 +492,7 @@ class TestAttributionAndRows:
                 _strategy("semantic", [stamped_elsewhere, _item("u", 0.4)]),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert sorted(_served(pack)) == ["new", "u"]
         assert _summary(pack)["by_reason"] == {"archived": 1}
@@ -507,7 +513,7 @@ class TestAttributionAndRows:
                 ),
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
 
         assert _rows(pack) == [
             ("old", SUPERSEDED, "keyword"),
@@ -532,7 +538,7 @@ class TestTheNote:
                 )
             ]
         )
-        pack = builder.build("deploy checklist")
+        pack = builder.build("deploy checklist", clearance="restricted")
         rows = [
             {
                 "item_id": i.item_id,

@@ -99,7 +99,7 @@ class TestFlatPack:
             ),
         )
 
-        pack = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["g1", "g2"]
         assert all(GRAPH_SEED_IDS_KEY not in i.metadata for i in pack.items)
@@ -112,7 +112,9 @@ class TestFlatPack:
     def test_an_unseeded_pack_still_records_an_empty_seed_list(
         self, log: SQLiteEventLog
     ) -> None:
-        pack = _builder(log, _Stub("graph", [_item("g1")])).build("anything")
+        pack = _builder(log, _Stub("graph", [_item("g1")])).build(
+            "anything", clearance="restricted"
+        )
 
         assert [i.item_id for i in pack.items] == ["g1"]
         assert _payload(log)["seed_entity_ids"] == []
@@ -121,8 +123,8 @@ class TestFlatPack:
         stored = _graph_item("g1")
         builder = _builder(log, _Stub("graph", [stored]))
 
-        pack = builder.build("anything")
-        again = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
+        again = builder.build("anything", clearance="restricted")
 
         assert GRAPH_SEED_IDS_KEY in stored.metadata
         assert stored.metadata[GRAPH_SEED_IDS_KEY] == _SEEDS
@@ -139,7 +141,7 @@ class TestFlatPack:
             log, _Stub("keyword", [doc]), _Stub("graph", [_graph_item("g1")])
         )
 
-        pack = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
 
         served = {i.item_id: i for i in pack.items}
         assert served["d1"].metadata[GRAPH_SEED_IDS_KEY] == ["document-own"]
@@ -164,7 +166,7 @@ class TestSeedsOutliveTheCutsOnGraphItems:
         loser = _graph_item("shared", score=0.1)
         builder = _builder(log, _Stub("keyword", [winner]), _Stub("graph", [loser]))
 
-        pack = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
 
         assert [i.item_id for i in pack.items] == ["shared"]
         assert pack.items[0].excerpt == "keyword copy"
@@ -181,7 +183,9 @@ class TestSeedsOutliveTheCutsOnGraphItems:
             _Stub("graph", [_graph_item("g1", score=0.1)]),
         )
 
-        pack = builder.build("anything", budget=PackBudget(max_items=1))
+        pack = builder.build(
+            "anything", budget=PackBudget(max_items=1), clearance="restricted"
+        )
 
         assert [i.item_id for i in pack.items] == ["d1"]
         assert [
@@ -199,7 +203,11 @@ class TestSeedsOutliveTheCutsOnGraphItems:
             _Stub("graph", [_graph_item("g1", score=0.1, excerpt=body)]),
         )
 
-        pack = builder.build("anything", budget=PackBudget(max_items=10, max_tokens=12))
+        pack = builder.build(
+            "anything",
+            budget=PackBudget(max_items=10, max_tokens=12),
+            clearance="restricted",
+        )
 
         assert [i.item_id for i in pack.items] == ["d1"]
         assert [
@@ -224,6 +232,7 @@ class TestSectionedPack:
                 SectionRequest(name="first"),
                 SectionRequest(name="second"),
             ],
+            clearance="restricted",
         )
 
         served = [i for section in pack.sections for i in section.items]
@@ -235,7 +244,7 @@ class TestSectionedPack:
         stored = _graph_item("g1")
 
         _builder(log, _Stub("graph", [stored])).build_sectioned(
-            "anything", sections=[SectionRequest(name="all")]
+            "anything", sections=[SectionRequest(name="all")], clearance="restricted"
         )
 
         assert stored.metadata[GRAPH_SEED_IDS_KEY] == _SEEDS

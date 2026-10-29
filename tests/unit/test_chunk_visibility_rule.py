@@ -211,7 +211,7 @@ def test_a_chunk_row_survives_pack_assembly(
     green. Assert the property where a reader would actually break it.
     """
     pack = PackBuilder(strategies=[KeywordSearch(chunked_store)]).build(
-        intent="retrieval budget"
+        intent="retrieval budget", clearance="restricted"
     )
 
     ids = {item.item_id for item in pack.items}

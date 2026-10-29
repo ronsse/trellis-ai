@@ -755,7 +755,10 @@ class TestRealPackBuilderAttribution:
         strategy.search.return_value = [item]
         builder = PackBuilder(strategies=[strategy], event_log=event_log)
         pack = builder.build(
-            "validate the deploy convention", domain="platform", run_id=run_id
+            "validate the deploy convention",
+            domain="platform",
+            run_id=run_id,
+            clearance="restricted",
         )
         return pack.pack_id
 
@@ -943,6 +946,7 @@ class TestObservableMetrics:
             domain="platform",
             run_id=run_id,
             budget=PackBudget(max_items=max_items),
+            clearance="restricted",
         )
         return pack.pack_id
 

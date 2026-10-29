@@ -85,7 +85,11 @@ def _serve_and_grade(
     builder = build_pack_builder(registry, surface="test")
     for n in range(rounds):
         pack = builder.build(
-            intent, run_id=f"run-{n}", intent_family=_FAMILY, limit_per_strategy=_LIMIT
+            intent,
+            run_id=f"run-{n}",
+            intent_family=_FAMILY,
+            limit_per_strategy=_LIMIT,
+            clearance="restricted",
         )
         assert _DOC in [i.item_id for i in pack.items], "the doc must be served"
         record_feedback(
@@ -202,8 +206,12 @@ class TestReach:
             )
         builder = build_pack_builder(registry, surface="test")
 
-        unseeded = builder.build(_UNSEEDED_INTENT, limit_per_strategy=_LIMIT)
-        seeded = builder.build(_SEEDED_INTENT, limit_per_strategy=_LIMIT)
+        unseeded = builder.build(
+            _UNSEEDED_INTENT, limit_per_strategy=_LIMIT, clearance="restricted"
+        )
+        seeded = builder.build(
+            _SEEDED_INTENT, limit_per_strategy=_LIMIT, clearance="restricted"
+        )
 
         assert precedent_id in [i.item_id for i in seeded.items]
         # This pinned the opposite until the promotion wrote a document row:
@@ -277,7 +285,7 @@ def test_only_the_graph_axis_is_read_for_seeds(tmp_path: Path) -> None:
             ],
             event_log=log,
         )
-        pack = builder.build("anything")
+        pack = builder.build("anything", clearance="restricted")
         payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=1)[
             0
         ].payload

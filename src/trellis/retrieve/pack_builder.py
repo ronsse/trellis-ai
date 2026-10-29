@@ -91,6 +91,11 @@ from trellis.retrieve.parent_verdicts import (
     partition_by_parent_signal_quality,
 )
 from trellis.retrieve.rerankers.base import Reranker
+from trellis.retrieve.sensitivity import (
+    SENSITIVITY_REJECTION_REASON,
+    partition_by_clearance,
+    withheld_ids_metadata,
+)
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
     GRAPH_CALLER_SEED_IDS_KEY,
@@ -107,7 +112,7 @@ from trellis.retrieve.tier_mapping import TierMapper
 from trellis.retrieve.token_counting import DEFAULT_TOKEN_COUNTER, TokenCounter
 from trellis.retrieve.withholding import SECTION_FILTER_REASON, summarize_withheld
 from trellis.schemas.advisory import Advisory
-from trellis.schemas.classification import facet_values
+from trellis.schemas.classification import Sensitivity, facet_values
 from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import (
     BudgetStep,
@@ -967,6 +972,7 @@ class PackBuilder:
         self,
         intent: str,
         *,
+        clearance: Sensitivity,
         domain: str | None = None,
         agent_id: str | None = None,
         session_id: str | None = None,
@@ -1197,6 +1203,15 @@ class PackBuilder:
         all_items, superseded = partition_superseded(all_items)
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
 
+        # The caller's clearance (#194): a document above it is withheld on
+        # every strategy's candidates, a chunk by its parent's label too.
+        # After supersession for the same reason class_prior is: a withheld
+        # successor must not un-supersede its loser.
+        all_items, over_clearance = partition_by_clearance(
+            all_items, clearance, parent_verdict_cache
+        )
+        rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+
         # The class-level serving prior runs after supersession is resolved,
         # not inside the per-strategy loop above: applying it earlier let a
         # withheld successor un-supersede its own loser (the loser stays
@@ -1385,7 +1400,10 @@ class PackBuilder:
             # One home, on both pack kinds: ``SectionedPack`` has no
             # top-level ``RetrievalReport`` to hold this, and the renderer
             # must read it the same way for both.
-            metadata={"withholding": withholding.as_telemetry()},
+            metadata={
+                "withholding": withholding.as_telemetry(),
+                **withheld_ids_metadata(rejected),
+            },
         )
 
         telemetry: dict[str, Any] = {
@@ -1446,6 +1464,7 @@ class PackBuilder:
         self,
         intent: str,
         *,
+        clearance: Sensitivity,
         sections: list[SectionRequest],
         domain: str | None = None,
         agent_id: str | None = None,
@@ -1587,6 +1606,15 @@ class PackBuilder:
         # 1a. Pairwise supersession gate (#613) — see build().
         all_items, superseded = partition_superseded(all_items)
         rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
+
+        # The caller's clearance (#194): a document above it is withheld on
+        # every strategy's candidates, a chunk by its parent's label too.
+        # After supersession for the same reason class_prior is: a withheld
+        # successor must not un-supersede its loser.
+        all_items, over_clearance = partition_by_clearance(
+            all_items, clearance, parent_verdict_cache
+        )
+        rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
 
         # 1b. Class-level serving prior, after supersession — see build().
         all_items, class_prior_rejected, class_prior_forms = (
@@ -1820,7 +1848,10 @@ class PackBuilder:
             intent_family=intent_family or normalize_intent_family(intent=intent),
             advisories=advisories,
             assembled_at=utc_now(),
-            metadata={"withholding": withholding.as_telemetry()},
+            metadata={
+                "withholding": withholding.as_telemetry(),
+                **withheld_ids_metadata(rejected),
+            },
         )
 
         telemetry: dict[str, Any] = {

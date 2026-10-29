@@ -334,7 +334,9 @@ class TestTheStampIsWhatFreesTheSlot:
             strategies=[GraphSearch(registry.knowledge.graph_store)],
             event_log=registry.operational.event_log,
         )
-        pack = builder.build("deploy gotcha", limit_per_strategy=3)
+        pack = builder.build(
+            "deploy gotcha", limit_per_strategy=3, clearance="restricted"
+        )
         # All three candidate slots went to meta rows, which the pack-side
         # filter then dropped. The memory never became a candidate.
         assert [item.item_id for item in pack.items] == []
@@ -347,7 +349,9 @@ class TestTheStampIsWhatFreesTheSlot:
             strategies=[GraphSearch(registry.knowledge.graph_store)],
             event_log=registry.operational.event_log,
         )
-        pack = builder.build("deploy gotcha", limit_per_strategy=3)
+        pack = builder.build(
+            "deploy gotcha", limit_per_strategy=3, clearance="restricted"
+        )
         served = {item.item_id for item in pack.items}
         assert "memory-1" in served
         assert not served & {f"meta-activity-{i}" for i in range(6)}
@@ -365,13 +369,18 @@ class TestIncludeMetaEscapeHatch:
     def test_include_meta_alone_is_not_enough(self, registry: StoreRegistry) -> None:
         activity_id = _record(registry)
         builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
-        pack = builder.build("anything", include_meta=True)
+        pack = builder.build("anything", include_meta=True, clearance="restricted")
         assert activity_id not in {item.item_id for item in pack.items}
 
     def test_both_flags_surface_it(self, registry: StoreRegistry) -> None:
         activity_id = _record(registry)
         builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
-        pack = builder.build("anything", include_meta=True, include_structural=True)
+        pack = builder.build(
+            "anything",
+            include_meta=True,
+            include_structural=True,
+            clearance="restricted",
+        )
         assert activity_id in {item.item_id for item in pack.items}
 
     def test_a_legacy_semantic_row_still_needs_only_include_meta(
@@ -389,8 +398,12 @@ class TestIncludeMetaEscapeHatch:
         )
         builder = PackBuilder(strategies=[GraphSearch(registry.knowledge.graph_store)])
         assert "legacy-meta-activity" not in {
-            item.item_id for item in builder.build("anything").items
+            item.item_id
+            for item in builder.build("anything", clearance="restricted").items
         }
         assert "legacy-meta-activity" in {
-            item.item_id for item in builder.build("anything", include_meta=True).items
+            item.item_id
+            for item in builder.build(
+                "anything", include_meta=True, clearance="restricted"
+            ).items
         }

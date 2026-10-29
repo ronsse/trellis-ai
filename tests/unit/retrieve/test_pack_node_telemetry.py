@@ -239,7 +239,7 @@ class TestPackAssembledPayload:
             strategies=[_StubStrategy("stub", [graph_item, doc_item])],
             event_log=event_log,
         )
-        builder.build("q")
+        builder.build("q", clearance="restricted")
 
         events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
         assert len(events) == 1
