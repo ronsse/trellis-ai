@@ -81,6 +81,10 @@ def build_trace_summary_command(
 class TraceSummaryIngestHandler(EvidenceIngestHandler):
     """Core evidence ingestion specialized to strict trace-summary embedding."""
 
+    #: The one writer the ``trace-summary:`` refusal exempts (#1054). Structural
+    #: on purpose: ``requested_by`` is a string a caller can write into a command.
+    reserved_doc_id_prefixes: tuple[str, ...] = ()
+
     def __init__(
         self,
         registry: StoreRegistry,

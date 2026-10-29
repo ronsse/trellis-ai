@@ -2467,7 +2467,9 @@ def save_memory(
     Args:
         content: Document content to store.
         metadata: Optional metadata (tags, source, domain, etc.).
-        doc_id: Optional document ID. Auto-generated if not provided.
+        doc_id: Optional document ID. Auto-generated if not provided. May not
+            start with ``trace-summary:``, which belongs to the trace embed
+            worker (refused, nothing written).
         supersedes: Optional id of an existing whole document this memory
             replaces. It is marked superseded by the saved (or matching)
             memory, so a pack holding both serves only the new one. Refused,
