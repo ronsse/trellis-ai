@@ -141,6 +141,18 @@ class TestReindexVectorsLeavesReservedIdsToTheWorker:
         assert vector_store.get(self.RESERVED) is None
         assert vector_store.get("doc-1") is not None
 
+    def test_a_chunk_id_under_the_prefix_is_reserved_too(self, cli_env) -> None:
+        _seed_documents()
+        chunk = f"{self.RESERVED}#chunk-0"
+        _get_registry().knowledge.document_store.put(
+            chunk, "filed by a caller", metadata={}
+        )
+
+        summary = _run_json()
+
+        assert summary["skipped_reserved"] == 1
+        assert _get_registry().knowledge.vector_store.get(chunk) is None
+
     def test_a_rerun_and_a_forced_run_still_leave_it_unembedded(self, cli_env) -> None:
         self._seed_reserved()
         _run_json()
