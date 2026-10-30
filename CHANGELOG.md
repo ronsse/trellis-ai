@@ -330,8 +330,8 @@ All notable changes to Trellis will be documented in this file.
   commits and, while more than one row is current, re-runs the write (at most
   three times, through the same bounded endpoint backoff as the first write),
   which closes every current row before it creates one and carries the
-  earliest row's `edge_id`, so the id the first committer already returned
-  still names the current edge. A re-run logs `edge_duplicate_current_rerun`
+  earliest-`valid_from` row's `edge_id`, so the id that row's writer (usually
+  the first committer) already returned still names the current edge. A re-run logs `edge_duplicate_current_rerun`
   at warning, with `resolved` from a recount after the last re-run; a
   duplicate that outlasts the bound is logged, not raised. Neo4j is unchanged
   (`VERIFY_EDGE_WRITE_UNIQUENESS` is off on the shared Bolt store).

@@ -404,9 +404,10 @@ def _earliest_row(rows: str) -> str:
     racing commit, to pick the ``edge_id`` and ``created_at`` it carries
     (the first write keeps the shown row's pick, which the duplicate-heal
     contract pins). When two writers of one new
-    edge both commit (#1078), the first committer has already returned its
-    ``edge_id`` to its caller: the survivor keeps that one, so the id the
-    first writer reported still names the current edge.
+    edge both commit (#1078), the writer of the earliest-``valid_from`` row
+    (usually the first committer) has already returned its ``edge_id`` to its
+    caller: the survivor keeps that one, so the id that writer reported still
+    names the current edge.
     """
     return (
         f"reduce(kept = head({rows}), r IN tail({rows}) | "
@@ -1430,10 +1431,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         (:func:`_earliest_row`). Each re-run goes through
         :meth:`_rerun_on_unreadable_endpoints`, so an endpoint a concurrent
         re-version has made momentarily unreadable is waited out rather than
-        leaving the duplicate. A write whose endpoint has since been purged
-        keeps the outcome already committed. Nothing here raises for a
-        duplicate that outlasts the bound: the write has committed, and the
-        warning says what was left (``resolved``, ``remaining``).
+        leaving the duplicate. A write whose endpoint has since been purged,
+        or stayed unreadable through the whole backoff, keeps the outcome
+        already committed and logs ``outcome="endpoint_missing"`` for either.
+        Nothing here raises for a duplicate that outlasts the bound: the write
+        has committed, and the warning says what was left (``resolved``,
+        ``remaining``).
         """
         reruns = 0
         endpoint_gone = False
