@@ -84,7 +84,7 @@ since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21. Its read-s
 has merged, and the mutation-side deny followed as #1027 (merged 2026-10-29). #194 stays
 open, and its remaining work is tracked in #1029.
 
-- Acceptance: `pytest tests/unit/ -k classification` proves a restricted document is
+- Acceptance: `pytest tests/unit/ -k "classification or sensitivity"` proves a restricted document is
   withheld from packs and search for a caller without the clearance (roadmap §3.H.1 (a));
   the mutation-side deny, (b), merged as #1027 on 2026-10-29.
 
