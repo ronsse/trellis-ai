@@ -321,25 +321,6 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **Precedent promote, demote and reinstate say so when the precedent's document
-  row is a redaction tombstone (part of #1034).** `precedent.promote` was
-  already refused over the blank row a redaction leaves, but with the write
-  seam's message, which names `--reingest-redacted` and
-  `evidence.reingest_redacted`, neither of which promotion can set. It now
-  refuses with `precedent_document_redacted` and says what the row is: if the
-  graph node still exists the redaction did not finish, so re-run
-  `redaction.apply` on it. Nothing is written and no `PRECEDENT_PROMOTED` event
-  is emitted. `precedent.demote` and `precedent.reinstate` skipped such a row
-  without a trace, so a reinstate could return "Precedent reinstated" having
-  stamped nothing. They still write the node and still leave the row alone, but
-  now log `precedent_document_stamp_skipped_redacted`, add a
-  `precedent_document_stamp_skipped_redacted:` entry to the result's warnings
-  and set `document_row: "skipped_redaction_tombstone"` on the event (absent
-  when the precedent simply has no row). A reinstate whose whole job is the row
-  stamp (re-issued after a failed stamp) is refused with
-  `precedent_document_redacted` instead of reporting a repair it did not make.
-  No pack gains or loses an item.
-
 - **A document id under `trace-summary:` is refused on every write door
   (#1054).** The trace-embed worker decides a trace is already embedded by
   asking the vector store for a row at `trace-summary:<trace_id>`. #1053 closed
@@ -598,6 +579,25 @@ All notable changes to Trellis will be documented in this file.
   until a later sync or `trellis admin resync-vector-metadata`. The decay
   threshold checked is the default; one lowered through the parameter registry is
   not reflected at write time.
+
+- **Precedent promote, demote and reinstate say so when the precedent's document
+  row is a redaction tombstone (part of #1034).** `precedent.promote` was
+  already refused over the blank row a redaction leaves, but with the write
+  seam's message, which names `--reingest-redacted` and
+  `evidence.reingest_redacted`, neither of which promotion can set. It now
+  refuses with `precedent_document_redacted` and says what the row is: if the
+  graph node still exists the redaction did not finish, so re-run
+  `redaction.apply` on it. Nothing is written and no `PRECEDENT_PROMOTED` event
+  is emitted. `precedent.demote` and `precedent.reinstate` skipped such a row
+  without a trace, so a reinstate could return "Precedent reinstated" having
+  stamped nothing. They still write the node and still leave the row alone, but
+  now log `precedent_document_stamp_skipped_redacted`, add a
+  `precedent_document_stamp_skipped_redacted:` entry to the result's warnings
+  and set `document_row: "skipped_redaction_tombstone"` on the event (absent
+  when the precedent simply has no row). A reinstate whose whole job is the row
+  stamp (re-issued after a failed stamp) is refused with
+  `precedent_document_redacted` instead of reporting a repair it did not make.
+  No pack gains or loses an item.
 
 ### Added
 
