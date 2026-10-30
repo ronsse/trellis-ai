@@ -43,7 +43,9 @@ current: re-versioning a node does not move its rows' relationships
 closed row. The lookup closes every current match with ``FOREACH``, as
 ``upsert_node`` does for its own rows, so a triplet that already has two
 current versions heals on its next write, and carries
-``edge_id``/``created_at`` forward from the :func:`_shown_row` pick.
+``edge_id``/``created_at`` forward from the :func:`_shown_row` pick. The one
+exception is ``upsert_edge``'s re-run after a racing commit (below), which
+carries them from the earliest row (:func:`_earliest_row`).
 
 ``upsert_edge`` had its own race, separate from the node-duplication one
 above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
@@ -391,6 +393,26 @@ def _shown_row(rows: str) -> str:
         "CASE WHEN r.valid_from > shown.valid_from OR "
         "(r.valid_from = shown.valid_from AND r.version_id > shown.version_id) "
         "THEN r ELSE shown END)"
+    )
+
+
+def _earliest_row(rows: str) -> str:
+    """Cypher for the row of the list *rows* with the earliest ``valid_from``.
+
+    ``null`` if empty; the lesser ``version_id`` breaks a tie. The mirror of
+    :func:`_shown_row`, and used only by ``upsert_edge``'s re-run after a
+    racing commit, to pick the ``edge_id`` and ``created_at`` it carries
+    (the first write keeps the shown row's pick, which the duplicate-heal
+    contract pins). When two writers of one new
+    edge both commit (#1078), the first committer has already returned its
+    ``edge_id`` to its caller: the survivor keeps that one, so the id the
+    first writer reported still names the current edge.
+    """
+    return (
+        f"reduce(kept = head({rows}), r IN tail({rows}) | "
+        "CASE WHEN r.valid_from < kept.valid_from OR "
+        "(r.valid_from = kept.valid_from AND r.version_id < kept.version_id) "
+        "THEN r ELSE kept END)"
     )
 
 
@@ -1404,26 +1426,46 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         re-read runs after this writer's commit, so the later committer sees
         both rows. ``rewrite`` is the whole write, and it closes every
         current row of the triplet before creating its replacement, so one
-        re-run leaves one current row. A write whose endpoint has since been
-        purged keeps the outcome already committed.
+        re-run leaves one current row, with the earliest row's ``edge_id``
+        (:func:`_earliest_row`). Each re-run goes through
+        :meth:`_rerun_on_unreadable_endpoints`, so an endpoint a concurrent
+        re-version has made momentarily unreadable is waited out rather than
+        leaving the duplicate. A write whose endpoint has since been purged
+        keeps the outcome already committed. Nothing here raises for a
+        duplicate that outlasts the bound: the write has committed, and the
+        warning says what was left (``resolved``, ``remaining``).
         """
         reruns = 0
-        while reruns < _EDGE_DUPLICATE_RERUN_ATTEMPTS and (
-            self._count_current_edge_rows(source_id, target_id, edge_type) > 1
-        ):
+        endpoint_gone = False
+        remaining = self._count_current_edge_rows(source_id, target_id, edge_type)
+        while remaining > 1 and reruns < _EDGE_DUPLICATE_RERUN_ATTEMPTS:
             reruns += 1
-            rewritten = rewrite()
+            rewritten = self._rerun_on_unreadable_endpoints(
+                rewrite, source_id=source_id, target_id=target_id
+            )
             if isinstance(rewritten, _EndpointMiss):
+                endpoint_gone = True
                 break
             outcome = rewritten
+            remaining = self._count_current_edge_rows(source_id, target_id, edge_type)
         if reruns:
             # A warning, not debug: no shipped configuration prints debug,
             # and this is the only record that the engine let a duplicate in.
             logger.warning(
                 "edge_duplicate_current_rerun",
                 reruns=reruns,
+                resolved=remaining <= 1,
+                remaining=remaining,
+                outcome=(
+                    "endpoint_missing"
+                    if endpoint_gone
+                    else "resolved"
+                    if remaining <= 1
+                    else "unresolved"
+                ),
                 source_id=source_id,
                 target_id=target_id,
+                edge_type=edge_type,
             )
         return outcome
 
@@ -1823,7 +1865,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         // first: a concurrent re-versioner of this exact triplet must be
         // forced to conflict here, not matched into silently. `MERGE`
         // catches two writers racing to CREATE this claim for the first
-        // time (the EdgeClaim unique constraint). The `SET` below writes
+        // time (the EdgeClaim unique constraint); on ArcadeDB it has been
+        // seen to miss that overlap, so ``upsert_edge`` re-reads the triplet
+        // after this commits (``_rerun_while_edge_has_duplicate_current_row``,
+        // #1078). The `SET` below writes
         // a fresh, per-attempt token: a genuine content change on the
         // claim row, so two writers racing to re-version an
         // *already-claimed* triplet (the module docstring's open race)
@@ -1858,7 +1903,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         RETURN new.edge_id AS edge_id
         """
 
-        def _tx(tx: ManagedTransaction) -> Any:
+        # The re-run after a racing commit carries the earliest current row's
+        # ``edge_id`` instead of the shown row's (``_earliest_row``); the rest
+        # of the statement is the same.
+        shown_pick = f"{_shown_row('old_rows')} AS old"
+        earliest_cypher = cypher.replace(
+            shown_pick, f"{_earliest_row('old_rows')} AS old"
+        )
+
+        def _tx(tx: ManagedTransaction, statement: str) -> Any:
             # Generated per attempt, inside the retried function, not once
             # per ``upsert_edge`` call: a driver-level retry (the
             # DeadlockDetected a real content write on an existing claim
@@ -1879,7 +1932,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # ``valid_from`` (#1002).
             now = _iso(utc_now())
             return tx.run(
-                cypher,
+                statement,
                 source_id=source_id,
                 target_id=target_id,
                 lo_id=lo_id,
@@ -1892,8 +1945,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 edge_claim_token=generate_ulid(),
             ).single()
 
-        def _attempt() -> Any:
-            record = self._execute_edge_claim_write(_tx)
+        def _attempt(statement: str = cypher) -> Any:
+            record = self._execute_edge_claim_write(lambda tx: _tx(tx, statement))
             if record is None:
                 return _EndpointMiss((source_id, target_id))
             return record
@@ -1904,7 +1957,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if not isinstance(outcome, _EndpointMiss):
             if self.VERIFY_EDGE_WRITE_UNIQUENESS:
                 outcome = self._rerun_while_edge_has_duplicate_current_row(
-                    _attempt,
+                    lambda: _attempt(earliest_cypher),
                     outcome,
                     source_id=source_id,
                     target_id=target_id,

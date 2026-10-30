@@ -284,10 +284,36 @@ class TestUpsertEdgeCollapsesADuplicateCurrentRow:
                 "event": "edge_duplicate_current_rerun",
                 "log_level": "warning",
                 "reruns": 1,
+                "resolved": True,
+                "remaining": 1,
+                "outcome": "resolved",
                 "source_id": "src",
                 "target_id": "tgt",
+                "edge_type": "race-rel",
             }
         ]
+
+    def test_a_duplicate_the_last_allowed_re_run_collapses_reads_resolved(self) -> None:
+        """The recount after the last re-run is what makes ``resolved`` true."""
+        store = _make_arcadedb_store()
+        _arm_execute_write(
+            store,
+            [
+                {"edge_id": f"edge_{i}"}
+                for i in range(_EDGE_DUPLICATE_RERUN_ATTEMPTS + 1)
+            ],
+        )
+        counts = [2] * _EDGE_DUPLICATE_RERUN_ATTEMPTS + [1]
+        store._count_current_edge_rows = MagicMock(side_effect=counts)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            store.upsert_edge("src", "tgt", "race-rel", {})
+
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert warning["reruns"] == _EDGE_DUPLICATE_RERUN_ATTEMPTS
+        assert warning["resolved"] is True
+        assert warning["remaining"] == 1
+        assert warning["outcome"] == "resolved"
 
     def test_one_current_row_is_not_re_run(self) -> None:
         store = _make_arcadedb_store()
@@ -313,10 +339,18 @@ class TestUpsertEdgeCollapsesADuplicateCurrentRow:
         )
         store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
 
-        result = store.upsert_edge("src", "tgt", "race-rel", {})
+        with capture_logs() as logs:
+            result = store.upsert_edge("src", "tgt", "race-rel", {})
 
         assert execute_write.call_count == 1 + _EDGE_DUPLICATE_RERUN_ATTEMPTS
         assert result == f"edge_{_EDGE_DUPLICATE_RERUN_ATTEMPTS}"
+        # The write has committed, so a duplicate that outlasts the bound is
+        # reported, not raised, and the recount after the last re-run says so.
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert warning["reruns"] == _EDGE_DUPLICATE_RERUN_ATTEMPTS
+        assert warning["resolved"] is False
+        assert warning["remaining"] == 2
+        assert warning["outcome"] == "unresolved"
 
     def test_a_re_run_that_finds_an_endpoint_gone_keeps_the_committed_edge(
         self,
@@ -324,9 +358,75 @@ class TestUpsertEdgeCollapsesADuplicateCurrentRow:
         store = _make_arcadedb_store()
         execute_write = _arm_execute_write(store, [{"edge_id": "edge_a"}, None])
         store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
+        store._endpoints_have_a_version_row = MagicMock(return_value=False)  # type: ignore[method-assign]
 
-        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_a"
+        with capture_logs() as logs:
+            assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_a"
+
         assert execute_write.call_count == 2
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert warning["outcome"] == "endpoint_missing"
+        assert warning["resolved"] is False
+
+    def test_a_re_run_waits_out_an_endpoint_that_is_momentarily_unreadable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A concurrent re-version can hide an endpoint's new row mid-commit.
+
+        The re-run goes through the same bounded backoff as the first write,
+        so one empty read does not leave the duplicate behind.
+        """
+        sleeps: list[float] = []
+        monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+        store = _make_arcadedb_store()
+        store._endpoints_have_a_version_row = MagicMock(return_value=True)  # type: ignore[method-assign]
+        execute_write = _arm_execute_write(
+            store, [{"edge_id": "edge_a"}, None, {"edge_id": "edge_b"}]
+        )
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 1])  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_b"
+
+        assert execute_write.call_count == 3
+        assert sleeps == [bolt_graph._EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[0]]
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert warning["outcome"] == "resolved"
+
+    def test_the_re_run_carries_the_earliest_current_rows_edge_id(self) -> None:
+        """The first committer already returned its id, so the survivor keeps it.
+
+        Writer A commits and counts one row, so A returns its own ``edge_id``.
+        Writer B commits unseen, counts two, and re-runs: the re-run must
+        carry A's id (the earlier ``valid_from``), not B's, or A's caller is
+        left holding the id of a closed row. The first write keeps the shown
+        row's pick, which the duplicate-heal contract pins.
+        """
+        store = _make_arcadedb_store()
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 1])  # type: ignore[method-assign]
+        tx = MagicMock()
+        tx.run.return_value.single.return_value = {"edge_id": "edge_a"}
+        session = MagicMock()
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+
+        store.upsert_edge("src", "tgt", "race-rel", {})
+
+        first, rerun = (call.args[0] for call in tx.run.call_args_list)
+        shown = f"{bolt_graph._shown_row('old_rows')} AS old"
+        earliest = f"{bolt_graph._earliest_row('old_rows')} AS old"
+        assert shown in first
+        assert earliest not in first
+        assert earliest in rerun
+        assert shown not in rerun
+        assert first.replace(shown, earliest) == rerun
+
+    def test_the_earliest_row_selector_orders_by_valid_from_then_version(self) -> None:
+        cypher = bolt_graph._earliest_row("rows")
+
+        assert "r.valid_from < kept.valid_from" in cypher
+        assert "r.version_id < kept.version_id" in cypher
+        assert "r.valid_from > " not in cypher
 
     def test_a_re_run_stamps_a_later_time_than_the_write_it_follows(
         self, monkeypatch: pytest.MonkeyPatch
