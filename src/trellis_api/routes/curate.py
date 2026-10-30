@@ -18,6 +18,8 @@ from trellis.mutate import (
     build_evidence_ingest_command,
 )
 from trellis.mutate.handlers import precedent_already_demoted_message
+from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
@@ -308,6 +310,38 @@ def create_entity(
     }
 
 
+#: ``metadata`` keys a document write may not carry, with the refusal each gets.
+#: The pack builder withholds *by id*: a ``lifecycle`` that says ``superseded``
+#: withholds the item it names, and an ``evidence_ref`` makes the document the
+#: successor another item's ``superseded_by`` resolves to. Both act on an item
+#: other than the document, so the caller does not get to set them; each has a
+#: governed writer, named in its message. The handler cannot hold this rule for
+#: every door, because ``save_memory(supersedes=)`` stamps a document's
+#: ``lifecycle`` through ``evidence.ingest`` on purpose.
+_DOCUMENT_POINTER_REFUSALS: dict[str, str] = {
+    LIFECYCLE_KEY: (
+        "metadata.lifecycle may not be set on a document write: it can withhold "
+        "another item from every pack. Supersede a document with MCP "
+        "save_memory(supersedes=...); change a lifecycle with the "
+        "retention.restore, precedent.demote or precedent.reinstate command. "
+        "Nothing was written"
+    ),
+    EVIDENCE_REF_KEY: (
+        "metadata.evidence_ref may not be set on a document write: it names the "
+        "document another item is superseded by. MCP "
+        "save_knowledge(evidence_ref=...) sets it on a graph node. "
+        "Nothing was written"
+    ),
+}
+
+
+def _refuse_document_pointer_keys(metadata: dict[str, Any]) -> None:
+    """422 when ``metadata`` carries a key that acts on another item (any value)."""
+    for key, detail in _DOCUMENT_POINTER_REFUSALS.items():
+        if key in metadata:
+            raise HTTPException(status_code=422, detail=detail)
+
+
 @router.post("/documents")
 def create_document(
     body: dict[str, Any],
@@ -323,6 +357,12 @@ def create_document(
     itself (403 otherwise), and an unknown label, or a raw
     ``data_classification`` in ``metadata``, is a 422. Nothing is written in
     either case.
+
+    ``metadata`` may not carry ``lifecycle`` or ``evidence_ref`` (422, whatever
+    the value and the caller, nothing written): the pack builder withholds items
+    by id, so either key would let this document withhold another item. Supersede
+    with MCP ``save_memory(supersedes=...)``; the message names the governed
+    writer for each key.
 
     A ``doc_id`` that already exists is refused (409) when the stored
     document's label is above the key's clearance, or above the label this
@@ -353,6 +393,7 @@ def create_document(
         raise HTTPException(
             status_code=422, detail="reingest_redacted must be a boolean"
         )
+    _refuse_document_pointer_keys(metadata)
     metadata = stamp_request_sensitivity(metadata, sensitivity, ctx=ctx)
     if isinstance(doc_id, str) and doc_id:
         refuse_document_overwrite(

@@ -3950,8 +3950,14 @@ above its own clearance, and cannot touch a document it may not read.**
   save tools use: a label above the key's own clearance is a 403, an unknown
   label (or one that is not a string) is a 422, and so is a raw
   `data_classification` key in `metadata` (for every caller, `admin` included:
-  the label has one door). `metadata` must be an object (422 otherwise). Nothing
-  is written on any refusal. The overwrite check compares the label this request
+  the label has one door). `metadata` must be an object (422 otherwise). So is
+  a `lifecycle` or `evidence_ref` key in `metadata`, whatever its value and the
+  caller: the pack builder withholds by id, so either would let this document
+  withhold another item. Supersede with MCP `save_memory(supersedes=...)`; the
+  refusal names the writer for each key. The route holds this rule, not
+  `evidence.ingest`, which takes the keys from `save_memory(supersedes=)`, so
+  `POST /evidence`, `POST /commands/batch` and `execute_mutation` still accept
+  them. Nothing is written on any refusal. The overwrite check compares the label this request
   writes, so a re-put that omits `sensitivity` over a labelled document is the
   downgrade it always was.
 - REST `POST /api/v1/vectors` judges every row before it writes any, so a refused
@@ -3979,7 +3985,8 @@ above its own clearance, and cannot touch a document it may not read.**
   not copied onto it but read through the chunk id when the row is served. A row
   at a stored document also takes that document's content (the excerpt a
   semantic hit serves, cut as the embed path cuts it) and role (`node_role`,
-  `node_type`, `agent_id`, `document_form`, removed where the document has
+  `node_type`, `agent_id`, `document_form`, the legacy flat `content_type`
+  that `document_form_of` reads as a form, removed where the document has
   none), not the caller's. An id that names no document is written as sent. The trace and memory extraction
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
