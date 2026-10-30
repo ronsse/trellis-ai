@@ -96,10 +96,14 @@ GitHub Actions outage, was orchestration discipline, not a control.
 
 **Why this is not panel-eligible.** Repo settings.
 
-**Recommendation: require the eight PR checks** (`lint`, `typecheck`, `test (3.11/3.12/3.13)`,
-`openapi-check`, `CodeQL`, `Analyze (python)`) and enable auto-merge. With required checks
-present, auto-merge becomes safe and the orchestrator stops being the only thing standing
-between an agent and `main`.
+**Recommendation: require the PR checks, strict, and leave auto-merge off** (revised
+2026-10-30). The required set is every non-flaky PR check: `lint`, `typecheck`, the four
+`tests.yml` matrix legs, `openapi-check`, `CodeQL`, `Analyze (python)` and the two
+`cold-install` legs. `live-infra` stays unrequired until its intermittent ArcadeDB edge
+failure ([#1078](https://github.com/ronsse/trellis-ai/issues/1078)) is settled. With
+`enforce_admins: false` the owner can still merge past a GitHub Actions outage. The
+original recommendation also enabled auto-merge; that is dropped, because merges here are
+serial and each one re-merges the rest of the queue by hand.
 
 **Cost of being wrong:** during an Actions outage nothing can merge at all. Given the
 alternative is *unverified merges* during an outage, that is the better failure.
@@ -117,8 +121,11 @@ gh api --method PUT /repos/ronsse/trellis-ai/branches/main/protection --input - 
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["lint", "typecheck", "test (3.11)", "test (3.12)", "test (3.13)",
-                 "openapi-check", "CodeQL", "Analyze (python)"]
+    "contexts": ["lint", "typecheck",
+                 "test (3.11, dev)", "test (3.12, dev)", "test (3.13, dev)",
+                 "test (3.13, dev,all)",
+                 "openapi-check", "CodeQL", "Analyze (python)",
+                 "cold-install (3.11)", "cold-install (3.13)"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -129,12 +136,17 @@ gh api --method PUT /repos/ronsse/trellis-ai/branches/main/protection --input - 
   "restrictions": null
 }
 JSON
-gh api --method PATCH /repos/ronsse/trellis-ai --field allow_auto_merge=true
 ```
 
+The context names are the check-run names GitHub reports, which carry the matrix values:
+`test (3.11, dev)`, not `test (3.11)`. The earlier draft of this payload used the short
+form, which matches no check and would have blocked every merge. Read the names off a
+recent PR with `gh pr checks <n>` before running it.
+
 **Two honest caveats**, neither fatal:
-- The matrix legs are pinned **by name**. Dropping 3.11 or adding 3.14 to
-  `.github/workflows/tests.yml` blocks every merge until this payload is updated too.
+- The matrix legs are pinned **by name**, and the name follows the matrix values. Dropping
+  3.11, adding 3.14 or renaming an extras set in `.github/workflows/tests.yml` or
+  `cold-install.yml` blocks every merge until this payload is updated too.
   That coupling is a real maintenance cost, not a hypothetical one.
 - `strict: true` means every PR must be rebased onto `main` before merging, so a busy
   queue serialises. At current volume (7 PRs in a day, one merger) that is free; it
