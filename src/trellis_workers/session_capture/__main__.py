@@ -15,6 +15,11 @@ exit code. A typed Trellis error that stops the sweep, such as a refused
 ``config.yaml``, exits ``5`` with its message on stderr in place of a
 traceback; ``trellis worker capture-sessions`` also exits ``5`` on a refused
 config.
+
+``--rejoin-since ISO`` is a different run, not a sweep option: it re-parses the
+transcripts modified at or after that instant and rewrites only the pack joins
+that differ, to back-fill joins written before a payload key existed. It builds
+no judge, distils nothing, writes no memory and leaves the watermark alone.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 
 import structlog
 
@@ -32,6 +38,7 @@ from trellis.stores.settings_store import load_settings_values
 from trellis_workers.session_capture.sweep import (
     CaptureJudgeUnavailableError,
     judge_unavailable_sessions,
+    run_rejoin,
     run_sweep,
     strict_mode,
 )
@@ -54,13 +61,64 @@ EXIT_SESSIONS_ERRORED = 3
 EXIT_TRELLIS_ERROR = 5
 
 
+def _aware_instant(value: str) -> datetime:
+    """An ISO-8601 instant that names its UTC offset; anything else is a usage error."""
+    try:
+        instant = datetime.fromisoformat(value)
+    except ValueError:
+        msg = f"not an ISO-8601 instant: {value!r}"
+        raise argparse.ArgumentTypeError(msg) from None
+    if instant.utcoffset() is None:
+        msg = f"{value!r} has no UTC offset; write it as 2026-10-01T00:00:00Z or +00:00"
+        raise argparse.ArgumentTypeError(msg)
+    return instant
+
+
+REJOIN_HELP = (
+    "Back-fill pack joins instead of sweeping: re-parse every transcript modified "
+    "at or after this ISO-8601 instant (with a UTC offset), ignoring the "
+    "watermark, and write a CAPTURE_SESSION_PACKS join only where it differs from "
+    "the session's latest. No judge, distillation, memory write or watermark "
+    "change. A rewritten join is stamped now, never backdated, and the pack "
+    "holdout reads that stamp: (1) a rewritten session reads 'unfinished' until a "
+    "completed non-dry-run sweep runs at least `trellis analyze holdout "
+    "--settle-hours` (default 3) after the rejoin, so run it at least 3 hours "
+    "before a nightly sweep and read the holdout only after that sweep; (2) the "
+    "main-session rollup re-dates to the rejoin time; (3) the join scan sees the "
+    "rewritten join at its new time. Exits 3 on any session error."
+)
+
+
+def _run_rejoin(since: datetime, registry: StoreRegistry, *, dry_run: bool) -> int:
+    """Print the rejoin report on stdout; exit 3 if any session raised."""
+    rejoin = run_rejoin(since=since, registry=registry, dry_run=dry_run)
+    sys.stdout.write(json.dumps(rejoin.to_payload(), indent=2) + "\n")
+    if rejoin.sessions_errored:
+        sys.stderr.write(
+            f"trellis-session-capture: {rejoin.sessions_errored} session(s) "
+            "raised during the rejoin and were skipped; see "
+            "capture_rejoin_session_failed in the log.\n"
+        )
+        return EXIT_SESSIONS_ERRORED
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run one capture sweep; return a process exit code."""
+    """Run one capture sweep, or a ``--rejoin-since`` back-fill; return an exit code."""
     parser = argparse.ArgumentParser(prog="trellis-session-capture")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Plan the sweep without writing memories or advancing the watermark.",
+        help=(
+            "Plan the sweep without writing memories or advancing the watermark; "
+            "with --rejoin-since, report the joins it would write and write none."
+        ),
+    )
+    parser.add_argument(
+        "--rejoin-since",
+        type=_aware_instant,
+        metavar="ISO",
+        help=REJOIN_HELP,
     )
     args = parser.parse_args(argv)
 
@@ -75,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         # never hand back. Same StoreRegistry.from_config_dir() resolution
         # either way; this just keeps the handle.
         registry = StoreRegistry.from_config_dir()
+        if args.rejoin_since is not None:
+            return _run_rejoin(args.rejoin_since, registry, dry_run=args.dry_run)
         report = run_sweep(dry_run=args.dry_run, registry=registry)
     except CaptureJudgeUnavailableError as exc:
         # A misconfigured `llm:` block is an operator error, not a crash: the

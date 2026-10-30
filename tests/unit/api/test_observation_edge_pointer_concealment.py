@@ -16,6 +16,7 @@ and type, which a last test pins.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -343,7 +344,11 @@ class TestEntityConcealsEdgePointers:
                 EDGE_ODD,
             }, scopes
             assert HIDDEN_ID not in resp.text, scopes
-            assert "evidence_ref" not in edges[EDGE_COLUMN]
+            # The column is on every stored edge, so it is blanked, not removed:
+            # a missing key would say the edge cites a document the key may not read.
+            assert "evidence_ref" in edges[EDGE_COLUMN], scopes
+            assert edges[EDGE_COLUMN]["evidence_ref"] is None, scopes
+            # A property is absent when unset, so removal there carries no tell.
             assert "evidence_ref" not in edges[EDGE_PROP]["properties"]
             assert edges[EDGE_PROP]["properties"]["note"] == "kept"
 
@@ -392,9 +397,7 @@ class TestEntityConcealsEdgePointers:
         for blind_edge, full_edge in zip(
             blind["subgraph"]["edges"], full["subgraph"]["edges"], strict=True
         ):
-            assert set(blind_edge) - {"evidence_ref"} == set(full_edge) - {
-                "evidence_ref"
-            }
+            assert set(blind_edge) == set(full_edge)
 
     def test_the_stored_edges_are_unchanged(self, client, registry):
         _entity(client, _headers(registry, ["read"]))
@@ -461,10 +464,54 @@ class TestConcealEdgePointersHelper:
             properties={"evidence_ref": HIDDEN_ID, "note": "kept"},
         )
         (out,) = conceal_edge_pointers([edge], store, "internal")
-        assert "evidence_ref" not in out
+        assert out["evidence_ref"] is None
         assert out["properties"] == {"note": "kept"}
         assert edge["evidence_ref"] == HIDDEN_ID
         assert edge["properties"]["evidence_ref"] == HIDDEN_ID
+
+    def test_a_property_only_pointer_is_concealed_without_touching_the_input(
+        self, registry
+    ):
+        """The copy-on-write pin: the input edge and its ``properties`` stay whole."""
+        store = registry.knowledge.document_store
+        edge = self._edge(
+            evidence_ref=OPEN_ID,
+            properties={
+                "evidence_ref": HIDDEN_ID,
+                "lifecycle": {"state": "superseded", "superseded_by": HIDDEN_ID},
+                "note": "kept",
+            },
+        )
+        before = copy.deepcopy(edge)
+        (out,) = conceal_edge_pointers([edge], store, "internal")
+        assert out is not edge
+        assert out["properties"] == {
+            "lifecycle": {"state": "superseded"},
+            "note": "kept",
+        }
+        assert out["evidence_ref"] == OPEN_ID
+        assert edge == before
+        assert edge["properties"] is not out["properties"]
+
+    def test_a_blanked_column_leaves_the_input_row_and_its_properties_alone(
+        self, registry
+    ):
+        store = registry.knowledge.document_store
+        props = {"note": "kept"}
+        edge = self._edge(evidence_ref=HIDDEN_ID, properties=props)
+        before = copy.deepcopy(edge)
+        (out,) = conceal_edge_pointers([edge], store, "internal")
+        assert out["evidence_ref"] is None
+        assert out["properties"] is props
+        assert edge == before
+
+    def test_an_unset_column_is_not_a_pointer_and_stays_null(self, registry):
+        store = registry.knowledge.document_store
+        edge = self._edge(properties={"evidence_ref": HIDDEN_ID})
+        (out,) = conceal_edge_pointers([edge], store, "internal")
+        assert "evidence_ref" in out
+        assert out["evidence_ref"] is None
+        assert out["properties"] == {}
 
     def test_a_store_error_hides_the_id(self, registry, monkeypatch):
         store = registry.knowledge.document_store
@@ -477,7 +524,7 @@ class TestConcealEdgePointersHelper:
         (out,) = conceal_edge_pointers(
             [self._edge(evidence_ref=OPEN_ID)], store, "internal"
         )
-        assert "evidence_ref" not in out
+        assert out["evidence_ref"] is None
 
     def test_no_store_and_restricted_leave_every_edge_as_it_is(self, registry):
         edge = self._edge(evidence_ref=HIDDEN_ID)

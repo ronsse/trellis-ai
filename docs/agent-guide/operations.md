@@ -3506,10 +3506,12 @@ calls, the tool-call count, and whether hook feedback preceded it); the funnel
 counts those as `pre_treatment_excluded`. A join written before capture
 recorded the timing is undecidable: it stays in, `pre_treatment_unknown` counts
 it, and the exclusion reads "partially applied" until none are left (a join is
-rewritten with the timing only when its session is parsed again, so a
-watermark reset back-fills old ones; a back-fill also re-dates each rewritten
-join, so the main-session rollup, which windows on the join's `occurred_at`,
-pulls those old sessions into the current window). The rule is per session:
+rewritten with the timing only when its session is parsed again;
+[`trellis-session-capture --rejoin-since`](#trellis-session-capture---rejoin-since)
+back-fills old ones without a watermark reset, which would re-run distillation;
+a back-fill also re-dates each rewritten join, so the main-session rollup, which
+windows on the join's `occurred_at`, pulls those old sessions into the current
+window). The rule is per session:
 an earlier stop's feedback in a multi-prompt session also excludes a later
 task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
@@ -3767,6 +3769,75 @@ trellis worker capture-sessions [--dry-run] [--format text|json]
 
 Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`. A session that raises mid-sweep is skipped and left for retry rather than ending the sweep; it is counted in `sessions_errored` and handled the same way (`"partial"`, non-zero unless `TRELLIS_CAPTURE_STRICT=0`).
 
+### `trellis-session-capture --rejoin-since`
+
+A one-off back-fill for `CAPTURE_SESSION_PACKS` joins written before a payload key
+existed (`outcome`, `retrieval_timing`, `covariates`). The sweep parses a transcript
+again only when its file changes, so an old join would otherwise read as `unknown`
+to the pack holdout's pre-treatment exclusion for good. A watermark reset is not the
+remedy: it re-runs distillation through the judge and can write near-duplicate
+memories.
+
+```bash
+trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]
+```
+
+It takes every transcript the sweep would discover whose file mtime is at or after
+the instant (ISO-8601 **with** a UTC offset; a naive value is a usage error, exit 2),
+**ignoring the watermark**, parses it exactly as the sweep does (same parent and
+sub-agent resolution, same `TRELLIS_CAPTURE_SOURCE_SYSTEM`) and writes a join only
+where it differs from the session's latest one. Transcripts from an ephemeral
+project are skipped, as in the sweep.
+
+It does **not** build or call a judge (no `llm:` block is needed), distil, gate,
+write a memory or document, emit `CAPTURE_SWEEP_COMPLETED` or a training pair, or
+read or write the watermark file. `--dry-run` writes nothing and reports the counts
+a live run would. The report is JSON on stdout: `mode` (`"rejoin"`), `since`,
+`dry_run`, `transcripts_root`, `source_system`, `sessions_scanned` (= `pack_joins_recorded` + `pack_joins_unchanged` +
+`sessions_skipped_empty` + `sessions_errored`), `sessions_skipped_ephemeral`. A
+session that raises is counted in `sessions_errored`, logged as
+`capture_rejoin_session_failed`, and skipped; the run goes on and exits `3`
+whatever `TRELLIS_CAPTURE_STRICT` says.
+
+A rewritten join is stamped when it is written, never backdated, and the holdout
+reads that stamp in three places (`src/trellis/analyze/holdout.py`):
+
+1. **Settle.** `_finished` requires a completed, non-dry-run sweep at least
+   `trellis analyze holdout --settle-hours` (default 3) after the session's latest
+   join, so every rewritten session reads `unfinished` until the next sweep that
+   completes that long after the rejoin. Run the rejoin at least 3 hours before a
+   nightly sweep, and read the holdout only after that sweep.
+2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
+   so the rollup re-dates to the rejoin time, and a run with `--until` earlier than
+   the rejoin drops every rewritten session from the rollup. The rollup is
+   descriptive; the primary estimate does not read it.
+3. **Join scan.** The scan that reads joins is windowed by event time, so it sees a
+   rewritten join at its new time.
+
+The per-task primary analysis is unaffected: it dates a task from its first pack, and
+reads only the latest join's payload. Selection is by mtime, so re-dating only moves a
+join later; it cannot pull in a session whose transcript last changed before the
+instant.
+
+**Choose an instant at or before the start of the holdout window you will analyse**
+(its first holdout row). A transcript's mtime is roughly when the session ended,
+which is after treatment, and never earlier than its first pack. An instant inside
+the window decides only the sessions that ended after it and leaves the rest
+`unknown`; if being withheld changes how long a session runs, that selection differs
+by arm and biases the estimate. An instant at or before the window start covers
+every unit in it.
+
+Check `source_system` in a `--dry-run` report before the live run: it comes from the
+caller's `TRELLIS_CAPTURE_SOURCE_SYSTEM`, and if that differs from the nightly sweep's,
+every join is rewritten under the wrong source and its sweep-based settle check never
+passes.
+
+A rejoin over a whole experiment can roughly double the joins in the window, and the
+holdout's join scan keeps only the newest `--limit` events (default 5000). When it
+truncates, the evidence window starts later and earlier units fall `outside_window`
+in both arms, which costs units rather than biasing them. Read the report's scan
+coverage after the rejoin, and raise `trellis analyze holdout --limit` if it was cut.
+
 ---
 
 ## API Authentication
@@ -3918,14 +3989,23 @@ names no property, so there is nothing in it to conceal, and a concealed pointer
 never removes a node, so its counts and `/graph/search`'s `total` are the same for
 every caller. An edge is concealed on the same terms in the `subgraph` of `GET
 /api/v1/entities/{id}`: a string top-level `evidence_ref` (the provenance
-column, not a node property) is dropped when it names a document the caller may
-not read, and so is a pointer inside its `properties` (`evidence_ref`,
-`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`); every other
-field and property stays, and a value that is not a string is left as stored. The
+column, not a node property) reads `null` when it names a document the caller may
+not read, and a pointer inside its `properties` (`evidence_ref`,
+`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`) is removed;
+every other field and property stays, and a value that is not a string is left as
+stored. The column is blanked rather than removed because every stored edge row
+carries it (null when unset), so a missing key would say the edge cites a
+document the caller may not read; `properties` keys are absent when unset, so
+their removal says nothing. The
 entity, its nodes and its edges are judged in one pass, so a response costs one
 store read per distinct id whichever kind of row names it. MCP `get_graph` reads
 the same edges and renders only their endpoints and type, so it names no edge
-pointer.
+pointer. A learning-sourced precedent node's `properties.source_item_id` (the
+item it was promoted from, often a document) is withheld like the node's other
+pointers, and so is `metadata.source_item_id` on the pack item the graph axis
+builds from that node: it is dropped from `POST /api/v1/packs` and
+`/packs/sectioned` for a caller below `restricted`, and the item is still served
+in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
@@ -4163,7 +4243,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
 | GET | `/traces` | `?domain=...&limit=20` | List traces; `limit` is 1 to 500, anything else a 422 |
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
-| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
+| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. A `payload.source_item_id` naming a document above the key's clearance is left out of that row's `payload`. |
 | GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |
 
 ### Explore

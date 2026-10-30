@@ -6,6 +6,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis-session-capture --rejoin-since ISO` back-fills stale pack joins
+  without a watermark reset (refs #1044).** A `CAPTURE_SESSION_PACKS` join written
+  before `retrieval_timing` and `covariates` existed read as `unknown` to the pack
+  holdout's pre-treatment exclusion until its session was parsed again, and a
+  session whose file never changes is not. The flag re-parses every transcript
+  modified at or after an ISO-8601 instant (a naive value is a usage error),
+  ignoring the watermark, and writes a join only where it differs from the
+  session's latest. It builds no judge, distils nothing, writes no memory,
+  emits no `CAPTURE_SWEEP_COMPLETED` and leaves the watermark file alone;
+  `--dry-run` reports the same counts and writes nothing. A rewritten join is
+  stamped when written, and the holdout reads that stamp, so a rewritten session
+  reads `unfinished` until a completed sweep at least `--settle-hours` later (run
+  the rejoin 3 or more hours before the nightly sweep), and the main-session
+  rollup and the join scan see it at the new time. Any session error exits 3.
+  The report names the `source_system` it wrote under, so a dry run shows a
+  shell that differs from the sweep's; choose an instant at or before the
+  analysed window's start, since a later one decides only sessions that ended
+  after it.
+
 - **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
   #1044).** `GET /api/v1/analyze` now describes the holdout report's
   covariate-adjusted secondary fits (brief length, then brief length with agent
@@ -332,6 +351,25 @@ All notable changes to Trellis will be documented in this file.
   `--force`, a reserved id that already has a vector is re-embedded as before.
   No pack gains or loses an item.
 
+- **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
+  (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
+  the served item the precedent came from, often a document, and the listing
+  served each event's `payload` as stored, so a key below that document's label
+  learned an id `GET /documents/{id}` answers 404 for. The route already required a
+  read-scoped credential; it now reads the caller's clearance from it like the other
+  gated reads, and `list_precedents` takes
+  keyword-only `document_store` and `clearance`: once the rows are chosen it
+  judges every string `source_item_id` in one `readable_ids` call and leaves the
+  key out of the served `payload` of a row naming an unreadable document. Titles,
+  descriptions, count and order do not depend on the key, and the stored event is
+  not changed. An id with no document row (a graph node, a trace) is served. The
+  defaults (`clearance="restricted"`, no store) serve every row as before; below
+  `restricted` with no store the key is left out of every row. `GET
+  /precedents/domains` (counts only) and MCP `get_lessons` (title, description
+  and domain only) are unchanged, and so is the promoted text: the description
+  still reads `Source item '<id>' showed ...`, and a promotion with no item title
+  is still named `Learning: <family> :: <id>`.
+
 - **Concurrent edge create on ArcadeDB leaves one current row (#1078).** Two
   writers of one new edge could both commit, `EdgeClaim` row included, with no
   error on either side, leaving the triplet two current rows. CI hit it once
@@ -409,6 +447,26 @@ All notable changes to Trellis will be documented in this file.
   that is not a string stays as stored, and the stored rows are not changed. No
   shipped writer puts a document id in an edge today, so this closes a path the
   schema allows rather than one in use.
+
+- **A concealed edge keeps a null `evidence_ref`, and a node's `source_item_id`
+  is a concealed pointer (follow-up to #1079).** An edge row carries the
+  `evidence_ref` provenance column whether or not it is set, so dropping the key
+  when it named an unreadable document told a caller below that document's label
+  that the edge cites one. `GET /api/v1/entities/{id}` now serves that column as
+  `null` instead; a pointer inside an edge's `properties` is still removed (those
+  keys are absent when unset, so removal says nothing), and a readable
+  `evidence_ref` is served as stored. A learning-sourced precedent node carries
+  `properties.source_item_id`, the id of the served item it was promoted from,
+  which is often a document; graph reads served it as stored, and so did a
+  pack, because the graph axis spreads a node's properties into its pack item's
+  metadata. Both now drop it, on the same terms and in the same one-pass
+  judgement as the node's other pointers (`SOURCE_ITEM_POINTER_PATHS`, in the
+  shared pointer walk): `POST /api/v1/packs` and `/packs/sectioned` still serve
+  the item, in the same position, without the key. The stored rows are not
+  changed.
+  The precedent's own description still names its source in prose, and
+  `GET /precedents` serves each promotion payload as stored; both are tracked in
+  #1080.
 
 - **A document id under `trace-summary:` is refused on every write door
   (#1054).** The trace-embed worker decides a trace is already embedded by

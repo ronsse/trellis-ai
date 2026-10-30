@@ -164,7 +164,7 @@ ROSTER: dict[str, str] = {
     "retrieve:list_traces": FREE,  # GET /traces
     "retrieve:list_trace_domains": FREE,  # GET /traces/domains
     "retrieve:get_trace": GATED,  # GET /traces/{trace_id}
-    "retrieve:list_precedents": FREE,  # GET /precedents
+    "retrieve:list_precedents": GATED,  # GET /precedents
     "retrieve:list_precedent_domains": FREE,  # GET /precedents/domains
     "settings:list_settings": ADMIN,  # GET /settings
     "settings:update_setting": ADMIN,  # PUT /settings/{name}
