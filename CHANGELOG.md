@@ -368,10 +368,13 @@ All notable changes to Trellis will be documented in this file.
   keys are absent when unset, so removal says nothing), and a readable
   `evidence_ref` is served as stored. A learning-sourced precedent node carries
   `properties.source_item_id`, the id of the served item it was promoted from,
-  which is often a document; graph reads served it as stored. They now drop it,
-  on the same terms and in the same one-pass judgement as the node's other
-  pointers (`NODE_SOURCE_POINTER_PATHS`, read for nodes only: the document
-  metadata walk that packs run is unchanged). The stored rows are not changed.
+  which is often a document; graph reads served it as stored, and so did a
+  pack, because the graph axis spreads a node's properties into its pack item's
+  metadata. Both now drop it, on the same terms and in the same one-pass
+  judgement as the node's other pointers (`SOURCE_ITEM_POINTER_PATHS`, in the
+  shared pointer walk): `POST /api/v1/packs` and `/packs/sectioned` still serve
+  the item, in the same position, without the key. The stored rows are not
+  changed.
   The precedent's own description still names its source in prose, and
   `GET /precedents` serves each promotion payload as stored; both are tracked in
   #1080.

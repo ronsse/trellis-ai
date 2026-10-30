@@ -4,10 +4,10 @@ Follows ``test_entities_pointer_concealment.py``. A precedent node promoted from
 the learning loop carries ``properties["source_item_id"]``, the id of the served
 item it came from, which is often a document. ``GET /entities/{id}`` served it
 whole, so a key below the document's label learned the id of a document that
-``GET /documents/{id}`` answers 404 for. The node walk now reads it
-(``NODE_SOURCE_POINTER_PATHS``); the document-metadata walk a pack runs does
-not, because no document row carries the key and the shared path tuple is
-what packs drop.
+``GET /documents/{id}`` answers 404 for. It is a concealed pointer path
+(``SOURCE_ITEM_POINTER_PATHS``) in the one walk graph reads and packs share:
+the graph axis spreads a node's properties into its pack item's metadata, so a
+precedent reaches ``POST /packs`` carrying it too.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from trellis.auth import generate_api_key
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve import sensitivity
 from trellis.retrieve.sensitivity import (
-    NODE_SOURCE_POINTER_PATHS,
+    SOURCE_ITEM_POINTER_PATHS,
     conceal_document_rows,
     conceal_node_pointers,
     conceal_unreadable_successors,
@@ -249,37 +249,110 @@ class TestConcealNodePointersHelper:
         assert out is node
 
 
-class TestPacksAreUntouched:
-    """The node path is its own tuple: a pack walks document metadata, not nodes.
+def _pack(client, headers, *, sectioned: bool) -> Any:
+    if sectioned:
+        resp = client.post(
+            "/api/v1/packs/sectioned",
+            json={"intent": "precedent guidance", "sections": [{"name": "All"}]},
+            headers=headers,
+        )
+    else:
+        resp = client.post(
+            "/api/v1/packs", json={"intent": "precedent guidance"}, headers=headers
+        )
+    assert resp.status_code == 200, resp.text
+    return resp
 
-    No document row carries ``source_item_id`` (a precedent's row is built by
-    ``precedent_document_metadata``, which does not copy it), so adding the key
-    to the shared tuple would only change what a pack drops from a
-    graph-axis item's spread properties and from any row that names it.
+
+def _items(resp) -> dict[str, dict[str, Any]]:
+    data = resp.json()
+    rows = (
+        [i for s in data["sections"] for i in s["items"]]
+        if "sections" in data
+        else data["items"]
+    )
+    return {i["item_id"]: i["metadata"] for i in rows}
+
+
+SURFACES = pytest.mark.parametrize(
+    "sectioned", [False, True], ids=["flat", "sectioned"]
+)
+
+
+class TestPacksConcealSourceItemId:
+    """The graph axis spreads a node's properties into its pack item's metadata.
+
+    A precedent served by the graph axis therefore carries its
+    ``source_item_id`` into the pack, so the pack walk drops it on the same
+    terms as ``evidence_ref``: the item is still served, in the same position.
     """
 
-    def test_the_node_path_is_its_own_constant(self) -> None:
-        assert NODE_SOURCE_POINTER_PATHS == (("source_item_id",),)
-        assert ("source_item_id",) not in sensitivity._CONCEALED_POINTER_PATHS
+    @pytest.fixture(autouse=True)
+    def _graph_axis_serves_the_seeded_nodes(self, monkeypatch) -> None:
+        monkeypatch.setenv("TRELLIS_GRAPH_RECENCY_FALLBACK", "1")
+
+    def test_the_path_is_a_concealed_pointer_path_of_its_own(self) -> None:
+        assert SOURCE_ITEM_POINTER_PATHS == (("source_item_id",),)
+        assert SOURCE_ITEM_POINTER_PATHS[0] in sensitivity._CONCEALED_POINTER_PATHS
         assert ("source_item_id",) not in sensitivity.EVIDENCE_POINTER_PATHS
         assert ("source_item_id",) not in sensitivity.SUPERSESSION_POINTER_PATHS
 
-    def test_a_document_row_keeps_a_source_item_id_naming_a_hidden_document(
+    @SURFACES
+    def test_a_key_below_the_label_is_served_the_precedent_without_the_id(
+        self, client, registry, level, sectioned
+    ):
+        for scopes in _blind(level):
+            resp = _pack(client, _headers(registry, scopes), sectioned=sectioned)
+            items = _items(resp)
+            assert HIDDEN_SRC in items, (scopes, resp.text)
+            assert HIDDEN_ID not in resp.text, scopes
+            assert "source_item_id" not in items[HIDDEN_SRC], scopes
+            assert items[HIDDEN_SRC]["note"] == "kept", scopes
+
+    @SURFACES
+    def test_a_key_that_may_read_the_label_is_served_the_id(
+        self, client, registry, level, sectioned
+    ):
+        for scopes in _cleared(level):
+            resp = _pack(client, _headers(registry, scopes), sectioned=sectioned)
+            assert _items(resp)[HIDDEN_SRC]["source_item_id"] == HIDDEN_ID, scopes
+
+    @SURFACES
+    def test_a_readable_source_and_one_with_no_row_are_kept(
+        self, client, registry, sectioned
+    ):
+        items = _items(_pack(client, _headers(registry, ["read"]), sectioned=sectioned))
+        assert items[OPEN_SRC]["source_item_id"] == OPEN_ID
+        assert items[NO_ROW_SRC]["source_item_id"] == NO_ROW_ID
+
+    def test_the_items_served_are_the_same_whatever_the_clearance(
+        self, client, registry
+    ):
+        """Only a served item's metadata differs, never which items or their order."""
+        served = {
+            tuple(scopes): list(
+                _items(_pack(client, _headers(registry, scopes), sectioned=False))
+            )
+            for scopes in (["read"], ["admin"])
+        }
+        assert served[("read",)] == served[("admin",)]
+        assert HIDDEN_SRC in served[("read",)]
+
+    def test_a_document_row_drops_a_source_item_id_naming_a_hidden_document(
         self, registry
     ):
         store = registry.knowledge.document_store
         row = {
             "doc_id": "d-1",
             "content": "body",
-            "metadata": {"source_item_id": HIDDEN_ID, "evidence_ref": HIDDEN_ID},
+            "metadata": {"source_item_id": HIDDEN_ID, "note": "kept"},
         }
+        before = copy.deepcopy(row)
         (out,) = conceal_document_rows([row], store, "internal")
-        # The shared walk still drops the pointers it owns ...
-        assert "evidence_ref" not in out["metadata"]
-        # ... and leaves this one exactly where it was.
-        assert out["metadata"]["source_item_id"] == HIDDEN_ID
+        assert out["metadata"] == {"note": "kept"}
+        assert row == before
 
-    def test_a_pack_item_keeps_a_source_item_id_naming_a_hidden_document(
+    def test_a_pack_item_drops_a_source_item_id_naming_a_hidden_document(
         self, registry
     ):
         store = registry.knowledge.document_store
@@ -288,8 +361,8 @@ class TestPacksAreUntouched:
             item_type="entity",
             excerpt="node",
             relevance_score=0.5,
-            metadata={"source_item_id": HIDDEN_ID, "evidence_ref": HIDDEN_ID},
+            metadata={"source_item_id": HIDDEN_ID, "note": "kept"},
         )
         (out,) = conceal_unreadable_successors([item], store, "internal")
-        assert "evidence_ref" not in out.metadata
-        assert out.metadata["source_item_id"] == HIDDEN_ID
+        assert out.metadata == {"note": "kept"}
+        assert item.metadata == {"source_item_id": HIDDEN_ID, "note": "kept"}

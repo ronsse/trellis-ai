@@ -224,18 +224,19 @@ SUPERSESSION_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
 #: reconcile writers' keys; every concealing walk covers both.
 EVIDENCE_POINTER_PATHS: tuple[tuple[str, ...], ...] = (("evidence_ref",),)
 
-_CONCEALED_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
-    SUPERSESSION_POINTER_PATHS + EVIDENCE_POINTER_PATHS
-)
+#: The metadata key path that names the item a learning-sourced precedent was
+#: promoted from: ``source_item_id``, the id of a served item that is often a
+#: document (``trellis/learning/scoring.py`` writes it into the precedent node's
+#: ``properties``). The graph axis spreads a node's properties into its pack
+#: item's metadata, so it reaches a pack exactly as ``evidence_ref`` does. Kept
+#: apart from :data:`SUPERSESSION_POINTER_PATHS` (pinned to the reconcile
+#: writers' keys) and :data:`EVIDENCE_POINTER_PATHS`; every concealing walk
+#: covers all three.
+SOURCE_ITEM_POINTER_PATHS: tuple[tuple[str, ...], ...] = (("source_item_id",),)
 
-#: The one property path only a graph *node* carries: a learning-sourced
-#: precedent's ``properties["source_item_id"]``, the id of the served item (often
-#: a document) it was promoted from (``trellis/learning/scoring.py``). It is
-#: read by the node walk alone and is deliberately not in
-#: :data:`_CONCEALED_POINTER_PATHS`: that tuple is also what a pack walks over a
-#: document's metadata, and no document row carries this key, so adding it there
-#: would change what packs drop.
-NODE_SOURCE_POINTER_PATHS: tuple[tuple[str, ...], ...] = (("source_item_id",),)
+_CONCEALED_POINTER_PATHS: tuple[tuple[str, ...], ...] = (
+    SUPERSESSION_POINTER_PATHS + EVIDENCE_POINTER_PATHS + SOURCE_ITEM_POINTER_PATHS
+)
 
 
 def _pointer_at(
@@ -258,8 +259,8 @@ def _pointer_at(
 def _stored_pointers(metadata: Mapping[str, Any] | None) -> set[str]:
     """Every id ``metadata`` names at a concealed pointer path.
 
-    Those are :data:`SUPERSESSION_POINTER_PATHS` and
-    :data:`EVIDENCE_POINTER_PATHS`.
+    Those are :data:`SUPERSESSION_POINTER_PATHS`,
+    :data:`EVIDENCE_POINTER_PATHS` and :data:`SOURCE_ITEM_POINTER_PATHS`.
     """
     return {
         pointer
@@ -358,9 +359,11 @@ def conceal_unreadable_successors(
     marker stay; the item reads superseded or updated, by nothing the caller
     may name.
 
-    A graph-axis item carries one more: the node's ``evidence_ref`` property is
+    A graph-axis item carries two more: the node's ``evidence_ref`` property is
     spread into the item's metadata (:data:`EVIDENCE_POINTER_PATHS`) and names
-    its evidence document. It is dropped on the same terms, in the same batch.
+    its evidence document, and a precedent's ``source_item_id`` is spread the
+    same way (:data:`SOURCE_ITEM_POINTER_PATHS`) and names the item it was
+    promoted from. Both are dropped on the same terms, in the same batch.
     Supersession is resolved over the pool first (``partition_superseded``
     reads ``evidence_ref`` itself), so which items are served, and in what
     order, does not change; only the served copy's metadata does.
@@ -419,26 +422,16 @@ def _node_pointers(node: Mapping[str, Any]) -> set[str]:
 
     The properties are walked as a pack item's metadata is
     (:func:`_stored_pointers`): the ``evidence_ref`` ``save_knowledge`` writes
-    beside ``document_ids``, and the ``lifecycle.superseded_by`` that
-    ``supersede_entity`` stamps. Only a non-empty string names an id, so a
-    ``document_ids`` that is not a list, and a member that is not a string,
-    name nothing. A precedent's ``source_item_id`` is read too
-    (:data:`NODE_SOURCE_POINTER_PATHS`), which a pack's metadata walk never is.
+    beside ``document_ids``, the ``lifecycle.superseded_by`` that
+    ``supersede_entity`` stamps, and a precedent's ``source_item_id``. Only a
+    non-empty string names an id, so a ``document_ids`` that is not a list, and
+    a member that is not a string, name nothing.
     """
     ids = node.get("document_ids")
     named = (
         {i for i in ids if isinstance(i, str) and i} if isinstance(ids, list) else set()
     )
-    props = node.get("properties")
-    return (
-        named
-        | _stored_pointers(props)
-        | {
-            pointer
-            for path in NODE_SOURCE_POINTER_PATHS
-            if (pointer := _pointer_at(props, path))
-        }
-    )
+    return named | _stored_pointers(node.get("properties"))
 
 
 def _node_without_pointers(
@@ -448,16 +441,10 @@ def _node_without_pointers(
 
     Copy-on-write: ``node`` itself comes back when nothing is dropped, and the
     stored node (and its ``properties``) is never mutated. A member of
-    ``document_ids`` that is not a string is kept as stored. A hidden
-    ``source_item_id`` is removed with the other properties' pointers; it is
-    absent from a node that has none, so the removal carries no tell.
+    ``document_ids`` that is not a string is kept as stored.
     """
     props = node.get("properties")
-    shown = props
-    if isinstance(props, dict):
-        shown = _without_pointers(props, hidden)
-        for path in NODE_SOURCE_POINTER_PATHS:
-            shown = _dropping(shown, path, hidden)
+    shown = _without_pointers(props, hidden) if isinstance(props, dict) else props
     out = node if shown is props else {**node, "properties": shown}
     ids = out.get("document_ids")
     if isinstance(ids, list):
@@ -482,7 +469,7 @@ def conceal_node_pointers(
     check), the ``properties["lifecycle"]["superseded_by"]`` that
     ``supersede_entity`` stamps and, on a learning-sourced precedent, the
     ``properties["source_item_id"]`` it was promoted from
-    (:data:`NODE_SOURCE_POINTER_PATHS`). Each drops an unreadable id; a pointer
+    (:data:`SOURCE_ITEM_POINTER_PATHS`). Each drops an unreadable id; a pointer
     key is removed rather than blanked, ``lifecycle.state`` and every other
     property stay, and a ``document_ids`` member that is not a string, an
     ``evidence_ref`` or ``source_item_id`` that is not a string, and a
@@ -587,12 +574,13 @@ def conceal_edge_pointers(
     the id of a document the caller may not read, in a string top-level
     ``evidence_ref`` (the provenance column) or at a pointer path of its
     ``properties`` (``evidence_ref``, ``lifecycle.superseded_by``,
-    ``supersedes_doc_id``, ``updates_doc_id``). No shipped writer puts a document
-    id in either, but the schema allows it and ``link.create`` stores
-    ``properties`` verbatim. Each drops an unreadable id: the top-level
-    ``evidence_ref`` reads ``None`` (the column is on every stored row, so
-    removing the key would tell), and a ``properties`` pointer is removed (those
-    keys are absent when unset). A value that is not a string is left as stored.
+    ``supersedes_doc_id``, ``updates_doc_id``, ``source_item_id``). No shipped
+    writer puts a document id in either, but the schema allows it and
+    ``link.create`` stores ``properties`` verbatim. Each drops an unreadable
+    id: the top-level ``evidence_ref`` reads ``None`` (the column is on every
+    stored row, so removing the key would tell), and a ``properties`` pointer is
+    removed (those keys are absent when unset). A value that is not a string is
+    left as stored.
 
     A surface that serves nodes beside its edges passes both to
     :func:`conceal_graph_pointers` instead, so the response is judged once.
@@ -859,12 +847,12 @@ def stamp_sensitivity(
 
 __all__ = [
     "EVIDENCE_POINTER_PATHS",
-    "NODE_SOURCE_POINTER_PATHS",
     "SENSITIVITY_REJECTION_REASON",
     "SENSITIVITY_WITHHELD_IDS_KEY",
     "CandidateIndex",
     "DocumentClearance",
     "OverwriteRefusedError",
+    "SOURCE_ITEM_POINTER_PATHS",
     "SUPERSESSION_POINTER_PATHS",
     "SensitivityLabelError",
     "conceal_document_rows",

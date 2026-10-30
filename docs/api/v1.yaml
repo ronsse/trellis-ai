@@ -4581,13 +4581,15 @@ paths:
 
         A node carries no label, so the entity and every node of the subgraph are
 
-        served; one whose ``document_ids``, ``evidence_ref`` property or
+        served; one whose ``document_ids``, ``evidence_ref`` property,
 
-        ``lifecycle.superseded_by`` names a document the caller may not read is
+        ``lifecycle.superseded_by`` or ``source_item_id`` names a document the
 
-        served without that id. An edge is served whole too, without an
+        caller may not read is served without that id. An edge is served whole too:
 
-        ``evidence_ref``, or a property pointer, that names such a document.'
+        its ``evidence_ref`` reads null, and a property pointer is removed, when it
+
+        names such a document.'
       operationId: get_entity_api_v1_entities__entity_id__get
       parameters:
       - in: path

@@ -3929,7 +3929,10 @@ store read per distinct id whichever kind of row names it. MCP `get_graph` reads
 the same edges and renders only their endpoints and type, so it names no edge
 pointer. A learning-sourced precedent node's `properties.source_item_id` (the
 item it was promoted from, often a document) is withheld like the node's other
-pointers, on node reads only: a pack's metadata walk does not read it.
+pointers, and so is `metadata.source_item_id` on the pack item the graph axis
+builds from that node: it is dropped from `POST /api/v1/packs` and
+`/packs/sectioned` for a caller below `restricted`, and the item is still served
+in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
