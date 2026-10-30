@@ -418,6 +418,26 @@ All notable changes to Trellis will be documented in this file.
   shipped writer puts a document id in an edge today, so this closes a path the
   schema allows rather than one in use.
 
+- **A concealed edge keeps a null `evidence_ref`, and a node's `source_item_id`
+  is a concealed pointer (follow-up to #1079).** An edge row carries the
+  `evidence_ref` provenance column whether or not it is set, so dropping the key
+  when it named an unreadable document told a caller below that document's label
+  that the edge cites one. `GET /api/v1/entities/{id}` now serves that column as
+  `null` instead; a pointer inside an edge's `properties` is still removed (those
+  keys are absent when unset, so removal says nothing), and a readable
+  `evidence_ref` is served as stored. A learning-sourced precedent node carries
+  `properties.source_item_id`, the id of the served item it was promoted from,
+  which is often a document; graph reads served it as stored, and so did a
+  pack, because the graph axis spreads a node's properties into its pack item's
+  metadata. Both now drop it, on the same terms and in the same one-pass
+  judgement as the node's other pointers (`SOURCE_ITEM_POINTER_PATHS`, in the
+  shared pointer walk): `POST /api/v1/packs` and `/packs/sectioned` still serve
+  the item, in the same position, without the key. The stored rows are not
+  changed.
+  The precedent's own description still names its source in prose, and
+  `GET /precedents` serves each promotion payload as stored; both are tracked in
+  #1080.
+
 - **A document id under `trace-summary:` is refused on every write door
   (#1054).** The trace-embed worker decides a trace is already embedded by
   asking the vector store for a row at `trace-summary:<trace_id>`. #1053 closed
