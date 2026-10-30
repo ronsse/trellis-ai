@@ -3499,10 +3499,12 @@ calls, the tool-call count, and whether hook feedback preceded it); the funnel
 counts those as `pre_treatment_excluded`. A join written before capture
 recorded the timing is undecidable: it stays in, `pre_treatment_unknown` counts
 it, and the exclusion reads "partially applied" until none are left (a join is
-rewritten with the timing only when its session is parsed again, so a
-watermark reset back-fills old ones; a back-fill also re-dates each rewritten
-join, so the main-session rollup, which windows on the join's `occurred_at`,
-pulls those old sessions into the current window). The rule is per session:
+rewritten with the timing only when its session is parsed again;
+[`trellis-session-capture --rejoin-since`](#trellis-session-capture---rejoin-since)
+back-fills old ones without a watermark reset, which would re-run distillation;
+a back-fill also re-dates each rewritten join, so the main-session rollup, which
+windows on the join's `occurred_at`, pulls those old sessions into the current
+window). The rule is per session:
 an earlier stop's feedback in a multi-prompt session also excludes a later
 task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
@@ -3759,6 +3761,54 @@ trellis worker capture-sessions [--dry-run] [--format text|json]
 | `--format` | `text` | `text` or `json`. |
 
 Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`. A session that raises mid-sweep is skipped and left for retry rather than ending the sweep; it is counted in `sessions_errored` and handled the same way (`"partial"`, non-zero unless `TRELLIS_CAPTURE_STRICT=0`).
+
+### `trellis-session-capture --rejoin-since`
+
+A one-off back-fill for `CAPTURE_SESSION_PACKS` joins written before a payload key
+existed (`outcome`, `retrieval_timing`, `covariates`). The sweep parses a transcript
+again only when its file changes, so an old join would otherwise read as `unknown`
+to the pack holdout's pre-treatment exclusion for good. A watermark reset is not the
+remedy: it re-runs distillation through the judge and can write near-duplicate
+memories.
+
+```bash
+trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]
+```
+
+It takes every transcript the sweep would discover whose file mtime is at or after
+the instant (ISO-8601 **with** a UTC offset; a naive value is a usage error, exit 2),
+**ignoring the watermark**, parses it exactly as the sweep does (same parent and
+sub-agent resolution, same `TRELLIS_CAPTURE_SOURCE_SYSTEM`) and writes a join only
+where it differs from the session's latest one. Transcripts from an ephemeral
+project are skipped, as in the sweep.
+
+It does **not** build or call a judge (no `llm:` block is needed), distil, gate,
+write a memory or document, emit `CAPTURE_SWEEP_COMPLETED` or a training pair, or
+read or write the watermark file. `--dry-run` writes nothing and reports the counts
+a live run would. The report is JSON on stdout: `mode` (`"rejoin"`), `since`,
+`dry_run`, `sessions_scanned` (= `pack_joins_recorded` + `pack_joins_unchanged` +
+`sessions_skipped_empty` + `sessions_errored`), `sessions_skipped_ephemeral`. A
+session that raises is counted in `sessions_errored`, logged as
+`capture_rejoin_session_failed`, and skipped; the run goes on and exits `3`
+whatever `TRELLIS_CAPTURE_STRICT` says.
+
+A rewritten join is stamped when it is written, never backdated, and the holdout
+reads that stamp in three places (`src/trellis/analyze/holdout.py`):
+
+1. **Settle.** `_finished` requires a completed, non-dry-run sweep at least
+   `trellis analyze holdout --settle-hours` (default 3) after the session's latest
+   join, so every rewritten session reads `unfinished` until the next sweep that
+   completes that long after the rejoin. Run the rejoin at least 3 hours before a
+   nightly sweep, and read the holdout only after that sweep.
+2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
+   so the rollup re-dates to the rejoin time.
+3. **Join scan.** The scan that reads joins is windowed by event time, so it sees a
+   rewritten join at its new time.
+
+The per-task primary analysis is unaffected: it dates a task from its first pack, and
+reads only the latest join's payload. Selection is by mtime, so re-dating only moves a
+join later; it cannot pull in a session whose transcript last changed before the
+instant. Choose the instant to cover the sessions the holdout window reads.
 
 ---
 

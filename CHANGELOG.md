@@ -6,6 +6,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis-session-capture --rejoin-since ISO` back-fills stale pack joins
+  without a watermark reset (refs #1044).** A `CAPTURE_SESSION_PACKS` join written
+  before `retrieval_timing` and `covariates` existed read as `unknown` to the pack
+  holdout's pre-treatment exclusion until its session was parsed again, and a
+  session whose file never changes is not. The flag re-parses every transcript
+  modified at or after an ISO-8601 instant (a naive value is a usage error),
+  ignoring the watermark, and writes a join only where it differs from the
+  session's latest. It builds no judge, distils nothing, writes no memory,
+  emits no `CAPTURE_SWEEP_COMPLETED` and leaves the watermark file alone;
+  `--dry-run` reports the same counts and writes nothing. A rewritten join is
+  stamped when written, and the holdout reads that stamp, so a rewritten session
+  reads `unfinished` until a completed sweep at least `--settle-hours` later (run
+  the rejoin 3 or more hours before the nightly sweep), and the main-session
+  rollup and the join scan see it at the new time. Any session error exits 3.
+
 - **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
   #1044).** `GET /api/v1/analyze` now describes the holdout report's
   covariate-adjusted secondary fits (brief length, then brief length with agent

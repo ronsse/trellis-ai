@@ -27,12 +27,17 @@ Each session runs inside one boundary: a session that raises is counted in
 ``sessions_errored``, skipped, and left un-watermarked for retry, so it cannot
 take the rest of the sweep down with it. The steps after the loop — the write,
 supersessions, training pairs and the watermark save — are outside it.
+
+:func:`rejoin_sessions` is the one other entry: it runs only the parse and the
+join step over recent transcripts, ignoring the watermark, to back-fill joins
+written before a payload key existed.
 """
 
 from __future__ import annotations
 
 import os
 from collections import Counter
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
@@ -64,6 +69,7 @@ from trellis_workers.session_capture.transcripts import (
 from trellis_workers.session_capture.watermark import WatermarkStore
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from pathlib import Path
 
     from trellis.llm import LLMClient
@@ -341,7 +347,7 @@ def _record_pack_join(
     parent: str | None,
     source_system: str,
     dry_run: bool,
-) -> None:
+) -> bool:
     """Record which context packs *digest*'s session was served.
 
     One ``CAPTURE_SESSION_PACKS`` event keyed on the session id, its payload
@@ -385,18 +391,23 @@ def _record_pack_join(
     while a transcript that grew records its new packs and outcome. A join
     written before the outcome, the timing or the covariates existed differs
     from every new parse, so the session's next parse writes it again with
-    them; a session whose file never changes is not parsed again, and its join
-    keeps reading as ``unknown`` to the holdout until a watermark reset parses
-    it.
+    them; a session whose file never changes is not parsed again by the sweep,
+    and its join keeps reading as ``unknown`` to the holdout until
+    :func:`rejoin_sessions` (``trellis-session-capture --rejoin-since``) parses
+    it. A watermark reset is not the remedy: it re-runs distillation.
 
     Not fail-soft, unlike :func:`_emit_sweep_completed`: this runs inside
     the per-session boundary, so a failed write leaves the session
     un-watermarked for the next sweep. Swallowing it would watermark the
     session and lose its join for good. A dry run reads, counts and writes
     nothing.
+
+    Returns ``False`` when the transcript is not a session (no turn and no
+    tool call) and so was neither compared nor counted, ``True`` otherwise,
+    whether the join was written, would be written (dry run) or was unchanged.
     """
     if digest.is_empty and not digest.tool_calls:
-        return
+        return False
     report.pack_ids_unparsed += digest.pack_ids_unparsed
     payload: dict[str, object] = {
         "pack_ids": list(digest.pack_ids),
@@ -418,7 +429,7 @@ def _record_pack_join(
     )
     if latest and latest[0].payload == payload:
         report.pack_joins_unchanged += 1
-        return
+        return True
     if not dry_run:
         event_log.emit(
             EventType.CAPTURE_SESSION_PACKS,
@@ -428,6 +439,122 @@ def _record_pack_join(
             payload=payload,
         )
     report.pack_joins_recorded += 1
+    return True
+
+
+@dataclass
+class RejoinReport:
+    """What one :func:`rejoin_sessions` run did, as the CLI prints it.
+
+    ``sessions_scanned`` is the transcripts at or after the cut-off that were
+    parsed: ``pack_joins_recorded + pack_joins_unchanged +
+    sessions_skipped_empty + sessions_errored``. An ephemeral-project transcript
+    is skipped before any parse, as the sweep skips it, and counted apart in
+    ``sessions_skipped_ephemeral`` so the skip is visible rather than absorbed.
+    """
+
+    since: datetime
+    transcripts_root: str
+    dry_run: bool = False
+    sessions_scanned: int = 0
+    pack_joins_recorded: int = 0
+    pack_joins_unchanged: int = 0
+    sessions_skipped_empty: int = 0
+    sessions_skipped_ephemeral: int = 0
+    sessions_errored: int = 0
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "mode": "rejoin",
+            "since": self.since.isoformat(),
+            "dry_run": self.dry_run,
+            "transcripts_root": self.transcripts_root,
+            "sessions_scanned": self.sessions_scanned,
+            "pack_joins_recorded": self.pack_joins_recorded,
+            "pack_joins_unchanged": self.pack_joins_unchanged,
+            "sessions_skipped_empty": self.sessions_skipped_empty,
+            "sessions_skipped_ephemeral": self.sessions_skipped_ephemeral,
+            "sessions_errored": self.sessions_errored,
+        }
+
+
+def _modified_at_or_after(path: Path, cutoff: datetime) -> bool:
+    """Whether the transcript's mtime is at or after *cutoff*.
+
+    A file that vanished since discovery is not selected: there is nothing
+    left to rejoin, and the sweep treats the same race as "retry later".
+    """
+    try:
+        return path.stat().st_mtime >= cutoff.timestamp()
+    except OSError:
+        return False
+
+
+def rejoin_sessions(
+    registry: StoreRegistry,
+    *,
+    transcripts_root: Path,
+    since: datetime,
+    source_system: str = DEFAULT_SOURCE_SYSTEM,
+    dry_run: bool = False,
+) -> RejoinReport:
+    """Re-parse recent transcripts and rewrite only the pack joins that differ.
+
+    The one-off back-fill for joins written before a payload key existed (the
+    outcome, ``retrieval_timing``, ``covariates``): a session whose file never
+    changes is not parsed again by the sweep, so its old join would read as
+    ``unknown`` to the pack holdout for good. This selects every transcript
+    the sweep would discover whose mtime is at or after *since*, **ignoring the
+    watermark**, parses it exactly as the sweep does and hands it to
+    :func:`_record_pack_join`, which writes only when the join differs from the
+    session's latest one.
+
+    Nothing else runs: no trigger, no judge, no distillation, no memory or
+    document write, no ``CAPTURE_SWEEP_COMPLETED``, no training pair, and the
+    watermark file is neither read nor written. A session that raises is counted
+    in ``sessions_errored`` and logged, and the run goes on.
+
+    The rewritten join is stamped when it is written, never backdated. The
+    holdout reads that stamp (settle check, main-session rollup, join scan
+    window); see ``docs/agent-guide/operations.md``.
+    """
+    report = RejoinReport(
+        since=since, transcripts_root=str(transcripts_root), dry_run=dry_run
+    )
+    joins = CaptureReport(transcripts_root=str(transcripts_root), dry_run=dry_run)
+    for path in discover_sessions(transcripts_root):
+        if not _modified_at_or_after(path, since):
+            continue
+        if is_ephemeral_project(path, transcripts_root):
+            report.sessions_skipped_ephemeral += 1
+            continue
+        report.sessions_scanned += 1
+        # ``Exception``, not a list of types, for the reason ``run_capture``
+        # gives at its own per-session boundary.
+        try:
+            considered = _record_pack_join(
+                registry,
+                parse_session(path),
+                joins,
+                parent=parent_session_id(path, transcripts_root),
+                source_system=source_system,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            report.sessions_errored += 1
+            logger.warning(
+                "capture_rejoin_session_failed",
+                session_id=path.stem,
+                error_class=type(exc).__name__,
+                exc_info=exc,
+            )
+            continue
+        if not considered:
+            report.sessions_skipped_empty += 1
+    report.pack_joins_recorded = joins.pack_joins_recorded
+    report.pack_joins_unchanged = joins.pack_joins_unchanged
+    logger.info("capture_rejoin_complete", **report.to_payload())
+    return report
 
 
 def _record_session_error(report: CaptureReport, path: Path, exc: Exception) -> None:
