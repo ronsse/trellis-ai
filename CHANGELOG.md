@@ -321,6 +321,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Concurrent edge create on ArcadeDB leaves one current row (#1078).** Two
+  writers of one new edge could both commit, `EdgeClaim` row included, with no
+  error on either side, leaving the triplet two current rows. CI hit it once
+  in about 2,500 reps of the live create race; a local loop against
+  `arcadedata/arcadedb:26.9.1` hit it once in 20,000.
+  `ArcadeDBGraphStore.upsert_edge` now re-reads the triplet after its write
+  commits and, while more than one row is current, re-runs the write (at most
+  three times), which closes every current row before it creates one; a re-run
+  logs `edge_duplicate_current_rerun` at warning. Neo4j is unchanged
+  (`VERIFY_EDGE_WRITE_UNIQUENESS` is off on the shared Bolt store).
+  `upsert_edges_bulk` takes no claim and is not covered.
+
 - **Observation reads and entity edges conceal pointers to unreadable
   documents (follow-up to #1063 and #1072).** `GET /api/v1/observations` and MCP
   `query_observations` served each observation's `evidence_ref` as stored. It is

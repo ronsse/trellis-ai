@@ -39,6 +39,7 @@ from trellis.stores.bolt_opencypher.graph import (
     _DEFAULT_SCHEMA_STATEMENTS,
     _EDGE_CLAIM_KEY_PROPERTY,
     _EDGE_CLAIM_LABEL,
+    _EDGE_DUPLICATE_RERUN_ATTEMPTS,
     _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS,
     BoltOpenCypherGraphStore,
     _is_edge_claim_contention,
@@ -247,6 +248,144 @@ class TestUpsertEdgeRetries:
             store.upsert_edge("src", "tgt", "race-rel", {})
 
         assert execute_write.call_count == 1
+
+
+class TestUpsertEdgeCollapsesADuplicateCurrentRow:
+    """Two writers of one new edge can both commit on ArcadeDB (#1078).
+
+    The live create race (``bolt_edge_create_race``) caught it about once in
+    2,500 reps on CI: both writers' transactions committed, ``EdgeClaim``
+    row included, with no error on either side, and the triplet was left with
+    two current rows. Neither writer saw the other's row, so each took its own
+    candidate ``edge_id``. The fake driver forces that interleaving by letting
+    the first write return normally and the post-commit re-read count two
+    current rows; the ArcadeDB store must then re-run the write, which closes
+    every current row of the triplet before it creates one.
+    """
+
+    def test_two_current_rows_after_a_clean_write_are_re_run(self) -> None:
+        store = _make_arcadedb_store()
+        execute_write = _arm_execute_write(
+            store, [{"edge_id": "edge_a"}, {"edge_id": "edge_b"}]
+        )
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 1])  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert result == "edge_b"
+        assert execute_write.call_count == 2
+        assert store._count_current_edge_rows.call_args_list == [
+            (("src", "tgt", "race-rel"),),
+            (("src", "tgt", "race-rel"),),
+        ]
+        assert [e for e in logs if e["event"] == "edge_duplicate_current_rerun"] == [
+            {
+                "event": "edge_duplicate_current_rerun",
+                "log_level": "warning",
+                "reruns": 1,
+                "source_id": "src",
+                "target_id": "tgt",
+            }
+        ]
+
+    def test_one_current_row_is_not_re_run(self) -> None:
+        store = _make_arcadedb_store()
+        execute_write = _arm_execute_write(store, [{"edge_id": "edge_a"}])
+        store._count_current_edge_rows = MagicMock(return_value=1)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_a"
+
+        assert execute_write.call_count == 1
+        store._count_current_edge_rows.assert_called_once_with("src", "tgt", "race-rel")
+        assert not [e for e in logs if e["event"] == "edge_duplicate_current_rerun"]
+
+    def test_a_triplet_that_stays_duplicated_stops_at_the_bound(self) -> None:
+        """The bound is what keeps a busy triplet from spinning its caller."""
+        store = _make_arcadedb_store()
+        execute_write = _arm_execute_write(
+            store,
+            [
+                {"edge_id": f"edge_{i}"}
+                for i in range(_EDGE_DUPLICATE_RERUN_ATTEMPTS + 3)
+            ],
+        )
+        store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
+
+        result = store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert execute_write.call_count == 1 + _EDGE_DUPLICATE_RERUN_ATTEMPTS
+        assert result == f"edge_{_EDGE_DUPLICATE_RERUN_ATTEMPTS}"
+
+    def test_a_re_run_that_finds_an_endpoint_gone_keeps_the_committed_edge(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        execute_write = _arm_execute_write(store, [{"edge_id": "edge_a"}, None])
+        store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_a"
+        assert execute_write.call_count == 2
+
+    def test_a_re_run_stamps_a_later_time_than_the_write_it_follows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-run closes rows a racer committed after the first ``now`` was read."""
+        _ticking_clock(monkeypatch)
+        store = _make_arcadedb_store()
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 1])  # type: ignore[method-assign]
+        tx = MagicMock()
+        tx.run.return_value.single.side_effect = [
+            {"edge_id": "edge_a"},
+            {"edge_id": "edge_b"},
+        ]
+        session = MagicMock()
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_b"
+
+        first, rerun = (
+            datetime.fromisoformat(call.kwargs["now"]) for call in tx.run.call_args_list
+        )
+        assert rerun > first
+
+    def test_the_base_bolt_store_does_not_re_read(self) -> None:
+        """Neo4j's ``MERGE`` blocks the second writer, so there is nothing to check."""
+        assert BoltOpenCypherGraphStore.VERIFY_EDGE_WRITE_UNIQUENESS is False
+        assert ArcadeDBGraphStore.VERIFY_EDGE_WRITE_UNIQUENESS is True
+        store = _make_store()
+        execute_write = _arm_execute_write(store, [{"edge_id": "edge_a"}])
+        store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_a"
+
+        assert execute_write.call_count == 1
+        store._count_current_edge_rows.assert_not_called()
+
+    def test_the_count_reads_current_rows_of_the_triplet_on_any_endpoint_row(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        store._run_read_list = MagicMock(return_value=[{"n": 2}])  # type: ignore[method-assign]
+
+        assert store._count_current_edge_rows("src", "tgt", "race-rel") == 2
+
+        (cypher,), params = store._run_read_list.call_args
+        assert "valid_to IS NULL" in cypher
+        assert "count(e)" in cypher
+        assert params == {
+            "source_id": "src",
+            "target_id": "tgt",
+            "edge_type": "race-rel",
+        }
+
+    def test_an_empty_read_counts_zero(self) -> None:
+        store = _make_arcadedb_store()
+        store._run_read_list = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        assert store._count_current_edge_rows("src", "tgt", "race-rel") == 0
 
 
 class TestEndpointThatIsMomentarilyUnreadable:

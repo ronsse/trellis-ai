@@ -533,6 +533,13 @@ _ALIAS_CLAIM_RETRY_ATTEMPTS = 3
 #: so a node that really is gone surfaces as an error instead of waiting.
 _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.01, 0.05, 0.15)
 
+#: How many times ``upsert_edge`` re-runs its write after the post-commit
+#: re-read finds the triplet with more than one current row (only on a
+#: backend that opts in with ``VERIFY_EDGE_WRITE_UNIQUENESS``). One re-run
+#: collapses the duplicate; the bound exists so a triplet that is being
+#: written without pause cannot spin a caller forever.
+_EDGE_DUPLICATE_RERUN_ATTEMPTS = 3
+
 
 def _names_token(message: str, token: str) -> bool:
     """Return True when ``message`` names ``token`` as a whole identifier."""
@@ -739,6 +746,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # DDL run at ``_init_schema()`` time. Subclasses override to narrow
     # this to the subset their backend supports.
     SCHEMA_STATEMENTS: tuple[str, ...] = _DEFAULT_SCHEMA_STATEMENTS
+
+    # Whether ``upsert_edge`` re-reads the triplet once its write has
+    # committed and re-runs the write while more than one row is current.
+    # Off by default: Neo4j's ``MERGE`` locks the ``EdgeClaim`` index entry,
+    # so a second writer blocks until the first commits and never leaves a
+    # duplicate. A backend whose commit check can miss two writes to the same
+    # claim row opts in (ArcadeDB, see its subclass).
+    VERIFY_EDGE_WRITE_UNIQUENESS: bool = False
 
     def __init__(
         self,
@@ -1353,6 +1368,65 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             )
         return outcome
 
+    def _count_current_edge_rows(
+        self, source_id: str, target_id: str, edge_type: str
+    ) -> int:
+        """Count the current rows of one edge triplet, on any row of its endpoints.
+
+        The same pattern ``upsert_edge``'s write reads ``old`` through, so the
+        count agrees with the rows a re-run would close.
+        """
+        records = self._run_read_list(
+            "MATCH (:Node {node_id: $source_id})"
+            "-[e:EDGE {edge_type: $edge_type}]->"
+            "(:Node {node_id: $target_id}) "
+            "WHERE e.valid_to IS NULL RETURN count(e) AS n",
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+        )
+        return int(records[0]["n"]) if records else 0
+
+    def _rerun_while_edge_has_duplicate_current_row(
+        self,
+        rewrite: Callable[[], _T | _EndpointMiss],
+        outcome: _T,
+        *,
+        source_id: str,
+        target_id: str,
+        edge_type: str,
+    ) -> _T:
+        """Re-run a committed edge write while its triplet has two current rows.
+
+        Two writers of one new edge can both commit, claim row included, when
+        the engine's commit check misses the overlap (``VERIFY_EDGE_WRITE_UNIQUENESS``;
+        #1078). Neither saw the other's row, so each created its own. The
+        re-read runs after this writer's commit, so the later committer sees
+        both rows. ``rewrite`` is the whole write, and it closes every
+        current row of the triplet before creating its replacement, so one
+        re-run leaves one current row. A write whose endpoint has since been
+        purged keeps the outcome already committed.
+        """
+        reruns = 0
+        while reruns < _EDGE_DUPLICATE_RERUN_ATTEMPTS and (
+            self._count_current_edge_rows(source_id, target_id, edge_type) > 1
+        ):
+            reruns += 1
+            rewritten = rewrite()
+            if isinstance(rewritten, _EndpointMiss):
+                break
+            outcome = rewritten
+        if reruns:
+            # A warning, not debug: no shipped configuration prints debug,
+            # and this is the only record that the engine let a duplicate in.
+            logger.warning(
+                "edge_duplicate_current_rerun",
+                reruns=reruns,
+                source_id=source_id,
+                target_id=target_id,
+            )
+        return outcome
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -1828,6 +1902,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             _attempt, source_id=source_id, target_id=target_id
         )
         if not isinstance(outcome, _EndpointMiss):
+            if self.VERIFY_EDGE_WRITE_UNIQUENESS:
+                outcome = self._rerun_while_edge_has_duplicate_current_row(
+                    _attempt,
+                    outcome,
+                    source_id=source_id,
+                    target_id=target_id,
+                    edge_type=edge_type,
+                )
             return str(outcome["edge_id"])
         msg = (
             f"Cannot upsert edge: source {source_id!r} or target "
