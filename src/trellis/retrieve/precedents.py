@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from trellis.schemas.classification import lifecycle_state_of
+from trellis.retrieve.sensitivity import readable_ids
+from trellis.schemas.classification import Sensitivity, lifecycle_state_of
+from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventLog, EventType
 from trellis.stores.base.graph import GraphStore
 
@@ -204,6 +206,8 @@ def list_precedents(
     domain: str | None = None,
     limit: int = 20,
     graph_store: GraphStore | None = None,
+    document_store: DocumentStore | None = None,
+    clearance: Sensitivity = "restricted",
 ) -> list[dict[str, Any]]:
     """Query PRECEDENT_PROMOTED events, optionally filtered by domain.
 
@@ -249,6 +253,15 @@ def list_precedents(
     unrelated reason (truncation reporting). Omitted, a caller with no
     graph store handy gets no lifecycle filter, since there is nothing to
     check against, but still the miner filter.
+
+    A learning promotion's ``payload.source_item_id`` names the served item the
+    precedent came from, often a document. Below ``restricted`` it is left out
+    of the served ``payload`` when :func:`~trellis.retrieve.sensitivity.readable_ids`
+    says ``clearance`` may not read that document, judged against
+    ``document_store`` once the rows are chosen so no title or description
+    changes. The default ``restricted`` serves every row as stored. A
+    ``clearance`` below it with no ``document_store`` has nothing to judge
+    against and leaves the key out of every row.
     """
     payload_filters = {"domain": domain} if domain else None
 
@@ -284,7 +297,44 @@ def list_precedents(
         if len(results) >= limit or exhausted or fetch_limit >= _MAX_PRECEDENT_SCAN:
             break
         fetch_limit = min(fetch_limit * 4, _MAX_PRECEDENT_SCAN)
-    return results
+    return _conceal_source_pointers(results, document_store, clearance)
+
+
+def _conceal_source_pointers(
+    rows: list[dict[str, Any]],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[dict[str, Any]]:
+    """``rows`` with each unreadable ``payload.source_item_id`` left out.
+
+    A row's ``payload`` may be the event's own dict (:func:`_serialize` aliases
+    it when neither text was overridden), so a concealed row gets a copy and the
+    event is never written to. Only a string id is judged; one id is judged once
+    however many rows name it.
+    """
+    if clearance == "restricted":
+        return rows
+    ids = list(
+        dict.fromkeys(
+            r["payload"]["source_item_id"]
+            for r in rows
+            if isinstance(r["payload"].get("source_item_id"), str)
+        )
+    )
+    if not ids:
+        return rows
+    readable = (
+        set(readable_ids(document_store, ids, clearance))
+        if document_store is not None
+        else set()
+    )
+    for row in rows:
+        source = row["payload"].get("source_item_id")
+        if isinstance(source, str) and source not in readable:
+            row["payload"] = {
+                k: v for k, v in row["payload"].items() if k != "source_item_id"
+            }
+    return rows
 
 
 def _serialize(
