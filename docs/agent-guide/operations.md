@@ -3911,14 +3911,20 @@ names no property, so there is nothing in it to conceal, and a concealed pointer
 never removes a node, so its counts and `/graph/search`'s `total` are the same for
 every caller. An edge is concealed on the same terms in the `subgraph` of `GET
 /api/v1/entities/{id}`: a string top-level `evidence_ref` (the provenance
-column, not a node property) is dropped when it names a document the caller may
-not read, and so is a pointer inside its `properties` (`evidence_ref`,
-`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`); every other
-field and property stays, and a value that is not a string is left as stored. The
+column, not a node property) reads `null` when it names a document the caller may
+not read, and a pointer inside its `properties` (`evidence_ref`,
+`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`) is removed;
+every other field and property stays, and a value that is not a string is left as
+stored. The column is blanked rather than removed because every stored edge row
+carries it (null when unset), so a missing key would say the edge cites a
+document the caller may not read; `properties` keys are absent when unset, so
+their removal says nothing. The
 entity, its nodes and its edges are judged in one pass, so a response costs one
 store read per distinct id whichever kind of row names it. MCP `get_graph` reads
 the same edges and renders only their endpoints and type, so it names no edge
-pointer.
+pointer. A learning-sourced precedent node's `properties.source_item_id` (the
+item it was promoted from, often a document) is withheld like the node's other
+pointers, on node reads only: a pack's metadata walk does not read it.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
