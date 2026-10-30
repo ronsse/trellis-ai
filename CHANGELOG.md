@@ -333,6 +333,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Concurrent edge create on ArcadeDB leaves one current row (#1078).** Two
+  writers of one new edge could both commit, `EdgeClaim` row included, with no
+  error on either side, leaving the triplet two current rows. CI hit it once
+  in about 2,500 reps of the live create race; a local loop against
+  `arcadedata/arcadedb:26.9.1` hit it once in 20,000.
+  `ArcadeDBGraphStore.upsert_edge` now re-reads the triplet after its write
+  commits and, while more than one row is current, re-runs the write (at most
+  three times, through the same bounded endpoint backoff as the first write),
+  which closes every current row before it creates one and carries the
+  earliest-`valid_from` row's `edge_id`, so the id that row's writer (usually
+  the first committer) already returned still names the current edge. A re-run logs `edge_duplicate_current_rerun`
+  at warning, with `resolved` from a recount after the last re-run; a
+  duplicate that outlasts the bound is logged, not raised. Neo4j is unchanged
+  (`VERIFY_EDGE_WRITE_UNIQUENESS` is off on the shared Bolt store).
+  `upsert_edges_bulk` takes no claim and is not covered.
+
 - **`POST /api/v1/documents` refuses `metadata.lifecycle` and
   `metadata.evidence_ref`, and `POST /api/v1/vectors` takes a stored document's
   flat `content_type` from the document (part of #1057).** The pack builder

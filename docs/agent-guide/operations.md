@@ -1398,7 +1398,9 @@ Scope boundaries, stated plainly:
   redaction re-runnable.
 - **A write over a redacted id is refused unless it says it means to (#1034).**
   `put_document` refuses a non-blank write to a document id whose row is a
-  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; an
+  redaction tombstone (`redaction_tombstone_overwrite`), on every surface
+  (`precedent.promote` refuses earlier, with `precedent_document_redacted`; see
+  below); an
   unflagged write passes only if the row it writes is still a tombstone (a
   second redaction, or a metadata write that keeps the blank content and the
   lifecycle stamp), so a blank write that drops or replaces the stamp is refused

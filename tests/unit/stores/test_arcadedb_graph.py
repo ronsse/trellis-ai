@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -312,6 +313,76 @@ def test_concurrent_edge_update_leaves_one_current_row(graph_store):
     bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row(
         graph_store, _second_arcadedb_store
     )
+
+
+@pytest.mark.parametrize(
+    ("racer_committed", "racer_wins_the_id"),
+    [("earlier", True), ("later", False)],
+)
+def test_upsert_edge_collapses_a_row_a_racing_writer_committed_unseen(
+    graph_store, monkeypatch, racer_committed, racer_wins_the_id
+):
+    """Force the interleaving behind #1078: a second writer's row lands unseen.
+
+    The live create race hit it about once in 2,500 reps on CI: both
+    writers committed, claim row included, with no error, and neither saw the
+    other's edge. The loop above cannot be relied on to reach that, so this
+    commits the second writer's row by hand right after the first write
+    returns, and the post-commit re-read must find it and re-run the write.
+
+    The survivor carries the earliest row's ``edge_id``, so whichever writer
+    committed first has reported an id that still names the current edge, and
+    it carries the re-running writer's properties.
+    """
+    graph_store.upsert_node("dup-src", "dup-node", {})
+    graph_store.upsert_node("dup-tgt", "dup-node", {})
+    real_write = graph_store._execute_edge_claim_write
+    raced: list[str] = []
+    first_edge_id: list[str] = []
+
+    def write_then_lose_the_race(tx_function):
+        result = real_write(tx_function)
+        if not raced:
+            first_edge_id.append(result["edge_id"])
+            now = datetime.now(UTC)
+            stamp = (
+                now - timedelta(minutes=1) if racer_committed == "earlier" else now
+            ).isoformat()
+            raced.append(stamp)
+            with graph_store._driver.session(database=graph_store._database) as session:
+                session.run(
+                    "MATCH (s:Node {node_id: 'dup-src'}) WHERE s.valid_to IS NULL "
+                    "MATCH (t:Node {node_id: 'dup-tgt'}) WHERE t.valid_to IS NULL "
+                    "CREATE (s)-[e:EDGE]->(t) SET e = $props",
+                    props={
+                        "version_id": "dup-racer-version",
+                        "source_id": "dup-src",
+                        "target_id": "dup-tgt",
+                        "edge_type": "dup-rel",
+                        "properties_json": '{"writer": "racer"}',
+                        "edge_id": "dup-racer-edge",
+                        "valid_from": stamp,
+                        "created_at": stamp,
+                    },
+                )
+        return result
+
+    monkeypatch.setattr(
+        graph_store, "_execute_edge_claim_write", write_then_lose_the_race
+    )
+
+    returned_id = graph_store.upsert_edge(
+        "dup-src", "dup-tgt", "dup-rel", {"writer": "a"}
+    )
+
+    assert len(raced) == 1
+    current = graph_store.get_edges(
+        "dup-src", direction="outgoing", edge_type="dup-rel"
+    )
+    assert len(current) == 1, [row["edge_id"] for row in current]
+    expected_id = "dup-racer-edge" if racer_wins_the_id else first_edge_id[0]
+    assert returned_id == current[0]["edge_id"] == expected_id
+    assert current[0]["properties"] == {"writer": "a"}
 
 
 def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
