@@ -1196,3 +1196,49 @@ class TestBulkDuplicateCurrentRows:
         (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
         assert (warning["path"], warning["outcome"]) == ("bulk", "unresolved")
         assert warning["reruns"] == _EDGE_DUPLICATE_RERUN_ATTEMPTS
+
+    def test_the_recount_reads_current_rows_of_the_triplet_edge_type_only(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        store._run_read_list = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        assert store._rows_with_duplicate_current_edges(list(self.EDGES)) == set()
+
+        statement = store._run_read_list.call_args.args[0]
+        triplets = store._run_read_list.call_args.kwargs["triplets"]
+        # A closed (re-versioned) row, or an edge of another type between the
+        # same endpoints, must not count: either would flag a healthy triplet.
+        assert "e.valid_to IS NULL" in statement
+        assert "e.edge_type = trip.edge_type" in statement
+        assert "count(e) AS n" in statement
+        assert "n > 1" in statement
+        assert [(t["row_index"], t["edge_type"]) for t in triplets] == [
+            (0, "links_to"),
+            (1, "links_to"),
+        ]
+
+    def test_a_repair_that_raises_keeps_the_committed_id_and_repairs_the_rest(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        rewrite = MagicMock(single=MagicMock(return_value={"edge_id": "surviving"}))
+        self._session(
+            store,
+            reads=[self.ENDPOINTS, [{"row_index": 0}, {"row_index": 1}]],
+            writes=[list(self.COMMITTED), RuntimeError("driver went away"), rewrite],
+        )
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 2, 1])  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        # Row 0's repair raised: it keeps the committed id. Row 1 is still repaired.
+        assert result == ["e0", "surviving"]
+        (failure,) = (
+            e for e in logs if e["event"] == "edge_duplicate_current_repair_failed"
+        )
+        assert failure["path"] == "bulk"
+        assert (failure["source_id"], failure["target_id"]) == ("a", "b")
+        assert failure["edge_type"] == "links_to"
+        assert failure["error_type"] == "RuntimeError"

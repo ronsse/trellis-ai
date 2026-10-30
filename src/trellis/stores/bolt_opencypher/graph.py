@@ -125,7 +125,8 @@ with more than one current row through the same
 from that row's own properties and provenance. The ``edge_id`` it returns
 for that row is the surviving row's, and the ``edge_duplicate_current_rerun``
 warning carries ``path="bulk"``. A batch with no duplicate costs that one
-read, and a duplicate that outlasts the bound is logged, not raised.
+read; a duplicate that outlasts the bound, or a repair that errors, is
+logged, not raised.
 
 ArcadeDB 26.10.1 ships the upstream page-slot fix (ArcadeDB PR #9270)
 and closes the underlying race on its own, measured 0 of 40 calls
@@ -409,8 +410,9 @@ def _earliest_row(rows: str) -> str:
     """Cypher for the row of the list *rows* with the earliest ``valid_from``.
 
     ``null`` if empty; the lesser ``version_id`` breaks a tie. The mirror of
-    :func:`_shown_row`, and used only by ``upsert_edge``'s re-run after a
-    racing commit, to pick the ``edge_id`` and ``created_at`` it carries
+    :func:`_shown_row`, and used only by the re-run after a racing commit
+    (``upsert_edge``'s, and ``upsert_edges_bulk``'s repair of a flagged
+    triplet), to pick the ``edge_id`` and ``created_at`` it carries
     (the first write keeps the shown row's pick, which the duplicate-heal
     contract pins). When two writers of one new
     edge both commit (#1078), the writer of the earliest-``valid_from`` row
@@ -565,11 +567,12 @@ _ALIAS_CLAIM_RETRY_ATTEMPTS = 3
 #: so a node that really is gone surfaces as an error instead of waiting.
 _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.01, 0.05, 0.15)
 
-#: How many times ``upsert_edge`` re-runs its write after the post-commit
-#: re-read finds the triplet with more than one current row (only on a
-#: backend that opts in with ``VERIFY_EDGE_WRITE_UNIQUENESS``). One re-run
-#: collapses the duplicate; the bound exists so a triplet that is being
-#: written without pause cannot spin a caller forever.
+#: How many times ``upsert_edge``, or ``upsert_edges_bulk`` for each triplet
+#: it flags, re-runs its write after the post-commit re-read finds the
+#: triplet with more than one current row (only on a backend that opts in
+#: with ``VERIFY_EDGE_WRITE_UNIQUENESS``). One re-run collapses the
+#: duplicate; the bound exists so a triplet that is being written without
+#: pause cannot spin a caller forever.
 _EDGE_DUPLICATE_RERUN_ATTEMPTS = 3
 
 
@@ -2244,25 +2247,44 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         :meth:`_rerun_while_edge_has_duplicate_current_row`, from that row's
         properties and provenance, and its ``edge_ids`` entry becomes the
         surviving row's id. A batch with no duplicate costs that one read.
+
+        The batch has committed, so a repair that raises is logged
+        (``edge_duplicate_current_repair_failed``, with the error type), that
+        triplet keeps the id the batch returned, and the next flagged triplet
+        is repaired. ``upsert_edge`` still raises: its write has not returned.
         """
         duplicated = self._rows_with_duplicate_current_edges(edges)
         for i in sorted(duplicated):
             spec = edges[i]
-            _, rewrite_earliest = self._edge_write_attempts(
-                spec["source_id"],
-                spec["target_id"],
-                spec["edge_type"],
-                spec.get("properties"),
-                **provenance[i],
-            )
-            outcome = self._rerun_while_edge_has_duplicate_current_row(
-                rewrite_earliest,
-                {"edge_id": edge_ids[i]},
-                source_id=spec["source_id"],
-                target_id=spec["target_id"],
-                edge_type=spec["edge_type"],
-                path="bulk",
-            )
+            try:
+                _, rewrite_earliest = self._edge_write_attempts(
+                    spec["source_id"],
+                    spec["target_id"],
+                    spec["edge_type"],
+                    spec.get("properties"),
+                    **provenance[i],
+                )
+                outcome = self._rerun_while_edge_has_duplicate_current_row(
+                    rewrite_earliest,
+                    {"edge_id": edge_ids[i]},
+                    source_id=spec["source_id"],
+                    target_id=spec["target_id"],
+                    edge_type=spec["edge_type"],
+                    path="bulk",
+                )
+            except Exception as exc:
+                # The batch has committed: raising here would lose every id
+                # it returned and leave the later flagged triplets unrepaired.
+                # This triplet keeps its committed id; the next is repaired.
+                logger.warning(
+                    "edge_duplicate_current_repair_failed",
+                    path="bulk",
+                    source_id=spec["source_id"],
+                    target_id=spec["target_id"],
+                    edge_type=spec["edge_type"],
+                    error_type=type(exc).__name__,
+                )
+                continue
             edge_ids[i] = str(outcome["edge_id"])
 
     def _rows_with_duplicate_current_edges(

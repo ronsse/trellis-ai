@@ -362,8 +362,9 @@ All notable changes to Trellis will be documented in this file.
   them through the same bounded re-run as `upsert_edge`, from that row's own
   properties and provenance. The id returned for a re-written row is the
   surviving row's. A batch with no duplicate costs that one read; a duplicate
-  that outlasts the bound is logged, not raised, because the write has
-  committed. The `edge_duplicate_current_rerun` warning gains `path` (`single`
+  that outlasts the bound, or a repair that raises, is logged, not raised,
+  because the write has committed (that triplet keeps its committed id and
+  the next is repaired). The `edge_duplicate_current_rerun` warning gains `path` (`single`
   or `bulk`). The bulk-vs-bulk and bulk-vs-single race checks now also run in
   `test_arcadedb_graph.py`; the opposite-row-order one stays Neo4j-only, as it
   asserts zero driver retries and ArcadeDB resolves overlapping batches by
