@@ -6,6 +6,37 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze holdout --by-commit` tabulates each arm per serving build.**
+  A holdout window can span several deployments, and a serving change that lands
+  mid-window mixes builds inside each arm. With the flag the report gains
+  `by_commit`: one row per build, in first-seen order, with the build's first and
+  last pack time and each arm's task count and mean outcome over the same
+  analysed tasks the estimate uses, plus `units_spanning_builds` for tasks whose
+  packs came from more than one build (counted once, under the earliest). A
+  build is the first 12 characters of the earliest pack's stamped commit, or
+  `unidentified` when the row has no stamp or a null commit. The table is
+  descriptive: no p-value, interval or verdict per build. Without the flag the
+  JSON, text and REST payloads are unchanged.
+
+- **`trellis-session-capture --rejoin-since ISO` back-fills stale pack joins
+  without a watermark reset (refs #1044).** A `CAPTURE_SESSION_PACKS` join written
+  before `retrieval_timing` and `covariates` existed read as `unknown` to the pack
+  holdout's pre-treatment exclusion until its session was parsed again, and a
+  session whose file never changes is not. The flag re-parses every transcript
+  modified at or after an ISO-8601 instant (a naive value is a usage error),
+  ignoring the watermark, and writes a join only where it differs from the
+  session's latest. It builds no judge, distils nothing, writes no memory,
+  emits no `CAPTURE_SWEEP_COMPLETED` and leaves the watermark file alone;
+  `--dry-run` reports the same counts and writes nothing. A rewritten join is
+  stamped when written, and the holdout reads that stamp, so a rewritten session
+  reads `unfinished` until a completed sweep at least `--settle-hours` later (run
+  the rejoin 3 or more hours before the nightly sweep), and the main-session
+  rollup and the join scan see it at the new time. Any session error exits 3.
+  The report names the `source_system` it wrote under, so a dry run shows a
+  shell that differs from the sweep's; choose an instant at or before the
+  analysed window's start, since a later one decides only sessions that ended
+  after it.
+
 - **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
   #1044).** `GET /api/v1/analyze` now describes the holdout report's
   covariate-adjusted secondary fits (brief length, then brief length with agent
@@ -337,6 +368,17 @@ All notable changes to Trellis will be documented in this file.
   `test_arcadedb_graph.py`; the opposite-row-order one stays Neo4j-only, as it
   asserts zero driver retries and ArcadeDB resolves overlapping batches by
   commit-time conflict retry.
+
+- **`trellis admin reindex-vectors` leaves the first vector at a
+  `trace-summary:` id to the trace-embed worker (refs #1076).** The worker
+  treats a vector row at `trace-summary:<trace_id>` as "this trace is embedded"
+  and skips it. A document filed under that prefix before it was reserved had no
+  vector unless embed-on-ingest was on, so `reindex-vectors` would have given it
+  the first one and blinded the worker to the real trace for good. A reserved id
+  with no vector row is now skipped and counted in the new `skipped_reserved`
+  summary key (text output and JSON, dry run included, exit code unchanged); with
+  `--force`, a reserved id that already has a vector is re-embedded as before.
+  No pack gains or loses an item.
 
 - **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
   (part of #1080).** A learning promotion's `payload.source_item_id` is the id of

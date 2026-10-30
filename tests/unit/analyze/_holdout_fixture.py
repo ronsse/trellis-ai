@@ -111,6 +111,11 @@ def legacy_timing_payload(*, hook_before: bool | None) -> dict[str, Any]:
     return timing
 
 
+def provenance(commit: str | None) -> dict[str, Any]:
+    """An event's ``metadata`` stamped by the build that wrote ``commit``."""
+    return {"write_provenance": {"version": "0.0.0", "commit": commit}}
+
+
 class HoldoutLog:
     """Appends synthetic experiment rows to one event log."""
 
@@ -128,12 +133,15 @@ class HoldoutLog:
         items: int,
         rate: float = 0.5,
         sectioned: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Append one ``PACK_ASSEMBLED`` row and return its pack id.
 
         ``withheld=None`` writes a row from a build before the holdout: no
         ``holdout`` key and no ``holdout_rate``. ``items`` is the would-be
         pack's size, recorded under ``holdout_*`` when the row is withheld.
+        ``metadata`` is the row's event metadata (see :func:`provenance`);
+        left ``None`` the row carries no stamp.
         """
         self._packs += 1
         pack_id = f"pack-{self._packs:04d}"
@@ -199,6 +207,7 @@ class HoldoutLog:
                 occurred_at=at,
                 recorded_at=at,
                 payload=payload,
+                metadata=metadata or {},
             )
         )
         return pack_id
@@ -284,16 +293,19 @@ class HoldoutLog:
         with_outcome: bool = True,
         timing: dict[str, Any] | None = None,
         covariates: dict[str, Any] | None = None,
+        pack_metadata: Sequence[dict[str, Any] | None] | None = None,
     ) -> str:
         """One task: a pack per entry of ``arms``, a minute apart, then its join.
 
         ``arms`` holds each call's ``withheld`` value in call order
         (``None`` for a row from a build before the holdout). The join is
-        written an hour after the last pack.
+        written an hour after the last pack. ``pack_metadata`` holds each
+        pack row's event metadata in the same order.
         """
         self._tasks += 1
         task_id = f"task-{self._tasks:04d}"
         sizes = [items] * len(arms) if isinstance(items, int) else list(items)
+        stamps = pack_metadata or [None] * len(arms)
         pack_ids = [
             self.pack(
                 at=start + timedelta(minutes=index),
@@ -301,8 +313,11 @@ class HoldoutLog:
                 items=size,
                 rate=rate,
                 sectioned=sectioned,
+                metadata=stamp,
             )
-            for index, (withheld, size) in enumerate(zip(arms, sizes, strict=True))
+            for index, (withheld, size, stamp) in enumerate(
+                zip(arms, sizes, stamps, strict=True)
+            )
         ]
         outcome = (
             outcome_payload(
