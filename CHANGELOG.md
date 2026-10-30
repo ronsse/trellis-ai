@@ -325,8 +325,9 @@ All notable changes to Trellis will be documented in this file.
   (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
   the served item the precedent came from, often a document, and the listing
   served each event's `payload` as stored, so a key below that document's label
-  learned an id `GET /documents/{id}` answers 404 for. The route now takes
-  `Depends(authenticate)` like the other gated reads, and `list_precedents` takes
+  learned an id `GET /documents/{id}` answers 404 for. The route already required a
+  read-scoped credential; it now reads the caller's clearance from it like the other
+  gated reads, and `list_precedents` takes
   keyword-only `document_store` and `clearance`: once the rows are chosen it
   judges every string `source_item_id` in one `readable_ids` call and leaves the
   key out of the served `payload` of a row naming an unreadable document. Titles,
@@ -335,8 +336,9 @@ All notable changes to Trellis will be documented in this file.
   defaults (`clearance="restricted"`, no store) serve every row as before; below
   `restricted` with no store the key is left out of every row. `GET
   /precedents/domains` (counts only) and MCP `get_lessons` (title, description
-  and domain only) are unchanged, and so is the promoted description's text,
-  which still reads `Source item '<id>' showed ...`.
+  and domain only) are unchanged, and so is the promoted text: the description
+  still reads `Source item '<id>' showed ...`, and a promotion with no item title
+  is still named `Learning: <family> :: <id>`.
 
 - **One bad document or node no longer fails the keyword or graph axis; one
   coercion rule for `auto_importance` (closes #1050).** The keyword axis scored
