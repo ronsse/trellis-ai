@@ -352,6 +352,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
+  #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
+  write target on every door), but `supersedes=` names a row to be stamped, not
+  written, and a `trace-summary:<id>` target passed the document checks. The
+  stamp was then rejected by the evidence-ingest id guard *after* the memory was
+  stored, so the caller got `Memory saved` plus a warning to "re-send to retry"
+  that could never succeed. The check now refuses on the id alone, before the
+  readability lookup, so the answer is the same whether or not the row exists and
+  nothing is written: `value` / `supersedes`, naming the worker as the owner. The
+  match is exact and case-sensitive, as the worker builds the id. The automated
+  supersession seams (reconcile-on-write, the capture reconcile pass) and
+  `classification.set` are unchanged.
+
 - **`trellis admin reindex-vectors` leaves the first vector at a
   `trace-summary:` id to the trace-embed worker (refs #1076).** The worker
   treats a vector row at `trace-summary:<trace_id>` as "this trace is embedded"
