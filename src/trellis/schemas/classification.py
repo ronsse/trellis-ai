@@ -148,8 +148,10 @@ class ContentTags(TrellisModel):
     #: cannot apply read-time decay safely. ``None`` means "never stamped"
     #: — same legacy / hand-edit story as :attr:`classified_at`. The
     #: read-path guardrail in :func:`trellis.retrieve.strategies._apply_importance`
-    #: raises ``ValueError`` if ``auto_importance`` is set but this stamp is
-    #: missing — every writer of ``auto_importance`` MUST also stamp here.
+    #: raises ``ValueError`` if ``auto_importance`` is set above the decay
+    #: threshold but this stamp is missing or is not a timestamp — every writer
+    #: of ``auto_importance`` MUST also stamp here. A retrieval axis skips the
+    #: one row that raises, and records it as ``malformed_metadata``.
     #: See ``docs/design/adr-importance-score-freshness.md``.
     importance_scored_at: datetime | None = None
 

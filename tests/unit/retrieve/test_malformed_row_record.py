@@ -16,6 +16,7 @@ key health reads.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -30,6 +31,8 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.sensitivity import SENSITIVITY_WITHHELD_IDS_KEY
 from trellis.retrieve.strategies import (
     MALFORMED_METADATA_REJECTION_REASON,
+    GraphSearch,
+    KeywordSearch,
     SearchStrategy,
     SemanticSearch,
 )
@@ -50,6 +53,9 @@ if TYPE_CHECKING:
 #: Clears the content floor's five-substance-word demotion.
 _BODY = "the deploy checklist requires draining the write queue first"
 _REASON = "malformed_metadata"
+#: A fresh stamp, so a bool importance is malformed because it is a bool and
+#: not because it is unstamped.
+_NOW = datetime.now(UTC).isoformat()
 
 
 def _row(item_id: str, score: float, **metadata: Any) -> dict[str, Any]:
@@ -90,6 +96,36 @@ def _doc(item_id: str, score: float, **metadata: Any) -> PackItem:
         relevance_score=score,
         metadata={"source_strategy": "keyword", **metadata},
     )
+
+
+def _keyword_axis(docs: list[dict[str, Any]]) -> KeywordSearch:
+    store = MagicMock()
+    store.search.return_value = docs
+    return KeywordSearch(store)
+
+
+def _doc_row(doc_id: str, rank: float, **metadata: Any) -> dict[str, Any]:
+    return {
+        "doc_id": doc_id,
+        "content": _BODY,
+        "metadata": {"auto_importance": 0.2, **metadata},
+        "rank": rank,
+    }
+
+
+def _graph_axis(nodes: list[dict[str, Any]]) -> GraphSearch:
+    store = MagicMock()
+    store.query.return_value = nodes
+    store.execute_node_query.return_value = nodes
+    return GraphSearch(store)
+
+
+def _node(node_id: str, **properties: Any) -> dict[str, Any]:
+    return {
+        "node_id": node_id,
+        "node_type": "service",
+        "properties": {"name": node_id, "description": _BODY, **properties},
+    }
 
 
 def _label(level: str) -> dict[str, Any]:
@@ -263,6 +299,119 @@ class TestSectionedPack:
         )
 
         assert _payload(log)["malformed_row_skips"] == {}
+
+
+class TestKeywordAndGraphAxes:
+    """All three axes skip and record a malformed row (#1050, items 2 and 3).
+
+    A bad document on the keyword axis and a bad node on the graph axis used to
+    fail their axis for every pack; now each costs only itself, and is
+    recorded the way a bad vector row is.
+    """
+
+    @staticmethod
+    def _two_axes() -> list[SearchStrategy]:
+        return [
+            _keyword_axis(
+                [
+                    _doc_row("kw-bad", -0.99, auto_importance="high"),
+                    _doc_row("kw-good", -0.5),
+                ]
+            ),
+            _graph_axis(
+                [
+                    _node("n-bad", auto_importance=True, importance_scored_at=_NOW),
+                    _node("n-good"),
+                ]
+            ),
+        ]
+
+    def test_a_flat_pack_serves_both_axes_and_records_both_skips(
+        self, tmp_path: Path
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        pack = PackBuilder(strategies=self._two_axes(), event_log=log).build(
+            "deploy checklist", clearance="restricted"
+        )
+
+        assert sorted(_served(pack)) == ["kw-good", "n-good"]
+        assert sorted(
+            (r.item_id, r.reason, r.strategy_source, r.item_type)
+            for r in pack.retrieval_report.rejected_items
+        ) == [
+            ("kw-bad", _REASON, "keyword", "document"),
+            ("n-bad", _REASON, "graph", "entity"),
+        ]
+        payload = _payload(log)
+        assert payload["malformed_row_skips"] == {"keyword": 1, "graph": 1}
+        assert payload["withholding"]["by_reason"] == {_REASON: 2}
+
+    def test_a_sectioned_pack_serves_both_axes_and_counts_both_skips(
+        self, tmp_path: Path
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        pack = PackBuilder(strategies=self._two_axes(), event_log=log).build_sectioned(
+            "deploy checklist", clearance="restricted", sections=_SECTIONS
+        )
+
+        served = sorted(i.item_id for s in pack.sections for i in s.items)
+        assert served == ["kw-good", "n-good"]
+        payload = _payload(log)
+        assert payload["malformed_row_skips"] == {"keyword": 1, "graph": 1}
+        assert pack.metadata["withholding"]["by_reason"] == {_REASON: 2}
+
+    def test_all_three_axes_are_counted_in_one_pack(self, tmp_path: Path) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        pack = PackBuilder(
+            strategies=[*self._two_axes(), _semantic([_good(), _bad()])],
+            event_log=log,
+        ).build("deploy checklist", clearance="restricted")
+
+        assert sorted(_served(pack)) == ["good", "kw-good", "n-good"]
+        assert _payload(log)["malformed_row_skips"] == {
+            "keyword": 1,
+            "graph": 1,
+            "semantic": 1,
+        }
+
+    def test_the_axes_leave_the_same_record_whatever_the_bad_value(
+        self, tmp_path: Path
+    ) -> None:
+        # A stamp it cannot read, not an importance it cannot read.
+        stamp = {"content_tags": {"importance_scored_at": "garbage"}}
+        log = SQLiteEventLog(tmp_path / "events.db")
+        strategies: list[SearchStrategy] = [
+            _keyword_axis([_doc_row("kw-bad", -0.9, auto_importance=0.97, **stamp)]),
+            _graph_axis([_node("n-bad", auto_importance=0.97, **stamp)]),
+        ]
+        pack = PackBuilder(strategies=strategies, event_log=log).build(
+            "deploy checklist", clearance="restricted"
+        )
+
+        assert _served(pack) == []
+        assert _payload(log)["malformed_row_skips"] == {"keyword": 1, "graph": 1}
+
+    def test_a_restricted_skipped_document_and_node_are_concealed(self) -> None:
+        strategies: list[SearchStrategy] = [
+            _keyword_axis(
+                [
+                    _doc_row(
+                        "kw-bad", -0.9, auto_importance="high", **_label("restricted")
+                    )
+                ]
+            ),
+            _graph_axis(
+                [_node("n-bad", auto_importance="high", **_label("restricted"))]
+            ),
+        ]
+        pack = PackBuilder(strategies=strategies).build(
+            "deploy checklist", clearance="internal"
+        )
+
+        assert sorted(pack.metadata[SENSITIVITY_WITHHELD_IDS_KEY]) == [
+            "kw-bad",
+            "n-bad",
+        ]
 
 
 class TestSupersession:
