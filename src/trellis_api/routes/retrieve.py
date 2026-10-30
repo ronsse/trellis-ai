@@ -627,14 +627,21 @@ def _evidence_links(
 def list_precedents(
     domain: str | None = Query(None),
     limit: int = Query(20, ge=1, le=500, description="Max results"),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
-    """List promoted precedents."""
+    """List promoted precedents.
+
+    A learning promotion's ``payload.source_item_id`` is left out when it names
+    a document above the caller's clearance.
+    """
     registry = get_registry()
     items = _list_precedents(
         registry.operational.event_log,
         domain=domain,
         limit=limit,
         graph_store=registry.knowledge.graph_store,
+        document_store=registry.knowledge.document_store,
+        clearance=request_clearance(ctx),
     )
     return {"status": "ok", "count": len(items), "precedents": items}
 

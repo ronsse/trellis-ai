@@ -4163,7 +4163,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
 | GET | `/traces` | `?domain=...&limit=20` | List traces; `limit` is 1 to 500, anything else a 422 |
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
-| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
+| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. A `payload.source_item_id` naming a document above the key's clearance is left out of that row's `payload`. |
 | GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |
 
 ### Explore

@@ -321,6 +321,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
+  (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
+  the served item the precedent came from, often a document, and the listing
+  served each event's `payload` as stored, so a key below that document's label
+  learned an id `GET /documents/{id}` answers 404 for. The route already required a
+  read-scoped credential; it now reads the caller's clearance from it like the other
+  gated reads, and `list_precedents` takes
+  keyword-only `document_store` and `clearance`: once the rows are chosen it
+  judges every string `source_item_id` in one `readable_ids` call and leaves the
+  key out of the served `payload` of a row naming an unreadable document. Titles,
+  descriptions, count and order do not depend on the key, and the stored event is
+  not changed. An id with no document row (a graph node, a trace) is served. The
+  defaults (`clearance="restricted"`, no store) serve every row as before; below
+  `restricted` with no store the key is left out of every row. `GET
+  /precedents/domains` (counts only) and MCP `get_lessons` (title, description
+  and domain only) are unchanged, and so is the promoted text: the description
+  still reads `Source item '<id>' showed ...`, and a promotion with no item title
+  is still named `Learning: <family> :: <id>`.
+
 - **Concurrent edge create on ArcadeDB leaves one current row (#1078).** Two
   writers of one new edge could both commit, `EdgeClaim` row included, with no
   error on either side, leaving the triplet two current rows. CI hit it once
