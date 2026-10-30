@@ -146,7 +146,7 @@ or `precedents_promoted: 0` as an unmet launch criterion. Rationale + decisions:
 | 2 | `pytest tests/unit/` green + 6 workflows green on main | cloud |
 | 3 | **Loop fed & wired** (30d): `injected_coverage ≥0.9` + `attribution_rate ≥0.2` + `graded_observations ≥5` + curate not all-zeros (nightly `dod3a_met`) | skynet |
 | 4 | Attribution round-trip: flat `get_context` carries `pack_id`; `record_feedback`→`FEEDBACK_RECORDED` | skynet |
-| 5 | #194 enforced (`pytest -k classification`) | cloud |
+| 5 | #194 enforced (`pytest tests/unit/ -k "classification or sensitivity"`) | cloud |
 | 6 | #250 closed: `.env` exists, dead AuraDB creds purged, CI secrets rotated | cloud + owner |
 | 7 | #200/#202/#203 resolved (fixture tests pass, or closed with a stated reason) | cloud |
 | 8 | #208 re-homed or closed | cloud |
