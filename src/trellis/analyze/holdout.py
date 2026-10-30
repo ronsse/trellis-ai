@@ -101,6 +101,13 @@ reads it, because the analysed set excludes the cut-offs unless ``itt``
 keeps them. Any other guardrail whose field no task in an arm carries is
 ``None`` there, with the missing field named.
 
+**Builds.** ``by_commit`` (opt-in) tabulates the analysed tasks per arm by
+the build that wrote the task's earliest pack, read from the row's
+``write_provenance.commit``. It is descriptive: a serving change that lands
+mid-window mixes builds inside each arm, and the table shows how, so a reader
+can judge whether a deploy confounds the comparison. It adds no estimate and
+changes no other figure.
+
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
 :data:`NO_EFFECT_VERDICT`, never "no effect".
@@ -118,7 +125,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import (
@@ -128,6 +135,7 @@ from trellis.core.pack_holdout import (
     HOLDOUT_SECTIONS_KEY,
     is_holdout,
 )
+from trellis.core.write_provenance import WRITE_PROVENANCE_KEY
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventType,
@@ -186,6 +194,17 @@ MIN_FORMULA_N = 6
 #: The pre-registration's "10% effect".
 _TEN_PERCENT = 0.1
 _EMPTY_WINDOW = "the evidence window is empty"
+#: ``by_commit`` names a build by this many characters of its commit.
+_BUILD_CHARS = 12
+UNIDENTIFIED_BUILD = "unidentified"
+_BY_COMMIT_NOTE = (
+    "Descriptive only; carries no inference. Each analysed task is counted "
+    "once, under the build whose commit is stamped on its earliest pack, and "
+    "a task whose packs span several builds is also counted in "
+    "units_spanning_builds. A build is the first "
+    f"{_BUILD_CHARS} characters of its stamped commit, or "
+    f"{UNIDENTIFIED_BUILD} when the stamp or its commit is missing."
+)
 _NO_ELIGIBLE = "no eligible task"
 
 _PRE_TREATMENT_NOT_APPLIED = (
@@ -589,6 +608,39 @@ class HoldoutGuardrails(TrellisModel):
     measures: list[HoldoutGuardrail]
 
 
+class HoldoutBuildArm(TrellisModel):
+    """One arm's analysed tasks under one build; a mean of nothing is ``None``."""
+
+    n: int
+    outcome_mean: float | None
+
+
+class HoldoutBuildRow(TrellisModel):
+    """The analysed tasks attributed to one build, split by arm.
+
+    ``first_seen`` and ``last_seen`` are the earliest and latest first-pack
+    times of the tasks counted under the build, as ISO-8601 UTC strings.
+    """
+
+    build: str
+    first_seen: str
+    last_seen: str
+    served: HoldoutBuildArm
+    withheld: HoldoutBuildArm
+
+
+class HoldoutByCommit(TrellisModel):
+    """The analysed tasks per serving build: descriptive, never an estimate.
+
+    Rows are in first-seen order. A task whose packs span several builds is
+    counted once, under its earliest, and again in ``units_spanning_builds``.
+    """
+
+    rows: list[HoldoutBuildRow]
+    units_spanning_builds: int
+    note: str
+
+
 class HoldoutReport(TrellisModel):
     status: str = "ok"
     window_days: int
@@ -610,8 +662,18 @@ class HoldoutReport(TrellisModel):
     covariate_adjusted: HoldoutCovariateAdjusted
     power: HoldoutPower
     guardrails: HoldoutGuardrails
+    #: Set only when ``by_commit`` is asked for, and absent from a dump
+    #: otherwise, so every other caller's payload is what it always was.
+    by_commit: HoldoutByCommit | None = None
     scan: ScanCoverage
     notes: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_unrequested_by_commit(self, handler: Any) -> dict[str, Any]:
+        dumped: dict[str, Any] = handler(self)
+        if self.by_commit is None:
+            dumped.pop("by_commit", None)
+        return dumped
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +1032,12 @@ class _Unit:
     both_arms: bool
     cut_off: bool
     outcome: Mapping[str, Any]
+    #: The build that wrote the task's earliest pack, that pack's time, and
+    #: whether the task's packs came from more than one build; only
+    #: ``by_commit`` reads them.
+    build: str
+    first_pack_at: datetime
+    spans_builds: bool
     #: The brief's length in characters, and a pseudonymous handle for the
     #: sub-agent's type, from the join's ``covariates``; ``None`` when the
     #: join lacks one or holds an unusable value. The handle is only compared
@@ -1322,6 +1390,7 @@ def analyze_holdout(
     rate: float | None = None,
     outcome: str = DEFAULT_OUTCOME,
     itt: bool = False,
+    by_commit: bool = False,
     permutations: int = 10_000,
     bootstraps: int = 4_000,
     power_sims: int = 600,
@@ -1343,6 +1412,8 @@ def analyze_holdout(
             present in the window.
         outcome: A key of :data:`OUTCOMES`.
         itt: Keep usage-limit cut-offs (the first sensitivity analysis).
+        by_commit: Add the descriptive per-build table of the analysed
+            tasks (:class:`HoldoutByCommit`); no other figure changes.
         permutations: Within-stratum permutations for the p-value.
         bootstraps: Stratified bootstrap replicates for the 95% CI.
         power_sims: Simulated experiments per power estimate.
@@ -1459,6 +1530,7 @@ def analyze_holdout(
             "rate": rate,
             "outcome": outcome,
             "itt": itt,
+            "by_commit": by_commit,
             "permutations": permutations,
             "bootstraps": bootstraps,
             "power_sims": power_sims,
@@ -1528,6 +1600,9 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         if p in packs and HOLDOUT_KEY in (packs[p].payload or {})
     }
     brief_chars, agent_type = _covariates(payload)
+    build, first_pack_at, spans_builds = _unit_builds(
+        [first, *(packs[p] for p in pack_ids[1:] if p in packs)]
+    )
     return _Unit(
         parent=parent,
         stratum=f"{parent}|{_iso_week(first_at)}",
@@ -1536,8 +1611,39 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         both_arms=len(arms) == _PAIR,
         cut_off=outcome.get("ended_on_error") is True,
         outcome=outcome,
+        build=build,
+        first_pack_at=first_pack_at,
+        spans_builds=spans_builds,
         brief_chars=brief_chars,
         agent_type=agent_type,
+    )
+
+
+def _build_of(pack: Event) -> str:
+    """The build that wrote a pack row: its stamped commit, shortened.
+
+    A row with no stamp, a stamp that is not a mapping, or a null or blank
+    ``commit`` (an image built without ``make docker-build``) is
+    :data:`UNIDENTIFIED_BUILD`; it served a pack, so it is a group, not a drop.
+    """
+    stamp = (pack.metadata or {}).get(WRITE_PROVENANCE_KEY)
+    commit = stamp.get("commit") if isinstance(stamp, Mapping) else None
+    if isinstance(commit, str) and commit.strip():
+        return commit.strip()[:_BUILD_CHARS]
+    return UNIDENTIFIED_BUILD
+
+
+def _unit_builds(packs: Sequence[Event]) -> tuple[str, datetime, bool]:
+    """``(earliest build, earliest time, spans several builds)`` of a task's packs.
+
+    The earliest row by ``occurred_at`` names the build; a tie falls to the
+    first in call order.
+    """
+    earliest = min(packs, key=lambda pack: _as_utc(pack.occurred_at))
+    return (
+        _build_of(earliest),
+        _as_utc(earliest.occurred_at),
+        len({_build_of(pack) for pack in packs}) > 1,
     )
 
 
@@ -1911,6 +2017,43 @@ def _descriptive(
     )
 
 
+def _build_arm(values: Sequence[float]) -> HoldoutBuildArm:
+    return HoldoutBuildArm(
+        n=len(values),
+        outcome_mean=math.fsum(values) / len(values) if values else None,
+    )
+
+
+def _by_commit(
+    analysed: Sequence[_Unit], y: npt.NDArray[np.float64]
+) -> HoldoutByCommit:
+    """The analysed tasks per build and arm, in the order builds were first seen.
+
+    ``y`` is the analysed tasks' outcome column, in the order of ``analysed``,
+    so each mean reads the column the primary estimate reads.
+    """
+    by_build: dict[str, list[tuple[_Unit, float]]] = {}
+    for unit, value in zip(analysed, y.tolist(), strict=True):
+        by_build.setdefault(unit.build, []).append((unit, value))
+    ordered = sorted(
+        by_build.items(), key=lambda item: min(u.first_pack_at for u, _ in item[1])
+    )
+    return HoldoutByCommit(
+        rows=[
+            HoldoutBuildRow(
+                build=build,
+                first_seen=min(u.first_pack_at for u, _ in members).isoformat(),
+                last_seen=max(u.first_pack_at for u, _ in members).isoformat(),
+                served=_build_arm([v for u, v in members if not u.withheld]),
+                withheld=_build_arm([v for u, v in members if u.withheld]),
+            )
+            for build, members in ordered
+        ],
+        units_spanning_builds=sum(unit.spans_builds for unit in analysed),
+        note=_BY_COMMIT_NOTE,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Guardrails
 # ---------------------------------------------------------------------------
@@ -2206,6 +2349,7 @@ def _report(
         covariate_adjusted=covariate_adjusted,
         power=power,
         guardrails=_guardrails(units, analysed, options["outcome"]),
+        by_commit=_by_commit(analysed, y) if options["by_commit"] else None,
         scan=scan,
         notes=notes,
     )

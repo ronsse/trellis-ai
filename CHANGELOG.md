@@ -6,6 +6,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze holdout --by-commit` tabulates each arm per serving build.**
+  A holdout window can span several deployments, and a serving change that lands
+  mid-window mixes builds inside each arm. With the flag the report gains
+  `by_commit`: one row per build, in first-seen order, with the build's first and
+  last pack time and each arm's task count and mean outcome over the same
+  analysed tasks the estimate uses, plus `units_spanning_builds` for tasks whose
+  packs came from more than one build (counted once, under the earliest). A
+  build is the first 12 characters of the earliest pack's stamped commit, or
+  `unidentified` when the row has no stamp or a null commit. The table is
+  descriptive: no p-value, interval or verdict per build. Without the flag the
+  JSON, text and REST payloads are unchanged.
+
 - **`trellis-session-capture --rejoin-since ISO` back-fills stale pack joins
   without a watermark reset (refs #1044).** A `CAPTURE_SESSION_PACKS` join written
   before `retrieval_timing` and `covariates` existed read as `unknown` to the pack

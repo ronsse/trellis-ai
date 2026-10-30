@@ -1902,6 +1902,35 @@ def _guardrail_arm(arm: HoldoutGuardrailArm, reads: str) -> str:
     return f"{_fig(arm.value, arm.not_measurable)} ({detail})"
 
 
+def _render_holdout_by_commit(report: HoldoutReport) -> None:
+    """The per-build table of the analysed tasks, descriptive only."""
+    table = report.by_commit
+    if table is None:
+        return
+    console.print()
+    console.print("  [bold]By serving build[/bold] (descriptive, no inference)")
+    width = max([len("build"), *(len(row.build) for row in table.rows)])
+    if not table.rows:
+        console.print("    no analysed task")
+    else:
+        console.print(
+            f"    {'build'.ljust(width)}  {'first':10}  {'last':10}  "
+            f"{'served n/mean':13}  withheld n/mean"
+        )
+    for row in table.rows:
+        served = f"{row.served.n} / {_num(row.served.outcome_mean)}"
+        withheld = f"{row.withheld.n} / {_num(row.withheld.outcome_mean)}"
+        console.print(
+            f"    {escape(row.build.ljust(width))}  {escape(row.first_seen[:10])}  "
+            f"{escape(row.last_seen[:10])}  {served:13}  {withheld}"
+        )
+    console.print(
+        f"    {table.units_spanning_builds} task(s) span builds, each counted "
+        "under its earliest"
+    )
+    console.print(f"    [dim]{escape(table.note)}[/dim]")
+
+
 def _render_holdout_guardrails(report: HoldoutReport) -> None:
     block = report.guardrails
     status = "" if block.status == "ok" else f": {escape(block.status)}"
@@ -1971,6 +2000,7 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"missing {f.outcome_missing}, analysed {f.analysed}"
     )
     _render_holdout_descriptive(report)
+    _render_holdout_by_commit(report)
     console.print()
     console.print("  [bold]Exclusions[/bold]")
     for exclusion in report.exclusions:
@@ -2019,6 +2049,14 @@ def holdout(
     ),
     itt: bool = typer.Option(
         False, "--itt", help="Keep usage-limit cut-offs (first sensitivity analysis)."
+    ),
+    by_commit: bool = typer.Option(
+        False,
+        "--by-commit",
+        help=(
+            "Add a descriptive table of the analysed tasks per arm and serving "
+            "build. No estimate; no other figure changes."
+        ),
     ),
     permutations: int = typer.Option(
         10_000, "--permutations", help="Within-stratum permutations for the p-value."
@@ -2078,6 +2116,7 @@ def holdout(
             rate=rate,
             outcome=outcome,
             itt=itt,
+            by_commit=by_commit,
             permutations=permutations,
             bootstraps=bootstraps,
             power_sims=power_sims,
