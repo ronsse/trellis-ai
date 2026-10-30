@@ -321,6 +321,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **One bad document or node no longer fails the keyword or graph axis; one
+  coercion rule for `auto_importance` (closes #1050).** The keyword axis scored
+  a document, and the graph axis a node, with an `auto_importance` that raised
+  (`"high"`, a list, an unstamped value above the decay threshold), and the
+  whole axis failed for every pack until the row was fixed. Each axis now skips
+  that one row, as the semantic axis does: a `keyword_row_skipped_malformed_metadata`
+  or `graph_row_skipped_malformed_metadata` warning names the id, field and
+  error type (never the value), and the row is recorded as `malformed_metadata`
+  in the pack's withheld items and in `PACK_ASSEMBLED.malformed_row_skips`. A
+  bad registry importance parameter and a non-numeric keyword `rank` still raise
+  for the whole axis. The three axes also now agree on what is malformed. A
+  `bool` importance (`True` was served as the maximum boost), a non-finite one
+  (`nan`, `inf`, `"1e400"`, also served as the maximum; an integer past float
+  range such as `10**400` failed the whole axis on every one) and an
+  `importance_scored_at` that is not a timestamp (`"garbage"`, `""`, `0`; it was
+  served undecayed, outranking an honestly stamped stale row) are each now
+  malformed, like a missing stamp. A numeric string such as `"0.9"` is still
+  coerced and served, and below the decay threshold no stamp is read, as before.
+  A row holding one of these values leaves the packs it was in; it surfaces in
+  `trellis analyze health` through the malformed-row count.
+
 - **Observation reads and entity edges conceal pointers to unreadable
   documents (follow-up to #1063 and #1072).** `GET /api/v1/observations` and MCP
   `query_observations` served each observation's `evidence_ref` as stored. It is
@@ -613,6 +634,25 @@ All notable changes to Trellis will be documented in this file.
   until a later sync or `trellis admin resync-vector-metadata`. The decay
   threshold checked is the default; one lowered through the parameter registry is
   not reflected at write time.
+
+- **Precedent promote, demote and reinstate say so when the precedent's document
+  row is a redaction tombstone (part of #1034).** `precedent.promote` was
+  already refused over the blank row a redaction leaves, but with the write
+  seam's message, which names `--reingest-redacted` and
+  `evidence.reingest_redacted`, neither of which promotion can set. It now
+  refuses with `precedent_document_redacted` and says what the row is: if the
+  graph node still exists the redaction did not finish, so re-run
+  `redaction.apply` on it. Nothing is written and no `PRECEDENT_PROMOTED` event
+  is emitted. `precedent.demote` and `precedent.reinstate` skipped such a row
+  without a trace, so a reinstate could return "Precedent reinstated" having
+  stamped nothing. They still write the node and still leave the row alone, but
+  now log `precedent_document_stamp_skipped_redacted`, add a
+  `precedent_document_stamp_skipped_redacted:` entry to the result's warnings
+  and set `document_row: "skipped_redaction_tombstone"` on the event (absent
+  when the precedent simply has no row). A reinstate whose whole job is the row
+  stamp (re-issued after a failed stamp) is refused with
+  `precedent_document_redacted` instead of reporting a repair it did not make.
+  No pack gains or loses an item.
 
 ### Added
 
