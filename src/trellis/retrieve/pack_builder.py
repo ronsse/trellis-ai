@@ -109,6 +109,7 @@ from trellis.retrieve.strategies import (
     RECENCY_CLOCK_METADATA_KEY,
     EmbedderResolveFailure,
     GraphSearch,
+    KeywordSearch,
     SearchStrategy,
     SemanticSearch,
     resolve_graph_axis_state,
@@ -502,17 +503,18 @@ def _search_strategy(
     """One strategy's candidates, its withheld state and its skipped rows.
 
     The graph axis alone can answer "nothing, and here is why" (see
-    :class:`~trellis.retrieve.strategies.GraphAnswer`), and the semantic axis
-    alone reports rows it skipped as malformed
-    (:class:`~trellis.retrieve.strategies.StrategyResult`); every other
-    strategy, and any test double, goes through :meth:`SearchStrategy.search`
-    and has neither to report. Both loops call this, so the two cannot
-    disagree about which strategies are asked for them.
+    :class:`~trellis.retrieve.strategies.GraphAnswer`), and the keyword and
+    semantic axes report rows they skipped as malformed
+    (:class:`~trellis.retrieve.strategies.StrategyResult`, and the graph axis's
+    ``GraphAnswer.skipped``); every other strategy, and any test double, goes
+    through :meth:`SearchStrategy.search` and has neither to report. Both loops
+    call this, so the two cannot disagree about which strategies are asked for
+    them.
     """
     if isinstance(strategy, GraphSearch):
         answer = strategy.search_answer(intent, limit=limit, filters=filters)
         return _StrategyOutput(answer.items, answer.axis_state, answer.skipped)
-    if isinstance(strategy, SemanticSearch):
+    if isinstance(strategy, (KeywordSearch, SemanticSearch)):
         result = strategy.search_result(intent, limit=limit, filters=filters)
         return _StrategyOutput(result.items, None, result.skipped)
     return _StrategyOutput(
