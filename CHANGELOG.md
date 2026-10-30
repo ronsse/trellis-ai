@@ -332,6 +332,67 @@ All notable changes to Trellis will be documented in this file.
   `--force`, a reserved id that already has a vector is re-embedded as before.
   No pack gains or loses an item.
 
+- **Concurrent edge create on ArcadeDB leaves one current row (#1078).** Two
+  writers of one new edge could both commit, `EdgeClaim` row included, with no
+  error on either side, leaving the triplet two current rows. CI hit it once
+  in about 2,500 reps of the live create race; a local loop against
+  `arcadedata/arcadedb:26.9.1` hit it once in 20,000.
+  `ArcadeDBGraphStore.upsert_edge` now re-reads the triplet after its write
+  commits and, while more than one row is current, re-runs the write (at most
+  three times, through the same bounded endpoint backoff as the first write),
+  which closes every current row before it creates one and carries the
+  earliest-`valid_from` row's `edge_id`, so the id that row's writer (usually
+  the first committer) already returned still names the current edge. A re-run logs `edge_duplicate_current_rerun`
+  at warning, with `resolved` from a recount after the last re-run; a
+  duplicate that outlasts the bound is logged, not raised. Neo4j is unchanged
+  (`VERIFY_EDGE_WRITE_UNIQUENESS` is off on the shared Bolt store).
+  `upsert_edges_bulk` takes no claim and is not covered.
+
+- **`POST /api/v1/documents` refuses `metadata.lifecycle` and
+  `metadata.evidence_ref`, and `POST /api/v1/vectors` takes a stored document's
+  flat `content_type` from the document (part of #1057).** The pack builder
+  withholds by id. A document written with `metadata.lifecycle` set to
+  `{"state": "superseded", "superseded_by": <id>}` withheld every candidate
+  under its own id, so one written at a graph node's id hid that node, and one
+  written with `metadata.evidence_ref` became the successor another item's
+  `superseded_by` resolves to, which withheld that item; the route refused
+  only `data_classification`. Either key is now a 422 whatever its value and
+  whoever the caller, with nothing written; the message names the governed
+  writers (MCP `save_memory(supersedes=...)`, the `retention.restore` command,
+  and MCP `save_knowledge(evidence_ref=...)` for a graph node). The refusal is in the
+  route, not in `EvidenceIngestHandler`, because `save_memory(supersedes=)` and
+  the operator restore recipe both stamp a document's `lifecycle` through
+  `evidence.ingest` on purpose. `POST /api/v1/evidence`, `POST /api/v1/commands/batch`
+  and MCP `execute_mutation` still accept the keys; the graph-node id collision
+  and the dedup winner's identity also stay open on #1057. `POST /vectors` (#1074)
+  took a stored document's role and content but left the legacy flat
+  `content_type`, which `document_form_of` reads as a document form when its value
+  is outside the content-type vocabulary, so a row at a stored document could
+  still carry a form the class-prior gate reads. A row at a stored document now
+  carries the document's `content_type`, removed where the document has none; a
+  row at an id with no stored document is stored as sent.
+
+- **One bad document or node no longer fails the keyword or graph axis; one
+  coercion rule for `auto_importance` (closes #1050).** The keyword axis scored
+  a document, and the graph axis a node, with an `auto_importance` that raised
+  (`"high"`, a list, an unstamped value above the decay threshold), and the
+  whole axis failed for every pack until the row was fixed. Each axis now skips
+  that one row, as the semantic axis does: a `keyword_row_skipped_malformed_metadata`
+  or `graph_row_skipped_malformed_metadata` warning names the id, field and
+  error type (never the value), and the row is recorded as `malformed_metadata`
+  in the pack's withheld items and in `PACK_ASSEMBLED.malformed_row_skips`. A
+  bad registry importance parameter and a non-numeric keyword `rank` still raise
+  for the whole axis. The three axes also now agree on what is malformed. A
+  `bool` importance (`True` was served as the maximum boost), a non-finite one
+  (`nan`, `inf`, `"1e400"`, also served as the maximum; an integer past float
+  range such as `10**400` failed the whole axis on every one) and an
+  `importance_scored_at` that is not a timestamp (`"garbage"`, `""`, `0`; it was
+  served undecayed, outranking an honestly stamped stale row) are each now
+  malformed, like a missing stamp. A numeric string such as `"0.9"` is still
+  coerced and served, and below the decay threshold no stamp is read, as before.
+  A row holding one of these values leaves the packs it was in; it surfaces in
+  `trellis analyze health` through the malformed-row count.
+
 - **Observation reads and entity edges conceal pointers to unreadable
   documents (follow-up to #1063 and #1072).** `GET /api/v1/observations` and MCP
   `query_observations` served each observation's `evidence_ref` as stored. It is
@@ -607,6 +668,25 @@ All notable changes to Trellis will be documented in this file.
   until a later sync or `trellis admin resync-vector-metadata`. The decay
   threshold checked is the default; one lowered through the parameter registry is
   not reflected at write time.
+
+- **Precedent promote, demote and reinstate say so when the precedent's document
+  row is a redaction tombstone (part of #1034).** `precedent.promote` was
+  already refused over the blank row a redaction leaves, but with the write
+  seam's message, which names `--reingest-redacted` and
+  `evidence.reingest_redacted`, neither of which promotion can set. It now
+  refuses with `precedent_document_redacted` and says what the row is: if the
+  graph node still exists the redaction did not finish, so re-run
+  `redaction.apply` on it. Nothing is written and no `PRECEDENT_PROMOTED` event
+  is emitted. `precedent.demote` and `precedent.reinstate` skipped such a row
+  without a trace, so a reinstate could return "Precedent reinstated" having
+  stamped nothing. They still write the node and still leave the row alone, but
+  now log `precedent_document_stamp_skipped_redacted`, add a
+  `precedent_document_stamp_skipped_redacted:` entry to the result's warnings
+  and set `document_row: "skipped_redaction_tombstone"` on the event (absent
+  when the precedent simply has no row). A reinstate whose whole job is the row
+  stamp (re-issued after a failed stamp) is refused with
+  `precedent_document_redacted` instead of reporting a repair it did not make.
+  No pack gains or loses an item.
 
 ### Added
 

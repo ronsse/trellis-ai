@@ -100,7 +100,7 @@ LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec c
 - `pytest tests/unit/ -q` green; all six workflows green: `gh run list --repo ronsse/trellis-ai --branch main --limit 6`.
 - Loop unstarved: within 30 days of session auto-capture landing, `trellis analyze context-effectiveness --format json` on skynet reports > 0 advisories and the nightly `worker curate` log stops being all-zeros.
 - Attribution round-trip from MCP: flat `get_context` output contains `**pack_id:**`, and a subsequent `record_feedback` produces a `FEEDBACK_RECORDED` event joining that pack (`GET /api/v1/events`).
-- #194 enforced: a `pytest -k classification` test proves a restricted item is filtered from retrieval and its mutation denied for an unscoped caller.
+- #194 enforced: a `pytest tests/unit/ -k "classification or sensitivity"` test proves a restricted item is filtered from retrieval and its mutation denied for an unscoped caller.
 
 ## 8. Open questions
 

@@ -102,6 +102,16 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
     before any Bolt session opens.
     """
 
+    # The ``EdgeClaim`` MERGE does not always serialize two writers of one new
+    # edge here: a rep of the live create race (both writers racing one fresh
+    # triplet) occasionally commits both writers' rows, claim row included,
+    # with no error on either side, leaving two current rows (#1078; one rep
+    # in 20,000 against ``arcadedata/arcadedb:26.9.1``, one in about 2,500 on
+    # CI's 26.8.1). The commit check cannot be asked for more, so
+    # ``upsert_edge`` re-reads the triplet after it commits and re-runs while
+    # two rows are current.
+    VERIFY_EDGE_WRITE_UNIQUENESS = True
+
     def _is_alias_write_contention(self, exc: Exception) -> bool:
         """Widen the base predicate over ArcadeDB's generic error channel.
 

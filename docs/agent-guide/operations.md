@@ -612,7 +612,7 @@ The vector row's metadata carries a `content` excerpt (500 chars — what `Seman
 
 That stored excerpt is produced by `truncate_excerpt` **at embed time**, not at retrieval time (#310): `build_vector_row` is the last point on the semantic path that still holds the full document, so it is the only point where the cut can break on a boundary and can name how much it dropped (`… [+12.4k chars]`). Retrieval re-runs `truncate_excerpt` over the stored string, which is a no-op for rows this hook wrote. Rows embedded before #310 hold a raw `content[:500]` slice and keep their mid-word cut until re-embedded — `trellis admin reindex-vectors --force` rewrites them through the same shared builder.
 
-On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call. A single vector row whose metadata cannot be read (a non-numeric or unstamped above-threshold `auto_importance`, a `content` or `excerpt` that is not a string) is skipped with a `semantic_row_skipped_malformed_metadata` warning naming the item id and field, never the value, and the rest of the axis is still served. The skip is also recorded: a flat pack's `rejected_items` carries the row with `reason: malformed_metadata` (`strategy_source: semantic`, `item_type: vector`), the Withheld note says `malformed_metadata N`, `PACK_ASSEMBLED.malformed_row_skips` counts it per strategy, and `trellis analyze health` turns `warn` while a pack in the window skipped one. A row whose successor was skipped does not lose a supersession verdict to it: the loser is still served.
+On the retrieval side, embedded documents are visible to every `SemanticSearch`/`PackBuilder` consumer. Since #262 the MCP `get_context` and `search` macro tools route through `PackBuilder`, which fuses the keyword, graph and **semantic** axes with Reciprocal Rank Fusion (deduplicated by `item_id`): when the embedder + vector store pair is configured, the query is embedded and vector hits join the fusion. The semantic axis is additive and degrades gracefully — a down embedder means keyword + graph results only, never a failed tool call. A single row whose metadata cannot be read is skipped, on all three axes (a vector row on the semantic axis, a document on the keyword axis, a node on the graph axis), with a `semantic_row_skipped_malformed_metadata` / `keyword_row_skipped_malformed_metadata` / `graph_row_skipped_malformed_metadata` warning naming the item id and field, never the value, and the rest of the axis is still served. A row is malformed when its `auto_importance` is not a number (a non-numeric string, a list, `null`, or a `bool`), is not finite (`nan`, `inf`, `"1e400"`), or is above the decay threshold with an `importance_scored_at` that is missing or is not a timestamp (`"garbage"`, `""`, `0`); on the semantic axis also when `content` or `excerpt` is not a string. A numeric string such as `"0.9"` is not malformed and is coerced. What stays loud, failing the axis into `strategy_failures`: a registry importance parameter that is not a number, and a store score or rank that is not a number. The skip is also recorded: a flat pack's `rejected_items` carries the row with `reason: malformed_metadata` (`strategy_source` the axis; `item_type` `vector`, `document` or `entity`), the Withheld note says `malformed_metadata N`, `PACK_ASSEMBLED.malformed_row_skips` counts it per strategy, and `trellis analyze health` turns `warn` while a pack in the window skipped one. A row whose successor was skipped does not lose a supersession verdict to it: the loser is still served.
 
 #### `save_memory` fuzzy dedup — seeding the MinHash index (opt-in)
 
@@ -1398,7 +1398,9 @@ Scope boundaries, stated plainly:
   redaction re-runnable.
 - **A write over a redacted id is refused unless it says it means to (#1034).**
   `put_document` refuses a non-blank write to a document id whose row is a
-  redaction tombstone (`redaction_tombstone_overwrite`), on every surface; an
+  redaction tombstone (`redaction_tombstone_overwrite`), on every surface
+  (`precedent.promote` refuses earlier, with `precedent_document_redacted`; see
+  below); an
   unflagged write passes only if the row it writes is still a tombstone (a
   second redaction, or a metadata write that keeps the blank content and the
   lifecycle stamp), so a blank write that drops or replaces the stamp is refused
@@ -1468,6 +1470,11 @@ Scope boundaries, stated plainly:
   reads the summary row to report the same count (and the same `embedded`) the
   live pass will, and the text output prints a `redacted:` line when it is
   non-zero.
+  A promoted precedent's row can be a tombstone too: `precedent.promote`
+  over it is refused with `precedent_document_redacted` (re-run `redaction.apply`
+  if the node still exists; promotion has no re-ingest flag), and
+  `precedent.demote` / `precedent.reinstate` leave it alone, adding a result
+  warning and `document_row: "skipped_redaction_tombstone"` on their event.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
@@ -3959,8 +3966,15 @@ above its own clearance, and cannot touch a document it may not read.**
   save tools use: a label above the key's own clearance is a 403, an unknown
   label (or one that is not a string) is a 422, and so is a raw
   `data_classification` key in `metadata` (for every caller, `admin` included:
-  the label has one door). `metadata` must be an object (422 otherwise). Nothing
-  is written on any refusal. The overwrite check compares the label this request
+  the label has one door). `metadata` must be an object (422 otherwise). A
+  `lifecycle` or `evidence_ref` key in `metadata` is also a 422, whatever its
+  value and the caller: the pack builder withholds by id, so a `lifecycle` would
+  withhold every item under this document's id (a graph node's included) and an
+  `evidence_ref` the item whose successor it names. Supersede with MCP `save_memory(supersedes=...)`; the
+  refusal names the writer for each key. The route holds this rule, not
+  `evidence.ingest`, which takes the keys from `save_memory(supersedes=)`, so
+  `POST /evidence`, `POST /commands/batch` and `execute_mutation` still accept
+  them. Nothing is written on any refusal. The overwrite check compares the label this request
   writes, so a re-put that omits `sensitivity` over a labelled document is the
   downgrade it always was.
 - REST `POST /api/v1/vectors` judges every row before it writes any, so a refused
@@ -3988,7 +4002,8 @@ above its own clearance, and cannot touch a document it may not read.**
   not copied onto it but read through the chunk id when the row is served. A row
   at a stored document also takes that document's content (the excerpt a
   semantic hit serves, cut as the embed path cuts it) and role (`node_role`,
-  `node_type`, `agent_id`, `document_form`, removed where the document has
+  `node_type`, `agent_id`, `document_form`, the legacy flat `content_type`
+  that `document_form_of` reads as a form, removed where the document has
   none), not the caller's. An id that names no document is written as sent. The trace and memory extraction
   hooks keep running at `restricted`: they write graph drafts, which target no
   document.
