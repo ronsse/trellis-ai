@@ -352,6 +352,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis analyze holdout --by-commit` names a build as `analyze health`
+  names a serving build, and from the pack that sets the arm.** The table keyed
+  a build on the first 12 characters of the stamped commit, ignoring `version`,
+  and folded every null-commit row into `unidentified`, while the serving-builds
+  view keys on `(version, commit)`, so the two could name one build differently
+  or two builds alike. It also took a task's build from its earliest pack by
+  time, though the arm, window and eligibility come from the first pack id its
+  join lists, and the two differ when a join lists packs out of time order.
+  A build is now the stamped `(version, commit)` pair of that first-listed pack,
+  and `rows[].build` is the label `analyze health` gives it (`1.0.0 @ <commit>`,
+  `1.0.0 @ commit unknown`, `no provenance`). Grouping uses the full pair, so
+  one commit under two versions is two rows, and the commit is no longer
+  shortened. `first_seen` and `last_seen` read that pack's time.
+  `units_spanning_builds` still reads every pack of the task. The field names
+  are unchanged; the `build` values are not (`unidentified` is gone).
+
 - **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
   #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
   write target on every door), but `supersedes=` names a row to be stamped, not

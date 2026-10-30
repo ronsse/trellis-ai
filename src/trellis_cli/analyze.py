@@ -1926,7 +1926,7 @@ def _render_holdout_by_commit(report: HoldoutReport) -> None:
         )
     console.print(
         f"    {table.units_spanning_builds} task(s) span builds, each counted "
-        "under its earliest"
+        "under its first pack's build"
     )
     console.print(f"    [dim]{escape(table.note)}[/dim]")
 
