@@ -467,20 +467,100 @@ def conceal_node_pointers(
     response costs one store read per distinct id however many nodes name it,
     and none when no node names one. A node that names only readable ids, or
     none, comes back as the same object. ``restricted`` does no reads, and a
-    missing store leaves every node as it is.
+    missing store leaves every node as it is. A response that serves edges too
+    passes both to :func:`conceal_graph_pointers`, to be judged once.
     """
-    pool = list(nodes)
+    return conceal_graph_pointers(nodes, (), document_store, clearance)[0]
+
+
+def _edge_pointers(edge: Mapping[str, Any]) -> set[str]:
+    """Every document id ``edge`` names, in its ``evidence_ref`` or properties.
+
+    The provenance column is a top-level key of the edge row
+    (:data:`EVIDENCE_POINTER_PATHS` read against the row itself), and the
+    caller-supplied ``properties`` are walked as a node's are
+    (:func:`_stored_pointers`). Only a non-empty string names an id.
+    """
+    named = {
+        pointer
+        for path in EVIDENCE_POINTER_PATHS
+        if (pointer := _pointer_at(edge, path))
+    }
+    return named | _stored_pointers(edge.get("properties"))
+
+
+def _edge_without_pointers(
+    edge: dict[str, Any], hidden: Collection[str]
+) -> dict[str, Any]:
+    """``edge`` without any ``hidden`` id in its ``evidence_ref`` or properties.
+
+    Copy-on-write: ``edge`` itself comes back when nothing is dropped, and the
+    stored edge (and its ``properties``) is never mutated.
+    """
+    out: Any = edge
+    for path in EVIDENCE_POINTER_PATHS:
+        out = _dropping(out, path, hidden)
+    props = out.get("properties")
+    shown = _without_pointers(props, hidden) if isinstance(props, dict) else props
+    return out if shown is props else {**out, "properties": shown}  # type: ignore[no-any-return]
+
+
+def conceal_graph_pointers(
+    nodes: Iterable[dict[str, Any]],
+    edges: Iterable[dict[str, Any]],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(nodes, edges)`` as a caller at ``clearance`` may be shown them.
+
+    The one judgement a graph read shares: the distinct ids named across *all*
+    the nodes (:func:`conceal_node_pointers`) and *all* the edges
+    (:func:`conceal_edge_pointers`) are judged in a single pass, so a response
+    costs one store read per distinct id however many rows, of either kind,
+    name it, and none when no row names one. A row that names only readable
+    ids, or none, comes back as the same object. ``restricted`` does no reads,
+    and a missing store leaves every row as it is.
+    """
+    node_pool = list(nodes)
+    edge_pool = list(edges)
     if clearance == "restricted" or document_store is None:
-        return pool
+        return node_pool, edge_pool
     named: set[str] = set()
-    for node in pool:
+    for node in node_pool:
         named |= _node_pointers(node)
+    for edge in edge_pool:
+        named |= _edge_pointers(edge)
     if not named:
-        return pool
+        return node_pool, edge_pool
     hidden = _unreadable_pointers(document_store, named, clearance)
     if not hidden:
-        return pool
-    return [_node_without_pointers(node, hidden) for node in pool]
+        return node_pool, edge_pool
+    return (
+        [_node_without_pointers(node, hidden) for node in node_pool],
+        [_edge_without_pointers(edge, hidden) for edge in edge_pool],
+    )
+
+
+def conceal_edge_pointers(
+    edges: Iterable[dict[str, Any]],
+    document_store: DocumentStore | None,
+    clearance: Sensitivity,
+) -> list[dict[str, Any]]:
+    """``edges`` as a caller at ``clearance`` may be shown them by a graph read.
+
+    An edge carries no label either, so it is served whole; what it can leak is
+    the id of a document the caller may not read, in a string top-level
+    ``evidence_ref`` (the provenance column) or at a pointer path of its
+    ``properties`` (``evidence_ref``, ``lifecycle.superseded_by``,
+    ``supersedes_doc_id``, ``updates_doc_id``). No shipped writer puts a document
+    id in either, but the schema allows it and ``link.create`` stores
+    ``properties`` verbatim. Each drops an unreadable id (the key is removed,
+    not blanked); a value that is not a string is left as stored.
+
+    A surface that serves nodes beside its edges passes both to
+    :func:`conceal_graph_pointers` instead, so the response is judged once.
+    """
+    return conceal_graph_pointers((), edges, document_store, clearance)[1]
 
 
 class OverwriteRefusedError(ValueError):
@@ -751,6 +831,8 @@ __all__ = [
     "SensitivityLabelError",
     "conceal_document_rows",
     "conceal_document_successor",
+    "conceal_edge_pointers",
+    "conceal_graph_pointers",
     "conceal_node_pointers",
     "conceal_withheld_ids",
     "conceal_unreadable_successors",

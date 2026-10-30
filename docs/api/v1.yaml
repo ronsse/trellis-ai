@@ -4585,7 +4585,9 @@ paths:
 
         ``lifecycle.superseded_by`` names a document the caller may not read is
 
-        served without that id. An edge''s own ``evidence_ref`` is served as stored.'
+        served without that id. An edge is served whole too, without an
+
+        ``evidence_ref``, or a property pointer, that names such a document.'
       operationId: get_entity_api_v1_entities__entity_id__get
       parameters:
       - in: path
@@ -5591,7 +5593,11 @@ paths:
 
         Filters apply on the graph store''s property-level WHERE clause —
 
-        matches against the same keys the Pydantic schema declares.'
+        matches against the same keys the Pydantic schema declares. A node carries
+
+        no label, so every match is served; one whose ``evidence_ref`` (normally a
+
+        document id) names a document the caller may not read is served without it.'
       operationId: list_observations_api_v1_observations_get
       parameters:
       - in: query

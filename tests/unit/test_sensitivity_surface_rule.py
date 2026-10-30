@@ -44,7 +44,7 @@ ROSTER: dict[str, str] = {
     "record_feedback": GATED,
     "get_graph": GATED,
     "get_lessons": FREE,
-    "query_observations": FREE,
+    "query_observations": GATED,
     "record_observation": FREE,
     "save_experience": FREE,
     "execute_mutation": FREE,

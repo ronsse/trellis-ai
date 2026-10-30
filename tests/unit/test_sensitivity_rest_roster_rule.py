@@ -148,7 +148,7 @@ ROSTER: dict[str, str] = {
     "ingest:ingest_bulk": FREE,  # POST /ingest/bulk
     "mutations:execute_batch": MUTATION,  # POST /commands/batch
     "observations:record_observation": MUTATION,  # POST /observations
-    "observations:list_observations": FREE,  # GET /observations
+    "observations:list_observations": GATED,  # GET /observations
     "observations:record_measurement": MUTATION,  # POST /measurements
     "observations:list_measurements": FREE,  # GET /measurements
     "policies:list_policies": FREE,  # GET /policies
