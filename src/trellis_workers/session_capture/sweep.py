@@ -36,12 +36,16 @@ from trellis.stores.registry import StoreRegistry
 from trellis_workers.session_capture.capture import (
     DEFAULT_SAMPLE_DENOMINATOR,
     DEFAULT_SOURCE_SYSTEM,
+    rejoin_sessions,
     run_capture,
 )
 from trellis_workers.session_capture.distill import DEFAULT_DISTILL_MODEL
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from trellis.llm import LLMClient
+    from trellis_workers.session_capture.capture import RejoinReport
     from trellis_workers.session_capture.models import CaptureReport
 
 logger = structlog.get_logger(__name__)
@@ -214,5 +218,33 @@ def run_sweep(
         source_system=source_system,
         sample_denominator=_sample_denominator(),
         distill_model_id=model_id,
+        dry_run=dry_run,
+    )
+
+
+def run_rejoin(
+    *,
+    since: datetime,
+    registry: StoreRegistry | None = None,
+    dry_run: bool = False,
+) -> RejoinReport:
+    """Rewrite the stale pack joins of every transcript modified at or after *since*.
+
+    The ``--rejoin-since`` mode: it resolves the transcripts root and source
+    system exactly as :func:`run_sweep` does, but builds **no judge** (so
+    :class:`CaptureJudgeUnavailableError` cannot fire and no ``llm:`` block is
+    needed) and never touches the watermark file, whose path is not even
+    resolved. See :func:`~trellis_workers.session_capture.capture.rejoin_sessions`.
+    """
+    root = Path(os.environ.get(ENV_ROOT, str(_default_root())))
+    source_system = os.environ.get(ENV_SOURCE_SYSTEM, DEFAULT_SOURCE_SYSTEM)
+    store_registry = registry
+    if store_registry is None:
+        store_registry = StoreRegistry.from_config_dir()
+    return rejoin_sessions(
+        store_registry,
+        transcripts_root=root,
+        since=since,
+        source_system=source_system,
         dry_run=dry_run,
     )
