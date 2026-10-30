@@ -14,6 +14,16 @@ feature flag — invoking it is the opt-in. It *does* require an
 ``embeddings:`` block (or ``TRELLIS_EMBEDDING_FN``) and a configured
 vector store, and exits loudly when either is missing rather than
 silently indexing nothing.
+
+**Ids under ``trace-summary:`` are the trace-embed worker's.** The worker
+decides a trace is already embedded by asking the vector store for a row at
+``trace-summary:<trace_id>``, and when it finds none it writes the real
+summary. A document filed at such an id before the prefix was reserved would
+get its first vector from this command, and the worker would then skip that
+trace for good. So a reserved id with no vector row is left alone and counted
+in ``skipped_reserved``; ``--force`` still re-embeds one that already has a
+vector, because after an embedding-model change the worker will not (it skips
+any id with a vector) and the row loses nothing by it.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ import structlog
 import typer
 from rich.markup import escape
 
+from trellis.core.reserved_doc_ids import is_trace_summary_doc_id
 from trellis.errors import StoreError, TrellisError
 from trellis.retrieve.embed_ingest_hook import build_vector_row
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
@@ -80,6 +91,25 @@ def _resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
         raise StoreError(msg, store="vector") from exc
 
 
+def _skip_reason(
+    doc_id: str, content: str, vector_store: VectorStore, *, force: bool
+) -> str | None:
+    """Why ``doc_id`` is not embedded (``empty``/``reserved``/``existing``), if so.
+
+    The order matters: a content-less row is empty before anything else, and a
+    reserved id with no vector is the worker's whether or not ``force`` is set,
+    so ``--force`` re-embeds a reserved id that has a vector but never grants
+    it a first one.
+    """
+    if not content.strip():
+        return "empty"
+    if is_trace_summary_doc_id(doc_id) and vector_store.get(doc_id) is None:
+        return "reserved"
+    if not force and vector_store.get(doc_id) is not None:
+        return "existing"
+    return None
+
+
 def run_reindex_vectors(
     registry: StoreRegistry,
     *,
@@ -91,7 +121,12 @@ def run_reindex_vectors(
     """Programmatic entry point — page, embed, bulk-upsert.
 
     Skips content-less documents and (unless ``force``) documents that
-    already have a vector. Per-document embed failures are counted and
+    already have a vector. A document under the ``trace-summary:`` prefix
+    with no vector row is skipped too and counted in ``skipped_reserved``:
+    the trace-embed worker owns the first vector at those ids, and one
+    written here would make it skip the trace for good. Under ``force`` a
+    reserved id that already has a vector is re-embedded like any other.
+    Per-document embed failures are counted and
     logged, never fatal — rerunning is always safe because rows are
     keyed by ``doc_id``. ``dry_run`` counts candidates without calling
     the embedder.
@@ -119,7 +154,8 @@ def run_reindex_vectors(
         msg = f"reindex-vectors requires: {', '.join(missing)}"
         raise ValueError(msg)
 
-    scanned = embedded = skipped_existing = skipped_empty = errors = 0
+    scanned = embedded = errors = 0
+    skipped = dict.fromkeys(("existing", "empty", "reserved"), 0)
     offset = 0
     while True:
         page_size = batch_size if limit == 0 else min(batch_size, limit - scanned)
@@ -139,11 +175,9 @@ def run_reindex_vectors(
         for doc in page:
             doc_id = doc["doc_id"]
             content = doc.get("content") or ""
-            if not content.strip():
-                skipped_empty += 1
-                continue
-            if not force and vector_store.get(doc_id) is not None:
-                skipped_existing += 1
+            reason = _skip_reason(doc_id, content, vector_store, force=force)
+            if reason is not None:
+                skipped[reason] += 1
                 continue
             if dry_run:
                 embedded += 1
@@ -175,8 +209,9 @@ def run_reindex_vectors(
         "status": "ok",
         "scanned": scanned,
         "embedded": embedded,
-        "skipped_existing": skipped_existing,
-        "skipped_empty": skipped_empty,
+        "skipped_existing": skipped["existing"],
+        "skipped_empty": skipped["empty"],
+        "skipped_reserved": skipped["reserved"],
         "errors": errors,
         "dry_run": dry_run,
     }
@@ -215,7 +250,12 @@ def register(admin_app: typer.Typer) -> None:
             "text", "--format", help="Output format: text or json"
         ),
     ) -> None:
-        """Backfill vector embeddings for stored documents."""
+        """Backfill vector embeddings for stored documents.
+
+        Documents under the ``trace-summary:`` prefix are left to the
+        trace-embed worker, which owns the first vector at those ids; with
+        --force, one that already has a vector is re-embedded.
+        """
         try:
             summary = run_reindex_vectors(
                 _get_registry(),
@@ -246,6 +286,7 @@ def register(admin_app: typer.Typer) -> None:
                 f"[green]Reindex complete:[/green] {verb} {summary['embedded']} of "
                 f"{summary['scanned']} scanned "
                 f"({summary['skipped_existing']} already indexed, "
-                f"{summary['skipped_empty']} empty, {summary['errors']} errors)"
+                f"{summary['skipped_empty']} empty, "
+                f"{summary['skipped_reserved']} reserved, {summary['errors']} errors)"
             )
         raise typer.Exit(code=EXIT_OK)
