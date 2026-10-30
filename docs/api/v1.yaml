@@ -4114,13 +4114,15 @@ paths:
 
         ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
 
-        accepted only as ``{"state": "current"}`` (no ``superseded_by`` or
+        accepted only as exactly ``{"state": "current"}``, which is how an operator
 
-        ``valid_until``), which is how an operator restores a superseded document,
+        restores a superseded document (any other field would let a caller forge a
 
-        and an ``evidence_ref`` only when it equals the value the document already
+        redaction tombstone), and an ``evidence_ref`` only when it equals the value
 
-        holds, so a round-tripped metadata bag keeps working. Anything else refuses
+        the document the command writes already holds, so a round-tripped metadata
+
+        bag keeps working. Anything else refuses
 
         the whole batch with 422, before any command executes and whatever the
 

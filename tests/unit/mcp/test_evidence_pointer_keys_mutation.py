@@ -22,6 +22,8 @@ import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
 from tests.unit.retrieve.test_sensitivity import label
+from trellis.core.document_write import is_redaction_tombstone
+from trellis.mutate.evidence_ingest import _stable_document_id
 from trellis.schemas.classification import LIFECYCLE_KEY
 
 if TYPE_CHECKING:
@@ -80,6 +82,9 @@ class TestAWithholdingLifecycleIsRefused:
             {"state": "current", "superseded_by": "doc-fresh"},
             {"state": "current", "valid_until": "2020-01-01T00:00:00+00:00"},
             {"state": "current", "unknown_key": 1},
+            {"state": "current", "deprecation_reason": "redacted"},
+            {"state": "current", "valid_from": "2020-01-01T00:00:00+00:00"},
+            {"state": "current", "classification_version": 2},
             {},
             "current",
             ["current"],
@@ -92,6 +97,9 @@ class TestAWithholdingLifecycleIsRefused:
             "current-with-superseded-by",
             "current-with-valid-until",
             "current-with-unknown-key",
+            "current-with-deprecation-reason",
+            "current-with-valid-from",
+            "current-with-classification-version",
             "empty-record",
             "string",
             "list",
@@ -114,6 +122,20 @@ class TestAWithholdingLifecycleIsRefused:
             "operation": "evidence.ingest",
         }
         assert _footprint(temp_registry, "doc-fresh", "doc-old") == before
+
+    def test_a_forged_redaction_tombstone_is_refused_and_nothing_is_written(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """``current`` plus a redaction reason on empty content is a tombstone."""
+        forged = {"state": "current", "deprecation_reason": "redacted"}
+        args = _ingest({LIFECYCLE_KEY: forged}, doc_id="doc-old", content="")
+        args["evidence"]["uri"] = "https://example.invalid/page"
+        before = _footprint(temp_registry, "doc-old")
+        err = _refused(args)
+        assert "metadata.lifecycle may not be set" in err.error.message
+        assert _footprint(temp_registry, "doc-old") == before
+        stored = temp_registry.knowledge.document_store.get("doc-old")
+        assert not is_redaction_tombstone(stored)
 
     def test_stdio_is_held_to_the_same_rule(self, temp_registry: StoreRegistry) -> None:
         before = _footprint(temp_registry, "doc-old")
@@ -177,6 +199,61 @@ class TestAnEvidenceRefThatIsNewOrChangedIsRefused:
         )
         err = _refused(_ingest({"evidence_ref": REF}, doc_id="doc-secret"))
         assert "metadata.evidence_ref may not be set" in err.error.message
+
+
+class TestTheCheckJudgesTheDocumentTheCommandWrites:
+    """One id for the check and the write: the command the builder resolved."""
+
+    @staticmethod
+    def _keyed(ref: str) -> dict[str, Any]:
+        return {"evidence": {"content": NEW, "metadata": {"evidence_ref": ref}}}
+
+    def test_an_idempotency_key_alone_names_the_document_the_builder_derives(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """No ``doc_id``: the write is at ``evidence:<digest>`` of the key."""
+        key = "restore-run-1"
+        derived = _stable_document_id(key)
+        documents = temp_registry.knowledge.document_store
+        documents.put(derived, OLD, {"evidence_ref": REF})
+
+        with as_http(MUTATE), pytest.raises(McpError) as err:
+            execute_mutation(
+                operation="evidence.ingest",
+                args=self._keyed("doc-elsewhere"),
+                idempotency_key=key,
+            )
+        assert err.value.error.code == INVALID_PARAMS
+        assert "metadata.evidence_ref may not be set" in err.value.error.message
+        stored = documents.get(derived)
+        assert stored is not None
+        assert stored["metadata"] == {"evidence_ref": REF}
+
+        with as_http(MUTATE):
+            out = json.loads(
+                execute_mutation(
+                    operation="evidence.ingest",
+                    args=self._keyed(REF),
+                    idempotency_key=key,
+                )
+            )
+        assert out["status"] == "success", out
+        stored = documents.get(derived)
+        assert stored is not None
+        assert stored["content"] == NEW
+
+    def test_an_idempotency_key_alone_with_no_stored_row_is_a_new_document(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        before = _footprint(temp_registry)
+        with as_http(MUTATE), pytest.raises(McpError) as err:
+            execute_mutation(
+                operation="evidence.ingest",
+                args=self._keyed(REF),
+                idempotency_key="restore-run-2",
+            )
+        assert err.value.error.code == INVALID_PARAMS
+        assert _footprint(temp_registry) == before
 
 
 class TestWhatStaysAccepted:

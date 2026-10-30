@@ -176,10 +176,11 @@ def execute_batch(
     builder withholds by id, so a ``lifecycle`` that says ``superseded`` would
     withhold every item under the document's id (a graph node's included) and an
     ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
-    accepted only as ``{"state": "current"}`` (no ``superseded_by`` or
-    ``valid_until``), which is how an operator restores a superseded document,
-    and an ``evidence_ref`` only when it equals the value the document already
-    holds, so a round-tripped metadata bag keeps working. Anything else refuses
+    accepted only as exactly ``{"state": "current"}``, which is how an operator
+    restores a superseded document (any other field would let a caller forge a
+    redaction tombstone), and an ``evidence_ref`` only when it equals the value
+    the document the command writes already holds, so a round-tripped metadata
+    bag keeps working. Anything else refuses
     the whole batch with 422, before any command executes and whatever the
     strategy, the way an unknown operation does; the message names the governed
     writer. A stored document above the key's clearance reads as absent for the
@@ -232,17 +233,15 @@ def execute_batch(
     # withhold or redirect an item other than the document, so a command that
     # carries one outside the restore form is refused the way an unknown
     # operation is: the whole batch, before any command executes, whatever the
-    # strategy. See trellis.mutate.evidence_pointer_keys.
+    # strategy. Judged on the built commands, so the document id checked is the
+    # one the command writes. See trellis.mutate.evidence_pointer_keys.
     document_store = get_registry().knowledge.document_store
     clearance = request_clearance(ctx)
-    for item, operation in zip(req.commands, operations, strict=True):
-        if operation is not Operation.EVIDENCE_INGEST:
+    for command in commands:
+        if command.operation is not Operation.EVIDENCE_INGEST:
             continue
         refusal = evidence_ingest_pointer_refusal(
-            item.args,
-            target_id=item.target_id,
-            document_store=document_store,
-            clearance=clearance,
+            command, document_store=document_store, clearance=clearance
         )
         if refusal is not None:
             raise HTTPException(status_code=422, detail=refusal.message)

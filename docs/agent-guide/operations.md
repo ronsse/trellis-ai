@@ -3983,12 +3983,13 @@ above its own clearance, and cannot touch a document it may not read.**
   refusal names the writer for each key. The handler does not hold this rule:
   `evidence.ingest` takes the keys from `save_memory(supersedes=)`, so each
   agent-facing door holds it. `POST /evidence` needs no check, because it never
-  stores the body's `metadata` (only the `evidence_type` and `source_origin` it
-  builds itself). `POST /commands/batch` and MCP `execute_mutation` hold a
+  stores the body's `metadata` (only the `evidence_type`, `source_origin` and
+  sensitivity label it builds itself). `POST /commands/batch` and MCP `execute_mutation` hold a
   narrower rule for an `evidence.ingest` command's `evidence.metadata`: a
-  `lifecycle` is accepted only as `{"state": "current"}` with no `superseded_by`
-  or `valid_until` (the operator restore below), and an `evidence_ref` only when
-  it equals the value the same `doc_id` already holds (so a metadata bag read back
+  `lifecycle` is accepted only as exactly `{"state": "current"}` (the operator
+  restore below; any other field, a `deprecation_reason` included, is refused), and
+  an `evidence_ref` only when it equals the value the document the command writes
+  already holds (so a metadata bag read back
   and re-sent keeps working). Anything else is a 422 for the whole batch,
   before any command runs, or an `INVALID_PARAMS` for `execute_mutation`, and the
   message names the governed writer. A stored document above the key's clearance

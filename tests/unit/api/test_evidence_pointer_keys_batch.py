@@ -18,7 +18,9 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.auth import generate_api_key
+from trellis.core.document_write import is_redaction_tombstone
 from trellis.mcp.supersession import supersede_document
+from trellis.mutate.evidence_ingest import _stable_document_id
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -97,6 +99,9 @@ class TestAWithholdingLifecycleIsRefused:
             {"state": "current", "superseded_by": "doc-fresh"},
             {"state": "current", "valid_until": "2020-01-01T00:00:00+00:00"},
             {"state": "current", "unknown_key": 1},
+            {"state": "current", "deprecation_reason": "redacted"},
+            {"state": "current", "valid_from": "2020-01-01T00:00:00+00:00"},
+            {"state": "current", "classification_version": 2},
             {},
             "current",
             ["current"],
@@ -109,6 +114,9 @@ class TestAWithholdingLifecycleIsRefused:
             "current-with-superseded-by",
             "current-with-valid-until",
             "current-with-unknown-key",
+            "current-with-deprecation-reason",
+            "current-with-valid-from",
+            "current-with-classification-version",
             "empty-record",
             "string",
             "list",
@@ -156,6 +164,21 @@ class TestAWithholdingLifecycleIsRefused:
         )
         assert resp.status_code == 422, resp.text
         assert _footprint(registry, "doc-old") == before
+
+    def test_a_forged_redaction_tombstone_is_refused_and_nothing_is_written(
+        self, client, registry
+    ):
+        """``current`` plus a redaction reason on empty content is a tombstone."""
+        forged = {"state": "current", "deprecation_reason": "redacted"}
+        command = _ingest({LIFECYCLE_KEY: forged}, doc_id="doc-old", content="")
+        command["args"]["evidence"]["uri"] = "https://example.invalid/page"
+        before = _footprint(registry, "doc-old")
+        resp = _batch(client, _headers(registry), command)
+        assert resp.status_code == 422, resp.text
+        assert "metadata.lifecycle may not be set" in resp.json()["detail"]
+        assert _footprint(registry, "doc-old") == before
+        stored = registry.knowledge.document_store.get("doc-old")
+        assert not is_redaction_tombstone(stored)
 
     @pytest.mark.parametrize("strategy", ["sequential", "stop_on_error"])
     def test_every_strategy_refuses_before_any_command_runs(
@@ -241,6 +264,97 @@ class TestAnEvidenceRefThatIsNewOrChangedIsRefused:
         )
         assert resp.status_code == 422, resp.text
         assert "metadata.evidence_ref may not be set" in resp.json()["detail"]
+
+
+def _targeted(metadata: Any, target_id: str, doc_id: str | None = None) -> dict:
+    evidence: dict[str, Any] = {"content": NEW, "metadata": metadata}
+    if doc_id is not None:
+        evidence["doc_id"] = doc_id
+    return {
+        "operation": "evidence.ingest",
+        "target_id": target_id,
+        "args": {"evidence": evidence},
+    }
+
+
+class TestTheCheckJudgesTheDocumentTheCommandWrites:
+    """One id for the check and the write: the command the builder resolved."""
+
+    def test_a_doc_id_and_a_target_id_that_differ_cannot_borrow_each_others_ref(
+        self, client, registry
+    ):
+        """The write lands on ``doc_id``; the ref is held by ``target_id``."""
+        registry.knowledge.document_store.put("doc-a", OLD, {"evidence_ref": REF})
+        before = _footprint(registry, "doc-a", "doc-x")
+        resp = _batch(
+            client,
+            _headers(registry),
+            _targeted({"evidence_ref": REF}, target_id="doc-a", doc_id="doc-x"),
+        )
+        assert resp.status_code == 422, resp.text
+        assert "metadata.evidence_ref may not be set" in resp.json()["detail"]
+        assert _footprint(registry, "doc-a", "doc-x") == before
+        assert registry.knowledge.document_store.get("doc-x") is None
+
+    def test_the_target_id_is_judged_when_the_body_names_no_doc_id(
+        self, client, registry
+    ):
+        registry.knowledge.document_store.put("doc-a", OLD, {"evidence_ref": REF})
+        resp = _batch(
+            client, _headers(registry), _targeted({"evidence_ref": REF}, "doc-a")
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["succeeded"] == 1, resp.text
+        refused = _batch(
+            client, _headers(registry), _targeted({"evidence_ref": REF}, "doc-b")
+        )
+        assert refused.status_code == 422, refused.text
+        assert registry.knowledge.document_store.get("doc-b") is None
+
+    def test_an_idempotency_key_alone_names_the_document_the_builder_derives(
+        self, client, registry
+    ):
+        """No ``doc_id``, no ``target_id``: the write is at ``evidence:<digest>``."""
+        key = "restore-run-1"
+        derived = _stable_document_id(key)
+        registry.knowledge.document_store.put(derived, OLD, {"evidence_ref": REF})
+
+        def command(ref: str) -> dict[str, Any]:
+            return {
+                "operation": "evidence.ingest",
+                "idempotency_key": key,
+                "args": {
+                    "evidence": {"content": NEW, "metadata": {"evidence_ref": ref}}
+                },
+            }
+
+        refused = _batch(client, _headers(registry), command("doc-elsewhere"))
+        assert refused.status_code == 422, refused.text
+        stored = registry.knowledge.document_store.get(derived)
+        assert stored["metadata"] == {"evidence_ref": REF}
+
+        kept = _batch(client, _headers(registry), command(REF))
+        assert kept.status_code == 200, kept.text
+        assert kept.json()["succeeded"] == 1, kept.text
+        assert registry.knowledge.document_store.get(derived)["content"] == NEW
+
+    def test_an_idempotency_key_alone_with_no_stored_row_is_a_new_document(
+        self, client, registry
+    ):
+        before = _footprint(registry)
+        resp = _batch(
+            client,
+            _headers(registry),
+            {
+                "operation": "evidence.ingest",
+                "idempotency_key": "restore-run-2",
+                "args": {
+                    "evidence": {"content": NEW, "metadata": {"evidence_ref": REF}}
+                },
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert _footprint(registry) == before
 
 
 class TestWhatStaysAccepted:

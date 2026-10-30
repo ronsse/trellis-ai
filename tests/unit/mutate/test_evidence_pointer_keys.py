@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from trellis.mutate.commands import Command, Operation
+from trellis.mutate.evidence_ingest import (
+    build_evidence_ingest_command_from_args,
+)
 from trellis.mutate.evidence_pointer_keys import (
     DOCUMENT_POINTER_REFUSALS,
     LIFECYCLE_RESTORE_NOTE,
@@ -52,9 +56,30 @@ class TestRestoreForm:
     def test_current_is_accepted(self):
         assert pointer_key_refusal({"lifecycle": {"state": "current"}}) is None
 
-    def test_current_with_a_deprecation_reason_is_accepted(self):
-        record = {"state": "current", "deprecation_reason": "restored"}
-        assert pointer_key_refusal({"lifecycle": record}) is None
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"state": "current", "deprecation_reason": "restored"},
+            {"state": "current", "deprecation_reason": "redacted"},
+            {"state": "current", "valid_from": "2020-01-01T00:00:00+00:00"},
+            {"state": "current", "classification_version": 2},
+            {"state": "current", "valid_until": None},
+            {"state": "current", "superseded_by": None},
+        ],
+        ids=[
+            "deprecation-reason",
+            "redaction-reason",
+            "valid-from",
+            "classification-version",
+            "null-valid-until",
+            "null-superseded-by",
+        ],
+    )
+    def test_only_the_exact_record_is_accepted(self, record):
+        """Any extra field is refused, a harmless-looking null included."""
+        refusal = pointer_key_refusal({"lifecycle": record})
+        assert refusal is not None
+        assert refusal.key == "lifecycle"
 
     def test_the_first_offending_key_is_the_one_named(self):
         refusal = pointer_key_refusal(
@@ -81,6 +106,22 @@ class TestRestoreForm:
         )
 
 
+def _command(args, *, target_id=None, idempotency_key=None):
+    """The command a door builds from ``args``, as the doors build it."""
+    return build_evidence_ingest_command_from_args(
+        args,
+        requested_by="tester",
+        target_id=target_id,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _refusal(documents, command):
+    return evidence_ingest_pointer_refusal(
+        command, document_store=documents, clearance="restricted"
+    )
+
+
 class TestEvidenceIngestShape:
     """A shape the handler refuses is not this rule's to refuse."""
 
@@ -95,29 +136,56 @@ class TestEvidenceIngestShape:
         ],
     )
     def test_no_refusal(self, documents, args):
-        assert (
-            evidence_ingest_pointer_refusal(
-                args, target_id=None, document_store=documents, clearance="restricted"
-            )
-            is None
+        assert _refusal(documents, _command(args)) is None
+
+    def test_a_command_whose_evidence_is_not_an_object_is_not_inspected(
+        self, documents
+    ):
+        command = Command(
+            operation=Operation.EVIDENCE_INGEST,
+            args={"evidence": "text"},
+            requested_by="tester",
         )
+        assert _refusal(documents, command) is None
+
+
+REF_ARGS = {"evidence": {"content": "c", "metadata": {"evidence_ref": "a"}}}
+
+
+class TestTheCommandsOwnDocumentIsJudged:
+    """The id read is the one the builder resolved, never a second derivation."""
 
     def test_a_missing_doc_id_falls_back_to_the_target_id(self, documents):
         documents.put("doc", "body", {"evidence_ref": "a"})
-        args = {"evidence": {"content": "c", "metadata": {"evidence_ref": "a"}}}
-        kept = evidence_ingest_pointer_refusal(
-            args, target_id="doc", document_store=documents, clearance="restricted"
-        )
-        assert kept is None
-        unknown = evidence_ingest_pointer_refusal(
-            args, target_id="other", document_store=documents, clearance="restricted"
-        )
+        assert _refusal(documents, _command(REF_ARGS, target_id="doc")) is None
+        unknown = _refusal(documents, _command(REF_ARGS, target_id="other"))
         assert unknown is not None
         assert unknown.key == "evidence_ref"
 
+    def test_the_doc_id_wins_over_the_target_id(self, documents):
+        """The ref sits on the target id only, and the write lands on the doc id."""
+        documents.put("doc-a", "body", {"evidence_ref": "a"})
+        args = {
+            "evidence": {
+                "doc_id": "doc-x",
+                "content": "c",
+                "metadata": {"evidence_ref": "a"},
+            }
+        }
+        command = _command(args, target_id="doc-a")
+        assert command.args["evidence"]["doc_id"] == "doc-x"
+        refusal = _refusal(documents, command)
+        assert refusal is not None
+        assert refusal.key == "evidence_ref"
+
+    def test_an_idempotency_key_alone_is_judged_at_the_derived_id(self, documents):
+        command = _command(REF_ARGS, idempotency_key="run-1")
+        derived = command.args["evidence"]["doc_id"]
+        assert derived.startswith("evidence:")
+        assert _refusal(documents, command) is not None
+        documents.put(derived, "body", {"evidence_ref": "a"})
+        assert _refusal(documents, command) is None
+
     def test_no_id_at_all_means_a_new_document(self, documents):
-        args = {"evidence": {"content": "c", "metadata": {"evidence_ref": "a"}}}
-        refusal = evidence_ingest_pointer_refusal(
-            args, target_id=None, document_store=documents, clearance="restricted"
-        )
+        refusal = _refusal(documents, _command(REF_ARGS))
         assert refusal is not None

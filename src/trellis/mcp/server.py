@@ -4371,19 +4371,19 @@ def _resolve_execute_mutation_target(
     return None, None, args
 
 
-def _refuse_evidence_pointer_keys(op: Any, args: dict[str, Any]) -> None:
+def _refuse_evidence_pointer_keys(command: Command) -> None:
     """Refuse an ``evidence.ingest`` whose metadata would withhold or redirect an item.
 
     A caller's ``lifecycle`` or ``evidence_ref`` can reach an item other than the
     document; only the restore form and an unchanged ``evidence_ref`` pass
-    (:mod:`trellis.mutate.evidence_pointer_keys`). Refused before anything is
-    built or written, with the tool's ordinary pre-flight ``INVALID_PARAMS``.
+    (:mod:`trellis.mutate.evidence_pointer_keys`), judged on the built command so
+    the document id is the one it will write. Refused before anything is
+    written, with the tool's ordinary pre-flight ``INVALID_PARAMS``.
     """
-    if op is not Operation.EVIDENCE_INGEST:
+    if command.operation is not Operation.EVIDENCE_INGEST:
         return
     refusal = evidence_ingest_pointer_refusal(
-        args,
-        target_id=None,
+        command,
         document_store=_get_registry().knowledge.document_store,
         clearance=current_clearance(),
     )
@@ -4392,7 +4392,7 @@ def _refuse_evidence_pointer_keys(op: Any, args: dict[str, Any]) -> None:
             refusal.message,
             data={
                 "field": f"args.evidence.metadata.{refusal.key}",
-                "operation": str(op),
+                "operation": str(command.operation),
             },
         )
 
@@ -4515,7 +4515,6 @@ def execute_mutation(
         if requested_by_claim is not None
         else {}
     )
-    _refuse_evidence_pointer_keys(op, args)
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
             command = build_evidence_ingest_command_from_args(
@@ -4540,6 +4539,7 @@ def execute_mutation(
             data={"operation": str(op), "error_class": type(exc).__name__},
         )
 
+    _refuse_evidence_pointer_keys(command)
     try:
         executor = build_curate_executor(_get_registry(), clearance=current_clearance())
         result = executor.execute(command)

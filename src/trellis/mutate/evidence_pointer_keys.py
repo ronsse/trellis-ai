@@ -17,10 +17,11 @@ keys. The rule sits at the agent-facing doors instead, in two strengths:
 * **Restore form** (``POST /commands/batch``, MCP ``execute_mutation``): the
   documented operator undo of a supersession stamp sends the document's metadata
   bag back through ``evidence.ingest`` with ``lifecycle`` set to ``current``, so
-  a ``lifecycle`` is accepted when it is a record that withholds nothing
-  (``state`` ``current``, no ``superseded_by``, no ``valid_until``), and an
-  ``evidence_ref`` when it is the value the same document already holds, so a
-  round-tripped bag keeps working. Anything else is refused.
+  a ``lifecycle`` is accepted when it is exactly ``{"state": "current"}``, and an
+  ``evidence_ref`` when it is the value the document the command will write
+  already holds, so a round-tripped bag keeps working. Anything else is refused:
+  a ``current`` record that also carries a ``deprecation_reason`` would forge the
+  tombstone a redaction leaves, which blocks later writes to the id.
 
 ``POST /evidence`` needs neither: it never stores the body's own ``metadata``.
 """
@@ -30,15 +31,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from pydantic import ValidationError
-
 from trellis.mutate.sensitivity_floor import visible_document
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
-from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
+from trellis.schemas.classification import LIFECYCLE_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from trellis.mutate.commands import Command
     from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
 
@@ -60,12 +60,13 @@ DOCUMENT_POINTER_REFUSALS: Final[dict[str, str]] = {
 
 #: Added to the ``lifecycle`` refusal at a door that accepts the restore form.
 LIFECYCLE_RESTORE_NOTE: Final[str] = (
-    '. A caller may write a lifecycle only as {"state": "current"}, with no '
-    "superseded_by or valid_until: that restores a document a supersession "
-    "stamp withheld"
+    '. A caller may write a lifecycle only as exactly {"state": "current"}: '
+    "that restores a document a supersession stamp withheld"
 )
 
 POINTER_KEYS: Final[frozenset[str]] = frozenset(DOCUMENT_POINTER_REFUSALS)
+
+_RESTORE_FORM: Final[dict[str, str]] = {"state": "current"}
 
 
 @dataclass(frozen=True)
@@ -77,22 +78,16 @@ class PointerKeyRefusal:
 
 
 def _is_restore_form(value: object) -> bool:
-    """Whether ``value`` is a lifecycle record that withholds nothing.
+    """Whether ``value`` is exactly the documented restore record.
 
-    A record that says ``state: current`` and carries no ``superseded_by`` and no
-    ``valid_until``. The state is spelled out (a record that leaves it to the
-    default is not the documented form), and the record must be a valid
-    :class:`~trellis.schemas.classification.Lifecycle` (a non-object, an unknown
-    key or a mistyped field is not), so what the door accepts is what the pack
-    builder's readers can parse.
+    Only ``{"state": "current"}``. Any other field is refused, not merely the
+    withholding ones: ``deprecation_reason`` set to ``redacted`` on a document
+    with empty content is the tombstone a redaction leaves
+    (:func:`~trellis.core.document_write.is_redaction_tombstone`), which blocks
+    later writes to the id, corpus sync and promotion, and a record that leaves
+    the state to its default is not the documented form either.
     """
-    if not isinstance(value, dict) or value.get("state") != "current":
-        return False
-    try:
-        record = Lifecycle.model_validate(value)
-    except ValidationError:
-        return False
-    return record.superseded_by is None and record.valid_until is None
+    return isinstance(value, dict) and value == _RESTORE_FORM
 
 
 def pointer_key_refusal(
@@ -127,29 +122,28 @@ def pointer_key_refusal(
 
 
 def evidence_ingest_pointer_refusal(
-    args: Mapping[str, Any],
+    command: Command,
     *,
-    target_id: str | None,
     document_store: DocumentStore,
     clearance: Sensitivity,
 ) -> PointerKeyRefusal | None:
     """The refusal for a generic-door ``evidence.ingest`` command, or ``None``.
 
-    ``args`` is the command's argument map as the caller sent it, and
-    ``target_id`` the id the door passes to
-    :func:`~trellis.mutate.evidence_ingest.build_evidence_ingest_command_from_args`
-    (so the same document id is judged that the command will write). Only the
-    caller's own ``evidence.metadata`` is read. The stored row is read at the
-    caller's ``clearance``: a row above it reads as absent, so the comparison
-    for ``evidence_ref`` cannot say what a document it may not read holds.
+    ``command`` is the command the door built, so the check judges what the
+    command will write: the document id is the one the builder resolved (the
+    caller's ``doc_id``, else the batch item's ``target_id``, else the id derived
+    from the idempotency key or a fresh one) and the metadata is the prepared
+    ``evidence.metadata``. The stored row is read at the caller's ``clearance``:
+    a row above it reads as absent, so the comparison for ``evidence_ref``
+    cannot say what a document it may not read holds.
     """
-    evidence = args.get("evidence")
+    evidence = command.args.get("evidence")
     if not isinstance(evidence, dict):
         return None
     metadata = evidence.get("metadata")
     if not isinstance(metadata, dict) or POINTER_KEYS.isdisjoint(metadata):
         return None
-    doc_id = evidence.get("doc_id") or target_id
+    doc_id = evidence.get("doc_id")
     stored: dict[str, Any] | None = None
     if isinstance(doc_id, str) and doc_id:
         stored = visible_document(document_store, doc_id, clearance=clearance)
