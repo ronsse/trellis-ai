@@ -325,14 +325,14 @@ All notable changes to Trellis will be documented in this file.
   `metadata.evidence_ref`, and `POST /api/v1/vectors` takes a stored document's
   flat `content_type` from the document (part of #1057).** The pack builder
   withholds by id. A document written with `metadata.lifecycle` set to
-  `{"state": "superseded", "superseded_by": <id>}` withheld the item it named
-  from every pack beside it, and one written with `metadata.evidence_ref` became
-  the successor another item's `superseded_by` resolves to; the route refused
+  `{"state": "superseded", "superseded_by": <id>}` withheld every candidate
+  under its own id, so one written at a graph node's id hid that node, and one
+  written with `metadata.evidence_ref` became the successor another item's
+  `superseded_by` resolves to, which withheld that item; the route refused
   only `data_classification`. Either key is now a 422 whatever its value and
   whoever the caller, with nothing written; the message names the governed
-  writers (MCP `save_memory(supersedes=...)`, the `retention.restore`,
-  `precedent.demote` and `precedent.reinstate` commands, and MCP
-  `save_knowledge(evidence_ref=...)` for a graph node). The refusal is in the
+  writers (MCP `save_memory(supersedes=...)`, the `retention.restore` command,
+  and MCP `save_knowledge(evidence_ref=...)` for a graph node). The refusal is in the
   route, not in `EvidenceIngestHandler`, because `save_memory(supersedes=)` and
   the operator restore recipe both stamp a document's `lifecycle` through
   `evidence.ingest` on purpose. `POST /api/v1/evidence`, `POST /api/v1/commands/batch`

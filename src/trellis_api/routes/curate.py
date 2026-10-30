@@ -311,20 +311,21 @@ def create_entity(
 
 
 #: ``metadata`` keys a document write may not carry, with the refusal each gets.
-#: The pack builder withholds *by id*: a ``lifecycle`` that says ``superseded``
-#: withholds the item it names, and an ``evidence_ref`` makes the document the
-#: successor another item's ``superseded_by`` resolves to. Both act on an item
-#: other than the document, so the caller does not get to set them; each has a
+#: The pack builder withholds *by id*. A ``lifecycle`` that says ``superseded``
+#: withholds every candidate under the document's id, so a document written at a
+#: graph node's id hides that node too; an ``evidence_ref`` makes the document the
+#: successor another item's ``superseded_by`` resolves to, which withholds that
+#: item. Both reach an item other than the document, so the caller does not get to
+#: set them; each has a
 #: governed writer, named in its message. The handler cannot hold this rule for
 #: every door, because ``save_memory(supersedes=)`` stamps a document's
 #: ``lifecycle`` through ``evidence.ingest`` on purpose.
 _DOCUMENT_POINTER_REFUSALS: dict[str, str] = {
     LIFECYCLE_KEY: (
-        "metadata.lifecycle may not be set on a document write: it can withhold "
-        "another item from every pack. Supersede a document with MCP "
-        "save_memory(supersedes=...); change a lifecycle with the "
-        "retention.restore, precedent.demote or precedent.reinstate command. "
-        "Nothing was written"
+        "metadata.lifecycle may not be set on a document write: it withholds "
+        "every item under the document's id, a graph node's included. Supersede "
+        "a document with MCP save_memory(supersedes=...); bring an archived one "
+        "back with the retention.restore command. Nothing was written"
     ),
     EVIDENCE_REF_KEY: (
         "metadata.evidence_ref may not be set on a document write: it names the "
@@ -360,7 +361,8 @@ def create_document(
 
     ``metadata`` may not carry ``lifecycle`` or ``evidence_ref`` (422, whatever
     the value and the caller, nothing written): the pack builder withholds items
-    by id, so either key would let this document withhold another item. Supersede
+    by id, so a ``lifecycle`` would withhold every item under this document's id
+    and an ``evidence_ref`` the item whose successor it names. Supersede
     with MCP ``save_memory(supersedes=...)``; the message names the governed
     writer for each key.
 

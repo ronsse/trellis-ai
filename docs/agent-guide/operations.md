@@ -3959,10 +3959,11 @@ above its own clearance, and cannot touch a document it may not read.**
   save tools use: a label above the key's own clearance is a 403, an unknown
   label (or one that is not a string) is a 422, and so is a raw
   `data_classification` key in `metadata` (for every caller, `admin` included:
-  the label has one door). `metadata` must be an object (422 otherwise). So is
-  a `lifecycle` or `evidence_ref` key in `metadata`, whatever its value and the
-  caller: the pack builder withholds by id, so either would let this document
-  withhold another item. Supersede with MCP `save_memory(supersedes=...)`; the
+  the label has one door). `metadata` must be an object (422 otherwise). A
+  `lifecycle` or `evidence_ref` key in `metadata` is also a 422, whatever its
+  value and the caller: the pack builder withholds by id, so a `lifecycle` would
+  withhold every item under this document's id (a graph node's included) and an
+  `evidence_ref` the item whose successor it names. Supersede with MCP `save_memory(supersedes=...)`; the
   refusal names the writer for each key. The route holds this rule, not
   `evidence.ingest`, which takes the keys from `save_memory(supersedes=)`, so
   `POST /evidence`, `POST /commands/batch` and `execute_mutation` still accept

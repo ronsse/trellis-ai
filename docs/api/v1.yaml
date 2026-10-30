@@ -4309,7 +4309,9 @@ paths:
 
         the value and the caller, nothing written): the pack builder withholds items
 
-        by id, so either key would let this document withhold another item. Supersede
+        by id, so a ``lifecycle`` would withhold every item under this document''s id
+
+        and an ``evidence_ref`` the item whose successor it names. Supersede
 
         with MCP ``save_memory(supersedes=...)``; the message names the governed
 
