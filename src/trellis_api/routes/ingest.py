@@ -259,13 +259,17 @@ _ITEM_POINTER_KEYS: tuple[str, ...] = (LIFECYCLE_KEY, EVIDENCE_REF_KEY)
 #: semantic axis spreads a row's metadata into the pack item it builds, and the
 #: builder withholds on these: ``node_role: structural`` drops the item, the form
 #: feeds the class-prior gate, and ``excerpt`` is the text served when the row has
-#: no ``content``. At a stored document each is the document's, copied if its
-#: metadata carries the key and removed from the row if not.
+#: no ``content``. The flat ``content_type`` is one of them because
+#: :func:`~trellis.schemas.document_metadata.document_form_of` reads a value
+#: outside the content-type vocabulary as a form; an in-vocabulary one is a facet
+#: mirror, and is the document's too. At a stored document each is the document's,
+#: copied if its metadata carries the key and removed from the row if not.
 _DOCUMENT_IDENTITY_KEYS: tuple[str, ...] = (
     "node_role",
     "node_type",
     "agent_id",
     "document_form",
+    "content_type",
     "excerpt",
 )
 
@@ -314,7 +318,8 @@ def _vector_row_metadata(
     document's content cut to :data:`VECTOR_METADATA_EXCERPT_CHARS`, and
     ``doc_id`` is the id, as ``build_vector_row`` writes them. The keys in
     :data:`_DOCUMENT_IDENTITY_KEYS` (``node_role``, ``node_type``, ``agent_id``,
-    ``document_form``, ``excerpt``) follow the mirrored keys' rule. Without this
+    ``document_form``, the flat ``content_type``, ``excerpt``) follow the mirrored
+    keys' rule. Without this
     a ``mutate``-scoped caller could replace a readable document's only semantic
     row with one carrying forged ``content``, or a ``structural`` role that
     withholds the document from every pack. A row ``build_vector_row`` wrote for
@@ -564,8 +569,8 @@ def upsert_vectors(
     ``evidence_ref``, for every caller, whatever the row's own ``metadata`` says.
     Its ``content`` (the excerpt a semantic hit serves) is the document's content,
     cut as the embed path cuts it, and its ``node_role``, ``node_type``,
-    ``agent_id``, ``document_form`` and ``excerpt`` are the document's, or absent
-    where the document has none.
+    ``agent_id``, ``document_form``, flat ``content_type`` and ``excerpt`` are the
+    document's, or absent where the document has none.
     For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
     document's own, else the parent the id names, whatever the row supplied; for
     any other id it is kept as supplied.

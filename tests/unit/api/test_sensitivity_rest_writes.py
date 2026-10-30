@@ -23,6 +23,7 @@ from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.mcp.supersession import supersede_document
 from trellis.mutate import build_curate_executor
 from trellis.retrieve.embed_ingest_hook import (
     VECTOR_METADATA_EXCERPT_CHARS,
@@ -35,7 +36,12 @@ from trellis.retrieve.strategies import (
     SearchStrategy,
     SemanticSearch,
 )
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY
+from trellis.schemas.classification import (
+    CONTENT_TYPE_VALUES,
+    DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
+)
+from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import PackItem
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -195,6 +201,102 @@ class TestDocumentsProducer:
         )
         assert resp.status_code == 200, resp.text
         assert registry.knowledge.document_store.get("doc-secret")["content"] == OPEN
+
+
+class TestDocumentsRefuseItemPointerKeys:
+    """``lifecycle`` and ``evidence_ref`` act on other items, by id.
+
+    The pack builder withholds by id: a document whose ``lifecycle`` says it is
+    superseded by another item's id, or whose ``evidence_ref`` makes it the
+    successor another item names, withholds that item. Only governed writers set
+    either, so the route refuses both before anything is written.
+    """
+
+    SUPERSEDED: ClassVar[dict[str, str]] = {
+        "state": "superseded",
+        "superseded_by": "doc-open",
+    }
+
+    def _post(self, client, headers, metadata, doc_id="doc-new"):
+        return client.post(
+            "/api/v1/documents",
+            json={"doc_id": doc_id, "content": OPEN, "metadata": metadata},
+            headers=headers,
+        )
+
+    @pytest.mark.parametrize("scopes", [MUTATE, ["admin"]], ids=["mutate", "admin"])
+    @pytest.mark.parametrize(
+        ("metadata", "key"),
+        [
+            ({LIFECYCLE_KEY: SUPERSEDED}, "lifecycle"),
+            ({LIFECYCLE_KEY: {"state": "archived"}}, "lifecycle"),
+            ({LIFECYCLE_KEY: None}, "lifecycle"),
+            ({"evidence_ref": "doc-open"}, "evidence_ref"),
+            ({"evidence_ref": None}, "evidence_ref"),
+            ({"title": "t", "evidence_ref": "doc-x"}, "evidence_ref"),
+        ],
+    )
+    def test_the_key_is_refused_and_nothing_is_written(
+        self, client, registry, scopes, metadata, key
+    ):
+        resp = self._post(client, _headers(registry, scopes), metadata)
+        assert resp.status_code == 422, resp.text
+        assert f"metadata.{key}" in resp.json()["detail"]
+        assert "Nothing was written" in resp.json()["detail"]
+        assert registry.knowledge.document_store.get("doc-new") is None
+
+    def test_the_lifecycle_refusal_names_the_governed_paths(self, client, registry):
+        detail = self._post(
+            client, _headers(registry, MUTATE), {LIFECYCLE_KEY: self.SUPERSEDED}
+        ).json()["detail"]
+        assert "save_memory(supersedes=" in detail
+        assert "retention.restore" in detail
+
+    def test_a_refused_write_leaves_an_existing_document_alone(self, client, registry):
+        resp = self._post(
+            client,
+            _headers(registry, MUTATE),
+            {LIFECYCLE_KEY: self.SUPERSEDED},
+            doc_id="doc-open",
+        )
+        assert resp.status_code == 422, resp.text
+        stored = registry.knowledge.document_store.get("doc-open")
+        assert stored["content"] == OPEN
+        assert stored["metadata"] == {"title": "Open"}
+
+    def test_a_raw_data_classification_is_still_refused(self, client, registry):
+        resp = self._post(
+            client,
+            _headers(registry, MUTATE),
+            {DATA_CLASSIFICATION_KEY: {"sensitivity": "public"}},
+        )
+        assert resp.status_code == 422, resp.text
+        assert DATA_CLASSIFICATION_KEY in resp.json()["detail"]
+        assert registry.knowledge.document_store.get("doc-new") is None
+
+    def test_an_ordinary_metadata_document_is_still_accepted(self, client, registry):
+        metadata = {"title": "Plain", "source_system": "notes", "tags": ["a"]}
+        resp = self._post(client, _headers(registry, MUTATE), metadata)
+        assert resp.status_code == 200, resp.text
+        stored = registry.knowledge.document_store.get("doc-new")
+        assert stored["content"] == OPEN
+        assert stored["metadata"]["title"] == "Plain"
+        assert LIFECYCLE_KEY not in stored["metadata"]
+        assert "evidence_ref" not in stored["metadata"]
+
+    def test_save_memory_supersedes_still_stamps_a_lifecycle(self, registry):
+        """The governed writer is untouched: the handler takes a ``lifecycle``."""
+        registry.knowledge.document_store.put("doc-new", OPEN, {"title": "New"})
+        error = supersede_document(
+            registry,
+            doc_id="doc-open",
+            successor="doc-new",
+            requested_by="mcp:save_memory",
+            clearance="restricted",
+        )
+        assert error is None
+        stamped = registry.knowledge.document_store.get("doc-open")["metadata"]
+        assert stamped[LIFECYCLE_KEY]["superseded_by"] == "doc-new"
 
 
 # ── POST /vectors: integrity of a labelled document's vector row ─────────
@@ -559,6 +661,16 @@ def _served_item(pack, item_id):
     return next((i for i in pack.items if i.item_id == item_id), None)
 
 
+IDENTITY_KEYS = [
+    "node_role",
+    "node_type",
+    "agent_id",
+    "document_form",
+    "content_type",
+    "excerpt",
+]
+
+
 class TestVectorsRowTakesItsDocumentsIdentity:
     """A row at a stored document carries that document's content and role.
 
@@ -605,9 +717,7 @@ class TestVectorsRowTakesItsDocumentsIdentity:
             "doc_id"
         ] == ("doc-open")
 
-    @pytest.mark.parametrize(
-        "key", ["node_role", "node_type", "agent_id", "document_form", "excerpt"]
-    )
+    @pytest.mark.parametrize("key", IDENTITY_KEYS)
     def test_a_key_the_document_lacks_is_removed_from_the_row(
         self, client, registry, key
     ):
@@ -615,15 +725,39 @@ class TestVectorsRowTakesItsDocumentsIdentity:
         assert key not in row
         assert row["title"] == "t", "only the identity keys are the document's"
 
-    @pytest.mark.parametrize(
-        "key", ["node_role", "node_type", "agent_id", "document_form", "excerpt"]
-    )
+    @pytest.mark.parametrize("key", IDENTITY_KEYS)
     def test_a_key_the_document_carries_is_copied_over_the_callers(
         self, client, registry, key
     ):
         registry.knowledge.document_store.put("doc-own", OPEN, {key: "own"})
         row = self._post(client, registry, "doc-own", {key: "forged"})
         assert row[key] == "own"
+
+    def test_a_foreign_flat_content_type_cannot_set_a_form_on_the_row(
+        self, client, registry
+    ):
+        """``document_form_of`` reads an out-of-vocabulary flat value as a form."""
+        assert "conversation" not in CONTENT_TYPE_VALUES
+        assert document_form_of({"content_type": "conversation"}) == "conversation"
+        row = self._post(client, registry, "doc-open", {"content_type": "conversation"})
+        assert document_form_of(row) is None
+        assert document_form_of(_vector_row(registry, "doc-open")["metadata"]) is None
+
+    def test_an_in_vocabulary_flat_content_type_mirrors_the_document(
+        self, client, registry
+    ):
+        mine, forged = sorted(CONTENT_TYPE_VALUES)[:2]
+        registry.knowledge.document_store.put("doc-own", OPEN, {"content_type": mine})
+        row = self._post(client, registry, "doc-own", {"content_type": forged})
+        assert row["content_type"] == mine
+        assert document_form_of(row) is None
+
+    def test_a_documents_own_legacy_form_still_reaches_its_row(self, client, registry):
+        registry.knowledge.document_store.put(
+            "doc-legacy", OPEN, {"content_type": "conversation"}
+        )
+        row = self._post(client, registry, "doc-legacy", {"content_type": "forged"})
+        assert document_form_of(row) == "conversation"
 
     def test_a_chunk_takes_its_own_documents_identity(self, client, registry):
         chunk_id = chunk_doc_id("doc-open", 0)
@@ -650,6 +784,7 @@ class TestVectorsRowTakesItsDocumentsIdentity:
             "node_type": "Thing",
             "agent_id": "someone",
             "document_form": "note",
+            "content_type": "a-form",
             "title": "t",
         }
         row = self._post(client, registry, "entity:not-a-document", supplied)
