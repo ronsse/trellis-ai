@@ -7,7 +7,7 @@ import math
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from pydantic import ValidationError as PydanticValidationError
@@ -655,6 +655,10 @@ def _write_precedent_document(
     (as :func:`_rewrite_precedent_document` does by keeping the whole bag):
     the node holds no label, and a rewrite that dropped it would read the row
     as ``internal`` again.
+
+    A row that is a redaction tombstone is refused before any write
+    (``precedent_document_redacted``): nothing is written and the caller emits
+    no event.
     """
     from trellis.learning.scoring import (  # noqa: PLC0415
         precedent_document_content,
@@ -672,6 +676,17 @@ def _write_precedent_document(
     metadata = precedent_document_metadata(properties)
     document_store = registry.knowledge.document_store
     stored = document_store.get(precedent_id)
+    if stored is not None and is_redaction_tombstone(stored):
+        # ``put_document`` would refuse this with a message about a re-ingest
+        # flag that ``precedent.promote`` has no way to set. Promotion does not
+        # re-ingest, so say what the row is and what can be done about it.
+        msg = (
+            f"precedent.promote will not write {precedent_id}: its document "
+            "row is the blank row a redaction left, and promotion does not "
+            "re-ingest. If its graph node still exists the redaction did not "
+            "finish; re-run redaction.apply on it"
+        )
+        raise ValidationError(msg, errors=[msg], code="precedent_document_redacted")
     stored_label = ((stored or {}).get("metadata") or {}).get(DATA_CLASSIFICATION_KEY)
     if stored_label is not None:
         metadata[DATA_CLASSIFICATION_KEY] = stored_label
@@ -686,22 +701,30 @@ def _write_precedent_document(
     run_embed_on_ingest(registry, precedent_id, content, metadata, source=source)
 
 
+#: What :func:`_stamp_precedent_document` did to a precedent's document row.
+StampOutcome = Literal["stamped", "no_row", "redaction_tombstone"]
+
+
 def _stamp_precedent_document(
     registry: StoreRegistry, precedent_id: str, lifecycle: dict[str, Any]
-) -> bool:
+) -> StampOutcome:
     """Stamp ``lifecycle`` onto a precedent's document row, if it has one.
 
     A metadata-only write that also mirrors the stamp onto the vector row
     (:func:`~trellis.core.document_write.put_document`). A precedent promoted
-    before it wrote a document has none, and is not given one here. Returns
-    whether a row was stamped; a document-store failure propagates. A row
-    that is a redaction tombstone is not stamped either (``False``): the stamp
-    would replace the redaction's lifecycle and unmark it.
+    before it wrote a document has none, and is not given one here
+    (``"no_row"``). A row that is a redaction tombstone is not stamped either
+    (``"redaction_tombstone"``): the stamp would replace the redaction's
+    lifecycle and unmark it. The two skips are told apart so a caller can say
+    which one it made; ``"stamped"`` means a row was written. A document-store
+    failure propagates.
     """
     document_store = registry.knowledge.document_store
     document = document_store.get(precedent_id)
-    if not document or is_redaction_tombstone(document):
-        return False
+    if not document:
+        return "no_row"
+    if is_redaction_tombstone(document):
+        return "redaction_tombstone"
     metadata = dict(document.get("metadata") or {})
     metadata[LIFECYCLE_KEY] = lifecycle
     put_document(
@@ -712,7 +735,30 @@ def _stamp_precedent_document(
         metadata,
         preserve_updated_at=True,
     )
-    return True
+    return "stamped"
+
+
+#: ``event_payload["document_row"]`` when a lifecycle stamp skipped a redaction
+#: tombstone. Promote's ``skipped_outside_namespace`` is the other value.
+DOCUMENT_ROW_SKIPPED_TOMBSTONE = "skipped_redaction_tombstone"
+
+
+def _note_skipped_tombstone(
+    command: Command, precedent_id: str, *, operation: str
+) -> None:
+    """Record that a lifecycle stamp skipped a precedent's redacted document row.
+
+    A warning log line (target id only) and one entry on the result's warnings.
+    The caller also sets ``document_row`` on its event, so the audit log says
+    it too. Nothing was written to the row.
+    """
+    logger.warning("precedent_document_stamp_skipped_redacted", target_id=precedent_id)
+    command.metadata.setdefault("handler_warnings", []).append(
+        f"precedent_document_stamp_skipped_redacted: {operation} left the "
+        f"document row for {precedent_id} alone; it is the blank row a "
+        "redaction left. If the precedent's graph node still exists the "
+        "redaction did not finish; re-run redaction.apply on it"
+    )
 
 
 def _precedent_document_state(registry: StoreRegistry, precedent_id: str) -> str | None:
@@ -1280,7 +1326,9 @@ class PrecedentDemoteHandler:
 
         # Before the node, so a failure leaves a precedent no axis withholds
         # rather than one the graph withholds and the keyword axis serves.
-        _stamp_precedent_document(self._registry, target_id, lifecycle)
+        stamp_outcome = _stamp_precedent_document(self._registry, target_id, lifecycle)
+        if stamp_outcome == "redaction_tombstone":
+            _note_skipped_tombstone(command, target_id, operation="precedent.demote")
 
         if _rewrite_current_node(graph, target_id, demote) is None:
             # Vanished between the read above and the write (purged
@@ -1312,6 +1360,8 @@ class PrecedentDemoteHandler:
             # event log (rather than the synchronous CommandResult) needs
             # its own way to see the semantic path went stale.
             event_payload["vector_sync_failed"] = True
+        if stamp_outcome == "redaction_tombstone":
+            event_payload["document_row"] = DOCUMENT_ROW_SKIPPED_TOMBSTONE
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_DEMOTED,
             source="mutation_executor",
@@ -1357,6 +1407,12 @@ class PrecedentReinstateHandler:
     reinstate then repairs it: a target whose node is already ``current`` but
     whose document row is still ``demoted`` is accepted, re-stamps the row and
     nothing else, and marks the event ``document_resync_only``.
+
+    A row that is a redaction tombstone is never stamped. The reinstatement
+    stands, the result's warnings say the row was skipped and the event carries
+    ``document_row: "skipped_redaction_tombstone"``; a resync-only repair, whose
+    whole job is that stamp, is refused (``precedent_document_redacted``)
+    instead.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1369,17 +1425,21 @@ class PrecedentReinstateHandler:
         lifecycle: dict[str, Any],
         *,
         strict: bool,
-    ) -> bool:
-        """Re-stamp the precedent's document row; ``True`` when that failed.
+    ) -> StampOutcome | Literal["failed"]:
+        """Re-stamp the precedent's document row; what happened to it.
 
-        After the node write a failure is fail-soft: the reinstatement stands,
-        the row stays withheld, and the warning names the repair (re-issue the
-        command). ``strict`` is the repair itself, where the node is already
-        current and this stamp is the whole job, so a failure raises rather
-        than reporting a repair that did not happen.
+        ``"failed"`` is a store failure; the other values are
+        :func:`_stamp_precedent_document`'s. After the node write a failure is
+        fail-soft: the reinstatement stands, the row stays withheld, and the
+        warning names the repair (re-issue the command). ``strict`` is the
+        repair itself, where the node is already current and this stamp is the
+        whole job, so a failure raises rather than reporting a repair that did
+        not happen. A redaction tombstone is a skip that repairs nothing, so it
+        raises under ``strict`` too (``precedent_document_redacted``) and is
+        recorded, with the row left alone, otherwise.
         """
         try:
-            _stamp_precedent_document(self._registry, target_id, lifecycle)
+            outcome = _stamp_precedent_document(self._registry, target_id, lifecycle)
         except Exception:
             if strict:
                 raise
@@ -1394,8 +1454,21 @@ class PrecedentReinstateHandler:
                 "withholding it until it is. Re-issue precedent.reinstate "
                 "for this id to re-stamp the row"
             )
-            return True
-        return False
+            return "failed"
+        if outcome == "redaction_tombstone":
+            if strict:
+                msg = (
+                    f"precedent.reinstate repaired nothing for {target_id}: "
+                    "its document row is the blank row a redaction left, so "
+                    "there is no row to re-stamp. If its graph node still "
+                    "exists the redaction did not finish; re-run "
+                    "redaction.apply on it"
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="precedent_document_redacted"
+                )
+            _note_skipped_tombstone(command, target_id, operation="precedent.reinstate")
+        return outcome
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         target_id = command.args["target_id"]
@@ -1478,7 +1551,7 @@ class PrecedentReinstateHandler:
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
-        document_sync_failed = self._restamp_document(
+        document_outcome = self._restamp_document(
             command, target_id, lifecycle, strict=document_resync_only
         )
 
@@ -1498,8 +1571,10 @@ class PrecedentReinstateHandler:
         }
         if vector_sync_outcome == "failed":
             event_payload["vector_sync_failed"] = True
-        if document_sync_failed:
+        if document_outcome == "failed":
             event_payload["document_sync_failed"] = True
+        if document_outcome == "redaction_tombstone":
+            event_payload["document_row"] = DOCUMENT_ROW_SKIPPED_TOMBSTONE
         if document_resync_only:
             event_payload["document_resync_only"] = True
         self._registry.operational.event_log.emit(

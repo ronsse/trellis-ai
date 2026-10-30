@@ -1042,14 +1042,14 @@ class TestRestoreRefusesAnOrphanedPrecedentRow:
 
 class TestDemoteStampLeavesARedactionTombstoneAlone:
     """A lifecycle stamp over a tombstone would replace its archived lifecycle
-    and unmark it, so the stamp helper reports ``False`` (no row stamped)
-    rather than raising mid-demote (#1034).
+    and unmark it, so the stamp helper reports ``"redaction_tombstone"`` (no row
+    stamped) rather than raising mid-demote (#1034).
 
     Defective subject: drop the ``is_redaction_tombstone`` test in
     ``_stamp_precedent_document``; it raises ``RedactionTombstoneError``.
     """
 
-    def test_stamping_a_tombstoned_row_returns_false_and_leaves_it(
+    def test_stamping_a_tombstoned_row_reports_the_tombstone_and_leaves_it(
         self, registry: StoreRegistry
     ) -> None:
         make_tombstone(
@@ -1059,18 +1059,22 @@ class TestDemoteStampLeavesARedactionTombstoneAlone:
 
         stamped = _stamp_precedent_document(registry, NODE_ID, {"state": "deprecated"})
 
-        assert stamped is False
+        assert stamped == "redaction_tombstone"
         assert _document(registry) == before
         assert is_redaction_tombstone(_document(registry))
 
-    def test_stamping_a_live_row_still_returns_true(
-        self, registry: StoreRegistry
-    ) -> None:
+    def test_stamping_a_live_row_still_stamps_it(self, registry: StoreRegistry) -> None:
         registry.knowledge.document_store.put(NODE_ID, "live text", {})
 
         assert (
-            _stamp_precedent_document(registry, NODE_ID, {"state": "demoted"}) is True
+            _stamp_precedent_document(registry, NODE_ID, {"state": "demoted"})
+            == "stamped"
         )
+
+    def test_stamping_a_missing_row_reports_no_row(
+        self, registry: StoreRegistry
+    ) -> None:
+        assert _stamp_precedent_document(registry, NODE_ID, {"state": "x"}) == "no_row"
 
 
 class TestRestoreRefusesARedactionTombstone:
