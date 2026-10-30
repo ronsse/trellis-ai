@@ -3435,7 +3435,7 @@ even a meta-trace.
 
 ```bash
 trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--itt] \
-    [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
+    [--by-commit] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
     [--planned-n N] [--settle-hours H] [--seed N] [--limit N] [--format text|json]
 ```
 
@@ -3446,6 +3446,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
+| `--by-commit` | off | Add `by_commit`, a descriptive per-build table of the analysed tasks; no estimate, and no other figure changes |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
 | `--power-sims` | `600` | Simulated experiments per power estimate |
@@ -3575,6 +3576,24 @@ an id). The exact specification:
   `mean_residual_withheld` are means of residuals, not of the outcome, and sit
   under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
   the unadjusted run, where they are outcome means.
+
+`--by-commit` adds a descriptive table of how the analysed tasks split across the
+builds that served them, so a reader can judge whether a deploy inside the window
+confounds the comparison. It is not a second estimate: no p-value, interval or
+verdict per build, and every other figure is what it is without the flag (the
+JSON carries no `by_commit` key unless it is passed, and the text table follows
+the descriptive block). A task's build is the first 12 characters of
+`metadata.write_provenance.commit` on its earliest `PACK_ASSEMBLED` row, or
+`unidentified` when the row has no stamp or its commit is null. `rows` come in
+first-seen order, each with `build`, `first_seen` and `last_seen` (the earliest
+and latest first-pack times of the tasks counted under it) and, per arm, `n` and
+`outcome_mean`, the mean of the primary's outcome column (`null` for an empty
+arm). The rows cover the same tasks as the primary: the analysed set, so cut-offs
+(unless `--itt`) and tasks without the outcome are out. A task whose packs came
+from more than one build is counted once, under its earliest build, and also in
+`units_spanning_builds`, so the table never sums to more than the analysed
+tasks. The commit is the one the build stamped at install, so an editable
+install on a moved working tree names the commit it was installed at.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
