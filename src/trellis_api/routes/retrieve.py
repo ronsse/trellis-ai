@@ -486,10 +486,11 @@ def get_entity(
     """Get an entity and its neighborhood.
 
     A node carries no label, so the entity and every node of the subgraph are
-    served; one whose ``document_ids``, ``evidence_ref`` property or
-    ``lifecycle.superseded_by`` names a document the caller may not read is
-    served without that id. An edge is served whole too, without an
-    ``evidence_ref``, or a property pointer, that names such a document.
+    served; one whose ``document_ids``, ``evidence_ref`` property,
+    ``lifecycle.superseded_by`` or ``source_item_id`` names a document the
+    caller may not read is served without that id. An edge is served whole too:
+    its ``evidence_ref`` reads null, and a property pointer is removed, when it
+    names such a document.
     """
     registry = get_registry()
     node = registry.knowledge.graph_store.get_node(entity_id)
@@ -627,14 +628,21 @@ def _evidence_links(
 def list_precedents(
     domain: str | None = Query(None),
     limit: int = Query(20, ge=1, le=500, description="Max results"),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
-    """List promoted precedents."""
+    """List promoted precedents.
+
+    A learning promotion's ``payload.source_item_id`` is left out when it names
+    a document above the caller's clearance.
+    """
     registry = get_registry()
     items = _list_precedents(
         registry.operational.event_log,
         domain=domain,
         limit=limit,
         graph_store=registry.knowledge.graph_store,
+        document_store=registry.knowledge.document_store,
+        clearance=request_clearance(ctx),
     )
     return {"status": "ok", "count": len(items), "precedents": items}
 

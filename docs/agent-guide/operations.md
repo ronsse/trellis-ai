@@ -3989,14 +3989,23 @@ names no property, so there is nothing in it to conceal, and a concealed pointer
 never removes a node, so its counts and `/graph/search`'s `total` are the same for
 every caller. An edge is concealed on the same terms in the `subgraph` of `GET
 /api/v1/entities/{id}`: a string top-level `evidence_ref` (the provenance
-column, not a node property) is dropped when it names a document the caller may
-not read, and so is a pointer inside its `properties` (`evidence_ref`,
-`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`); every other
-field and property stays, and a value that is not a string is left as stored. The
+column, not a node property) reads `null` when it names a document the caller may
+not read, and a pointer inside its `properties` (`evidence_ref`,
+`lifecycle.superseded_by`, `supersedes_doc_id`, `updates_doc_id`) is removed;
+every other field and property stays, and a value that is not a string is left as
+stored. The column is blanked rather than removed because every stored edge row
+carries it (null when unset), so a missing key would say the edge cites a
+document the caller may not read; `properties` keys are absent when unset, so
+their removal says nothing. The
 entity, its nodes and its edges are judged in one pass, so a response costs one
 store read per distinct id whichever kind of row names it. MCP `get_graph` reads
 the same edges and renders only their endpoints and type, so it names no edge
-pointer.
+pointer. A learning-sourced precedent node's `properties.source_item_id` (the
+item it was promoted from, often a document) is withheld like the node's other
+pointers, and so is `metadata.source_item_id` on the pack item the graph axis
+builds from that node: it is dropped from `POST /api/v1/packs` and
+`/packs/sectioned` for a caller below `restricted`, and the item is still served
+in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
@@ -4234,7 +4243,7 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
 | GET | `/traces` | `?domain=...&limit=20` | List traces; `limit` is 1 to 500, anything else a 422 |
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
-| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
+| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. A `payload.source_item_id` naming a document above the key's clearance is left out of that row's `payload`. |
 | GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |
 
 ### Explore
