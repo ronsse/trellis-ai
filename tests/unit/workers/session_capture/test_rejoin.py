@@ -422,6 +422,22 @@ class TestEntryPoint:
         for key in ("sessions_skipped_empty", "sessions_skipped_ephemeral"):
             assert key in payload
 
+    def test_the_report_names_the_source_system_it_wrote_under(
+        self, env, capsys, monkeypatch
+    ) -> None:
+        # The source comes from the caller's shell, so a dry run must show it
+        # before a live run rewrites every join under the wrong one.
+        monkeypatch.setenv(sweep.ENV_SOURCE_SYSTEM, "other-source")
+
+        code = capture_main.main(
+            ["--rejoin-since", "2000-01-01T00:00:00Z", "--dry-run"]
+        )
+
+        assert code == capture_main.EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source_system"] == "other-source"
+        assert payload["transcripts_root"] == str(env[1])
+
     def test_dry_run_flag_reaches_the_rejoin(self, env, capsys) -> None:
         registry, _ = env
         before = len(_events(registry, EventType.CAPTURE_SESSION_PACKS))

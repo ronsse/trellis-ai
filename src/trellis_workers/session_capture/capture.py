@@ -455,6 +455,7 @@ class RejoinReport:
 
     since: datetime
     transcripts_root: str
+    source_system: str = DEFAULT_SOURCE_SYSTEM
     dry_run: bool = False
     sessions_scanned: int = 0
     pack_joins_recorded: int = 0
@@ -469,6 +470,7 @@ class RejoinReport:
             "since": self.since.isoformat(),
             "dry_run": self.dry_run,
             "transcripts_root": self.transcripts_root,
+            "source_system": self.source_system,
             "sessions_scanned": self.sessions_scanned,
             "pack_joins_recorded": self.pack_joins_recorded,
             "pack_joins_unchanged": self.pack_joins_unchanged,
@@ -519,7 +521,10 @@ def rejoin_sessions(
     window); see ``docs/agent-guide/operations.md``.
     """
     report = RejoinReport(
-        since=since, transcripts_root=str(transcripts_root), dry_run=dry_run
+        since=since,
+        transcripts_root=str(transcripts_root),
+        source_system=source_system,
+        dry_run=dry_run,
     )
     joins = CaptureReport(transcripts_root=str(transcripts_root), dry_run=dry_run)
     for path in discover_sessions(transcripts_root):

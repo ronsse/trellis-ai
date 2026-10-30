@@ -3791,7 +3791,7 @@ It does **not** build or call a judge (no `llm:` block is needed), distil, gate,
 write a memory or document, emit `CAPTURE_SWEEP_COMPLETED` or a training pair, or
 read or write the watermark file. `--dry-run` writes nothing and reports the counts
 a live run would. The report is JSON on stdout: `mode` (`"rejoin"`), `since`,
-`dry_run`, `sessions_scanned` (= `pack_joins_recorded` + `pack_joins_unchanged` +
+`dry_run`, `transcripts_root`, `source_system`, `sessions_scanned` (= `pack_joins_recorded` + `pack_joins_unchanged` +
 `sessions_skipped_empty` + `sessions_errored`), `sessions_skipped_ephemeral`. A
 session that raises is counted in `sessions_errored`, logged as
 `capture_rejoin_session_failed`, and skipped; the run goes on and exits `3`
@@ -3806,14 +3806,35 @@ reads that stamp in three places (`src/trellis/analyze/holdout.py`):
    completes that long after the rejoin. Run the rejoin at least 3 hours before a
    nightly sweep, and read the holdout only after that sweep.
 2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
-   so the rollup re-dates to the rejoin time.
+   so the rollup re-dates to the rejoin time, and a run with `--until` earlier than
+   the rejoin drops every rewritten session from the rollup. The rollup is
+   descriptive; the primary estimate does not read it.
 3. **Join scan.** The scan that reads joins is windowed by event time, so it sees a
    rewritten join at its new time.
 
 The per-task primary analysis is unaffected: it dates a task from its first pack, and
 reads only the latest join's payload. Selection is by mtime, so re-dating only moves a
 join later; it cannot pull in a session whose transcript last changed before the
-instant. Choose the instant to cover the sessions the holdout window reads.
+instant.
+
+**Choose an instant at or before the start of the holdout window you will analyse**
+(its first holdout row). A transcript's mtime is roughly when the session ended,
+which is after treatment, and never earlier than its first pack. An instant inside
+the window decides only the sessions that ended after it and leaves the rest
+`unknown`; if being withheld changes how long a session runs, that selection differs
+by arm and biases the estimate. An instant at or before the window start covers
+every unit in it.
+
+Check `source_system` in a `--dry-run` report before the live run: it comes from the
+caller's `TRELLIS_CAPTURE_SOURCE_SYSTEM`, and if that differs from the nightly sweep's,
+every join is rewritten under the wrong source and its sweep-based settle check never
+passes.
+
+A rejoin over a whole experiment can roughly double the joins in the window, and the
+holdout's join scan keeps only the newest `--limit` events (default 5000). When it
+truncates, the evidence window starts later and earlier units fall `outside_window`
+in both arms, which costs units rather than biasing them. Read the report's scan
+coverage after the rejoin, and raise `trellis analyze holdout --limit` if it was cut.
 
 ---
 

@@ -20,6 +20,10 @@ All notable changes to Trellis will be documented in this file.
   reads `unfinished` until a completed sweep at least `--settle-hours` later (run
   the rejoin 3 or more hours before the nightly sweep), and the main-session
   rollup and the join scan see it at the new time. Any session error exits 3.
+  The report names the `source_system` it wrote under, so a dry run shows a
+  shell that differs from the sweep's; choose an instant at or before the
+  analysed window's start, since a later one decides only sessions that ended
+  after it.
 
 - **Holdout secondary-analysis reporting and bounded REST `limit`s (follow-up to
   #1044).** `GET /api/v1/analyze` now describes the holdout report's
