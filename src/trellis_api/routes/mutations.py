@@ -176,15 +176,15 @@ def execute_batch(
     builder withholds by id, so a ``lifecycle`` that says ``superseded`` would
     withhold every item under the document's id (a graph node's included) and an
     ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
-    accepted only as exactly ``{"state": "current"}``, which is how an operator
-    restores a superseded document (any other field would let a caller forge a
-    redaction tombstone), and an ``evidence_ref`` only when it equals the value
-    the document the command writes already holds, so a round-tripped metadata
-    bag keeps working. Anything else refuses
-    the whole batch with 422, before any command executes and whatever the
-    strategy, the way an unknown operation does; the message names the governed
-    writer. A stored document above the key's clearance reads as absent for the
-    comparison.
+    accepted only as ``{"state": "current"}``, with any other field null or at
+    its default, which is how an operator restores a superseded document (a set
+    ``deprecation_reason`` would let a caller forge a redaction tombstone), and
+    an ``evidence_ref`` only when it equals the value the document the command
+    writes already holds, so a round-tripped metadata bag keeps working.
+    Anything else refuses the whole batch with 422, before any command executes
+    and whatever the strategy, the way an unknown operation does; the message
+    names the governed writer. A stored document above the key's clearance
+    reads as absent for the comparison.
     """
     operations = [_parse_operation(item.operation) for item in req.commands]
 

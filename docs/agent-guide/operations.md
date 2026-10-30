@@ -4076,8 +4076,9 @@ above its own clearance, and cannot touch a document it may not read.**
   stores the body's `metadata` (only the `evidence_type`, `source_origin` and
   sensitivity label it builds itself). `POST /commands/batch` and MCP `execute_mutation` hold a
   narrower rule for an `evidence.ingest` command's `evidence.metadata`: a
-  `lifecycle` is accepted only as exactly `{"state": "current"}` (the operator
-  restore below; any other field, a `deprecation_reason` included, is refused), and
+  `lifecycle` is accepted only as `{"state": "current"}` with every other field
+  null or at its default (the operator restore below; a set field, a
+  `deprecation_reason` included, is refused), and
   an `evidence_ref` only when it equals the value the document the command writes
   already holds (so a metadata bag read back
   and re-sent keeps working). Anything else is a 422 for the whole batch,

@@ -4114,23 +4114,23 @@ paths:
 
         ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
 
-        accepted only as exactly ``{"state": "current"}``, which is how an operator
+        accepted only as ``{"state": "current"}``, with any other field null or at
 
-        restores a superseded document (any other field would let a caller forge a
+        its default, which is how an operator restores a superseded document (a set
 
-        redaction tombstone), and an ``evidence_ref`` only when it equals the value
+        ``deprecation_reason`` would let a caller forge a redaction tombstone), and
 
-        the document the command writes already holds, so a round-tripped metadata
+        an ``evidence_ref`` only when it equals the value the document the command
 
-        bag keeps working. Anything else refuses
+        writes already holds, so a round-tripped metadata bag keeps working.
 
-        the whole batch with 422, before any command executes and whatever the
+        Anything else refuses the whole batch with 422, before any command executes
 
-        strategy, the way an unknown operation does; the message names the governed
+        and whatever the strategy, the way an unknown operation does; the message
 
-        writer. A stored document above the key''s clearance reads as absent for the
+        names the governed writer. A stored document above the key''s clearance
 
-        comparison.'
+        reads as absent for the comparison.'
       operationId: execute_batch_api_v1_commands_batch_post
       requestBody:
         content:

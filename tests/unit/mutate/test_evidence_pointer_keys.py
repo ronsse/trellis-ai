@@ -14,6 +14,7 @@ from trellis.mutate.evidence_pointer_keys import (
     evidence_ingest_pointer_refusal,
     pointer_key_refusal,
 )
+from trellis.schemas.classification import Lifecycle
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
 
@@ -59,24 +60,47 @@ class TestRestoreForm:
     @pytest.mark.parametrize(
         "record",
         [
+            {"state": "current", "valid_until": None},
+            {"state": "current", "superseded_by": None},
+            {"state": "current", "deprecation_reason": None},
+            {"state": "current", "classification_version": "1"},
+            Lifecycle().model_dump(mode="json"),
+        ],
+        ids=[
+            "null-valid-until",
+            "null-superseded-by",
+            "null-deprecation-reason",
+            "default-classification-version",
+            "schema-default-dump",
+        ],
+    )
+    def test_current_with_every_other_field_at_its_default_is_accepted(self, record):
+        """The record ``Lifecycle()`` dumps is the restore form too."""
+        assert pointer_key_refusal({"lifecycle": record}) is None
+
+    @pytest.mark.parametrize(
+        "record",
+        [
             {"state": "current", "deprecation_reason": "restored"},
             {"state": "current", "deprecation_reason": "redacted"},
             {"state": "current", "valid_from": "2020-01-01T00:00:00+00:00"},
             {"state": "current", "classification_version": 2},
-            {"state": "current", "valid_until": None},
-            {"state": "current", "superseded_by": None},
+            {"state": "current", "valid_until": "2020-01-01T00:00:00+00:00"},
+            {"state": "current", "superseded_by": "doc-x"},
+            {"state": "current", "unknown_key": None},
         ],
         ids=[
             "deprecation-reason",
             "redaction-reason",
             "valid-from",
             "classification-version",
-            "null-valid-until",
-            "null-superseded-by",
+            "valid-until",
+            "superseded-by",
+            "unknown-key",
         ],
     )
     def test_only_the_exact_record_is_accepted(self, record):
-        """Any extra field is refused, a harmless-looking null included."""
+        """A set value in any other field is refused, an unknown key too."""
         refusal = pointer_key_refusal({"lifecycle": record})
         assert refusal is not None
         assert refusal.key == "lifecycle"

@@ -361,8 +361,9 @@ All notable changes to Trellis will be documented in this file.
   item names. Both doors now refuse the command, naming the governed writer, with
   nothing written: the whole batch with a 422 before any command runs (the way an
   unknown operation is), `execute_mutation` as `INVALID_PARAMS`. A `lifecycle` is
-  accepted only as exactly `{"state": "current"}` (any other field, such as a
-  `deprecation_reason`, could forge a redaction tombstone), which keeps the
+  accepted only as `{"state": "current"}` with every other field null or at its
+  default (a set field, such as a `deprecation_reason`, could forge a redaction
+  tombstone), which keeps the
   documented operator restore of a superseded document working, and an
   `evidence_ref` only when it equals the value the document the command writes
   already holds (the id the command builder resolved, so a `doc_id` and a

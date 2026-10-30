@@ -17,7 +17,8 @@ keys. The rule sits at the agent-facing doors instead, in two strengths:
 * **Restore form** (``POST /commands/batch``, MCP ``execute_mutation``): the
   documented operator undo of a supersession stamp sends the document's metadata
   bag back through ``evidence.ingest`` with ``lifecycle`` set to ``current``, so
-  a ``lifecycle`` is accepted when it is exactly ``{"state": "current"}``, and an
+  a ``lifecycle`` is accepted when it says ``{"state": "current"}`` with every
+  other field null or at its default (the record ``Lifecycle()`` dumps), and an
   ``evidence_ref`` when it is the value the document the command will write
   already holds, so a round-tripped bag keeps working. Anything else is refused:
   a ``current`` record that also carries a ``deprecation_reason`` would forge the
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from trellis.mutate.sensitivity_floor import visible_document
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -60,13 +61,18 @@ DOCUMENT_POINTER_REFUSALS: Final[dict[str, str]] = {
 
 #: Added to the ``lifecycle`` refusal at a door that accepts the restore form.
 LIFECYCLE_RESTORE_NOTE: Final[str] = (
-    '. A caller may write a lifecycle only as exactly {"state": "current"}: '
-    "that restores a document a supersession stamp withheld"
+    '. A caller may write a lifecycle only as {"state": "current"}, with any '
+    "other field null or at its default: that restores a document a "
+    "supersession stamp withheld"
 )
 
 POINTER_KEYS: Final[frozenset[str]] = frozenset(DOCUMENT_POINTER_REFUSALS)
 
-_RESTORE_FORM: Final[dict[str, str]] = {"state": "current"}
+#: Lifecycle fields the restore form may carry, but only as null.
+_NULL_ONLY_FIELDS: Final[frozenset[str]] = frozenset(
+    {"valid_from", "valid_until", "superseded_by", "deprecation_reason"}
+)
+_DEFAULT_CLASSIFICATION_VERSION: Final[str] = Lifecycle().classification_version
 
 
 @dataclass(frozen=True)
@@ -78,16 +84,32 @@ class PointerKeyRefusal:
 
 
 def _is_restore_form(value: object) -> bool:
-    """Whether ``value`` is exactly the documented restore record.
+    """Whether ``value`` is the documented restore record.
 
-    Only ``{"state": "current"}``. Any other field is refused, not merely the
-    withholding ones: ``deprecation_reason`` set to ``redacted`` on a document
-    with empty content is the tombstone a redaction leaves
+    ``{"state": "current"}``, optionally with the other :class:`Lifecycle`
+    fields at their defaults, so the record ``Lifecycle().model_dump()``
+    produces passes too. A set value in any other field is refused, not merely
+    the withholding ones: ``deprecation_reason`` set to ``redacted`` on a
+    document with empty content is the tombstone a redaction leaves
     (:func:`~trellis.core.document_write.is_redaction_tombstone`), which blocks
-    later writes to the id, corpus sync and promotion, and a record that leaves
-    the state to its default is not the documented form either.
+    later writes to the id, corpus sync and promotion. An unknown key is
+    refused, and a record that leaves the state to its default is not the
+    documented form either.
     """
-    return isinstance(value, dict) and value == _RESTORE_FORM
+    if not isinstance(value, dict) or value.get("state") != "current":
+        return False
+    for key, field_value in value.items():
+        if key == "state":
+            continue
+        if key in _NULL_ONLY_FIELDS and field_value is None:
+            continue
+        if (
+            key == "classification_version"
+            and field_value == _DEFAULT_CLASSIFICATION_VERSION
+        ):
+            continue
+        return False
+    return True
 
 
 def pointer_key_refusal(
