@@ -6047,7 +6047,12 @@ paths:
       - policies
   /api/v1/precedents:
     get:
-      description: List promoted precedents.
+      description: 'List promoted precedents.
+
+
+        A learning promotion''s ``payload.source_item_id`` is left out when it names
+
+        a document above the caller''s clearance.'
       operationId: list_precedents_api_v1_precedents_get
       parameters:
       - in: query
