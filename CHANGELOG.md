@@ -370,6 +370,60 @@ All notable changes to Trellis will be documented in this file.
   asserts zero driver retries and ArcadeDB resolves overlapping batches by
   commit-time conflict retry.
 
+- **`POST /api/v1/commands/batch` and MCP `execute_mutation` refuse a withholding
+  `lifecycle` and a new `evidence_ref` on `evidence.ingest` (part of #1057).** The
+  pack builder withholds by id, and an `evidence.ingest` command's
+  `evidence.metadata` reached the document store with any `lifecycle` or
+  `evidence_ref` a caller sent, so a document at a graph node's id could hide the
+  node and one carrying an `evidence_ref` could make itself the successor another
+  item names. Both doors now refuse the command, naming the governed writer, with
+  nothing written: the whole batch with a 422 before any command runs (the way an
+  unknown operation is), `execute_mutation` as `INVALID_PARAMS`. A `lifecycle` is
+  accepted only as `{"state": "current"}` with every other field null or at its
+  default (a set field, such as a `deprecation_reason`, could forge a redaction
+  tombstone), which keeps the
+  documented operator restore of a superseded document working, and an
+  `evidence_ref` only when it equals the value the document the command writes
+  already holds (the id the command builder resolved, so a `doc_id` and a
+  `target_id` that differ cannot borrow each other's value), read at the caller's
+  clearance (a row above it reads as absent), so a metadata bag read back and
+  re-sent still works. The rule and the `POST /documents` messages
+  live in `trellis.mutate.evidence_pointer_keys`; `POST /documents` calls it in a
+  strict mode that refuses any value, unchanged. `EvidenceIngestHandler` is
+  unchanged: `save_memory(supersedes=)` stamps a lifecycle through it on purpose.
+  Correction to the entry below: `POST /api/v1/evidence` never stored the body's
+  `metadata`, so it was not a way to set either key and needs no check; the
+  entry's statement that it "still accepts the keys" was wrong. The graph-node id
+  collision and the dedup winner's identity stay open on #1057.
+
+- **A learning promotion copies no text or id from a source labelled above
+  `internal` (part of #1080).** A promoted precedent holds no sensitivity label of its own, but
+  the promotion read its source's body, title and id without asking for the
+  source's label: the `Source excerpt:` text, a name built from the source's
+  title or first line (or its id), and the `Source item '<id>' showed ...`
+  sentence. A `confidential` or `restricted` source (a chunk is judged by its
+  parent too) therefore reached every caller at `internal` clearance. Now such a
+  promotion writes no excerpt (`source_excerpt_status` reads `source_labelled`),
+  a neutral name with `name_source` `neutral` unless a reviewer supplied the
+  name, and a statistics sentence that reads `The source item showed ...` with no
+  id. A store that cannot answer the label read counts as labelled. A source with
+  no label, or none stored, promotes byte for byte as before, and
+  `properties.source_item_id` is kept as the structured pointer. Precedents
+  already promoted are not rewritten.
+
+- **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
+  #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
+  write target on every door), but `supersedes=` names a row to be stamped, not
+  written, and a `trace-summary:<id>` target passed the document checks. The
+  stamp was then rejected by the evidence-ingest id guard *after* the memory was
+  stored, so the caller got `Memory saved` plus a warning to "re-send to retry"
+  that could never succeed. The check now refuses on the id alone, before the
+  readability lookup, so the answer is the same whether or not the row exists and
+  nothing is written: `value` / `supersedes`, naming the worker as the owner. The
+  match is exact and case-sensitive, as the worker builds the id. The automated
+  supersession seams (reconcile-on-write, the capture reconcile pass) and
+  `classification.set` are unchanged.
+
 - **`trellis admin reindex-vectors` leaves the first vector at a
   `trace-summary:` id to the trace-embed worker (refs #1076).** The worker
   treats a vector row at `trace-summary:<trace_id>` as "this trace is embedded"

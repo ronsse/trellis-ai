@@ -4101,7 +4101,36 @@ paths:
 
         yet. Either one naming a reserved key refuses the whole batch with
 
-        400, naming the key, before any command executes.'
+        400, naming the key, before any command executes.
+
+
+        An ``evidence.ingest`` command''s own ``evidence.metadata`` may not use
+
+        ``lifecycle`` or ``evidence_ref`` to withhold or redirect an item: the pack
+
+        builder withholds by id, so a ``lifecycle`` that says ``superseded`` would
+
+        withhold every item under the document''s id (a graph node''s included) and an
+
+        ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
+
+        accepted only as ``{"state": "current"}``, with any other field null or at
+
+        its default, which is how an operator restores a superseded document (a set
+
+        ``deprecation_reason`` would let a caller forge a redaction tombstone), and
+
+        an ``evidence_ref`` only when it equals the value the document the command
+
+        writes already holds, so a round-tripped metadata bag keeps working.
+
+        Anything else refuses the whole batch with 422, before any command executes
+
+        and whatever the strategy, the way an unknown operation does; the message
+
+        names the governed writer. A stored document above the key''s clearance
+
+        reads as absent for the comparison.'
       operationId: execute_batch_api_v1_commands_batch_post
       requestBody:
         content:
@@ -4131,9 +4160,11 @@ paths:
                 - $ref: '#/components/schemas/BatchCommandBodyError'
                 - $ref: '#/components/schemas/BatchOperationNameError'
                 title: Response 422 Execute Batch Api V1 Commands Batch Post
-          description: A pydantic body-validation failure (BatchCommandBodyError -- ``detail`` is a list of field errors),
+          description: 'A pydantic body-validation failure (BatchCommandBodyError -- ``detail`` is a list of field errors),
             or a command names an operation outside the Operation enum (BatchOperationNameError -- ``detail`` is a plain string
-            naming the bad value; see ``_parse_operation``).
+            naming the bad value; see ``_parse_operation``), or an ``evidence.ingest`` command''s ``evidence.metadata`` carries
+            a ``lifecycle`` that is not ``{"state": "current"}`` or an ``evidence_ref`` the document does not already hold
+            (``detail`` is a plain string; the whole batch is refused and nothing is written).'
       security:
       - APIKeyHeader: []
       summary: Execute Batch

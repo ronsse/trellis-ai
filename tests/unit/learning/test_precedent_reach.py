@@ -349,7 +349,6 @@ class TestExcerptDegradation:
             (_DocStore(None), "document_not_found"),
             (_DocStore({"content": "   \n  "}), "document_empty"),
             (_DocStore({"content": "---\ntitle: t\n---\n"}), "document_empty"),
-            (_DocStore(raises=True), "lookup_failed"),
         ],
     )
     def test_missing_source_keeps_the_statistics_and_records_why(
@@ -359,6 +358,15 @@ class TestExcerptDegradation:
         assert props["source_excerpt_status"] == status
         assert "Source excerpt" not in props["description"]
         assert "Source item 'doc:x' showed success_rate=1.0" in props["description"]
+
+    def test_a_store_that_raises_keeps_the_statistics_but_not_the_id(self) -> None:
+        # The label read cannot be answered, and an outage is not permission:
+        # the source counts as labelled, so the description names no id.
+        props = _payloads(_DocStore(raises=True))
+        assert props["source_excerpt_status"] == "lookup_failed"
+        assert "Source excerpt" not in props["description"]
+        assert "doc:x" not in props["description"]
+        assert "The source item showed success_rate=1.0" in props["description"]
 
     @pytest.mark.parametrize(
         ("store", "item_id"),
