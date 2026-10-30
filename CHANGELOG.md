@@ -321,6 +321,28 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`POST /api/v1/commands/batch` and MCP `execute_mutation` refuse a withholding
+  `lifecycle` and a new `evidence_ref` on `evidence.ingest` (part of #1057).** The
+  pack builder withholds by id, and an `evidence.ingest` command's
+  `evidence.metadata` reached the document store with any `lifecycle` or
+  `evidence_ref` a caller sent, so a document at a graph node's id could hide the
+  node and one carrying an `evidence_ref` could make itself the successor another
+  item names. Both doors now refuse the command, naming the governed writer, with
+  nothing written: the whole batch with a 422 before any command runs (the way an
+  unknown operation is), `execute_mutation` as `INVALID_PARAMS`. A `lifecycle` is
+  accepted only as `{"state": "current"}` with no `superseded_by` or `valid_until`,
+  which keeps the documented operator restore of a superseded document working, and
+  an `evidence_ref` only when it equals the value the same `doc_id` already holds,
+  read at the caller's clearance (a row above it reads as absent), so a metadata bag
+  read back and re-sent still works. The rule and the `POST /documents` messages
+  live in `trellis.mutate.evidence_pointer_keys`; `POST /documents` calls it in a
+  strict mode that refuses any value, unchanged. `EvidenceIngestHandler` is
+  unchanged: `save_memory(supersedes=)` stamps a lifecycle through it on purpose.
+  Correction to the entry below: `POST /api/v1/evidence` never stored the body's
+  `metadata`, so it was not a way to set either key and needs no check; the
+  entry's statement that it "still accepts the keys" was wrong. The graph-node id
+  collision and the dedup winner's identity stay open on #1057.
+
 - **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
   (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
   the served item the precedent came from, often a document, and the listing

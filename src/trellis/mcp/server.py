@@ -125,6 +125,7 @@ from trellis.mutate import (
     redirect_unreachable_settings_update,
     requires_admin_scope,
 )
+from trellis.mutate.evidence_pointer_keys import evidence_ingest_pointer_refusal
 from trellis.ops import (
     check_capture_health,
     format_capture_warning,
@@ -4370,6 +4371,32 @@ def _resolve_execute_mutation_target(
     return None, None, args
 
 
+def _refuse_evidence_pointer_keys(op: Any, args: dict[str, Any]) -> None:
+    """Refuse an ``evidence.ingest`` whose metadata would withhold or redirect an item.
+
+    A caller's ``lifecycle`` or ``evidence_ref`` can reach an item other than the
+    document; only the restore form and an unchanged ``evidence_ref`` pass
+    (:mod:`trellis.mutate.evidence_pointer_keys`). Refused before anything is
+    built or written, with the tool's ordinary pre-flight ``INVALID_PARAMS``.
+    """
+    if op is not Operation.EVIDENCE_INGEST:
+        return
+    refusal = evidence_ingest_pointer_refusal(
+        args,
+        target_id=None,
+        document_store=_get_registry().knowledge.document_store,
+        clearance=current_clearance(),
+    )
+    if refusal is not None:
+        _raise_invalid_params(
+            refusal.message,
+            data={
+                "field": f"args.evidence.metadata.{refusal.key}",
+                "operation": str(op),
+            },
+        )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def execute_mutation(
     operation: str,
@@ -4429,7 +4456,10 @@ def execute_mutation(
     Raises:
         McpError: With ``INVALID_PARAMS`` for pre-flight argument
             issues (empty operation, unknown enum, non-dict args,
-            ``Command`` construction failure), ``POLICY_DENIED`` for a
+            ``Command`` construction failure, an ``evidence.ingest`` whose
+            ``evidence.metadata`` sets a ``lifecycle`` other than
+            ``{"state": "current"}`` or an ``evidence_ref`` the document does
+            not already hold), ``POLICY_DENIED`` for a
             destructive operation without the ``admin`` scope, and
             ``INTERNAL_ERROR`` for unexpected executor-side crashes.
     """
@@ -4485,6 +4515,7 @@ def execute_mutation(
         if requested_by_claim is not None
         else {}
     )
+    _refuse_evidence_pointer_keys(op, args)
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
             command = build_evidence_ingest_command_from_args(

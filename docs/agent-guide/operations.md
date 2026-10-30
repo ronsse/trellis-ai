@@ -3069,7 +3069,7 @@ The stamp's first deterministic producer is an explicit declaration by the agent
 Undoing a stamp:
 
 - **Entity:** `execute_mutation("entity.update", {"entity_id": N, "properties": {"lifecycle": {"state": "current"}}})` — the same operation and top-level property merge as the stamp. It leaves `lifecycle` set to `current` rather than removing the key, which the gate reads exactly as an unstamped node. **Not for a precedent node**: `entity.update` refuses any write to `properties.lifecycle` where the current node type is `"precedent"`, naming `precedent.demote`/`precedent.reinstate` as the way to change it instead — those are the only path for a precedent, supersession stamp or not.
-- **Document (operator-only):** read the metadata bag with `GET /api/v1/documents/{doc_id}`, set its `lifecycle` to `{"state": "current"}`, and submit `execute_mutation("evidence.ingest", {"evidence": {"doc_id": …, "content": <unchanged>, "metadata": <bag>, "preserve_updated_at": true}}, idempotency_key=<fresh>)`, adding `"uri": <the bag's uri>` when the content is empty (the handler refuses empty content without one). `execute_mutation` runs the default `soft` executor, so with `TRELLIS_ENABLE_EMBED_ON_INGEST=1` this re-embeds the document and restamps its vector row's `created_at`. There is no restore tool.
+- **Document (operator-only):** read the metadata bag with `GET /api/v1/documents/{doc_id}`, set its `lifecycle` to `{"state": "current"}`, and submit `execute_mutation("evidence.ingest", {"evidence": {"doc_id": …, "content": <unchanged>, "metadata": <bag>, "preserve_updated_at": true}}, idempotency_key=<fresh>)`, adding `"uri": <the bag's uri>` when the content is empty (the handler refuses empty content without one). `current` is the only `lifecycle` a caller may write through `execute_mutation` or `POST /commands/batch` (with no `superseded_by` or `valid_until`), and the bag's `evidence_ref`, when it has one, must go back unchanged: any other `lifecycle`, or a new or changed `evidence_ref`, is refused before anything is written. `execute_mutation` runs the default `soft` executor, so with `TRELLIS_ENABLE_EMBED_ON_INGEST=1` this re-embeds the document and restamps its vector row's `created_at`. There is no restore tool.
 
 ---
 
@@ -3980,10 +3980,19 @@ above its own clearance, and cannot touch a document it may not read.**
   value and the caller: the pack builder withholds by id, so a `lifecycle` would
   withhold every item under this document's id (a graph node's included) and an
   `evidence_ref` the item whose successor it names. Supersede with MCP `save_memory(supersedes=...)`; the
-  refusal names the writer for each key. The route holds this rule, not
-  `evidence.ingest`, which takes the keys from `save_memory(supersedes=)`, so
-  `POST /evidence`, `POST /commands/batch` and `execute_mutation` still accept
-  them. Nothing is written on any refusal. The overwrite check compares the label this request
+  refusal names the writer for each key. The handler does not hold this rule:
+  `evidence.ingest` takes the keys from `save_memory(supersedes=)`, so each
+  agent-facing door holds it. `POST /evidence` needs no check, because it never
+  stores the body's `metadata` (only the `evidence_type` and `source_origin` it
+  builds itself). `POST /commands/batch` and MCP `execute_mutation` hold a
+  narrower rule for an `evidence.ingest` command's `evidence.metadata`: a
+  `lifecycle` is accepted only as `{"state": "current"}` with no `superseded_by`
+  or `valid_until` (the operator restore below), and an `evidence_ref` only when
+  it equals the value the same `doc_id` already holds (so a metadata bag read back
+  and re-sent keeps working). Anything else is a 422 for the whole batch,
+  before any command runs, or an `INVALID_PARAMS` for `execute_mutation`, and the
+  message names the governed writer. A stored document above the key's clearance
+  reads as absent for that comparison. Nothing is written on any refusal. The overwrite check compares the label this request
   writes, so a re-put that omits `sensitivity` over a labelled document is the
   downgrade it always was.
 - REST `POST /api/v1/vectors` judges every row before it writes any, so a refused
