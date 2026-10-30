@@ -674,12 +674,12 @@ trellis admin reindex-vectors [--batch-size <n>] [--limit <n>] [--force] [--dry-
 | `--dry-run` | off | Count what would be embedded without calling the embedder. |
 | `--format` | `text` | `text` or `json`. |
 
-This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — it is the explicit, operator-driven backfill path. It **does** require the embedder and vector store to be configured, and exits non-zero when they are not. Content-less documents are skipped; per-document embed failures are counted and logged, never fatal. Rerunning is always safe (rows are keyed by `doc_id`).
+This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — it is the explicit, operator-driven backfill path. It **does** require the embedder and vector store to be configured, and exits non-zero when they are not. Content-less documents are skipped; per-document embed failures are counted and logged, never fatal. Rerunning is always safe (rows are keyed by `doc_id`). A document under the `trace-summary:` prefix that has no vector row is left alone and counted in `skipped_reserved` (dry run too): the trace-embed worker owns the first vector at those ids, because a vector row there makes it skip that trace for good. The worker reaches only traces at or after its watermark, so a skipped row for an older trace stays unembedded until `trellis worker embed-traces --reset-watermark` runs. With `--force`, a reserved id that already has a vector is re-embedded like any other.
 
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "errors": 0, "dry_run": false}
+{"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "skipped_reserved": 0, "errors": 0, "dry_run": false}
 ```
 
 ### `trellis admin resync-vector-metadata` (divergence repair)
@@ -1860,7 +1860,7 @@ learning-artifacts directory the Review queue reads. Each row carries:
 - `candidate_id`, `intent_family`, the source `item_id`, and a
   `source_excerpt` of at most 300 characters, resolved as a promotion
   resolves it. `source_excerpt_status` is `included` or the reason there is
-  none, including `source_withheld` for a noise or archived source;
+  none, including `source_withheld` for a noise or archived source and `source_labelled` for one labelled above `internal`;
 - `helpful_count`, `unhelpful_count`, `distinct_helpful_sessions` and
   `sessionless_helpful_count` (`null` when an older artifact never wrote the
   field), and `target_entity_count`;
@@ -3064,7 +3064,7 @@ Three properties worth knowing:
 
 A third gate runs **after** collection, over the whole pool (#613): an item whose `Lifecycle` is `superseded` is withheld under reason `superseded` only when the `superseded_by` it names is itself a candidate — by `item_id`, or as a graph node whose `evidence_ref` property is that document id. With the successor absent the loser is served as before (recency-demoted, fetchable); a malformed stamp never hides; a supersession cycle is served whole with one `supersession_cycle_kept` warning. The gate runs before the budget walk, so a successor that is a candidate but is then cut by `max_items` / `max_tokens` (or by the rendered pack's own token budget) leaves neither version served; the withholding note still counts the loser under `superseded`.
 
-The stamp's first deterministic producer is an explicit declaration by the agent that wrote the replacement (#613). `save_memory(content, supersedes=T)` marks document `T` superseded by the memory it stores — or, on an exact-content hit, by the document that already holds that content. `save_knowledge(name, content=… or evidence_ref=…, supersedes=N)` marks entity `N` **and** `N`'s evidence document superseded by the *new entity's evidence document*, because that document id is what a pack carries for the new version and what the gate matches. Both stamps are governed writes: `evidence.ingest` for a document (metadata-only — the content goes back unchanged, the write clock is kept, nothing is re-embedded, and the lifecycle is mirrored onto the vector row) and `entity.update` for a node, each with `requested_by` set to the calling surface (`mcp:save_memory` / `mcp:save_knowledge`). Every check runs before the first write, and a refusal writes nothing and says so: an id that is not a document (`save_memory`) or not an entity (`save_knowledge`), an archived target (the stamp replaces the whole `lifecycle` value, so stamping would un-archive it), a target already superseded by something else, a self-reference, a revert that would close a cycle the gate keeps whole, and — for `save_memory` only — a target that is part of a chunked document (its chunks are separate rows the gate would keep serving) or content that near-duplicates a memory other than the target. `save_knowledge` does not refuse over `N`'s evidence document: one that is missing, chunked, archived or already superseded by something else is left unchanged and named in the reply, and `N` is still stamped. On `save_knowledge` the stamps go on once the new evidence document exists and before the entity is created, so a failure never leaves a new entity beside an old version that is still served. The stamps carry no idempotency key and check state instead: re-sending a call writes nothing already in place, finishes a call that failed partway, and re-applies a stamp an operator has undone. An explicit `supersedes=` bypasses the reconcile-on-write judge (`TRELLIS_ENABLE_RECONCILE_ON_WRITE`), since the caller has already said what the write replaces. The parameter is MCP-only; REST, the CLI and the SDK have no equivalent yet.
+The stamp's first deterministic producer is an explicit declaration by the agent that wrote the replacement (#613). `save_memory(content, supersedes=T)` marks document `T` superseded by the memory it stores — or, on an exact-content hit, by the document that already holds that content. `save_knowledge(name, content=… or evidence_ref=…, supersedes=N)` marks entity `N` **and** `N`'s evidence document superseded by the *new entity's evidence document*, because that document id is what a pack carries for the new version and what the gate matches. Both stamps are governed writes: `evidence.ingest` for a document (metadata-only — the content goes back unchanged, the write clock is kept, nothing is re-embedded, and the lifecycle is mirrored onto the vector row) and `entity.update` for a node, each with `requested_by` set to the calling surface (`mcp:save_memory` / `mcp:save_knowledge`). Every check runs before the first write, and a refusal writes nothing and says so: an id that is not a document (`save_memory`) or not an entity (`save_knowledge`), an archived target (the stamp replaces the whole `lifecycle` value, so stamping would un-archive it), a target already superseded by something else, a self-reference, a revert that would close a cycle the gate keeps whole, and — for `save_memory` only — a target that is part of a chunked document (its chunks are separate rows the gate would keep serving) or content that near-duplicates a memory other than the target. A `save_memory` target under the `trace-summary:` prefix is refused on the id alone, before any lookup, so the answer is the same whether or not the row exists: that namespace belongs to the trace embed worker (#1076). `save_knowledge` does not refuse over `N`'s evidence document: one that is missing, chunked, archived or already superseded by something else is left unchanged and named in the reply, and `N` is still stamped. On `save_knowledge` the stamps go on once the new evidence document exists and before the entity is created, so a failure never leaves a new entity beside an old version that is still served. The stamps carry no idempotency key and check state instead: re-sending a call writes nothing already in place, finishes a call that failed partway, and re-applies a stamp an operator has undone. An explicit `supersedes=` bypasses the reconcile-on-write judge (`TRELLIS_ENABLE_RECONCILE_ON_WRITE`), since the caller has already said what the write replaces. The parameter is MCP-only; REST, the CLI and the SDK have no equivalent yet.
 
 Undoing a stamp:
 
@@ -3437,7 +3437,7 @@ even a meta-trace.
 
 ```bash
 trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--itt] \
-    [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
+    [--by-commit] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
     [--planned-n N] [--settle-hours H] [--seed N] [--limit N] [--format text|json]
 ```
 
@@ -3448,6 +3448,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
+| `--by-commit` | off | Add `by_commit`, a descriptive per-build table of the analysed tasks; no estimate, and no other figure changes |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
 | `--power-sims` | `600` | Simulated experiments per power estimate |
@@ -3506,10 +3507,12 @@ calls, the tool-call count, and whether hook feedback preceded it); the funnel
 counts those as `pre_treatment_excluded`. A join written before capture
 recorded the timing is undecidable: it stays in, `pre_treatment_unknown` counts
 it, and the exclusion reads "partially applied" until none are left (a join is
-rewritten with the timing only when its session is parsed again, so a
-watermark reset back-fills old ones; a back-fill also re-dates each rewritten
-join, so the main-session rollup, which windows on the join's `occurred_at`,
-pulls those old sessions into the current window). The rule is per session:
+rewritten with the timing only when its session is parsed again;
+[`trellis-session-capture --rejoin-since`](#trellis-session-capture---rejoin-since)
+back-fills old ones without a watermark reset, which would re-run distillation;
+a back-fill also re-dates each rewritten join, so the main-session rollup, which
+windows on the join's `occurred_at`, pulls those old sessions into the current
+window). The rule is per session:
 an earlier stop's feedback in a multi-prompt session also excludes a later
 task's retrieval, which sub-agent units rarely meet. `pre_treatment_hook_feedback_seen`
 counts the decided tasks whose session held any hook feedback; zero across
@@ -3577,6 +3580,24 @@ an id). The exact specification:
   `mean_residual_withheld` are means of residuals, not of the outcome, and sit
   under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
   the unadjusted run, where they are outcome means.
+
+`--by-commit` adds a descriptive table of how the analysed tasks split across the
+builds that served them, so a reader can judge whether a deploy inside the window
+confounds the comparison. It is not a second estimate: no p-value, interval or
+verdict per build, and every other figure is what it is without the flag (the
+JSON carries no `by_commit` key unless it is passed, and the text table follows
+the descriptive block). A task's build is the first 12 characters of
+`metadata.write_provenance.commit` on its earliest `PACK_ASSEMBLED` row, or
+`unidentified` when the row has no stamp or its commit is null. `rows` come in
+first-seen order, each with `build`, `first_seen` and `last_seen` (the earliest
+and latest first-pack times of the tasks counted under it) and, per arm, `n` and
+`outcome_mean`, the mean of the primary's outcome column (`null` for an empty
+arm). The rows cover the same tasks as the primary: the analysed set, so cut-offs
+(unless `--itt`) and tasks without the outcome are out. A task whose packs came
+from more than one build is counted once, under its earliest build, and also in
+`units_spanning_builds`, so the table never sums to more than the analysed
+tasks. The commit is the one the build stamped at install, so an editable
+install on a moved working tree names the commit it was installed at.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
@@ -3705,7 +3726,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 
 **Promotion-ready digest (#845).** Both `--format json`'s `learning_promotion_ready` field and the `intent_learning_candidates.json` artifact's `promotion_ready` key carry a surfacing-only summary — `count` of `promote_guidance` candidates with `helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (currently `1`) and `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate` desc, then `times_served` desc). Text output prints `"N candidate(s) promotion-ready — review with trellis curate promote-learning or the Review tab"` when `N > 0` (singular at `N == 1`). Nothing here promotes anything; it only tells a reader that candidates are waiting. A candidate's `precedent_name` also gets a readable fallback name (first non-empty line of its document, frontmatter and heading markers stripped) when it has no `title` and its item resolves — kept as a bare item id only when the item can't be resolved.
 
-**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes.
+**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes. A precedent whose source is labelled above `internal` (`confidential` or `restricted`, a chunk judged by its parent too) carries no source text and no source id outside `properties.source_item_id`: no excerpt, a neutral name unless a reviewer supplied one, a statistics sentence without the id, and `source_excerpt_status` reads `source_labelled`.
 
 ### `trellis worker enrich`
 
@@ -3766,6 +3787,75 @@ trellis worker capture-sessions [--dry-run] [--format text|json]
 | `--format` | `text` | `text` or `json`. |
 
 Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`. A session that raises mid-sweep is skipped and left for retry rather than ending the sweep; it is counted in `sessions_errored` and handled the same way (`"partial"`, non-zero unless `TRELLIS_CAPTURE_STRICT=0`).
+
+### `trellis-session-capture --rejoin-since`
+
+A one-off back-fill for `CAPTURE_SESSION_PACKS` joins written before a payload key
+existed (`outcome`, `retrieval_timing`, `covariates`). The sweep parses a transcript
+again only when its file changes, so an old join would otherwise read as `unknown`
+to the pack holdout's pre-treatment exclusion for good. A watermark reset is not the
+remedy: it re-runs distillation through the judge and can write near-duplicate
+memories.
+
+```bash
+trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]
+```
+
+It takes every transcript the sweep would discover whose file mtime is at or after
+the instant (ISO-8601 **with** a UTC offset; a naive value is a usage error, exit 2),
+**ignoring the watermark**, parses it exactly as the sweep does (same parent and
+sub-agent resolution, same `TRELLIS_CAPTURE_SOURCE_SYSTEM`) and writes a join only
+where it differs from the session's latest one. Transcripts from an ephemeral
+project are skipped, as in the sweep.
+
+It does **not** build or call a judge (no `llm:` block is needed), distil, gate,
+write a memory or document, emit `CAPTURE_SWEEP_COMPLETED` or a training pair, or
+read or write the watermark file. `--dry-run` writes nothing and reports the counts
+a live run would. The report is JSON on stdout: `mode` (`"rejoin"`), `since`,
+`dry_run`, `transcripts_root`, `source_system`, `sessions_scanned` (= `pack_joins_recorded` + `pack_joins_unchanged` +
+`sessions_skipped_empty` + `sessions_errored`), `sessions_skipped_ephemeral`. A
+session that raises is counted in `sessions_errored`, logged as
+`capture_rejoin_session_failed`, and skipped; the run goes on and exits `3`
+whatever `TRELLIS_CAPTURE_STRICT` says.
+
+A rewritten join is stamped when it is written, never backdated, and the holdout
+reads that stamp in three places (`src/trellis/analyze/holdout.py`):
+
+1. **Settle.** `_finished` requires a completed, non-dry-run sweep at least
+   `trellis analyze holdout --settle-hours` (default 3) after the session's latest
+   join, so every rewritten session reads `unfinished` until the next sweep that
+   completes that long after the rejoin. Run the rejoin at least 3 hours before a
+   nightly sweep, and read the holdout only after that sweep.
+2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
+   so the rollup re-dates to the rejoin time, and a run with `--until` earlier than
+   the rejoin drops every rewritten session from the rollup. The rollup is
+   descriptive; the primary estimate does not read it.
+3. **Join scan.** The scan that reads joins is windowed by event time, so it sees a
+   rewritten join at its new time.
+
+The per-task primary analysis is unaffected: it dates a task from its first pack, and
+reads only the latest join's payload. Selection is by mtime, so re-dating only moves a
+join later; it cannot pull in a session whose transcript last changed before the
+instant.
+
+**Choose an instant at or before the start of the holdout window you will analyse**
+(its first holdout row). A transcript's mtime is roughly when the session ended,
+which is after treatment, and never earlier than its first pack. An instant inside
+the window decides only the sessions that ended after it and leaves the rest
+`unknown`; if being withheld changes how long a session runs, that selection differs
+by arm and biases the estimate. An instant at or before the window start covers
+every unit in it.
+
+Check `source_system` in a `--dry-run` report before the live run: it comes from the
+caller's `TRELLIS_CAPTURE_SOURCE_SYSTEM`, and if that differs from the nightly sweep's,
+every join is rewritten under the wrong source and its sweep-based settle check never
+passes.
+
+A rejoin over a whole experiment can roughly double the joins in the window, and the
+holdout's join scan keeps only the newest `--limit` events (default 5000). When it
+truncates, the evidence window starts later and earlier units fall `outside_window`
+in both arms, which costs units rather than biasing them. Read the report's scan
+coverage after the rejoin, and raise `trellis analyze holdout --limit` if it was cut.
 
 ---
 
