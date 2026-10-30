@@ -674,12 +674,12 @@ trellis admin reindex-vectors [--batch-size <n>] [--limit <n>] [--force] [--dry-
 | `--dry-run` | off | Count what would be embedded without calling the embedder. |
 | `--format` | `text` | `text` or `json`. |
 
-This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — it is the explicit, operator-driven backfill path. It **does** require the embedder and vector store to be configured, and exits non-zero when they are not. Content-less documents are skipped; per-document embed failures are counted and logged, never fatal. Rerunning is always safe (rows are keyed by `doc_id`).
+This command does **not** require the `TRELLIS_ENABLE_EMBED_ON_INGEST` flag — it is the explicit, operator-driven backfill path. It **does** require the embedder and vector store to be configured, and exits non-zero when they are not. Content-less documents are skipped; per-document embed failures are counted and logged, never fatal. Rerunning is always safe (rows are keyed by `doc_id`). A document under the `trace-summary:` prefix that has no vector row is left alone and counted in `skipped_reserved` (dry run too): the trace-embed worker owns the first vector at those ids, because a vector row there makes it skip that trace for good. The worker reaches only traces at or after its watermark, so a skipped row for an older trace stays unembedded until `trellis worker embed-traces --reset-watermark` runs. With `--force`, a reserved id that already has a vector is re-embedded like any other.
 
 **JSON output:**
 
 ```json
-{"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "errors": 0, "dry_run": false}
+{"status": "ok", "scanned": 240, "embedded": 198, "skipped_existing": 30, "skipped_empty": 12, "skipped_reserved": 0, "errors": 0, "dry_run": false}
 ```
 
 ### `trellis admin resync-vector-metadata` (divergence repair)

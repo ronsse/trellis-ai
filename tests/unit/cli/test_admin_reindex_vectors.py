@@ -14,6 +14,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.errors import ConfigError
 from trellis.stores.registry import _KnowledgePlane
 from trellis_cli.admin import admin_app
@@ -110,6 +111,124 @@ class TestReindexVectorsCLI:
         _seed_documents()
         summary = _run_json("--limit", "1")
         assert summary["scanned"] == 1
+
+
+class TestReindexVectorsLeavesReservedIdsToTheWorker:
+    """A ``trace-summary:`` id with no vector is the trace-embed worker's to embed.
+
+    The worker treats a vector row at that id as "this trace is done", so a
+    first vector written here for a row it did not write would blind it to the
+    real trace for good.
+    """
+
+    RESERVED = "trace-summary:trace-0001"
+
+    def _seed_reserved(self) -> None:
+        _seed_documents()
+        _get_registry().knowledge.document_store.put(
+            self.RESERVED, "filed by a caller", metadata={}
+        )
+
+    def test_reserved_id_without_a_vector_is_not_embedded(self, cli_env) -> None:
+        self._seed_reserved()
+
+        summary = _run_json()
+
+        assert summary["skipped_reserved"] == 1
+        assert summary["embedded"] == 2  # doc-1 and doc-2, not the reserved row
+        assert summary["scanned"] == 4
+        vector_store = _get_registry().knowledge.vector_store
+        assert vector_store.get(self.RESERVED) is None
+        assert vector_store.get("doc-1") is not None
+
+    def test_a_chunk_id_under_the_prefix_is_reserved_too(self, cli_env) -> None:
+        _seed_documents()
+        chunk = f"{self.RESERVED}#chunk-0"
+        _get_registry().knowledge.document_store.put(
+            chunk, "filed by a caller", metadata={}
+        )
+
+        summary = _run_json()
+
+        assert summary["skipped_reserved"] == 1
+        assert _get_registry().knowledge.vector_store.get(chunk) is None
+
+    def test_a_rerun_and_a_forced_run_still_leave_it_unembedded(self, cli_env) -> None:
+        self._seed_reserved()
+        _run_json()
+
+        assert _run_json()["skipped_reserved"] == 1
+        # ``--force`` re-embeds rows that already have a vector; it does not
+        # grant a first vector to one that has none.
+        forced = _run_json("--force")
+        assert forced["skipped_reserved"] == 1
+        assert forced["embedded"] == 2
+        assert _get_registry().knowledge.vector_store.get(self.RESERVED) is None
+
+    def test_dry_run_counts_it_as_reserved_not_as_a_candidate(self, cli_env) -> None:
+        self._seed_reserved()
+
+        summary = _run_json("--dry-run")
+
+        assert summary["skipped_reserved"] == 1
+        assert summary["embedded"] == 2
+        assert _get_registry().knowledge.vector_store.count() == 0
+
+    def test_force_re_embeds_a_reserved_id_that_already_has_a_vector(
+        self, cli_env
+    ) -> None:
+        self._seed_reserved()
+        vector_store = _get_registry().knowledge.vector_store
+        vector_store.upsert(self.RESERVED, [9.0, 9.0, 9.0], {"content": "stale"})
+
+        # Without --force it is an ordinary already-indexed row.
+        plain_run = _run_json()
+        assert plain_run["skipped_reserved"] == 0
+        assert plain_run["skipped_existing"] == 1
+        assert vector_store.get(self.RESERVED)["vector"] == [9.0, 9.0, 9.0]
+
+        forced = _run_json("--force")
+        assert forced["skipped_reserved"] == 0
+        assert forced["embedded"] == 3  # doc-1, doc-2 and the reserved row
+        row = vector_store.get(self.RESERVED)
+        assert row["vector"] == fake_embed("filed by a caller")
+        assert row["metadata"]["content"] == "filed by a caller"
+
+    def test_empty_reserved_row_is_counted_empty_first(self, cli_env) -> None:
+        _get_registry().knowledge.document_store.put(self.RESERVED, "", metadata={})
+
+        summary = _run_json()
+
+        assert summary["skipped_empty"] == 1
+        assert summary["skipped_reserved"] == 0
+
+    def test_lookalike_ids_are_ordinary(self, cli_env) -> None:
+        store = _get_registry().knowledge.document_store
+        # The prefix is exact: no colon, other case, or a leading word is a
+        # different namespace and indexes as usual.
+        for doc_id in ("trace-summary", "Trace-Summary:x", "my-trace-summary:x"):
+            store.put(doc_id, f"body of {doc_id}", metadata={})
+
+        summary = _run_json()
+
+        assert summary["skipped_reserved"] == 0
+        assert summary["embedded"] == 3
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_exit_code_is_zero_in_both_formats(self, cli_env, fmt: str) -> None:
+        self._seed_reserved()
+
+        result = runner.invoke(admin_app, ["reindex-vectors", "--format", fmt])
+
+        assert result.exit_code == 0, result.output
+
+    def test_text_output_names_the_reserved_count(self, cli_env) -> None:
+        self._seed_reserved()
+
+        result = runner.invoke(admin_app, ["reindex-vectors"])
+
+        # Rich wraps the line at the terminal width; read it as one sentence.
+        assert "1 reserved," in " ".join(plain(result.output).split())
 
 
 class TestReindexVectorsStoreResolveFailure:
