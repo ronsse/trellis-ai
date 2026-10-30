@@ -116,7 +116,16 @@ committed state rather than papering over a conflict that was never
 detected. Only single-row writers take the claim: ``upsert_edges_bulk``
 does not (it would need a sorted per-row claim order across every row
 it writes, like Postgres's bulk edge path), so a bulk write racing
-another writer of the same edge can still leave two current rows.
+another writer of the same edge can still leave two current rows (#1078).
+On a backend that sets ``VERIFY_EDGE_WRITE_UNIQUENESS`` (ArcadeDB),
+``upsert_edges_bulk`` therefore re-reads its triplets once the batch
+commits, in one read for the whole batch, and re-writes each triplet found
+with more than one current row through the same
+:meth:`_rerun_while_edge_has_duplicate_current_row` as ``upsert_edge``,
+from that row's own properties and provenance. The ``edge_id`` it returns
+for that row is the surviving row's, and the ``edge_duplicate_current_rerun``
+warning carries ``path="bulk"``. A batch with no duplicate costs that one
+read, and a duplicate that outlasts the bound is logged, not raised.
 
 ArcadeDB 26.10.1 ships the upstream page-slot fix (ArcadeDB PR #9270)
 and closes the underlying race on its own, measured 0 of 40 calls
@@ -1418,6 +1427,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         source_id: str,
         target_id: str,
         edge_type: str,
+        path: str = "single",
     ) -> _T:
         """Re-run a committed edge write while its triplet has two current rows.
 
@@ -1436,7 +1446,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         already committed and logs ``outcome="endpoint_missing"`` for either.
         Nothing here raises for a duplicate that outlasts the bound: the write
         has committed, and the warning says what was left (``resolved``,
-        ``remaining``).
+        ``remaining``). ``path`` names the writer (``single`` or ``bulk``) in that
+        warning.
         """
         reruns = 0
         endpoint_gone = False
@@ -1469,6 +1480,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 source_id=source_id,
                 target_id=target_id,
                 edge_type=edge_type,
+                path=path,
             )
         return outcome
 
@@ -1807,6 +1819,59 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             extractor_tier=extractor_tier,
         )["extractor_tier"]
 
+        attempt, rewrite_earliest = self._edge_write_attempts(
+            source_id,
+            target_id,
+            edge_type,
+            properties,
+            source_trace_id=source_trace_id,
+            agent_id=agent_id,
+            confidence=confidence,
+            evidence_ref=evidence_ref,
+            extractor_tier=extractor_tier,
+        )
+        outcome = self._rerun_on_unreadable_endpoints(
+            attempt, source_id=source_id, target_id=target_id
+        )
+        if not isinstance(outcome, _EndpointMiss):
+            if self.VERIFY_EDGE_WRITE_UNIQUENESS:
+                outcome = self._rerun_while_edge_has_duplicate_current_row(
+                    rewrite_earliest,
+                    outcome,
+                    source_id=source_id,
+                    target_id=target_id,
+                    edge_type=edge_type,
+                )
+            return str(outcome["edge_id"])
+        msg = (
+            f"Cannot upsert edge: source {source_id!r} or target "
+            f"{target_id!r} has no current version"
+        )
+        raise ValueError(msg)
+
+    def _edge_write_attempts(
+        self,
+        source_id: str,
+        target_id: str,
+        edge_type: str,
+        properties: dict[str, Any] | None,
+        *,
+        source_trace_id: str | None,
+        agent_id: str | None,
+        confidence: float | None,
+        evidence_ref: str | None,
+        extractor_tier: str | None,
+    ) -> tuple[Callable[[], Any], Callable[[], Any]]:
+        """Build one edge's write: ``(attempt, rewrite_earliest)``.
+
+        Each callable runs the whole claim-taking write and returns its record,
+        or an :class:`_EndpointMiss` when an endpoint has no current row.
+        ``attempt`` carries ``edge_id`` forward from the shown row;
+        ``rewrite_earliest`` from the earliest row, which is what a re-run
+        after a racing commit needs (:meth:`upsert_edge` and, for a batch that
+        raced, :meth:`upsert_edges_bulk`). ``extractor_tier`` is already
+        normalized.
+        """
         # One Cypher round trip: endpoint-lock prelude + edge-claim prelude +
         # endpoint MATCH + existing-edge OPTIONAL MATCH + close-old +
         # create-new, in a single query. Each endpoint is narrowed to the
@@ -1954,24 +2019,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 return _EndpointMiss((source_id, target_id))
             return record
 
-        outcome = self._rerun_on_unreadable_endpoints(
-            _attempt, source_id=source_id, target_id=target_id
-        )
-        if not isinstance(outcome, _EndpointMiss):
-            if self.VERIFY_EDGE_WRITE_UNIQUENESS:
-                outcome = self._rerun_while_edge_has_duplicate_current_row(
-                    lambda: _attempt(earliest_cypher),
-                    outcome,
-                    source_id=source_id,
-                    target_id=target_id,
-                    edge_type=edge_type,
-                )
-            return str(outcome["edge_id"])
-        msg = (
-            f"Cannot upsert edge: source {source_id!r} or target "
-            f"{target_id!r} has no current version"
-        )
-        raise ValueError(msg)
+        return _attempt, lambda: _attempt(earliest_cypher)
 
     def upsert_edges_bulk(
         self,
@@ -2173,7 +2221,79 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         edge_ids: list[str] = [""] * len(edges)
         for r in records:
             edge_ids[int(r["row_index"])] = str(r["edge_id"])
+        if self.VERIFY_EDGE_WRITE_UNIQUENESS:
+            self._collapse_duplicate_current_bulk_rows(
+                edges, per_row_provenance, edge_ids
+            )
         return edge_ids
+
+    def _collapse_duplicate_current_bulk_rows(
+        self,
+        edges: list[dict[str, Any]],
+        provenance: list[dict[str, Any]],
+        edge_ids: list[str],
+    ) -> None:
+        """Repair each triplet of a committed batch that has two current rows.
+
+        ``upsert_edges_bulk`` takes no ``EdgeClaim``, so on a backend whose
+        commit check can miss two writes to one edge
+        (``VERIFY_EDGE_WRITE_UNIQUENESS``) a racing writer's row can survive
+        beside the batch's own (#1078). One read finds the triplets with more
+        than one current row; each is then re-written the way
+        :meth:`upsert_edge` re-writes a raced edge, through
+        :meth:`_rerun_while_edge_has_duplicate_current_row`, from that row's
+        properties and provenance, and its ``edge_ids`` entry becomes the
+        surviving row's id. A batch with no duplicate costs that one read.
+        """
+        duplicated = self._rows_with_duplicate_current_edges(edges)
+        for i in sorted(duplicated):
+            spec = edges[i]
+            _, rewrite_earliest = self._edge_write_attempts(
+                spec["source_id"],
+                spec["target_id"],
+                spec["edge_type"],
+                spec.get("properties"),
+                **provenance[i],
+            )
+            outcome = self._rerun_while_edge_has_duplicate_current_row(
+                rewrite_earliest,
+                {"edge_id": edge_ids[i]},
+                source_id=spec["source_id"],
+                target_id=spec["target_id"],
+                edge_type=spec["edge_type"],
+                path="bulk",
+            )
+            edge_ids[i] = str(outcome["edge_id"])
+
+    def _rows_with_duplicate_current_edges(
+        self, edges: list[dict[str, Any]]
+    ) -> set[int]:
+        """Indices of the ``edges`` whose triplet has more than one current row.
+
+        One round trip for the whole batch, matching each endpoint by ``node_id``
+        on any row as :meth:`_count_current_edge_rows` does. It filters in
+        ``WHERE`` rather than in a property pattern, for the reason the write's
+        ``OPTIONAL MATCH`` does (ArcadeDB does not resolve ``UNWIND`` row
+        references there).
+        """
+        records = self._run_read_list(
+            "UNWIND $triplets AS trip "
+            "MATCH (s:Node)-[e:EDGE]->(d:Node) "
+            "WHERE s.node_id = trip.source_id AND d.node_id = trip.target_id "
+            "AND e.edge_type = trip.edge_type AND e.valid_to IS NULL "
+            "WITH trip.row_index AS row_index, count(e) AS n "
+            "WHERE n > 1 RETURN row_index",
+            triplets=[
+                {
+                    "row_index": i,
+                    "source_id": spec["source_id"],
+                    "target_id": spec["target_id"],
+                    "edge_type": spec["edge_type"],
+                }
+                for i, spec in enumerate(edges)
+            ],
+        )
+        return {int(r["row_index"]) for r in records}
 
     def _bulk_endpoint_refusal(self, session: Any, miss: _EndpointMiss) -> ValueError:
         """The ``upsert_edges_bulk`` error for the row ``miss`` refused."""

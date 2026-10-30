@@ -321,6 +321,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`upsert_edges_bulk` on ArcadeDB leaves one current row per triplet (part of
+  #1078).** #1086 gave `upsert_edge` a re-read after its write commits, but the
+  bulk path takes no `EdgeClaim`, so a bulk batch racing another writer of the
+  same edge could still commit beside that writer's row and leave two. On a
+  backend that sets `VERIFY_EDGE_WRITE_UNIQUENESS` (ArcadeDB; Neo4j is
+  unchanged), `upsert_edges_bulk` now reads, in one round trip, which triplets
+  of the committed batch have more than one current row, and re-writes each of
+  them through the same bounded re-run as `upsert_edge`, from that row's own
+  properties and provenance. The id returned for a re-written row is the
+  surviving row's. A batch with no duplicate costs that one read; a duplicate
+  that outlasts the bound is logged, not raised, because the write has
+  committed. The `edge_duplicate_current_rerun` warning gains `path` (`single`
+  or `bulk`). The bulk-vs-bulk and bulk-vs-single race checks now also run in
+  `test_arcadedb_graph.py`; the opposite-row-order one stays Neo4j-only, as it
+  asserts zero driver retries and ArcadeDB resolves overlapping batches by
+  commit-time conflict retry.
+
 - **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
   (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
   the served item the precedent came from, often a document, and the listing

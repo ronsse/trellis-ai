@@ -315,35 +315,53 @@ def test_concurrent_edge_update_leaves_one_current_row(graph_store):
     )
 
 
+def test_concurrent_bulk_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_bulk_edge_create_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+# The opposite-row-order check asserts zero driver retries, and ArcadeDB resolves
+# overlapping batches by commit-time conflict retry (DeadlockDetected, "slot rebase").
+
+
+@pytest.mark.parametrize("raced_position", [0, 1], ids=["first-row", "second-row"])
 @pytest.mark.parametrize(
     ("racer_committed", "racer_wins_the_id"),
     [("earlier", True), ("later", False)],
 )
-def test_upsert_edge_collapses_a_row_a_racing_writer_committed_unseen(
-    graph_store, monkeypatch, racer_committed, racer_wins_the_id
+def test_upsert_edges_bulk_collapses_a_row_a_racing_writer_committed_unseen(
+    graph_store, monkeypatch, racer_committed, racer_wins_the_id, raced_position
 ):
-    """Force the interleaving behind #1078: a second writer's row lands unseen.
+    """Force the bulk side of #1078: a second current row lands after the batch.
 
-    The live create race hit it about once in 2,500 reps on CI: both
-    writers committed, claim row included, with no error, and neither saw the
-    other's edge. The loop above cannot be relied on to reach that, so this
-    commits the second writer's row by hand right after the first write
-    returns, and the post-commit re-read must find it and re-run the write.
-
-    The survivor carries the earliest row's ``edge_id``, so whichever writer
-    committed first has reported an id that still names the current edge, and
-    it carries the re-running writer's properties.
+    ``upsert_edges_bulk`` takes no ``EdgeClaim``, so a racing writer's row can
+    survive beside the batch's own. This commits that row by hand right after
+    the batch's write returns, for one triplet of two (the first or the
+    second), and the recount must find it and re-write that triplet from its
+    own spec. The returned id is the survivor's, which is the earliest row's,
+    and the other triplet of the batch is not touched: one row, the batch's
+    own, never re-versioned.
     """
-    graph_store.upsert_node("dup-src", "dup-node", {})
-    graph_store.upsert_node("dup-tgt", "dup-node", {})
-    real_write = graph_store._execute_edge_claim_write
-    raced: list[str] = []
-    first_edge_id: list[str] = []
+    import neo4j
 
-    def write_then_lose_the_race(tx_function):
-        result = real_write(tx_function)
+    for node_id in ("dup-s0", "dup-t0", "dup-s1", "dup-t1"):
+        graph_store.upsert_node(node_id, "dup-node", {})
+    raced_key = f"dup-s{raced_position}"
+    raced_target = f"dup-t{raced_position}"
+    other_position = 1 - raced_position
+    real_execute_write = neo4j.Session.execute_write
+    raced: list[str] = []
+
+    def write_then_lose_the_race(self, tx_function, *args, **kwargs):
+        result = real_execute_write(self, tx_function, *args, **kwargs)
         if not raced:
-            first_edge_id.append(result["edge_id"])
             now = datetime.now(UTC)
             stamp = (
                 now - timedelta(minutes=1) if racer_committed == "earlier" else now
@@ -351,13 +369,15 @@ def test_upsert_edge_collapses_a_row_a_racing_writer_committed_unseen(
             raced.append(stamp)
             with graph_store._driver.session(database=graph_store._database) as session:
                 session.run(
-                    "MATCH (s:Node {node_id: 'dup-src'}) WHERE s.valid_to IS NULL "
-                    "MATCH (t:Node {node_id: 'dup-tgt'}) WHERE t.valid_to IS NULL "
+                    "MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL "
+                    "MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL "
                     "CREATE (s)-[e:EDGE]->(t) SET e = $props",
+                    source_id=raced_key,
+                    target_id=raced_target,
                     props={
                         "version_id": "dup-racer-version",
-                        "source_id": "dup-src",
-                        "target_id": "dup-tgt",
+                        "source_id": raced_key,
+                        "target_id": raced_target,
                         "edge_type": "dup-rel",
                         "properties_json": '{"writer": "racer"}',
                         "edge_id": "dup-racer-edge",
@@ -367,22 +387,42 @@ def test_upsert_edge_collapses_a_row_a_racing_writer_committed_unseen(
                 )
         return result
 
-    monkeypatch.setattr(
-        graph_store, "_execute_edge_claim_write", write_then_lose_the_race
-    )
+    monkeypatch.setattr(neo4j.Session, "execute_write", write_then_lose_the_race)
 
-    returned_id = graph_store.upsert_edge(
-        "dup-src", "dup-tgt", "dup-rel", {"writer": "a"}
+    returned = graph_store.upsert_edges_bulk(
+        [
+            {
+                "source_id": f"dup-s{k}",
+                "target_id": f"dup-t{k}",
+                "edge_type": "dup-rel",
+                "properties": {"writer": "bulk"},
+            }
+            for k in (0, 1)
+        ]
     )
 
     assert len(raced) == 1
     current = graph_store.get_edges(
-        "dup-src", direction="outgoing", edge_type="dup-rel"
+        raced_key, direction="outgoing", edge_type="dup-rel"
     )
     assert len(current) == 1, [row["edge_id"] for row in current]
-    expected_id = "dup-racer-edge" if racer_wins_the_id else first_edge_id[0]
-    assert returned_id == current[0]["edge_id"] == expected_id
-    assert current[0]["properties"] == {"writer": "a"}
+    assert current[0]["properties"] == {"writer": "bulk"}
+    if racer_wins_the_id:
+        assert returned[raced_position] == current[0]["edge_id"] == "dup-racer-edge"
+    else:
+        assert returned[raced_position] == current[0]["edge_id"] != "dup-racer-edge"
+    untouched = graph_store.get_edges(
+        f"dup-s{other_position}", direction="outgoing", edge_type="dup-rel"
+    )
+    assert [row["edge_id"] for row in untouched] == [returned[other_position]]
+    with graph_store._driver.session(database=graph_store._database) as session:
+        rows_of_untouched = session.run(
+            "MATCH (:Node {node_id: $source_id})-[e:EDGE]->"
+            "(:Node {node_id: $target_id}) RETURN count(e) AS n",
+            source_id=f"dup-s{other_position}",
+            target_id=f"dup-t{other_position}",
+        ).single()["n"]
+    assert rows_of_untouched == 1
 
 
 def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
