@@ -146,7 +146,7 @@ ROSTER: dict[str, str] = {
     "ingest:ingest_evidence": GATED,  # POST /evidence
     "ingest:upsert_vectors": GATED,  # POST /vectors
     "ingest:ingest_bulk": FREE,  # POST /ingest/bulk
-    "mutations:execute_batch": MUTATION,  # POST /commands/batch
+    "mutations:execute_batch": GATED,  # POST /commands/batch
     "observations:record_observation": MUTATION,  # POST /observations
     "observations:list_observations": GATED,  # GET /observations
     "observations:record_measurement": MUTATION,  # POST /measurements

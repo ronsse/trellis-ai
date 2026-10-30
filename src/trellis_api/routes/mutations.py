@@ -19,6 +19,7 @@ from trellis.mutate import (
     reject_reserved_metadata,
     requires_admin_scope,
 )
+from trellis.mutate.evidence_pointer_keys import evidence_ingest_pointer_refusal
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import request_clearance, resolve_requested_by
@@ -127,7 +128,12 @@ def _build_command(
                 "``detail`` is a list of field errors), or a command names "
                 "an operation outside the Operation enum "
                 "(BatchOperationNameError -- ``detail`` is a plain string "
-                "naming the bad value; see ``_parse_operation``)."
+                "naming the bad value; see ``_parse_operation``), or an "
+                "``evidence.ingest`` command's ``evidence.metadata`` carries a "
+                '``lifecycle`` that is not ``{"state": "current"}`` or an '
+                "``evidence_ref`` the document does not already hold "
+                "(``detail`` is a plain string; the whole batch is refused and "
+                "nothing is written)."
             ),
             "model": BatchCommandBodyError | BatchOperationNameError,
         },
@@ -164,6 +170,21 @@ def execute_batch(
     command's) carries the same restriction, even though nothing reads it
     yet. Either one naming a reserved key refuses the whole batch with
     400, naming the key, before any command executes.
+
+    An ``evidence.ingest`` command's own ``evidence.metadata`` may not use
+    ``lifecycle`` or ``evidence_ref`` to withhold or redirect an item: the pack
+    builder withholds by id, so a ``lifecycle`` that says ``superseded`` would
+    withhold every item under the document's id (a graph node's included) and an
+    ``evidence_ref`` the item whose successor it names. A ``lifecycle`` is
+    accepted only as ``{"state": "current"}``, with any other field null or at
+    its default, which is how an operator restores a superseded document (a set
+    ``deprecation_reason`` would let a caller forge a redaction tombstone), and
+    an ``evidence_ref`` only when it equals the value the document the command
+    writes already holds, so a round-tripped metadata bag keeps working.
+    Anything else refuses the whole batch with 422, before any command executes
+    and whatever the strategy, the way an unknown operation does; the message
+    names the governed writer. A stored document above the key's clearance
+    reads as absent for the comparison.
     """
     operations = [_parse_operation(item.operation) for item in req.commands]
 
@@ -207,6 +228,23 @@ def execute_batch(
         # str(exc) is ReservedMetadataKeyError's own message -- built from
         # RESERVED_COMMAND_METADATA_KEYS, not a second copy of this prose.
         raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    # A caller's ``lifecycle`` or ``evidence_ref`` on an ``evidence.ingest`` can
+    # withhold or redirect an item other than the document, so a command that
+    # carries one outside the restore form is refused the way an unknown
+    # operation is: the whole batch, before any command executes, whatever the
+    # strategy. Judged on the built commands, so the document id checked is the
+    # one the command writes. See trellis.mutate.evidence_pointer_keys.
+    document_store = get_registry().knowledge.document_store
+    clearance = request_clearance(ctx)
+    for command in commands:
+        if command.operation is not Operation.EVIDENCE_INGEST:
+            continue
+        refusal = evidence_ingest_pointer_refusal(
+            command, document_store=document_store, clearance=clearance
+        )
+        if refusal is not None:
+            raise HTTPException(status_code=422, detail=refusal.message)
 
     batch = CommandBatch(
         commands=commands,
