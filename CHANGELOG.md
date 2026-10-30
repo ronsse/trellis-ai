@@ -321,6 +321,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin reindex-vectors` leaves the first vector at a
+  `trace-summary:` id to the trace-embed worker (refs #1076).** The worker
+  treats a vector row at `trace-summary:<trace_id>` as "this trace is embedded"
+  and skips it. A document filed under that prefix before it was reserved had no
+  vector unless embed-on-ingest was on, so `reindex-vectors` would have given it
+  the first one and blinded the worker to the real trace for good. A reserved id
+  with no vector row is now skipped and counted in the new `skipped_reserved`
+  summary key (text output and JSON, dry run included, exit code unchanged); with
+  `--force`, a reserved id that already has a vector is re-embedded as before.
+  No pack gains or loses an item.
+
 - **Observation reads and entity edges conceal pointers to unreadable
   documents (follow-up to #1063 and #1072).** `GET /api/v1/observations` and MCP
   `query_observations` served each observation's `evidence_ref` as stored. It is
