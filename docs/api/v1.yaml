@@ -4305,6 +4305,19 @@ paths:
         either case.
 
 
+        ``metadata`` may not carry ``lifecycle`` or ``evidence_ref`` (422, whatever
+
+        the value and the caller, nothing written): the pack builder withholds items
+
+        by id, so a ``lifecycle`` would withhold every item under this document''s id
+
+        and an ``evidence_ref`` the item whose successor it names. Supersede
+
+        with MCP ``save_memory(supersedes=...)``; the message names the governed
+
+        writer for each key.
+
+
         A ``doc_id`` that already exists is refused (409) when the stored
 
         document''s label is above the key''s clearance, or above the label this
@@ -7193,9 +7206,9 @@ paths:
 
         cut as the embed path cuts it, and its ``node_role``, ``node_type``,
 
-        ``agent_id``, ``document_form`` and ``excerpt`` are the document''s, or absent
+        ``agent_id``, ``document_form``, flat ``content_type`` and ``excerpt`` are the
 
-        where the document has none.
+        document''s, or absent where the document has none.
 
         For a chunk id (``<parent>#chunk-<digits>``) ``parent_doc_id`` is the chunk
 
