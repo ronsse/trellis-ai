@@ -352,6 +352,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A learning promotion copies no text or id from a source labelled above
+  `internal` (part of #1080).** A promoted precedent holds no sensitivity label of its own, but
+  the promotion read its source's body, title and id without asking for the
+  source's label: the `Source excerpt:` text, a name built from the source's
+  title or first line (or its id), and the `Source item '<id>' showed ...`
+  sentence. A `confidential` or `restricted` source (a chunk is judged by its
+  parent too) therefore reached every caller at `internal` clearance. Now such a
+  promotion writes no excerpt (`source_excerpt_status` reads `source_labelled`),
+  a neutral name with `name_source` `neutral` unless a reviewer supplied the
+  name, and a statistics sentence that reads `The source item showed ...` with no
+  id. A store that cannot answer the label read counts as labelled. A source with
+  no label, or none stored, promotes byte for byte as before, and
+  `properties.source_item_id` is kept as the structured pointer. Precedents
+  already promoted are not rewritten.
+
 - **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
   #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
   write target on every door), but `supersedes=` names a row to be stamped, not
