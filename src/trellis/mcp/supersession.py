@@ -36,6 +36,10 @@ import structlog
 
 from trellis.core.error_sanitize import render_exception_detail, sanitize_error_message
 from trellis.core.hashing import content_hash
+from trellis.core.reserved_doc_ids import (
+    TRACE_SUMMARY_DOC_ID_PREFIX,
+    is_trace_summary_doc_id,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -140,7 +144,21 @@ def check_memory_target(
     A ``target`` above the caller's ``clearance`` is answered exactly as a
     missing one, so a key that cannot read it cannot learn it exists, and
     cannot stamp it superseded.
+
+    A ``target`` under the trace-summary prefix is refused first, on the id
+    alone (#1076): the trace-embed worker owns that namespace, and a stamp
+    would withhold a trace's summary on the strength of another caller's
+    memory. Checking before the lookup keeps the answer the same whether or
+    not the row exists, so the refusal is no existence oracle.
     """
+    if is_trace_summary_doc_id(target):
+        return _refused(
+            "value",
+            "supersedes",
+            f"supersedes cannot target {target}: ids under "
+            f"{TRACE_SUMMARY_DOC_ID_PREFIX!r} belong to the trace embed worker, "
+            "and such a row is not superseded by a memory",
+        )
     doc = visible_document(
         registry.knowledge.document_store, target, clearance=clearance
     )

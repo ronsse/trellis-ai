@@ -321,6 +321,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
+  #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
+  write target on every door), but `supersedes=` names a row to be stamped, not
+  written, and a `trace-summary:<id>` target passed the document checks. The
+  stamp was then rejected by the evidence-ingest id guard *after* the memory was
+  stored, so the caller got `Memory saved` plus a warning to "re-send to retry"
+  that could never succeed. The check now refuses on the id alone, before the
+  readability lookup, so the answer is the same whether or not the row exists and
+  nothing is written: `value` / `supersedes`, naming the worker as the owner. The
+  match is exact and case-sensitive, as the worker builds the id. The automated
+  supersession seams (reconcile-on-write, the capture reconcile pass) and
+  `classification.set` are unchanged.
+
 - **`GET /api/v1/precedents` conceals a `source_item_id` the caller may not read
   (part of #1080).** A learning promotion's `payload.source_item_id` is the id of
   the served item the precedent came from, often a document, and the listing

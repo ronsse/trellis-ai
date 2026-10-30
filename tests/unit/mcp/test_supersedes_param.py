@@ -536,6 +536,30 @@ def _m2_node(reg: StoreRegistry) -> Prepared:
     )
 
 
+#: The trace-embed worker's id namespace (#1075, #1076): never a ``supersedes=``
+#: target, whether or not a row is there.
+TRACE_SUMMARY_TARGET = "trace-summary:zf-trace"
+_TRACE_SUMMARY_FRAGMENT = (
+    f"supersedes cannot target {TRACE_SUMMARY_TARGET}: ids under "
+    "'trace-summary:' belong to the trace embed worker"
+)
+
+
+def _trace_summary_row(reg: StoreRegistry) -> Prepared:
+    _put(reg, TRACE_SUMMARY_TARGET, T_TEXT, source_system="trace_embed")
+    return Prepared(
+        {"content": X_TEXT, "supersedes": TRACE_SUMMARY_TARGET},
+        _TRACE_SUMMARY_FRAGMENT,
+    )
+
+
+def _trace_summary_absent(reg: StoreRegistry) -> Prepared:
+    return Prepared(
+        {"content": X_TEXT, "supersedes": TRACE_SUMMARY_TARGET},
+        _TRACE_SUMMARY_FRAGMENT,
+    )
+
+
 def _self_doc_id(reg: StoreRegistry) -> Prepared:
     t = _doc_id(save_memory(T_TEXT))
     return Prepared(
@@ -734,6 +758,12 @@ _DANGLING, _VALUE = "dangling_reference", "value"
 REFUSALS = [
     RefusalCase("m2-unknown", _MEMORY, _DANGLING, "supersedes", _m2_unknown),
     RefusalCase("m2-node", _MEMORY, _DANGLING, "supersedes", _m2_node),
+    RefusalCase(
+        "m-trace-summary-row", _MEMORY, _VALUE, "supersedes", _trace_summary_row
+    ),
+    RefusalCase(
+        "m-trace-summary-absent", _MEMORY, _VALUE, "supersedes", _trace_summary_absent
+    ),
     RefusalCase("self-doc-id", _MEMORY, _VALUE, "supersedes", _self_doc_id),
     RefusalCase("self-identical", _MEMORY, _VALUE, "supersedes", _self_identical),
     RefusalCase("m4-chunked-parent", _MEMORY, _VALUE, "supersedes", _m4_chunked_parent),
@@ -824,6 +854,73 @@ def test_refusal_writes_nothing_and_says_so(temp_registry, case):
     assert rejected[0].payload["tool"] == case.tool
     assert rejected[0].payload["rejections"][0]["kind"] == case.kind
     assert rejected[0].payload["rejections"][0]["loc"] == case.loc
+
+
+def _refusal_of(target: str) -> tuple[int, str, dict[str, Any]]:
+    with pytest.raises(McpError) as excinfo:
+        save_memory(X_TEXT, supersedes=target)
+    error = excinfo.value.error
+    return error.code, error.message, error.data
+
+
+def test_trace_summary_refusal_is_no_existence_oracle(temp_registry):
+    reg = temp_registry
+    absent = _refusal_of(TRACE_SUMMARY_TARGET)
+    _put(reg, TRACE_SUMMARY_TARGET, T_TEXT, source_system="trace_embed")
+
+    assert _refusal_of(TRACE_SUMMARY_TARGET) == absent
+    assert _TRACE_SUMMARY_FRAGMENT in absent[1]
+
+
+def test_trace_summary_refusal_leaves_the_worker_row_byte_identical(temp_registry):
+    reg = temp_registry
+    docs = reg.knowledge.document_store
+    _put(
+        reg,
+        TRACE_SUMMARY_TARGET,
+        T_TEXT,
+        source_system="trace_embed",
+        trace_id="zf-trace",
+    )
+
+    def snapshot() -> str:
+        return json.dumps(docs.get(TRACE_SUMMARY_TARGET), sort_keys=True, default=str)
+
+    before = snapshot()
+    _refusal_of(TRACE_SUMMARY_TARGET)
+
+    assert snapshot() == before
+    assert LIFECYCLE_KEY not in _meta(reg, TRACE_SUMMARY_TARGET)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["Trace-Summary:zf-trace", "my-trace-summary:zf-trace", "trace-summary-zf-trace"],
+)
+def test_ids_beside_the_reserved_prefix_are_stamped_like_any_other(
+    temp_registry, target
+):
+    # The prefix is exact and case-sensitive, as the worker builds it, so a
+    # near miss is an ordinary document id and follows the ordinary path.
+    reg = temp_registry
+    _put(reg, target, T_TEXT)
+
+    reply = save_memory(X_TEXT, supersedes=target)
+
+    x = _doc_id(reply)
+    assert reply == f"Memory saved (supersedes {target}): {x}"
+    assert declared_successor(_meta(reg, target)) == x
+
+
+@pytest.mark.parametrize(
+    "target", ["Trace-Summary:zf-trace", "my-trace-summary:zf-trace"]
+)
+def test_an_absent_id_beside_the_reserved_prefix_is_dangling(temp_registry, target):
+    code, message, _data = _refusal_of(target)
+
+    assert code == INVALID_PARAMS
+    assert f"supersedes does not reference an existing document: {target}" in message
+    assert "trace embed worker" not in message
 
 
 # ---------------------------------------------------------------------------
