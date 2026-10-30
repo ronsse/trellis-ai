@@ -23,6 +23,7 @@ from trellis.learning.scoring import (
     NAME_SOURCE_ITEM_ID,
     NAME_SOURCE_NEUTRAL,
     NAME_SOURCE_REVIEWER,
+    REFUSED_REDACTED,
     SOURCE_EXCERPT_INCLUDED,
     SOURCE_EXCERPT_LABELLED,
     _apply_readable_name_fallback,
@@ -33,6 +34,8 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.mutate import build_curate_executor
+from trellis.mutate.handlers import REDACTION_TOMBSTONE_REASON
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
@@ -176,6 +179,36 @@ def test_a_chunk_of_an_unlabelled_parent_still_lends_its_text(
     assert status == SOURCE_EXCERPT_INCLUDED
     assert excerpt is not None
     assert "SECRETWORD" in excerpt
+
+
+def test_a_chunk_whose_row_is_gone_is_still_judged_by_its_parent(
+    documents: SQLiteDocumentStore,
+) -> None:
+    """A re-chunk deletes the chunk row; the candidate still names the old id."""
+    chunk_id = f"{SOURCE_ID}#chunk-0"
+    documents.put(SOURCE_ID, BODY, _label("confidential"))
+    assert documents.get(chunk_id) is None
+    assert resolve_source_excerpt(chunk_id, documents) == (
+        None,
+        SOURCE_EXCERPT_LABELLED,
+    )
+
+    payloads = _build(_candidate(chunk_id, title=TITLE), documents)
+
+    _assert_no_source_leak(payloads, chunk_id, SOURCE_ID)
+
+
+def test_a_chunk_whose_row_is_gone_under_an_unlabelled_parent_is_unchanged(
+    documents: SQLiteDocumentStore,
+) -> None:
+    chunk_id = f"{SOURCE_ID}#chunk-0"
+    documents.put(SOURCE_ID, BODY, _label("internal"))
+
+    entity = _entity(_build(_candidate(chunk_id), documents))
+
+    assert entity["properties"]["source_excerpt_status"] == "document_not_found"
+    assert entity["name"] == f"Learning: {FAMILY} :: {chunk_id}"
+    assert f"Source item '{chunk_id}' showed " in entity["properties"]["description"]
 
 
 @pytest.mark.parametrize(
@@ -346,3 +379,68 @@ def test_a_labelled_promotion_lands_and_a_re_run_is_already_promoted(
     assert TITLE not in row["content"]
 
     assert submit()["status"] == "already_promoted"
+
+
+class _Promotions:
+    """A real registry, and the promote-and-redact steps the tests below share."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        self.registry = StoreRegistry(stores_dir=stores_dir)
+        self.graph = self.registry.knowledge.graph_store
+        self.events = self.registry.operational.event_log
+        self.documents = self.registry.knowledge.document_store
+        self.executor = build_curate_executor(self.registry, clearance="restricted")
+        self.graph.upsert_node("entity://shared", "entity", {"name": "shared"})
+
+    def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        payloads = _build(copy.deepcopy(candidate), self.documents)
+        return submit_learning_promotion(
+            self.executor,
+            payloads["entity_payload"],
+            payloads["edge_payloads"],
+            requested_by="test",
+            graph_store=self.graph,
+            event_log=self.events,
+            document_store=self.documents,
+        )
+
+    def promote_while_confidential(self) -> dict[str, Any]:
+        """A candidate named from the source's text, promoted once the source is
+        labelled, then the label lowered: the shape of a re-promotion."""
+        self.documents.put(SOURCE_ID, BODY, _label("internal"))
+        candidate = _named_from_source(self.documents)
+        self.documents.put(SOURCE_ID, BODY, _label("confidential"))
+        assert self.submit(candidate)["status"] == "promoted"
+        self.documents.put(SOURCE_ID, BODY, _label("internal"))
+        return candidate
+
+
+@pytest.fixture
+def promotions(tmp_path: Path):
+    p = _Promotions(tmp_path)
+    yield p
+    p.registry.close()
+
+
+def test_lowering_the_label_does_not_make_the_earlier_promotion_a_redaction(
+    promotions: _Promotions,
+) -> None:
+    """The neutral name a labelled source earns is not a redaction marker."""
+    candidate = promotions.promote_while_confidential()
+
+    assert promotions.submit(candidate)["status"] == "promoted"
+
+
+def test_a_real_redaction_of_a_labelled_source_is_still_refused(
+    promotions: _Promotions,
+) -> None:
+    candidate = promotions.promote_while_confidential()
+    promotions.documents.put(
+        SOURCE_ID,
+        "",
+        {LIFECYCLE_KEY: {"deprecation_reason": REDACTION_TOMBSTONE_REASON}},
+    )
+
+    assert promotions.submit(candidate)["status"] == REFUSED_REDACTED

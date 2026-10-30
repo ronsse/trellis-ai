@@ -939,8 +939,9 @@ def _source_is_labelled(item_id: str, document_store: DocumentStore | None) -> b
     The clearance a promoted precedent is served at: it holds no label, so a
     source a caller at ``internal`` cannot read must not lend it text. A chunk
     is judged by its parent as well (:class:`DocumentClearance`). A missing
-    document, or no store to ask, is no verdict (``False``); a store that
-    raises is unreadable, and an outage must not read as permission (``True``).
+    document, or no store to ask, is no verdict (``False``), except a chunk id
+    whose parent is labelled; a store that raises is unreadable, and an outage
+    must not read as permission (``True``).
     """
     if document_store is None or not item_id:
         return False
@@ -949,10 +950,10 @@ def _source_is_labelled(item_id: str, document_store: DocumentStore | None) -> b
 
     try:
         document = document_store.get(item_id)
-        if not document:
-            return False
+        # No early return on a missing row: a chunk whose row is gone (a
+        # re-chunk) is still judged by its parent, as ``readable_ids`` does.
         gate = DocumentClearance(document_store, "internal")
-        return not gate.permits(item_id, document.get("metadata"))
+        return not gate.permits(item_id, (document or {}).get("metadata"))
     except Exception as exc:  # advisory step; fails closed
         logger.warning(
             "precedent_source_label_lookup_failed",
@@ -994,7 +995,7 @@ def resolve_source_excerpt(
             error_type=type(exc).__name__,
         )
         return None, "lookup_failed"
-    labelled = bool(document) and _source_is_labelled(item_id, document_store)
+    labelled = _source_is_labelled(item_id, document_store)
     if labelled or withheld or not document:
         # The graph axis never re-checks a precedent's source, so copying a
         # noise/archived or labelled body here would launder it into every pack.
@@ -1499,8 +1500,9 @@ def _source_redacted(
     them, and the ``REDACTION_APPLIED`` event names the source's id, not the
     precedent's. Three signals, any of which answers yes:
 
-    * the current node's markers, ``name_source`` ``neutral`` or
-      ``source_excerpt_status`` ``source_redacted``. These do not last: a
+    * the current node's markers, ``name_source`` ``neutral`` (not when
+      ``source_excerpt_status`` is ``source_labelled``, which also earns that
+      name) or ``source_excerpt_status`` ``source_redacted``. These do not last: a
       later promotion of a regenerated candidate writes a new version without
       them, so they cannot be the only signal;
     * a redaction trace (:func:`_redaction_trace`) on the payload's
@@ -1520,7 +1522,12 @@ def _source_redacted(
         and existing_node.get("node_type") == "precedent"
         and isinstance(node_props, Mapping)
         and (
-            node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+            (
+                node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+                # A labelled source gets the neutral name too; lowering its
+                # label later must not read the earlier promotion as redacted.
+                and node_props.get("source_excerpt_status") != SOURCE_EXCERPT_LABELLED
+            )
             or node_props.get("source_excerpt_status") == SOURCE_EXCERPT_REDACTED
         )
     ):
