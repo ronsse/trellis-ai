@@ -1468,6 +1468,11 @@ Scope boundaries, stated plainly:
   reads the summary row to report the same count (and the same `embedded`) the
   live pass will, and the text output prints a `redacted:` line when it is
   non-zero.
+  A promoted precedent's row can be a tombstone too: `precedent.promote`
+  over it is refused with `precedent_document_redacted` (re-run `redaction.apply`
+  if the node still exists; promotion has no re-ingest flag), and
+  `precedent.demote` / `precedent.reinstate` leave it alone, adding a result
+  warning and `document_row: "skipped_redaction_tombstone"` on their event.
 - **Linked documents are not cascaded** — documents the node merely links
   through `document_ids` are untouched (one may back many entities); the union
   of those links across all versions rides the audit payload for a follow-up
