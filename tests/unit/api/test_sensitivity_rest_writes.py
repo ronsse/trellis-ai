@@ -1188,7 +1188,19 @@ class TestVectorsPartialBatch:
         assert _vector_row(registry, "doc-secret") is None
 
 
-_ABSENT = object()
+class _Absent:
+    """A field left out of the payload.
+
+    ``ids=repr`` puts this in a test id, and a bare ``object()`` renders as its
+    memory address: the id then differs per process, and pytest-xdist aborts at
+    collection because two workers disagree about which tests exist.
+    """
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+_ABSENT = _Absent()
 
 
 class TestVectorsItemIds:

@@ -41,6 +41,12 @@ from tests.structlog_isolation import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+# Rich freezes a console's size from COLUMNS and LINES when it is built, and
+# every trellis_cli module builds one at import, so an ambient pair beats a
+# test's later COLUMNS. pytest-xdist workers on GitHub start with 80 and 24.
+os.environ.pop("COLUMNS", None)
+os.environ.pop("LINES", None)
+
 # A short, deterministic-feeling profile for in-tree property tests. Property
 # tests in this repo are invariant checks, not soak/fuzz tests — 50 examples
 # is enough to catch regressions without slowing the unit suite.
