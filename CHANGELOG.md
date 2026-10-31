@@ -4,6 +4,23 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
+  (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
+  its criteria, so archived, too-young and wrong-state rows used up the window and a
+  prune found nothing while eligible nodes sat further back, still reporting
+  `scan_truncated: false`. The scan now pages through the graph (`search_nodes`, newest
+  first) until it has `max_items` candidates or has read `MAX_ENTITIES_SCANNED` (20,000)
+  nodes. `scan_truncated` is `true` only when that cap left rows unread; the audit
+  payload gains `scan_truncated_planes`, and the operator message names the capped plane
+  and no longer says "re-run to continue", because archived rows keep using scan budget.
+  A node deleted between two reads no longer hides the one behind it. `entities_scanned`
+  now counts every node read rather than only unconfirmed mints, and both entity criteria
+  share one walk. A later prune may therefore see more candidates than before; nothing in
+  this repository runs it on a schedule, and `max_items` still bounds what one pass
+  archives.
+
 ### Changed
 
 - **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**

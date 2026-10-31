@@ -61,6 +61,7 @@ from trellis.mutate.retention import (
     ARCHIVED_STATE,
     CURRENT_STATE,
     MAX_DOCUMENTS_SCANNED,
+    MAX_ENTITIES_SCANNED,
     ResolutionReport,
     RetentionCandidate,
     RetentionCriteria,
@@ -4136,9 +4137,17 @@ def _prune_message(
             "says nothing about the corpus"
         )
     if report.scan_truncated:
+        caps = {
+            "document": f"{MAX_DOCUMENTS_SCANNED} documents",
+            "entity": f"{MAX_ENTITIES_SCANNED} entities",
+        }
+        capped = (
+            " and ".join(caps[plane] for plane in report.scan_truncated_planes)
+            or f"{MAX_DOCUMENTS_SCANNED} documents"
+        )
         message += (
-            f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
-            "candidate set is a prefix, re-run to continue"
+            f"; WARNING scan capped at {capped} — candidate set is a prefix "
+            "of the real population, not the whole of it"
         )
     if skipped:
         message += f"; {skipped} skipped (vanished between resolve and write)"
@@ -4287,6 +4296,7 @@ class RetentionPruneHandler:
             "documents_scanned": report.documents_scanned,
             "entities_scanned": report.entities_scanned,
             "scan_truncated": report.scan_truncated,
+            "scan_truncated_planes": report.scan_truncated_planes,
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
             "skipped_restored": report.skipped_restored,

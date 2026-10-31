@@ -21,7 +21,7 @@ wrong about the live corpus:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, get_args
 
@@ -31,6 +31,8 @@ from tests.document_recency import fake_document_clock, keyword_recency_ratio
 from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
+from trellis.mutate import handlers as handlers_module
+from trellis.mutate import retention as retention_module
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     MAX_RETENTION_REASON_CHARS,
@@ -1863,3 +1865,292 @@ class TestTheRestoredGuardIsProvenanceIndependent:
         assert report.candidates == []
         assert report.skipped_restored == 1
         assert report.unselectable_lifecycle_states == [CURRENT_STATE]
+
+
+class TestEntityScanPaging:
+    """The entity scan pages the graph, so ``max_items`` bounds what is
+    *selected*, not what is *looked at*.
+
+    The scan once asked the graph for its newest ``max_items`` rows and only
+    then dropped the archived, the too-young and the wrong-state ones, so
+    those rows used up the window: a second prune pass over the same graph
+    archived nothing, and the report read ``scan_truncated=False`` beside
+    eligible rows it had never reached.
+    """
+
+    @staticmethod
+    def _clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        holder: dict[str, Any] = {"base": now, "now": now}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.graph.utc_now", lambda: holder["now"]
+        )
+        return holder
+
+    @staticmethod
+    def _node(
+        registry: StoreRegistry,
+        clock: dict[str, Any],
+        node_id: str,
+        *,
+        age_days: int,
+        mint: bool = False,
+        state: str | None = None,
+    ) -> str:
+        """Seed one node stamped ``age_days`` old (older sorts later)."""
+        clock["now"] = clock["base"] - timedelta(days=age_days)
+        props: dict[str, Any] = {"name": node_id}
+        if mint:
+            props[EXTRACTION_STATUS_PROPERTY] = EXTRACTION_STATUS_UNCONFIRMED
+        if state is not None:
+            props[LIFECYCLE_KEY] = {"state": state}
+        return registry.knowledge.graph_store.upsert_node(
+            node_id=node_id, node_type="concept", properties=props
+        )
+
+    @staticmethod
+    def _is_archived_node(registry: StoreRegistry, node_id: str) -> bool:
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        return (node["properties"].get(LIFECYCLE_KEY) or {}).get(
+            "state"
+        ) == ARCHIVED_STATE
+
+    def test_unconfirmed_mint_prune_makes_progress_across_passes(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        ids = [
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+            for i in range(6)
+        ]
+        executor = build_curate_executor(registry, clearance="restricted")
+        criteria = {"unconfirmed_mints": True, "older_than_days": 30, "max_items": 2}
+
+        for done in (2, 4, 6):
+            result = executor.execute(_prune(criteria, dry_run=False))
+            assert result.status == CommandStatus.SUCCESS, result.message
+            archived = [n for n in ids if self._is_archived_node(registry, n)]
+            # ``max_items`` still bounds what one pass archives.
+            assert len(archived) == done
+
+    def test_old_mints_reached_when_newest_window_is_young(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(2):
+            self._node(registry, clock, f"young{i}", age_days=1 + i, mint=True)
+        for i in range(3):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30, max_items=2),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["old0", "old1"]
+        assert report.scan_truncated is False
+
+    def test_lifecycle_entity_beyond_first_window_reached(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"fresh{i}", age_days=1 + i)
+        self._node(registry, clock, "stale", age_days=90, state="deprecated")
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["deprecated"], older_than_days=30, max_items=3
+            ),
+            registry,
+        )
+
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            ("stale", "lifecycle_stale")
+        ]
+
+    def test_fewer_eligible_than_max_items_is_a_complete_scan(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "young", age_days=1, mint=True)
+        for i in range(3):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+        self._node(registry, clock, "plain", age_days=200)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30, max_items=10),
+            registry,
+        )
+
+        assert len(report.candidates) == 3
+        assert report.scan_truncated is False
+        assert report.entities_scanned == 5
+
+    def test_a_mint_scan_counts_skips_only_for_mints(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Walking every node must not widen what a mint-only pass reports.
+
+        The store used to answer the mint predicate itself, so an archived
+        non-mint never reached the counters; the walk sees it and has to drop
+        it unremarked.
+        """
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "other", age_days=90, state=ARCHIVED_STATE)
+        self._node(registry, clock, "kept", age_days=91, state=CURRENT_STATE)
+        self._node(registry, clock, "m0", age_days=92, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert [c.item_id for c in report.candidates] == ["m0"]
+        assert report.skipped_already_archived == 0
+        assert report.skipped_restored == 0
+
+    @pytest.mark.parametrize(
+        ("nodes", "truncated"), [(4, False), (5, True)], ids=["exactly-cap", "past-cap"]
+    )
+    def test_the_cap_reports_only_when_rows_were_left_unread(
+        self,
+        nodes: int,
+        truncated: bool,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 4)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 3)
+        clock = self._clock(monkeypatch)
+        for i in range(nodes):
+            self._node(registry, clock, f"y{i}", age_days=1 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert report.candidates == []
+        assert report.entities_scanned == min(nodes, 4)
+        assert report.scan_truncated is truncated
+
+    def test_a_cap_that_hides_eligible_rows_says_so_to_the_operator(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 3)
+        monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", 3)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"y{i}", age_days=1 + i, mint=True)
+        self._node(registry, clock, "old", age_days=90, mint=True)
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"unconfirmed_mints": True, "older_than_days": 30})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        assert "scan capped at 3 entities" in (result.message or "")
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[0].payload["scan_truncated"] is True
+        assert events[0].payload["scan_truncated_planes"] == ["entity"]
+
+    def test_dry_run_reads_only(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"unconfirmed_mints": True, "older_than_days": 30, "max_items": 2})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        graph = registry.knowledge.graph_store
+        assert [len(graph.get_node_history(f"m{i}")) for i in range(3)] == [1, 1, 1]
+        assert not any(self._is_archived_node(registry, f"m{i}") for i in range(3))
+
+    def test_a_row_deleted_between_pages_does_not_hide_the_next_one(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An offset walk over a list that shrinks skips the row that slid up.
+
+        Page one reads the two newest; deleting one of them before page two
+        moves every later row up a place, so a plain ``offset += len(page)``
+        resumes one row too far on.
+        """
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        ids = [
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+            for i in range(6)
+        ]
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def shrinking(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) == 2:
+                assert graph.delete_node("m0")
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", shrinking)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        # ``m0`` was selected from page one before it was deleted; ``m2`` is
+        # the row a plain offset walk would have stepped over.
+        assert sorted(c.item_id for c in report.candidates) == sorted(ids)
+        assert len(calls) > 2
+
+    def test_rows_archived_between_pages_do_not_move_the_walk(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Archiving keeps a node current and keeps its place in the order."""
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        for i in range(6):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def archiving(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) == 2:
+                # One row already read, one not yet reached.
+                for node_id in ("m0", "m4"):
+                    node = graph.get_node(node_id)
+                    assert node is not None
+                    graph.upsert_node(
+                        node_id=node_id,
+                        node_type="concept",
+                        properties={
+                            **node["properties"],
+                            LIFECYCLE_KEY: {"state": ARCHIVED_STATE},
+                        },
+                    )
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", archiving)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        # ``m0`` was selected from page one before it was archived; ``m4``
+        # was archived before its page was read.
+        assert sorted(c.item_id for c in report.candidates) == [
+            "m0",
+            "m1",
+            "m2",
+            "m3",
+            "m5",
+        ]
+        assert report.skipped_already_archived == 1
