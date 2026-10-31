@@ -3225,3 +3225,12 @@ _register_backfill_outcomes(admin_app)
 from trellis_cli.admin_settings import register as _register_settings  # noqa: E402
 
 _register_settings(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# backup — online copy of the SQLite stores
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_backup import register as _register_backup  # noqa: E402
+
+_register_backup(admin_app)
