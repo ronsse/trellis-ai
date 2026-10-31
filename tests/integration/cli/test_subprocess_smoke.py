@@ -327,6 +327,40 @@ def test_structlog_routes_to_stderr_not_stdout(
     assert "[info" not in stdout, f"structlog leaked onto stdout: {stdout!r}"
 
 
+def test_a_shadowed_data_dir_warns_on_stderr_and_leaves_stdout_parseable(
+    cli_runner: Callable[..., Any],
+    initialized_cli_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """``config.yaml``'s ``data_dir`` beats the variable; the warning is stderr only.
+
+    ``init`` wrote ``data_dir`` into ``config.yaml``, so pointing
+    ``TRELLIS_DATA_DIR`` somewhere else is the restore-and-redirect mistake:
+    the key still decides. ``cli_runner`` asserts exit 0 and json-decodes
+    stdout, so a warning that reached stdout fails there; the stderr line is
+    asserted here so a clean stdout is not a vacuous pass.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    env = {
+        **initialized_cli_env,
+        "TRELLIS_DATA_DIR": str(elsewhere),
+        "TRELLIS_LOG_LEVEL": "WARNING",
+    }
+
+    for args in (
+        ["admin", "stats", "--format", "json"],
+        ["admin", "health", "--format", "json"],
+    ):
+        completed, payload = cli_runner(args, env)
+        stderr = completed.stderr.decode(errors="replace")
+        stdout = completed.stdout.decode(errors="replace")
+        assert "registry_data_dir_env_ignored" in stderr, stderr
+        assert str(elsewhere) in stderr
+        assert "registry_data_dir_env_ignored" not in stdout, stdout
+        assert not elsewhere.exists()  # the variable did not decide
+    assert payload["data_dir_disagreement"]["ignored"] == str(elsewhere)
+
+
 # ── machine-output fidelity (#403) ────────────────────────────────────
 
 
