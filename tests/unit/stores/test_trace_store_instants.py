@@ -385,6 +385,85 @@ def test_text_python_cannot_write_stays_visible(tmp_path: Path) -> None:
         store.close()
 
 
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("2026-03-04T05:06:07Z", "2026-03-04T05:06:07.000000"),
+        ("2026-03-04T05:06:07.250000Z", "2026-03-04T05:06:07.250000"),
+    ],
+    ids=["no-fraction", "fraction"],
+)
+def test_an_old_row_ending_z_is_keyed_by_its_instant(
+    tmp_path: Path, text: str, key: str
+) -> None:
+    """Python never writes ``Z``, but another writer to an old file may. The raw
+    text would sort after the same instant written with a fraction."""
+    db = tmp_path / "z.db"
+    row = _trace("z", _NOON)
+    _write_as_an_earlier_build(db, [row], texts={row.trace_id: text})
+    store = SQLiteTraceStore(db)
+    try:
+        (stored,) = store._conn.execute("SELECT created_at_utc FROM traces").fetchone()
+        assert stored == key
+        instant = datetime.fromisoformat(key).replace(tzinfo=UTC)
+        found = store.query(since=instant, until=instant)
+        assert [t.intent for t in found] == ["z"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        # Keyed by its raw digits: ``strftime`` cannot read the offset.
+        ("2026-03-04T05:06:07.123+00:00", "2026-03-04T05:06:07.123+00:00"),
+        ("2026-03-04T05:06:07+5:0", "2026-03-04T05:06:07+5:0"),
+        # Not by its raw digits: the fraction is read as six characters, so the
+        # key is the text padded, and the offset is never applied.
+        ("2026-03-04T05:06:00.5+5:0", "2026-03-04T05:06:00.5+5:00"),
+    ],
+)
+def test_text_python_cannot_write_is_keyed_deterministically(
+    tmp_path: Path, text: str, key: str
+) -> None:
+    """Pins what such text gets, whether or not that is its raw digits. The
+    column and the inline expression (used when the migration did not run)
+    agree."""
+    store = SQLiteTraceStore(tmp_path / "junk.db")
+    try:
+        assert _key(store, text) == key
+        inline = store._conn.execute(
+            f"SELECT ({_CREATED_AT_UTC_SQL}) FROM traces"  # noqa: S608
+        ).fetchone()[0]
+        assert inline == key
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["0001-01-01T00:00:00+05:30", "9999-12-31T23:00:00-05:00"],
+)
+def test_known_limit_an_old_row_past_the_edge_can_miss_its_own_stamp(
+    tmp_path: Path, text: str
+) -> None:
+    """A known limit, pinned so a fix or a regression shows. Such an old row's
+    key falls outside the edge ``as_utc`` clamps a bound to, so ``since`` its own
+    stamp misses it while ``until`` and an unbounded query find it. ``append``
+    clamps the stamp before writing, so a row it wrote is found (see
+    ``test_a_stamp_past_the_representable_edge_is_stored_and_found``)."""
+    moment = datetime.fromisoformat(text)
+    db = tmp_path / "edge-old.db"
+    _write_as_an_earlier_build(db, [_trace("edge", moment)])
+    store = SQLiteTraceStore(db)
+    try:
+        assert [t.intent for t in store.query()] == ["edge"]
+        assert [t.intent for t in store.query(until=moment)] == ["edge"]
+        assert store.query(since=moment) == []
+    finally:
+        store.close()
+
+
 #: Texts ``strftime`` would read as the current time, which a generated column
 #: and its index refuse to evaluate. The NUL ends the string for ``strftime``,
 #: so the last one is ``now`` to it and a different string to ``lower()``.
@@ -557,6 +636,66 @@ def test_a_read_only_file_still_opens_and_reads_by_instant(
     finally:
         folder.chmod(0o755)
         db.chmod(0o644)
+
+
+def test_opening_survives_an_exclusive_lock_taken_as_the_alter_starts(
+    tmp_path: Path,
+) -> None:
+    """In a rollback-journal file an exclusive lock also refuses the re-read of
+    the columns that follows a failed ``ALTER``. Opening must still return, with
+    the column counted as absent, as any other refused migration."""
+    db = tmp_path / "exclusive.db"
+    _write_as_an_earlier_build(db, _old_traces())
+    held: list[sqlite3.Connection] = []
+
+    class TakesTheLock(SQLiteTraceStore):
+        def _migrate_add_created_at_utc(self) -> bool:
+            def take(statement: str) -> None:
+                if statement.startswith("ALTER") and not held:
+                    other = sqlite3.connect(db, timeout=0.1, isolation_level=None)
+                    other.execute("BEGIN EXCLUSIVE")
+                    held.append(other)
+
+            # Opening put the file in WAL, where a reader is never refused.
+            self._conn.execute("PRAGMA journal_mode=DELETE")
+            self._conn.set_trace_callback(take)
+            try:
+                return super()._migrate_add_created_at_utc()
+            finally:
+                self._conn.set_trace_callback(None)
+
+    try:
+        with capture_logs() as logs:
+            store = TakesTheLock(db)
+        assert len(held) == 1
+        try:
+            assert not store._has_created_at_utc
+            (skipped,) = _skips(logs)
+            assert skipped["event"] == "trace_schema_migration_skipped"
+            # While the lock is held a read is refused, exactly as a plain
+            # ``SELECT`` from another connection is: that is not this store's.
+            store._conn.execute("PRAGMA busy_timeout=100")
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                store.query()
+            plain = sqlite3.connect(db, timeout=0.1)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    plain.execute("SELECT trace_json FROM traces").fetchall()
+            finally:
+                plain.close()
+            _release(held.pop())
+            _check_reads_by_instant(store)
+        finally:
+            store.close()
+    finally:
+        for other in held:
+            _release(other)
+
+    again = SQLiteTraceStore(db)
+    try:
+        assert again._has_created_at_utc
+    finally:
+        again.close()
 
 
 def test_an_already_migrated_file_opens_under_a_writer_lock_without_a_warning(
@@ -748,5 +887,8 @@ def test_a_stamp_past_the_representable_edge_is_stored_and_found(
             "SELECT created_at, created_at_utc FROM traces"
         ).fetchone()
         assert stored["created_at_utc"] == _instant_key(moment)
+        # ``append`` writes the clamped value to the column; ``trace_json``
+        # (read back by ``get`` above) keeps the original.
+        assert stored["created_at"] == as_utc(moment).isoformat()
     finally:
         store.close()

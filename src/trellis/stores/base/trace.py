@@ -63,8 +63,9 @@ class TraceStore(ABC):
         happened, not by the wall-clock digits it was written with. A naive
         bound or a naive stored ``created_at`` is read as UTC (see
         :func:`as_utc`). The returned trace keeps the ``created_at`` it was
-        appended with, so a caller that compares or sorts them must normalise
-        with :func:`as_utc` first.
+        appended with (an offset's seconds, if it has any, are dropped by the
+        trace's JSON round trip, as they always were), so a caller that
+        compares or sorts them must normalise with :func:`as_utc` first.
         """
 
     @abstractmethod

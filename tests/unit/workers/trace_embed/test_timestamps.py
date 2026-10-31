@@ -12,6 +12,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
+from trellis.schemas.trace import Trace
 from trellis_workers.trace_embed import TraceEmbedWatermark, run_trace_embed_pass
 from trellis_workers.trace_embed.watermark import TraceCursor
 from trellis_workers.trace_embed.worker import collect_candidates
@@ -209,6 +213,43 @@ def test_a_page_never_steps_over_rows_between_two_offsets(registry) -> None:
         "trace-0002",  # 09:00Z
         "trace-0001",  # 10:00Z
     ]
+
+
+def test_known_limit_an_offset_with_seconds_can_skip_a_row_in_the_walk(
+    registry,
+) -> None:
+    """A known limit, pinned so a fix or a regression shows. The trace's JSON,
+    which the walk reads, keeps an offset only to the minute, while the store's
+    key keeps the second, so the walk's bound can sit up to a minute off the key
+    and step over a row within that minute. Whole-minute offsets lose nothing
+    (``test_a_page_never_steps_over_rows_between_two_offsets``). Only an
+    in-process ``datetime`` writes such an offset: the schema rejects the string.
+    """
+    sub_minute = timezone(-timedelta(hours=5, minutes=30, seconds=45))
+    day = datetime(2026, 1, 1, tzinfo=UTC)
+    stamp = datetime(2026, 1, 1, 1, 0, tzinfo=sub_minute)  # 06:30:45Z
+    traces = [
+        _at(0, day.replace(hour=7)),
+        _at(1, stamp),
+        _at(2, day.replace(hour=6, minute=30, second=20)),
+        _at(3, day.replace(hour=5)),
+    ]
+    payload = json.loads(traces[1].model_dump_json())
+    with pytest.raises(ValidationError):
+        Trace.model_validate({**payload, "created_at": "2026-01-01T01:00:00-05:30:45"})
+    read_back = Trace.model_validate_json(traces[1].model_dump_json())
+    assert read_back.created_at.utcoffset() == timedelta(hours=-5, minutes=-30)
+    _append(registry, traces)
+    store = registry.operational.trace_store
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    small, _ = collect_candidates(store, after=None, page_size=2, now=now)
+    one_page, _ = collect_candidates(store, after=None, page_size=500, now=now)
+
+    # trace-0002 (06:30:20Z) is within a minute of the offset-with-seconds row
+    # and is the one that is skipped; one page reads all four.
+    assert [t.trace_id for t in small] == ["trace-0003", "trace-0001", "trace-0000"]
+    assert sorted(t.trace_id for t in one_page) == [f"trace-000{n}" for n in range(4)]
 
 
 def test_a_small_page_over_naive_and_aware_stamps_does_not_raise(registry) -> None:

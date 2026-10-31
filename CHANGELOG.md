@@ -71,27 +71,40 @@ All notable changes to Trellis will be documented in this file.
   naive stamp read as UTC, and `SQLiteTraceStore` filters and orders on a
   generated `created_at_utc` column plus index, added to existing files on open
   without rewriting any stored row. The key applies any offset Python can write
-  (sign, hours, minutes, seconds); a sub-second offset moves it by under a
-  second, and text Python cannot write (`2026-03-04T05:06:07.123+00:00`) keeps
-  its raw digits as its key rather than disappearing. A literal `now` in an old
-  row is kept away from `strftime`, which would otherwise refuse to evaluate the
-  column and fail every open. New rows are written as UTC text; `trace_json` is
-  unchanged. The migration is best effort: a read-only file, or one another
-  connection holds the write lock on, still opens and `query` evaluates the same
-  expression inline, unindexed, until a later open succeeds (the attempt waits
-  250 ms, not the connection's ten seconds). `idx_traces_created` stays, because
-  an older build expects it, and `SCHEMA_VERSION` is not bumped, matching the
-  graph store. The trace-embed worker and its cursor order and bound by instant
-  too, so one naive trace among aware ones no longer raises `TypeError` out of
-  the pass on any backend; `as_utc` clamps a stamp `datetime` cannot name in UTC
-  (`datetime.min` at `+05:30`) to the edge instead of raising `OverflowError`.
-  The Postgres trace store now binds `as_utc(...)` on `append` and `query`, so a
-  naive stamp is stored as UTC whatever the session time zone (no change under a
-  UTC session; stored rows are not rewritten). A cursor file written by this
-  build holds an aware stamp, so an older build reading it against a store whose
-  traces are all naive raises `TypeError`; that matters only where an older
-  checkout shares the cursor file. The event log has the same text comparison on
-  `occurred_at` (`stores/sqlite/event_log.py`); it is not changed here.
+  to the column text (sign, hours, minutes, seconds); an offset with its own
+  fraction moves it by under a second. Text Python cannot write is keyed
+  deterministically, by its raw digits for `2026-03-04T05:06:07.123+00:00` (so
+  it stays in a bounded query rather than disappearing) but not always:
+  `2026-03-04T05:06:00.5+5:0` becomes `2026-03-04T05:06:00.5+5:00`. A literal
+  `now` in an old row is kept away from `strftime`, which would otherwise refuse
+  to evaluate the column and fail every open. New rows are written as UTC text,
+  and a stamp `datetime` cannot name in UTC is clamped to its edge in the
+  column; `trace_json` keeps the original. The migration is best effort: a
+  read-only file, or one another connection holds the write lock on (including
+  an exclusive lock that also refuses the follow-up re-read of the columns),
+  still opens and `query` evaluates the same expression inline, unindexed, until
+  a later open succeeds (the attempt waits 250 ms, not the connection's ten
+  seconds). Known limits: an old row past what `datetime` can name in UTC
+  (`0001-01-01T00:00+05:30`, `9999-12-31T23:00-05:00`) can be missed by
+  `query(since=<its own stamp>)`, and rows this build appends are unaffected
+  because their stamp is clamped first. `trace_json` keeps an offset only to the
+  minute, as it always has, while the key keeps the second, so an offset with
+  seconds can make the embed walk skip a row within a minute of it; whole-minute
+  offsets are unaffected. The trace schema rejects such a string, and only an
+  in-process `datetime` with a sub-minute `tzinfo` writes one.
+  `idx_traces_created` stays, because an older build expects it, and
+  `SCHEMA_VERSION` is not bumped, matching the graph store. The trace-embed
+  worker and its cursor order and bound by instant too, so one naive trace among
+  aware ones no longer raises `TypeError` out of the pass on any backend;
+  `as_utc` clamps a stamp `datetime` cannot name in UTC (`datetime.min` at
+  `+05:30`) to the edge instead of raising `OverflowError`. The Postgres trace
+  store now binds `as_utc(...)` on `append` and `query`, so a naive stamp is
+  stored as UTC whatever the session time zone (no change under a UTC session;
+  stored rows are not rewritten). A cursor file written by this build holds an
+  aware stamp, so an older build reading it against a store whose traces are all
+  naive raises `TypeError`; that matters only where an older checkout shares the
+  cursor file. The event log has the same text comparison on `occurred_at`
+  (`stores/sqlite/event_log.py`); it is not changed here.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and

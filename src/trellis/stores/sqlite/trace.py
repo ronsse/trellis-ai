@@ -29,15 +29,27 @@ logger = structlog.get_logger(__name__)
 #: the text. The fraction never reaches ``strftime``, which rounds to the
 #: millisecond, and is re-attached verbatim, so the key keeps the microsecond.
 #:
-#: Two limits. An offset's own fraction (``+05:30:15.5``, which only a
-#: hand-written ``tzinfo`` produces) is dropped, so that key is within a second
-#: of the instant. And text Python cannot write falls back to the raw text,
-#: ordered by its digits, so such a row stays in a bounded query instead of
-#: dropping out on a NULL. The ``GLOB`` keeps text that does not start with a
-#: year away from ``strftime``: ``strftime`` reads ``now`` as the current time,
-#: which a generated column and its index refuse by raising, and it stops at a
-#: NUL, so ``now\x00x`` is read as ``now`` and ``lower(created_at) = 'now'``
-#: would miss it. One such old row would otherwise fail every open.
+#: Four limits. An offset's own fraction (``+05:30:15.5``, which a stdlib
+#: ``timezone(timedelta(seconds=15, microseconds=500000))`` writes) is dropped,
+#: so that key is within a second of the instant. Text Python cannot write is
+#: keyed deterministically by what this expression makes of it, not always by its
+#: raw digits: ``.123+00:00`` keeps them, so such a row stays in a bounded query
+#: instead of dropping out on a NULL, while ``00.5+5:0`` becomes ``00.5+5:00``.
+#: An old row past what ``datetime`` can name in UTC (``0001-01-01T00:00+05:30``,
+#: ``9999-12-31T23:00-05:00``) has a key outside the edge ``as_utc`` clamps a
+#: bound to, so ``query(since=<its own stamp>)`` can miss it; ``append`` clamps
+#: such a stamp before writing it, so only old rows are affected. And the embed
+#: walk reads ``trace_json``, which keeps an offset only to the minute (as it
+#: always has), while this key keeps the second: an offset with seconds can make
+#: the walk skip a row within a minute of it. Whole-minute offsets, past 14:00
+#: included, are unaffected. The trace schema rejects an offset with seconds as
+#: a string; only an in-process ``datetime`` with such a ``tzinfo`` writes one.
+#:
+#: The ``GLOB`` keeps text that does not start with a year away from
+#: ``strftime``: ``strftime`` reads ``now`` as the current time, which a
+#: generated column and its index refuse by raising, and it stops at a NUL, so
+#: ``now\x00x`` is read as ``now`` and ``lower(created_at) = 'now'`` would miss
+#: it. One such old row would otherwise fail every open.
 _OFFSET_SQL = (
     "substr(created_at, CASE WHEN substr(created_at, 20, 1) = '.' THEN 27 ELSE 20 END)"
 )
@@ -154,8 +166,15 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
                         f"GENERATED ALWAYS AS ({_CREATED_AT_UTC_SQL}) VIRTUAL"
                     )
                 except sqlite3.OperationalError as exc:
-                    # A concurrent opener may have added it first.
-                    if "created_at_utc" not in self._trace_columns():
+                    # A concurrent opener may have added it first. The re-read
+                    # can be refused too (a journal-mode file under another
+                    # connection's exclusive lock), and then the column counts
+                    # as absent: opening must not raise.
+                    try:
+                        added = "created_at_utc" in self._trace_columns()
+                    except sqlite3.OperationalError:
+                        added = False
+                    if not added:
                         logger.warning(
                             "trace_schema_migration_skipped",
                             db_path=str(self._db_path),
@@ -205,8 +224,8 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
                         agent_id,
                         outcome_status,
                         trace.model_dump_json(),
-                        # The column is the instant in UTC; ``trace_json``
-                        # keeps the trace exactly as it was given.
+                        # The column is the instant in UTC; ``trace_json`` is
+                        # the trace's own JSON, unchanged.
                         as_utc(trace.created_at).isoformat(),
                     ),
                 )
