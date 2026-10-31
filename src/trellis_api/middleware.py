@@ -29,15 +29,21 @@ Four pieces wired into the FastAPI app from :func:`create_app`:
   ``allow_nan=False``, so an error echoing ``NaN`` or ``Infinity`` (both
   of which Python's ``json`` module parses) makes that 422 raise and the
   catch-all answer ``500 internal_error``. This handler writes a
-  non-finite float as its token. A NUL byte or an unpaired UTF-16
-  surrogate (issue #869 F5) is a second way the same ``detail[].input``
-  echo breaks rendering -- pydantic already rejects the value with a
-  ``string_unicode`` error, but that error's own ``input`` carries the
-  raw surrogate forward, and ``str.encode("utf-8")`` refuses a lone
-  surrogate outright (``allow_nan`` does not apply; there is no token to
-  substitute). This handler checks for that case first and answers 400
-  without building the 422 body at all, so the unsafe value never
-  reaches a renderer.
+  non-finite float as its token, and undecodable ``bytes`` (a body that
+  is not valid UTF-8, routed to a body model with no JSON content type,
+  so the ``input`` is the raw bytes rather than a parsed value) with
+  ``backslashreplace``, for the same reason: ``jsonable_encoder``'s
+  default ``bytes`` encoder is a strict ``.decode()``, which raises
+  ``UnicodeDecodeError`` and the catch-all answers ``500`` for what is,
+  like a non-finite float, a caller error that belongs at 422. A NUL
+  byte or an unpaired UTF-16 surrogate (issue #869 F5) is a further way
+  the same ``detail[].input`` echo breaks rendering -- pydantic already
+  rejects the value with a ``string_unicode`` error, but that error's
+  own ``input`` carries the raw surrogate forward, and
+  ``str.encode("utf-8")`` refuses a lone surrogate outright
+  (``allow_nan`` does not apply; there is no token to substitute). This
+  handler checks for that case first and answers 400 without building
+  the 422 body at all, so the unsafe value never reaches a renderer.
 
 Health and version probes pass through the middleware too; the
 overhead is a ULID + a contextvar bind, both microsecond-scale.
@@ -171,21 +177,40 @@ def _json_safe_float(value: float) -> float | str:
     return value
 
 
+def _json_safe_bytes(value: bytes) -> str:
+    """Undecodable ``bytes`` as a legible string; never raises.
+
+    ``jsonable_encoder``'s own default for ``bytes`` is ``o.decode()`` —
+    strict UTF-8 — which raises ``UnicodeDecodeError`` for a body that
+    is not valid UTF-8 and ``input`` holds the raw bytes (a body routed
+    to a model with no JSON content type, so there was no JSON parse to
+    fail on first). ``backslashreplace`` renders every byte, valid or
+    not, as an escape the caller can read back as the exact value sent —
+    unlike ``errors="replace"``, which collapses any run of bad bytes
+    into indistinguishable U+FFFD characters and so cannot tell a caller
+    which bytes, or how many, were rejected.
+    """
+    return value.decode(errors="backslashreplace")
+
+
 async def request_validation_error_handler(
     request: Request,  # noqa: ARG001 — Starlette's handler signature; the 422 needs nothing from it
     exc: Exception,
 ) -> JSONResponse:
-    """FastAPI's 422, with a non-finite float written as its token.
+    """FastAPI's 422, with a non-finite float or undecodable bytes legible.
 
     The same status and body as FastAPI's
     ``request_validation_exception_handler`` — ``{"detail": [...]}`` from
-    ``exc.errors()`` through ``jsonable_encoder`` — with one difference: a
-    non-finite float anywhere in the errors, at any depth, is rendered as
-    its token. A missing-field error echoes the whole body as its
-    ``input``, so a non-finite number anywhere in a body missing a field
-    reaches the renderer, not only one in the field that failed. A finite
-    float is returned unchanged, so every finite case *with no rating
-    unit-mismatch guess* is FastAPI's own response, byte for byte
+    ``exc.errors()`` through ``jsonable_encoder`` — with two differences:
+    a non-finite float anywhere in the errors, at any depth, is rendered
+    as its token, and undecodable ``bytes`` are rendered with
+    ``backslashreplace`` instead of raising. A missing-field error echoes
+    the whole body as its ``input``, so a non-finite number or a bad byte
+    anywhere in a body missing a field reaches the renderer, not only one
+    in the field that failed. A finite float or decodable bytes value is
+    returned unchanged (decoded the same way ``jsonable_encoder`` would
+    decode it), so every such case *with no rating unit-mismatch guess*
+    is FastAPI's own response, byte for byte
     (``tests/unit/api/test_non_finite_body.py``).
 
     A ``rating`` field rejected for being out of ``[0.0, 1.0]`` gains a
@@ -232,7 +257,9 @@ async def request_validation_error_handler(
                 )
             },
         )
-    detail = jsonable_encoder(errors, custom_encoder={float: _json_safe_float})
+    detail = jsonable_encoder(
+        errors, custom_encoder={float: _json_safe_float, bytes: _json_safe_bytes}
+    )
     return JSONResponse(status_code=422, content={"detail": detail})
 
 
