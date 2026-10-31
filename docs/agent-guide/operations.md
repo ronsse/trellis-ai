@@ -2748,13 +2748,20 @@ Below `restricted` (a key with a lower clearance, over REST or MCP; the trusted
 local CLI reads at `restricted`, so nothing here changes it) the listing
 withholds a precedent whose own document row the caller may not read, and one
 whose source (`payload.source_item_id`, else the node's
-`properties.source_item_id`) it may not read. A promotion made while its source
-sat above `internal` is exempt from the second rule: its node reads
-`source_excerpt_status` `source_labelled`, so it carries no source text and is
-served. Withholding drops the row, never rewrites its text, and happens before
-`--limit`, so a page stays full while readable precedents remain. A store that
-cannot answer, or no document store at all, withholds every row that needs a
-verdict. MCP `get_lessons` applies the same rule with the caller's clearance.
+`properties.source_item_id`) it may not read. A row that holds nothing of its
+source is exempt from the second rule and served: the node reads
+`source_excerpt_status` `source_labelled`, the node's `description` equals the
+event's (a node vouches only for the event whose text it holds, so an older
+event of a precedent promoted again is judged on its own), and the source id is
+in neither the served title nor description. Withholding drops the row, never
+rewrites its text, and happens before `--limit`, so a page stays full while
+readable precedents remain. A document store that cannot answer, or no document
+store at all, withholds every row that needs a verdict. MCP `get_lessons` applies
+the same rule with the caller's clearance. This covers precedent listings only:
+a source relabelled after promotion still reaches a read key through
+`GET /entities/{id}`, `GET /documents/{id}`, `GET /search` and `POST /packs`
+(the precedent's own row and node hold the excerpt and carry no label), and
+`GET /precedents/domains` still counts a withheld precedent's domain.
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]

@@ -7,10 +7,12 @@ key cannot read. The id is dropped from the served copy of each such row, judged
 once the rows are chosen so no title, description, count or order moves, and the
 immutable event keeps it.
 
-Every fixture row here was promoted under the source-label rule
-(``source_excerpt_status="source_labelled"``): it holds no text from its source,
-so the listing serves it and conceals only the pointer. A row that does hold
-source text is withheld outright (``test_precedent_listing_clearance.py``).
+Every fixture row but ``prec-bare`` was promoted under the source-label rule
+(``source_excerpt_status="source_labelled"``, node description equal to the
+event's, source id in neither served text): it holds nothing of its source, so
+the listing serves it and conceals only the pointer. ``prec-bare`` has the same
+node but its title names its source id, so it is withheld below ``restricted``
+like any row that holds source text (``test_precedent_listing_clearance.py``).
 """
 
 from __future__ import annotations
@@ -42,7 +44,9 @@ DOCUMENTS = {
 #: first, so the listing serves them in reverse. ``prec-bare`` is a promotion
 #: whose own title is the bare-id name of its source and whose node holds
 #: another name: ``_served_title`` reads ``payload.source_item_id`` to judge it,
-#: so a concealment that ran first would rename it.
+#: so a concealment that ran first would rename it. That title names the source
+#: id, so below ``restricted`` the row is withheld, and at ``restricted`` it is
+#: served with the title as promoted.
 LABELLED = "source_labelled"
 ROWS: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = [
     ("prec-secret", {"source_item_id": "doc-secret"}, {"name": "title of prec-secret"}),
@@ -70,6 +74,8 @@ SOURCES = {
 READ = {"prec-open", "prec-node"}
 CONFIDENTIAL = READ | {"prec-conf"}
 RESTRICTED = CONFIDENTIAL | {"prec-secret", "prec-bare"}
+#: Rows served below ``restricted``: all but the one whose title names its source.
+BELOW_RESTRICTED = [e for e, _, _ in reversed(ROWS) if e != "prec-bare"]
 
 
 def _seed(registry: StoreRegistry) -> None:
@@ -83,7 +89,13 @@ def _seed(registry: StoreRegistry) -> None:
     for entity_id, extras, node in ROWS:
         if node is not None:
             registry.knowledge.graph_store.upsert_node(
-                entity_id, "precedent", {**node, "source_excerpt_status": LABELLED}
+                entity_id,
+                "precedent",
+                {
+                    **node,
+                    "description": f"description of {entity_id}",
+                    "source_excerpt_status": LABELLED,
+                },
             )
         log.emit(
             EventType.PRECEDENT_PROMOTED,
@@ -169,18 +181,22 @@ class TestRestListing:
     ):
         low = _listing(client, registry, ["read"])
         high = _listing(client, registry, ["read", "restricted"])
-        assert [r["entity_id"] for r in low] == [r["entity_id"] for r in high]
+        assert [r["entity_id"] for r in low] == BELOW_RESTRICTED
         assert [r["entity_id"] for r in high] == [e for e, _, _ in reversed(ROWS)]
+        served = [r for r in high if r["entity_id"] != "prec-bare"]
         for field in ("event_id", "title", "description", "domain", "occurred_at"):
-            assert [r[field] for r in low] == [r[field] for r in high]
-        # The one that reads ``source_item_id`` to judge its own title keeps it.
-        (bare,) = (r for r in low if r["entity_id"] == "prec-bare")
+            assert [r[field] for r in low] == [r[field] for r in served]
+        # The row whose title names its source id is withheld below
+        # ``restricted`` and served as promoted at it, not renamed.
+        (bare,) = (r for r in high if r["entity_id"] == "prec-bare")
         assert bare["title"] == "Learning: deploys :: doc-secret"
+        assert all(r["entity_id"] != "prec-bare" for r in low)
 
     def test_only_source_item_id_is_left_out_of_a_payload(self, client, registry):
         low = _listing(client, registry, ["read"])
         high = _listing(client, registry, ["read", "restricted"])
-        for lo, hi in zip(low, high, strict=True):
+        served = [r for r in high if r["entity_id"] != "prec-bare"]
+        for lo, hi in zip(low, served, strict=True):
             assert {
                 k: v for k, v in lo["payload"].items() if k != "source_item_id"
             } == {k: v for k, v in hi["payload"].items() if k != "source_item_id"}
@@ -234,7 +250,9 @@ class TestCore:
             graph_store=registry.knowledge.graph_store,
             clearance="internal",
         )
-        assert len(rows) == len(ROWS)
+        # Every id reads as unreadable with no store: the row whose title names
+        # its source id is withheld, the rest are served without a pointer.
+        assert [r["entity_id"] for r in rows] == BELOW_RESTRICTED
         assert _sources(rows) == {}
 
     def test_a_store_that_cannot_answer_withholds_the_row(self, registry):
@@ -288,12 +306,17 @@ class TestCore:
     def test_the_events_own_payload_is_never_written_to(self, registry):
         # An SQLite log hands back fresh dicts, so only a log that returns the
         # same ``Event`` objects can show an in-place write.
+        payload = {
+            "title": "title of prec-secret",
+            "description": "description of prec-secret",
+            "source_item_id": "doc-secret",
+        }
         events = [
             Event(
                 event_type=EventType.PRECEDENT_PROMOTED,
                 source="mutation_executor",
                 entity_id="prec-secret",
-                payload={"title": "t", "source_item_id": "doc-secret"},
+                payload=dict(payload),
             )
         ]
         log = MagicMock(spec=EventLog)
@@ -306,4 +329,4 @@ class TestCore:
         )
         assert "source_item_id" not in row["payload"]
         assert row["payload"] is not events[0].payload
-        assert events[0].payload == {"title": "t", "source_item_id": "doc-secret"}
+        assert events[0].payload == payload

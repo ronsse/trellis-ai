@@ -273,6 +273,138 @@ class TestSource:
 
         assert ids_of(listing(registry, "internal")) == ["trace-1"]
 
+    def test_a_precedent_promoted_again_serves_only_the_row_that_holds_no_source(
+        self, registry: StoreRegistry, source: str
+    ) -> None:
+        # The listing serves a row per promotion, and the node vouches only for
+        # the event whose text it holds: after the source is labelled and the
+        # same candidate promoted again, the node reads ``source_labelled`` but
+        # the older event's description still holds the excerpt and the id.
+        entity_id = promote(registry, "cand:one", source)
+        relabel(registry, source, "confidential")
+        assert promote(registry, "cand:one", source) == entity_id
+        node = registry.knowledge.graph_store.get_node(entity_id)
+        assert node is not None
+        assert node["properties"]["source_excerpt_status"] == SOURCE_EXCERPT_LABELLED
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_PROMOTED, limit=10, order="desc"
+        )
+        assert len(events) == 2
+        assert len(listing(registry, "restricted")) == 2
+
+        (row,) = listing(registry, "internal")
+
+        assert row["event_id"] == events[0].event_id
+        assert source not in text_of([row])
+        assert not any(leak in text_of([row]) for leak in LEAKS)
+        (lesson,) = json.loads(text_of(listing(registry, "internal")))
+        assert lesson["event_id"] == events[0].event_id
+
+
+class TestHoldsNothingOfSource:
+    """The exemption's clauses, on hand-built rows so each can be broken alone."""
+
+    HIDDEN = "doc-hidden"
+
+    def _row(
+        self,
+        registry: StoreRegistry,
+        *,
+        node: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        registry.knowledge.document_store.put(self.HIDDEN, BODY, label("confidential"))
+        registry.knowledge.graph_store.upsert_node(
+            "prec-hand",
+            "precedent",
+            {
+                "name": "n",
+                "description": "d",
+                "source_item_id": self.HIDDEN,
+                "source_excerpt_status": SOURCE_EXCERPT_LABELLED,
+                **(node or {}),
+            },
+        )
+        registry.operational.event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            "mutation_executor",
+            entity_id="prec-hand",
+            entity_type="precedent",
+            payload={
+                "title": "n",
+                "description": "d",
+                "source_item_id": self.HIDDEN,
+                **(payload or {}),
+            },
+        )
+        return "prec-hand"
+
+    def test_a_labelled_node_holding_this_events_text_is_served(
+        self, registry: StoreRegistry
+    ) -> None:
+        # The premise the withholding cases below depart from one clause each.
+        entity_id = self._row(registry)
+
+        (row,) = listing(registry, "internal")
+
+        assert row["entity_id"] == entity_id
+        assert "source_item_id" not in row["payload"]
+        assert self.HIDDEN not in text_of([row])
+
+    @pytest.mark.parametrize(
+        ("node", "payload"),
+        [
+            ({"description": "another event's text"}, {}),
+            ({"description": None}, {}),
+            ({}, {"description": None}),
+            ({"description": 7}, {"description": 7}),
+        ],
+        ids=["differs", "node-has-none", "event-has-none", "not-a-string"],
+    )
+    def test_a_node_vouches_only_for_the_event_whose_description_it_holds(
+        self, registry: StoreRegistry, node: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        entity_id = self._row(registry, node=node, payload=payload)
+
+        assert listing(registry, "internal") == []
+        assert ids_of(listing(registry, "confidential")) == [entity_id]
+
+    @pytest.mark.parametrize(
+        ("node", "payload"),
+        [
+            (
+                {"name": "Learning: x :: doc-hidden"},
+                {"title": "Learning: x :: doc-hidden"},
+            ),
+            (
+                {"description": "taken from doc-hidden"},
+                {"description": "taken from doc-hidden"},
+            ),
+        ],
+        ids=["title", "description"],
+    )
+    def test_a_served_text_that_names_the_source_id_is_withheld(
+        self, registry: StoreRegistry, node: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        entity_id = self._row(registry, node=node, payload=payload)
+
+        assert listing(registry, "internal") == []
+        (row,) = listing(registry, "confidential")
+        assert row["entity_id"] == entity_id
+
+    @pytest.mark.parametrize("bad", [7, ["doc-hidden"], {"k": "v"}, True])
+    def test_a_non_string_event_id_does_not_hide_the_nodes_string_id(
+        self, registry: StoreRegistry, bad: Any
+    ) -> None:
+        entity_id = self._row(
+            registry,
+            node={"source_excerpt_status": SOURCE_EXCERPT_INCLUDED},
+            payload={"source_item_id": bad},
+        )
+
+        assert listing(registry, "internal") == []
+        assert ids_of(listing(registry, "confidential")) == [entity_id]
+
 
 class TestWindow:
     def _five(self, registry: StoreRegistry) -> list[str]:

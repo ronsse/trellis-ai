@@ -271,19 +271,30 @@ def list_precedents(
     * a document row exists at its entity id (a promotion writes one, and the
       keyword and semantic axes withhold it above the caller's clearance) and
       ``clearance`` may not read it;
-    * its source id (the event's ``source_item_id``, else the node's) names a
-      document ``clearance`` may not read, unless the node's
-      ``source_excerpt_status`` is ``source_labelled``: a promotion made after
-      the source carried its label copies no text and no id from it, so the row
-      holds nothing of the source to withhold.
+    * its source id (the event's ``source_item_id``, else the node's, the
+      first that is a string) names a document ``clearance`` may not read,
+      unless the row holds nothing of that source: the node's
+      ``source_excerpt_status`` is ``source_labelled`` (a promotion made after
+      the source carried its label copies no text and no id from it), the
+      node's ``description`` equals the event's (a node vouches only for the
+      event whose text it holds, and the listing serves a row per promotion, so
+      an older event of a precedent promoted again stays judged by its own
+      text), and the source id appears in neither the served title nor the
+      served description.
 
     Both are decided **before** the ``limit`` cap, with one ``readable_ids``
     call per fetch window, so a withheld row never takes a slot from a
-    servable one past the window. A store or judgement that raises withholds
-    (an outage must not read as permission). A ``clearance`` below
-    ``restricted`` with no ``document_store`` has nothing to judge against and
-    withholds every row that names a source or has a document row (an id in the
-    precedent namespace); a trace precedent, which has neither, is served.
+    servable one past the window. A document store that raises, or a
+    judgement that does, leaves unjudged ids unreadable (an outage must not
+    read as permission), so the rows that need them are withheld; a graph store
+    read that raises propagates out of this function, as it did before this
+    check, and nothing is served. A ``clearance`` below ``restricted`` with no
+    ``document_store`` has nothing to judge against: every id reads as
+    unreadable, so a row with a document row (an id in the precedent
+    namespace) is withheld, and so is a row that names a source unless the
+    exemption above holds for it, in which case it is served with the source id
+    left out of its payload. A trace precedent, which has neither a document row
+    nor a source, is served.
 
     A served learning promotion's ``payload.source_item_id`` is also left out of
     the ``payload`` when ``clearance`` may not read that document, once the rows
@@ -361,8 +372,38 @@ def _is_listed(event: Event, node: dict[str, Any] | None) -> bool:
 def _source_id_of(payload: dict[str, Any], node: dict[str, Any] | None) -> str | None:
     """The id of the item a precedent came from: the event's, else the node's."""
     props = (node or {}).get("properties") or {}
-    source = payload.get("source_item_id") or props.get("source_item_id")
-    return source if isinstance(source, str) and source else None
+    # Each candidate is tested for str on its own: a truthy non-string id on the
+    # event must not hide the node's string id from the check.
+    for source in (payload.get("source_item_id"), props.get("source_item_id")):
+        if isinstance(source, str) and source:
+            return source
+    return None
+
+
+def _holds_nothing_of_source(
+    event: Event, node: dict[str, Any] | None, source: str
+) -> bool:
+    """Whether ``event``'s served row holds nothing of ``source``.
+
+    True only when the node reads ``source_labelled``, the node's description is
+    the event's (it vouches only for the event whose text it holds), and the
+    source id is in neither the served title nor the served description.
+    """
+    # Deferred: ``trellis.learning`` imports the retrieve package.
+    from trellis.learning.scoring import SOURCE_EXCERPT_LABELLED  # noqa: PLC0415
+
+    props = (node or {}).get("properties") or {}
+    if props.get("source_excerpt_status") != SOURCE_EXCERPT_LABELLED:
+        return False
+    description = event.payload.get("description")
+    if not isinstance(description, str) or props.get("description") != description:
+        return False
+    title = _served_title(node, event.payload, event.entity_id)
+    if title is None:
+        title = event.payload.get("title")
+    served = _served_description(node, event.payload)
+    text = f"{title or ''}\n{description if served is None else served}"
+    return source not in text
 
 
 class _ListingClearance:
@@ -415,16 +456,12 @@ class _ListingClearance:
         :meth:`judge` call, then applies the two rules in
         :func:`list_precedents`.
         """
-        # Deferred: ``trellis.learning`` imports the retrieve package.
-        from trellis.learning.scoring import SOURCE_EXCERPT_LABELLED  # noqa: PLC0415
-
         planned = []
         wanted: list[str] = []
         for e in events:
             node = node_of(e)
             source = _source_id_of(e.payload, node)
-            props = (node or {}).get("properties") or {}
-            exempt = props.get("source_excerpt_status") == SOURCE_EXCERPT_LABELLED
+            exempt = source is not None and _holds_nothing_of_source(e, node, source)
             planned.append((e, source, exempt))
             if e.entity_id:
                 wanted.append(e.entity_id)
