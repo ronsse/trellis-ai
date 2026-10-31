@@ -184,11 +184,17 @@ deliberately out of scope here; the pattern is what transfers.
 from __future__ import annotations
 
 import ast
+import functools
+import hashlib
 import io
+import pickle
+import sys
 import tokenize
+import types
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 __all__ = [
     "AXES",
@@ -200,9 +206,11 @@ __all__ = [
     "NAIVE_SCANNERS",
     "PRIMARY_FILE",
     "SECOND_FILE",
+    "SHARED_PARSE_MEMO",
     "CallSite",
     "Decoy",
     "Evasion",
+    "ParseMemo",
     "RenderedCorpus",
     "assert_hand_read_floor",
     "assert_scan_is_not_vacuous",
@@ -212,12 +220,201 @@ __all__ = [
     "construction_sites",
     "decoy_lines",
     "generate_call_sites",
+    "install_parse_memo",
     "is_call_to",
     "iter_modules",
     "marker_lines",
     "name_of",
     "render_evasion_corpus",
 ]
+
+
+# ---------------------------------------------------------------------------
+# One parse per distinct source, shared by every rule in the session
+# ---------------------------------------------------------------------------
+
+#: The real ``ast.parse``, even if :func:`install_parse_memo` already ran.
+_ORIGINAL_PARSE: Callable[..., Any] = getattr(
+    ast.parse, "_parse_memo_original", ast.parse
+)
+
+
+class ParseMemo:
+    """``ast.parse``, memoised by its arguments, that can say if a tree was altered.
+
+    **Every tree handed out here is SHARED by every caller that parses the
+    same source. Do not mutate one.** That covers assigning to a field,
+    editing a ``body`` list, hanging an attribute such as ``.parent`` on a
+    node, and running an ``ast.NodeTransformer`` over it, which rewrites the
+    tree it visits in place. A rule that needs to change a tree takes
+    ``copy.deepcopy`` of the subtree first. :meth:`altered` compares each
+    tree with a fingerprint taken when it was parsed, the session fixture in
+    ``tests/conftest.py`` fails the run if any tree differs, naming the
+    source, and ``tests/unit/test_ast_parse_memo.py`` runs mutating subjects
+    through it and watches it fail.
+
+    Rule files parse ``src/`` and ``tests/`` again in every test, and one
+    parse of all of ``src/`` takes about a second, so one tree per source is
+    the saving. The memo is unbounded on purpose: its sources are the files
+    in this repository.
+
+    A ``SyntaxError`` is never cached, and arguments that cannot be hashed
+    bypass the memo rather than failing.
+    """
+
+    def __init__(self) -> None:
+        self._trees: dict[tuple[Any, ...], tuple[ast.AST, bytes | None]] = {}
+
+    def __len__(self) -> int:
+        return len(self._trees)
+
+    def parse(self, source: str, *args: Any, **kwargs: Any) -> ast.AST:
+        """``ast.parse(source, *args, **kwargs)``, the same object every time."""
+        try:
+            key = (source, args, tuple(sorted(kwargs.items())))
+            held = self._trees.get(key)
+        except TypeError:  # an unhashable argument leaves nothing to key on
+            return _ORIGINAL_PARSE(source, *args, **kwargs)
+        if held is None:
+            tree = _ORIGINAL_PARSE(source, *args, **kwargs)
+            held = self._trees.setdefault(key, (tree, _fingerprint(tree)))
+        return held[0]
+
+    def drop(self, source: str) -> None:
+        """Forget every tree parsed from *source*."""
+        for key in [key for key in self._trees if key[0] == source]:
+            del self._trees[key]
+
+    def altered(self, sources: Collection[str] | None = None) -> list[str]:
+        """One line per cached tree that no longer matches its parse-time fingerprint.
+
+        The fingerprint is a pickle of the whole tree, so it sees a changed
+        field, a moved position and an added attribute such as ``.parent``
+        alike; ``ast.dump`` prints none of the last. Comparing it is a
+        fraction of the cost of parsing again, which matters because the
+        session fixture checks every tree in the repository. Only a tree that
+        *has* changed is parsed again, to say where. *sources* limits the
+        check to those texts.
+
+        ``Load``, ``Store`` and ``Del`` are the exception to "one tree per
+        source": ``ast.parse`` hands the *same* node object to every tree, in
+        every module, so an attribute hung on one (``node.parent = ...`` over
+        a whole tree reaches them) is reachable from every tree at once. That
+        is reported alone, because every tree would otherwise be listed.
+        """
+        if polluted := _polluted_context_singletons():
+            return polluted
+        found: list[str] = []
+        for key, (tree, taken) in list(self._trees.items()):
+            source, args, kwargs = key
+            if (sources is not None and source not in sources) or (
+                _fingerprint(tree) == taken
+            ):
+                continue
+            how = _how_it_differs(tree, _ORIGINAL_PARSE(source, *args, **dict(kwargs)))
+            first_line = next((ln for ln in source.splitlines() if ln.strip()), "")
+            found.append(f"{how} (source begins {first_line.strip()[:60]!r})")
+        return found
+
+
+def _fingerprint(tree: ast.AST) -> bytes | None:
+    """A digest of everything on *tree*, or ``None`` if it cannot be pickled.
+
+    ``None`` on both sides of a comparison reads as unchanged: a tree too
+    deep to pickle is not verified, which is the guard failing open rather
+    than breaking a test that parsed it.
+    """
+    try:
+        return hashlib.blake2b(
+            pickle.dumps(tree, protocol=pickle.HIGHEST_PROTOCOL), digest_size=16
+        ).digest()
+    except (RecursionError, pickle.PicklingError, TypeError, AttributeError):
+        return None
+
+
+def _polluted_context_singletons() -> list[str]:
+    """One line per ``Load`` / ``Store`` / ``Del`` that carries an attribute.
+
+    A context node has no fields, so a clean one has an empty ``__dict__``.
+    """
+    found = []
+    for source, kind in (("a", ast.Load), ("a = 1", ast.Store), ("del a", ast.Del)):
+        singleton = next(
+            node for node in ast.walk(_ORIGINAL_PARSE(source)) if isinstance(node, kind)
+        )
+        if vars(singleton):
+            found.append(
+                f"ast.{kind.__name__} is one object shared by every tree and "
+                f"gained attribute(s) {sorted(vars(singleton))}; annotating every "
+                f"node of one tree reaches all of them"
+            )
+    return found
+
+
+def _how_it_differs(tree: ast.AST, fresh: ast.AST) -> str:
+    """Where *tree* departs from *fresh*, a clean parse of the same source."""
+    if ast.dump(tree, include_attributes=True) != ast.dump(
+        fresh, include_attributes=True
+    ):
+        if isinstance(tree, ast.Module) and isinstance(fresh, ast.Module):
+            if len(tree.body) != len(fresh.body):
+                return (
+                    f"top-level body went from {len(fresh.body)} to "
+                    f"{len(tree.body)} statements"
+                )
+            for have, want in zip(tree.body, fresh.body, strict=True):
+                if ast.dump(have, include_attributes=True) != ast.dump(
+                    want, include_attributes=True
+                ):
+                    return f"statement at line {want.lineno} was changed"
+        return "tree was changed"
+    for have, want in zip(ast.walk(tree), ast.walk(fresh), strict=True):
+        gained = vars(have).keys() - vars(want).keys()
+        if gained:
+            return (
+                f"{type(have).__name__} at line {getattr(want, 'lineno', '?')} "
+                f"gained attribute(s) {sorted(gained)}"
+            )
+    return "tree was changed in a way a dump does not show"
+
+
+#: The one memo ``ast.parse`` is routed through once :func:`install_parse_memo` runs.
+SHARED_PARSE_MEMO = ParseMemo()
+
+
+def _is_test_code(frame: types.FrameType) -> bool:
+    module = frame.f_globals.get("__name__", "")
+    return module == "tests" or module.startswith("tests.")
+
+
+def install_parse_memo() -> None:
+    """Route ``ast.parse`` calls made from test code through :data:`SHARED_PARSE_MEMO`.
+
+    Rule files call ``ast.parse`` directly, so a memo that only
+    :func:`iter_modules` used would leave most of the repeated parsing in
+    place. ``tests/conftest.py`` calls this once, at import.
+
+    The replacement is **scoped by the module making the call**: only a
+    caller whose ``__name__`` is ``tests`` or begins ``tests.`` gets a shared
+    tree. Everything else gets the real ``ast.parse`` and a fresh tree, and
+    that is the point. pytest's assertion rewriter parses each test module
+    and edits the result in place, and ``ast.literal_eval`` and ``hypothesis``
+    parse from inside their own modules; sharing a tree with any of them
+    would hand a rule a rewritten tree. Source-text keyed, ``bytes`` and
+    ``ast.AST`` sources are not memoised. Idempotent.
+    """
+    if hasattr(ast.parse, "_parse_memo_original"):
+        return
+    original = ast.parse
+
+    @functools.wraps(original)
+    def parse(source: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(source, str) and _is_test_code(sys._getframe(1)):
+            return SHARED_PARSE_MEMO.parse(source, *args, **kwargs)
+        return original(source, *args, **kwargs)
+
+    parse._parse_memo_original = original  # type: ignore[attr-defined]
+    ast.parse = parse
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +555,9 @@ def calls_named(name: str, tree: ast.AST, *, resolve: bool = False) -> list[ast.
 
 def iter_modules(root: Path) -> Iterator[tuple[Path, ast.Module]]:
     """Every ``*.py`` under *root*, parsed, in path order.
+
+    The trees are shared with every other caller (see :class:`ParseMemo`):
+    read them, never edit them.
 
     One walker, so a rule's two counters cannot drift apart the way #464's
     did — but note what that does *not* buy: two counters sharing this
