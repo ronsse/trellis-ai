@@ -20,6 +20,7 @@ import json
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import structlog
 
@@ -65,6 +66,37 @@ _HTTP_CLIENT_MAX = 499
 _HTTP_NOT_FOUND = 404
 _HTTP_RATE_LIMITED = 429
 _HTTP_SERVER_MIN = 500
+
+
+#: RFC 3986 ``pchar`` characters beyond the unreserved ones ``quote`` already
+#: keeps: legal inside a path segment, so an id made of these and alphanumerics
+#: (``entity:abc``, ``a+b``) keeps the wire form it had before ``path_id``.
+_PATH_SEGMENT_SAFE = "!$&'()*+,;=:@"
+
+
+def path_id(value: str) -> str:
+    """Encode *value* as exactly one URL path segment.
+
+    Every id a client puts in a path goes through here
+    (``tests/unit/sdk/test_path_id_rule.py``). An id is any string, and
+    interpolated raw it can address another row: ``#`` and ``?`` end the path,
+    so the request reaches whatever the text before them names; ``%`` is read
+    back as an escape; and ``/`` adds segments, which ``httpx`` then collapses
+    (``a/../b`` is sent as ``b``).
+
+    ``/`` is encoded as ``%2F`` even for ``GET /entities/{entity_id:path}``,
+    which would accept it raw: the server decodes ``%2F`` before it routes, so
+    the route sees the id as it was given. A route that is not ``:path`` (a
+    trace or pack id) cannot match an id with ``/`` either way.
+
+    ``.`` and ``..`` are the one case ``quote`` cannot protect: they are
+    unreserved, yet ``httpx`` drops them as dot segments, so they go out as
+    ``%2E``, which ``httpx`` leaves alone.
+    """
+    encoded = quote(str(value), safe=_PATH_SEGMENT_SAFE)
+    if encoded in {".", ".."}:
+        return encoded.replace(".", "%2E")
+    return encoded
 
 
 def describe_body_parse_error(exc: Exception) -> str:

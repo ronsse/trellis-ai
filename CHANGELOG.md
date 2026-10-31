@@ -6,6 +6,57 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
+  A file that starts today can stop starting, including on a harmless stray key
+  such as `version: 1`; rename it `x-version` to keep it. Loading
+  `config.yaml` used to ignore an unknown top-level key (`knowlege:`, `storage:`),
+  and logged a warning for a store name no plane has, a store under the wrong
+  plane, or the removed flat `stores:` block, then served every store from the
+  SQLite default. Each of those now raises `ConfigError` naming the file and every
+  offending entry at that level, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
+  409 `config_error` when it surfaces inside a request, and the API refuses to start.
+  The accepted top-level keys are `knowledge`, `operational`, `embeddings`,
+  `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`,
+  `default_agent` and `format`, plus any key starting with `x-` (an anchor holder,
+  as in Compose). The message lists them. Keys are echoed only when they are plain
+  names. A plane whose value is not a mapping (`knowledge: [graph]`) is still a
+  warning, not a refusal.
+- **A plane DSN that no store reads now warns.** Setting `TRELLIS_KNOWLEDGE_PG_DSN`
+  or `TRELLIS_OPERATIONAL_PG_DSN` does not select Postgres: only a store whose
+  backend is `postgres` or `pgvector` reads it. When the variable is set and no
+  store of that plane uses either backend, the registry logs
+  `registry_plane_dsn_unused` once per plane per process, naming the plane, the
+  variable and the file, never the DSN. A plane with at least one Postgres store
+  stays silent, since a plane may legitimately run some stores on SQLite.
+
+- **The AST rule tests share one parse per source.** `ast.parse` called from test
+  code is now memoised by its source text (`tests/ast_rules.py`, installed from
+  `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
+  test. Only callers under `tests` get a shared tree: pytest's assertion rewriter,
+  `ast.literal_eval`, `scripts/` and `src/` keep the real `ast.parse`. Shared
+  trees must not be edited, and a session fixture plus
+  `tests/unit/test_ast_parse_memo.py` fail the run if one is. That check found one
+  existing rule, `test_error_describe_not_quote_rule.py`, rewriting a tree in
+  place through `ast.NodeTransformer`; it now transforms a copy. Test-suite
+  change only; nothing under `src/` is touched.
+
+- **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
+  `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
+  only, so `make test` and a bare `pytest` stay one process. Same legs, same
+  selection. A parametrized sensitivity REST write test used a bare `object()`
+  sentinel with `ids=repr`, so its test id carried a memory address that differed
+  per process, and xdist aborts at collection when two workers disagree about
+  which tests exist; the sentinel now has a stable repr.
+- **`pytest` no longer inherits `-v` from `addopts`.** CI and `make test` pass
+  `-v` explicitly, so their output is unchanged; a bare targeted run prints a
+  dot per test instead of a line per test. Pass `-v` for the old output.
+
+### Added
+
+- **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
+
+### Changed
+
 - **A wrong MCP tool argument is now answered from the tool's own schema, and a
   rejected write is recorded.** FastMCP validates a call's arguments before the
   tool body runs, so a misspelt or mistyped argument came back as pydantic's own
@@ -133,6 +184,23 @@ All notable changes to Trellis will be documented in this file.
   written and how they are judged do not change. A dry run still makes one pass
   and saves nothing.
 
+
+- **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
+  could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
+  interpolated the id into the path of `get_entity`, `get_trace` and
+  `record_feedback` as it was given: `get_entity("tbl#col")` requested
+  `/entities/tbl` (a `#` starts the URL fragment) and returned that entity with a
+  200, `get_trace("t?1")` returned trace `t`, and `a/../b` was collapsed to `b`
+  before it was sent. Every path id now goes through one `path_id()` helper
+  (`trellis_sdk._http`) that encodes it as a single path segment, and
+  `tests/unit/sdk/test_path_id_rule.py` fails when a client builds a path from an
+  unencoded value. An id that was already legal in a path (`entity:abc`, `a+b`)
+  keeps its wire form. A `/` in an id is now sent as `%2F`, which the server
+  decodes before it routes. A trace id or pack id containing `/` still cannot be
+  routed, because `GET /traces/{trace_id}` and `POST /packs/{pack_id}/feedback`
+  are not `:path` routes; the SDK now sends it as one segment, so a trace id
+  reads as not found and a pack id raises, instead of reaching a different
+  route. No server change.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and

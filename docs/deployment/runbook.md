@@ -18,6 +18,15 @@ runs; this one describes *how* to operate it once it's running.
 [recommended-config.yaml](recommended-config.yaml)); no variable
 below selects one.
 
+The two `*_PG_DSN` variables supply a DSN; they do not choose a backend. A store
+reads one only when its `backend` is `postgres` or `pgvector` and it sets no `dsn`
+of its own. If a variable is set and no store of that plane uses either backend,
+the registry logs a `registry_plane_dsn_unused` warning (plane, variable and file,
+never the value). `config.yaml` itself is closed: an unknown top-level key, a store
+name the plane does not have, a store under the wrong plane, or the old flat
+`stores:` block raises `ConfigError` (CLI exit 5, API startup refused) rather than
+falling back to SQLite.
+
 The minimum set to bring up the API against Postgres + Neo4j:
 
 | Variable                       | Required? | Purpose                                                                  |

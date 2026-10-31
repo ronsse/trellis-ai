@@ -24,7 +24,7 @@ Plugin authors declare entry points in their ``pyproject.toml``::
 Trellis config selects the plugin by its entry-point name::
 
     # ~/.trellis/config.yaml
-    stores:
+    knowledge:
       graph:
         backend: unity_native
     llm:
