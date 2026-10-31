@@ -33,7 +33,7 @@ def _write_config(tmp_path: Path, llm_block: dict[str, Any] | None) -> Path:
     """Write a minimal ``config.yaml`` with the given ``llm:`` block."""
     import yaml
 
-    data: dict[str, Any] = {"stores": {}}
+    data: dict[str, Any] = {"knowledge": {}}
     if llm_block is not None:
         data["llm"] = llm_block
     config_dir = tmp_path / ".trellis"

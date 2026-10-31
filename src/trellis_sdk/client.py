@@ -28,6 +28,7 @@ from trellis_sdk._http import (
     check_handshake,
     describe_body_parse_error,
     pack_attribution,
+    path_id,
     raise_for_status,
     rating_validation_hint,
     wrap_transport_error,
@@ -215,7 +216,7 @@ class TrellisClient:
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         self._ensure_handshake()
-        path = f"/api/v1/traces/{trace_id}"
+        path = f"/api/v1/traces/{path_id(trace_id)}"
         try:
             resp = self._http.get(path)
         except httpx.HTTPError as exc:
@@ -373,7 +374,7 @@ class TrellisClient:
 
     def get_entity(self, entity_id: str) -> dict[str, Any] | None:
         self._ensure_handshake()
-        path = f"/api/v1/entities/{entity_id}"
+        path = f"/api/v1/entities/{path_id(entity_id)}"
         try:
             resp = self._http.get(path)
         except httpx.HTTPError as exc:
@@ -482,7 +483,7 @@ class TrellisClient:
                 raise
             msg = f"rating must be between 0.0 and 1.0; {hint}"
             raise ValueError(msg) from exc
-        path = f"/api/v1/packs/{pack_id}/feedback"
+        path = f"/api/v1/packs/{path_id(pack_id)}/feedback"
         resp = self._request("POST", path, json=body.model_dump(mode="json"))
         try:
             return PackFeedbackResponse.model_validate(resp.json())

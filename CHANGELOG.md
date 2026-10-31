@@ -6,6 +6,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
+  A file that starts today can stop starting, including on a harmless stray key
+  such as `version: 1`; rename it `x-version` to keep it. Loading
+  `config.yaml` used to ignore an unknown top-level key (`knowlege:`, `storage:`),
+  and logged a warning for a store name no plane has, a store under the wrong
+  plane, or the removed flat `stores:` block, then served every store from the
+  SQLite default. Each of those now raises `ConfigError` naming the file and every
+  offending entry at that level, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
+  409 `config_error` when it surfaces inside a request, and the API refuses to start.
+  The accepted top-level keys are `knowledge`, `operational`, `embeddings`,
+  `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`,
+  `default_agent` and `format`, plus any key starting with `x-` (an anchor holder,
+  as in Compose). The message lists them. Keys are echoed only when they are plain
+  names. A plane whose value is not a mapping (`knowledge: [graph]`) is still a
+  warning, not a refusal.
+- **A plane DSN that no store reads now warns.** Setting `TRELLIS_KNOWLEDGE_PG_DSN`
+  or `TRELLIS_OPERATIONAL_PG_DSN` does not select Postgres: only a store whose
+  backend is `postgres` or `pgvector` reads it. When the variable is set and no
+  store of that plane uses either backend, the registry logs
+  `registry_plane_dsn_unused` once per plane per process, naming the plane, the
+  variable and the file, never the DSN. A plane with at least one Postgres store
+  stays silent, since a plane may legitimately run some stores on SQLite.
+
+- **The AST rule tests share one parse per source.** `ast.parse` called from test
+  code is now memoised by its source text (`tests/ast_rules.py`, installed from
+  `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
+  test. Only callers under `tests` get a shared tree: pytest's assertion rewriter,
+  `ast.literal_eval`, `scripts/` and `src/` keep the real `ast.parse`. Shared
+  trees must not be edited, and a session fixture plus
+  `tests/unit/test_ast_parse_memo.py` fail the run if one is. That check found one
+  existing rule, `test_error_describe_not_quote_rule.py`, rewriting a tree in
+  place through `ast.NodeTransformer`; it now transforms a copy. Test-suite
+  change only; nothing under `src/` is touched.
+
 - **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
   `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
   only, so `make test` and a bare `pytest` stay one process. Same legs, same
@@ -105,6 +139,128 @@ All notable changes to Trellis will be documented in this file.
   naive raises `TypeError`; that matters only where an older checkout shares the
   cursor file. The event log has the same text comparison on `occurred_at`
   (`stores/sqlite/event_log.py`); it is not changed here.
+
+- **A `data_dir` in `config.yaml` quietly beat `TRELLIS_DATA_DIR`, so a restored
+  store or a cloned config could write into the original while the copy looked
+  untouched.** The precedence is unchanged and intended: an absolute `data_dir`
+  in `config.yaml` wins over the variable. What was missing was any sign of it.
+  When the variable is set and names a different directory, building the store
+  registry now logs a `registry_data_dir_env_ignored` warning to stderr, once per
+  process, naming the `data_dir` key and both paths. `admin health` shows the
+  same two paths in a `data_dir_disagreement` field (JSON) or two lines under the
+  table (text). The same directory spelled another way (trailing slash, symlink,
+  `..`) does not warn, and neither stdout nor an exit code changes. "Stores not
+  initialized at PATH" now names the `data_dir` key when that key supplied the
+  path, and no longer offers `admin init` as the only remedy: for a moved or
+  restored store, change `data_dir`, since `init` creates an empty `stores/`
+  at the configured path. The docs that implied the variable selects the data
+  directory (`mcp-claude-code.md`, `scheduled-curation.md`, `running-trellis.md`)
+  are corrected.
+
+- **The session-capture sweep keeps its progress as it goes.** `run_capture`
+  held every record until the end of the run and saved the watermark last, so a
+  kill, or one store error, discarded all the judging done so far and the
+  `CAPTURE_SWEEP_COMPLETED` event never fired. Judged sessions are now written in
+  batches of `checkpoint_every` (default 5, a keyword of `run_capture`): the
+  batch's records land, then supersessions and training pairs, then the cursors
+  and the watermark, in that order, so a cursor is never saved before its records.
+  A record that fails to write counts its session in `sessions_errored` and leaves
+  it un-watermarked for the next sweep; the other records and sessions continue,
+  and the sweep event still fires with the errors counted. `sessions_errored`
+  therefore also counts store errors after the transcript parsed, so under strict
+  mode `trellis-session-capture` can now exit `EXIT_SESSIONS_ERRORED` for a store
+  error, which it could not before. A NUL character in a judged field of the reply
+  no longer reaches the store (SQLite keeps it, and a Postgres text column
+  refuses it); it is stripped where the reply is parsed. `CORPUS_SYNCED` now fires
+  once per batch rather than once per sweep. `sync_records` gains optional
+  `on_record_error` and `minhash` arguments; without them it behaves as before.
+
+  A failed batch is retried correctly, not just retried:
+  - A session with a record that failed to write emits no training pairs in that
+    run; its retry emits them once the session completes, so a retry cannot
+    count a landed record's pair twice.
+  - A stored parent no longer counts as a landed record by itself, here and in
+    corpus sync. The parent is still written before its chunks, but the sync's
+    same-hash skip and reconcile's exact-duplicate drop now also read the chunk
+    rows the write would produce (`record_landed` in `trellis.ingest_corpus.sync`)
+    and treat the record as landed only when each `#chunk-i` row exists with its
+    span's text. A record that died between two chunk writes is written again by
+    the next sync or sweep, where it used to be skipped as already stored with its
+    chunks missing, so a retry now lands memories a failed sweep used to drop. A
+    record that does not chunk reads no extra row. No retrieval code changes.
+  - Repairing a document whose content is unchanged keeps the parent's
+    `updated_at` (a metadata-only write), so a repair does not move its recency;
+    a chunk the repair restores gets a fresh stamp, and an edited document is
+    stamped as before.
+  - A document that shrank leaves no surplus chunks behind a crash. The delete
+    probes upward from the new chunk count until a row is absent and runs top
+    down (a redaction tombstone is kept), and `record_landed` also reads from the
+    new count upward, so a record with surplus rows is written again. A clean
+    chunked record costs one more read; a record that does not chunk costs none.
+  - Changing `CHUNK_TARGET_CHARS`, `CHUNK_MAX_CHARS`, `CHUNK_OVERLAP_CHARS` or the embed cap now
+    rewrites every chunked document once at the next sync, because the chunk
+    check recomputes spans.
+  - With reconcile on, a supersession that raised, or was lost to a kill, is
+    applied by the retry: an exact-duplicate no-op whose stored document names a
+    `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
+    while applying supersessions no longer blocks the batch's training pairs; the
+    sessions that claimed a supersession stay un-watermarked. The repair leaves an
+    archived, superseded or deleted target alone, so it cannot return an archived
+    document to packs or count a target deleted after a good supersession as a
+    failure.
+  - With reconcile on, a record whose own parent row is stored but not landed is
+    no longer judged again. It keeps the verdict that row was stored with
+    (`reconciliation`, `supersedes_doc_id`, `updates_doc_id`), is written again,
+    and its supersession is applied, to a target that still reads as current
+    only (an archived, superseded or deleted one is left alone, as in the repair
+    above, and a deleted one counts no failure). Before, a judge that answered
+    no-op dropped the record with its chunks missing and the session was
+    watermarked, and a retry with no judge lost the supersession the first run
+    had claimed.
+  - Limit: a process kill between a batch's records and its training pairs loses
+    that batch's keep pairs when reconcile is on, because the retry no-ops those
+    records. It is bounded by `checkpoint_every` sessions and costs training
+    data only. With reconcile off, a kill between the pairs and the watermark
+    save emits that batch's keep pairs a second time. A kill between a chunk's
+    write and its embed leaves that chunk without a vector row, which the
+    row-based check does not see. A retry whose judge words the memory
+    differently does not find the stored one as an exact duplicate, so the
+    supersession repair does not run for it. A retry of a never-announced
+    document emits `MEMORY_STORED` with action `update`, not `new`. A kill before
+    the whole-document vector delete leaves the stale vector row; a crash during
+    a move leaves the old parent until a prune; a document that shrank to no
+    chunks and was killed before its chunks were deleted keeps them until its
+    next update.
+
+  A clean run writes the same records and documents (metadata and lifecycle
+  included) and the same report at any `checkpoint_every`, with one exception:
+  `distill_unavailable` warnings are added while sessions are judged and
+  near-duplicate warnings when a batch is written, so a run that has both lists
+  them in a different order. It emits the same events for each document, but not
+  in the same sequence: they interleave batch by batch instead of arriving in
+  blocks, and `CORPUS_SYNCED` fires once per batch that writes a record rather
+  than once per sweep. The sweep's own flushed
+  memories stay hidden from later sessions' reconcile, so which memories are
+  written and how they are judged do not change. A dry run still makes one pass
+  and saves nothing.
+
+
+- **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
+  could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
+  interpolated the id into the path of `get_entity`, `get_trace` and
+  `record_feedback` as it was given: `get_entity("tbl#col")` requested
+  `/entities/tbl` (a `#` starts the URL fragment) and returned that entity with a
+  200, `get_trace("t?1")` returned trace `t`, and `a/../b` was collapsed to `b`
+  before it was sent. Every path id now goes through one `path_id()` helper
+  (`trellis_sdk._http`) that encodes it as a single path segment, and
+  `tests/unit/sdk/test_path_id_rule.py` fails when a client builds a path from an
+  unencoded value. An id that was already legal in a path (`entity:abc`, `a+b`)
+  keeps its wire form. A `/` in an id is now sent as `%2F`, which the server
+  decodes before it routes. A trace id or pack id containing `/` still cannot be
+  routed, because `GET /traces/{trace_id}` and `POST /packs/{pack_id}/feedback`
+  are not `:path` routes; the SDK now sends it as one segment, so a trace id
+  reads as not found and a pack id raises, instead of reaching a different
+  route. No server change.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and

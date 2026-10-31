@@ -21,6 +21,11 @@ import re
 from trellis.ingest_corpus.models import ChunkSpan
 from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP
 
+# These constants, and the embed cap behind CHUNK_THRESHOLD_CHARS, are part of
+# what a stored chunk row is: ``record_landed`` recomputes the spans and compares
+# each row's hash to its span, so changing any of them makes every chunked
+# document read as not landed, and the next sync rewrites it once.
+
 #: Content length above which a document is chunked. Equal to the embed
 #: hook's input cap: anything longer would be silently truncated at
 #: embedding time, which is exactly the failure chunking exists to fix.

@@ -39,7 +39,9 @@ A single user crontab covering the daily and weekly cadence. Adjust paths and th
 
 ```cron
 # /etc/cron.d/trellis-curation   (or `crontab -e` for a user crontab)
-# All times UTC. TRELLIS_CONFIG_DIR / TRELLIS_DATA_DIR point at the deployment.
+# All times UTC. TRELLIS_CONFIG_DIR picks the deployment. The data directory is the
+# `data_dir` in that config.yaml (`trellis admin init` writes it); TRELLIS_DATA_DIR is
+# read only when config.yaml has no `data_dir`, so it cannot redirect a config that names one.
 TRELLIS_CONFIG_DIR=/var/lib/trellis/config
 TRELLIS_DATA_DIR=/var/lib/trellis/data
 PATH=/usr/local/bin:/usr/bin:/bin

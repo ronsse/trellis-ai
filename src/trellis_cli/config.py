@@ -44,7 +44,12 @@ def get_data_dir() -> Path:
 
 
 class TrellisConfig(TrellisModel):
-    """CLI configuration."""
+    """CLI configuration.
+
+    A new field is a new top-level key of ``config.yaml``, which the registry
+    refuses unless ``_CONFIG_DOCUMENT_KEYS`` (``trellis.stores.registry``) lists it;
+    ``tests/unit/stores/test_registry_config_keys.py`` pins the two together.
+    """
 
     # Its values come from config.yaml, so a ValidationError names the key
     # and the expected type but never repeats the value (a mapping under

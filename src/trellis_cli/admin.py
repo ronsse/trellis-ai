@@ -320,6 +320,10 @@ def health(
     backend is reported by name as not checked — never as missing. A
     value that names no registered backend is reported as unknown, and
     is never printed: it can be a DSN written where a name belongs.
+
+    When ``config.yaml``'s ``data_dir`` overrides a ``TRELLIS_DATA_DIR`` that
+    names another directory, both are shown (``data_dir_disagreement`` in
+    JSON), because that variable is otherwise ignored without a word.
     """
     from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
@@ -328,6 +332,15 @@ def health(
     # The registry's order, without building a second registry.
     data_dir = Path(config.data_dir) if config.data_dir else get_default_data_dir()
     stores_dir = registry.stores_dir
+    ignored_env = registry.ignored_env_data_dir
+    disagreement: dict[str, str] | None = None
+    if ignored_env is not None and stores_dir is not None:
+        disagreement = {
+            "in_use": str(stores_dir.parent),
+            "in_use_from": "data_dir in config.yaml",
+            "ignored": str(ignored_env),
+            "ignored_from": "TRELLIS_DATA_DIR",
+        }
 
     checks: dict[str, bool] = {
         "config": get_config_dir().exists(),
@@ -351,7 +364,10 @@ def health(
         # width soft-wrap never splits the JSON across lines. Machine
         # consumers expect single-line JSON per the project rule in
         # CLAUDE.md (`parse JSON output, not human-readable text`).
-        print(json.dumps({**checks, "backends": backends}))
+        payload: dict[str, Any] = {**checks, "backends": backends}
+        if disagreement is not None:
+            payload["data_dir_disagreement"] = disagreement
+        print(json.dumps(payload))
     else:
         table = Table(title="Trellis Health")
         table.add_column("Component", style="cyan")
@@ -369,6 +385,20 @@ def health(
                 )
                 table.add_row(store_type, status)
         console.print(table)
+        if disagreement is not None:
+            # Below the table, unwrapped: a path folded across lines is not
+            # one a reader can copy.
+            console.print(
+                "[yellow]data_dir in config.yaml overrides TRELLIS_DATA_DIR,"
+                " which names another directory:[/yellow]",
+                soft_wrap=True,
+            )
+            console.print(
+                f"  in use:  {escape(disagreement['in_use'])}", soft_wrap=True
+            )
+            console.print(
+                f"  ignored: {escape(disagreement['ignored'])}", soft_wrap=True
+            )
 
 
 @admin_app.command()

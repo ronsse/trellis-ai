@@ -1772,9 +1772,9 @@ class TestWorkerCurateLoop:
     ) -> None:
         """A config.yaml parse warning fires once per process, not per cycle.
 
-        A top-level ``stores:`` block is deprecated and makes
+        A plane block that is not a mapping (``knowledge: [graph]``) makes
         ``StoreRegistry.from_config_dir`` log
-        ``registry_config_flat_stores_removed`` once per call. Each curate
+        ``registry_config_plane_not_mapping`` once per call. Each curate
         cycle used to rebuild a *second* registry (via
         ``trellis_cli.config.get_data_dir``) to resolve its advisory store,
         re-parsing config.yaml and re-logging that warning every cycle. The
@@ -1782,7 +1782,7 @@ class TestWorkerCurateLoop:
         across ``max_cycles=3`` the warning fires exactly once — from
         whichever call first builds the registry, not once per cycle.
         """
-        _write_config(tmp_path / "config", "stores: {}\n")
+        _write_config(tmp_path / "config", "knowledge: [graph]\n")
         _seed_promote_signal(temp_stores)
 
         monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
@@ -1809,9 +1809,7 @@ class TestWorkerCurateLoop:
             clear_cached_logger_proxies()
 
         occurrences = [
-            e
-            for e in cap_logs
-            if e.get("event") == "registry_config_flat_stores_removed"
+            e for e in cap_logs if e.get("event") == "registry_config_plane_not_mapping"
         ]
         assert len(occurrences) == 1, occurrences
 
