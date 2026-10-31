@@ -4,6 +4,8 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-31
+
 ### Added
 
 - **`trellis analyze holdout --by-commit` tabulates each arm per serving build.**
@@ -12,9 +14,8 @@ All notable changes to Trellis will be documented in this file.
   `by_commit`: one row per build, in first-seen order, with the build's first and
   last pack time and each arm's task count and mean outcome over the same
   analysed tasks the estimate uses, plus `units_spanning_builds` for tasks whose
-  packs came from more than one build (counted once, under the earliest). A
-  build is the first 12 characters of the earliest pack's stamped commit, or
-  `unidentified` when the row has no stamp or a null commit. The table is
+  packs came from more than one build (counted once, under the first pack's
+  build). A build is named as `trellis analyze health` names it. The table is
   descriptive: no p-value, interval or verdict per build. Without the flag the
   JSON, text and REST payloads are unchanged.
 
