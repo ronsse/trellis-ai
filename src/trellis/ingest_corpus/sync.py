@@ -326,7 +326,8 @@ def sync_records(
             the failed one that was written before it raised. A record that
             raised after its parent was written is not skipped as stored by
             the next sync: :func:`record_landed` reads its chunk rows, finds
-            one missing or different, and the record is written again.
+            one missing, different or left over from a longer version, and
+            the record is written again.
         minhash: The near-duplicate index to compare against and add to.
             A caller that syncs one source in several calls passes the same
             index to each, so a near-duplicate is still warned about across
@@ -434,17 +435,25 @@ def record_landed(doc_store: DocumentStore, doc_id: str, content: str) -> bool:
     recomputes the spans :func:`sync_records` would write with
     :func:`chunk_spans` and reads each ``#chunk-i`` row: a row that is absent,
     or whose hash is not that of its span, means the record has not landed and
-    the caller must write it again, not skip it. A record that does not chunk
-    has no rows to read and reads as landed.
+    the caller must write it again, not skip it. So does a live row *past* the
+    last span, which a run that shrank the document left when it died before
+    deleting the surplus; the parent no longer declares it, so only this read
+    finds it. A record that does not chunk has no rows to read and reads as
+    landed. A document that shrank from chunked to unchunked and then died
+    before deleting its chunk rows is therefore not found: reading one row for
+    every record that does not chunk would put a read on every record of every
+    sync.
 
-    A chunk that is a redaction tombstone counts as landed. The write path
-    leaves it alone and warns (#1034), so a retry could not change it and
-    a record carrying one would otherwise be rewritten by every sync.
+    A chunk that is a redaction tombstone counts as landed, past the last span
+    as within it. The write path leaves it alone and warns (#1034), so a retry
+    could not change it and a record carrying one would otherwise be rewritten
+    by every sync.
 
     Compares rows, not vectors: a chunk written and then not embedded, because
     the run died between the two, reads as landed here.
     """
-    for span in chunk_spans(content):
+    spans = chunk_spans(content)
+    for span in spans:
         row = doc_store.get(chunk_doc_id(doc_id, span.index))
         if row is None:
             return False
@@ -452,6 +461,16 @@ def record_landed(doc_store: DocumentStore, doc_id: str, content: str) -> bool:
             continue
         if row.get("content_hash") != content_hash(content[span.start : span.end]):
             return False
+    if not spans:
+        return True
+    # Surplus rows form a run from ``len(spans)`` (:func:`_delete_surplus_chunks`
+    # deletes from the top), so the first absent row ends the search, and a
+    # clean record costs exactly this one read.
+    index = len(spans)
+    while (row := doc_store.get(chunk_doc_id(doc_id, index))) is not None:
+        if not is_redaction_tombstone(row):
+            return False
+        index += 1
     return True
 
 
@@ -547,9 +566,18 @@ def _apply_record(
         metadata["chunk_count"] = len(spans)
 
     old_chunk_count = 0
+    # An ``update`` whose stored parent already carries this text is a repair,
+    # not an edit: the planner sends it here because chunk rows are missing or
+    # surplus (:func:`record_landed`), and writing the parent again must not
+    # move its recency. Only the rows that were absent get a fresh clock, and
+    # that is right, since their content is new to the store.
+    parent_content_unchanged = False
     if outcome.action == "update":
         stored = doc_store.get(outcome.doc_id)
         old_chunk_count = _chunk_count_of(stored)
+        parent_content_unchanged = stored is not None and stored.get(
+            "content_hash"
+        ) == content_hash(text)
         # Merge under the fresh metadata so keys this run does not own
         # (enrichment tags, noise flags) survive the re-put.
         metadata = {**_stored_metadata(stored), **metadata}
@@ -598,7 +626,7 @@ def _apply_record(
         outcome.doc_id,
         text,
         metadata,
-        preserve_updated_at=False,
+        preserve_updated_at=parent_content_unchanged,
     )
     outcome.chunks_written = _write_chunks(
         registry,
@@ -619,18 +647,16 @@ def _apply_record(
         mirror=mirror,
         report=report,
     )
-    for index in range(len(spans), old_chunk_count):
-        orphan_id = chunk_doc_id(outcome.doc_id, index)
-        # A redacted chunk is not an orphan to clean up: deleting its row loses
-        # the tombstone, and the file growing back would write the redacted
-        # text under the same id with nothing to refuse it (#1034).
-        orphan = doc_store.get(orphan_id)
-        if orphan is not None and is_redaction_tombstone(orphan):
-            report.warnings.append(
-                _redaction_tombstone_warning(outcome.relpath, orphan_id)
-            )
-            continue
-        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
+    if outcome.action == "update":
+        _delete_surplus_chunks(
+            doc_store,
+            vector_store,
+            outcome.doc_id,
+            kept=len(spans),
+            old_chunk_count=old_chunk_count,
+            report=report,
+            relpath=outcome.relpath,
+        )
     if not spans:
         run_embed_on_ingest(
             registry, outcome.doc_id, text, metadata, source=requested_by
@@ -690,6 +716,46 @@ def _apply_record(
         )
         report.entities_extracted += entities
         report.edges_extracted += edges
+
+
+def _delete_surplus_chunks(
+    doc_store: DocumentStore,
+    vector_store: Any,
+    parent_doc_id: str,
+    *,
+    kept: int,
+    old_chunk_count: int,
+    report: CorpusSyncReport,
+    relpath: str,
+) -> None:
+    """Delete the chunk rows of *parent_doc_id* at or past index *kept*.
+
+    *old_chunk_count* is what the parent declared when this run read it. A run
+    that died after writing the parent had already replaced that count with the
+    new one, so the rows it was meant to delete are past the declared range;
+    the rows are therefore probed upward from the declared end until one is
+    absent, the way a redaction finds a target's chunks (#1008).
+
+    Deleted from the top down. A kill between two deletes then leaves a run of
+    rows that starts at *kept*, which both the probe here and
+    :func:`record_landed` find; deleting upward could leave a gap at *kept* and
+    hide the rows above it from both.
+
+    A redacted chunk is not an orphan to clean up: deleting its row loses the
+    tombstone, and the file growing back would write the redacted text under
+    the same id with nothing to refuse it (#1034). It is left in place and the
+    probe continues past it.
+    """
+    stop = max(kept, old_chunk_count)
+    while doc_store.get(chunk_doc_id(parent_doc_id, stop)) is not None:
+        stop += 1
+    for index in range(stop - 1, kept - 1, -1):
+        orphan_id = chunk_doc_id(parent_doc_id, index)
+        orphan = doc_store.get(orphan_id)
+        if orphan is not None and is_redaction_tombstone(orphan):
+            report.warnings.append(_redaction_tombstone_warning(relpath, orphan_id))
+            continue
+        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
 
 
 def _write_chunks(

@@ -9,7 +9,9 @@ All tests are synchronous for the reason ``test_capture`` gives.
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -1175,3 +1177,134 @@ class TestRepairLeavesATargetAlone:
         )
         assert after["updated_at"] == before["updated_at"]
         assert _cursors(wm, [path]) == [True]
+
+
+# ---------------------------------------------------------------------------
+# An unlanded record keeps the verdict it was stored with
+# ---------------------------------------------------------------------------
+
+
+def _varied_memory(seed: int, *, drop_every: int = 0) -> str:
+    """A chunked memory whose shingles are distinct, so near-duplicates match.
+
+    :func:`_big_candidate` repeats one paragraph, which gives MinHash almost
+    nothing to compare. ``drop_every`` removes words, for the near-duplicate.
+    """
+    rng = random.Random(seed)  # noqa: S311 - a fixture, not a secret
+    words = [f"w{rng.randrange(100_000)}" for _ in range(1900)]
+    if drop_every:
+        words = [w for i, w in enumerate(words) if i % drop_every]
+    return "\n\n".join(" ".join(words[i : i + 150]) for i in range(0, len(words), 150))
+
+
+class TestAnUnlandedRecordKeepsItsVerdict:
+    """The retry of a half-written record is not judged again.
+
+    Run 1 stores the parent and dies before its chunks. Its record already
+    carries the verdict that run reached; a second judgement of the same record
+    can only contradict it, and the contradictions both lose something.
+    """
+
+    _NEIGHBOUR = "capture:claude-code:old-near"
+
+    def _half_written(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        replies: list[str],
+        seed_before: bool,
+    ) -> tuple[MagicMock, Path, Path, Path]:
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+        registry = _registry(tmp_path)
+        root, wm = tmp_path / "projects", tmp_path / "wm.json"
+        (path,) = _sessions(root, 1)
+        if seed_before:
+            _seed(registry, self._NEIGHBOUR, _varied_memory(1, drop_every=40))
+        with monkeypatch.context() as patch:
+            _fail_chunks(patch)
+            first = run_capture(
+                registry,
+                transcripts_root=root,
+                watermark_path=wm,
+                llm_client=FakeLLMClient(replies),
+            )
+        assert first.sessions_errored == 1
+        assert _cursors(wm, [path]) == [False]
+        assert _chunk_rows(registry) == []
+        return registry, root, wm, path
+
+    @classmethod
+    def _parent_of_the_capture(cls, registry: MagicMock) -> dict[str, Any]:
+        (parent,) = [
+            d
+            for d in _stored(registry)
+            if d["doc_id"] != cls._NEIGHBOUR and "#chunk-" not in d["doc_id"]
+        ]
+        return parent
+
+    @classmethod
+    def _assert_the_neighbour_is_a_near_duplicate(cls, registry: MagicMock) -> None:
+        """The canary: without it the tests below could pass by never judging."""
+        from trellis.classify.dedup.minhash import MinHashIndex
+
+        docs = registry.knowledge.document_store
+        index = MinHashIndex()
+        index.add(cls._NEIGHBOUR, docs.get(cls._NEIGHBOUR)["content"])
+        parent = cls._parent_of_the_capture(registry)
+        hits = dict(index.query(docs.get(parent["doc_id"])["content"]))
+        assert hits.get(cls._NEIGHBOUR, 0.0) > 0.5
+        assert hits[cls._NEIGHBOUR] < reconcile_pass._NEAR_CEILING
+
+    def test_a_judge_that_says_noop_cannot_drop_a_record_whose_chunks_are_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reply = candidates_json(good_candidate(memory=_varied_memory(1)))
+        registry, root, wm, path = self._half_written(
+            tmp_path, monkeypatch, replies=[reply], seed_before=False
+        )
+        # The neighbour arrives between the runs, so this run would judge.
+        _seed(registry, self._NEIGHBOUR, _varied_memory(1, drop_every=40))
+        self._assert_the_neighbour_is_a_near_duplicate(registry)
+
+        retry = FakeLLMClient([reply, _NOOP])
+        second = run_capture(
+            registry, transcripts_root=root, watermark_path=wm, llm_client=retry
+        )
+
+        assert len(retry.calls) == 1  # the distillation; no reconcile judge
+        assert second.sessions_errored == 0
+        assert second.candidates_reconciled_noop == 0
+        assert second.memories_written == 1
+        assert _cursors(wm, [path]) == [True]
+        parent = self._parent_of_the_capture(registry)
+        assert parent["metadata"]["chunk_count"] == len(_chunk_rows(registry)) >= 2
+
+    def test_a_retry_that_cannot_judge_keeps_the_supersession_the_first_run_claimed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reply = candidates_json(good_candidate(memory=_varied_memory(1)))
+        registry, root, wm, path = self._half_written(
+            tmp_path, monkeypatch, replies=[reply, _SUPERSEDE], seed_before=True
+        )
+        self._assert_the_neighbour_is_a_near_duplicate(registry)
+        parent = self._parent_of_the_capture(registry)
+        # What run 1 left: a claim on the stored row, and an unmarked target.
+        assert parent["metadata"]["supersedes_doc_id"] == self._NEIGHBOUR
+        assert parent["metadata"]["reconciliation"] == "supersede"
+        assert _superseded_by(registry, self._NEIGHBOUR) is None
+
+        # The model is unreachable, which reconcile reads as "add, skipped".
+        retry = FakeLLMClient([reply])
+        second = run_capture(
+            registry, transcripts_root=root, watermark_path=wm, llm_client=retry
+        )
+
+        assert len(retry.calls) == 1
+        assert second.sessions_errored == 0
+        assert _cursors(wm, [path]) == [True]
+        stored = registry.knowledge.document_store.get(parent["doc_id"])
+        assert stored["metadata"]["reconciliation"] == "supersede"
+        assert stored["metadata"]["supersedes_doc_id"] == self._NEIGHBOUR
+        assert _superseded_by(registry, self._NEIGHBOUR) == parent["doc_id"]
+        assert stored["metadata"]["chunk_count"] == len(_chunk_rows(registry)) >= 2

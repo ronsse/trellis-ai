@@ -77,8 +77,18 @@ All notable changes to Trellis will be documented in this file.
     the next sync or sweep, where it used to be skipped as already stored with its
     chunks missing, so a retry now lands memories a failed sweep used to drop. A
     record that does not chunk reads no extra row. No retrieval code changes.
-    Removing a shrunk document's surplus chunks and its whole-document vector row
-    still run after the parent, so a failure there is not retried.
+  - Repairing a document whose content is unchanged keeps the parent's
+    `updated_at` (a metadata-only write), so a repair does not move its recency;
+    a chunk the repair restores gets a fresh stamp, and an edited document is
+    stamped as before.
+  - A document that shrank leaves no surplus chunks behind a crash. The delete
+    probes upward from the new chunk count until a row is absent and runs top
+    down (a redaction tombstone is kept), and `record_landed` also reads from the
+    new count upward, so a record with surplus rows is written again. A clean
+    chunked record costs one more read; a record that does not chunk costs none.
+  - Changing `CHUNK_TARGET_CHARS`, `CHUNK_MAX_CHARS`, `CHUNK_OVERLAP_CHARS` or the embed cap now
+    rewrites every chunked document once at the next sync, because the chunk
+    check recomputes spans.
   - With reconcile on, a supersession that raised, or was lost to a kill, is
     applied by the retry: an exact-duplicate no-op whose stored document names a
     `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
@@ -87,6 +97,12 @@ All notable changes to Trellis will be documented in this file.
     archived, superseded or deleted target alone, so it cannot return an archived
     document to packs or count a target deleted after a good supersession as a
     failure.
+  - With reconcile on, a record whose own parent row is stored but not landed is
+    no longer judged again. It keeps the verdict that row was stored with
+    (`reconciliation`, `supersedes_doc_id`, `updates_doc_id`), is written again,
+    and its supersession is applied. Before, a judge that answered no-op dropped
+    the record with its chunks missing and the session was watermarked, and a
+    retry with no judge lost the supersession the first run had claimed.
   - Limit: a process kill between a batch's records and its training pairs loses
     that batch's keep pairs when reconcile is on, because the retry no-ops those
     records. It is bounded by `checkpoint_every` sessions and costs training
@@ -95,7 +111,12 @@ All notable changes to Trellis will be documented in this file.
     write and its embed leaves that chunk without a vector row, which the
     row-based check does not see. A retry whose judge words the memory
     differently does not find the stored one as an exact duplicate, so the
-    supersession repair does not run for it.
+    supersession repair does not run for it. A retry of a never-announced
+    document emits `MEMORY_STORED` with action `update`, not `new`. A kill before
+    the whole-document vector delete leaves the stale vector row; a crash during
+    a move leaves the old parent until a prune; a document that shrank to no
+    chunks and was killed before its chunks were deleted keeps them until its
+    next update.
 
   A clean run writes the same records and documents (metadata and lifecycle
   included), the same events in the same order, and the same report at any

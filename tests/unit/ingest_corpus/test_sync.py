@@ -28,6 +28,7 @@ from trellis.core.vector_metadata import (
     MIRRORED_METADATA_KEYS,
     vector_metadata_diverges,
 )
+from trellis.ingest_corpus.chunker import chunk_spans
 from trellis.ingest_corpus.models import (
     chunk_doc_id,
     corpus_doc_id,
@@ -2125,3 +2126,309 @@ class TestAStoredParentIsNotALandedRecord:
             .build("kubernetes", clearance="restricted")
             .items
         )
+
+
+def _topics(prefix: str, count: int) -> tuple[str, ...]:
+    """*count* topic words that no other prefix shares, one section each."""
+    return tuple(f"{prefix}{chr(ord('a') + i)}" for i in range(count))
+
+
+def _chunk_ids(store, parent_id: str) -> list[str]:
+    """The stored chunk ids of *parent_id*, in chunk order."""
+    prefix = f"{parent_id}#chunk-"
+    return sorted(
+        (
+            d["doc_id"]
+            for d in store.list_documents(limit=1000)
+            if d["doc_id"].startswith(prefix)
+        ),
+        key=lambda doc_id: int(doc_id.removeprefix(prefix)),
+    )
+
+
+class TestAShrunkDocumentLeavesNoSurplusChunks:
+    """A run that dies after writing the shrunk parent has lost the old count.
+
+    The parent is written first and carries ``chunk_count``, so by the time the
+    orphan delete is reached the number it ranged over is the *new* one and the
+    rows past it are no longer declared by anything. A retry has to find them
+    by looking, and has to know there is something to find.
+    """
+
+    @staticmethod
+    def _seed_long_then_shrink(registry, vault, monkeypatch):
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+        note.write_text(_long_markdown(_topics("oldword", 18)))
+        sync_corpus(registry, vault, source_system="obsidian")
+        before = _chunk_ids(store, parent_id)
+        assert len(before) >= 12
+        note.write_text(_long_markdown(_topics("newword", 6)))
+        return parent_id, before
+
+    def test_a_crash_at_the_second_chunk_still_ends_with_only_the_new_chunks(
+        self, registry, vault, monkeypatch
+    ):
+        from trellis.retrieve.strategies import KeywordSearch
+
+        store = registry.knowledge.document_store
+        parent_id, before = self._seed_long_then_shrink(registry, vault, monkeypatch)
+
+        with monkeypatch.context() as patch:
+            TestAStoredParentIsNotALandedRecord._fail_chunk(patch, 1)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        # The parent already declares the short document; the long one's rows
+        # are all still there, which is the state the retry meets.
+        declared = store.get(parent_id)["metadata"]["chunk_count"]
+        assert declared < len(before)
+        assert _chunk_ids(store, parent_id) == before
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert next(f for f in report.files if f.relpath == "long.md").action == (
+            "update"
+        )
+        after = _chunk_ids(store, parent_id)
+        assert after == [chunk_doc_id(parent_id, i) for i in range(declared)]
+        assert "oldword" not in "".join(store.get(i)["content"] for i in after)
+        assert KeywordSearch(store).search("oldwordq", limit=10) == []
+        for gone in set(before) - set(after):
+            assert registry.knowledge.vector_store.get(gone) is None
+        again = sync_corpus(registry, vault, source_system="obsidian")
+        assert again.counts()["skipped_unchanged"] == 3
+
+    def test_a_crash_after_every_chunk_write_still_has_its_surplus_removed(
+        self, registry, vault, monkeypatch
+    ):
+        import trellis.ingest_corpus.sync as sync_module
+
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        parent_id, before = self._seed_long_then_shrink(registry, vault, monkeypatch)
+
+        def refuse(*_args: Any, **_kwargs: Any) -> None:
+            msg = "store refused the delete"
+            raise RuntimeError(msg)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sync_module, "_delete_doc_and_vector", refuse)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        declared = store.get(parent_id)["metadata"]["chunk_count"]
+        surplus = before[declared:]
+        assert surplus
+        assert all(store.get(i) is not None for i in surplus)
+        # Every chunk the new text needs is written, so a reader that compared
+        # only those rows would call the record landed.
+        text = store.get(parent_id)["content"]
+        assert "oldword" not in "".join(
+            store.get(chunk_doc_id(parent_id, i))["content"] for i in range(declared)
+        )
+        assert sync_module.record_landed(store, parent_id, text) is False
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert next(f for f in report.files if f.relpath == "long.md").action == (
+            "update"
+        )
+        assert _chunk_ids(store, parent_id) == before[:declared]
+        assert all(vectors.get(i) is None for i in surplus)
+        assert sync_module.record_landed(store, parent_id, text) is True
+        again = sync_corpus(registry, vault, source_system="obsidian")
+        assert again.counts()["skipped_unchanged"] == 3
+
+    def test_a_kill_part_way_through_the_surplus_delete_leaves_a_run_the_retry_finds(
+        self, registry, vault, monkeypatch
+    ):
+        """Deleting from the top down keeps the leftovers contiguous from ``kept``."""
+        import trellis.ingest_corpus.sync as sync_module
+
+        store = registry.knowledge.document_store
+        parent_id, before = self._seed_long_then_shrink(registry, vault, monkeypatch)
+        real = sync_module._delete_doc_and_vector
+        seen: list[str] = []
+
+        def die_after_two(doc_store, vector_store, doc_id):  # type: ignore[no-untyped-def]
+            if len(seen) == 2:
+                msg = "killed"
+                raise RuntimeError(msg)
+            seen.append(doc_id)
+            return real(doc_store, vector_store, doc_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sync_module, "_delete_doc_and_vector", die_after_two)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        declared = store.get(parent_id)["metadata"]["chunk_count"]
+        left = _chunk_ids(store, parent_id)
+        assert left == before[: len(before) - 2]
+        text = store.get(parent_id)["content"]
+        assert sync_module.record_landed(store, parent_id, text) is False
+
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert _chunk_ids(store, parent_id) == before[:declared]
+
+    def test_a_redacted_chunk_past_the_end_is_kept_not_rewritten_every_sync(
+        self, registry, vault, monkeypatch
+    ):
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        note = vault / "long.md"
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        full = _topics("oldword", 12)
+        note.write_text(_long_markdown(full))
+        sync_corpus(registry, vault, source_system="obsidian")
+        note.write_text(_long_markdown(full[:4]))
+        kept = chunk_doc_id(
+            parent_id,
+            len(chunk_spans(_long_markdown(full[:4]))),
+        )
+        make_tombstone(store, vectors, kept)
+
+        first = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert any(
+            w["kind"] == "redaction_tombstone" and w["doc_id"] == kept
+            for w in first.warnings
+        )
+        assert is_redaction_tombstone(store.get(kept))
+        again = sync_corpus(registry, vault, source_system="obsidian")
+        assert again.counts()["skipped_unchanged"] == 3
+        assert again.counts()["updated"] == 0
+
+    def test_a_clean_chunked_record_costs_one_read_past_its_last_chunk(
+        self, registry, vault, monkeypatch
+    ):
+        """And a record that does not chunk reads nothing at all."""
+        from trellis.ingest_corpus.sync import record_landed
+
+        store = registry.knowledge.document_store
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        count = store.get(parent_id)["metadata"]["chunk_count"]
+        text = store.get(parent_id)["content"]
+        reads: list[str] = []
+        real = store.get
+
+        def spy(doc_id):  # type: ignore[no-untyped-def]
+            reads.append(doc_id)
+            return real(doc_id)
+
+        monkeypatch.setattr(store, "get", spy)
+
+        assert record_landed(store, parent_id, text)
+        assert reads == [chunk_doc_id(parent_id, i) for i in range(count + 1)]
+        reads.clear()
+        assert record_landed(store, "corpus:obsidian:note-a.md", "short text")
+        assert reads == []
+
+
+class TestARepairKeepsTheParentsClock:
+    """A retry that changes no parent text must not move the parent's recency.
+
+    Before a stored parent with a matching hash could reach the write path, an
+    equal hash never did, so the parent re-put stamped ``updated_at`` only for
+    an edit. A repair is not an edit.
+    """
+
+    def test_a_repaired_parent_keeps_its_updated_at_and_the_chunk_gets_a_fresh_one(
+        self, registry, vault, monkeypatch
+    ):
+        from datetime import timedelta
+
+        clock = fake_document_clock(monkeypatch)
+        t1 = clock["now"]
+        t0 = t1 - timedelta(days=365)
+        clock["now"] = t0
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        store = registry.knowledge.document_store
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        count = store.get(parent_id)["metadata"]["chunk_count"]
+        assert store.get(parent_id)["updated_at"] == t0.isoformat()
+        # A half-landed record: the parent is stored, a chunk row is not.
+        store.delete(chunk_doc_id(parent_id, 1))
+
+        clock["now"] = t1
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert next(f for f in report.files if f.relpath == "long.md").action == (
+            "update"
+        )
+        assert store.get(parent_id)["updated_at"] == t0.isoformat()
+        restored = store.get(chunk_doc_id(parent_id, 1))
+        # Content that was missing is new to the store, so it is stamped now;
+        # this is also the canary that the clock patch is in effect.
+        assert restored["updated_at"] == t1.isoformat()
+        for index in range(count):
+            if index != 1:
+                assert (
+                    store.get(chunk_doc_id(parent_id, index))["updated_at"]
+                    == t0.isoformat()
+                )
+
+    def test_an_edited_parent_is_still_stamped_with_the_edit(
+        self, registry, vault, monkeypatch
+    ):
+        from datetime import timedelta
+
+        clock = fake_document_clock(monkeypatch)
+        t1 = clock["now"]
+        clock["now"] = t1 - timedelta(days=365)
+        note = vault / "long.md"
+        note.write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+        parent_id = corpus_doc_id("obsidian", "long.md")
+
+        clock["now"] = t1
+        note.write_text(_long_markdown() + " tail.")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        store = registry.knowledge.document_store
+        assert store.get(parent_id)["updated_at"] == t1.isoformat()
+
+    def test_a_repair_does_not_change_the_keyword_ranking_of_the_parent(
+        self, registry, vault, monkeypatch
+    ):
+        from datetime import timedelta
+
+        from trellis.retrieve.strategies import KeywordSearch
+
+        clock = fake_document_clock(monkeypatch)
+        t1 = clock["now"]
+        clock["now"] = t1 - timedelta(days=400)
+        shared = "zebra quartz harbor "
+        for name in ("half", "other"):
+            (vault / f"{name}.md").write_text(
+                _long_markdown((f"{name}one", f"{name}two", f"{name}three")).replace(
+                    "All about", shared + "All about"
+                )
+            )
+        sync_corpus(registry, vault, source_system="obsidian")
+        store = registry.knowledge.document_store
+        half = corpus_doc_id("obsidian", "half.md")
+        other = corpus_doc_id("obsidian", "other.md")
+        search = KeywordSearch(store, recency_half_life_days=30.0)
+
+        def scores() -> dict[str, float]:
+            return {
+                i.item_id: i.relevance_score
+                for i in search.search("zebra quartz harbor", limit=20)
+            }
+
+        before = scores()
+        store.delete(chunk_doc_id(half, 1))
+        clock["now"] = t1
+        sync_corpus(registry, vault, source_system="obsidian")
+        after = scores()
+
+        assert half in before
+        assert other in before
+        assert after[half] == pytest.approx(before[half], rel=1e-3)
+        assert after[other] == pytest.approx(before[other], rel=1e-3)

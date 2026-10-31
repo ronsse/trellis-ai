@@ -13,7 +13,9 @@ set (off by default — the same flag #263 gates ``save_memory`` with):
 
 * **Exact duplicate** already stored under this source's prefix, with every
   chunk row it should have → dropped (deterministic NOOP; no model call, no
-  event). One whose chunks are not all stored is not a duplicate yet.
+  event). One whose chunks are not all stored is not a duplicate yet; when it
+  is this candidate's own parent row, the candidate keeps the verdict that row
+  was stored with and is written again, without a second judge call.
 * **Near duplicate** → the local model judges ADD / UPDATE / SUPERSEDE / NOOP
   exactly as ``save_memory`` does; NOOP drops the candidate, SUPERSEDE stamps
   a successor marker, UPDATE stamps an addendum marker. Each non-fallback
@@ -58,6 +60,7 @@ from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
+    UPDATES_DOC_KEY,
     ReconcileCandidate,
     ReconcileDecision,
     ReconcileFallbackReason,
@@ -156,6 +159,17 @@ def adjudicate(
     near-duplicate judge like any other, whose verdicts are unchanged. The writer
     then rewrites the parent and its chunks.
 
+    **An unlanded exact duplicate of this very candidate is not judged again.**
+    Its stored parent already records what an earlier judge decided, so the
+    candidate takes that verdict, its marker and the ids it names, and goes
+    straight to the writer, which completes the chunk rows; the stale-mark is
+    then applied by :func:`apply_supersessions` like any other survivor's.
+    Judging it again would be a second verdict on a record that already has one:
+    a NOOP would drop it with its chunks still missing, and a run with no judge
+    would stamp ``add`` over a stored ``supersede`` and never mark the target.
+    It adds nothing to the report's verdict counts, which the sweep that judged
+    it already made.
+
     **An exact duplicate also repairs the supersession it names.** A document
     that claims ``supersedes_doc_id`` was written by an earlier sweep whose
     stale-mark may never have happened (the process died, or the store refused,
@@ -178,19 +192,23 @@ def adjudicate(
     for candidate in candidates:
         chash = content_hash(candidate.content)
         exact = doc_store.get_by_hash(chash)
+        exact_id = str(exact.get("doc_id", "")) if exact is not None else ""
         if (
             exact is not None
-            and str(exact.get("doc_id", "")).startswith(id_prefix)
-            and str(exact.get("doc_id", "")) not in hidden_doc_ids
-            and record_landed(
-                doc_store, str(exact.get("doc_id", "")), candidate.content
-            )
+            and exact_id.startswith(id_prefix)
+            and exact_id not in hidden_doc_ids
         ):
-            candidate.reconciliation = ReconcileDecision.NOOP.value
-            report.candidates_reconciled_noop += 1
-            if not dry_run:
-                _repair_supersession(registry, exact, report)
-            continue
+            if record_landed(doc_store, exact_id, candidate.content):
+                candidate.reconciliation = ReconcileDecision.NOOP.value
+                report.candidates_reconciled_noop += 1
+                if not dry_run:
+                    _repair_supersession(registry, exact, report)
+                continue
+            if exact_id == candidate.doc_id:
+                # Already in ``existing`` and ``index``, which loaded it.
+                _take_stored_verdict(candidate, exact)
+                survivors.append(candidate)
+                continue
 
         matches = [
             (mid, sim)
@@ -239,6 +257,26 @@ def adjudicate(
         existing[candidate.doc_id] = candidate.content
         survivors.append(candidate)
     return survivors
+
+
+def _take_stored_verdict(candidate: CandidateMemory, stored: dict[str, Any]) -> None:
+    """Copy the markers of *stored*, this candidate's own parent row, onto it.
+
+    The writer merges stored metadata under the fresh, so a marker left off the
+    candidate would overwrite the stored one with a different verdict. A row
+    with no marker, written before markers existed, is an ADD.
+    """
+    metadata = stored.get("metadata") or {}
+    marker = metadata.get(RECONCILIATION_KEY)
+    candidate.reconciliation = (
+        marker if isinstance(marker, str) and marker else ReconcileDecision.ADD.value
+    )
+    supersedes = metadata.get(SUPERSEDES_DOC_KEY)
+    if isinstance(supersedes, str) and supersedes:
+        candidate.supersedes_doc_id = supersedes
+    updates = metadata.get(UPDATES_DOC_KEY)
+    if isinstance(updates, str) and updates:
+        candidate.updates_doc_id = updates
 
 
 def _apply_verdict(
