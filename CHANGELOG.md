@@ -368,6 +368,65 @@ All notable changes to Trellis will be documented in this file.
   `units_spanning_builds` still reads every pack of the task. The field names
   are unchanged; the `build` values are not (`unidentified` is gone).
 
+- **`upsert_edges_bulk` on ArcadeDB leaves one current row per triplet (part of
+  #1078).** #1086 gave `upsert_edge` a re-read after its write commits, but the
+  bulk path takes no `EdgeClaim`, so a bulk batch racing another writer of the
+  same edge could still commit beside that writer's row and leave two. On a
+  backend that sets `VERIFY_EDGE_WRITE_UNIQUENESS` (ArcadeDB; Neo4j is
+  unchanged), `upsert_edges_bulk` now reads, in one round trip, which triplets
+  of the committed batch have more than one current row, and re-writes each of
+  them through the same bounded re-run as `upsert_edge`, from that row's own
+  properties and provenance. The id returned for a re-written row is the
+  surviving row's. A batch with no duplicate costs that one read; a duplicate
+  that outlasts the bound, or a repair that raises, is logged, not raised,
+  because the write has committed (that triplet keeps its committed id and
+  the next is repaired). The `edge_duplicate_current_rerun` warning gains `path` (`single`
+  or `bulk`). The bulk-vs-bulk and bulk-vs-single race checks now also run in
+  `test_arcadedb_graph.py`; the opposite-row-order one stays Neo4j-only, as it
+  asserts zero driver retries and ArcadeDB resolves overlapping batches by
+  commit-time conflict retry.
+
+- **`POST /api/v1/commands/batch` and MCP `execute_mutation` refuse a withholding
+  `lifecycle` and a new `evidence_ref` on `evidence.ingest` (part of #1057).** The
+  pack builder withholds by id, and an `evidence.ingest` command's
+  `evidence.metadata` reached the document store with any `lifecycle` or
+  `evidence_ref` a caller sent, so a document at a graph node's id could hide the
+  node and one carrying an `evidence_ref` could make itself the successor another
+  item names. Both doors now refuse the command, naming the governed writer, with
+  nothing written: the whole batch with a 422 before any command runs (the way an
+  unknown operation is), `execute_mutation` as `INVALID_PARAMS`. A `lifecycle` is
+  accepted only as `{"state": "current"}` with every other field null or at its
+  default (a set field, such as a `deprecation_reason`, could forge a redaction
+  tombstone), which keeps the
+  documented operator restore of a superseded document working, and an
+  `evidence_ref` only when it equals the value the document the command writes
+  already holds (the id the command builder resolved, so a `doc_id` and a
+  `target_id` that differ cannot borrow each other's value), read at the caller's
+  clearance (a row above it reads as absent), so a metadata bag read back and
+  re-sent still works. The rule and the `POST /documents` messages
+  live in `trellis.mutate.evidence_pointer_keys`; `POST /documents` calls it in a
+  strict mode that refuses any value, unchanged. `EvidenceIngestHandler` is
+  unchanged: `save_memory(supersedes=)` stamps a lifecycle through it on purpose.
+  Correction to the entry below: `POST /api/v1/evidence` never stored the body's
+  `metadata`, so it was not a way to set either key and needs no check; the
+  entry's statement that it "still accepts the keys" was wrong. The graph-node id
+  collision and the dedup winner's identity stay open on #1057.
+
+- **A learning promotion copies no text or id from a source labelled above
+  `internal` (part of #1080).** A promoted precedent holds no sensitivity label of its own, but
+  the promotion read its source's body, title and id without asking for the
+  source's label: the `Source excerpt:` text, a name built from the source's
+  title or first line (or its id), and the `Source item '<id>' showed ...`
+  sentence. A `confidential` or `restricted` source (a chunk is judged by its
+  parent too) therefore reached every caller at `internal` clearance. Now such a
+  promotion writes no excerpt (`source_excerpt_status` reads `source_labelled`),
+  a neutral name with `name_source` `neutral` unless a reviewer supplied the
+  name, and a statistics sentence that reads `The source item showed ...` with no
+  id. A store that cannot answer the label read counts as labelled. A source with
+  no label, or none stored, promotes byte for byte as before, and
+  `properties.source_item_id` is kept as the structured pointer. Precedents
+  already promoted are not rewritten.
+
 - **MCP `save_memory(supersedes=)` refuses a `trace-summary:` target (part of
   #1076).** The prefix belongs to the trace embed worker (#1075 refuses it as a
   write target on every door), but `supersedes=` names a row to be stamped, not

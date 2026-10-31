@@ -290,6 +290,7 @@ class TestUpsertEdgeCollapsesADuplicateCurrentRow:
                 "source_id": "src",
                 "target_id": "tgt",
                 "edge_type": "race-rel",
+                "path": "single",
             }
         ]
 
@@ -1078,3 +1079,166 @@ class TestClaimWritePrimitiveIsPinned:
         assert len(tx.calls) == 2
         tokens = [params["edge_claim_token"] for _, params in tx.calls]
         assert tokens[0] != tokens[1]
+
+
+class TestBulkDuplicateCurrentRows:
+    """``upsert_edges_bulk`` re-reads its triplets once the batch commits (#1078).
+
+    It takes no ``EdgeClaim``, so on a backend with
+    ``VERIFY_EDGE_WRITE_UNIQUENESS`` a racing writer's row can survive beside
+    the batch's own. A fake session scripts the committed batch and the
+    recount, so the interleaving is the order of the scripted reads and writes.
+    """
+
+    EDGES = (
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {
+            "source_id": "c",
+            "target_id": "d",
+            "edge_type": "links_to",
+            "properties": {"k": "v"},
+            "confidence": 0.5,
+            "agent_id": "agent-x",
+        },
+    )
+    ENDPOINTS = tuple({"node_id": n} for n in ("a", "b", "c", "d"))
+    COMMITTED = ({"row_index": 0, "edge_id": "e0"}, {"row_index": 1, "edge_id": "e1"})
+
+    @staticmethod
+    def _session(
+        store: BoltOpenCypherGraphStore, *, reads: list[Any], writes: list[Any]
+    ) -> MagicMock:
+        """A session answering ``reads`` and each ``tx.run`` from ``writes``."""
+        tx = MagicMock()
+        tx.run.side_effect = writes
+        session = MagicMock()
+        session.execute_read.side_effect = reads
+        session.execute_write.side_effect = lambda fn: fn(tx)
+        session.tx = tx
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+        return session
+
+    def test_the_base_bolt_store_issues_no_recount_read(self) -> None:
+        store = _make_store()
+        session = self._session(
+            store, reads=[self.ENDPOINTS], writes=[list(self.COMMITTED)]
+        )
+
+        with capture_logs() as logs:
+            assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0", "e1"]
+
+        # Round trip 1 is the only read, and the batch is the only write.
+        assert session.execute_read.call_count == 1
+        assert session.execute_write.call_count == 1
+        assert not [e for e in logs if e["event"] == "edge_duplicate_current_rerun"]
+
+    def test_a_batch_with_no_duplicate_costs_one_read_and_no_rewrite(self) -> None:
+        store = _make_arcadedb_store()
+        session = self._session(
+            store, reads=[self.ENDPOINTS, []], writes=[list(self.COMMITTED)]
+        )
+
+        assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0", "e1"]
+
+        assert session.execute_read.call_count == 2
+        assert session.execute_write.call_count == 1
+
+    def test_a_duplicated_triplet_is_rewritten_and_returns_the_surviving_id(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        rewrite = MagicMock(single=MagicMock(return_value={"edge_id": "surviving"}))
+        session = self._session(
+            store,
+            reads=[self.ENDPOINTS, [{"row_index": 1}]],
+            writes=[list(self.COMMITTED), rewrite],
+        )
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 1])  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        # The other triplet keeps the id the batch returned for it.
+        assert result == ["e0", "surviving"]
+        assert session.execute_write.call_count == 2
+        store._count_current_edge_rows.assert_called_with("c", "d", "links_to")
+        assert store._count_current_edge_rows.call_count == 2
+        # The rewrite is the single-edge earliest write, from the row's own spec.
+        statement = session.tx.run.call_args_list[1].args[0]
+        sent = session.tx.run.call_args_list[1].kwargs
+        assert bolt_graph._earliest_row("old_rows") in statement
+        assert (sent["source_id"], sent["target_id"]) == ("c", "d")
+        assert sent["base_props"]["properties_json"] == '{"k": "v"}'
+        assert sent["base_props"]["confidence"] == 0.5
+        assert sent["base_props"]["agent_id"] == "agent-x"
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert warning["path"] == "bulk"
+        assert warning["outcome"] == "resolved"
+        assert (warning["source_id"], warning["target_id"]) == ("c", "d")
+
+    def test_a_duplicate_that_outlasts_the_bound_keeps_the_committed_id(self) -> None:
+        store = _make_arcadedb_store()
+        rewrites = [
+            MagicMock(single=MagicMock(return_value={"edge_id": "e1"}))
+            for _ in range(_EDGE_DUPLICATE_RERUN_ATTEMPTS)
+        ]
+        self._session(
+            store,
+            reads=[self.ENDPOINTS, [{"row_index": 1}]],
+            writes=[list(self.COMMITTED), *rewrites],
+        )
+        store._count_current_edge_rows = MagicMock(return_value=2)  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        assert result == ["e0", "e1"]
+        (warning,) = (e for e in logs if e["event"] == "edge_duplicate_current_rerun")
+        assert (warning["path"], warning["outcome"]) == ("bulk", "unresolved")
+        assert warning["reruns"] == _EDGE_DUPLICATE_RERUN_ATTEMPTS
+
+    def test_the_recount_reads_current_rows_of_the_triplet_edge_type_only(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        store._run_read_list = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        assert store._rows_with_duplicate_current_edges(list(self.EDGES)) == set()
+
+        statement = store._run_read_list.call_args.args[0]
+        triplets = store._run_read_list.call_args.kwargs["triplets"]
+        # A closed (re-versioned) row, or an edge of another type between the
+        # same endpoints, must not count: either would flag a healthy triplet.
+        assert "e.valid_to IS NULL" in statement
+        assert "e.edge_type = trip.edge_type" in statement
+        assert "count(e) AS n" in statement
+        assert "n > 1" in statement
+        assert [(t["row_index"], t["edge_type"]) for t in triplets] == [
+            (0, "links_to"),
+            (1, "links_to"),
+        ]
+
+    def test_a_repair_that_raises_keeps_the_committed_id_and_repairs_the_rest(
+        self,
+    ) -> None:
+        store = _make_arcadedb_store()
+        rewrite = MagicMock(single=MagicMock(return_value={"edge_id": "surviving"}))
+        self._session(
+            store,
+            reads=[self.ENDPOINTS, [{"row_index": 0}, {"row_index": 1}]],
+            writes=[list(self.COMMITTED), RuntimeError("driver went away"), rewrite],
+        )
+        store._count_current_edge_rows = MagicMock(side_effect=[2, 2, 1])  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        # Row 0's repair raised: it keeps the committed id. Row 1 is still repaired.
+        assert result == ["e0", "surviving"]
+        (failure,) = (
+            e for e in logs if e["event"] == "edge_duplicate_current_repair_failed"
+        )
+        assert failure["path"] == "bulk"
+        assert (failure["source_id"], failure["target_id"]) == ("a", "b")
+        assert failure["edge_type"] == "links_to"
+        assert failure["error_type"] == "RuntimeError"

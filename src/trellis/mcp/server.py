@@ -125,6 +125,7 @@ from trellis.mutate import (
     redirect_unreachable_settings_update,
     requires_admin_scope,
 )
+from trellis.mutate.evidence_pointer_keys import evidence_ingest_pointer_refusal
 from trellis.ops import (
     check_capture_health,
     format_capture_warning,
@@ -4370,6 +4371,32 @@ def _resolve_execute_mutation_target(
     return None, None, args
 
 
+def _refuse_evidence_pointer_keys(command: Command) -> None:
+    """Refuse an ``evidence.ingest`` whose metadata would withhold or redirect an item.
+
+    A caller's ``lifecycle`` or ``evidence_ref`` can reach an item other than the
+    document; only the restore form and an unchanged ``evidence_ref`` pass
+    (:mod:`trellis.mutate.evidence_pointer_keys`), judged on the built command so
+    the document id is the one it will write. Refused before anything is
+    written, with the tool's ordinary pre-flight ``INVALID_PARAMS``.
+    """
+    if command.operation is not Operation.EVIDENCE_INGEST:
+        return
+    refusal = evidence_ingest_pointer_refusal(
+        command,
+        document_store=_get_registry().knowledge.document_store,
+        clearance=current_clearance(),
+    )
+    if refusal is not None:
+        _raise_invalid_params(
+            refusal.message,
+            data={
+                "field": f"args.evidence.metadata.{refusal.key}",
+                "operation": str(command.operation),
+            },
+        )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def execute_mutation(
     operation: str,
@@ -4429,7 +4456,10 @@ def execute_mutation(
     Raises:
         McpError: With ``INVALID_PARAMS`` for pre-flight argument
             issues (empty operation, unknown enum, non-dict args,
-            ``Command`` construction failure), ``POLICY_DENIED`` for a
+            ``Command`` construction failure, an ``evidence.ingest`` whose
+            ``evidence.metadata`` sets a ``lifecycle`` other than
+            ``{"state": "current"}`` or an ``evidence_ref`` the document does
+            not already hold), ``POLICY_DENIED`` for a
             destructive operation without the ``admin`` scope, and
             ``INTERNAL_ERROR`` for unexpected executor-side crashes.
     """
@@ -4509,6 +4539,7 @@ def execute_mutation(
             data={"operation": str(op), "error_class": type(exc).__name__},
         )
 
+    _refuse_evidence_pointer_keys(command)
     try:
         executor = build_curate_executor(_get_registry(), clearance=current_clearance())
         result = executor.execute(command)

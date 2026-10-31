@@ -1860,7 +1860,7 @@ learning-artifacts directory the Review queue reads. Each row carries:
 - `candidate_id`, `intent_family`, the source `item_id`, and a
   `source_excerpt` of at most 300 characters, resolved as a promotion
   resolves it. `source_excerpt_status` is `included` or the reason there is
-  none, including `source_withheld` for a noise or archived source;
+  none, including `source_withheld` for a noise or archived source and `source_labelled` for one labelled above `internal`;
 - `helpful_count`, `unhelpful_count`, `distinct_helpful_sessions` and
   `sessionless_helpful_count` (`null` when an older artifact never wrote the
   field), and `target_entity_count`;
@@ -3069,7 +3069,7 @@ The stamp's first deterministic producer is an explicit declaration by the agent
 Undoing a stamp:
 
 - **Entity:** `execute_mutation("entity.update", {"entity_id": N, "properties": {"lifecycle": {"state": "current"}}})` — the same operation and top-level property merge as the stamp. It leaves `lifecycle` set to `current` rather than removing the key, which the gate reads exactly as an unstamped node. **Not for a precedent node**: `entity.update` refuses any write to `properties.lifecycle` where the current node type is `"precedent"`, naming `precedent.demote`/`precedent.reinstate` as the way to change it instead — those are the only path for a precedent, supersession stamp or not.
-- **Document (operator-only):** read the metadata bag with `GET /api/v1/documents/{doc_id}`, set its `lifecycle` to `{"state": "current"}`, and submit `execute_mutation("evidence.ingest", {"evidence": {"doc_id": …, "content": <unchanged>, "metadata": <bag>, "preserve_updated_at": true}}, idempotency_key=<fresh>)`, adding `"uri": <the bag's uri>` when the content is empty (the handler refuses empty content without one). `execute_mutation` runs the default `soft` executor, so with `TRELLIS_ENABLE_EMBED_ON_INGEST=1` this re-embeds the document and restamps its vector row's `created_at`. There is no restore tool.
+- **Document (operator-only):** read the metadata bag with `GET /api/v1/documents/{doc_id}`, set its `lifecycle` to `{"state": "current"}`, and submit `execute_mutation("evidence.ingest", {"evidence": {"doc_id": …, "content": <unchanged>, "metadata": <bag>, "preserve_updated_at": true}}, idempotency_key=<fresh>)`, adding `"uri": <the bag's uri>` when the content is empty (the handler refuses empty content without one). `current` is the only `lifecycle` a caller may write through `execute_mutation` or `POST /commands/batch` (with no `superseded_by` or `valid_until`), and the bag's `evidence_ref`, when it has one, must go back unchanged: any other `lifecycle`, or a new or changed `evidence_ref`, is refused before anything is written. `execute_mutation` runs the default `soft` executor, so with `TRELLIS_ENABLE_EMBED_ON_INGEST=1` this re-embeds the document and restamps its vector row's `created_at`. There is no restore tool.
 
 ---
 
@@ -3730,7 +3730,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 
 **Promotion-ready digest (#845).** Both `--format json`'s `learning_promotion_ready` field and the `intent_learning_candidates.json` artifact's `promotion_ready` key carry a surfacing-only summary — `count` of `promote_guidance` candidates with `helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (currently `1`) and `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate` desc, then `times_served` desc). Text output prints `"N candidate(s) promotion-ready — review with trellis curate promote-learning or the Review tab"` when `N > 0` (singular at `N == 1`). Nothing here promotes anything; it only tells a reader that candidates are waiting. A candidate's `precedent_name` also gets a readable fallback name (first non-empty line of its document, frontmatter and heading markers stripped) when it has no `title` and its item resolves — kept as a bare item id only when the item can't be resolved.
 
-**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes.
+**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes. A precedent whose source is labelled above `internal` (`confidential` or `restricted`, a chunk judged by its parent too) carries no source text and no source id outside `properties.source_item_id`: no excerpt, a neutral name unless a reviewer supplied one, a statistics sentence without the id, and `source_excerpt_status` reads `source_labelled`.
 
 ### `trellis worker enrich`
 
@@ -4074,10 +4074,21 @@ above its own clearance, and cannot touch a document it may not read.**
   value and the caller: the pack builder withholds by id, so a `lifecycle` would
   withhold every item under this document's id (a graph node's included) and an
   `evidence_ref` the item whose successor it names. Supersede with MCP `save_memory(supersedes=...)`; the
-  refusal names the writer for each key. The route holds this rule, not
-  `evidence.ingest`, which takes the keys from `save_memory(supersedes=)`, so
-  `POST /evidence`, `POST /commands/batch` and `execute_mutation` still accept
-  them. Nothing is written on any refusal. The overwrite check compares the label this request
+  refusal names the writer for each key. The handler does not hold this rule:
+  `evidence.ingest` takes the keys from `save_memory(supersedes=)`, so each
+  agent-facing door holds it. `POST /evidence` needs no check, because it never
+  stores the body's `metadata` (only the `evidence_type`, `source_origin` and
+  sensitivity label it builds itself). `POST /commands/batch` and MCP `execute_mutation` hold a
+  narrower rule for an `evidence.ingest` command's `evidence.metadata`: a
+  `lifecycle` is accepted only as `{"state": "current"}` with every other field
+  null or at its default (the operator restore below; a set field, a
+  `deprecation_reason` included, is refused), and
+  an `evidence_ref` only when it equals the value the document the command writes
+  already holds (so a metadata bag read back
+  and re-sent keeps working). Anything else is a 422 for the whole batch,
+  before any command runs, or an `INVALID_PARAMS` for `execute_mutation`, and the
+  message names the governed writer. A stored document above the key's clearance
+  reads as absent for that comparison. Nothing is written on any refusal. The overwrite check compares the label this request
   writes, so a re-put that omits `sensitivity` over a labelled document is the
   downgrade it always was.
 - REST `POST /api/v1/vectors` judges every row before it writes any, so a refused

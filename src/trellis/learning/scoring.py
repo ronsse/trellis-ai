@@ -118,6 +118,13 @@ SOURCE_EXCERPT_INCLUDED = "included"
 #: removed".
 SOURCE_EXCERPT_REDACTED = "source_redacted"
 
+#: ``properties["source_excerpt_status"]`` when the source document is
+#: labelled above ``internal`` (:func:`_source_is_labelled`). Never copied: a
+#: precedent carries no label of its own, so its text would reach every caller
+#: at ``internal`` clearance. Such a promotion also names no source id outside
+#: ``source_item_id``, the structured pointer a read surface conceals.
+SOURCE_EXCERPT_LABELLED = "source_labelled"
+
 #: How a promoted precedent's name was derived, recorded as
 #: ``properties["name_source"]`` on its node and ``name_source`` on its
 #: ``PRECEDENT_PROMOTED`` payload. Only :data:`NAME_SOURCE_SOURCE_TEXT`
@@ -926,6 +933,35 @@ def _withheld_from_packs(document: Mapping[str, Any], document_store: Any) -> bo
     return False
 
 
+def _source_is_labelled(item_id: str, document_store: DocumentStore | None) -> bool:
+    """Whether the source document's label is above ``internal``.
+
+    The clearance a promoted precedent is served at: it holds no label, so a
+    source a caller at ``internal`` cannot read must not lend it text. A chunk
+    is judged by its parent as well (:class:`DocumentClearance`). A missing
+    document, or no store to ask, is no verdict (``False``), except a chunk id
+    whose parent is labelled; a store that raises is unreadable, and an outage
+    must not read as permission (``True``).
+    """
+    if document_store is None or not item_id:
+        return False
+    # Deferred like the imports above: ``trellis.retrieve`` imports this module.
+    from trellis.retrieve.sensitivity import DocumentClearance  # noqa: PLC0415
+
+    try:
+        document = document_store.get(item_id)
+        # No early return on a missing row: a chunk whose row is gone (a
+        # re-chunk) is still judged by its parent, as ``readable_ids`` does.
+        gate = DocumentClearance(document_store, "internal")
+        return not gate.permits(item_id, (document or {}).get("metadata"))
+    except Exception as exc:  # advisory step; fails closed
+        logger.warning(
+            "precedent_source_label_lookup_failed",
+            error_type=type(exc).__name__,
+        )
+        return True
+
+
 def resolve_source_excerpt(
     item_id: str, document_store: DocumentStore | None
 ) -> tuple[str | None, str]:
@@ -937,7 +973,8 @@ def resolve_source_excerpt(
     missing or empty document and a store that raises all degrade to "no
     excerpt". Only documents are read — a candidate whose item is a trace,
     an entity or another precedent resolves to ``document_not_found``, and so
-    does the document row a precedent writes for itself.
+    does the document row a precedent writes for itself. A source labelled
+    above ``internal`` yields :data:`SOURCE_EXCERPT_LABELLED` and no text.
     """
     if document_store is None:
         return None, "no_document_store"
@@ -958,10 +995,12 @@ def resolve_source_excerpt(
             error_type=type(exc).__name__,
         )
         return None, "lookup_failed"
-    if not document or withheld:
+    labelled = _source_is_labelled(item_id, document_store)
+    if labelled or withheld or not document:
         # The graph axis never re-checks a precedent's source, so copying a
-        # noise/archived body here would launder it into every pack.
-        return None, "source_withheld" if withheld else "document_not_found"
+        # noise/archived or labelled body here would launder it into every pack.
+        reason = "source_withheld" if withheld else "document_not_found"
+        return None, SOURCE_EXCERPT_LABELLED if labelled else reason
     body = _FALLBACK_NAME_FRONTMATTER_RE.sub(
         "", str(document.get("content") or ""), count=1
     )
@@ -1147,10 +1186,18 @@ def build_learning_promotion_payloads(
     ]
     primary_domain = str(candidate.get("primary_domain") or "").strip()
     name_source = _promotion_name_source(candidate, promotion_name)
+    source_item_id = str(candidate.get("item_id") or "").strip()
+    # A label above ``internal`` on the source: the precedent holds none, so
+    # it copies no text and names no id outside ``source_item_id``. Only a
+    # reviewer's own name survives.
+    labelled = _source_is_labelled(source_item_id, document_store)
+    if labelled and name_source != NAME_SOURCE_REVIEWER:
+        entity_name = neutral_precedent_name(entity_id, candidate.get("intent_family"))
+        name_source = NAME_SOURCE_NEUTRAL
     # Read side only, and at command-build time: the write still goes
     # through ``submit_learning_promotion`` and the executor.
     source_excerpt, source_excerpt_status = resolve_source_excerpt(
-        str(candidate.get("item_id") or "").strip(), document_store
+        source_item_id, document_store
     )
     entity_payload = {
         "entity_type": "precedent",
@@ -1160,7 +1207,10 @@ def build_learning_promotion_payloads(
             **dict(candidate.get("precedent_properties", {})),
             **({"name_source": name_source} if name_source else {}),
             "description": _build_precedent_description(
-                candidate, rationale=rationale, source_excerpt=source_excerpt
+                candidate,
+                rationale=rationale,
+                source_excerpt=source_excerpt,
+                name_source_item=not labelled,
             ),
             # ``included``, or why the description carries no source content.
             "source_excerpt_status": source_excerpt_status,
@@ -1450,8 +1500,9 @@ def _source_redacted(
     them, and the ``REDACTION_APPLIED`` event names the source's id, not the
     precedent's. Three signals, any of which answers yes:
 
-    * the current node's markers, ``name_source`` ``neutral`` or
-      ``source_excerpt_status`` ``source_redacted``. These do not last: a
+    * the current node's markers, ``name_source`` ``neutral`` (not when
+      ``source_excerpt_status`` is ``source_labelled``, which also earns that
+      name) or ``source_excerpt_status`` ``source_redacted``. These do not last: a
       later promotion of a regenerated candidate writes a new version without
       them, so they cannot be the only signal;
     * a redaction trace (:func:`_redaction_trace`) on the payload's
@@ -1471,7 +1522,12 @@ def _source_redacted(
         and existing_node.get("node_type") == "precedent"
         and isinstance(node_props, Mapping)
         and (
-            node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+            (
+                node_props.get("name_source") == NAME_SOURCE_NEUTRAL
+                # A labelled source gets the neutral name too; lowering its
+                # label later must not read the earlier promotion as redacted.
+                and node_props.get("source_excerpt_status") != SOURCE_EXCERPT_LABELLED
+            )
             or node_props.get("source_excerpt_status") == SOURCE_EXCERPT_REDACTED
         )
     ):
@@ -2269,6 +2325,7 @@ def _build_precedent_description(
     *,
     rationale: str,
     source_excerpt: str | None = None,
+    name_source_item: bool = True,
 ) -> str:
     metrics = candidate.get("metrics", {})
     if not isinstance(metrics, Mapping):
@@ -2294,7 +2351,11 @@ def _build_precedent_description(
     # survive in the stored description either way.
     if source_excerpt:
         parts.append(f"{_SOURCE_EXCERPT_PREFIX}{source_excerpt}")
-    parts.append(f"{_source_item_marker(item)}{measured}.")
+    if name_source_item:
+        parts.append(f"{_source_item_marker(item)}{measured}.")
+    else:
+        # A labelled source: the same statistics, without the id.
+        parts.append(f"The source item showed {measured}.")
     # Citation evidence, stated rather than implied. ``success_rate`` is a
     # pack-level outcome that says nothing about whether a grader ever
     # found *this item* useful, and on the live corpus most promote
@@ -2345,6 +2406,7 @@ __all__ = [
     "PROMOTE_RECOMMENDATIONS",
     "REFUSED_REDACTED",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
+    "SOURCE_EXCERPT_LABELLED",
     "SOURCE_EXCERPT_REDACTED",
     "PromotionVerdict",
     "analyze_learning_observations",
