@@ -352,6 +352,35 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Precedent listings withhold a precedent the caller's clearance cannot read,
+  and MCP `get_lessons` is gated (part of #1080).** Below `restricted`,
+  `GET /precedents` and `get_lessons` served a promoted precedent whose own
+  document row the caller could not read, and one whose source document it could
+  not read (a source relabelled after the promotion, so the node still carried
+  its text). A row is now withheld, not rewritten, when its own document row is
+  unreadable or its source id (the payload's `source_item_id`, else the node's)
+  is, unless the row holds nothing of that source: the node's
+  `source_excerpt_status` is `source_labelled`, the node's `description` equals
+  the event's (the listing serves a row per promotion, and a node vouches only
+  for the event whose text it holds, so an older event of a precedent promoted
+  again is judged on its own), and the source id is in neither the served title
+  nor the served description. Both checks run before a row takes a `limit` slot,
+  in one `readable_ids` call per fetch window, so a page stays full while
+  readable precedents remain. A document store that raises withholds the rows it
+  could not judge (a graph store read that raises still propagates, as before),
+  and below `restricted` with no document store every row with a document row, or
+  that names a source without meeting the exemption, is withheld. A non-string
+  event `source_item_id` no longer hides the node's string id from the check.
+  `get_lessons` now passes the caller's clearance (its roster claim in
+  `test_sensitivity_surface_rule.py` flips from `FREE` to `GATED`), and the
+  `restricted` default, served text, stored rows and pack building are unchanged.
+  This change covers precedent listings only. A source relabelled after
+  promotion still reaches a read key through `GET /entities/{id}`,
+  `GET /documents/{id}`, `GET /search` and `POST /packs`, because the
+  precedent's own row and node hold the excerpt and carry no label, and
+  relabelling the source does not touch them. `GET /precedents/domains` still
+  counts a withheld precedent's domain tag; it has no clearance to judge by.
+
 - **`trellis analyze holdout --by-commit` names a build as `analyze health`
   names a serving build, and from the pack that sets the arm.** The table keyed
   a build on the first 12 characters of the stamped commit, ignoring `version`,

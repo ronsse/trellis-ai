@@ -6081,9 +6081,15 @@ paths:
       description: 'List promoted precedents.
 
 
-        A learning promotion''s ``payload.source_item_id`` is left out when it names
+        Below ``restricted`` a precedent is withheld when its own document row or
 
-        a document above the caller''s clearance.'
+        its source document is above the caller''s clearance, unless the promotion
+
+        was made under the source-label rule. A learning promotion''s
+
+        ``payload.source_item_id`` is left out when it names a document above the
+
+        caller''s clearance.'
       operationId: list_precedents_api_v1_precedents_get
       parameters:
       - in: query

@@ -3128,6 +3128,9 @@ def get_lessons(
 ) -> str:
     """Get lessons learned (promoted precedents) from past experiences.
 
+    A lesson whose own document row or source the caller's clearance cannot read
+    is left out.
+
     Args:
         domain: Optional domain filter.
         limit: Maximum lessons to return (default 10).
@@ -3141,6 +3144,8 @@ def get_lessons(
         domain=domain,
         limit=limit,
         graph_store=registry.knowledge.graph_store,
+        document_store=registry.knowledge.document_store,
+        clearance=current_clearance(),
     )
 
     result = format_lessons_as_markdown(lessons, max_tokens=max_tokens)
