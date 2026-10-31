@@ -6,6 +6,29 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
+  A file that starts today can stop starting, including on a harmless stray key
+  such as `version: 1`; rename it `x-version` to keep it. Loading
+  `config.yaml` used to ignore an unknown top-level key (`knowlege:`, `storage:`),
+  and logged a warning for a store name no plane has, a store under the wrong
+  plane, or the removed flat `stores:` block, then served every store from the
+  SQLite default. Each of those now raises `ConfigError` naming the file and every
+  offending entry at that level, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
+  409 `config_error` when it surfaces inside a request, and the API refuses to start.
+  The accepted top-level keys are `knowledge`, `operational`, `embeddings`,
+  `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`,
+  `default_agent` and `format`, plus any key starting with `x-` (an anchor holder,
+  as in Compose). The message lists them. Keys are echoed only when they are plain
+  names. A plane whose value is not a mapping (`knowledge: [graph]`) is still a
+  warning, not a refusal.
+- **A plane DSN that no store reads now warns.** Setting `TRELLIS_KNOWLEDGE_PG_DSN`
+  or `TRELLIS_OPERATIONAL_PG_DSN` does not select Postgres: only a store whose
+  backend is `postgres` or `pgvector` reads it. When the variable is set and no
+  store of that plane uses either backend, the registry logs
+  `registry_plane_dsn_unused` once per plane per process, naming the plane, the
+  variable and the file, never the DSN. A plane with at least one Postgres store
+  stays silent, since a plane may legitimately run some stores on SQLite.
+
 - **The AST rule tests share one parse per source.** `ast.parse` called from test
   code is now memoised by its source text (`tests/ast_rules.py`, installed from
   `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
