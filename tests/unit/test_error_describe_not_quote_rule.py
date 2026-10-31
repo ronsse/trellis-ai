@@ -206,7 +206,9 @@ def _resolve_transitively(expr: ast.expr, handler: ast.ExceptHandler) -> ast.exp
             finally:
                 self.visiting.discard(node.id)
 
-    return _Inliner().visit(expr)
+    # ``NodeTransformer.visit`` rewrites the tree it is given, and *expr* is a
+    # node of a tree ``ast.parse`` shares with every other test (tests/ast_rules.py).
+    return _Inliner().visit(copy.deepcopy(expr))
 
 
 def _scan(tree: ast.Module, path: Path, family: frozenset[str]) -> list[_RaiseSite]:
