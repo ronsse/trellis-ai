@@ -371,6 +371,24 @@ All notable changes to Trellis will be documented in this file.
   `GET /precedents/domains` still counts a withheld precedent's domain tag; it
   has no clearance to judge by, and closing that is a separate change.
 
+- **`upsert_edges_bulk` on ArcadeDB leaves one current row per triplet (part of
+  #1078).** #1086 gave `upsert_edge` a re-read after its write commits, but the
+  bulk path takes no `EdgeClaim`, so a bulk batch racing another writer of the
+  same edge could still commit beside that writer's row and leave two. On a
+  backend that sets `VERIFY_EDGE_WRITE_UNIQUENESS` (ArcadeDB; Neo4j is
+  unchanged), `upsert_edges_bulk` now reads, in one round trip, which triplets
+  of the committed batch have more than one current row, and re-writes each of
+  them through the same bounded re-run as `upsert_edge`, from that row's own
+  properties and provenance. The id returned for a re-written row is the
+  surviving row's. A batch with no duplicate costs that one read; a duplicate
+  that outlasts the bound, or a repair that raises, is logged, not raised,
+  because the write has committed (that triplet keeps its committed id and
+  the next is repaired). The `edge_duplicate_current_rerun` warning gains `path` (`single`
+  or `bulk`). The bulk-vs-bulk and bulk-vs-single race checks now also run in
+  `test_arcadedb_graph.py`; the opposite-row-order one stays Neo4j-only, as it
+  asserts zero driver retries and ArcadeDB resolves overlapping batches by
+  commit-time conflict retry.
+
 - **`POST /api/v1/commands/batch` and MCP `execute_mutation` refuse a withholding
   `lifecycle` and a new `evidence_ref` on `evidence.ingest` (part of #1057).** The
   pack builder withholds by id, and an `evidence.ingest` command's

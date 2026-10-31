@@ -315,6 +315,22 @@ def test_concurrent_edge_update_leaves_one_current_row(graph_store):
     )
 
 
+def test_concurrent_bulk_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_bulk_edge_create_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+# The opposite-row-order check asserts zero driver retries, and ArcadeDB resolves
+# overlapping batches by commit-time conflict retry (DeadlockDetected, "slot rebase").
+
+
 @pytest.mark.parametrize(
     ("racer_committed", "racer_wins_the_id"),
     [("earlier", True), ("later", False)],
@@ -383,6 +399,149 @@ def test_upsert_edge_collapses_a_row_a_racing_writer_committed_unseen(
     expected_id = "dup-racer-edge" if racer_wins_the_id else first_edge_id[0]
     assert returned_id == current[0]["edge_id"] == expected_id
     assert current[0]["properties"] == {"writer": "a"}
+
+
+@pytest.mark.parametrize("raced_position", [0, 1], ids=["first-row", "second-row"])
+@pytest.mark.parametrize(
+    ("racer_committed", "racer_wins_the_id"),
+    [("earlier", True), ("later", False)],
+)
+def test_upsert_edges_bulk_collapses_a_row_a_racing_writer_committed_unseen(
+    graph_store, monkeypatch, racer_committed, racer_wins_the_id, raced_position
+):
+    """Force the bulk side of #1078: a second current row lands after the batch.
+
+    ``upsert_edges_bulk`` takes no ``EdgeClaim``, so a racing writer's row can
+    survive beside the batch's own. This commits that row by hand right after
+    the batch's write returns, for one triplet of two (the first or the
+    second), and the recount must find it and re-write that triplet from its
+    own spec. The returned id is the survivor's, which is the earliest row's,
+    and the other triplet of the batch is not touched: one row, the batch's
+    own, never re-versioned.
+    """
+    import neo4j
+
+    for node_id in ("dup-s0", "dup-t0", "dup-s1", "dup-t1"):
+        graph_store.upsert_node(node_id, "dup-node", {})
+    raced_key = f"dup-s{raced_position}"
+    raced_target = f"dup-t{raced_position}"
+    other_position = 1 - raced_position
+    real_execute_write = neo4j.Session.execute_write
+    raced: list[str] = []
+
+    def write_then_lose_the_race(self, tx_function, *args, **kwargs):
+        result = real_execute_write(self, tx_function, *args, **kwargs)
+        if not raced:
+            now = datetime.now(UTC)
+            stamp = (
+                now - timedelta(minutes=1) if racer_committed == "earlier" else now
+            ).isoformat()
+            raced.append(stamp)
+            with graph_store._driver.session(database=graph_store._database) as session:
+                session.run(
+                    "MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL "
+                    "MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL "
+                    "CREATE (s)-[e:EDGE]->(t) SET e = $props",
+                    source_id=raced_key,
+                    target_id=raced_target,
+                    props={
+                        "version_id": "dup-racer-version",
+                        "source_id": raced_key,
+                        "target_id": raced_target,
+                        "edge_type": "dup-rel",
+                        "properties_json": '{"writer": "racer"}',
+                        "edge_id": "dup-racer-edge",
+                        "valid_from": stamp,
+                        "created_at": stamp,
+                    },
+                )
+        return result
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", write_then_lose_the_race)
+
+    returned = graph_store.upsert_edges_bulk(
+        [
+            {
+                "source_id": f"dup-s{k}",
+                "target_id": f"dup-t{k}",
+                "edge_type": "dup-rel",
+                "properties": {"writer": "bulk"},
+            }
+            for k in (0, 1)
+        ]
+    )
+
+    assert len(raced) == 1
+    current = graph_store.get_edges(
+        raced_key, direction="outgoing", edge_type="dup-rel"
+    )
+    assert len(current) == 1, [row["edge_id"] for row in current]
+    assert current[0]["properties"] == {"writer": "bulk"}
+    if racer_wins_the_id:
+        assert returned[raced_position] == current[0]["edge_id"] == "dup-racer-edge"
+    else:
+        assert returned[raced_position] == current[0]["edge_id"] != "dup-racer-edge"
+    untouched = graph_store.get_edges(
+        f"dup-s{other_position}", direction="outgoing", edge_type="dup-rel"
+    )
+    assert [row["edge_id"] for row in untouched] == [returned[other_position]]
+    with graph_store._driver.session(database=graph_store._database) as session:
+        rows_of_untouched = session.run(
+            "MATCH (:Node {node_id: $source_id})-[e:EDGE]->"
+            "(:Node {node_id: $target_id}) RETURN count(e) AS n",
+            source_id=f"dup-s{other_position}",
+            target_id=f"dup-t{other_position}",
+        ).single()["n"]
+    assert rows_of_untouched == 1
+
+
+def test_bulk_recount_ignores_closed_versions_and_other_edge_types(graph_store):
+    """The recount flags a triplet only for a second *current* row of its type.
+
+    A re-versioned triplet has a closed row beside its current one, and two
+    nodes can share an edge of another type. Neither is a duplicate, and
+    flagging one would re-write a healthy triplet on every bulk write.
+    """
+    for node_id in ("rc-s0", "rc-t0", "rc-s1", "rc-t1"):
+        graph_store.upsert_node(node_id, "rc-node", {})
+
+    def spec(k, props):
+        return {
+            "source_id": f"rc-s{k}",
+            "target_id": f"rc-t{k}",
+            "edge_type": "rc-rel",
+            "properties": props,
+        }
+
+    graph_store.upsert_edges_bulk([spec(0, {"v": 1})])
+    graph_store.upsert_edges_bulk([spec(0, {"v": 2})])
+    graph_store.upsert_edge("rc-s0", "rc-t0", "rc-other", {})
+    graph_store.upsert_edges_bulk([spec(1, {"v": 1})])
+    with graph_store._driver.session(database=graph_store._database) as session:
+        versions = session.run(
+            "MATCH (:Node {node_id: 'rc-s0'})-[e:EDGE]->(:Node {node_id: 'rc-t0'}) "
+            "WHERE e.edge_type = 'rc-rel' RETURN count(e) AS n"
+        ).single()["n"]
+        session.run(
+            "MATCH (s:Node {node_id: 'rc-s1'}) WHERE s.valid_to IS NULL "
+            "MATCH (t:Node {node_id: 'rc-t1'}) WHERE t.valid_to IS NULL "
+            "CREATE (s)-[e:EDGE]->(t) SET e = $props",
+            props={
+                "version_id": "rc-racer-version",
+                "source_id": "rc-s1",
+                "target_id": "rc-t1",
+                "edge_type": "rc-rel",
+                "properties_json": "{}",
+                "edge_id": "rc-racer-edge",
+                "valid_from": datetime.now(UTC).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    assert versions == 2  # the re-version left a closed row beside the current one
+
+    flagged = graph_store._rows_with_duplicate_current_edges([spec(0, {}), spec(1, {})])
+
+    assert flagged == {1}
 
 
 def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
