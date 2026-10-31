@@ -1931,3 +1931,101 @@ class TestRedactedChunksSurviveMoveAndPrune:
         assert docs.get(gone_id) is None
         for index in range(gone_count):
             assert docs.get(chunk_doc_id(gone_id, index)) is None
+
+
+class TestParentIsTheCommitMarker:
+    """A document's parent row is written after its chunks.
+
+    A parent stored without its chunks reads as "landed" to the sync's own
+    same-hash skip, so a run that died between two chunk writes would have been
+    skipped by every later run, with the document's text in one row and no
+    chunk to serve it.
+    """
+
+    @staticmethod
+    def _fail_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+        import trellis.ingest_corpus.sync as sync_module
+
+        real = sync_module.put_document
+
+        def flaky(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if is_chunk_doc_id(doc_id):
+                msg = "transient store error"
+                raise RuntimeError(msg)
+            return real(doc_store, vector_store, doc_id, *args, **kwargs)
+
+        monkeypatch.setattr(sync_module, "put_document", flaky)
+
+    def test_the_parent_is_written_after_every_chunk(
+        self, registry, vault, monkeypatch
+    ):
+        import trellis.ingest_corpus.sync as sync_module
+
+        (vault / "long.md").write_text(_long_markdown())
+        order: list[str] = []
+        real = sync_module.put_document
+
+        def spy(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
+            order.append(doc_id)
+            return real(doc_store, vector_store, doc_id, *args, **kwargs)
+
+        monkeypatch.setattr(sync_module, "put_document", spy)
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        mine = [doc_id for doc_id in order if doc_id.startswith(parent_id)]
+        assert mine[-1] == parent_id
+        assert len(mine) >= 3
+        assert all(is_chunk_doc_id(doc_id) for doc_id in mine[:-1])
+
+    def test_a_chunk_that_fails_leaves_no_parent_and_the_rerun_writes_all(
+        self, registry, vault, monkeypatch
+    ):
+        (vault / "long.md").write_text(_long_markdown())
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+
+        with monkeypatch.context() as patch:
+            self._fail_chunks(patch)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        assert store.get(parent_id) is None
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        parent = store.get(parent_id)
+        count = parent["metadata"]["chunk_count"]
+        assert count >= 2
+        assert all(
+            store.get(chunk_doc_id(parent_id, index)) is not None
+            for index in range(count)
+        )
+        long_file = next(f for f in report.files if f.relpath == "long.md")
+        assert long_file.action == "new"
+        assert long_file.chunks_written == count
+
+    def test_an_edit_whose_chunks_fail_keeps_the_old_parent_and_the_rerun_updates(
+        self, registry, vault, monkeypatch
+    ):
+        (vault / "long.md").write_text(_long_markdown())
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+        sync_corpus(registry, vault, source_system="obsidian")
+        old_hash = store.get(parent_id)["content_hash"]
+
+        edited = _long_markdown() + "\n\nA section added after the first sync.\n"
+        (vault / "long.md").write_text(edited)
+        with monkeypatch.context() as patch:
+            self._fail_chunks(patch)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        assert store.get(parent_id)["content_hash"] == old_hash
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        long_file = next(f for f in report.files if f.relpath == "long.md")
+        assert long_file.action == "update"
+        parent = store.get(parent_id)
+        assert parent["content"].rstrip().endswith("after the first sync.")
+        last = chunk_doc_id(parent_id, parent["metadata"]["chunk_count"] - 1)
+        assert "after the first sync." in store.get(last)["content"]

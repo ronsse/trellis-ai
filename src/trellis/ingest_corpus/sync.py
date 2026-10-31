@@ -323,7 +323,10 @@ def sync_records(
             caller that writes incrementally keeps the records that landed.
             Unset, the first error propagates as it always did. Records
             already applied are not rolled back, and neither is any part of
-            the failed one that was written before it raised.
+            the failed one that was written before it raised. A failed
+            record's chunks are written before its parent document, so one
+            that raised mid-chunks has no parent (or an old one) and the next
+            sync writes it again rather than skipping it as stored.
         minhash: The near-duplicate index to compare against and add to.
             A caller that syncs one source in several calls passes the same
             index to each, so a near-duplicate is still warned about across
@@ -544,22 +547,13 @@ def _apply_record(
     # `content_type` → `document_form` key; see trellis.schemas.document_metadata.
     metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
 
-    # Through the seam, even though the unchunked branch below re-embeds and
-    # would rebuild the row wholesale anyway: ``run_embed_on_ingest`` is
-    # gated on ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with
-    # that flag off the embed is not a mirror at all. The seam's mirror is
-    # unconditional. It also reaches the case the embed never covers — a
-    # document that has just *become* chunked keeps the whole-document
-    # vector row written by an earlier unchunked run, and nothing here
-    # re-embeds it (#567).
-    put_document(
-        doc_store,
-        vector_store,
-        outcome.doc_id,
-        text,
-        metadata,
-        preserve_updated_at=False,
-    )
+    # The chunks go in BEFORE the parent, so the parent is the commit marker: a
+    # run that dies between two chunk writes leaves no parent (or, for an
+    # update, the parent still holding the old hash), and the next sync plans
+    # the record as ``new`` / ``update`` and writes the rest, whereas a parent
+    # written first reads as "landed" to :func:`_plan_record` and to the
+    # capture sweep's exact-duplicate check, both of which skip a stored parent
+    # whose chunks never arrived.
     outcome.chunks_written = _write_chunks(
         registry,
         parent_doc_id=outcome.doc_id,
@@ -578,6 +572,22 @@ def _apply_record(
         },
         mirror=mirror,
         report=report,
+    )
+    # Through the seam, even though the unchunked branch below re-embeds and
+    # would rebuild the row wholesale anyway: ``run_embed_on_ingest`` is
+    # gated on ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with
+    # that flag off the embed is not a mirror at all. The seam's mirror is
+    # unconditional. It also reaches the case the embed never covers — a
+    # document that has just *become* chunked keeps the whole-document
+    # vector row written by an earlier unchunked run, and nothing here
+    # re-embeds it (#567).
+    put_document(
+        doc_store,
+        vector_store,
+        outcome.doc_id,
+        text,
+        metadata,
+        preserve_updated_at=False,
     )
     for index in range(len(spans), old_chunk_count):
         orphan_id = chunk_doc_id(outcome.doc_id, index)

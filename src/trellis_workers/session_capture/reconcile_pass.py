@@ -50,6 +50,7 @@ import structlog
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
@@ -65,6 +66,7 @@ from trellis.mcp.reconcile import (
     marker_for_fallback,
     reconcile_timeout_seconds,
 )
+from trellis.retrieve.lifecycle import declared_successor
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -143,6 +145,14 @@ def adjudicate(
     not start to: the ids are left out of the stored captures compared against
     and out of the exact-duplicate check, so a candidate is reconciled against
     what was stored before the sweep began and nothing else.
+
+    **An exact duplicate also repairs the supersession it names.** A document
+    that claims ``supersedes_doc_id`` was written by an earlier sweep whose
+    stale-mark may never have happened (the process died, or the store refused,
+    between the write and :func:`apply_supersessions`). That sweep's session is
+    left un-watermarked and judged again, its candidate lands here as an exact
+    duplicate, and without this the retry would report clean while the target
+    stays servable and unmarked. See :func:`_repair_supersession`.
     """
     doc_store = registry.knowledge.document_store
     event_log = registry.operational.event_log
@@ -165,6 +175,8 @@ def adjudicate(
         ):
             candidate.reconciliation = ReconcileDecision.NOOP.value
             report.candidates_reconciled_noop += 1
+            if not dry_run:
+                _repair_supersession(registry, exact, report)
             continue
 
         matches = [
@@ -289,30 +301,86 @@ def apply_supersessions(
                 report, "supersede_successor_missing", match_id, candidate.doc_id
             )
             continue
-        refusal = mark_document_superseded(
-            doc_store,
-            old_doc_id=match_id,
-            new_doc_id=candidate.doc_id,
-            vector_store=vector_store,
-        )
-        if refusal is None:
-            continue
-        # mark_document_superseded logs the refusal; the report is what an
-        # operator reading the sweep sees, and the successor must stop
-        # claiming a supersession that did not happen.
-        kind = (
-            "supersede_target_protected"
-            if refusal is ReconcileFallbackReason.TARGET_PROTECTED
-            else "supersede_target_missing"
-        )
-        _record_supersede_failure(report, kind, match_id, candidate.doc_id)
-        _withdraw_supersede_claim(
+        _stamp_or_withdraw(
             doc_store,
             candidate.doc_id,
             successor,
-            reason=refusal,
+            match_id,
+            report,
             vector_store=vector_store,
         )
+
+
+def _stamp_or_withdraw(
+    doc_store: DocumentStore,
+    successor_id: str,
+    successor: dict[str, Any],
+    match_id: str,
+    report: CaptureReport,
+    *,
+    vector_store: VectorStore | None,
+) -> None:
+    """Stale-mark *match_id* as superseded by a stored *successor*, or give up.
+
+    A refusal is counted and warned about, and the successor stops claiming a
+    supersession that did not happen.
+    """
+    refusal = mark_document_superseded(
+        doc_store,
+        old_doc_id=match_id,
+        new_doc_id=successor_id,
+        vector_store=vector_store,
+    )
+    if refusal is None:
+        return
+    # mark_document_superseded logs the refusal; the report is what an
+    # operator reading the sweep sees, and the successor must stop
+    # claiming a supersession that did not happen.
+    kind = (
+        "supersede_target_protected"
+        if refusal is ReconcileFallbackReason.TARGET_PROTECTED
+        else "supersede_target_missing"
+    )
+    _record_supersede_failure(report, kind, match_id, successor_id)
+    _withdraw_supersede_claim(
+        doc_store,
+        successor_id,
+        successor,
+        reason=refusal,
+        vector_store=vector_store,
+    )
+
+
+def _repair_supersession(
+    registry: StoreRegistry, stored: dict[str, Any], report: CaptureReport
+) -> None:
+    """Apply the supersession a stored capture names but its target lacks.
+
+    ``stored`` is a document an exact-duplicate check just matched. When its
+    metadata names ``supersedes_doc_id`` and that target carries no superseded
+    marker, the stale-mark is applied now, through the same seam
+    :func:`apply_supersessions` uses (so a vanished or protected target is
+    counted and the claim withdrawn the same way). Idempotent: a target that
+    already declares a successor, this document or another, is left alone, and
+    a withdrawn claim leaves no key to act on a second time. Live runs only;
+    the caller skips a dry run.
+    """
+    metadata = stored.get("metadata") or {}
+    match_id = metadata.get(SUPERSEDES_DOC_KEY)
+    if not isinstance(match_id, str) or not match_id:
+        return
+    doc_store = registry.knowledge.document_store
+    target = doc_store.get(match_id)
+    if target is not None and declared_successor(target.get("metadata")) is not None:
+        return
+    _stamp_or_withdraw(
+        doc_store,
+        str(stored.get("doc_id", "")),
+        stored,
+        match_id,
+        report,
+        vector_store=resolve_vector_store(registry),
+    )
 
 
 def _record_supersede_failure(

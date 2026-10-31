@@ -791,6 +791,17 @@ def _write_records(
     report.warnings.extend(sync_report.warnings)
 
 
+def _landed_of(
+    session: _PendingSession, failed: dict[int, Exception]
+) -> list[CandidateMemory]:
+    """The candidates of *session* whose records the write seam did not fail."""
+    return [
+        candidate
+        for candidate, record in zip(session.survivors, session.records, strict=True)
+        if id(record) not in failed
+    ]
+
+
 def _checkpoint(
     registry: StoreRegistry,
     batch: list[_PendingSession],
@@ -816,21 +827,43 @@ def _checkpoint(
 
     * **A record that fails to write** counts its session in
       ``sessions_errored`` and leaves it un-watermarked. The batch's other
-      records are written. Of the failed session's own candidates, those that
-      did land still get their supersession and their ``keep`` pair, because
-      the retry re-judges the session and, with reconcile on, drops them as
-      exact duplicates, so nothing would ever apply either again. Its ``discard``
-      pairs are withheld: the retry judges the session afresh and emits its own.
+      records are written. A record whose chunks fail leaves no parent document
+      (:func:`~trellis.ingest_corpus.sync._apply_record` writes the parent
+      last), so the retry stores it afresh. Of the failed session's own
+      candidates, those that did land still get their supersession, because
+      the retry would drop them as exact duplicates. The session gets **no
+      training pairs** in this run, ``keep`` and ``discard`` alike: it has no
+      watermark, the retry judges it afresh and emits its own once it completes,
+      and a ``keep`` pair emitted now would be emitted a second time then when
+      reconcile is off.
     * **A failure outside any one record** (the write seam itself raising)
       errors every session of the batch and skips the batch's supersessions and
       pairs, since which records landed is not known. Nothing is watermarked.
-    * **A failure in supersessions or pairs** errors the sessions whose records
-      landed and leaves them un-watermarked. Their memories are already stored.
+    * **A failure in supersessions** errors, and leaves un-watermarked, every
+      completed session holding a candidate that names a target, since the
+      raise may have skipped any of them. The batch's pairs are still emitted
+      for its completed sessions: the retry drops a landed candidate as an
+      exact duplicate, and a duplicate emits no pair, so skipping them now
+      would lose them. The retry applies the supersession the raise skipped,
+      because an exact duplicate whose target is not yet marked superseded
+      repairs it (:func:`~reconcile_pass.adjudicate`).
+    * **A failure in pairs** errors the sessions that completed, with or without
+      a record, and leaves them un-watermarked. Their memories are already
+      stored.
 
     A session with no record to write (nothing survived the gates) still waits
     for its checkpoint, so its ``discard`` pairs go out before its cursor.
     Sessions the sweep skipped without judging are stamped as they are skipped
     and saved with whichever checkpoint comes next.
+
+    **What a kill still loses.** The process going away between the write and
+    the pairs loses that batch's ``keep`` pairs when reconcile is on, because
+    the retry finds every landed candidate already stored and drops it as a
+    duplicate; the supersessions are not lost, the retry repairs them. The loss
+    is bounded by ``checkpoint_every`` sessions and is training data only, so
+    nothing is built to recover it. A kill between the pairs and the watermark
+    save does the opposite when reconcile is off: the retry emits that batch's
+    ``keep`` pairs a second time.
 
     A dry run writes nothing durable, so it makes no mid-sweep checkpoint and
     skips the supersessions, the pairs and the watermark here.
@@ -840,8 +873,12 @@ def _checkpoint(
     # succeeds: a half-written document is as much this sweep's own as a whole.
     writes.flushed_doc_ids.update(record.doc_id for record in records)
     failed: dict[int, Exception] = {}
+    #: Sessions every one of whose records landed (or that had none to write).
     complete: list[_PendingSession] = []
+    #: Every candidate that landed, including a failed session's own.
     landed: list[CandidateMemory] = []
+    #: The completed sessions' survivors and discards: the sweep's training pairs.
+    paired: list[CandidateMemory] = []
     discards: list[CandidateMemory] = []
     try:
         _write_records(
@@ -862,22 +899,53 @@ def _checkpoint(
             errors = [failed[id(r)] for r in session.records if id(r) in failed]
             if errors:
                 _record_session_error(report, session.path, errors[0])
-                landed.extend(
-                    candidate
-                    for candidate, record in zip(
-                        session.survivors, session.records, strict=True
-                    )
-                    if id(record) not in failed
-                )
+                landed.extend(_landed_of(session, failed))
                 continue
             complete.append(session)
             landed.extend(session.survivors)
+            paired.extend(session.survivors)
             discards.extend(session.discards)
         writes.memory_sessions.update(c.session_id for c in landed)
         report.sessions_with_memory = len(writes.memory_sessions)
 
     if dry_run:
         return
+    _advance(
+        registry,
+        report,
+        watermark,
+        complete=complete,
+        landed=landed,
+        paired=paired,
+        discards=discards,
+        distill_model_id=distill_model_id,
+    )
+
+
+def _advance(
+    registry: StoreRegistry,
+    report: CaptureReport,
+    watermark: WatermarkStore,
+    *,
+    complete: list[_PendingSession],
+    landed: list[CandidateMemory],
+    paired: list[CandidateMemory],
+    discards: list[CandidateMemory],
+    distill_model_id: str,
+) -> None:
+    """The steps of a live :func:`_checkpoint` that rest on its write.
+
+    Supersessions, then training pairs, then the cursor of every completed
+    session that neither step errored, then the watermark file.
+    """
+    #: Completed sessions that a later step errored; they are not watermarked.
+    errored: set[int] = set()
+
+    def fail(session: _PendingSession, exc: Exception) -> None:
+        if id(session) not in errored:
+            errored.add(id(session))
+            _record_session_error(report, session.path, exc)
+
     try:
         # After the write seam, never before it: a SUPERSEDE verdict is a
         # claim about two documents, and until the write has run the
@@ -891,13 +959,17 @@ def _checkpoint(
             report,
             vector_store=resolve_vector_store(registry),
         )
-        _emit_training_pairs(registry, landed, discards, distill_model_id)
     except Exception as exc:
         for session in complete:
-            _record_session_error(report, session.path, exc)
-        complete = []
+            if any(c.supersedes_doc_id for c in session.survivors):
+                fail(session, exc)
+    try:
+        _emit_training_pairs(registry, paired, discards, distill_model_id)
+    except Exception as exc:
+        for session in complete:
+            fail(session, exc)
     for session in complete:
-        if session.stat is not None:
+        if id(session) not in errored and session.stat is not None:
             watermark.record(session.path, stat=session.stat)
     watermark.save()
 

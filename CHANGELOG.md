@@ -15,16 +15,45 @@ All notable changes to Trellis will be documented in this file.
   and the watermark, in that order, so a cursor is never saved before its records.
   A record that fails to write counts its session in `sessions_errored` and leaves
   it un-watermarked for the next sweep; the other records and sessions continue,
-  and the sweep event still fires with the errors counted. A NUL
-  character in a judged field of the reply no longer reaches the store (SQLite
-  keeps it, and a Postgres text column refuses it); it is stripped where the
-  reply is parsed. A clean run writes the same
-  records, in the same order, as before, with the same report and the same
-  near-duplicate warnings; the sweep's own flushed memories stay hidden from later
-  sessions' reconcile, so which memories are written and how they are judged do
-  not change. A dry run still makes one pass and saves nothing. `CORPUS_SYNCED` now
-  fires once per batch rather than once per sweep. `sync_records` gains optional
+  and the sweep event still fires with the errors counted. `sessions_errored`
+  therefore also counts store errors after the transcript parsed, so under strict
+  mode `trellis-session-capture` can now exit `EXIT_SESSIONS_ERRORED` for a store
+  error, which it could not before. A NUL character in a judged field of the reply
+  no longer reaches the store (SQLite keeps it, and a Postgres text column
+  refuses it); it is stripped where the reply is parsed. `CORPUS_SYNCED` now fires
+  once per batch rather than once per sweep. `sync_records` gains optional
   `on_record_error` and `minhash` arguments; without them it behaves as before.
+
+  A failed batch is retried correctly, not just retried:
+  - A session with a record that failed to write emits no training pairs in that
+    run; its retry emits them once the session completes, so a retry cannot
+    count a landed record's pair twice.
+  - A record's chunks are written before its parent document, here and in corpus
+    sync, so the parent says the record landed. A record that died between two
+    chunk writes has no parent and is written again by the next sweep, where it
+    used to be skipped as already stored with its chunks missing. Within one
+    document the parent row is now stamped after its chunks, not before. Removing
+    a shrunk document's surplus chunks and its whole-document vector row still
+    run after the parent, so a failure there is not retried.
+  - With reconcile on, a supersession that raised, or was lost to a kill, is
+    applied by the retry: an exact-duplicate no-op whose stored document names a
+    `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
+    while applying supersessions no longer blocks the batch's training pairs; the
+    sessions that claimed a supersession stay un-watermarked.
+  - Limit: a process kill between a batch's records and its training pairs loses
+    that batch's keep pairs when reconcile is on, because the retry no-ops those
+    records. It is bounded by `checkpoint_every` sessions and costs training
+    data only. With reconcile off, a kill between the pairs and the watermark
+    save emits that batch's keep pairs a second time.
+
+  A clean run writes the same records and documents (metadata and lifecycle
+  included), the same events in the same order, and the same report at any
+  `checkpoint_every`, with one exception: `distill_unavailable` warnings are added
+  while sessions are judged and near-duplicate warnings when a batch is written,
+  so a run that has both lists them in a different order. The sweep's own flushed
+  memories stay hidden from later sessions' reconcile, so which memories are
+  written and how they are judged do not change. A dry run still makes one pass
+  and saves nothing.
 
 - **A body that is not valid UTF-8 answers 422, not 500.** Pre-existing, and
   distinct from #741: a body sent with no JSON content type (`text/plain`, say)
