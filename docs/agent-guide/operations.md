@@ -3468,7 +3468,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
 | `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean; no interval or p-value, and no other figure changes |
-| `--operational` | off | Report only what shows the experiment is running, with no outcome read; see [`--operational`](#operational-mode) |
+| `--operational` | off | Report only what shows the experiment is running, reading no outcome value; see [`--operational`](#operational-mode) |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
 | `--power-sims` | `600` | Simulated experiments per power estimate |
@@ -3628,24 +3628,45 @@ install on a moved working tree names the commit it was installed at.
 results, so a reader can ask the question before the pre-registered analysis is
 due. The outcome-derived figures are never computed, not computed and hidden: the
 report is its own model (`mode: "operational"`), with no field that could carry
-one. It keeps `status`, the window and task-window fields, `rate`, `rows`,
-`funnel`, `exclusions`, `scan` and `notes`, and the `descriptive` counts: eligible
-and analysed tasks and their rates, packs per task, `eligible_by_arm`,
-`tasks_with_both_arms`, `arm_ratio` (with its p and the pause-and-fix note), the
-top-parent share and `sessions` counts. It adds `covariate_coverage`, how many
-analysed tasks carry each adjustment's covariates, with no fit. It drops `seed`,
-`inference`, `covariate_adjusted`, `power` and `guardrails`, and from
-`descriptive` every outcome mean or SD, the MDE and sample-size horizons, the
-cut-off share and the cut-offs and analysed counts split by arm. A task counts as
-analysed when it carries the outcome's field and is not a cut-off (unless
-`--itt`); the field's value is not read. The funnel's pooled `cut_offs_excluded`
-stays, as it is a count over both arms together.
-`--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` do
-nothing with it. With `--by-commit`, `by_commit` holds counts only: per build the
-eligible tasks that were `served` and `withheld`, so the table cannot be
-subtracted from the analysed counts into cut-offs by arm. Exit codes are those of
-the full report in both formats. The text and JSON are an inspection aid, not a
-pause control: nothing here stops a run.
+one.
+
+What the mode guarantees is narrower than "no outcome read". Every figure that
+carries an arm or a build is fixed by a task's first pack (its arm, size, build
+and time), its brief, and when capture finished with it, or counts tasks as they
+arrive. The one fact read from after the first pack is whether the task's join
+carries an outcome block at all: a join without one is dropped before
+eligibility (`funnel.no_outcome`), so a missing block moves `eligible_by_arm`,
+and the arm-ratio check needs that. The block's contents are never read, nor is
+`ended_on_error`, the session's tool-call count, its hook feedback, a later
+pack's arm or build, or the unparsed-pack-id count of an eligible task. So
+neither one report nor the differences between reports over several windows
+(`--until`, `--days`, or stored nightly output) can recover a cut-off, a missing
+outcome field, a session's length or a pack count per task by arm. The full
+report makes no such promise, and the bound is on the report, not the store: a
+reader of the events can still read them.
+
+It keeps `status`, the window and task-window fields, `rate`, `settle_hours`,
+`rows`, `scan` and `notes`; the `funnel` up to eligibility, without the
+cut-off, outcome-missing, analysed, post-hoc, hook-feedback-seen and unparsed
+pack id counts; the first two `exclusions` (the population and the
+pre-treatment rule), without the cut-off one; and `descriptive`: the eligible
+task count and rate, `eligible_by_arm`, `arm_ratio` (with its p and the
+pause-and-fix note), the top-parent share and `sessions`. `rows` counts every
+pack assembled in the window by the draw that pack received, and a pack's arm
+is drawn per pack, so a later pack's arm does not follow its task's.
+`sessions` counts main sessions, with no arm. It adds `covariate_coverage`, how
+many eligible tasks carry each adjustment's covariates, with no fit. It drops
+`seed`, `inference`, `covariate_adjusted`, `power`, `guardrails`, the `outcome`
+and `itt` echoes, and from `descriptive` every outcome mean or SD, the MDE and
+sample-size horizons, and every count that follows the first pack: analysed
+tasks, packs per task, tasks with several packs or both arms, the post-hoc
+share, and the cut-offs split by arm. `--outcome` and `--itt` are accepted and
+change nothing; `--permutations`, `--bootstraps`, `--power-sims`,
+`--planned-*` and `--seed` are validated as for the full report and then
+unused, so one command line exits alike with and without `--operational`. With
+`--by-commit`, `by_commit` holds counts only: per build the eligible tasks that
+were `served` and `withheld`, each under its first pack's build. The text and
+JSON are an inspection aid, not a pause control: nothing here stops a run.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no

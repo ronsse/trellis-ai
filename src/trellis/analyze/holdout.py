@@ -114,12 +114,18 @@ figure.
 experiment running?" without reading its outcomes. It returns a
 :class:`HoldoutOperationalReport`, a separate model that has no field for an
 outcome mean, estimate, interval, outcome p-value, power, SD, guardrail or
-covariate fit, and it never calls an :data:`OUTCOMES` reader: whether a task
-has the outcome is asked of :func:`_outcome_present`, which checks the fields
-exist and are counts and returns no value. The cut-off flag is the one
-outcome field read (it sets the funnel's exclusion). Its per-build table counts
-eligible tasks rather than analysed ones, so no subtraction of two counts
-yields a cut-off count by arm.
+covariate fit. It carries only figures fixed before the treatment could act
+on a task, plus counts that accumulate as tasks arrive: the task's arm, build,
+parent, brief covariates and whether capture had finished with it are all
+settled by the first pack, and the one post-treatment fact it uses is whether
+the join carries an outcome block at all (``no_outcome``; an absent block
+drops the task before eligibility, so it moves ``eligible_by_arm``, which the
+arm-ratio check needs). No other post-treatment value (an outcome field, the
+tool-call count, a later pack, hook feedback after the first retrieval) is
+read, counted or branched on, so no figure moves with one: neither a report
+over one window nor the differences between reports over several windows can
+recover such a value, pooled or by arm. The full report reads them and does
+not carry that guarantee.
 
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
@@ -676,24 +682,56 @@ class HoldoutOperationalSessions(TrellisModel):
     not_measurable: dict[str, str] = Field(default_factory=dict)
 
 
-class HoldoutOperationalDescriptive(TrellisModel):
-    """:class:`HoldoutDescriptive` without the figures that read an outcome.
+class HoldoutOperationalFunnel(TrellisModel):
+    """:class:`HoldoutFunnel` less every count a post-treatment value moves.
 
-    ``analysed_tasks`` counts eligible tasks that are not cut-offs (unless
-    ``itt``) and carry the outcome's field; the field's value is not read.
-    Nothing here splits cut-offs, or tasks lacking the outcome, by arm.
+    The same stages in the same order, so the stage counts from
+    ``main_sessions`` to ``pre_treatment_excluded`` plus ``eligible`` sum to
+    ``sessions``. Absent: the cut-off, outcome-missing and analysed counts
+    (outcome values), the post-hoc counts (the session's tool-call count), the
+    hook-feedback-seen count (feedback however late) and the unparsed-pack-id
+    count (a whole session's retrievals). ``no_outcome`` stays: whether a join
+    carries an outcome block decides eligibility, and the arm-ratio check
+    reads the arms of the tasks that remain.
+    """
+
+    joins_scanned: int = 0
+    sessions: int = 0
+    main_sessions: int = 0
+    no_outcome: int = 0
+    no_retrieval: int = 0
+    no_retrieval_never_called: int = 0
+    no_retrieval_errored: int = 0
+    no_retrieval_unparsed: int = 0
+    no_retrieval_empty_answer: int = 0
+    first_pack_not_found: int = 0
+    outside_window: int = 0
+    first_pack_old_build: int = 0
+    other_rate: int = 0
+    empty_first_pack: int = 0
+    unfinished: int = 0
+    pre_treatment_excluded: int = 0
+    pre_treatment_excluded_after_commit: int = 0
+    eligible: int = 0
+    pre_treatment_unknown: int = 0
+
+
+#: Either funnel: the stages both count are the ones the shared code touches.
+_AnyFunnel = HoldoutFunnel | HoldoutOperationalFunnel
+
+
+class HoldoutOperationalDescriptive(TrellisModel):
+    """:class:`HoldoutDescriptive` less every figure a post-treatment value moves.
+
+    Counts of eligible tasks, by arm, and their arrival rate, the parent
+    concentration, the arm-ratio checks and the main-session counts. Nothing
+    here is per task after its first pack: no packs per task, no cut-off or
+    analysed count, no post-hoc share.
     """
 
     eligible_tasks: int
     eligible_per_30d: float | None
-    analysed_tasks: int
-    analysed_per_30d: float | None
-    packs_per_task: float | None
-    tasks_with_several_packs: int
-    post_hoc_share: float | None
-    post_hoc_note: str
     eligible_by_arm: ArmCounts
-    tasks_with_both_arms: int
     arm_ratio: list[ArmRatioCheck]
     top_parent_share: float | None
     sessions: HoldoutOperationalSessions
@@ -701,10 +739,11 @@ class HoldoutOperationalDescriptive(TrellisModel):
 
 
 class HoldoutCovariateCoverage(TrellisModel):
-    """How many analysed tasks carry the covariates an adjustment needs.
+    """How many eligible tasks carry the covariates an adjustment needs.
 
     The counts :class:`HoldoutAdjustment` reports as ``n_used`` and
-    ``n_missing_covariate``, with no fit.
+    ``n_missing_covariate``, over eligible tasks rather than analysed ones,
+    with no fit.
     """
 
     name: str
@@ -724,20 +763,25 @@ class HoldoutBuildCountRow(TrellisModel):
 
 
 class HoldoutOperationalByCommit(TrellisModel):
-    """:class:`HoldoutByCommit` as counts of eligible tasks, with no outcome."""
+    """:class:`HoldoutByCommit` as counts of eligible tasks, with no outcome.
+
+    Rows are in first-seen order. There is no spanning-builds count: whether
+    a task's later packs came from another build is a fact about packs after
+    the first.
+    """
 
     rows: list[HoldoutBuildCountRow]
-    units_spanning_builds: int
     note: str
 
 
 class HoldoutOperationalReport(TrellisModel):
-    """Whether the experiment is running, with no outcome read.
+    """Whether the experiment is running, from pre-treatment facts alone.
 
     Every field is a count, a rate, a window, a configuration echo or a
     note. There is no outcome mean, estimate, interval, outcome p-value,
     power, SD, guardrail or covariate fit, and the seed is left out because
-    nothing here is random.
+    nothing here is random. ``outcome`` and ``itt`` are not echoed: they only
+    choose which tasks are analysed, and this report analyses none.
     """
 
     status: str = "ok"
@@ -749,11 +793,9 @@ class HoldoutOperationalReport(TrellisModel):
     task_window_since: str
     task_window_days: float
     rate: float | None
-    outcome: str
-    itt: bool
     settle_hours: float
     rows: HoldoutRows
-    funnel: HoldoutFunnel
+    funnel: HoldoutOperationalFunnel
     exclusions: list[HoldoutExclusion]
     descriptive: HoldoutOperationalDescriptive
     covariate_coverage: list[HoldoutCovariateCoverage]
@@ -856,28 +898,6 @@ OUTCOMES: dict[str, Callable[[Mapping[str, Any]], float | None]] = {
     "log1p_commits": lambda outcome: _log1p_count(outcome.get("commits")),
     "any_commit": _any_commit,
 }
-
-
-#: The ``SessionOutcome`` fields each outcome reads; an outcome is present
-#: when any of them is a count. ``tests/unit/analyze`` pins this against
-#: :data:`OUTCOMES` over a grid of values.
-_OUTCOME_FIELDS: dict[str, tuple[str, ...]] = {
-    "log1p_turns": ("assistant_turns",),
-    "prs_created": ("prs_created",),
-    "log1p_tokens": _TOKEN_FIELDS,
-    "commits": ("commits",),
-    "log1p_commits": ("commits",),
-    "any_commit": ("commits",),
-}
-
-
-def _outcome_present(name: str, outcome: Mapping[str, Any]) -> bool:
-    """Whether :data:`OUTCOMES` ``[name]`` would read a value from ``outcome``.
-
-    Answers from the fields' validity alone and never forms the value, so the
-    operational mode can count analysed tasks without computing an outcome.
-    """
-    return any(_is_count(outcome.get(field_)) for field_ in _OUTCOME_FIELDS[name])
 
 
 # ---------------------------------------------------------------------------
@@ -1178,27 +1198,41 @@ def n_for_mde(sd: float, effect: float) -> int:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Unit:
+@dataclass(kw_only=True)
+class _Arrival:
+    """An eligible task as the first pack fixes it, before treatment can act.
+
+    Everything here is settled by the task's first pack, its brief and when
+    capture finished with it. The operational mode builds these and nothing
+    more, so a figure over them cannot depend on a post-treatment value.
+    """
+
     parent: str
     stratum: str
     withheld: bool
-    packs: int
-    both_arms: bool
-    cut_off: bool
-    outcome: Mapping[str, Any]
-    #: The ``(version, commit)`` of the pack that sets the task's arm, that
-    #: pack's time, and whether the task's packs came from more than one
-    #: build; only ``by_commit`` reads them.
+    #: The ``(version, commit)`` of the pack that sets the task's arm, and
+    #: that pack's time; only ``by_commit`` reads them.
     build: BuildKey
     first_pack_at: datetime
-    spans_builds: bool
     #: The brief's length in characters, and a pseudonymous handle for the
     #: sub-agent's type, from the join's ``covariates``; ``None`` when the
     #: join lacks one or holds an unusable value. The handle is only compared
     #: for equality and never reaches the report.
     brief_chars: float | None = None
     agent_type: str | None = None
+
+
+@dataclass(kw_only=True)
+class _Unit(_Arrival):
+    """An :class:`_Arrival` with the post-treatment facts the full report reads."""
+
+    packs: int
+    both_arms: bool
+    cut_off: bool
+    outcome: Mapping[str, Any]
+    #: Whether the task's packs came from more than one build; only
+    #: ``by_commit`` reads it.
+    spans_builds: bool
 
 
 @dataclass
@@ -1304,7 +1338,7 @@ def _pack_ids(payload: Mapping[str, Any]) -> list[str]:
     return [p for p in payload.get("pack_ids") or [] if isinstance(p, str) and p]
 
 
-def _count_no_retrieval(payload: Mapping[str, Any], funnel: HoldoutFunnel) -> None:
+def _count_no_retrieval(payload: Mapping[str, Any], funnel: _AnyFunnel) -> None:
     """Count a join that names no pack, by the reason its own counters give.
 
     The order is what each counter proves: no retrieval result at all is
@@ -1369,29 +1403,34 @@ def _post_hoc(
     )
 
 
-def _pre_treatment_excluded(payload: Mapping[str, Any], funnel: HoldoutFunnel) -> bool:
+def _pre_treatment_excluded(payload: Mapping[str, Any], funnel: _AnyFunnel) -> bool:
     """Whether the unit's first retrieval followed a stop hook's feedback or a commit.
 
     Either comparison being true decides it. A join that has no real boolean
     for one comparison and shows neither is undecidable: it is kept, counted
-    as ``pre_treatment_unknown``, never read as passing. Also counts whether
-    the session held any hook feedback at all, and what the post-hoc share
-    needs, so an undecidable join stays eligible and visibly so.
+    as ``pre_treatment_unknown``, never read as passing. The full funnel also
+    counts whether the session held any hook feedback at all, and what the
+    post-hoc share needs, so an undecidable join stays eligible and visibly
+    so. Both read what comes after the first retrieval (the session's whole
+    tool-call count, feedback however late), so the operational funnel has no
+    field for them and they are not read for it.
     """
     raw = payload.get("retrieval_timing")
     timing: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
     after_hook = _flag(timing, "hook_feedback_before_first_retrieval")
     after_commit = _flag(timing, "commit_before_first_retrieval")
-    post_hoc = _post_hoc(timing, after_hook, after_commit)
-    if post_hoc is not None:
-        funnel.post_hoc_measured += 1
-        funnel.post_hoc_after_work += post_hoc
+    full = funnel if isinstance(funnel, HoldoutFunnel) else None
+    if full is not None:
+        post_hoc = _post_hoc(timing, after_hook, after_commit)
+        if post_hoc is not None:
+            full.post_hoc_measured += 1
+            full.post_hoc_after_work += post_hoc
     excluded = after_hook is True or after_commit is True
     if not excluded and (after_hook is None or after_commit is None):
         funnel.pre_treatment_unknown += 1
         return False
-    if (_count(timing.get("hook_feedback_messages")) or 0) > 0:
-        funnel.pre_treatment_hook_feedback_seen += 1
+    if full is not None and (_count(timing.get("hook_feedback_messages")) or 0) > 0:
+        full.pre_treatment_hook_feedback_seen += 1
     funnel.pre_treatment_excluded_after_commit += after_commit is True
     return excluded
 
@@ -1492,7 +1531,7 @@ def _task_window_note(
     figures = (
         "figures per 30 days and the task MDE horizons"
         if horizons
-        else ("figures per 30 days")
+        else "figures per 30 days"
     )
     return (
         f"The task {figures} divide by the "
@@ -1614,6 +1653,7 @@ def analyze_holdout(
         seed=seed,
         limit=limit,
     )
+    funnel = HoldoutFunnel()
     ev = _gather(
         event_log,
         days=days,
@@ -1621,6 +1661,7 @@ def analyze_holdout(
         rate=rate,
         settle_hours=settle_hours,
         limit=limit,
+        funnel=funnel,
     )
     sessions = _sessions(
         event_log,
@@ -1637,7 +1678,7 @@ def analyze_holdout(
     return _report(
         units=ev.units,
         rows=ev.rows,
-        funnel=ev.funnel,
+        funnel=funnel,
         scan=ev.scan,
         notes=ev.notes,
         sweeps=ev.sweeps,
@@ -1666,19 +1707,17 @@ def analyze_holdout(
 
 _OPERATIONAL_NOTE = (
     "Operational view: no outcome mean, estimate, interval, outcome p-value, "
-    "power, SD, guardrail or covariate fit was computed. analysed counts the "
-    "tasks that carry the outcome's field, never its value, and cut-offs are "
-    "counted pooled over both arms, as the funnel counts them."
+    "power, SD, guardrail or covariate fit was computed, and every figure is "
+    "fixed by the task's first pack or counts tasks as they arrive. The one "
+    "post-treatment fact used is whether a join carries an outcome block at "
+    "all: a join without one is dropped before eligibility. --outcome and "
+    "--itt change nothing here."
 )
 _OPERATIONAL_BY_COMMIT_NOTE = (
-    "Counts only; no outcome is read. Each eligible task is counted once, "
-    "under the build stamped on the first pack of its join (the pack that "
-    "sets its arm), and a task whose packs span several builds is also "
-    "counted in units_spanning_builds. Eligible tasks include cut-offs and "
-    "tasks without the outcome, so these counts exceed the analysed counts "
-    "of the full table. A build is the stamped (version, commit) pair, named "
-    "as analyze health names a serving build; a pack with no usable stamp "
-    f"reads {NO_PROVENANCE_LABEL!r}."
+    "Counts only. Each eligible task is counted once, under the build stamped "
+    "on the first pack of its join (the pack that sets its arm). A build is "
+    "the stamped (version, commit) pair, named as analyze health names a "
+    f"serving build; a pack with no usable stamp reads {NO_PROVENANCE_LABEL!r}."
 )
 _OPERATIONAL_SESSIONS_NOTE = (
     "Main sessions count packs from every build and rate, so their figures "
@@ -1696,30 +1735,47 @@ def analyze_holdout_operational(
     outcome: str = DEFAULT_OUTCOME,
     itt: bool = False,
     by_commit: bool = False,
+    permutations: int = 10_000,
+    bootstraps: int = 4_000,
+    power_sims: int = 600,
+    planned_mde: float = DEFAULT_PLANNED_MDE,
+    planned_n: int = DEFAULT_PLANNED_N,
     settle_hours: float = DEFAULT_SETTLE_HOURS,
+    seed: int = DEFAULT_SEED,
     limit: int = DEFAULT_SCAN_LIMIT,
 ) -> HoldoutOperationalReport:
     """Say whether the holdout is running, without reading its outcomes.
 
     Reads the same rows, joins and sweeps as :func:`analyze_holdout` and
-    returns its funnel, arm counts, arm-ratio checks, capture and covariate
-    coverage, scan and volume fields. No outcome value is computed: the
-    :data:`OUTCOMES` readers are not called, an outcome's presence is read
-    from the validity of its fields, and the one outcome field consulted is
-    the cut-off flag the funnel's exclusion already sets. ``outcome`` and
-    ``itt`` therefore only change how many tasks count as analysed.
+    returns its funnel (less the counts a post-treatment value moves), arm
+    counts, arm-ratio checks, covariate coverage, scan and volume fields.
+    Each figure is fixed by a task's first pack or counts tasks as they
+    arrive, so none moves with an outcome, the tool-call count, a later pack
+    or hook feedback, and the differences between reports over several
+    windows name none of them. The one post-treatment fact it uses is whether
+    a join carries an outcome block at all.
+
+    ``outcome``, ``itt``, ``permutations``, ``bootstraps``, ``power_sims``,
+    ``planned_mde``, ``planned_n`` and ``seed`` change no figure. They are
+    validated as :func:`analyze_holdout` validates them, so one command line
+    has one exit status in both modes, and are otherwise ignored.
 
     Args:
         event_log: Operational event log, as for :func:`analyze_holdout`.
         days: Window length.
         until: Window end (default: now).
         rate: The ``holdout_rate`` to analyse (default: the single one present).
-        outcome: A key of :data:`OUTCOMES`; names the field whose presence
-            makes a task analysed.
-        itt: Keep usage-limit cut-offs in the analysed count.
+        outcome: A key of :data:`OUTCOMES`; validated and ignored.
+        itt: Validated and ignored.
         by_commit: Add the per-build counts of eligible tasks
             (:class:`HoldoutOperationalByCommit`).
+        permutations: Validated and ignored.
+        bootstraps: Validated and ignored.
+        power_sims: Validated and ignored.
+        planned_mde: Validated and ignored.
+        planned_n: Validated and ignored.
         settle_hours: Hours a completed sweep must follow a task's latest join.
+        seed: Validated and ignored.
         limit: Per-event-type scan limit.
 
     Returns:
@@ -1729,19 +1785,21 @@ def analyze_holdout_operational(
         HoldoutAnalysisError: An option is out of range, or several rates
             are present and ``rate`` names none of them.
     """
+    del itt  # accepted for the shared command line; nothing here depends on it
     _validate(
         days=days,
         rate=rate,
         outcome=outcome,
-        permutations=1,
-        bootstraps=1,
-        power_sims=1,
-        planned_mde=DEFAULT_PLANNED_MDE,
-        planned_n=DEFAULT_PLANNED_N,
+        permutations=permutations,
+        bootstraps=bootstraps,
+        power_sims=power_sims,
+        planned_mde=planned_mde,
+        planned_n=planned_n,
         settle_hours=settle_hours,
-        seed=DEFAULT_SEED,
+        seed=seed,
         limit=limit,
     )
+    funnel = HoldoutOperationalFunnel()
     ev = _gather(
         event_log,
         days=days,
@@ -1749,15 +1807,8 @@ def analyze_holdout_operational(
         rate=rate,
         settle_hours=settle_hours,
         limit=limit,
-        horizons=False,
+        funnel=funnel,
     )
-    funnel = ev.funnel
-    kept = ev.units if itt else [unit for unit in ev.units if not unit.cut_off]
-    analysed = [unit for unit in kept if _outcome_present(outcome, unit.outcome)]
-    funnel.cut_offs_excluded = 0 if itt else len(ev.units) - len(kept)
-    funnel.outcome_missing = len(kept) - len(analysed)
-    funnel.analysed = len(analysed)
-
     tally = _tally_sessions(
         event_log, ev.joins, ev.packs, ev.sweeps, ev.settle, ev.evidence_start, ev.end
     )
@@ -1779,35 +1830,22 @@ def analyze_holdout_operational(
             }
         ),
     )
-    arm_ratio = _arm_ratio(ev.rows, ev.units, ev.rate)
-    units = ev.units
-    eligible_per_30d = _per_30d(len(units), ev.task_days)
-    analysed_per_30d = _per_30d(len(analysed), ev.task_days)
-    by_parent = Counter(unit.parent for unit in units)
-    top_share = _share(max(by_parent.values()), len(units)) if units else None
-    packs_per_task = sum(unit.packs for unit in units) / len(units) if units else None
-    post_hoc_share, post_hoc_note = _post_hoc_share(funnel)
+    arrivals = ev.arrivals
+    arm_ratio = _arm_ratio(ev.rows, arrivals, ev.rate)
+    eligible_per_30d = _per_30d(len(arrivals), ev.task_days)
+    by_parent = Counter(arrival.parent for arrival in arrivals)
+    top_share = _share(max(by_parent.values()), len(arrivals)) if arrivals else None
     descriptive = HoldoutOperationalDescriptive(
-        eligible_tasks=len(units),
+        eligible_tasks=len(arrivals),
         eligible_per_30d=eligible_per_30d,
-        analysed_tasks=len(analysed),
-        analysed_per_30d=analysed_per_30d,
-        packs_per_task=packs_per_task,
-        tasks_with_several_packs=sum(unit.packs > 1 for unit in units),
-        post_hoc_share=post_hoc_share,
-        post_hoc_note=post_hoc_note,
-        eligible_by_arm=_arm_counts(units),
-        tasks_with_both_arms=sum(unit.both_arms for unit in units),
+        eligible_by_arm=_arm_counts(arrivals),
         arm_ratio=arm_ratio,
         top_parent_share=top_share,
         sessions=sessions,
         not_measurable=_reasons(
             {
                 "eligible_per_30d": (eligible_per_30d, _EMPTY_WINDOW),
-                "analysed_per_30d": (analysed_per_30d, _EMPTY_WINDOW),
                 "top_parent_share": (top_share, _NO_ELIGIBLE),
-                "packs_per_task": (packs_per_task, _NO_ELIGIBLE),
-                "post_hoc_share": (post_hoc_share, post_hoc_note),
             }
         ),
     )
@@ -1815,9 +1853,9 @@ def analyze_holdout_operational(
         HoldoutCovariateCoverage(
             name=name,
             preregistered=preregistered,
-            n_used=sum(_has_covariates(unit, with_agent_type) for unit in analysed),
+            n_used=sum(_has_covariates(a, with_agent_type) for a in arrivals),
             n_missing_covariate=sum(
-                not _has_covariates(unit, with_agent_type) for unit in analysed
+                not _has_covariates(a, with_agent_type) for a in arrivals
             ),
         )
         for name, preregistered, with_agent_type in _ADJUSTMENT_SPECS
@@ -1843,24 +1881,24 @@ def analyze_holdout_operational(
         task_window_since=ev.task_start.isoformat(),
         task_window_days=round(ev.task_days, 2),
         rate=ev.rate,
-        outcome=outcome,
-        itt=itt,
         settle_hours=settle_hours,
         rows=ev.rows.report(ev.rate),
         funnel=funnel,
-        exclusions=_exclusions(funnel, itt),
+        exclusions=_population_exclusions(funnel),
         descriptive=descriptive,
         covariate_coverage=coverage,
-        by_commit=_operational_by_commit(units) if by_commit else None,
+        by_commit=_operational_by_commit(arrivals) if by_commit else None,
         scan=ev.scan,
         notes=[*notes, _OPERATIONAL_NOTE],
     )
 
 
-def _operational_by_commit(units: Sequence[_Unit]) -> HoldoutOperationalByCommit:
+def _operational_by_commit(
+    arrivals: Sequence[_Arrival],
+) -> HoldoutOperationalByCommit:
     """The eligible tasks per build and arm, in the order builds were first seen."""
-    by_build: dict[BuildKey, list[_Unit]] = {}
-    for unit in units:
+    by_build: dict[BuildKey, list[_Arrival]] = {}
+    for unit in arrivals:
         by_build.setdefault(unit.build, []).append(unit)
     ordered = sorted(
         by_build.items(), key=lambda item: min(u.first_pack_at for u in item[1])
@@ -1876,18 +1914,21 @@ def _operational_by_commit(units: Sequence[_Unit]) -> HoldoutOperationalByCommit
             )
             for build, members in ordered
         ],
-        units_spanning_builds=sum(unit.spans_builds for unit in units),
         note=_OPERATIONAL_BY_COMMIT_NOTE,
     )
 
 
 @dataclass
 class _Evidence:
-    """What both modes read before any outcome: the scan, rows, funnel and units."""
+    """What both modes read: the scan, the rows and the eligible tasks.
 
+    ``units`` is filled only for the full funnel; ``arrivals`` is every
+    eligible task as its first pack fixes it, for either.
+    """
+
+    arrivals: Sequence[_Arrival]
     units: list[_Unit]
     rows: _Rows
-    funnel: HoldoutFunnel
     scan: ScanCoverage
     notes: list[str]
     sweeps: dict[str, datetime]
@@ -1911,9 +1952,16 @@ def _gather(
     rate: float | None,
     settle_hours: float,
     limit: int,
-    horizons: bool = True,
+    funnel: _AnyFunnel,
 ) -> _Evidence:
-    """Scan the log and build every eligible unit; reads no outcome value."""
+    """Scan the log and count every join into ``funnel``, building the eligible tasks.
+
+    The full funnel builds the full units, which read the outcome and the
+    task's later packs. The operational funnel builds only each task's
+    :class:`_Arrival`, which reads no value a treatment could have moved
+    except whether the join carries an outcome block at all.
+    """
+    full = funnel if isinstance(funnel, HoldoutFunnel) else None
 
     end = _as_utc(until) if until is not None else datetime.now(tz=UTC)
     since = end - timedelta(days=days)
@@ -1953,11 +2001,11 @@ def _gather(
                 task_start=task_start,
                 task_days=task_days,
                 rate=rate,
-                horizons=horizons,
+                horizons=full is not None,
             )
         )
 
-    funnel = HoldoutFunnel(joins_scanned=len(join_scan.events))
+    funnel.joins_scanned = len(join_scan.events)
     latest_joins: dict[str, Event] = {}
     for event in join_scan.events:
         if event.entity_id:
@@ -1965,17 +2013,33 @@ def _gather(
     sweeps = _latest_sweeps(sweep_scan.events)
     settle = timedelta(hours=settle_hours)
     units: list[_Unit] = []
+    arrivals: list[_Arrival] = []
     for join in latest_joins.values():
         funnel.sessions += 1
+        if full is None:
+            arrival = _arrival(
+                event_log,
+                join,
+                packs,
+                sweeps,
+                settle,
+                rate,
+                evidence_start,
+                end,
+                funnel,
+            )
+            if arrival is not None:
+                arrivals.append(arrival)
+            continue
         unit = _unit(
-            event_log, join, packs, sweeps, settle, rate, evidence_start, end, funnel
+            event_log, join, packs, sweeps, settle, rate, evidence_start, end, full
         )
         if unit is not None:
             units.append(unit)
     return _Evidence(
+        arrivals=units if full is not None else arrivals,
         units=units,
         rows=rows,
-        funnel=funnel,
         scan=scan,
         notes=notes,
         sweeps=sweeps,
@@ -1992,7 +2056,7 @@ def _gather(
     )
 
 
-def _unit(  # noqa: PLR0911 - one return per funnel stage
+def _arrival(  # noqa: PLR0911 - one return per funnel stage
     event_log: EventLog,
     join: Event,
     packs: dict[str, Event],
@@ -2001,16 +2065,22 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
     rate: float | None,
     start: datetime,
     end: datetime,
-    funnel: HoldoutFunnel,
-) -> _Unit | None:
-    """The join's eligible unit, or ``None`` after counting why it is not one."""
+    funnel: _AnyFunnel,
+) -> _Arrival | None:
+    """The join's eligible task as its first pack fixes it, else ``None`` and a count.
+
+    The one post-treatment fact read is whether the join carries an outcome
+    block: capture writes the join before the outcome is known, so a join
+    without one is dropped here, and that moves the arm counts. The block's
+    values are never read, nor is any later pack, so nothing this returns or
+    counts depends on a value the treatment could have moved.
+    """
     payload = join.payload or {}
     parent = payload.get("parent_session_id")
     if not isinstance(parent, str) or not parent:
         funnel.main_sessions += 1
         return None
-    outcome = payload.get("outcome")
-    if not isinstance(outcome, Mapping):
+    if not isinstance(payload.get("outcome"), Mapping):
         funnel.no_outcome += 1
         return None
     pack_ids = _pack_ids(payload)
@@ -2042,6 +2112,40 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         funnel.pre_treatment_excluded += 1
         return None
     funnel.eligible += 1
+    brief_chars, agent_type = _covariates(payload)
+    return _Arrival(
+        parent=parent,
+        stratum=f"{parent}|{_iso_week(first_at)}",
+        withheld=is_holdout(first_payload),
+        build=_build_of(first),
+        first_pack_at=first_at,
+        brief_chars=brief_chars,
+        agent_type=agent_type,
+    )
+
+
+def _unit(
+    event_log: EventLog,
+    join: Event,
+    packs: dict[str, Event],
+    sweeps: Mapping[str, datetime],
+    settle: timedelta,
+    rate: float | None,
+    start: datetime,
+    end: datetime,
+    funnel: HoldoutFunnel,
+) -> _Unit | None:
+    """The join's eligible unit, or ``None`` after counting why it is not one.
+
+    The task as :func:`_arrival` fixes it, plus what the full report reads
+    after the first pack: its outcome, its later packs and its cut-off.
+    """
+    arrival = _arrival(event_log, join, packs, sweeps, settle, rate, start, end, funnel)
+    payload = join.payload or {}
+    outcome = payload.get("outcome")
+    if arrival is None or not isinstance(outcome, Mapping):
+        return None
+    pack_ids = _pack_ids(payload)
     if (_count(payload.get("pack_ids_unparsed")) or 0) > 0:
         funnel.eligible_with_unparsed_pack_ids += 1
     arms = {
@@ -2049,23 +2153,21 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         for p in pack_ids
         if p in packs and HOLDOUT_KEY in (packs[p].payload or {})
     }
-    brief_chars, agent_type = _covariates(payload)
-    build, spans_builds = _unit_builds(
-        first, [packs[p] for p in pack_ids[1:] if p in packs]
-    )
     return _Unit(
-        parent=parent,
-        stratum=f"{parent}|{_iso_week(first_at)}",
-        withheld=is_holdout(first_payload),
+        parent=arrival.parent,
+        stratum=arrival.stratum,
+        withheld=arrival.withheld,
+        build=arrival.build,
+        first_pack_at=arrival.first_pack_at,
+        brief_chars=arrival.brief_chars,
+        agent_type=arrival.agent_type,
         packs=len(pack_ids),
         both_arms=len(arms) == _PAIR,
         cut_off=outcome.get("ended_on_error") is True,
         outcome=outcome,
-        build=build,
-        first_pack_at=first_at,
-        spans_builds=spans_builds,
-        brief_chars=brief_chars,
-        agent_type=agent_type,
+        spans_builds=any(
+            _build_of(packs[p]) != arrival.build for p in pack_ids[1:] if p in packs
+        ),
     )
 
 
@@ -2079,17 +2181,6 @@ def _build_of(pack: Event) -> BuildKey:
     """
     version, commit, _ = stamp_fields(pack)
     return version, commit
-
-
-def _unit_builds(first: Event, rest: Sequence[Event]) -> tuple[BuildKey, bool]:
-    """``(build of the arm-setting pack, spans several builds)`` of a task's packs.
-
-    The build is that of ``first``, the pack whose arm, window and eligibility
-    the task takes, wherever it falls in time. ``spans several builds`` reads
-    every pack of the task.
-    """
-    build = _build_of(first)
-    return build, any(_build_of(pack) != build for pack in rest)
 
 
 def _covariates(payload: Mapping[str, Any]) -> tuple[float | None, str | None]:
@@ -2116,7 +2207,7 @@ def _per_30d(count: int, window_days: float) -> float | None:
     return count * 30 / window_days if window_days > 0 else None
 
 
-def _arm_counts(units: Sequence[_Unit]) -> ArmCounts:
+def _arm_counts(units: Sequence[_Arrival]) -> ArmCounts:
     withheld = sum(unit.withheld for unit in units)
     return ArmCounts(served=len(units) - withheld, withheld=withheld)
 
@@ -2668,7 +2759,7 @@ def _guardrails(
 
 
 def _arm_ratio(
-    rows: _Rows, eligible: Sequence[_Unit], rate: float | None
+    rows: _Rows, eligible: Sequence[_Arrival], rate: float | None
 ) -> list[ArmRatioCheck]:
     if rate is None:
         return []
@@ -2811,8 +2902,8 @@ def _report(
     )
 
 
-def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
-    """The three pre-registered exclusions, in the order the report lists them."""
+def _population_exclusions(funnel: _AnyFunnel) -> list[HoldoutExclusion]:
+    """The two exclusions fixed before treatment: the population and pre-treatment."""
     return [
         HoldoutExclusion(
             name="non_ephemeral",
@@ -2822,6 +2913,13 @@ def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
             note=_NON_EPHEMERAL_NOTE,
         ),
         _pre_treatment_exclusion(funnel),
+    ]
+
+
+def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
+    """The three pre-registered exclusions, in the order the report lists them."""
+    return [
+        *_population_exclusions(funnel),
         HoldoutExclusion(
             name="cut_offs",
             timing="post-treatment",
@@ -2835,14 +2933,14 @@ def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
     ]
 
 
-def _pre_treatment_decided(funnel: HoldoutFunnel) -> int:
+def _pre_treatment_decided(funnel: _AnyFunnel) -> int:
     """Units whose join let the pre-treatment rule decide: kept or excluded."""
     return (
         funnel.eligible - funnel.pre_treatment_unknown + funnel.pre_treatment_excluded
     )
 
 
-def _pre_treatment_exclusion(funnel: HoldoutFunnel) -> HoldoutExclusion:
+def _pre_treatment_exclusion(funnel: _AnyFunnel) -> HoldoutExclusion:
     """The pre-treatment exclusion's state: not, partially or fully applied.
 
     Applied once any unit could be decided. Units whose join lacks the timing
@@ -2885,7 +2983,7 @@ def _pre_treatment_exclusion(funnel: HoldoutFunnel) -> HoldoutExclusion:
     )
 
 
-def _pre_treatment_notes(funnel: HoldoutFunnel) -> list[str]:
+def _pre_treatment_notes(funnel: _AnyFunnel) -> list[str]:
     """What a reader of the pre-treatment exclusion needs to know it may be inert."""
     notes: list[str] = []
     if funnel.pre_treatment_unknown:
@@ -2895,7 +2993,11 @@ def _pre_treatment_notes(funnel: HoldoutFunnel) -> list[str]:
             "or its first commit's position): the pre-treatment exclusion could "
             "not decide them, so they stay in."
         )
-    if _pre_treatment_decided(funnel) and not funnel.pre_treatment_hook_feedback_seen:
+    if (
+        isinstance(funnel, HoldoutFunnel)
+        and _pre_treatment_decided(funnel)
+        and not funnel.pre_treatment_hook_feedback_seen
+    ):
         notes.append(
             "No decided task's session held a stop-hook feedback message. If "
             "these sessions ran under a stop hook, the capture's "
@@ -3038,7 +3140,7 @@ def _arm_balance_r2(
     return min(1.0, max(0.0, 1.0 - residual_ss(design) / within))
 
 
-def _has_covariates(unit: _Unit, with_agent_type: bool) -> bool:
+def _has_covariates(unit: _Arrival, with_agent_type: bool) -> bool:
     """Whether the unit carries every covariate the adjustment needs."""
     return unit.brief_chars is not None and (
         not with_agent_type or unit.agent_type is not None
@@ -3289,7 +3391,7 @@ def _power(
 
 def _notes(
     rows: _Rows,
-    funnel: HoldoutFunnel,
+    funnel: _AnyFunnel,
     rate: float | None,
     sweeps: Mapping[str, datetime],
     arm_ratio: Sequence[ArmRatioCheck],
@@ -3339,7 +3441,7 @@ def _notes(
             f"for: {', '.join(sorted(sweeps))}). They are left out."
         )
     notes.extend(_pre_treatment_notes(funnel))
-    if funnel.eligible_with_unparsed_pack_ids:
+    if isinstance(funnel, HoldoutFunnel) and funnel.eligible_with_unparsed_pack_ids:
         notes.append(
             f"{funnel.eligible_with_unparsed_pack_ids} eligible tasks reported a "
             "pack id the capture could not parse, so the first parsed pack, "
@@ -3395,6 +3497,7 @@ __all__ = [
     "HoldoutBuildCountRow",
     "HoldoutCovariateCoverage",
     "HoldoutFunnel",
+    "HoldoutOperationalFunnel",
     "HoldoutGuardrail",
     "HoldoutGuardrailArm",
     "HoldoutGuardrails",

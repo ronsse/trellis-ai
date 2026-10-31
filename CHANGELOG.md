@@ -8,14 +8,20 @@ All notable changes to Trellis will be documented in this file.
 
 - **`trellis analyze holdout --operational` reports the experiment's health
   without reading an outcome.** A pack holdout needs a check that it is running
-  (arm counts and their ratio, the funnel, capture health, covariate coverage,
-  scan and volume, per-build counts) that does not expose the results it is
-  meant to leave blind. The flag emits only those fields, from a separate report
-  model that has no outcome-mean, estimate, interval, p-value, power, MDE,
-  guardrail or covariate-fit field, and it skips the outcome computations rather
-  than filtering their output. With `--by-commit` the table is eligible-task
-  counts per build and arm. Default output and exit codes are unchanged, and
-  there is no REST or OpenAPI surface for the flag yet.
+  (arm counts and their ratio, the funnel, covariate coverage, scan and volume,
+  per-build counts) that does not expose the results it is meant to leave blind.
+  The flag emits only figures fixed by each task's first pack, or counting tasks
+  as they arrive, from a separate report model that has no outcome-mean,
+  estimate, interval, p-value, power, MDE, guardrail or covariate-fit field, no
+  cut-off, analysed or post-hoc count and no pack count per task, so neither one
+  report nor the differences between reports over several windows recover them
+  by arm. The one fact it reads from after the first pack is whether a join
+  carries an outcome block at all; a join without one is dropped before
+  eligibility, which moves the arm counts. The inference options are validated
+  as for the full report, so a command line exits alike with and without the
+  flag. With `--by-commit` the table is eligible-task counts per build and arm.
+  Default output and exit codes are unchanged, and there is no REST or OpenAPI
+  surface for the flag yet.
 
 ### Fixed
 
@@ -23,9 +29,6 @@ All notable changes to Trellis will be documented in this file.
   say the table has "no estimate".** It prints each arm's outcome mean per
   build; what it omits is an interval and a p-value. `analyze value`'s help no
   longer says the system has no withhold arm and points to `analyze holdout`.
-
-### Fixed
-
 - **A body that is not valid UTF-8 answers 422, not 500.** Pre-existing, and
   distinct from #741: a body sent with no JSON content type (`text/plain`, say)
   reaches the validation error with the raw, undecodable bytes as `input`, and

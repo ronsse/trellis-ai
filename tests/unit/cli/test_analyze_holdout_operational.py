@@ -80,7 +80,10 @@ def test_operational_json_has_no_outcome_section_and_exits_alike() -> None:
     assert payload["mode"] == "operational"
     assert OUTCOME_KEYS.isdisjoint(payload)
     assert payload["funnel"]["eligible"] == 24
-    assert payload["funnel"]["analysed"] == 19
+    assert payload["funnel"]["no_outcome"] == 1
+    assert {"analysed", "cut_offs_excluded", "outcome_missing"}.isdisjoint(
+        payload["funnel"]
+    )
     assert "by_commit" not in payload
 
 
@@ -88,7 +91,7 @@ def test_operational_json_has_no_outcome_section_and_exits_alike() -> None:
 def test_operational_text_prints_counts_and_no_outcome_figure() -> None:
     text, _ = _run("--operational", "--by-commit")
     flat = _flat(text)
-    assert "Counts (no outcome read)" in flat
+    assert "Counts (no outcome value read)" in flat
     assert "Covariate coverage" in flat
     assert "By serving build (eligible task counts only)" in flat
     for absent in (
@@ -99,6 +102,13 @@ def test_operational_text_prints_counts_and_no_outcome_figure() -> None:
         "mean served",
         "outcome SD",
         "n/mean",
+        "analysed tasks",
+        "outcome missing",
+        "cut-offs excluded",
+        "packs per task",
+        "post-hoc",
+        "span builds",
+        "outcome's field",
     ):
         assert absent not in flat, absent
 
@@ -141,12 +151,36 @@ def test_a_validation_error_exits_alike_in_both_formats() -> None:
 
 
 @pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize(
+    "option",
+    [
+        ("--permutations", "0"),
+        ("--bootstraps", "0"),
+        ("--power-sims", "0"),
+        ("--planned-mde", "0"),
+        ("--planned-n", "0"),
+        ("--seed", "-1"),
+    ],
+    ids=lambda option: option[0],
+)
+def test_an_invalid_inference_option_exits_alike_with_and_without_the_flag(
+    option: tuple[str, str],
+) -> None:
+    """The flag ignores these options, but a command line that is wrong is wrong."""
+    for flag in ((), ("--operational",)):
+        text, as_json = _run(*flag, *option)
+        assert text.exit_code == as_json.exit_code == EXIT_VALIDATION, (flag, option)
+        assert _payload(as_json)["status"] == "error"
+
+
+@pytest.mark.usefixtures("seeded")
 def test_help_describes_the_flag_and_no_longer_denies_the_means() -> None:
     holdout_help = runner.invoke(app, ["analyze", "holdout", "--help"])
     flat = _flat(holdout_help)
     assert "--operational" in flat
     assert "No estimate" not in flat
-    assert "outcome mean" in flat
+    assert "No outcome value is read" in flat
+    assert "validated" in flat
     value_help = _flat(runner.invoke(app, ["analyze", "value", "--help"]))
     assert "does not have" not in value_help
     assert "analyze holdout" in value_help
@@ -168,4 +202,16 @@ def test_every_shared_cli_default_is_the_operational_library_default() -> None:
     }
 
     assert command == library
-    assert set(library) >= {"days", "rate", "outcome", "itt", "by_commit"}
+    assert set(library) >= {
+        "days",
+        "rate",
+        "outcome",
+        "itt",
+        "by_commit",
+        "permutations",
+        "bootstraps",
+        "power_sims",
+        "planned_mde",
+        "planned_n",
+        "seed",
+    }
