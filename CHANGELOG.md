@@ -17,6 +17,50 @@ All notable changes to Trellis will be documented in this file.
   `-v` explicitly, so their output is unchanged; a bare targeted run prints a
   dot per test instead of a line per test. Pass `-v` for the old output.
 
+### Added
+
+- **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
+
+### Changed
+
+- **A wrong MCP tool argument is now answered from the tool's own schema, and a
+  rejected write is recorded.** FastMCP validates a call's arguments before the
+  tool body runs, so a misspelt or mistyped argument came back as pydantic's own
+  text: no accepted parameter named, the caller's value quoted, and no
+  `WRITE_REJECTED` event because the body never ran. A middleware now rewrites
+  that failure: `unknown argument item_ids; record_feedback accepts [...]; did
+  you mean helpful_item_ids, ...?`, `missing required argument trace_json`, and,
+  for an object passed as `trace_json`, an instruction to pass a JSON string. The
+  accepted names are read off the live tool schema, and no value the caller sent
+  is repeated. The call is still rejected exactly as before: no alias is
+  accepted and nothing is coerced. `save_experience`, `save_knowledge`,
+  `save_memory` and `record_feedback` also emit `WRITE_REJECTED` for this class
+  (source `mcp:<tool>`, kinds from the existing taxonomy), the four tools that
+  already record their body-level rejections; `record_observation` and
+  `execute_mutation` get the message but no event, and a read tool likewise.
+  **The reported rejection rate will rise** once these rows appear, because a
+  previously invisible class now counts toward it (and toward `trellis analyze
+  health`'s warning threshold and the capture-health banner's three-rejection,
+  zero-accepted condition on a capture surface).
+
+- **A trace field rejected on one model that another declares is told where it
+  belongs.** The `extra_forbidden` hint advised free-form `metadata` for any
+  unknown field, so a caller who sent `domain`, `agent_id`, `started_at`,
+  `summary` or `status` at the top level followed it, kept the trace valid and
+  left `context.domain` (or the other declared field) empty. The hint now finds
+  the rejected name on a model reachable from `Trace` (read off the live
+  models, not a roster) and names that path, for example `domain belongs at
+  context.domain`; `artifacts` is pointed at `artifacts_produced`. A field no
+  model declares keeps the `metadata` advice. `Trace` and `TraceStep` still
+  reject every unknown field.
+
+- **`save_experience`'s `trace_json` description shows a complete trace.** The
+  example now carries step `args`, a `result` object with a `summary`, a step
+  recorded in `error`, and `outcome.status` with `outcome.summary`, and one line
+  lists every step field. The `record-after-task` skill's gotcha table gains the
+  `action` and `observation` step keys. The example's lead-in is now "Example
+  valid trace:".
+
 ### Fixed
 
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock

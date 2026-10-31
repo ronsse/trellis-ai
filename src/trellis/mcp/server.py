@@ -452,6 +452,91 @@ class _SanitizeUncaughtToolErrors(Middleware):
 mcp.add_middleware(_SanitizeUncaughtToolErrors())
 
 
+#: The tools whose argument rejections are recorded as ``WRITE_REJECTED``.
+#: Each already records its body-level rejections through
+#: ``_record_boundary_rejection``, so ``test_capture_surface_roster.py``
+#: already knows how its surface clears (a capture surface with an accept
+#: recipe, or ``NON_CAPTURE_SURFACES``). ``record_observation`` and
+#: ``execute_mutation`` are deliberately absent: neither records a boundary
+#: rejection today, and ``execute_mutation`` stamps accepted writes with the
+#: authenticated principal rather than ``mcp:execute_mutation``, so a banner
+#: raised under that label could not clear. A read tool gets the message and
+#: no event.
+_RECORDED_ARGUMENT_TOOLS = frozenset(
+    {"save_experience", "save_knowledge", "save_memory", "record_feedback"}
+)
+
+
+class _ExplainArgumentRejections(Middleware):
+    """Tell a caller what a tool accepts when its arguments are wrong.
+
+    FastMCP validates a call's arguments against the tool signature before
+    the tool body runs, so a misspelt or mistyped argument never reaches the
+    body's own handling. Left alone it comes back as pydantic's text, which
+    names no accepted parameter and quotes the value the caller sent; and
+    because the body never ran it left no ``WRITE_REJECTED`` event either.
+
+    This rewrites that one failure (a pydantic ``ValidationError`` titled
+    ``call[<tool>]``, found as the ``__cause__`` of the exception FastMCP
+    raises) from the tool's own JSON schema, through
+    :func:`trellis.ops.write_health.describe_argument_rejection`, and records
+    it for a tool in :data:`_RECORDED_ARGUMENT_TOOLS`. It never loosens
+    anything: the call is still rejected, with the same ``ToolError`` type,
+    and an unexpected shape passes through untouched.
+
+    The rewrite is fail-soft as a whole: guidance is advisory, so a failure
+    to build it re-raises the original error. It never renders the exception
+    itself (``test_exception_text_roster.py``): the message is built from the
+    error's structured ``errors()`` rows and the schema.
+    """
+
+    def __init__(self, server: FastMCP) -> None:
+        self._server = server
+
+    async def _explain(self, tool: str, cause: BaseException | None) -> str | None:
+        """The rewritten message, or ``None`` to leave the error as it is."""
+        if not isinstance(cause, ValidationError) or not cause.title.startswith(
+            "call["
+        ):
+            return None
+        try:
+            from trellis.ops.write_health import (  # noqa: PLC0415
+                describe_argument_rejection,
+            )
+
+            declared = await self._server.get_tool(tool)
+            if declared is None:
+                return None
+            guidance = describe_argument_rejection(tool, declared.parameters, cause)
+            if tool in _RECORDED_ARGUMENT_TOOLS:
+                _record_boundary_rejection(
+                    tool=tool,
+                    error=cause,
+                    rejections=guidance.rows,
+                    hints=guidance.hints,
+                )
+        except Exception:
+            logger.warning("argument_rejection.guidance_failed", tool=tool)
+            return None
+        return guidance.message
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except Exception as exc:
+            message = await self._explain(context.message.name, exc.__cause__)
+            if message is None:
+                raise
+            raise ToolError(message) from exc.__cause__
+
+
+mcp.add_middleware(_ExplainArgumentRejections(mcp))
+
+
 _registry: StoreRegistry | None = None
 
 
@@ -1690,17 +1775,21 @@ def save_experience(trace_json: str) -> str:
             top-level keys are ``source``, ``intent``, and ``context``.
             ``source`` must be one of ``agent``, ``human``, ``workflow``, or
             ``system``. Put execution details such as ``agent_id``, ``domain``,
-            ``started_at``, and ``ended_at`` inside ``context``. Each entry in
-            ``steps`` requires ``step_type`` and ``name``; do not use
-            ``action``/``observation`` as field names. A step's ``result`` is
-            an object, never a bare string: write ``{"summary": "12 passed"}``,
-            not ``"12 passed"``. Validation is
+            ``started_at``, and ``ended_at`` inside ``context``. A step takes
+            ``step_type`` and ``name`` (both required) and, optionally,
+            ``args``, ``result``, ``error``, ``duration_ms``, and
+            ``started_at``; there is no ``action`` or ``observation`` field.
+            A step's ``args`` and ``result`` are objects, never a bare string:
+            write ``{"summary": "12 passed"}``, not ``"12 passed"``. Record a
+            step that failed in its ``error`` string. Put how the work ended
+            in top-level ``outcome``: ``status`` (``success``, ``failure``,
+            ``partial`` or ``unknown``) and ``summary``. Validation is
             all-or-nothing: an unknown top-level or context field rejects the
             **entire trace** and nothing is recorded — not just that field. So
             put additional data in top-level ``metadata`` (or outcome
             measurements in ``outcome.metrics``).
 
-            Example minimal valid trace:
+            Example valid trace:
             {
               "source": "agent",
               "intent": "Fix a failing test",
@@ -1710,10 +1799,31 @@ def save_experience(trace_json: str) -> str:
                 "started_at": "2026-08-27T00:00:00Z",
                 "ended_at": "2026-08-27T00:01:00Z"
               },
-              "metadata": {"repo": "my/repo"},
               "steps": [
-                {"step_type": "tool_call", "name": "search"}
-              ]
+                {
+                  "step_type": "tool_call",
+                  "name": "run_tests",
+                  "args": {"path": "tests/unit"},
+                  "result": {"summary": "1 failed, 11 passed"}
+                },
+                {
+                  "step_type": "tool_call",
+                  "name": "edit_file",
+                  "args": {"path": "src/parser.py"},
+                  "error": "patch did not apply: file changed on disk"
+                },
+                {
+                  "step_type": "tool_call",
+                  "name": "edit_file",
+                  "args": {"path": "src/parser.py"},
+                  "result": {"summary": "patched"}
+                }
+              ],
+              "outcome": {
+                "status": "success",
+                "summary": "Fixed the failing parser test"
+              },
+              "metadata": {"repo": "my/repo"}
             }
     """
     if not trace_json or not trace_json.strip():

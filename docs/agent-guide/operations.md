@@ -91,6 +91,67 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### `trellis admin backup`
+
+Copy the SQLite stores to a directory while they are in use.
+
+```bash
+trellis admin backup --output DIR [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output` | (required) | A new directory, or an existing empty one. A non-empty directory or a file is refused (exit 2) before any store is read, so two backups never mix. |
+| `--format` | `text` | Output format. The exit code does not depend on it. |
+
+**Do not copy the `.db` files with `cp`.** The SQLite stores run in WAL mode: a write is acknowledged once it is in the `-wal` file, and the main file lags behind until a checkpoint. A `cp` of the main file while a server runs drops those writes, and the copy still passes `PRAGMA integrity_check`, so nothing flags the loss. `admin backup` copies each store with SQLite's online backup API (`sqlite3.Connection.backup`), which reads one consistent snapshot of that store and is safe beside a running writer. Each copy is a single self-contained file with no `-wal` / `-shm` beside it.
+
+**What is copied.** The set of stores comes from the same resolution the rest of Trellis uses (`config.yaml` and the registry), not from a filename glob, so a store with an explicit `db_path` is found. Under `OUTPUT/stores/`:
+
+- one `.db` file per configured SQLite store that exists: `traces.db`, `documents.db`, `graph.db`, `vectors.db`, `events.db`, `outcomes.db`, `parameters.db`, `tuner_state.db` and `api_keys.db`;
+- `policies.json` when the policy file exists;
+- `feedback/pack_feedback.jsonl` when the feedback audit log exists.
+
+`OUTPUT/manifest.json` records, per store, the file, its size in bytes, the row count of every table (virtual-table shadow tables such as the full-text index's are left out), the `PRAGMA integrity_check` result of the **copy**, and the Trellis version and commit that wrote it. The JSON printed by `--format json` is the same document plus `output`.
+
+**What is not copied, and how it is reported.** Nothing is skipped silently:
+
+- A store on a backend other than SQLite (for example `postgres`, `pgvector`, `neo4j`, `arcadedb`) has status `skipped`. Use that backend's own tool: `pg_dump` for Postgres and pgvector, `neo4j-admin database dump` for Neo4j, ArcadeDB's `BACKUP DATABASE` command. A `null` event log has nothing to copy and is `not_applicable`, not a gap.
+- A local blob directory with files in it is `skipped`: this command does not copy the tree. Copy `stores/blobs/` with your file tooling, or rely on S3 bucket versioning for the `s3` backend.
+- `not_copied` lists every other entry under the stores directory, such as the JSON state files (`settings.json`, `advisories.json`, `schedule.json`) and any other directory. They are not copied, only named. `config.yaml` and `learning_params.yaml` live in the config directory, outside it, and are never copied: back them up yourself, because the restore below needs the `data_dir` line in `config.yaml`.
+
+**Exit codes.** `0` only when every configured store was copied and its copy passed `integrity_check`. `5` when a store failed (`status: error`), when something was skipped (`status: incomplete`), or when no store file was found at all (a wrong data directory looks like this). `2` when `--output` is refused. A backup that left data out never exits `0`.
+
+**The stores are copied one after another**, so the set is not a single instant. Each store is internally consistent; documents and events written between the first and last copy may not line up across stores. Stop the writers (the API, the MCP server, the capture sweep) first if the stores must agree with each other.
+
+**The output holds every memory and the API-key hashes.** The directory is created `0700` and each file `0600`. Keep it that way, and keep it off shared storage.
+
+#### Restoring a backup
+
+There is no restore command: a restore is placing files while nothing is writing to them.
+
+1. **Stop every process that opens the stores:** the API, the MCP server (including the HTTP container), the capture sweep and any scheduled job. A running server keeps the old files open and goes on writing to them.
+2. **Choose the target data directory** and make sure `OUTPUT/stores/` goes to `<data_dir>/stores/`. For an in-place restore, move the damaged `stores/` aside first rather than deleting it.
+3. **Copy `OUTPUT/stores/*` into `<data_dir>/stores/`**, then delete any `*.db-wal` and `*.db-shm` left beside a store you replaced: a stale `-wal` belongs to the old file and must not be applied to the restored one. If `config.yaml` gives a store an explicit `db_path`, copy that store's `.db` to that path instead, since the registry reads that path and not `stores/`.
+4. **Point Trellis at the target through `config.yaml`.** `trellis admin init` writes the data directory into `config.yaml` as `data_dir`, and a `data_dir` in `config.yaml` beats `$TRELLIS_DATA_DIR`: `StoreRegistry.from_config_dir` takes the environment variable first, then overwrites it with the config value when one is set. So exporting `TRELLIS_DATA_DIR=/restore/target` on a host whose `config.yaml` already names a `data_dir` changes nothing: every surface keeps opening, and writing to, the original stores, and the restored copy sits unread. Edit `data_dir` in `config.yaml` to the target (or remove the line and use the environment variable), and confirm with the drill below: `admin stats` must show the restored counts, not the old store's.
+5. **Start the writers** once the drill below passes.
+
+#### Restore drill
+
+Run this against a scratch directory before you need it, and again after changing the backup job. It touches only the scratch directory.
+
+```bash
+SCRATCH=$(mktemp -d)
+export TRELLIS_CONFIG_DIR="$SCRATCH/config"   # a scratch config, not the real one
+unset TRELLIS_DATA_DIR
+trellis admin init --data-dir "$SCRATCH/data"
+cp -r OUTPUT/stores/. "$SCRATCH/data/stores/"
+trellis admin stats --format json
+trellis retrieve search "<a word you know is stored>" --format json
+```
+
+Compare `admin stats` with the table counts in `OUTPUT/manifest.json`. `traces` is the `traces` table of `traces.db`, `events` the `events` table of `events.db` and `document_rows` the `documents` table of `documents.db`: each must be equal. `nodes` and `edges` count only the current version of each row, while the manifest counts every row of the `nodes` and `edges` tables, superseded versions included, so they may be lower than the manifest and never higher. The search must return a document you know was stored. A restore that opens but is short of rows, or answers from an empty store, is a failed drill.
+
 ### `GET /api/v1/loops`
 
 Is each curation / learning loop actually doing anything? Admin scope,
