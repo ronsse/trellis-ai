@@ -4,6 +4,19 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The AST rule tests share one parse per source.** `ast.parse` called from test
+  code is now memoised by its source text (`tests/ast_rules.py`, installed from
+  `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
+  test. Only callers under `tests` get a shared tree: pytest's assertion rewriter,
+  `ast.literal_eval`, `scripts/` and `src/` keep the real `ast.parse`. Shared
+  trees must not be edited, and a session fixture plus
+  `tests/unit/test_ast_parse_memo.py` fail the run if one is. That check found one
+  existing rule, `test_error_describe_not_quote_rule.py`, rewriting a tree in
+  place through `ast.NodeTransformer`; it now transforms a copy. Test-suite
+  change only; nothing under `src/` is touched.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added

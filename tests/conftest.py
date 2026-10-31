@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 import pytest
 from hypothesis import HealthCheck, settings
 
+from tests.ast_rules import SHARED_PARSE_MEMO, install_parse_memo
 from tests.structlog_isolation import (
     IsolatedCliRunner,
     reset_structlog_global_state,
@@ -52,6 +53,11 @@ settings.register_profile(
     suppress_health_check=[HealthCheck.too_slow],
 )
 settings.load_profile("fast")
+
+# The AST rule files call ``ast.parse`` directly, once per test, on the same
+# files. Route those calls (only those made from test code) through one memo.
+# The trees are shared, so a test must never edit one: see ``ParseMemo``.
+install_parse_memo()
 
 # (cli_flag, env_var, marker_name(s)) — when multiple marker names are
 # listed, the include flag relaxes every "not <name>" segment for each.
@@ -413,3 +419,24 @@ def _isolated_structlog() -> Iterator[None]:
         yield
     finally:
         reset_structlog_global_state()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _shared_parse_trees_stay_pristine() -> Iterator[None]:
+    """Fail the run if any test edited a tree ``ast.parse`` shared with other tests.
+
+    Runs after the last test, so it also covers a rule that runs after
+    ``test_ast_parse_memo.py``'s own check. pytest reports it against
+    whichever test ran last; the message names the source that was altered.
+    """
+    yield
+    altered = SHARED_PARSE_MEMO.altered()
+    if altered:
+        listing = "\n  ".join(altered)
+        pytest.fail(
+            f"{len(altered)} tree(s) returned by ast.parse no longer match a fresh "
+            "parse of their source. Those trees are shared by every test that "
+            "parses the same text; copy.deepcopy the subtree before changing it "
+            f"(see tests/ast_rules.py, ParseMemo):\n  {listing}",
+            pytrace=False,
+        )
