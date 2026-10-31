@@ -26,6 +26,16 @@ All notable changes to Trellis will be documented in this file.
   fires once per batch rather than once per sweep. `sync_records` gains optional
   `on_record_error` and `minhash` arguments; without them it behaves as before.
 
+- **A body that is not valid UTF-8 answers 422, not 500.** Pre-existing, and
+  distinct from #741: a body sent with no JSON content type (`text/plain`, say)
+  reaches the validation error with the raw, undecodable bytes as `input`, and
+  `jsonable_encoder`'s default `bytes` encoder is a strict `.decode()`, which
+  raised `UnicodeDecodeError` and the catch-all answered `500 internal_error`.
+  The API's 422 handler, which every request-validation error goes through, now
+  renders undecodable bytes with `backslashreplace` instead of raising. A body
+  sent with a JSON content type was already unaffected: FastAPI's own routing
+  turns that decode failure into a 422 or 400 before this handler runs.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added
