@@ -158,11 +158,13 @@ UNSELECTABLE_STATES: frozenset[LifecycleState] = frozenset(
 #: bites, the resolver says so rather than silently returning a short list.
 MAX_DOCUMENTS_SCANNED = 20_000
 
-#: Hard ceiling on graph nodes walked per resolution pass, independent of
+#: Hard ceiling on graph nodes read per resolution pass, independent of
 #: ``max_items`` — the entity counterpart of :data:`MAX_DOCUMENTS_SCANNED`.
-#: ``GraphStore`` has no lifecycle or age predicate, so the entity resolver
-#: pages every current node (``search_nodes``) and filters client-side; the
-#: cap bounds that walk, and when it bites the report says so.
+#: ``GraphStore`` has no lifecycle or age predicate, so a pass that names
+#: lifecycle states pages every current node (``search_nodes``) and filters
+#: client-side; a mint-only pass asks the store for the unconfirmed mints
+#: themselves (``query``), so plain nodes cost it nothing. Either way the cap
+#: bounds the read, and when it leaves rows unread the report says so.
 MAX_ENTITIES_SCANNED = 20_000
 
 #: Page size for both scans.
@@ -233,7 +235,10 @@ class ResolutionReport(TrellisModel):
     candidate set is a prefix of the real population, not the whole of it.
     ``scan_truncated_planes`` names which scan the cap ended. A pass that
     stops because ``max_items`` was reached is not truncated: it found what
-    it was asked for.
+    it was asked for. On the entity plane the flag is true only when the cap
+    left rows unread; the document plane can also read true when the corpus
+    holds exactly the cap, since it cannot tell a full last page from a
+    longer corpus.
     ``unselectable_lifecycle_states`` is the same rule one level up: a zero
     that was *guaranteed by the criteria* must not read as a zero the corpus
     produced.
@@ -585,6 +590,44 @@ def _classify_entity(
     return None
 
 
+def _consider_entity(
+    node: dict[str, Any],
+    criteria: RetentionCriteria,
+    wanted_states: set[LifecycleState],
+    cutoff: datetime,
+    report: ResolutionReport,
+    seen: set[str],
+) -> None:
+    """Classify one node the entity scan read and record it if it qualifies."""
+    node_id = node.get("node_id")
+    if not node_id or node_id in seen:
+        return
+    props = node.get("properties") or {}
+    reason = _classify_entity(node, props, criteria, wanted_states, cutoff, report)
+    if reason is None:
+        return
+    seen.add(node_id)
+    report.candidates.append(
+        RetentionCandidate(
+            item_id=node_id,
+            kind="entity",
+            reason_code=reason,
+            name=props.get("name"),
+        )
+    )
+
+
+def _mark_entity_scan_truncated(report: ResolutionReport) -> None:
+    report.scan_truncated = True
+    report.scan_truncated_planes.append("entity")
+    logger.warning(
+        "retention_scan_truncated",
+        scanned=report.entities_scanned,
+        cap=MAX_ENTITIES_SCANNED,
+        plane="entity",
+    )
+
+
 def _resolve_entities(
     criteria: RetentionCriteria,
     registry: StoreRegistry,
@@ -599,11 +642,76 @@ def _resolve_entities(
     ``wanted_states`` arrives already stripped of :data:`UNSELECTABLE_STATES`
     by :func:`resolve_candidates` — the one place that subtraction happens.
 
-    Pages the graph newest-first until ``max_items`` candidates are found, the
-    graph ends, or :data:`MAX_ENTITIES_SCANNED` nodes have been walked. The
-    limit used to be handed to the store before the archived, too-young and
-    wrong-state rows were dropped, so those rows used up the window and a
-    prune stalled once the newest ``max_items`` nodes were all ineligible.
+    Two shapes, because the store can answer one question and not the other.
+    A pass with no selectable lifecycle state is about unconfirmed mints, and
+    ``GraphStore.query`` filters on that property in the store, so plain nodes
+    never reach the cap (:func:`_query_unconfirmed_mints`). Lifecycle lives in
+    the property bag, which the store cannot filter, so a pass that names a
+    state walks every current node (:func:`_walk_entities`).
+    """
+    if remaining() <= 0:
+        # The documents already filled ``max_items``; an entity read would
+        # only add a candidate past it.
+        return
+    graph = registry.knowledge.graph_store
+    if wanted_states:
+        _walk_entities(graph, criteria, report, cutoff, seen, remaining, wanted_states)
+    else:
+        _query_unconfirmed_mints(
+            graph, criteria, report, cutoff, seen, remaining, wanted_states
+        )
+
+
+def _query_unconfirmed_mints(
+    graph: Any,
+    criteria: RetentionCriteria,
+    report: ResolutionReport,
+    cutoff: datetime,
+    seen: set[str],
+    remaining: Any,
+    wanted_states: set[LifecycleState],
+) -> None:
+    """One bounded read of the unconfirmed mints, then the usual gates.
+
+    Asks for one row more than :data:`MAX_ENTITIES_SCANNED`, so a store that
+    holds exactly the cap reads as complete and only a longer list reads as
+    truncated. The extra row is not walked. On the Bolt backends ``query``
+    reads ``limit * 4`` newest nodes before it applies the property filter, so
+    there the read reaches mints only among the newest ``4 * (cap + 1)`` nodes
+    and a shorter answer does not prove it found them all; that store-side cap
+    is not this module's to lift.
+    """
+    rows = graph.query(
+        properties={EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED},
+        limit=MAX_ENTITIES_SCANNED + 1,
+    )
+    for node in rows[:MAX_ENTITIES_SCANNED]:
+        report.entities_scanned += 1
+        _consider_entity(node, criteria, wanted_states, cutoff, report, seen)
+        if remaining() <= 0:
+            return
+    if len(rows) > MAX_ENTITIES_SCANNED:
+        _mark_entity_scan_truncated(report)
+
+
+def _walk_entities(
+    graph: Any,
+    criteria: RetentionCriteria,
+    report: ResolutionReport,
+    cutoff: datetime,
+    seen: set[str],
+    remaining: Any,
+    wanted_states: set[LifecycleState],
+) -> None:
+    """Page the graph newest-first for a pass that names a lifecycle state.
+
+    Stops when ``max_items`` candidates are found, the graph ends, or
+    :data:`MAX_ENTITIES_SCANNED` nodes have been read. The limit used to be
+    handed to the store before the archived, too-young and wrong-state rows
+    were dropped, so those rows used up the window and a prune stalled once
+    the newest ``max_items`` nodes were all ineligible. The newest rows use the
+    budget first, so a graph larger than the cap can stay truncated however
+    often the pass is run: the flag says so, and a re-run does not help.
 
     The walk pages with ``search_nodes``, which orders by ``(created_at,
     node_id)`` so a page boundary is stable while the graph does not change.
@@ -614,24 +722,47 @@ def _resolve_entities(
     skips rows it has already seen. A deletion behind the cursor paired with
     an insert ahead of it between two pages leaves the total unchanged and is
     not detected; the next pass reaches that row.
-    """
-    graph = registry.knowledge.graph_store
 
+    Two bounds keep a store that misreports from looping the walk: a read
+    budget of ``4 * MAX_ENTITIES_SCANNED // _SCAN_PAGE`` (a clean walk needs
+    at most ``MAX_ENTITIES_SCANNED // _SCAN_PAGE``, and each step-back adds a
+    re-read), and the cap itself. Either reports truncated, as does an empty
+    page while the total still shows rows unread. All three are conservative:
+    a row deleted at the cap under a race can read truncated with every live
+    row read.
+    """
     visited: set[str] = set()
     offset = 0
     last_total: int | None = None
+    reads = 0
+    max_reads = 4 * MAX_ENTITIES_SCANNED // _SCAN_PAGE
 
     while remaining() > 0:
+        if reads >= max_reads:
+            _mark_entity_scan_truncated(report)
+            return
+        reads += 1
         start = offset
         page, total = graph.search_nodes(
             limit=min(_SCAN_PAGE, MAX_ENTITIES_SCANNED - len(visited)),
             offset=start,
         )
-        if not page:
+        # A fall in the total since the last read is the number of rows that
+        # moved up past the cursor.
+        fall = last_total - total if last_total is not None else 0
+        if not page and fall <= 0:
+            # Empty beyond the last row is the end. Empty while the total
+            # still counts rows not read is a store that does not agree with
+            # itself, which is not a complete scan.
+            if len(visited) < total:
+                _mark_entity_scan_truncated(report)
             return
         offset = start + len(page)
-        if last_total is not None and total < last_total:
-            offset = max(0, start - (last_total - total))
+        if fall > 0:
+            # The cursor moves back by the same amount, also when the page is
+            # empty: the deletion can have been of the last rows, and the one
+            # now at ``start - fall`` is still unread.
+            offset = max(0, start - fall)
         last_total = total
 
         for node in page:
@@ -642,47 +773,14 @@ def _resolve_entities(
                     continue
                 visited.add(node_id)
             report.entities_scanned += 1
-            if not node_id or node_id in seen:
-                continue
-            props = node.get("properties") or {}
-            if not wanted_states and not (
-                criteria.unconfirmed_mints
-                and props.get(EXTRACTION_STATUS_PROPERTY)
-                == EXTRACTION_STATUS_UNCONFIRMED
-            ):
-                # The walk reaches every node, but a mint-only pass is about
-                # unconfirmed mints: the rest are not its skips to count.
-                continue
-
-            reason = _classify_entity(
-                node, props, criteria, wanted_states, cutoff, report
-            )
-            if reason is None:
-                continue
-
-            seen.add(node_id)
-            report.candidates.append(
-                RetentionCandidate(
-                    item_id=node_id,
-                    kind="entity",
-                    reason_code=reason,
-                    name=props.get("name"),
-                )
-            )
+            _consider_entity(node, criteria, wanted_states, cutoff, report, seen)
             if remaining() <= 0:
                 return
 
         if offset >= total:
             return
         if len(visited) >= MAX_ENTITIES_SCANNED:
-            report.scan_truncated = True
-            report.scan_truncated_planes.append("entity")
-            logger.warning(
-                "retention_scan_truncated",
-                scanned=report.entities_scanned,
-                cap=MAX_ENTITIES_SCANNED,
-                plane="entity",
-            )
+            _mark_entity_scan_truncated(report)
             return
 
 
