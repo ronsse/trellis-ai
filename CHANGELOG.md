@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added
