@@ -2744,6 +2744,18 @@ than `--limit` while that many servable (non-demoted, non-archived)
 precedents exist, even when demoted/archived rows sit inside the
 underlying scan window.
 
+Below `restricted` (a key with a lower clearance, over REST or MCP; the trusted
+local CLI reads at `restricted`, so nothing here changes it) the listing
+withholds a precedent whose own document row the caller may not read, and one
+whose source (`payload.source_item_id`, else the node's
+`properties.source_item_id`) it may not read. A promotion made while its source
+sat above `internal` is exempt from the second rule: its node reads
+`source_excerpt_status` `source_labelled`, so it carries no source text and is
+served. Withholding drops the row, never rewrites its text, and happens before
+`--limit`, so a page stays full while readable precedents remain. A store that
+cannot answer, or no document store at all, withholds every row that needs a
+verdict. MCP `get_lessons` applies the same rule with the caller's clearance.
+
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
 ```

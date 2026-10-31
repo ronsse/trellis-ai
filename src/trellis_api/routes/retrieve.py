@@ -632,8 +632,11 @@ def list_precedents(
 ) -> dict[str, Any]:
     """List promoted precedents.
 
-    A learning promotion's ``payload.source_item_id`` is left out when it names
-    a document above the caller's clearance.
+    Below ``restricted`` a precedent is withheld when its own document row or
+    its source document is above the caller's clearance, unless the promotion
+    was made under the source-label rule. A learning promotion's
+    ``payload.source_item_id`` is left out when it names a document above the
+    caller's clearance.
     """
     registry = get_registry()
     items = _list_precedents(

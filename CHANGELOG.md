@@ -352,6 +352,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Precedent listings withhold a precedent the caller's clearance cannot read,
+  and MCP `get_lessons` is gated (#1080).** Below `restricted`, `GET /precedents`
+  and `get_lessons` served a promoted precedent whose own document row the caller
+  could not read, and one whose source document it could not read (a source
+  relabelled after the promotion, so the node still carried its text). A row is
+  now withheld, not rewritten, when its own document row is unreadable or its
+  source id (the payload's `source_item_id`, else the node's) is, unless the
+  node's `source_excerpt_status` is `source_labelled`: that promotion was made
+  under the source-label rule and carries no source text. Both checks run before
+  a row takes a `limit` slot, in one `readable_ids` call per fetch window, so a
+  page stays full while readable precedents remain. A store that raises withholds
+  the rows it could not judge, and below `restricted` with no document store every
+  row that names a source or has a document row is withheld. `get_lessons` now
+  passes the caller's clearance (its roster claim in
+  `test_sensitivity_surface_rule.py` flips from `FREE` to `GATED`), and the
+  `restricted` default, served text, stored rows and pack building are unchanged.
+  `GET /precedents/domains` still counts a withheld precedent's domain tag; it
+  has no clearance to judge by, and closing that is a separate change.
+
 - **`POST /api/v1/commands/batch` and MCP `execute_mutation` refuse a withholding
   `lifecycle` and a new `evidence_ref` on `evidence.ingest` (part of #1057).** The
   pack builder withholds by id, and an `evidence.ingest` command's

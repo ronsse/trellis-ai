@@ -6,6 +6,11 @@ precedent came from, often a document. The listing serves each promotion event's
 key cannot read. The id is dropped from the served copy of each such row, judged
 once the rows are chosen so no title, description, count or order moves, and the
 immutable event keeps it.
+
+Every fixture row here was promoted under the source-label rule
+(``source_excerpt_status="source_labelled"``): it holds no text from its source,
+so the listing serves it and conceals only the pointer. A row that does hold
+source text is withheld outright (``test_precedent_listing_clearance.py``).
 """
 
 from __future__ import annotations
@@ -38,11 +43,12 @@ DOCUMENTS = {
 #: whose own title is the bare-id name of its source and whose node holds
 #: another name: ``_served_title`` reads ``payload.source_item_id`` to judge it,
 #: so a concealment that ran first would rename it.
+LABELLED = "source_labelled"
 ROWS: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = [
-    ("prec-secret", {"source_item_id": "doc-secret"}, None),
-    ("prec-conf", {"source_item_id": "doc-conf"}, None),
-    ("prec-open", {"source_item_id": "doc-open"}, None),
-    ("prec-node", {"source_item_id": "node-plain"}, None),
+    ("prec-secret", {"source_item_id": "doc-secret"}, {"name": "title of prec-secret"}),
+    ("prec-conf", {"source_item_id": "doc-conf"}, {"name": "title of prec-conf"}),
+    ("prec-open", {"source_item_id": "doc-open"}, {"name": "title of prec-open"}),
+    ("prec-node", {"source_item_id": "node-plain"}, {"name": "title of prec-node"}),
     ("prec-trace", {"trace_id": "trace-1"}, None),
     (
         "prec-bare",
@@ -76,7 +82,9 @@ def _seed(registry: StoreRegistry) -> None:
     log = registry.operational.event_log
     for entity_id, extras, node in ROWS:
         if node is not None:
-            registry.knowledge.graph_store.upsert_node(entity_id, "precedent", node)
+            registry.knowledge.graph_store.upsert_node(
+                entity_id, "precedent", {**node, "source_excerpt_status": LABELLED}
+            )
         log.emit(
             EventType.PRECEDENT_PROMOTED,
             "mutation_executor",
@@ -221,19 +229,25 @@ class TestCore:
         store.get.assert_not_called()
 
     def test_below_restricted_with_no_store_leaves_every_id_out(self, registry):
-        rows = list_precedents(registry.operational.event_log, clearance="internal")
+        rows = list_precedents(
+            registry.operational.event_log,
+            graph_store=registry.knowledge.graph_store,
+            clearance="internal",
+        )
         assert len(rows) == len(ROWS)
         assert _sources(rows) == {}
 
-    def test_a_store_that_cannot_answer_reads_as_unreadable(self, registry):
+    def test_a_store_that_cannot_answer_withholds_the_row(self, registry):
+        # Reads as unreadable: a row it cannot judge is left out, not served bare.
         store = MagicMock(spec=registry.knowledge.document_store)
         store.get.side_effect = RuntimeError("down")
         rows = list_precedents(
             registry.operational.event_log,
+            graph_store=registry.knowledge.graph_store,
             document_store=store,
             clearance="confidential",
         )
-        assert _sources(rows) == {}
+        assert rows == []
 
     def test_ids_are_judged_in_one_call_however_many_rows_name_them(
         self, registry, monkeypatch
@@ -248,13 +262,15 @@ class TestCore:
         monkeypatch.setattr(precedents_mod, "readable_ids", spy)
         list_precedents(
             registry.operational.event_log,
+            graph_store=registry.knowledge.graph_store,
             document_store=registry.knowledge.document_store,
             clearance="internal",
         )
+        # Every precedent's own id and every source id, each once.
         (ids,) = calls
-        assert sorted(ids) == sorted(set(SOURCES.values()))
+        assert sorted(ids) == sorted({e for e, _, _ in ROWS} | set(SOURCES.values()))
 
-    def test_no_id_to_judge_never_reaches_the_store(self, registry):
+    def test_no_source_to_judge_reads_only_the_precedents_own_row(self, registry):
         log = MagicMock(spec=EventLog)
         log.get_events.return_value = [
             Event(
@@ -267,7 +283,7 @@ class TestCore:
         store = MagicMock(spec=registry.knowledge.document_store)
         (row,) = list_precedents(log, document_store=store, clearance="internal")
         assert row["payload"]["trace_id"] == "trace-1"
-        store.get.assert_not_called()
+        store.get.assert_called_once_with("prec-trace")
 
     def test_the_events_own_payload_is_never_written_to(self, registry):
         # An SQLite log hands back fresh dicts, so only a log that returns the
@@ -284,6 +300,7 @@ class TestCore:
         log.get_events.return_value = events
         (row,) = list_precedents(
             log,
+            graph_store=registry.knowledge.graph_store,
             document_store=registry.knowledge.document_store,
             clearance="internal",
         )

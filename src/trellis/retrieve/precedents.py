@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import structlog
+
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.retrieve.sensitivity import readable_ids
-from trellis.schemas.classification import Sensitivity, lifecycle_state_of
+from trellis.schemas.classification import lifecycle_state_of
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventLog, EventType
 from trellis.stores.base.graph import GraphStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from trellis.schemas.classification import Sensitivity
+
+logger = structlog.get_logger(__name__)
 
 #: Hard ceiling on how far :func:`list_precedents` will widen its
 #: over-fetch window chasing ``limit`` servable rows. Shares
@@ -254,16 +264,46 @@ def list_precedents(
     graph store handy gets no lifecycle filter, since there is nothing to
     check against, but still the miner filter.
 
-    A learning promotion's ``payload.source_item_id`` names the served item the
-    precedent came from, often a document. Below ``restricted`` it is left out
-    of the served ``payload`` when :func:`~trellis.retrieve.sensitivity.readable_ids`
-    says ``clearance`` may not read that document, judged against
-    ``document_store`` once the rows are chosen so no title or description
-    changes. The default ``restricted`` serves every row as stored. A
-    ``clearance`` below it with no ``document_store`` has nothing to judge
-    against and leaves the key out of every row.
+    A precedent carries no label of its own, so below ``restricted`` a row is
+    **left out** (never rewritten) when either of these holds, judged with
+    :func:`~trellis.retrieve.sensitivity.readable_ids` against ``document_store``:
+
+    * a document row exists at its entity id (a promotion writes one, and the
+      keyword and semantic axes withhold it above the caller's clearance) and
+      ``clearance`` may not read it;
+    * its source id (the event's ``source_item_id``, else the node's) names a
+      document ``clearance`` may not read, unless the node's
+      ``source_excerpt_status`` is ``source_labelled``: a promotion made after
+      the source carried its label copies no text and no id from it, so the row
+      holds nothing of the source to withhold.
+
+    Both are decided **before** the ``limit`` cap, with one ``readable_ids``
+    call per fetch window, so a withheld row never takes a slot from a
+    servable one past the window. A store or judgement that raises withholds
+    (an outage must not read as permission). A ``clearance`` below
+    ``restricted`` with no ``document_store`` has nothing to judge against and
+    withholds every row that names a source or has a document row (an id in the
+    precedent namespace); a trace precedent, which has neither, is served.
+
+    A served learning promotion's ``payload.source_item_id`` is also left out of
+    the ``payload`` when ``clearance`` may not read that document, once the rows
+    are chosen, so no title or description changes. The default ``restricted``
+    serves every row as stored and reads no store.
     """
     payload_filters = {"domain": domain} if domain else None
+    gate = (
+        None
+        if clearance == "restricted"
+        else _ListingClearance(document_store, clearance)
+    )
+    nodes: dict[str, dict[str, Any] | None] = {}
+
+    def node_of(e: Event) -> dict[str, Any] | None:
+        if graph_store is None or not e.entity_id:
+            return None
+        if e.entity_id not in nodes:
+            nodes[e.entity_id] = graph_store.get_node(e.entity_id)
+        return nodes[e.entity_id]
 
     fetch_limit = max(limit, 1)
     results: list[dict[str, Any]] = []
@@ -274,6 +314,14 @@ def list_precedents(
             order="desc",
             payload_filters=payload_filters,
         )
+        barred = (
+            gate.barred_events(
+                [e for e in events if _is_listed(e, node_of(e))],
+                node_of,
+            )
+            if gate is not None
+            else frozenset()
+        )
         results = []
         for e in events:
             if len(results) >= limit:
@@ -281,10 +329,13 @@ def list_precedents(
             if is_miner_candidate_event(e):
                 continue
             if graph_store is None:
-                results.append(_serialize(e))
+                if e.event_id not in barred:
+                    results.append(_serialize(e))
                 continue
-            node = graph_store.get_node(e.entity_id) if e.entity_id else None
+            node = node_of(e)
             if node is not None and _node_is_withheld(node):
+                continue
+            if e.event_id in barred:
                 continue
             results.append(
                 _serialize(
@@ -297,40 +348,127 @@ def list_precedents(
         if len(results) >= limit or exhausted or fetch_limit >= _MAX_PRECEDENT_SCAN:
             break
         fetch_limit = min(fetch_limit * 4, _MAX_PRECEDENT_SCAN)
-    return _conceal_source_pointers(results, document_store, clearance)
+    return _conceal_source_pointers(results, gate)
+
+
+def _is_listed(event: Event, node: dict[str, Any] | None) -> bool:
+    """Whether the listing considers ``event`` at all: not mined, not demoted."""
+    if is_miner_candidate_event(event):
+        return False
+    return node is None or not _node_is_withheld(node)
+
+
+def _source_id_of(payload: dict[str, Any], node: dict[str, Any] | None) -> str | None:
+    """The id of the item a precedent came from: the event's, else the node's."""
+    props = (node or {}).get("properties") or {}
+    source = payload.get("source_item_id") or props.get("source_item_id")
+    return source if isinstance(source, str) and source else None
+
+
+class _ListingClearance:
+    """What a caller at ``clearance`` may be served from a precedent listing.
+
+    One instance per listing. Each id is judged once, in a batch per fetch
+    window (:meth:`barred_events`), and the verdict is kept for the pointer
+    concealment that follows (:func:`_conceal_source_pointers`), so a listing
+    reads each document once however many rows name it.
+    """
+
+    def __init__(
+        self, document_store: DocumentStore | None, clearance: Sensitivity
+    ) -> None:
+        self._store = document_store
+        self._clearance = clearance
+        self._verdicts: dict[str, bool] = {}
+
+    def judge(self, ids: Iterable[str]) -> None:
+        """Record whether the caller may read each id not yet judged, in one call."""
+        fresh = [i for i in dict.fromkeys(ids) if i not in self._verdicts]
+        if not fresh:
+            return
+        readable: set[str] = set()
+        if self._store is not None:
+            try:
+                readable = set(readable_ids(self._store, fresh, self._clearance))
+            except Exception as exc:  # advisory step; fails closed
+                # GRACEFUL-DEGRADATION: an outage must not read as permission, so
+                # an id the judgement could not answer for is unreadable.
+                logger.warning(
+                    "precedent_listing_clearance_failed",
+                    error_type=type(exc).__name__,
+                )
+        for item_id in fresh:
+            self._verdicts[item_id] = item_id in readable
+
+    def may_read(self, item_id: str) -> bool:
+        """The recorded verdict; an id never judged is unreadable."""
+        return self._verdicts.get(item_id, False)
+
+    def barred_events(
+        self,
+        events: list[Event],
+        node_of: Callable[[Event], dict[str, Any] | None],
+    ) -> frozenset[str]:
+        """The ``event_id`` of each of ``events`` the caller may not be served.
+
+        Judges every id the window needs (each entity id, each source id) in one
+        :meth:`judge` call, then applies the two rules in
+        :func:`list_precedents`.
+        """
+        # Deferred: ``trellis.learning`` imports the retrieve package.
+        from trellis.learning.scoring import SOURCE_EXCERPT_LABELLED  # noqa: PLC0415
+
+        planned = []
+        wanted: list[str] = []
+        for e in events:
+            node = node_of(e)
+            source = _source_id_of(e.payload, node)
+            props = (node or {}).get("properties") or {}
+            exempt = props.get("source_excerpt_status") == SOURCE_EXCERPT_LABELLED
+            planned.append((e, source, exempt))
+            if e.entity_id:
+                wanted.append(e.entity_id)
+            if source is not None:
+                wanted.append(source)
+        self.judge(wanted)
+        return frozenset(
+            e.event_id
+            for e, source, exempt in planned
+            if self._own_row_unreadable(e.entity_id)
+            or (source is not None and not exempt and not self.may_read(source))
+        )
+
+    def _own_row_unreadable(self, entity_id: str | None) -> bool:
+        if not entity_id:
+            return False
+        if self._store is None:
+            # No store to ask whether a row exists: a learning promotion has one
+            # by construction, a trace precedent has none.
+            return is_promoted_precedent_document(entity_id)
+        return not self.may_read(entity_id)
 
 
 def _conceal_source_pointers(
-    rows: list[dict[str, Any]],
-    document_store: DocumentStore | None,
-    clearance: Sensitivity,
+    rows: list[dict[str, Any]], gate: _ListingClearance | None
 ) -> list[dict[str, Any]]:
     """``rows`` with each unreadable ``payload.source_item_id`` left out.
 
     A row's ``payload`` may be the event's own dict (:func:`_serialize` aliases
     it when neither text was overridden), so a concealed row gets a copy and the
     event is never written to. Only a string id is judged; one id is judged once
-    however many rows name it.
+    however many rows name it. ``gate`` is ``None`` at ``restricted``, which
+    conceals nothing.
     """
-    if clearance == "restricted":
+    if gate is None:
         return rows
-    ids = list(
-        dict.fromkeys(
-            r["payload"]["source_item_id"]
-            for r in rows
-            if isinstance(r["payload"].get("source_item_id"), str)
-        )
-    )
-    if not ids:
-        return rows
-    readable = (
-        set(readable_ids(document_store, ids, clearance))
-        if document_store is not None
-        else set()
+    gate.judge(
+        r["payload"]["source_item_id"]
+        for r in rows
+        if isinstance(r["payload"].get("source_item_id"), str)
     )
     for row in rows:
         source = row["payload"].get("source_item_id")
-        if isinstance(source, str) and source not in readable:
+        if isinstance(source, str) and not gate.may_read(source):
             row["payload"] = {
                 k: v for k, v in row["payload"].items() if k != "source_item_id"
             }
