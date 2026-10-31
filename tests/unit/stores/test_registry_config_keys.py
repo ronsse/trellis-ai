@@ -179,6 +179,20 @@ def test_every_stray_top_level_key_is_listed_with_the_keys_read(
 # -- What still loads -----------------------------------------------------
 
 
+def test_every_misplaced_store_in_a_plane_is_listed(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _load(tmp_path, "knowledge:\n  trace: {}\n  event_log: {}\n")
+
+    assert "'trace'" in str(excinfo.value)
+    assert "'event_log'" in str(excinfo.value)
+
+
+def test_the_constructor_refuses_a_flat_stores_block_beside_a_plane() -> None:
+    """The file-level key check does not run here, only the plane-level one."""
+    with pytest.raises(ConfigError, match="flat 'stores:' block"):
+        StoreRegistry(config={"knowledge": {}, "stores": {}})
+
+
 def test_every_allowlisted_key_loads(tmp_path: Path) -> None:
     config = (
         "knowledge:\n  graph:\n    backend: sqlite\n"

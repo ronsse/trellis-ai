@@ -4,14 +4,16 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- **A misspelled `config.yaml` is refused instead of running on SQLite.** Loading
+- **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
+  A file that starts today can stop starting, including on a harmless stray key
+  such as `version: 1`; rename it `x-version` to keep it. Loading
   `config.yaml` used to ignore an unknown top-level key (`knowlege:`, `storage:`),
   and logged a warning for a store name no plane has, a store under the wrong
   plane, or the removed flat `stores:` block, then served every store from the
   SQLite default. Each of those now raises `ConfigError` naming the file and every
-  offending entry at once, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
+  offending entry at that level, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
   409 `config_error` when it surfaces inside a request, and the API refuses to start.
   The accepted top-level keys are `knowledge`, `operational`, `embeddings`,
   `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`,
@@ -26,9 +28,6 @@ All notable changes to Trellis will be documented in this file.
   `registry_plane_dsn_unused` once per plane per process, naming the plane, the
   variable and the file, never the DSN. A plane with at least one Postgres store
   stays silent, since a plane may legitimately run some stores on SQLite.
-
-### Changed
-
 - **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
   `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
   only, so `make test` and a bare `pytest` stay one process. Same legs, same
