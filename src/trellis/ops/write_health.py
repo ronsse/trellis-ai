@@ -35,9 +35,11 @@ could drift would recreate exactly that failure.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from enum import Enum
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
@@ -46,6 +48,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.pack_holdout import drop_holdout, is_holdout, unscanned_pack_ids
 from trellis.feedback.attribution import (
     StrayCitationTally,
@@ -124,6 +127,9 @@ RejectionKind = Literal[
 #: ``other`` rather than inventing a kind.
 _PYDANTIC_KIND_PREFIXES: tuple[tuple[str, str], ...] = (
     ("extra_forbidden", "extra_forbidden"),
+    # A tool call naming an argument the tool does not declare: the same
+    # failure as a forbidden key, one level up (``unexpected_keyword_argument``).
+    ("unexpected_keyword", "extra_forbidden"),
     ("enum", "enum"),
     ("missing", "missing"),
     ("json_invalid", "json_invalid"),
@@ -479,6 +485,46 @@ _NARRATION_HINT = (
 )
 
 
+def _single_instance_models() -> list[tuple[str, type[BaseModel]]]:
+    """``(path, model)`` for ``Trace`` and each model nested under it by a plain field.
+
+    ``("", Trace)``, ``("context", TraceContext)``, ``("outcome", Outcome)``
+    today, read off the live annotations. List elements (``steps[]``,
+    ``artifacts_produced[]``…) are left out on purpose: they are records
+    *about* the run, and a loose run-level key that shares a name with one
+    (``started_at`` is on both ``context`` and every step) does not mean
+    the step's field.
+    """
+    found: list[tuple[str, type[BaseModel]]] = [("", Trace)]
+    seen: set[type[BaseModel]] = {Trace}
+    for path, model in found:
+        for name, field in model.model_fields.items():
+            nested = _unwrap_optional(field.annotation)
+            if _is_model(nested) and nested not in seen:
+                seen.add(nested)
+                found.append((f"{path}.{name}" if path else name, nested))
+    return found
+
+
+def _declared_elsewhere(target: _LocTarget) -> list[str]:
+    """Where the rejected name *is* declared, when a rejection is a misplacement.
+
+    Walks the models :func:`_single_instance_models` finds, so it covers
+    every one reachable from ``Trace`` without a roster: a top-level
+    ``domain`` resolves to ``context.domain``. Empty when the rejection
+    sits inside a list element or when no other single-instance model
+    declares the name — callers then fall back to the generic clause.
+    """
+    if target.field is None or "[]" in target.path:
+        return []
+    homes = []
+    for path, model in _single_instance_models():
+        if model is target.model or target.field not in model.model_fields:
+            continue
+        homes.append(f"{path}.{target.field}" if path else f"top-level {target.field}")
+    return homes
+
+
 def _extra_forbidden_hint(target: _LocTarget) -> str:
     if target.model is Outcome and (target.field or "").startswith("artifact"):
         # Hand-written on purpose: the generated form would list Outcome's
@@ -489,12 +535,33 @@ def _extra_forbidden_hint(target: _LocTarget) -> str:
             '"artifacts_produced": [{"artifact_id": ..., '
             '"artifact_type": ...}] — not inside outcome'
         )
+    if target.model is Trace and target.field == "artifacts":
+        # Hand-written: the one misplacement that is a *rename*, so no
+        # model declares the name and the walk below cannot find it.
+        return (
+            "artifacts is not accepted on Trace: the top-level field is "
+            'artifacts_produced: [{"artifact_id": ..., "artifact_type": ...}]'
+        )
     if target.model is TraceStep and target.field == "index":
         return (
             f"{target.path} is not accepted: steps are ordered by position, so drop it"
         )
     if target.model is TraceStep and target.field in _NARRATION_KEYS:
         return _NARRATION_HINT.format(loc=target.path)
+    homes = _declared_elsewhere(target)
+    if homes:
+        # Checked before the free-form clause on purpose: that clause is
+        # what sent a top-level ``domain`` into ``metadata``, where it was
+        # accepted and left ``context.domain`` empty.
+        where = (
+            f"belongs at {homes[0]}"
+            if len(homes) == 1
+            else f"is declared at {', '.join(homes)}; use the one that fits"
+        )
+        return (
+            f"{target.path} is not accepted on {target.model.__name__}: "
+            f"{target.field} {where}"
+        )
     return (
         f"{target.path} is not accepted: {target.model.__name__} accepts only "
         f"[{_fields(target.model)}]{_freeform_clause(target)}"
@@ -591,6 +658,161 @@ def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
         if hint and hint not in hints:
             hints.append(hint)
     return hints
+
+
+#: An argument or location segment is echoed back only when it looks like
+#: one: a caller-chosen key is caller content, and a long or odd one is
+#: not something a reply should repeat.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+#: ``difflib`` ratio at which an accepted argument name is offered as a
+#: correction, and how many are offered.
+_SUGGESTION_CUTOFF = 0.6
+_MAX_SUGGESTIONS = 3
+
+#: JSON-schema scalar types in caller-facing words.
+_SCHEMA_TYPE_WORDS = {
+    "string": "a string",
+    "integer": "an integer",
+    "number": "a number",
+    "boolean": "a boolean",
+    "object": "an object",
+    "array": "an array",
+}
+
+
+def _safe_name(part: object) -> str:
+    text = str(part)
+    return text if _SAFE_NAME.fullmatch(text) else "<name not shown>"
+
+
+def _schema_phrase(prop: Mapping[str, Any]) -> str:
+    """The shape a tool parameter's JSON schema accepts, in caller-facing words."""
+    options = [
+        option
+        for option in prop.get("anyOf", [prop])
+        if isinstance(option, Mapping) and option.get("type") != "null"
+    ]
+    option = options[0] if len(options) == 1 else {}
+    word = _SCHEMA_TYPE_WORDS.get(str(option.get("type")))
+    if word is None:
+        return "a different type"
+    items = option.get("items")
+    if isinstance(items, Mapping) and items.get("type") in _SCHEMA_TYPE_WORDS:
+        return f"{word} of {items['type']}"
+    return word
+
+
+@dataclass(frozen=True)
+class ArgumentRejection:
+    """A tool call's argument failure, rewritten from the tool's own schema.
+
+    ``message`` is what the caller is told, ``hints`` the guidance clauses
+    inside it (what the ``WRITE_REJECTED`` event carries), ``rows`` the
+    taxonomy rows. None of the three quotes a value the caller sent.
+    """
+
+    message: str
+    hints: list[str]
+    rows: list[dict[str, str]]
+
+
+def _closest_names(name: str, accepted: list[str]) -> list[str]:
+    """Accepted argument names to offer for an unknown ``name``, best first.
+
+    A name that contains the unknown one, or is contained in it, is the
+    likeliest slip (``item_ids`` for ``helpful_item_ids``) and outranks any
+    spelling-distance match, which would otherwise surface an unrelated
+    parameter that merely shares letters. Ties keep declared order, so the
+    result does not depend on which candidate ``difflib`` happens to see first.
+    """
+    contained = [c for c in accepted if name in c or c in name]
+    if contained:
+        return contained[:_MAX_SUGGESTIONS]
+    scored = sorted(
+        (-SequenceMatcher(None, name, candidate).ratio(), index, candidate)
+        for index, candidate in enumerate(accepted)
+    )
+    return [c for score, _, c in scored if -score >= _SUGGESTION_CUTOFF][
+        :_MAX_SUGGESTIONS
+    ]
+
+
+def describe_argument_rejection(
+    tool: str, parameters: Mapping[str, Any], error: ValidationError
+) -> ArgumentRejection:
+    """Describe a failed tool-call validation by the tool's declared parameters.
+
+    FastMCP validates a call's arguments before the tool body runs, and
+    renders the failure as pydantic's own text: ``item_ids / Unexpected
+    keyword argument [... input_value=['a'] ...]``. That names no accepted
+    parameter and quotes what the caller sent. This reads the same failure
+    off ``errors(include_input=False)`` and the tool's JSON schema
+    (``parameters``) instead, so the accepted names are never a copy that
+    can drift from the signature. ``item_ids`` on ``record_feedback`` comes
+    back as ``unknown argument item_ids; record_feedback accepts [...]; did
+    you mean helpful_item_ids…?``.
+
+    A name the caller chose is echoed only if it is identifier-shaped
+    (:data:`_SAFE_NAME`). A value is never echoed.
+    """
+    properties = parameters.get("properties")
+    properties = properties if isinstance(properties, Mapping) else {}
+    accepted = [str(name) for name in properties]
+    problems: list[str] = []
+    rows: list[dict[str, str]] = []
+    unknown: list[str] = []
+    missing: list[str] = []
+    for err in error.errors(include_input=False):
+        loc = tuple(err.get("loc", ()))
+        kind = str(err.get("type", ""))
+        label = ".".join(_safe_name(part) for part in loc) or "<arguments>"
+        msg = sanitize_error_message(str(err.get("msg", "")))[:_MAX_MSG]
+        rows.append({"kind": _kind_for(kind), "loc": label, "msg": msg})
+        top = str(loc[0]) if loc else ""
+        if kind == "unexpected_keyword_argument":
+            unknown.append(top if _SAFE_NAME.fullmatch(top) else "")
+            problems.append(
+                f"unknown argument {unknown[-1]}"
+                if unknown[-1]
+                else "unknown argument (name not shown)"
+            )
+        elif kind == "missing_argument" and top in properties:
+            missing.append(top)
+            problems.append(f"missing required argument {top}")
+        elif (
+            len(loc) == 1 and top in properties and kind.endswith(("_type", "_parsing"))
+        ):
+            problems.append(f"{top} must be {_schema_phrase(properties[top])}")
+            if top == "trace_json" and kind == "string_type":
+                # Hand-written: an object where the schema wants a string is
+                # the one wrong-type call with a known cause and a known fix.
+                problems[-1] = (
+                    "trace_json must be a JSON string: serialize the trace "
+                    "object (e.g. json.dumps) rather than passing it as an object"
+                )
+        else:
+            problems.append(f"{label}: {msg}")
+
+    hints: list[str] = []
+    if unknown:
+        hints.append(f"{tool} accepts [{', '.join(accepted)}]")
+    if missing:
+        required = [n for n in parameters.get("required", []) if n in properties]
+        hints.append(f"required: [{', '.join(str(n) for n in required)}]")
+    named = [name for name in unknown if name]
+    for name in named:
+        close = _closest_names(name, accepted)
+        if not close:
+            continue
+        options = (
+            close[0] if len(close) == 1 else f"{', '.join(close[:-1])} or {close[-1]}"
+        )
+        suffix = f" for {name}" if len(named) > 1 else ""
+        hints.append(f"did you mean {options}{suffix}?")
+    return ArgumentRejection(
+        message="; ".join([*problems, *hints]), hints=hints, rows=rows
+    )
 
 
 def record_write_rejection(
