@@ -34,6 +34,44 @@ def test_parse_candidates_happy_path() -> None:
     assert result.candidates[0].non_derivable is True
 
 
+def test_parse_candidates_strips_nul_from_every_string_field() -> None:
+    """A ``\\u0000`` in a reply decodes to a real NUL, and a store may refuse it."""
+    nul = "\x00"
+    raw = candidates_json(
+        good_candidate(
+            title=f"Widget{nul} deploy needs the migrate flag first",
+            memory=good_candidate()["memory"] + f" tail{nul}end",
+            memory_type=f"proce{nul}dural",
+            signal=f"fail{nul}ure",
+            evidence=f"playbook{nul} order",
+        )
+    )
+    assert "\\u0000" in raw  # the reply carries the escape, not a raw NUL
+
+    result = distill.parse_candidates(raw, "sess-fake-0001")
+
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    candidate = result.candidates[0]
+    for value in (
+        candidate.title,
+        candidate.memory,
+        candidate.memory_type,
+        candidate.signal,
+        candidate.evidence,
+    ):
+        assert nul not in value
+    assert candidate.title == "Widget deploy needs the migrate flag first"
+    assert candidate.memory.endswith(" tailend")
+    assert candidate.signal == "failure"
+
+
+def test_a_title_of_only_nul_is_unusable_not_empty_titled() -> None:
+    raw = candidates_json(good_candidate(title="\x00\x00"))
+    result = distill.parse_candidates(raw, "sess-fake-0001")
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert result.candidates == ()
+
+
 def test_parse_candidates_tolerates_code_fence() -> None:
     raw = "```json\n" + candidates_json(good_candidate()) + "\n```"
     result = distill.parse_candidates(raw, "s")

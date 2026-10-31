@@ -114,6 +114,94 @@ All notable changes to Trellis will be documented in this file.
   directory (`mcp-claude-code.md`, `scheduled-curation.md`, `running-trellis.md`)
   are corrected.
 
+- **The session-capture sweep keeps its progress as it goes.** `run_capture`
+  held every record until the end of the run and saved the watermark last, so a
+  kill, or one store error, discarded all the judging done so far and the
+  `CAPTURE_SWEEP_COMPLETED` event never fired. Judged sessions are now written in
+  batches of `checkpoint_every` (default 5, a keyword of `run_capture`): the
+  batch's records land, then supersessions and training pairs, then the cursors
+  and the watermark, in that order, so a cursor is never saved before its records.
+  A record that fails to write counts its session in `sessions_errored` and leaves
+  it un-watermarked for the next sweep; the other records and sessions continue,
+  and the sweep event still fires with the errors counted. `sessions_errored`
+  therefore also counts store errors after the transcript parsed, so under strict
+  mode `trellis-session-capture` can now exit `EXIT_SESSIONS_ERRORED` for a store
+  error, which it could not before. A NUL character in a judged field of the reply
+  no longer reaches the store (SQLite keeps it, and a Postgres text column
+  refuses it); it is stripped where the reply is parsed. `CORPUS_SYNCED` now fires
+  once per batch rather than once per sweep. `sync_records` gains optional
+  `on_record_error` and `minhash` arguments; without them it behaves as before.
+
+  A failed batch is retried correctly, not just retried:
+  - A session with a record that failed to write emits no training pairs in that
+    run; its retry emits them once the session completes, so a retry cannot
+    count a landed record's pair twice.
+  - A stored parent no longer counts as a landed record by itself, here and in
+    corpus sync. The parent is still written before its chunks, but the sync's
+    same-hash skip and reconcile's exact-duplicate drop now also read the chunk
+    rows the write would produce (`record_landed` in `trellis.ingest_corpus.sync`)
+    and treat the record as landed only when each `#chunk-i` row exists with its
+    span's text. A record that died between two chunk writes is written again by
+    the next sync or sweep, where it used to be skipped as already stored with its
+    chunks missing, so a retry now lands memories a failed sweep used to drop. A
+    record that does not chunk reads no extra row. No retrieval code changes.
+  - Repairing a document whose content is unchanged keeps the parent's
+    `updated_at` (a metadata-only write), so a repair does not move its recency;
+    a chunk the repair restores gets a fresh stamp, and an edited document is
+    stamped as before.
+  - A document that shrank leaves no surplus chunks behind a crash. The delete
+    probes upward from the new chunk count until a row is absent and runs top
+    down (a redaction tombstone is kept), and `record_landed` also reads from the
+    new count upward, so a record with surplus rows is written again. A clean
+    chunked record costs one more read; a record that does not chunk costs none.
+  - Changing `CHUNK_TARGET_CHARS`, `CHUNK_MAX_CHARS`, `CHUNK_OVERLAP_CHARS` or the embed cap now
+    rewrites every chunked document once at the next sync, because the chunk
+    check recomputes spans.
+  - With reconcile on, a supersession that raised, or was lost to a kill, is
+    applied by the retry: an exact-duplicate no-op whose stored document names a
+    `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
+    while applying supersessions no longer blocks the batch's training pairs; the
+    sessions that claimed a supersession stay un-watermarked. The repair leaves an
+    archived, superseded or deleted target alone, so it cannot return an archived
+    document to packs or count a target deleted after a good supersession as a
+    failure.
+  - With reconcile on, a record whose own parent row is stored but not landed is
+    no longer judged again. It keeps the verdict that row was stored with
+    (`reconciliation`, `supersedes_doc_id`, `updates_doc_id`), is written again,
+    and its supersession is applied, to a target that still reads as current
+    only (an archived, superseded or deleted one is left alone, as in the repair
+    above, and a deleted one counts no failure). Before, a judge that answered
+    no-op dropped the record with its chunks missing and the session was
+    watermarked, and a retry with no judge lost the supersession the first run
+    had claimed.
+  - Limit: a process kill between a batch's records and its training pairs loses
+    that batch's keep pairs when reconcile is on, because the retry no-ops those
+    records. It is bounded by `checkpoint_every` sessions and costs training
+    data only. With reconcile off, a kill between the pairs and the watermark
+    save emits that batch's keep pairs a second time. A kill between a chunk's
+    write and its embed leaves that chunk without a vector row, which the
+    row-based check does not see. A retry whose judge words the memory
+    differently does not find the stored one as an exact duplicate, so the
+    supersession repair does not run for it. A retry of a never-announced
+    document emits `MEMORY_STORED` with action `update`, not `new`. A kill before
+    the whole-document vector delete leaves the stale vector row; a crash during
+    a move leaves the old parent until a prune; a document that shrank to no
+    chunks and was killed before its chunks were deleted keeps them until its
+    next update.
+
+  A clean run writes the same records and documents (metadata and lifecycle
+  included) and the same report at any `checkpoint_every`, with one exception:
+  `distill_unavailable` warnings are added while sessions are judged and
+  near-duplicate warnings when a batch is written, so a run that has both lists
+  them in a different order. It emits the same events for each document, but not
+  in the same sequence: they interleave batch by batch instead of arriving in
+  blocks, and `CORPUS_SYNCED` fires once per batch that writes a record rather
+  than once per sweep. The sweep's own flushed
+  memories stay hidden from later sessions' reconcile, so which memories are
+  written and how they are judged do not change. A dry run still makes one pass
+  and saves nothing.
+
+
 - **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
   could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
   interpolated the id into the path of `get_entity`, `get_trace` and

@@ -49,7 +49,7 @@ by construction), unchunked documents embed the parent row itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -276,6 +276,8 @@ def sync_records(
     extraction_participant_names: Sequence[str] = (),
     unsupported: Sequence[str] = (),
     initial_warnings: Sequence[dict[str, Any]] = (),
+    on_record_error: Callable[[SyncRecord, Exception], None] | None = None,
+    minhash: MinHashIndex | None = None,
 ) -> CorpusSyncReport:
     """Idempotent sync core over reader-produced :class:`SyncRecord`s.
 
@@ -314,6 +316,22 @@ def sync_records(
         initial_warnings: Reader warnings raised before record building
             (e.g. unreadable files and directories), seeded so the summary
             event counts them.
+        on_record_error: Turns a per-record boundary on. When one record
+            raises (an ``Exception``, never a ``BaseException``), the error
+            goes to this callback with the record, the record is left out of
+            ``report.files`` and the run goes on with the next one, so a
+            caller that writes incrementally keeps the records that landed.
+            Unset, the first error propagates as it always did. Records
+            already applied are not rolled back, and neither is any part of
+            the failed one that was written before it raised. A record that
+            raised after its parent was written is not skipped as stored by
+            the next sync: :func:`record_landed` reads its chunk rows, finds
+            one missing, different or left over from a longer version, and
+            the record is written again.
+        minhash: The near-duplicate index to compare against and add to.
+            A caller that syncs one source in several calls passes the same
+            index to each, so a near-duplicate is still warned about across
+            the calls. Unset, each call starts an empty index.
 
     Returns:
         A :class:`CorpusSyncReport`.
@@ -330,7 +348,8 @@ def sync_records(
 
     records = list(records)
     current_ids = {record.doc_id for record in records}
-    minhash = MinHashIndex()
+    if minhash is None:
+        minhash = MinHashIndex()
     moved_from_ids: set[str] = set()
 
     # Build the deterministic classify-on-write pipeline once per run when the
@@ -343,50 +362,55 @@ def sync_records(
     mirror = _VectorMirrorTally()
 
     for record in records:
-        report.warnings.extend(record.warnings)
-        outcome = _plan_record(
-            doc_store,
-            report,
-            doc_id=record.doc_id,
-            source_key=record.source_key,
-            content=record.content,
-            id_prefix=id_prefix,
-            current_ids=current_ids,
-            detect_moves=detect_moves,
-        )
-        for match_id, similarity in minhash.query(record.content):
-            report.warnings.append(
-                {
-                    "kind": "near_duplicate",
-                    "path": record.source_key,
-                    "match_doc_id": match_id,
-                    "similarity": round(similarity, 3),
-                }
-            )
-        minhash.add(outcome.doc_id, record.content)
-
-        spans = chunk_spans(record.content)
-        outcome.chunk_count = len(spans)
-        if outcome.moved_from is not None:
-            moved_from_ids.add(outcome.moved_from)
-
-        if not dry_run and outcome.action != "skip":
-            _apply_record(
-                registry,
+        try:
+            report.warnings.extend(record.warnings)
+            outcome = _plan_record(
+                doc_store,
                 report,
-                outcome=outcome,
-                text=record.content,
-                handler_metadata=record.handler_metadata,
-                extra_metadata=extra_metadata or {},
-                spans=spans,
-                source_system=source_system,
-                requested_by=requested_by,
-                extractor=extractor,
-                extraction_participant_names=extraction_participant_names,
-                classifier=classifier,
-                mirror=mirror,
+                doc_id=record.doc_id,
+                source_key=record.source_key,
+                content=record.content,
+                id_prefix=id_prefix,
+                current_ids=current_ids,
+                detect_moves=detect_moves,
             )
-        report.files.append(outcome)
+            for match_id, similarity in minhash.query(record.content):
+                report.warnings.append(
+                    {
+                        "kind": "near_duplicate",
+                        "path": record.source_key,
+                        "match_doc_id": match_id,
+                        "similarity": round(similarity, 3),
+                    }
+                )
+            minhash.add(outcome.doc_id, record.content)
+
+            spans = chunk_spans(record.content)
+            outcome.chunk_count = len(spans)
+            if outcome.moved_from is not None:
+                moved_from_ids.add(outcome.moved_from)
+
+            if not dry_run and outcome.action != "skip":
+                _apply_record(
+                    registry,
+                    report,
+                    outcome=outcome,
+                    text=record.content,
+                    handler_metadata=record.handler_metadata,
+                    extra_metadata=extra_metadata or {},
+                    spans=spans,
+                    source_system=source_system,
+                    requested_by=requested_by,
+                    extractor=extractor,
+                    extraction_participant_names=extraction_participant_names,
+                    classifier=classifier,
+                    mirror=mirror,
+                )
+            report.files.append(outcome)
+        except Exception as exc:
+            if on_record_error is None:
+                raise
+            on_record_error(record, exc)
 
     if prune_check is not None:
         _prune_vanished(
@@ -401,6 +425,53 @@ def sync_records(
     _log_vector_mirror(registry, mirror, dry_run=dry_run)
     _emit_summary(registry, report, requested_by=requested_by)
     return report
+
+
+def record_landed(doc_store: DocumentStore, doc_id: str, content: str) -> bool:
+    """Whether the chunk rows the write path makes of *content* are all stored.
+
+    The parent row is written first, so a stored parent carrying *content*'s
+    hash proves only that the run reached it. For a record that chunks, this
+    recomputes the spans :func:`sync_records` would write with
+    :func:`chunk_spans` and reads each ``#chunk-i`` row: a row that is absent,
+    or whose hash is not that of its span, means the record has not landed and
+    the caller must write it again, not skip it. So does a live row *past* the
+    last span, which a run that shrank the document left when it died before
+    deleting the surplus; the parent no longer declares it, so only this read
+    finds it. A record that does not chunk has no rows to read and reads as
+    landed. A document that shrank from chunked to unchunked and then died
+    before deleting its chunk rows is therefore not found: reading one row for
+    every record that does not chunk would put a read on every record of every
+    sync.
+
+    A chunk that is a redaction tombstone counts as landed, past the last span
+    as within it. The write path leaves it alone and warns (#1034), so a retry
+    could not change it and a record carrying one would otherwise be rewritten
+    by every sync.
+
+    Compares rows, not vectors: a chunk written and then not embedded, because
+    the run died between the two, reads as landed here.
+    """
+    spans = chunk_spans(content)
+    for span in spans:
+        row = doc_store.get(chunk_doc_id(doc_id, span.index))
+        if row is None:
+            return False
+        if is_redaction_tombstone(row):
+            continue
+        if row.get("content_hash") != content_hash(content[span.start : span.end]):
+            return False
+    if not spans:
+        return True
+    # Surplus rows form a run from ``len(spans)`` (:func:`_delete_surplus_chunks`
+    # deletes from the top), so the first absent row ends the search, and a
+    # clean record costs exactly this one read.
+    index = len(spans)
+    while (row := doc_store.get(chunk_doc_id(doc_id, index))) is not None:
+        if not is_redaction_tombstone(row):
+            return False
+        index += 1
+    return True
 
 
 def _redaction_tombstone_warning(path: str, doc_id: str) -> dict[str, Any]:
@@ -426,6 +497,12 @@ def _plan_record(
     the file's hash, so without this it planned as ``update`` and wrote the
     redacted text straight back (#1034). Bringing the id back is a deliberate
     act (``reingest_redacted`` on ``put_document``); a sync does not make it.
+
+    **A matching hash is not by itself a skip.** The parent is written before
+    its chunks, so a stored parent whose hash matches may belong to a run that
+    died between two chunk writes. The skip also needs
+    :func:`record_landed`; a record whose chunks are not all there plans as
+    ``update`` and the normal write path rewrites the parent and the chunks.
     """
     chash = content_hash(content)
 
@@ -434,7 +511,9 @@ def _plan_record(
         if is_redaction_tombstone(existing):
             report.warnings.append(_redaction_tombstone_warning(source_key, doc_id))
             return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
-        if existing.get("content_hash") == chash:
+        if existing.get("content_hash") == chash and record_landed(
+            doc_store, doc_id, content
+        ):
             return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
         return FileOutcome(relpath=source_key, doc_id=doc_id, action="update")
 
@@ -487,9 +566,18 @@ def _apply_record(
         metadata["chunk_count"] = len(spans)
 
     old_chunk_count = 0
+    # An ``update`` whose stored parent already carries this text is a repair,
+    # not an edit: the planner sends it here because chunk rows are missing or
+    # surplus (:func:`record_landed`), and writing the parent again must not
+    # move its recency. Only the rows that were absent get a fresh clock, and
+    # that is right, since their content is new to the store.
+    parent_content_unchanged = False
     if outcome.action == "update":
         stored = doc_store.get(outcome.doc_id)
         old_chunk_count = _chunk_count_of(stored)
+        parent_content_unchanged = stored is not None and stored.get(
+            "content_hash"
+        ) == content_hash(text)
         # Merge under the fresh metadata so keys this run does not own
         # (enrichment tags, noise flags) survive the re-put.
         metadata = {**_stored_metadata(stored), **metadata}
@@ -538,7 +626,7 @@ def _apply_record(
         outcome.doc_id,
         text,
         metadata,
-        preserve_updated_at=False,
+        preserve_updated_at=parent_content_unchanged,
     )
     outcome.chunks_written = _write_chunks(
         registry,
@@ -559,18 +647,16 @@ def _apply_record(
         mirror=mirror,
         report=report,
     )
-    for index in range(len(spans), old_chunk_count):
-        orphan_id = chunk_doc_id(outcome.doc_id, index)
-        # A redacted chunk is not an orphan to clean up: deleting its row loses
-        # the tombstone, and the file growing back would write the redacted
-        # text under the same id with nothing to refuse it (#1034).
-        orphan = doc_store.get(orphan_id)
-        if orphan is not None and is_redaction_tombstone(orphan):
-            report.warnings.append(
-                _redaction_tombstone_warning(outcome.relpath, orphan_id)
-            )
-            continue
-        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
+    if outcome.action == "update":
+        _delete_surplus_chunks(
+            doc_store,
+            vector_store,
+            outcome.doc_id,
+            kept=len(spans),
+            old_chunk_count=old_chunk_count,
+            report=report,
+            relpath=outcome.relpath,
+        )
     if not spans:
         run_embed_on_ingest(
             registry, outcome.doc_id, text, metadata, source=requested_by
@@ -630,6 +716,55 @@ def _apply_record(
         )
         report.entities_extracted += entities
         report.edges_extracted += edges
+
+
+def _delete_surplus_chunks(
+    doc_store: DocumentStore,
+    vector_store: Any,
+    parent_doc_id: str,
+    *,
+    kept: int,
+    old_chunk_count: int,
+    report: CorpusSyncReport,
+    relpath: str,
+) -> None:
+    """Delete the chunk rows of *parent_doc_id* at or past index *kept*.
+
+    *old_chunk_count* is what the parent declared when this run read it. A run
+    that died after writing the parent had already replaced that count with the
+    new one, so the rows it was meant to delete are past the declared range;
+    the rows are therefore probed upward from the declared end until one is
+    absent, the way a redaction finds a target's chunks (#1008).
+
+    Deleted from the top down. A kill between two deletes then leaves a run of
+    rows that starts at *kept*, which both the probe here and
+    :func:`record_landed` find; deleting upward could leave a gap at *kept* and
+    hide the rows above it from both.
+
+    A redacted chunk is not an orphan to clean up: deleting its row loses the
+    tombstone, and the file growing back would write the redacted text under
+    the same id with nothing to refuse it (#1034). It is left in place and the
+    probe continues past it.
+    """
+    stop = max(kept, old_chunk_count)
+    while doc_store.get(chunk_doc_id(parent_doc_id, stop)) is not None:
+        stop += 1
+    # The warnings are met top down and reported bottom up, the order the
+    # report has always listed them in.
+    kept_tombstones: list[str] = []
+    try:
+        for index in range(stop - 1, kept - 1, -1):
+            orphan_id = chunk_doc_id(parent_doc_id, index)
+            orphan = doc_store.get(orphan_id)
+            if orphan is not None and is_redaction_tombstone(orphan):
+                kept_tombstones.append(orphan_id)
+                continue
+            _delete_doc_and_vector(doc_store, vector_store, orphan_id)
+    finally:
+        report.warnings.extend(
+            _redaction_tombstone_warning(relpath, orphan_id)
+            for orphan_id in reversed(kept_tombstones)
+        )
 
 
 def _write_chunks(
