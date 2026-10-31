@@ -33,7 +33,7 @@ instance are set up here.
    a tool call has its pack ids recorded as one `capture.session_packs` event,
    an empty list for a session that never retrieved. The same payload carries
    the session's `outcome`, read from the transcript and from no pack: tool
-   calls and errors, assistant and user turns, token totals where usage was
+   calls and errors, calls to Trellis's own tools, assistant and user turns, token totals where usage was
    recorded (`null`, not 0, where it was not), the wall-clock span, commits
    and pull requests made, and whether it ended on an error or an interrupt.
    It holds counts, one duration and two flags, never command, path, URL or
