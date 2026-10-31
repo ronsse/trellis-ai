@@ -720,7 +720,7 @@ def test_an_already_migrated_file_opens_under_a_writer_lock_without_a_warning(
 def test_a_missing_index_alone_is_retried_on_the_next_open(old_file: Path) -> None:
     SQLiteTraceStore(old_file).close()
     raw = sqlite3.connect(old_file)
-    raw.execute("DROP INDEX idx_traces_created_at_utc")
+    raw.executescript("DROP INDEX idx_traces_created_at_utc")
     raw.commit()
     raw.close()
 
