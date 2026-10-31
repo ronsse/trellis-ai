@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from trellis.schemas.trace import Trace
 
@@ -11,14 +11,24 @@ from trellis.schemas.trace import Trace
 def as_utc(moment: datetime) -> datetime:
     """Return *moment* as an aware UTC datetime; a naive one is read as UTC.
 
-    ``Trace.created_at`` accepts a naive datetime, and Postgres reads a naive
-    value as UTC in its default session time zone. Every ``TraceStore`` and its
-    callers therefore settle the question the same way, so naive and aware
-    values compare by instant instead of raising or sorting as text.
+    ``Trace.created_at`` accepts a naive datetime. Every ``TraceStore`` and its
+    callers settle the question the same way, as UTC whatever the session or
+    process time zone, so naive and aware values compare by instant instead of
+    raising or sorting as text.
     """
     if moment.tzinfo is None:
         return moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC)
+    try:
+        return moment.astimezone(UTC)
+    except OverflowError:
+        # ``datetime.min`` at a positive offset, or ``datetime.max`` at a
+        # negative one, is an instant ``datetime`` cannot name in UTC. Clamp to
+        # the edge it fell off, so a stamp a writer could build still sorts, is
+        # found by a bound, and loads from a cursor file, where it would
+        # otherwise raise out of every one of them.
+        if (moment.utcoffset() or timedelta(0)) >= timedelta(0):
+            return datetime.min.replace(tzinfo=UTC)
+        return datetime.max.replace(tzinfo=UTC)
 
 
 class TraceStore(ABC):

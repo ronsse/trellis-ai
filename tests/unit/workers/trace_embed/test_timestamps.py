@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 from trellis_workers.trace_embed import TraceEmbedWatermark, run_trace_embed_pass
 from trellis_workers.trace_embed.watermark import TraceCursor
+from trellis_workers.trace_embed.worker import collect_candidates
 
 from .conftest import make_trace
 
@@ -149,3 +150,132 @@ class TestTraceCursorReadsAnInstant:
         )
         assert mark.advance_to(later) is True
         assert mark.cursor == later
+
+
+def _append_as_an_earlier_build(registry, traces) -> None:
+    """Insert rows keeping each trace's own offset in the stored text."""
+    conn = registry.operational.trace_store._conn
+    for t in traces:
+        conn.execute(
+            "INSERT INTO traces (trace_id, source, intent, domain, agent_id,"
+            " outcome_status, trace_json, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                t.trace_id,
+                t.source.value,
+                t.intent,
+                t.context.domain,
+                None,
+                None,
+                t.model_dump_json(),
+                t.created_at.isoformat(),
+            ),
+        )
+    conn.commit()
+
+
+def _at(n: int, moment: datetime):
+    return make_trace(n).model_copy(update={"created_at": moment, "updated_at": moment})
+
+
+def test_a_page_never_steps_over_rows_between_two_offsets(registry) -> None:
+    """The walk bounds each page by the oldest instant it read, so the store
+    must key every stored offset the way Python reads it. ``+15:00`` is past
+    what ``strftime`` accepts as an offset in the text, which an earlier
+    build could still write: one key off by its offset made the next page start
+    past two rows, and nothing said so."""
+    plus_15 = timezone(timedelta(hours=15))
+    day = datetime(2026, 8, 1, tzinfo=UTC)
+    traces = [
+        _at(0, datetime(2026, 8, 1, 20, 0, tzinfo=plus_15)),  # 05:00Z
+        _at(1, day.replace(hour=10)),
+        _at(2, day.replace(hour=9)),
+        _at(3, day.replace(hour=7)),
+        _at(4, day.replace(hour=4)),
+    ]
+    _append_as_an_earlier_build(registry, traces)
+
+    found, truncated = collect_candidates(
+        registry.operational.trace_store,
+        after=None,
+        page_size=2,
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert not truncated
+    assert [t.trace_id for t in found] == [
+        "trace-0004",  # 04:00Z
+        "trace-0000",  # 05:00Z
+        "trace-0003",  # 07:00Z
+        "trace-0002",  # 09:00Z
+        "trace-0001",  # 10:00Z
+    ]
+
+
+def test_a_small_page_over_naive_and_aware_stamps_does_not_raise(registry) -> None:
+    """With ``page_size=2`` the lower bound of a full page is a ``min`` over
+    stamps of both kinds; a naive one does not compare with an aware one."""
+    stamps = [
+        datetime(2026, 1, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, 2),  # noqa: DTZ001
+        datetime(2026, 1, 1, 3, tzinfo=UTC),
+        datetime(2026, 1, 1, 4),  # noqa: DTZ001
+    ]
+    for n, moment in enumerate(stamps):
+        registry.operational.trace_store.append(_at(n, moment))
+
+    found, _ = collect_candidates(
+        registry.operational.trace_store,
+        after=None,
+        page_size=2,
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert [t.trace_id for t in found] == [f"trace-{n:04d}" for n in range(4)]
+
+
+def test_a_stored_stamp_past_the_representable_edge_does_not_stop_the_pass(
+    registry,
+) -> None:
+    """``datetime.min`` read in ``+05:30`` is before the earliest UTC instant
+    ``datetime`` can name, so converting it raised ``OverflowError`` out of the
+    walk, on every pass, for a row nothing can remove."""
+    edge = datetime.min.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    traces = [
+        _at(0, edge),
+        _at(1, datetime(2026, 8, 1, 1, tzinfo=UTC)),
+        _at(2, datetime(2026, 8, 1, 2, tzinfo=UTC)),
+    ]
+    _append_as_an_earlier_build(registry, traces)
+
+    found, _ = collect_candidates(
+        registry.operational.trace_store,
+        after=None,
+        page_size=2,
+        now=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert [t.trace_id for t in found] == ["trace-0000", "trace-0001", "trace-0002"]
+
+
+def test_a_saved_cursor_past_the_representable_edge_degrades_instead_of_raising(
+    watermark_path,
+) -> None:
+    """A corrupt cursor degrades to a re-scan; an extreme one must not be the
+    exception that escapes ``_load``."""
+    watermark_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cursor": {
+                    "created_at": "0001-01-01T00:00:00+05:30",
+                    "trace_id": "a",
+                },
+            }
+        )
+    )
+
+    cursor = TraceEmbedWatermark(watermark_path).cursor
+
+    assert cursor == TraceCursor(
+        created_at=datetime.min.replace(tzinfo=UTC), trace_id="a"
+    )

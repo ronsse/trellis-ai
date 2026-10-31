@@ -19,33 +19,58 @@ logger = structlog.get_logger(__name__)
 #: whatever offset (or none) the text was written with. A naive text is read as
 #: UTC, as :func:`~trellis.stores.base.trace.as_utc` does.
 #:
-#: Python writes ``created_at`` with ``isoformat()``, so the fraction is absent
-#: or exactly six digits, which fixes where the offset starts. The offset is
-#: handed to ``strftime`` with the fraction cut off because ``strftime`` rounds
-#: to the millisecond, and a ``.9996`` would otherwise carry into the next
-#: second. The fraction is re-attached verbatim, so the key keeps the
-#: microsecond. Text ``strftime`` cannot read (an offset beyond +/-14:00, or one
-#: with seconds) falls back to the raw text, so such a row stays visible
-#: ordered by its wall clock, as it was before, instead of dropping out of every
-#: bounded query on a NULL. ``append`` never writes one.
-_CREATED_AT_UTC_SQL = """COALESCE(
-    strftime(
-        '%Y-%m-%dT%H:%M:%S',
-        substr(created_at, 1, 19)
-        || substr(
-            created_at,
-            CASE WHEN substr(created_at, 20, 1) = '.' THEN 27 ELSE 20 END
+#: Python writes ``created_at`` with ``isoformat()``: the wall clock to the
+#: second, then a fraction that is absent or exactly six digits, then an offset
+#: that is absent or ``+HH:MM``, with ``:SS`` and ``.ffffff`` when it has them.
+#: That fixes where the offset starts. ``strftime`` is handed the wall clock
+#: alone, and the offset's sign, hours, minutes and seconds go in as one
+#: modifier of the opposite sign (``-05:30:15`` for ``+05:30:15``), so any
+#: offset Python can write is read, not only the ones ``strftime`` accepts in
+#: the text. The fraction never reaches ``strftime``, which rounds to the
+#: millisecond, and is re-attached verbatim, so the key keeps the microsecond.
+#:
+#: Two limits. An offset's own fraction (``+05:30:15.5``, which only a
+#: hand-written ``tzinfo`` produces) is dropped, so that key is within a second
+#: of the instant. And text Python cannot write falls back to the raw text,
+#: ordered by its digits, so such a row stays in a bounded query instead of
+#: dropping out on a NULL. The ``GLOB`` keeps text that does not start with a
+#: year away from ``strftime``: ``strftime`` reads ``now`` as the current time,
+#: which a generated column and its index refuse by raising, and it stops at a
+#: NUL, so ``now\x00x`` is read as ``now`` and ``lower(created_at) = 'now'``
+#: would miss it. One such old row would otherwise fail every open.
+_OFFSET_SQL = (
+    "substr(created_at, CASE WHEN substr(created_at, 20, 1) = '.' THEN 27 ELSE 20 END)"
+)
+_CREATED_AT_UTC_SQL = f"""CASE WHEN created_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN
+    COALESCE(
+        strftime(
+            '%Y-%m-%dT%H:%M:%S',
+            substr(created_at, 1, 19),
+            CASE
+                WHEN {_OFFSET_SQL} IN ('', 'Z') THEN '+00:00'
+                WHEN substr({_OFFSET_SQL}, 1, 1) = '+'
+                    THEN '-' || substr({_OFFSET_SQL}, 2, 8)
+                WHEN substr({_OFFSET_SQL}, 1, 1) = '-'
+                    THEN '+' || substr({_OFFSET_SQL}, 2, 8)
+            END
         )
+        || '.'
+        || substr(
+            CASE WHEN substr(created_at, 20, 1) = '.'
+                THEN substr(created_at, 21, 6) ELSE '' END
+            || '000000',
+            1, 6
+        ),
+        created_at
     )
-    || '.'
-    || substr(
-        CASE WHEN substr(created_at, 20, 1) = '.'
-            THEN substr(created_at, 21, 6) ELSE '' END
-        || '000000',
-        1, 6
-    ),
-    created_at
-)"""
+ELSE created_at END"""
+
+#: How long opening a store waits for the write lock the migration needs. The
+#: migration is optional (see ``_migrate_add_created_at_utc``), so a reader does
+#: not wait out the connection's own timeout behind a job that holds the lock.
+_MIGRATION_BUSY_TIMEOUT_MS = 250
+
+_CREATED_AT_UTC_INDEX = "idx_traces_created_at_utc"
 
 
 def _instant_key(moment: datetime) -> str:
@@ -85,9 +110,12 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
             CREATE INDEX IF NOT EXISTS idx_traces_outcome ON traces(outcome_status);
         """)
         self._conn.commit()
-        self._migrate_add_created_at_utc()
+        self._has_created_at_utc = self._migrate_add_created_at_utc()
 
-    def _migrate_add_created_at_utc(self) -> None:
+    def _trace_columns(self) -> set[str]:
+        return {row["name"] for row in self._conn.execute("PRAGMA table_xinfo(traces)")}
+
+    def _migrate_add_created_at_utc(self) -> bool:
         """Additive migration: index ``created_at`` by instant, not by text.
 
         ``created_at`` is TEXT, and rows written by earlier builds carry
@@ -97,30 +125,58 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
         without touching one: no stored value is rewritten, and an older build
         that opens the file afterwards still reads and writes it (its
         ``INSERT`` names its columns). Idempotent.
+
+        Best effort. Opening a store must not depend on being able to migrate
+        it: a read-only file, or one another connection holds the write lock
+        on, would otherwise stop a reader that opened fine before. A statement
+        that fails with ``OperationalError`` logs a warning and the next open
+        tries again. Returns whether the column exists afterwards; when it does
+        not, :meth:`query` evaluates the same expression inline, which returns
+        the same rows and is merely unindexed.
         """
-        columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_xinfo(traces)")
-        }
-        if "created_at_utc" not in columns:
-            logger.info("migrating_trace_schema_add_created_at_utc")
+        columns = self._trace_columns()
+        indexed = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (_CREATED_AT_UTC_INDEX,),
+        ).fetchone()
+        if "created_at_utc" in columns and indexed:
+            return True
+
+        conn = self._conn
+        (prior_timeout_ms,) = conn.execute("PRAGMA busy_timeout").fetchone()
+        conn.execute(f"PRAGMA busy_timeout={_MIGRATION_BUSY_TIMEOUT_MS}")
+        try:
+            if "created_at_utc" not in columns:
+                logger.info("migrating_trace_schema_add_created_at_utc")
+                try:
+                    conn.execute(
+                        "ALTER TABLE traces ADD COLUMN created_at_utc TEXT "
+                        f"GENERATED ALWAYS AS ({_CREATED_AT_UTC_SQL}) VIRTUAL"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # A concurrent opener may have added it first.
+                    if "created_at_utc" not in self._trace_columns():
+                        logger.warning(
+                            "trace_schema_migration_skipped",
+                            db_path=str(self._db_path),
+                            error=str(exc),
+                        )
+                        return False
             try:
-                self._conn.execute(
-                    "ALTER TABLE traces ADD COLUMN created_at_utc TEXT "
-                    f"GENERATED ALWAYS AS ({_CREATED_AT_UTC_SQL}) VIRTUAL"
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {_CREATED_AT_UTC_INDEX} "
+                    "ON traces(created_at_utc)"
                 )
-            except sqlite3.OperationalError:
-                # A concurrent opener may have added it first.
-                now = {
-                    row["name"]
-                    for row in self._conn.execute("PRAGMA table_xinfo(traces)")
-                }
-                if "created_at_utc" not in now:
-                    raise
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_traces_created_at_utc "
-            "ON traces(created_at_utc)"
-        )
-        self._conn.commit()
+            except sqlite3.OperationalError as exc:
+                logger.warning(
+                    "trace_index_creation_skipped",
+                    db_path=str(self._db_path),
+                    error=str(exc),
+                )
+            conn.commit()
+            return True
+        finally:
+            conn.execute(f"PRAGMA busy_timeout={int(prior_timeout_ms)}")
 
     # ------------------------------------------------------------------
     # Append
@@ -200,11 +256,18 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
         if agent_id is not None:
             conditions.append("agent_id = ?")
             params.append(agent_id)
+        # The indexed column when the migration ran, else the expression it
+        # holds: the same rows, found by a scan.
+        instant = (
+            "created_at_utc"
+            if self._has_created_at_utc
+            else (f"({_CREATED_AT_UTC_SQL})")
+        )
         if since is not None:
-            conditions.append("created_at_utc >= ?")
+            conditions.append(f"{instant} >= ?")
             params.append(_instant_key(since))
         if until is not None:
-            conditions.append("created_at_utc <= ?")
+            conditions.append(f"{instant} <= ?")
             params.append(_instant_key(until))
 
         where = ""
@@ -213,10 +276,7 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
 
         params.append(limit)
 
-        sql = (
-            f"SELECT trace_json FROM traces {where} "
-            "ORDER BY created_at_utc DESC LIMIT ?"
-        )
+        sql = f"SELECT trace_json FROM traces {where} ORDER BY {instant} DESC LIMIT ?"
         cursor = self._conn.execute(sql, params)
         return [
             Trace.model_validate_json(row["trace_json"]) for row in cursor.fetchall()
