@@ -4,6 +4,20 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **On Postgres, a node, alias or stale-owner replacement queued behind a lock
+  could stamp its version earlier than the version it was waiting to close.**
+  `upsert_node` (through `_write_node_version`), `upsert_alias` and
+  `bind_alias_if_absent` each read the clock before acquiring their row or
+  advisory lock, the order [#768](https://github.com/ronsse/trellis-ai/pull/768)
+  fixed in `upsert_edge`: a queued writer's
+  `valid_to` could land before the winner's `valid_from`, so an `as_of` read in
+  that gap served two current-looking versions of one node or alias. All three
+  now read the clock after the lock is granted, matching `upsert_edge`.
+  `upsert_nodes_bulk` reads its existing rows with no lock at all and is
+  unchanged here.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added
