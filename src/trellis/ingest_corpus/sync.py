@@ -49,7 +49,7 @@ by construction), unchunked documents embed the parent row itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -276,6 +276,8 @@ def sync_records(
     extraction_participant_names: Sequence[str] = (),
     unsupported: Sequence[str] = (),
     initial_warnings: Sequence[dict[str, Any]] = (),
+    on_record_error: Callable[[SyncRecord, Exception], None] | None = None,
+    minhash: MinHashIndex | None = None,
 ) -> CorpusSyncReport:
     """Idempotent sync core over reader-produced :class:`SyncRecord`s.
 
@@ -314,6 +316,18 @@ def sync_records(
         initial_warnings: Reader warnings raised before record building
             (e.g. unreadable files and directories), seeded so the summary
             event counts them.
+        on_record_error: Turns a per-record boundary on. When one record
+            raises (an ``Exception``, never a ``BaseException``), the error
+            goes to this callback with the record, the record is left out of
+            ``report.files`` and the run goes on with the next one, so a
+            caller that writes incrementally keeps the records that landed.
+            Unset, the first error propagates as it always did. Records
+            already applied are not rolled back, and neither is any part of
+            the failed one that was written before it raised.
+        minhash: The near-duplicate index to compare against and add to.
+            A caller that syncs one source in several calls passes the same
+            index to each, so a near-duplicate is still warned about across
+            the calls. Unset, each call starts an empty index.
 
     Returns:
         A :class:`CorpusSyncReport`.
@@ -330,7 +344,8 @@ def sync_records(
 
     records = list(records)
     current_ids = {record.doc_id for record in records}
-    minhash = MinHashIndex()
+    if minhash is None:
+        minhash = MinHashIndex()
     moved_from_ids: set[str] = set()
 
     # Build the deterministic classify-on-write pipeline once per run when the
@@ -343,50 +358,55 @@ def sync_records(
     mirror = _VectorMirrorTally()
 
     for record in records:
-        report.warnings.extend(record.warnings)
-        outcome = _plan_record(
-            doc_store,
-            report,
-            doc_id=record.doc_id,
-            source_key=record.source_key,
-            content=record.content,
-            id_prefix=id_prefix,
-            current_ids=current_ids,
-            detect_moves=detect_moves,
-        )
-        for match_id, similarity in minhash.query(record.content):
-            report.warnings.append(
-                {
-                    "kind": "near_duplicate",
-                    "path": record.source_key,
-                    "match_doc_id": match_id,
-                    "similarity": round(similarity, 3),
-                }
-            )
-        minhash.add(outcome.doc_id, record.content)
-
-        spans = chunk_spans(record.content)
-        outcome.chunk_count = len(spans)
-        if outcome.moved_from is not None:
-            moved_from_ids.add(outcome.moved_from)
-
-        if not dry_run and outcome.action != "skip":
-            _apply_record(
-                registry,
+        try:
+            report.warnings.extend(record.warnings)
+            outcome = _plan_record(
+                doc_store,
                 report,
-                outcome=outcome,
-                text=record.content,
-                handler_metadata=record.handler_metadata,
-                extra_metadata=extra_metadata or {},
-                spans=spans,
-                source_system=source_system,
-                requested_by=requested_by,
-                extractor=extractor,
-                extraction_participant_names=extraction_participant_names,
-                classifier=classifier,
-                mirror=mirror,
+                doc_id=record.doc_id,
+                source_key=record.source_key,
+                content=record.content,
+                id_prefix=id_prefix,
+                current_ids=current_ids,
+                detect_moves=detect_moves,
             )
-        report.files.append(outcome)
+            for match_id, similarity in minhash.query(record.content):
+                report.warnings.append(
+                    {
+                        "kind": "near_duplicate",
+                        "path": record.source_key,
+                        "match_doc_id": match_id,
+                        "similarity": round(similarity, 3),
+                    }
+                )
+            minhash.add(outcome.doc_id, record.content)
+
+            spans = chunk_spans(record.content)
+            outcome.chunk_count = len(spans)
+            if outcome.moved_from is not None:
+                moved_from_ids.add(outcome.moved_from)
+
+            if not dry_run and outcome.action != "skip":
+                _apply_record(
+                    registry,
+                    report,
+                    outcome=outcome,
+                    text=record.content,
+                    handler_metadata=record.handler_metadata,
+                    extra_metadata=extra_metadata or {},
+                    spans=spans,
+                    source_system=source_system,
+                    requested_by=requested_by,
+                    extractor=extractor,
+                    extraction_participant_names=extraction_participant_names,
+                    classifier=classifier,
+                    mirror=mirror,
+                )
+            report.files.append(outcome)
+        except Exception as exc:
+            if on_record_error is None:
+                raise
+            on_record_error(record, exc)
 
     if prune_check is not None:
         _prune_vanished(
