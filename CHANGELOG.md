@@ -371,6 +371,22 @@ All notable changes to Trellis will be documented in this file.
   `GET /precedents/domains` still counts a withheld precedent's domain tag; it
   has no clearance to judge by, and closing that is a separate change.
 
+- **`trellis analyze holdout --by-commit` names a build as `analyze health`
+  names a serving build, and from the pack that sets the arm.** The table keyed
+  a build on the first 12 characters of the stamped commit, ignoring `version`,
+  and folded every null-commit row into `unidentified`, while the serving-builds
+  view keys on `(version, commit)`, so the two could name one build differently
+  or two builds alike. It also took a task's build from its earliest pack by
+  time, though the arm, window and eligibility come from the first pack id its
+  join lists, and the two differ when a join lists packs out of time order.
+  A build is now the stamped `(version, commit)` pair of that first-listed pack,
+  and `rows[].build` is the label `analyze health` gives it (`1.0.0 @ <commit>`,
+  `1.0.0 @ commit unknown`, `no provenance`). Grouping uses the full pair, so
+  one commit under two versions is two rows, and the commit is no longer
+  shortened. `first_seen` and `last_seen` read that pack's time.
+  `units_spanning_builds` still reads every pack of the task. The field names
+  are unchanged; the `build` values are not (`unidentified` is gone).
+
 - **`upsert_edges_bulk` on ArcadeDB leaves one current row per triplet (part of
   #1078).** #1086 gave `upsert_edge` a re-read after its write commits, but the
   bulk path takes no `EdgeClaim`, so a bulk batch racing another writer of the

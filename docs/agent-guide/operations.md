@@ -3598,15 +3598,19 @@ builds that served them, so a reader can judge whether a deploy inside the windo
 confounds the comparison. It is not a second estimate: no p-value, interval or
 verdict per build, and every other figure is what it is without the flag (the
 JSON carries no `by_commit` key unless it is passed, and the text table follows
-the descriptive block). A task's build is the first 12 characters of
-`metadata.write_provenance.commit` on its earliest `PACK_ASSEMBLED` row, or
-`unidentified` when the row has no stamp or its commit is null. `rows` come in
-first-seen order, each with `build`, `first_seen` and `last_seen` (the earliest
-and latest first-pack times of the tasks counted under it) and, per arm, `n` and
+the descriptive block). A task's build is the `(version, commit)` in
+`metadata.write_provenance` on its first pack, the first id its join lists,
+which is the pack that sets its arm. `build` is the label `analyze health`
+gives that pair in `serve.serving_builds` (`1.0.0 @ <commit>`,
+`1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp),
+and rows are grouped on the full pair, so one commit under two versions is two
+rows. `rows` come in first-seen order, each with `build`, `first_seen` and
+`last_seen` (the earliest and latest first-pack times of the tasks counted under
+it) and, per arm, `n` and
 `outcome_mean`, the mean of the primary's outcome column (`null` for an empty
 arm). The rows cover the same tasks as the primary: the analysed set, so cut-offs
 (unless `--itt`) and tasks without the outcome are out. A task whose packs came
-from more than one build is counted once, under its earliest build, and also in
+from more than one build is counted once, under its first pack's build, and also in
 `units_spanning_builds`, so the table never sums to more than the analysed
 tasks. The commit is the one the build stamped at install, so an editable
 install on a moved working tree names the commit it was installed at.

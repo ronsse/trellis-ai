@@ -102,8 +102,9 @@ keeps them. Any other guardrail whose field no task in an arm carries is
 ``None`` there, with the missing field named.
 
 **Builds.** ``by_commit`` (opt-in) tabulates the analysed tasks per arm by
-the build that wrote the task's earliest pack, read from the row's
-``write_provenance.commit``. It is descriptive: a serving change that lands
+the build that wrote the pack that sets the task's arm (``pack_ids[0]``), the
+``(version, commit)`` pair of its ``write_provenance``, named as ``analyze
+health`` names a serving build. It is descriptive: a serving change that lands
 mid-window mixes builds inside each arm, and the table shows how, so a reader
 can judge whether a deploy confounds the comparison. It adds no estimate and
 changes no other figure.
@@ -135,7 +136,7 @@ from trellis.core.pack_holdout import (
     HOLDOUT_SECTIONS_KEY,
     is_holdout,
 )
-from trellis.core.write_provenance import WRITE_PROVENANCE_KEY
+from trellis.ops.serving_builds import NO_PROVENANCE_LABEL, build_label, stamp_fields
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventType,
@@ -194,16 +195,16 @@ MIN_FORMULA_N = 6
 #: The pre-registration's "10% effect".
 _TEN_PERCENT = 0.1
 _EMPTY_WINDOW = "the evidence window is empty"
-#: ``by_commit`` names a build by this many characters of its commit.
-_BUILD_CHARS = 12
-UNIDENTIFIED_BUILD = "unidentified"
+#: A build as ``analyze health`` keys one: the stamped ``(version, commit)``,
+#: each ``None`` when the row carries no usable value.
+BuildKey = tuple[str | None, str | None]
 _BY_COMMIT_NOTE = (
     "Descriptive only; carries no inference. Each analysed task is counted "
-    "once, under the build whose commit is stamped on its earliest pack, and "
-    "a task whose packs span several builds is also counted in "
-    "units_spanning_builds. A build is the first "
-    f"{_BUILD_CHARS} characters of its stamped commit, or "
-    f"{UNIDENTIFIED_BUILD} when the stamp or its commit is missing."
+    "once, under the build stamped on the first pack of its join (the pack "
+    "that sets its arm), and a task whose packs span several builds is also "
+    "counted in units_spanning_builds. A build is the stamped (version, "
+    "commit) pair, named as analyze health names a serving build; a pack "
+    f"with no usable stamp reads {NO_PROVENANCE_LABEL!r}."
 )
 _NO_ELIGIBLE = "no eligible task"
 
@@ -633,7 +634,9 @@ class HoldoutByCommit(TrellisModel):
     """The analysed tasks per serving build: descriptive, never an estimate.
 
     Rows are in first-seen order. A task whose packs span several builds is
-    counted once, under its earliest, and again in ``units_spanning_builds``.
+    counted once, under the build of its first pack (the one that sets its
+    arm), and again in ``units_spanning_builds``. ``build`` is the
+    ``(version, commit)`` label ``analyze health`` gives the same stamp.
     """
 
     rows: list[HoldoutBuildRow]
@@ -1032,10 +1035,10 @@ class _Unit:
     both_arms: bool
     cut_off: bool
     outcome: Mapping[str, Any]
-    #: The build that wrote the task's earliest pack, that pack's time, and
-    #: whether the task's packs came from more than one build; only
-    #: ``by_commit`` reads them.
-    build: str
+    #: The ``(version, commit)`` of the pack that sets the task's arm, that
+    #: pack's time, and whether the task's packs came from more than one
+    #: build; only ``by_commit`` reads them.
+    build: BuildKey
     first_pack_at: datetime
     spans_builds: bool
     #: The brief's length in characters, and a pseudonymous handle for the
@@ -1600,8 +1603,8 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         if p in packs and HOLDOUT_KEY in (packs[p].payload or {})
     }
     brief_chars, agent_type = _covariates(payload)
-    build, first_pack_at, spans_builds = _unit_builds(
-        [first, *(packs[p] for p in pack_ids[1:] if p in packs)]
+    build, spans_builds = _unit_builds(
+        first, [packs[p] for p in pack_ids[1:] if p in packs]
     )
     return _Unit(
         parent=parent,
@@ -1612,39 +1615,34 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
         cut_off=outcome.get("ended_on_error") is True,
         outcome=outcome,
         build=build,
-        first_pack_at=first_pack_at,
+        first_pack_at=first_at,
         spans_builds=spans_builds,
         brief_chars=brief_chars,
         agent_type=agent_type,
     )
 
 
-def _build_of(pack: Event) -> str:
-    """The build that wrote a pack row: its stamped commit, shortened.
+def _build_of(pack: Event) -> BuildKey:
+    """The ``(version, commit)`` build that stamped a pack row.
 
-    A row with no stamp, a stamp that is not a mapping, or a null or blank
-    ``commit`` (an image built without ``make docker-build``) is
-    :data:`UNIDENTIFIED_BUILD`; it served a pack, so it is a group, not a drop.
+    Reads the stamp as ``analyze health`` does when it groups serving builds,
+    so the two name one build alike. A row with no stamp, or a stamp with no
+    commit or version (an image built without ``make docker-build``), keeps
+    its ``None`` parts; it served a pack, so it is a group, not a drop.
     """
-    stamp = (pack.metadata or {}).get(WRITE_PROVENANCE_KEY)
-    commit = stamp.get("commit") if isinstance(stamp, Mapping) else None
-    if isinstance(commit, str) and commit.strip():
-        return commit.strip()[:_BUILD_CHARS]
-    return UNIDENTIFIED_BUILD
+    version, commit, _ = stamp_fields(pack)
+    return version, commit
 
 
-def _unit_builds(packs: Sequence[Event]) -> tuple[str, datetime, bool]:
-    """``(earliest build, earliest time, spans several builds)`` of a task's packs.
+def _unit_builds(first: Event, rest: Sequence[Event]) -> tuple[BuildKey, bool]:
+    """``(build of the arm-setting pack, spans several builds)`` of a task's packs.
 
-    The earliest row by ``occurred_at`` names the build; a tie falls to the
-    first in call order.
+    The build is that of ``first``, the pack whose arm, window and eligibility
+    the task takes, wherever it falls in time. ``spans several builds`` reads
+    every pack of the task.
     """
-    earliest = min(packs, key=lambda pack: _as_utc(pack.occurred_at))
-    return (
-        _build_of(earliest),
-        _as_utc(earliest.occurred_at),
-        len({_build_of(pack) for pack in packs}) > 1,
-    )
+    build = _build_of(first)
+    return build, any(_build_of(pack) != build for pack in rest)
 
 
 def _covariates(payload: Mapping[str, Any]) -> tuple[float | None, str | None]:
@@ -2032,7 +2030,7 @@ def _by_commit(
     ``y`` is the analysed tasks' outcome column, in the order of ``analysed``,
     so each mean reads the column the primary estimate reads.
     """
-    by_build: dict[str, list[tuple[_Unit, float]]] = {}
+    by_build: dict[BuildKey, list[tuple[_Unit, float]]] = {}
     for unit, value in zip(analysed, y.tolist(), strict=True):
         by_build.setdefault(unit.build, []).append((unit, value))
     ordered = sorted(
@@ -2041,7 +2039,7 @@ def _by_commit(
     return HoldoutByCommit(
         rows=[
             HoldoutBuildRow(
-                build=build,
+                build=build_label(*build),
                 first_seen=min(u.first_pack_at for u, _ in members).isoformat(),
                 last_seen=max(u.first_pack_at for u, _ in members).isoformat(),
                 served=_build_arm([v for u, v in members if not u.withheld]),

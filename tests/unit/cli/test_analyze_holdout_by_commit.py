@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from tests.unit.analyze._holdout_fixture import MONDAY, HoldoutLog, provenance
+from trellis.ops.serving_builds import NO_PROVENANCE_LABEL, build_label
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK
 from trellis_cli.main import app
@@ -30,11 +31,16 @@ runner = CliRunner()
 
 WINDOW = ["--until", "2026-09-28T00:00:00+00:00", "--days", "60"]
 FAST = ["--permutations", "999", "--bootstraps", "300", "--power-sims", "30"]
-BUILD_A = "a1b2c3d4e5f6"
-BUILD_B = "9f8e7d6c5b4a"
-#: A build name the console would mangle unless it is escaped: ``[b]`` is a
+COMMIT_A = "a1b2c3d4e5f6"
+COMMIT_B = "9f8e7d6c5b4a"
+#: A build is the fixture's stamped ``(version, commit)``, labelled as
+#: ``analyze health`` labels it.
+BUILD_A = build_label("0.0.0", COMMIT_A)
+BUILD_B = build_label("0.0.0", COMMIT_B)
+#: A commit the console would mangle unless the label is escaped: ``[b]`` is a
 #: style tag Rich deletes and ``:smile:`` an emoji code it replaces.
-MARKUP_BUILD = "[b]x:smile:y"
+MARKUP_COMMIT = "[b]x:smile:y"
+MARKUP_BUILD = build_label("0.0.0", MARKUP_COMMIT)
 
 
 @pytest.fixture(autouse=True)
@@ -70,23 +76,23 @@ def _flat(result: Result) -> str:
     return " ".join(plain(result.stdout).split())
 
 
-def _seed(log: HoldoutLog, build_b: str = BUILD_B) -> None:
+def _seed(log: HoldoutLog, commit_b: str = COMMIT_B) -> None:
     """Build A (hours 0-1): one served task of 2 commits, one withheld of 4.
 
     Build B (hours 30-31): one served task of 6 commits, one withheld of 8.
     """
     layout = [
-        (0, BUILD_A, False, 2),
-        (1, BUILD_A, True, 4),
-        (30, build_b, False, 6),
-        (31, build_b, True, 8),
+        (0, COMMIT_A, False, 2),
+        (1, COMMIT_A, True, 4),
+        (30, commit_b, False, 6),
+        (31, commit_b, True, 8),
     ]
-    for hours, build, withheld, commits in layout:
+    for hours, commit, withheld, commits in layout:
         log.task(
             start=MONDAY + timedelta(hours=hours),
             arms=[withheld],
             commits=commits,
-            pack_metadata=[provenance(build)],
+            pack_metadata=[provenance(commit)],
         )
     log.sweep()
 
@@ -134,7 +140,7 @@ def test_without_the_flag_nothing_changes(log: HoldoutLog) -> None:
 
 
 def test_a_build_name_is_never_read_as_console_markup(log: HoldoutLog) -> None:
-    _seed(log, build_b=MARKUP_BUILD)
+    _seed(log, commit_b=MARKUP_COMMIT)
 
     text, machine = _run("--by-commit")
 
@@ -151,3 +157,36 @@ def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike() -> None:
     assert text.exit_code == machine.exit_code
     assert _payload(machine)["by_commit"]["rows"] == []
     assert "no analysed task" in _flat(text)
+
+
+def test_a_build_is_the_version_and_commit_pair_labelled_as_health_labels_it(
+    log: HoldoutLog,
+) -> None:
+    stamps = [
+        {"write_provenance": {"version": "1.0.0", "commit": COMMIT_A}},
+        {"write_provenance": {"version": "1.1.0", "commit": COMMIT_A}},
+        None,
+    ]
+    for hours, stamp in enumerate(stamps):
+        log.task(
+            start=MONDAY + timedelta(hours=hours),
+            arms=[False],
+            commits=hours + 1,
+            pack_metadata=[stamp],
+        )
+    log.sweep()
+
+    text, machine = _run("--by-commit")
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    expected = [
+        build_label("1.0.0", COMMIT_A),
+        build_label("1.1.0", COMMIT_A),
+        NO_PROVENANCE_LABEL,
+    ]
+    table = _payload(machine)["by_commit"]
+    assert [row["build"] for row in table["rows"]] == expected
+    flat = _flat(text)
+    for label in expected:
+        assert label in flat
+    assert "under its first pack's build" in flat
