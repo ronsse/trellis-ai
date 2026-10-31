@@ -3476,7 +3476,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--planned-n` | `114` | Planned analysed tasks (the pre-registration's) |
 | `--settle-hours` | `3` | Hours a completed capture sweep must follow a task's latest join before the task counts as finished |
 | `--seed` | `20261004` | Seed for every random draw, so a report reproduces |
-| `--limit` | `5000` | Max events scanned per event type |
+| `--limit` | `5000` | Max events scanned per event type; with `--operational` it is refused (exit `2`), since that mode pages to completion |
 
 A unit is a finished sub-agent task (its join names a parent session) whose
 first pack is non-empty in its own arm's terms: a withheld row's
@@ -3630,33 +3630,53 @@ due. The outcome-derived figures are never computed, not computed and hidden: th
 report is its own model (`mode: "operational"`), with no field that could carry
 one.
 
+**The structure.** Operational mode reads the capture joins, the capture
+sweeps and, for each join, the one pack row its first pack id names, fetched by
+id. It does not scan `PACK_ASSEMBLED`: later packs, the number of packs and the
+volume of pack rows never enter the computation, so there is nothing to filter
+out of the output. A test enforces this with an event log that raises on any
+read of the pack stream other than a join's first pack, by id. Joins and sweeps
+are paged to completion, so there is no scan cap and `--limit` with
+`--operational` is a usage error (exit 2 in both formats). A window in which
+more joins or sweeps share one timestamp than a page holds cannot be paged
+through, and is refused rather than read short.
+
 **The rule.** An operational figure depends only on values fixed when a task's
 first pack was assembled, and on capture sweep times, which no one task drives.
 The first pack's values are its time, its arm draw, its build stamp and rate,
-and, from the join, the agent type, the brief and covariates and the two timing
-flags set before the first retrieval. Everything after it is post-treatment and
-is never read: pack count, later packs, when a join was written, whether it was
-written again, a session's length and every outcome value. Pooling does not
-make a post-treatment figure safe, because a pooled count differenced against
-`eligible_by_arm` across windows recovers it by arm, so pooled counts of them
-are absent too. Neither one report nor the differences between reports over
-several windows (`--until`, `--days`, or stored nightly output) vary with those
-values.
+and, from the session's earliest join, the agent type, the brief and covariates
+and the two timing flags set before the first retrieval. The earliest join is
+the one read because a later join for the same session can change the flags,
+the covariates and the first pack id; a session with any join before the window
+start is skipped, so a join written again inside the window cannot bring it in
+with other values. Everything after the first pack is post-treatment and is
+never read: later packs, the pack count, a session's length and every outcome
+value. Pooling does not make a post-treatment figure safe, because a pooled
+count differenced against `eligible_by_arm` across windows recovers it by arm,
+so pooled counts of them are absent too. Neither one report nor the differences
+between reports over several windows (`--until`, `--days`, or stored nightly
+output) vary with those values.
 
-**Two disclosed exceptions.** Whether a task's join carries an outcome block at
+**One disclosed exception.** Whether a task's join carries an outcome block at
 all is read, as presence only: a join without one is dropped before eligibility
-(`funnel.no_outcome`), which moves `eligible_by_arm`. And `scan.truncated`
-with `scan.covered_since` is a coarse pooled function of how many events of
-every type the window holds, pack volume included, so a store busy enough to
-reach the per-type scan limit moves it. Beyond these two the report does not
-promise that a figure is recoverable or not: it promises the rule, and a figure
-that breaks it is a defect. The bound is on the report, not the store: a reader
-of the events can still read them. Two assumptions are not covered by the
-tests' fixtures: capture writes a task's first join on the first sweep that
-sees its transcript, so the join exists by the time a settled sweep admits it;
-and `task_window_since` is read from the times of rate-keyed pack rows without
-regard to arm, so a later pack could move it only at a build where the rate
-changed.
+(`funnel.no_outcome`), which moves `eligible_by_arm`. Current capture always
+writes the block, so such a join comes from an older build. The bound is on the
+report, not the store: a reader of the events can still read them.
+
+**Stated limits.** These are not fixed here.
+
+- A join with no pack id, or whose first pack has no row, has no anchor and no
+  arm. It is windowed on its join time and counted pooled
+  (`funnel.first_pack_not_found` and the other pre-eligibility stages).
+- A task whose first join is written later than the sweep that would admit it
+  enters on the first night the join exists, not the night its first pack
+  settled, so a night asked about again later can show a larger `eligible`.
+  Two causes are known: a per-session parse error that capture retries at a
+  later sweep, and a `--rejoin-since` backfill, which stamps the join when it
+  is written.
+- A first pack at another rate is counted under `funnel.other_rate`, and a
+  later pack at another rate is not read, so it cannot raise the "several
+  holdout rates" error that the full report raises.
 
 **First-pack admission.** A task is windowed on its first pack's time and
 admitted once a completed sweep ran `settle_hours` after that pack. The full
@@ -3665,11 +3685,13 @@ capture writes again whenever a session continues, so a continued session moves
 the night it counts. The two anchors differ, so operational `eligible`, the
 funnel counts and `sessions` can differ from the full report's on the same
 night. They are not the same number and neither stands in for the other; the
-full report's counts are the preregistered ones.
+full report's counts are the preregistered ones. `task_window_since` is the
+earliest admitted first pack at the rate, and `task_window_days` runs from it
+to the window end.
 
 It keeps `status`, the window and task-window fields, `rate`, `settle_hours` and
-`notes`; `scan` reduced to `limit`, `truncated` and `covered_since`, with no
-`scanned`, `matched` or `dropped`, which count packs; the `funnel` stages from
+`notes`, with no `scan` block and no `effective_window_days`, which describe the
+pack scan this mode does not make; the `funnel` stages from
 the sub-agent joins admitted on their first pack up to eligibility, without the
 join, session, outside-window and unfinished counts, and without the cut-off,
 outcome-missing, analysed, post-hoc, hook-feedback-seen and unparsed pack id

@@ -110,7 +110,7 @@ def test_operational_text_prints_counts_and_no_outcome_figure() -> None:
         "span builds",
         "outcome's field",
         # figures that count packs or follow a join's time are the full report's
-        "pack rows",
+        # (the note names pack rows only to say they are not read)
         "rows scanned",
         "joins scanned",
         "outside the window",
@@ -128,7 +128,8 @@ def test_operational_json_carries_no_pack_count_or_join_time_figure() -> None:
     _, as_json = _run("--operational")
     payload = _payload(as_json)
     assert "rows" not in payload
-    assert set(payload["scan"]) == {"limit", "truncated", "covered_since"}
+    # No scan block, and no window figure derived from one: the mode scans no packs.
+    assert {"scan", "effective_window_days"}.isdisjoint(payload)
     assert {"joins_scanned", "sessions", "outside_window", "unfinished"}.isdisjoint(
         payload["funnel"]
     )
@@ -198,6 +199,29 @@ def test_an_invalid_inference_option_exits_alike_with_and_without_the_flag(
         text, as_json = _run(*flag, *option)
         assert text.exit_code == as_json.exit_code == EXIT_VALIDATION, (flag, option)
         assert _payload(as_json)["status"] == "error"
+
+
+@pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize("value", ["100", "0", "-3"])
+def test_limit_with_the_flag_is_a_usage_error_in_both_formats(value: str) -> None:
+    """The flag pages its reads to completion, so a cap on them is refused."""
+    text, as_json = _run("--operational", "--limit", value)
+    assert text.exit_code == as_json.exit_code == EXIT_VALIDATION
+    payload = _payload(as_json)
+    assert payload["status"] == "error"
+    assert "--limit" in payload["message"]
+    assert "--operational" in payload["message"]
+    assert "--limit" in plain(text.stdout)
+
+
+@pytest.mark.usefixtures("seeded")
+def test_limit_without_the_flag_still_caps_the_full_report() -> None:
+    """The refusal is the flag's: the full report keeps its scan cap and its checks."""
+    text, as_json = _run(*FAST, "--limit", "1000000")
+    assert text.exit_code == as_json.exit_code == EXIT_OK
+    assert _payload(as_json)["scan"]["limit"] == 1_000_000
+    bad_text, bad_json = _run(*FAST, "--limit", "0")
+    assert bad_text.exit_code == bad_json.exit_code == EXIT_VALIDATION
 
 
 @pytest.mark.usefixtures("seeded")

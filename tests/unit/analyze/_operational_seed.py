@@ -4,12 +4,15 @@
 :class:`PostTreatment` names: the outcome magnitudes (turns, commits, PRs, tool
 errors, tokens), which tasks are cut off, where the zeros and the missing
 field fall, how many tool calls a session made, how much hook feedback it drew,
-what its later packs were, how many packs it drew, how long after its first
-pack its join was written, whether the join was written again, whether it ended
-interrupted and how many pack ids the capture could not parse. Every arm, build,
-covariate and timing flag a first pack settles, which joins carry an outcome
-block at all, and when capture swept, are fixed by the task's index, so two
-stores that differ only in a :class:`PostTreatment` differ only in values a
+what its later packs were (their arm, build and rate, and whether they carry a
+holdout key at all), how many packs it drew, how long after its first pack its
+join was written, whether the join was written again (and whether the second
+join also changes the timing flags, covariates and first pack id the first
+join fixed), whether it ended interrupted, how many pack ids the capture could
+not parse, and which pack rows another surface wrote that no join names. Every
+arm, build, covariate and timing flag a first pack settles, which joins carry an
+outcome block at all, and when capture swept, are fixed by the task's index, so
+two stores that differ only in a :class:`PostTreatment` differ only in values a
 treatment could have moved.
 
 A join is written before the first sweep that could admit its task (at most 25
@@ -66,6 +69,10 @@ class PostTreatment:
     later_pack_same_arm: bool = False
     later_pack_other_build: bool = False
     later_packs_everywhere: bool = False
+    #: The rate a later pack was written at (every first pack is at 0.5).
+    later_pack_rate: float = 0.5
+    #: Write a later pack as a row from a build before the holdout (no key).
+    later_pack_unkeyed: bool = False
     unparsed_pack_ids: int = 0
     #: Minutes from a task's first pack to its join, for (served, withheld) tasks.
     join_lag_minutes: tuple[int, int] = (10, 10)
@@ -73,6 +80,13 @@ class PostTreatment:
     #: ``served``, ``withheld`` or ``all``. The second join differs in every
     #: post-treatment value.
     reemit_in: str = "none"
+    #: Make the second join differ in what the first one fixed too: the timing
+    #: flags (both set), the covariates and the first pack id.
+    reemit_pretreatment: bool = False
+    #: Pack rows no join names, written by another surface: ``none``,
+    #: ``rate0`` (rate 0 rows), ``unkeyed`` (no holdout key) or ``both``,
+    #: from two days before the first task on.
+    stray_rows: str = "none"
     #: Mark the outcome ``ended_interrupted``, for tasks of this arm (same values).
     interrupted_in: str = "none"
     #: Packs drawn after the first, for (served, withheld) tasks, in their arm.
@@ -135,10 +149,13 @@ def seed_store(
                     pack_ids.append(
                         log.pack(
                             at=start + timedelta(minutes=1),
-                            withheld=withheld
+                            withheld=None
+                            if post.later_pack_unkeyed
+                            else withheld
                             if post.later_pack_same_arm
                             else not withheld,
                             items=2,
+                            rate=post.later_pack_rate,
                             metadata=provenance(later_commit),
                         )
                     )
@@ -174,17 +191,57 @@ def seed_store(
                 )
                 if post.reemit_in in (arm_name, "all"):
                     again = dict(outcome, assistant_turns=999, input_tokens=77_777)
+                    second_ids, second_timing, second_covariates = (
+                        pack_ids,
+                        timing,
+                        covariates,
+                    )
+                    if post.reemit_pretreatment:
+                        other = log.pack(
+                            at=start + timedelta(minutes=3),
+                            withheld=not withheld,
+                            items=2,
+                            metadata=provenance(COMMIT_B),
+                        )
+                        second_ids = [other, *pack_ids[1:]]
+                        second_timing = timing_payload(
+                            hook_before=True,
+                            commit_before=True,
+                            hook_messages=1,
+                            ordinal=1,
+                            calls=2,
+                        )
+                        second_covariates = covariates_payload(
+                            brief_chars=9_999, agent_type="z" * 12
+                        )
                     log.join(
                         f"task-{index:03d}",
                         at=start + timedelta(hours=30),
-                        pack_ids=pack_ids,
+                        pack_ids=second_ids,
                         parent=parent,
                         outcome=None if index == 11 else again,
                         pack_ids_unparsed=post.unparsed_pack_ids,
-                        timing=timing,
-                        covariates=covariates,
+                        timing=second_timing,
+                        covariates=second_covariates,
                     )
                 index += 1
+    for step in range(8) if post.stray_rows != "none" else ():
+        at = MONDAY + timedelta(days=step - 2, hours=5)
+        if post.stray_rows in ("rate0", "both"):
+            log.pack(
+                at=at,
+                withheld=step % 2 == 0,
+                items=1,
+                rate=0.0,
+                metadata=provenance(COMMIT_B),
+            )
+        if post.stray_rows in ("unkeyed", "both"):
+            log.pack(
+                at=at + timedelta(minutes=7),
+                withheld=None,
+                items=1,
+                metadata=provenance(COMMIT_B),
+            )
     main = log.task(start=MONDAY + timedelta(days=2), parent=None, arms=[False])
     log.task(
         start=MONDAY + timedelta(days=2, hours=1),

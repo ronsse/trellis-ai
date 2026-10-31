@@ -1969,16 +1969,16 @@ def _render_holdout_title(
         f"  task window {escape(report.task_window_since)} to "
         f"{escape(report.until)} ({report.task_window_days:g} days)"
     )
-    if report.scan.truncated:
-        console.print(
-            f"  [yellow]window[/yellow] evidence covers "
-            f"{report.effective_window_days:g} of {report.window_days} days"
-        )
 
 
 def _render_holdout_header(report: HoldoutReport, qualifiers: str) -> None:
     """The title, window, row counts and funnel of the full report."""
     _render_holdout_title(report, qualifiers)
+    if report.scan.truncated:
+        console.print(
+            f"  [yellow]window[/yellow] evidence covers "
+            f"{report.effective_window_days:g} of {report.window_days} days"
+        )
     rows = report.rows
     console.print(
         f"  PACK_ASSEMBLED rows {rows.scanned}: {rows.without_holdout_key} without "
@@ -2178,15 +2178,17 @@ def holdout(
         "--operational",
         help=(
             "Check the experiment is running without reading its outcomes: the "
-            "funnel, arm counts and ratio checks and covariate coverage, each "
-            "fixed by a task's first pack (and the scan's cap and whether it "
-            "bit). A task is admitted on its first pack, so its counts can "
-            "differ from the full report's. No outcome value is "
-            "read (only whether a join has an outcome block), and no mean, "
-            "estimate, CI, p-value, power, SD, guardrail or fit is computed. "
-            "--outcome, --itt, --permutations, --bootstraps, --power-sims, "
-            "--planned-* and --seed are validated as for the full report and "
-            "change no figure; with --by-commit the table holds counts only."
+            "funnel, arm counts and ratio checks and covariate coverage. It "
+            "reads the capture joins, the capture sweeps and each join's "
+            "first pack, fetched by id, and does not scan the pack stream, so "
+            "no later pack or pack count reaches a figure. A task is admitted "
+            "on its first pack, so its counts can differ from the full "
+            "report's. No outcome value is read (only whether a join has an "
+            "outcome block), and no mean, estimate, CI, p-value, power, SD, "
+            "guardrail or fit is computed. --outcome, --itt, --permutations, "
+            "--bootstraps, --power-sims, --planned-* and --seed are validated "
+            "as for the full report and change no figure; with --by-commit the "
+            "table holds counts only. --limit does not apply and is refused."
         ),
     ),
     permutations: int = typer.Option(
@@ -2213,12 +2215,14 @@ def holdout(
         ),
     ),
     seed: int = typer.Option(20261004, "--seed", help="Seed for every random draw."),
-    limit: int = typer.Option(
-        DEFAULT_SCAN_LIMIT,
+    limit: int | None = typer.Option(
+        None,
         "--limit",
         help=(
-            "Max events to scan per event type. Raise it when the report says "
-            "the evidence covers less than the window."
+            "Max events to scan per event type (default "
+            f"{DEFAULT_SCAN_LIMIT}). Raise it when the report says the evidence "
+            "covers less than the window. Refused with --operational, which "
+            "pages the joins and sweeps to completion."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -2235,15 +2239,27 @@ def holdout(
     writes nothing, not even a meta-trace.
 
     With --operational the report holds only what shows the experiment is
-    running (funnel, arm counts, arm-ratio checks, coverage), each fixed by a
-    task's first pack; the outcome-derived figures are not computed and no
-    pack count is reported.
+    running (funnel, arm counts, arm-ratio checks, coverage). It reads the
+    capture joins, the capture sweeps and each join's first pack, and nothing
+    else from the pack stream; the outcome-derived figures are not computed
+    and no pack count is reported.
     """
     from trellis.analyze.holdout import (  # noqa: PLC0415
         HoldoutAnalysisError,
         analyze_holdout,
         analyze_holdout_operational,
     )
+
+    if operational and limit is not None:
+        message = (
+            "--limit does not apply with --operational: it reads no pack scan "
+            "and pages the joins and sweeps to completion."
+        )
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         if operational:
@@ -2262,7 +2278,6 @@ def holdout(
                 planned_n=planned_n,
                 settle_hours=settle_hours,
                 seed=seed,
-                limit=limit,
             )
             if output_format == "json":
                 emit_json(operational_report.model_dump())
@@ -2284,7 +2299,7 @@ def holdout(
             planned_n=planned_n,
             settle_hours=settle_hours,
             seed=seed,
-            limit=limit,
+            limit=DEFAULT_SCAN_LIMIT if limit is None else limit,
         )
     except HoldoutAnalysisError as exc:
         message = str(exc)

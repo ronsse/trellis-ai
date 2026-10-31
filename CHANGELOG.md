@@ -12,17 +12,25 @@ All notable changes to Trellis will be documented in this file.
   counts) that does not expose the results it is meant to leave blind. The flag
   emits a separate report model with no outcome-mean, estimate, interval,
   p-value, power, MDE, guardrail or covariate-fit field, no cut-off, analysed or
-  post-hoc count, and no pack row count. Every figure depends only on values
-  fixed when a task's first pack was assembled (that pack's time, arm draw,
-  build and rate, and the join's agent type, brief and the two timing flags set
-  before the first retrieval) and on capture sweep times; pack count, later
-  packs, join time, re-emitted joins, session length and outcome values are
-  never read, so reports over several windows, or stored nightly, do not vary
-  with them. Two exceptions are disclosed: whether a join carries an outcome
-  block (presence only; a join without one is dropped before eligibility), and
-  `scan.truncated` with `scan.covered_since`, a coarse function of how many
-  events the window holds. A task is admitted and windowed on its first pack, so
-  operational `eligible` can differ from the full report's on the same night.
+  post-hoc count, and no pack row count. It does not scan `PACK_ASSEMBLED`: it
+  reads the capture joins, the capture sweeps and, for each join, the one pack
+  row its first pack id names, fetched by id, so later packs, the number of
+  packs and the volume of pack rows never enter it. A test enforces that with
+  an event log that raises on any other read of the pack stream. Every figure
+  depends only on values fixed when a task's first pack was assembled (that
+  pack's time, arm draw, build and rate, and, from the session's earliest join,
+  the agent type, brief and the two timing flags set before the first
+  retrieval) and on capture sweep times, so reports over several windows, or
+  stored nightly, do not vary with later packs, re-emitted joins, session
+  length or outcome values. Joins and sweeps are paged to completion,
+  so `--limit` with `--operational` is a usage error (exit 2). One exception is
+  disclosed: whether a join carries an outcome block (presence only; a join
+  without one is dropped before eligibility). Stated limits: a join with no
+  first-pack row is windowed on its join time and counted pooled, and a task
+  whose first join is written after its settling sweep (a retried parse error,
+  a `--rejoin-since` backfill) counts from the night the join exists. A task is
+  admitted and windowed on its first pack, so operational `eligible` can differ
+  from the full report's on the same night.
   The arm-ratio check runs on `assigned`, the first pack of each admitted join
   at the rate. The inference options are validated as for the full report, so a
   command line exits alike with and without the flag. With `--by-commit` the

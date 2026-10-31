@@ -114,24 +114,37 @@ figure.
 experiment running?" without reading its outcomes. It returns a
 :class:`HoldoutOperationalReport`, a separate model that has no field for an
 outcome mean, estimate, interval, outcome p-value, power, SD, guardrail or
-covariate fit. Its design rule: a figure may depend only on values fixed when
-the task's first pack was assembled (that pack's time, arm draw, build stamp
-and rate, the join's agent type, brief and the two timing flags set before the
-first retrieval) and on capture sweep timestamps, which belong to no task.
-Everything from after that pack is post-treatment and is read nowhere: the
-number of packs, a later pack, the join's time, a join re-emitted because the
-session went on, the session's length and every outcome value. A task is
-therefore admitted on its first pack (the latest sweep for its source system
-ran ``settle_hours`` after it) and windowed by it, where the full report
-admits on the latest join; the two ``eligible`` counts can differ on the same
-night. No pack row count is reported, so the rows are not a second route to
-packs per task by arm: the arm-ratio check runs on ``assigned``, the first
-pack of each join at the rate. The disclosed exceptions are two. A join's
-outcome block is tested for presence (``no_outcome``), never read, because
-capture writes a join before the outcome is known and a join without one is
-dropped before eligibility. And ``scan.truncated`` with ``covered_since`` is a
-coarse function of how many events the window holds, pack volume included. The
-full report reads every one of these values and carries no such guarantee.
+covariate fit. It does not scan ``PACK_ASSEMBLED``. It reads the capture
+joins, the capture sweeps and, for each join, the one pack row that join
+names first, fetched by id, and nothing else from the pack stream, so a later
+pack, the number of packs and the volume of pack rows reach no figure. Its
+design rule: a figure may depend only on values fixed when the task's first
+pack was assembled (that pack's time, arm draw, build stamp and rate, and the
+join's agent type, brief and the two timing flags set before the first
+retrieval) and on capture sweep timestamps, which belong to no task. Those
+join fields come from the session's earliest join, so a join written again
+later changes none of them. A task is admitted on its first pack (the latest
+sweep for its source system ran ``settle_hours`` after it) and windowed by it,
+where the full report admits on the latest join; the two ``eligible`` counts
+can differ on the same night. The rate, the unkeyed-row note, the task window
+(from the earliest admitted first pack at the rate to the window end) and the
+arm-ratio check come from first packs alone: a first pack at another rate
+counts under ``other_rate``, and a later pack at another rate is not seen. The
+joins and sweeps are paged to completion, so no figure depends on a scan cap
+and there is no ``limit``.
+
+One exception is disclosed: a join's outcome block is tested for presence
+(``no_outcome``), never read, because a join without one is dropped before
+eligibility; capture writes the block on every join, so only a join written by
+an older build lacks it. Three limits are stated rather than fixed. A join
+with no pack, or whose first pack has no row, has no first pack to anchor on,
+so it is windowed on its join time and its arm is unknown, and the rows with no
+arm are pooled. A task whose first join is written after the sweep that would
+admit it enters from the night the join exists; the known causes are a
+session's parse error retried at a later sweep, and a ``--rejoin-since``
+backfill, whose join is stamped when it is written. And the report is only as
+sound as the first-pack row the join names. The full report reads every one of
+these values and carries no such guarantee.
 
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
@@ -197,6 +210,8 @@ NO_SERVED_ARM = "no served arm"
 NO_BOTH_ARM_STRATUM = "no stratum with both arms"
 
 _DAY_SECONDS = 86_400
+#: Events read per page when the operational report pages the joins and sweeps.
+_PAGE_SIZE = DEFAULT_SCAN_LIMIT
 _RATE_TOLERANCE = 1e-9
 #: Below this within-stratum sum of squares the arm is taken not to vary.
 _ARM_SS_TOLERANCE = 1e-9
@@ -693,38 +708,22 @@ class HoldoutOperationalSessions(TrellisModel):
     not_measurable: dict[str, str] = Field(default_factory=dict)
 
 
-class HoldoutOperationalScan(TrellisModel):
-    """The scan's cap and whether it bit, with no event count.
-
-    ``truncated`` and ``covered_since`` stay because a capped read makes the
-    window shorter than asked and the report has to say so. Both are coarse
-    functions of how many events of every type the window holds, pack volume
-    included, so they are a disclosed exception to the rule that a figure
-    depends only on what a task's first pack fixes. ``scanned``, ``matched``
-    and ``dropped`` are left out: they count packs.
-    """
-
-    limit: int
-    truncated: bool
-    covered_since: str
-
-
 class HoldoutOperationalFunnel(TrellisModel):
     """:class:`HoldoutFunnel` less every count a post-treatment value moves.
 
     The stages, in order, over the sub-agent joins admitted on their first
-    pack. Absent: the join and session totals, ``main_sessions`` (counted
-    under the sessions block, on each transcript's own first pack),
-    ``outside_window`` and ``unfinished`` (each is
-    a function of when a join was written, and capture re-writes a join when its
-    session goes on), the cut-off, outcome-missing and analysed counts (outcome
-    values), the post-hoc counts (the session's tool-call count), the
+    pack, each read from its session's earliest join. Absent: the join and
+    session totals, ``main_sessions`` (counted under the sessions block, on each
+    transcript's own first pack), ``outside_window`` and ``unfinished`` (each is
+    a function of when a join was written, and capture writes a join again when
+    its session goes on), the cut-off, outcome-missing and analysed counts
+    (outcome values), the post-hoc counts (the session's tool-call count), the
     hook-feedback-seen count (feedback however late) and the unparsed-pack-id
     count (a whole session's retrievals). A join with no pack, or whose first
-    pack has no row, has no first pack to window or admit it on, so those two
-    stages count the joins the scan holds. ``no_outcome`` stays: whether a join
-    carries an outcome block decides eligibility, and the arm-ratio check reads
-    the arms of the tasks that remain.
+    pack has no row, has no first pack to window or admit it on, so it is
+    windowed on its join time and counted pooled. ``no_outcome`` stays: whether
+    a join carries an outcome block decides eligibility, and the arm-ratio check
+    reads the arms of the tasks that remain.
     """
 
     no_outcome: int = 0
@@ -809,13 +808,14 @@ class HoldoutOperationalReport(TrellisModel):
     Every field is a count, a rate, a window, a configuration echo or a note.
     There is no outcome mean, estimate, interval, outcome p-value, power, SD,
     guardrail or covariate fit, no pack row count, and the seed is left out
-    because nothing here is random. A figure depends only on values fixed when
-    a task's first pack was assembled (that pack's time, arm draw, build and
-    rate, and the join's agent type, brief and the two timing flags set before
-    the first retrieval) and on capture sweep times. Two disclosed exceptions:
-    whether a join carries an outcome block (tested for presence, never
-    read), and ``scan.truncated`` with ``covered_since``, a coarse function of
-    how many events the window holds. A task is admitted and windowed on its
+    because nothing here is random. The report reads the capture joins, the
+    capture sweeps and each join's first pack, fetched by id, and nothing else
+    from the pack stream. A figure depends only on values fixed when a task's
+    first pack was assembled (that pack's time, arm draw, build and rate, and
+    the join's agent type, brief and the two timing flags set before the first
+    retrieval, read from the session's earliest join) and on capture sweep
+    times. One exception is disclosed: whether a join carries an outcome block
+    (tested for presence, never read). A task is admitted and windowed on its
     first pack, so ``eligible`` can differ from the full report's on the same
     night. ``outcome`` and ``itt`` are not echoed: they only choose which tasks
     are analysed, and this report analyses none.
@@ -824,7 +824,6 @@ class HoldoutOperationalReport(TrellisModel):
     status: str = "ok"
     mode: str = "operational"
     window_days: int
-    effective_window_days: float
     since: str
     until: str
     task_window_since: str
@@ -838,7 +837,6 @@ class HoldoutOperationalReport(TrellisModel):
     #: Set only when ``by_commit`` is asked for, and absent from a dump
     #: otherwise, as in :class:`HoldoutReport`.
     by_commit: HoldoutOperationalByCommit | None = None
-    scan: HoldoutOperationalScan
     notes: list[str] = Field(default_factory=list)
 
     @model_serializer(mode="wrap")
@@ -1502,16 +1500,19 @@ def _finished(join: Event, sweeps: Mapping[str, datetime], settle: timedelta) ->
     return _swept(join, sweeps, _as_utc(join.occurred_at) + settle)
 
 
-def _find_pack(
-    event_log: EventLog, packs: dict[str, Event], pack_id: str
-) -> Event | None:
-    """The pack's row from the scan, or by id when it predates the scan."""
-    if pack_id in packs:
-        return packs[pack_id]
+def _pack_by_id(event_log: EventLog, pack_id: str) -> Event | None:
+    """The pack's row, fetched by id."""
     found = event_log.get_events(
         event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
     )
     return found[0] if found else None
+
+
+def _find_pack(
+    event_log: EventLog, packs: dict[str, Event], pack_id: str
+) -> Event | None:
+    """The pack's row from the scan, or by id when it predates the scan."""
+    return packs[pack_id] if pack_id in packs else _pack_by_id(event_log, pack_id)
 
 
 def _resolve_rate(
@@ -1575,27 +1576,12 @@ def _task_window_start(
 
 
 def _task_window_note(
-    *,
-    days: int,
-    truncated: bool,
-    task_start: datetime,
-    task_days: float,
-    rate: float,
-    horizons: bool = True,
+    *, days: int, truncated: bool, task_start: datetime, task_days: float, rate: float
 ) -> str:
-    """Why the task figures divide by fewer days than the window holds.
-
-    ``horizons`` names the MDE horizons the full report prints; the operational
-    report prints none, so its note leaves them out.
-    """
+    """Why the task figures divide by fewer days than the window holds."""
     before = "the scanned part of the window" if truncated else "the window"
-    figures = (
-        "figures per 30 days and the task MDE horizons"
-        if horizons
-        else "figures per 30 days"
-    )
     return (
-        f"The task {figures} divide by the "
+        "The task figures per 30 days and the task MDE horizons divide by the "
         f"{round(task_days, 2):g} days from {task_start.isoformat()} to the window "
         f"end, not by the {days}-day window: the window's first row at rate "
         f"{rate:g} was written then, and no pack row before {before} shows that "
@@ -1620,7 +1606,7 @@ def _validate(
     planned_n: int,
     settle_hours: float,
     seed: int,
-    limit: int,
+    limit: int | None,
 ) -> None:
     """Refuse out-of-range options, naming each one as the CLI spells it."""
     problems: list[str] = []
@@ -1632,8 +1618,9 @@ def _validate(
         "--bootstraps": bootstraps,
         "--power-sims": power_sims,
         "--planned-n": planned_n,
-        "--limit": limit,
     }
+    if limit is not None:
+        counts["--limit"] = limit
     problems.extend(
         f"{name} must be at least 1, got {value}"
         for name, value in counts.items()
@@ -1768,21 +1755,20 @@ def analyze_holdout(
 
 _OPERATIONAL_NOTE = (
     "Operational view: no outcome mean, estimate, interval, outcome p-value, "
-    "power, SD, guardrail or covariate fit was computed, and no pack row count "
-    "is reported. Every figure depends only on what was fixed when a task's "
-    "first pack was assembled (its time, arm draw, build and rate, and the "
-    "join's agent type, brief and the two timing flags set before the first "
-    "retrieval) or on capture sweep times. A task is admitted and windowed on "
-    "its first pack, so eligible counts can differ from the full report's on "
-    "the same night. Two disclosed exceptions: whether a join carries an "
-    "outcome block at all (a join without one is dropped before eligibility; "
-    "its values are never read), and scan.truncated with covered_since, a "
-    "coarse function of how many events the window holds, pack volume "
-    "included. --outcome and --itt change nothing here."
-)
-_OPERATIONAL_TRUNCATED_NOTE = (
-    "A per-type scan limit was reached, so the window starts at "
-    "scan.covered_since instead of the day asked for."
+    "power, SD, guardrail or covariate fit was computed. This view reads the "
+    "capture joins, the capture sweeps and, for each join, the one pack row it "
+    "names first. It does not scan PACK_ASSEMBLED, so a later pack, the number "
+    "of packs and the volume of pack rows are not read. Each task is read from "
+    "its session's earliest join (a later join can change the timing flags, "
+    "the covariates and the first pack id), admitted on its first pack once a "
+    "completed sweep ran settle_hours after it, and windowed by it, so "
+    "eligible counts can differ from the full report's on the same night. One "
+    "disclosed exception: whether a join carries an outcome block at all (a "
+    "join without one is dropped before eligibility; its values are never "
+    "read). A task whose first join is written after the sweep that would "
+    "admit it counts from the night the join exists. A join with no pack, or "
+    "whose first pack has no row, has no arm: it is windowed on its join time "
+    "and counted pooled. --outcome and --itt change nothing here."
 )
 _OPERATIONAL_BY_COMMIT_NOTE = (
     "Counts only. Each eligible task is counted once, under the build stamped "
@@ -1814,28 +1800,23 @@ def analyze_holdout_operational(
     planned_n: int = DEFAULT_PLANNED_N,
     settle_hours: float = DEFAULT_SETTLE_HOURS,
     seed: int = DEFAULT_SEED,
-    limit: int = DEFAULT_SCAN_LIMIT,
 ) -> HoldoutOperationalReport:
     """Say whether the holdout is running, without reading its outcomes.
 
-    Reads the same event types as :func:`analyze_holdout`, stopped at the
-    window end, and returns a funnel, arm counts, arm-ratio checks,
-    covariate coverage and scan fields. A figure depends only on what was
-    fixed when a task's first pack was assembled (that pack's time, arm draw,
-    build and rate, the join's agent type, brief and the two timing flags set
-    before the first retrieval) and on capture sweep times. Everything after
-    that pack is read nowhere: pack counts, later packs, the join's time or a
-    re-emitted join, the session's length and every outcome value. A task is
-    therefore admitted on its first pack (a completed sweep ran ``settle_hours``
-    after it) and windowed by it, so ``eligible`` can differ from
-    :func:`analyze_holdout`'s on the same night, which admits on the latest
-    join. The arm-ratio check runs on ``assigned``, the first pack of each
-    join at the rate, and no pack row count is reported.
+    Reads the capture joins and sweeps from ``days`` before ``until`` to
+    ``until`` and, for each join, the one pack row its first pack id names,
+    fetched by id. It queries ``PACK_ASSEMBLED`` no other way, so a later
+    pack, the number of packs and the volume of pack rows reach no figure.
+    Each task is read from its session's earliest join, admitted on its first
+    pack (a completed sweep ran ``settle_hours`` after it) and windowed by it,
+    so ``eligible`` can differ from :func:`analyze_holdout`'s on the same
+    night, which admits on the latest join. The rate, the unkeyed-row note,
+    the task window and the arm-ratio check come from the first packs alone.
+    The joins and sweeps are paged to completion, so no figure is a function
+    of a scan cap and there is no ``limit``.
 
-    Two disclosed exceptions: whether a join carries an outcome block (a join
-    without one is dropped before eligibility, never read), and
-    ``scan.truncated`` with ``covered_since``, a coarse function of how many
-    events the window holds, pack volume included.
+    One disclosed exception: whether a join carries an outcome block (a join
+    without one is dropped before eligibility, never read).
 
     ``outcome``, ``itt``, ``permutations``, ``bootstraps``, ``power_sims``,
     ``planned_mde``, ``planned_n`` and ``seed`` change no figure. They are
@@ -1846,7 +1827,8 @@ def analyze_holdout_operational(
         event_log: Operational event log, as for :func:`analyze_holdout`.
         days: Window length.
         until: Window end (default: now).
-        rate: The ``holdout_rate`` to analyse (default: the single one present).
+        rate: The ``holdout_rate`` to analyse (default: the single one that
+            the tasks' first packs show).
         outcome: A key of :data:`OUTCOMES`; validated and ignored.
         itt: Validated and ignored.
         by_commit: Add the per-build counts of eligible tasks
@@ -1858,14 +1840,14 @@ def analyze_holdout_operational(
         planned_n: Validated and ignored.
         settle_hours: Hours a completed sweep must follow a task's first pack.
         seed: Validated and ignored.
-        limit: Per-event-type scan limit.
 
     Returns:
         A :class:`HoldoutOperationalReport`.
 
     Raises:
-        HoldoutAnalysisError: An option is out of range, or several rates
-            are present and ``rate`` names none of them.
+        HoldoutAnalysisError: An option is out of range, several rates are
+            present among the first packs and ``rate`` names none of them, or
+            the log cannot be paged to completion.
     """
     del itt  # accepted for the shared command line; nothing here depends on it
     _validate(
@@ -1879,27 +1861,26 @@ def analyze_holdout_operational(
         planned_n=planned_n,
         settle_hours=settle_hours,
         seed=seed,
-        limit=limit,
+        limit=None,
     )
     funnel = HoldoutOperationalFunnel()
-    ev = _gather(
+    ev = _gather_operational(
         event_log,
         days=days,
         until=until,
         rate=rate,
         settle_hours=settle_hours,
-        limit=limit,
         funnel=funnel,
     )
     mains = ev.mains
-    first_pack_per_30d = _per_30d(mains.with_first_pack, ev.effective_days)
-    session_eligible_per_30d = _per_30d(mains.eligible, ev.effective_days)
+    first_pack_per_30d = _per_30d(mains.with_first_pack, days)
+    session_eligible_per_30d = _per_30d(mains.eligible, days)
     sessions = HoldoutOperationalSessions(
         with_first_pack=mains.with_first_pack,
         with_first_pack_per_30d=first_pack_per_30d,
         eligible=mains.eligible,
         eligible_per_30d=session_eligible_per_30d,
-        note=_OPERATIONAL_SESSIONS_NOTE.format(days=round(ev.effective_days, 2)),
+        note=_OPERATIONAL_SESSIONS_NOTE.format(days=days),
         not_measurable=_reasons(
             {
                 "with_first_pack_per_30d": (first_pack_per_30d, _EMPTY_WINDOW),
@@ -1937,23 +1918,8 @@ def analyze_holdout_operational(
         )
         for name, preregistered, with_agent_type in _ADJUSTMENT_SPECS
     ]
-    notes = ev.notes + _notes(
-        ev.rows,
-        funnel,
-        ev.rate,
-        ev.sweeps,
-        arm_ratio,
-        None,
-        ev.scan.model_copy(update={"note": _OPERATIONAL_TRUNCATED_NOTE}),
-        settle_hours,
-        0,
-        0,
-        None,
-        counts=False,
-    )
     return HoldoutOperationalReport(
         window_days=days,
-        effective_window_days=round(ev.effective_days, 2),
         since=ev.since.isoformat(),
         until=ev.end.isoformat(),
         task_window_since=ev.task_start.isoformat(),
@@ -1965,12 +1931,7 @@ def analyze_holdout_operational(
         descriptive=descriptive,
         covariate_coverage=coverage,
         by_commit=_operational_by_commit(arrivals) if by_commit else None,
-        scan=HoldoutOperationalScan(
-            limit=ev.scan.limit,
-            truncated=ev.scan.truncated,
-            covered_since=ev.scan.covered_since,
-        ),
-        notes=[*notes, _OPERATIONAL_NOTE],
+        notes=[*_operational_notes(ev, funnel, arm_ratio, days), _OPERATIONAL_NOTE],
     )
 
 
@@ -2000,190 +1961,166 @@ def _operational_by_commit(
 
 
 @dataclass
-class _Evidence:
-    """What both modes read: the scan, the rows and the eligible tasks.
+class _OperationalEvidence:
+    """What the operational report reads: first packs, joins and sweeps only.
 
-    ``units`` is filled only for the full funnel; ``arrivals`` is every
-    eligible task as its first pack fixes it, for either.
+    ``first_packs`` are the rows the joins name first, inside the window; no
+    other pack row is held, so none can reach a figure.
     """
 
-    arrivals: Sequence[_Arrival]
-    units: list[_Unit]
-    rows: _Rows
-    scan: ScanCoverage
+    arrivals: list[_Arrival]
+    assigned: list[_Assignment]
+    mains: _MainTranscripts
+    first_packs: list[Event]
     notes: list[str]
     sweeps: dict[str, datetime]
-    joins: dict[str, Event]
-    packs: dict[str, Event]
-    settle: timedelta
     since: datetime
     end: datetime
-    evidence_start: datetime
-    effective_days: float
     rate: float | None
     task_start: datetime
     task_days: float
-    #: Filled only for the operational funnel.
-    assigned: list[_Assignment] = field(default_factory=list)
-    mains: _MainTranscripts = field(default_factory=_MainTranscripts)
 
 
-def _gather(
+def _gather_operational(
     event_log: EventLog,
     *,
     days: int,
     until: datetime | None,
     rate: float | None,
     settle_hours: float,
-    limit: int,
-    funnel: _AnyFunnel,
-) -> _Evidence:
-    """Scan the log and count every join into ``funnel``, building the eligible tasks.
+    funnel: HoldoutOperationalFunnel,
+) -> _OperationalEvidence:
+    """Read the joins, the sweeps and each join's first pack, and count the tasks.
 
-    The full funnel builds the full units, which read the outcome and the
-    task's later packs. The operational funnel builds only each task's
-    :class:`_Arrival`, which reads no value a treatment could have moved
-    except whether the join carries an outcome block at all.
+    Never queries ``PACK_ASSEMBLED`` by type: a pack row is fetched by id, and
+    only the first pack id of a session's earliest join is ever named. A
+    session with a join older than the window began before it, so its first
+    pack is outside the window whatever a later join says, and it is left out.
     """
-    full = funnel if isinstance(funnel, HoldoutFunnel) else None
-
-    op = funnel if isinstance(funnel, HoldoutOperationalFunnel) else None
-
     end = _as_utc(until) if until is not None else datetime.now(tz=UTC)
     since = end - timedelta(days=days)
-    # The operational scans stop at the window end, so a report for night N
-    # reads nothing written after N and a stored nightly can be replayed with
-    # ``--until``. The full report's scans are left as they were.
-    stop = end if op is not None else None
-    pack_scan = scan_events(
-        event_log,
-        event_type=EventType.PACK_ASSEMBLED,
-        since=since,
-        until=stop,
-        limit=limit,
+    joins = _earliest_joins(
+        _read_window(event_log, EventType.CAPTURE_SESSION_PACKS, since, end)
     )
-    join_scan = scan_events(
-        event_log,
-        event_type=EventType.CAPTURE_SESSION_PACKS,
-        since=since,
-        until=stop,
-        limit=limit,
+    sweeps = _latest_sweeps(
+        _read_window(event_log, EventType.CAPTURE_SWEEP_COMPLETED, since, end)
     )
-    sweep_scan = scan_events(
-        event_log,
-        event_type=EventType.CAPTURE_SWEEP_COMPLETED,
-        since=since,
-        until=stop,
-        limit=limit,
-    )
-    scan = merge_coverage(pack_scan.coverage, join_scan.coverage, sweep_scan.coverage)
-    evidence_start = since
-    if scan.truncated and scan.covered_since:
-        evidence_start = max(since, _as_utc(datetime.fromisoformat(scan.covered_since)))
-    effective_days = max((end - evidence_start).total_seconds(), 0.0) / _DAY_SECONDS
-
-    packs: dict[str, Event] = {}
-    rows = _Rows()
-    for event in pack_scan.events:
-        if event.entity_id:
-            packs.setdefault(event.entity_id, event)
-        if evidence_start <= _as_utc(event.occurred_at) < end:
-            rows.window.append(event)
-    rate, notes = _resolve_rate(rows, rate, counts=full is not None)
-    task_start = _task_window_start(event_log, rows, rate, evidence_start)
-    task_days = max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS
-    if task_start > evidence_start and rate is not None:
-        notes.append(
-            _task_window_note(
-                days=days,
-                truncated=evidence_start > since,
-                task_start=task_start,
-                task_days=task_days,
-                rate=rate,
-                horizons=full is not None,
-            )
-        )
-
-    if full is not None:
-        full.joins_scanned = len(join_scan.events)
-    latest_joins = _latest_joins(join_scan.events)
-    sweeps = _latest_sweeps(sweep_scan.events)
     settle = timedelta(hours=settle_hours)
-    units: list[_Unit] = []
+    named: list[tuple[Event, Event | None]] = []
+    for session, join in joins.items():
+        if _began_before(event_log, session, since):
+            continue
+        first_id = _first_pack_id(join.payload or {})
+        named.append((join, _first_pack_row(event_log, first_id) if first_id else None))
+    first_packs = [
+        first
+        for _, first in named
+        if first is not None and since <= _as_utc(first.occurred_at) < end
+    ]
+    rate, notes = _resolve_rate(_Rows(window=first_packs), rate, counts=False)
     arrivals: list[_Arrival] = []
     assigned: list[_Assignment] = []
     mains = _MainTranscripts()
-    for join in latest_joins.values():
-        if op is not None:
-            arrival = _first_pack_arrival(
-                event_log,
-                join,
-                packs,
-                sweeps,
-                settle,
-                rate,
-                evidence_start,
-                end,
-                op,
-                assigned,
-                mains,
-            )
-            if arrival is not None:
-                arrivals.append(arrival)
-        elif full is not None:
-            full.sessions += 1
-            unit = _unit(
-                event_log, join, packs, sweeps, settle, rate, evidence_start, end, full
-            )
-            if unit is not None:
-                units.append(unit)
-    return _Evidence(
-        arrivals=units if full is not None else arrivals,
-        units=units,
-        rows=rows,
-        scan=scan,
-        notes=notes,
-        sweeps=sweeps,
-        joins=latest_joins,
-        packs=packs,
-        settle=settle,
-        since=since,
-        end=end,
-        evidence_start=evidence_start,
-        effective_days=effective_days,
-        rate=rate,
-        task_start=task_start,
-        task_days=task_days,
+    for join, first in named:
+        arrival = _operational_arrival(
+            join,
+            first,
+            sweeps=sweeps,
+            settle=settle,
+            rate=rate,
+            start=since,
+            end=end,
+            funnel=funnel,
+            assigned=assigned,
+            mains=mains,
+        )
+        if arrival is not None:
+            arrivals.append(arrival)
+    task_start = min((draw.at for draw in assigned), default=since)
+    return _OperationalEvidence(
+        arrivals=arrivals,
         assigned=assigned,
         mains=mains,
+        first_packs=first_packs,
+        notes=notes,
+        sweeps=sweeps,
+        since=since,
+        end=end,
+        rate=rate,
+        task_start=task_start,
+        task_days=max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS,
     )
 
 
-def _latest_joins(events: Sequence[Event]) -> dict[str, Event]:
-    """Each session's latest join, by entity id."""
-    latest: dict[str, Event] = {}
+def _read_window(
+    event_log: EventLog, event_type: EventType, since: datetime, until: datetime
+) -> list[Event]:
+    """Every ``event_type`` event from ``since`` to ``until``, oldest first.
+
+    Read a page at a time, newest first, each page ending where the last one
+    began; ``until`` is inclusive, so the boundary rows come twice and are
+    kept once. No cap applies, so no figure is a function of how many events
+    the window holds. A page that holds nothing new is a timestamp shared by
+    more events than a page, which a timestamp cursor cannot get past, and is
+    an error rather than a silently short window.
+    """
+    seen: dict[str, Event] = {}
+    cursor = until
+    while True:
+        page = event_log.get_events(
+            event_type=event_type,
+            since=since,
+            until=cursor,
+            limit=_PAGE_SIZE,
+            order="desc",
+        )
+        fresh = [event for event in page if event.event_id not in seen]
+        seen.update((event.event_id, event) for event in fresh)
+        if len(page) < _PAGE_SIZE:
+            break
+        if not fresh:
+            message = (
+                f"More than {_PAGE_SIZE} {event_type.value} events share one "
+                "timestamp, so the log cannot be read to completion."
+            )
+            raise HoldoutAnalysisError(message)
+        cursor = min(_as_utc(event.occurred_at) for event in page)
+    return sorted(seen.values(), key=lambda event: _as_utc(event.occurred_at))
+
+
+def _earliest_joins(events: Sequence[Event]) -> dict[str, Event]:
+    """Each session's earliest join, by entity id, from events oldest first."""
+    earliest: dict[str, Event] = {}
     for event in events:
         if event.entity_id:
-            latest[event.entity_id] = event
-    return latest
+            earliest.setdefault(event.entity_id, event)
+    return earliest
 
 
-def _first_pack_id(payload: Mapping[str, Any]) -> str | None:
-    """The first pack id a join parsed. Reads index 0 and nothing after it."""
-    ids = payload.get("pack_ids")
-    if not isinstance(ids, list):
-        return None
-    try:
-        first = ids[0]
-    except IndexError:
-        return None
-    return first if isinstance(first, str) and first else None
+def _began_before(event_log: EventLog, session: str, since: datetime) -> bool:
+    """Whether the session has a join written before the window opened."""
+    return bool(
+        event_log.get_events(
+            event_type=EventType.CAPTURE_SESSION_PACKS,
+            entity_id=session,
+            until=since - timedelta(microseconds=1),
+            limit=1,
+        )
+    )
 
 
-def _first_pack_arrival(  # noqa: PLR0911 - one return per funnel stage
-    event_log: EventLog,
+def _first_pack_row(event_log: EventLog, pack_id: str) -> Event | None:
+    """The pack's row, by id. The one way the operational path reads a pack."""
+    found = event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
+    )
+    return found[0] if found else None
+
+
+def _operational_arrival(  # noqa: PLR0911 - one return per funnel stage
     join: Event,
-    packs: dict[str, Event],
+    first: Event | None,
+    *,
     sweeps: Mapping[str, datetime],
     settle: timedelta,
     rate: float | None,
@@ -2195,17 +2132,18 @@ def _first_pack_arrival(  # noqa: PLR0911 - one return per funnel stage
 ) -> _Arrival | None:
     """The join's eligible task, admitted and windowed on its first pack.
 
-    The anchor is the first pack alone: it is windowed by its time and admitted
-    once a completed sweep ran ``settle`` after it, so nothing about the join
-    (when it was written, whether it was written again) or any later pack moves
-    the night a task counts. A join with no pack, or whose first pack has no row,
-    has no such anchor and is counted as the scan holds it. Past the anchor the
-    one post-treatment fact read is whether the join carries an outcome block;
+    ``join`` is the session's earliest and ``first`` the row its first pack id
+    names. The anchor is that pack alone: it is windowed by its time and
+    admitted once a completed sweep ran ``settle`` after it, so nothing about
+    the join (when it was written, whether it was written again) or any later
+    pack moves the night a task counts, except that a join must exist to be
+    read. A join with no pack, or whose first pack has no row, has no such
+    anchor and is counted as the scan holds it, pooled. Past the anchor the one
+    post-treatment fact read is whether the join carries an outcome block;
     its values never are.
     """
     payload = join.payload or {}
     first_id = _first_pack_id(payload)
-    first = _find_pack(event_log, packs, first_id) if first_id else None
     if first is not None:
         first_at = _as_utc(first.occurred_at)
         if not start <= first_at < end or not _swept(join, sweeps, first_at + settle):
@@ -2254,6 +2192,183 @@ def _first_pack_arrival(  # noqa: PLR0911 - one return per funnel stage
         brief_chars=brief_chars,
         agent_type=agent_type,
     )
+
+
+def _operational_notes(
+    ev: _OperationalEvidence,
+    funnel: HoldoutOperationalFunnel,
+    arm_ratio: Sequence[ArmRatioCheck],
+    days: int,
+) -> list[str]:
+    """The operational report's notes, each from first packs, joins or sweeps."""
+    notes = list(ev.notes)
+    keyed = sum(HOLDOUT_KEY in (e.payload or {}) for e in ev.first_packs)
+    if ev.first_packs and not keyed:
+        notes.append(
+            "No task's first pack in the window records a holdout: the build "
+            "that wrote them predates #701, so nothing here is an experiment row."
+        )
+    elif len(ev.first_packs) > keyed:
+        notes.append(
+            "Some tasks' first packs record no holdout (builds before #701); "
+            "they are not experiment rows, so the task figures leave them out."
+        )
+    if ev.rate == 0.0:
+        notes.append(
+            "At rate 0 an empty pack is returned without a pack id, so a task "
+            "whose first retrieval was empty joins from its first non-empty "
+            "pack: eligibility can over-count such tasks."
+        )
+    if funnel.first_pack_not_found:
+        notes.append(
+            f"{funnel.first_pack_not_found} tasks name a first pack with no "
+            "PACK_ASSEMBLED row; every eligible task should join to its row."
+        )
+    if not ev.sweeps:
+        notes.append(
+            "No completed, non-dry-run capture sweep was found, so no task "
+            "counts as finished."
+        )
+    notes.extend(_pre_treatment_notes(funnel))
+    if ev.rate is not None and ev.task_start > ev.since:
+        notes.append(
+            f"The task figures per 30 days divide by the {round(ev.task_days, 2):g} "
+            f"days from {ev.task_start.isoformat()} to the window end, not by "
+            f"the {days}-day window: the earliest admitted first pack at rate "
+            f"{ev.rate:g} was written then."
+        )
+    failing = [c.population for c in arm_ratio if c.p_value < ARM_RATIO_PAUSE_P]
+    if failing:
+        notes.append(
+            "Arm ratio off the rate (binomial p < 0.001) for: "
+            f"{', '.join(failing)}. The pre-registration says pause and fix."
+        )
+    return notes
+
+
+@dataclass
+class _Evidence:
+    """What the full report reads: the scan, the rows and the eligible tasks."""
+
+    units: list[_Unit]
+    rows: _Rows
+    scan: ScanCoverage
+    notes: list[str]
+    sweeps: dict[str, datetime]
+    joins: dict[str, Event]
+    packs: dict[str, Event]
+    settle: timedelta
+    since: datetime
+    end: datetime
+    evidence_start: datetime
+    effective_days: float
+    rate: float | None
+    task_start: datetime
+    task_days: float
+
+
+def _gather(
+    event_log: EventLog,
+    *,
+    days: int,
+    until: datetime | None,
+    rate: float | None,
+    settle_hours: float,
+    limit: int,
+    funnel: HoldoutFunnel,
+) -> _Evidence:
+    """Scan the log and count every join into ``funnel``, building the full units."""
+    end = _as_utc(until) if until is not None else datetime.now(tz=UTC)
+    since = end - timedelta(days=days)
+    pack_scan = scan_events(
+        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+    )
+    join_scan = scan_events(
+        event_log, event_type=EventType.CAPTURE_SESSION_PACKS, since=since, limit=limit
+    )
+    sweep_scan = scan_events(
+        event_log,
+        event_type=EventType.CAPTURE_SWEEP_COMPLETED,
+        since=since,
+        limit=limit,
+    )
+    scan = merge_coverage(pack_scan.coverage, join_scan.coverage, sweep_scan.coverage)
+    evidence_start = since
+    if scan.truncated and scan.covered_since:
+        evidence_start = max(since, _as_utc(datetime.fromisoformat(scan.covered_since)))
+    effective_days = max((end - evidence_start).total_seconds(), 0.0) / _DAY_SECONDS
+
+    packs: dict[str, Event] = {}
+    rows = _Rows()
+    for event in pack_scan.events:
+        if event.entity_id:
+            packs.setdefault(event.entity_id, event)
+        if evidence_start <= _as_utc(event.occurred_at) < end:
+            rows.window.append(event)
+    rate, notes = _resolve_rate(rows, rate)
+    task_start = _task_window_start(event_log, rows, rate, evidence_start)
+    task_days = max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS
+    if task_start > evidence_start and rate is not None:
+        notes.append(
+            _task_window_note(
+                days=days,
+                truncated=evidence_start > since,
+                task_start=task_start,
+                task_days=task_days,
+                rate=rate,
+            )
+        )
+
+    funnel.joins_scanned = len(join_scan.events)
+    latest_joins = _latest_joins(join_scan.events)
+    sweeps = _latest_sweeps(sweep_scan.events)
+    settle = timedelta(hours=settle_hours)
+    units: list[_Unit] = []
+    for join in latest_joins.values():
+        funnel.sessions += 1
+        unit = _unit(
+            event_log, join, packs, sweeps, settle, rate, evidence_start, end, funnel
+        )
+        if unit is not None:
+            units.append(unit)
+    return _Evidence(
+        units=units,
+        rows=rows,
+        scan=scan,
+        notes=notes,
+        sweeps=sweeps,
+        joins=latest_joins,
+        packs=packs,
+        settle=settle,
+        since=since,
+        end=end,
+        evidence_start=evidence_start,
+        effective_days=effective_days,
+        rate=rate,
+        task_start=task_start,
+        task_days=task_days,
+    )
+
+
+def _latest_joins(events: Sequence[Event]) -> dict[str, Event]:
+    """Each session's latest join, by entity id."""
+    latest: dict[str, Event] = {}
+    for event in events:
+        if event.entity_id:
+            latest[event.entity_id] = event
+    return latest
+
+
+def _first_pack_id(payload: Mapping[str, Any]) -> str | None:
+    """The first pack id a join parsed. Reads index 0 and nothing after it."""
+    ids = payload.get("pack_ids")
+    if not isinstance(ids, list):
+        return None
+    try:
+        first = ids[0]
+    except IndexError:
+        return None
+    return first if isinstance(first, str) and first else None
 
 
 def _arrival(  # noqa: PLR0911 - one return per funnel stage
@@ -3123,8 +3238,7 @@ def _report(
         power,
         scan,
         options["settle_hours"],
-        sessions.not_finished,
-        sessions.without_main_join,
+        sessions,
         covariate_adjusted.note,
     )
     return HoldoutReport(
@@ -3640,57 +3754,32 @@ def _power(
     return result
 
 
-def _unkeyed_rows_note(rows: _Rows, *, counts: bool) -> str | None:
-    """The note on PACK_ASSEMBLED rows with no holdout key, if there are any."""
+def _notes(
+    rows: _Rows,
+    funnel: HoldoutFunnel,
+    rate: float | None,
+    sweeps: Mapping[str, datetime],
+    arm_ratio: Sequence[ArmRatioCheck],
+    power: HoldoutPower,
+    scan: ScanCoverage,
+    settle_hours: float,
+    sessions: HoldoutSessions,
+    covariate_note: str,
+) -> list[str]:
+    notes: list[str] = []
     keyed = sum(HOLDOUT_KEY in (e.payload or {}) for e in rows.window)
     if rows.window and not keyed:
-        return (
+        notes.append(
             "No PACK_ASSEMBLED row in the window records a holdout: the build "
-            "that wrote them predates #701, so nothing here is an experiment row."
-            + (
-                ""
-                if not counts
-                else " The main-session figures count them all the same."
-            )
+            "that wrote them predates #701, so nothing here is an experiment row. "
+            "The main-session figures count them all the same."
         )
-    if len(rows.window) > keyed and not counts:
-        return (
-            "Some PACK_ASSEMBLED rows record no holdout (builds before #701); "
-            "they are not experiment rows, so the task figures leave them out."
-        )
-    if len(rows.window) > keyed:
-        return (
+    elif len(rows.window) > keyed:
+        notes.append(
             f"{len(rows.window) - keyed} PACK_ASSEMBLED rows record no holdout "
             "(builds before #701); they are not experiment rows, so the task "
             "figures leave them out, but the main-session figures count them."
         )
-    return None
-
-
-def _notes(
-    rows: _Rows,
-    funnel: _AnyFunnel,
-    rate: float | None,
-    sweeps: Mapping[str, datetime],
-    arm_ratio: Sequence[ArmRatioCheck],
-    power: HoldoutPower | None,
-    scan: ScanCoverage,
-    settle_hours: float,
-    sessions_not_finished: int,
-    sessions_without_main_join: int,
-    covariate_note: str | None,
-    *,
-    counts: bool = True,
-) -> list[str]:
-    """The report's notes; ``None`` for *power* or *covariate_note* leaves it out.
-
-    ``counts=False`` is the operational report: no pack row count appears in
-    any line, and a line about join-time admission is left out.
-    """
-    notes: list[str] = []
-    unkeyed = _unkeyed_rows_note(rows, counts=counts)
-    if unkeyed:
-        notes.append(unkeyed)
     if rate == 0.0:
         notes.append(
             "At rate 0 an empty pack is returned without a pack id, so a task "
@@ -3707,7 +3796,7 @@ def _notes(
             "No completed, non-dry-run capture sweep was found, so no task "
             "counts as finished."
         )
-    elif isinstance(funnel, HoldoutFunnel) and funnel.unfinished:
+    elif funnel.unfinished:
         notes.append(
             f"{funnel.unfinished} tasks are not finished yet: no completed, "
             "non-dry-run capture sweep for their source system ran at least "
@@ -3715,17 +3804,17 @@ def _notes(
             f"for: {', '.join(sorted(sweeps))}). They are left out."
         )
     notes.extend(_pre_treatment_notes(funnel))
-    if isinstance(funnel, HoldoutFunnel) and funnel.eligible_with_unparsed_pack_ids:
+    if funnel.eligible_with_unparsed_pack_ids:
         notes.append(
             f"{funnel.eligible_with_unparsed_pack_ids} eligible tasks reported a "
             "pack id the capture could not parse, so the first parsed pack, "
             "which sets the arm, may not be the task's first call."
         )
-    if sessions_not_finished or sessions_without_main_join:
+    if sessions.not_finished or sessions.without_main_join:
         notes.append(
             "Main sessions left out of the session figures: "
-            f"{sessions_not_finished} not finished yet, "
-            f"{sessions_without_main_join} with no join for the main transcript."
+            f"{sessions.not_finished} not finished yet, "
+            f"{sessions.without_main_join} with no join for the main transcript."
         )
     failing = [
         check.population for check in arm_ratio if check.p_value < ARM_RATIO_PAUSE_P
@@ -3735,12 +3824,11 @@ def _notes(
             "Arm ratio off the rate (binomial p < 0.001) for: "
             f"{', '.join(failing)}. The pre-registration says pause and fix."
         )
-    if power and power.status == "ok" and power.mde_at_target_power is None:
+    if power.status == "ok" and power.mde_at_target_power is None:
         notes.append("Simulated power stays below the target across the shifts tried.")
     if scan.truncated and scan.note:
         notes.append(scan.note)
-    if covariate_note is not None:
-        notes.append(covariate_note)
+    notes.append(covariate_note)
     return notes
 
 
