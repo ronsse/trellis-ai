@@ -1109,7 +1109,7 @@ class TestTheRulePremiseStillHolds:
         (config_dir / "config.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "stores": {},
+                    "knowledge": {},
                     "llm": {
                         **_PARENT,
                         "tiers": {"deep": _DEEP},

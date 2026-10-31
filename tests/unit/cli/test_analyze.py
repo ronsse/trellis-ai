@@ -1267,9 +1267,9 @@ class TestAdvisoryEffectiveness:
 class TestRegistryWarningLogsOncePerProcess:
     """A config.yaml parse warning fires once per process, not per command.
 
-    A top-level ``stores:`` block is deprecated and makes
+    A plane block that is not a mapping (``knowledge: [graph]``) makes
     ``StoreRegistry.from_config_dir`` log
-    ``registry_config_flat_stores_removed`` once per call.
+    ``registry_config_plane_not_mapping`` once per call.
     ``generate-advisories`` and ``advisory-effectiveness`` used to resolve
     their advisory store via ``trellis_cli.config.get_data_dir``, which
     builds a *second* registry and re-parses config.yaml on every call --
@@ -1285,7 +1285,9 @@ class TestRegistryWarningLogsOncePerProcess:
     ) -> None:
         config_dir = tmp_path / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "config.yaml").write_text("stores: {}\n", encoding="utf-8")
+        (config_dir / "config.yaml").write_text(
+            "knowledge: [graph]\n", encoding="utf-8"
+        )
 
         monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
         configure_stderr_logging()
@@ -1301,7 +1303,7 @@ class TestRegistryWarningLogsOncePerProcess:
         assert first.exit_code == 0, first.output
         assert second.exit_code == 0, second.output
 
-        event = "registry_config_flat_stores_removed"
+        event = "registry_config_plane_not_mapping"
         combined = plain(first.output) + plain(second.output)
         matching_lines = [line for line in combined.splitlines() if event in line]
         assert len(matching_lines) == 1, combined

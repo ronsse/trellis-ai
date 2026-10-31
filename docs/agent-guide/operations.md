@@ -26,6 +26,8 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 
 When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix for `Stores not initialized at PATH`.
 
+`config.yaml` is read strictly. The top-level keys it accepts are `knowledge`, `operational`, `embeddings`, `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`, `default_agent` and `format`, plus any key starting with `x-`. An unknown key, a store name its plane does not have, a store placed under the other plane, or the removed flat `stores:` block raises `ConfigError` naming the file and each offending entry: the CLI exits 5 (`EXIT_STORE`), REST answers 409 `config_error` when it surfaces in a request, and the API refuses to start. Keys are echoed only when they are plain names. A plane DSN env var (`TRELLIS_KNOWLEDGE_PG_DSN` or `TRELLIS_OPERATIONAL_PG_DSN`) that no store of that plane reads logs a `registry_plane_dsn_unused` warning once per process.
+
 **JSON output (success):**
 
 ```json

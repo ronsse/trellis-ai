@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import urlparse
 
 import structlog
@@ -194,6 +194,14 @@ _PLANE_PG_DSN_ENV: dict[str, str] = {
     "operational": "TRELLIS_OPERATIONAL_PG_DSN",
 }
 
+# The backends that fall back to the plane's DSN variable when a store's
+# config names no ``dsn``.
+_PG_DSN_BACKENDS = frozenset({"postgres", "pgvector"})
+
+# Planes whose unused-DSN warning this process already logged: the CLI builds
+# a second registry to resolve its data dir, and a server reloads the config.
+_WARNED_UNUSED_PLANE_DSNS: set[str] = set()
+
 # Operator-controlled toggle for the connectivity-ping branch in
 # :meth:`StoreRegistry.validate`. Read at validate-time, not import-time,
 # so a process can flip the env var between runs without reload.
@@ -296,6 +304,79 @@ def _literal_placeholders(
             yield from _literal_placeholders(value, f"{path}[{index}]", seen)
 
 
+# Every top-level key a ``config.yaml`` may carry, and who reads it. A key
+# outside this set is refused, not ignored: a misspelled plane
+# (``knowlege:``) matches nothing below, so its stores would run on their
+# default sqlite backend while every surface reported normal. A new reader of
+# a top-level key adds it here; ``tests/unit/stores/test_registry_config_keys.py``
+# pins the CLI-owned and worker-owned keys against their readers.
+_CONFIG_DOCUMENT_KEYS: frozenset[str] = frozenset(
+    {
+        "knowledge",  # store planes, read by ``_extract_store_config``
+        "operational",
+        "embeddings",  # registry sections, read by ``from_config_dir``
+        "retrieval",
+        "llm",
+        "classify",
+        "data_dir",  # the registry's data dir, and ``TrellisConfig.data_dir``
+        "default_domain",  # ``trellis_cli.config.TrellisConfig``
+        "default_agent",
+        "format",
+        "learning",  # ``learning.auto_promote``, read by ``trellis_cli.worker``
+    }
+)
+
+# A key with this prefix is an extension field, as in Compose: it is never
+# read, so it can hold a YAML anchor that the plane blocks alias.
+_CONFIG_EXTENSION_PREFIX = "x-"
+
+
+def _refuse_flat_stores_block(config_source: str) -> NoReturn:
+    """Raise :class:`ConfigError` for the removed flat ``stores:`` block."""
+    msg = (
+        f"Trellis config at {config_source} has a flat 'stores:' block, which"
+        " was removed in 0.6.0 and is not read, so the stores named in it would"
+        " run on their default sqlite backend. Move its entries under"
+        " 'knowledge:' (graph, vector, document, blob) and 'operational:'"
+        " (trace, event_log, outcome, parameter, tuner_state, api_key)."
+    )
+    raise ConfigError(msg, setting="stores")
+
+
+def _refuse_unknown_config_keys(data: dict[str, Any], config_source: str) -> None:
+    """Raise :class:`ConfigError` for a top-level key nothing reads.
+
+    The removed flat ``stores:`` block gets its own message, since moving its
+    entries is the whole fix. Every other stray key is listed, with the keys
+    that are read, so a misspelling is a diff away. Keys are rendered with
+    :func:`_describe_key`: a stray key can be a DSN or a password written
+    where a key belongs.
+    """
+    if "stores" in data:
+        _refuse_flat_stores_block(config_source)
+    unknown = [
+        key
+        for key in data
+        if not (
+            isinstance(key, str)
+            and (
+                key in _CONFIG_DOCUMENT_KEYS or key.startswith(_CONFIG_EXTENSION_PREFIX)
+            )
+        )
+    ]
+    if not unknown:
+        return
+    listed = ", ".join(repr(_describe_key(key)) for key in unknown)
+    accepted = ", ".join(sorted(_CONFIG_DOCUMENT_KEYS))
+    msg = (
+        f"Trellis config at {config_source} has top-level key(s) Trellis does not"
+        f" read: {listed}. A misspelled store block would run on the default"
+        f" sqlite backend, so it is refused. Keys read: {accepted}; a key starting"
+        f" with '{_CONFIG_EXTENSION_PREFIX}' is allowed and ignored."
+    )
+    raise ConfigError(msg, setting=_describe_key(unknown[0]))
+
+
 def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str, Any]:
     """Flatten the YAML store config into the internal ``{store_type: cfg}`` shape.
 
@@ -303,18 +384,14 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
     blocks). The internal representation stays flat
     (``{"graph": {...}, ...}``) because ``_instantiate`` resolves the
     plane from ``_PLANE_OF`` at lookup time.
+
+    Raises :class:`ConfigError` for a flat ``stores:`` block, a store name no
+    plane has, and a store under the wrong plane. Each used to log a warning
+    and fall through to the store's default backend, so a deployment
+    configured for Postgres ran on SQLite with every surface reporting normal.
     """
     if "stores" in data:
-        # Nothing below reads the flat block, so a store configured only
-        # there runs on its default backend; without this line, silently.
-        logger.warning(
-            "registry_config_flat_stores_removed",
-            source=config_source,
-            hint=(
-                "the flat 'stores:' block was removed in 0.6.0 and is ignored;"
-                " move its entries under 'knowledge:' / 'operational:'"
-            ),
-        )
+        _refuse_flat_stores_block(config_source)
     knowledge_cfg = data.get("knowledge")
     operational_cfg = data.get("operational")
 
@@ -322,6 +399,8 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
         return {}
 
     merged: dict[str, Any] = {}
+    problems: list[str] = []
+    first_setting: str | None = None
     for plane_name, plane_cfg in (
         ("knowledge", knowledge_cfg),
         ("operational", operational_cfg),
@@ -338,23 +417,26 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
         for store_type, store_cfg in plane_cfg.items():
             expected_plane = _PLANE_OF.get(store_type)
             if expected_plane is None:
-                logger.warning(
-                    "registry_config_unknown_store_type",
-                    store_type=_describe_key(store_type),
-                    plane=plane_name,
-                    source=config_source,
+                problems.append(
+                    f"'{plane_name}:' has no store named"
+                    f" {_describe_key(store_type)!r}; its stores are"
+                    f" {', '.join(sorted(_BUILTIN_BACKENDS[plane_name]))}"
                 )
-                continue
-            if expected_plane != plane_name:
-                logger.warning(
-                    "registry_config_store_in_wrong_plane",
-                    store_type=store_type,
-                    declared_plane=plane_name,
-                    expected_plane=expected_plane,
-                    source=config_source,
+            elif expected_plane != plane_name:
+                problems.append(
+                    f"'{store_type}' is a store of the {expected_plane} plane, not"
+                    f" the {plane_name} plane; move it under '{expected_plane}:'"
                 )
+            else:
+                merged[store_type] = store_cfg
                 continue
-            merged[store_type] = store_cfg
+            first_setting = first_setting or f"{plane_name}.{_describe_key(store_type)}"
+    if problems:
+        msg = (
+            f"Trellis config at {config_source} names stores Trellis cannot place,"
+            f" which would run on their default sqlite backend: {'; '.join(problems)}."
+        )
+        raise ConfigError(msg, setting=first_setting)
     return merged
 
 
@@ -877,7 +959,7 @@ class StoreRegistry:
         return self._classify_config
 
     @classmethod
-    def from_config_dir(
+    def from_config_dir(  # noqa: PLR0915
         cls,
         config_dir: Path | None = None,
         data_dir: Path | None = None,
@@ -976,6 +1058,7 @@ class StoreRegistry:
                     " with api_key_env)."
                 )
                 raise ConfigError(msg, setting=placeholders[0][0])
+            _refuse_unknown_config_keys(data, str(config_path))
             store_config = _extract_store_config(data, str(config_path))
             embedding_config = data.get("embeddings", {})
             retrieval_config = data.get("retrieval", {})
@@ -996,7 +1079,7 @@ class StoreRegistry:
                 data_dir = Path(raw_data_dir)
 
         stores_dir = data_dir / "stores"
-        return cls(
+        registry = cls(
             config=store_config,
             stores_dir=stores_dir,
             embedding_config=embedding_config,
@@ -1004,6 +1087,55 @@ class StoreRegistry:
             llm_config=llm_config,
             classify_config=classify_config,
         )
+        registry._warn_unused_plane_dsns(str(config_path))
+        return registry
+
+    def _warn_unused_plane_dsns(self, config_source: str) -> None:
+        """Warn once per plane whose DSN variable is set and no store reads it.
+
+        ``TRELLIS_KNOWLEDGE_PG_DSN`` and ``TRELLIS_OPERATIONAL_PG_DSN`` only
+        supply a DSN to a store whose ``backend`` is ``postgres`` or
+        ``pgvector``; they never select one. Set beside a config that names
+        none, every store in the plane runs on sqlite and health reports
+        ``sqlite``, which reads as a deployment that came up on Postgres.
+
+        Judged per plane, and only on whether *some* store of the plane takes
+        a Postgres backend: the planes' DSNs are set for different stores
+        (graph on ArcadeDB with documents on Postgres is normal), and each
+        plane may be set while the other is not. A backend value that is not
+        a string is the registry's other refusal to make, so it stays quiet.
+        """
+        import os  # noqa: PLC0415
+
+        for plane, env_var in _PLANE_PG_DSN_ENV.items():
+            if plane in _WARNED_UNUSED_PLANE_DSNS or not os.environ.get(env_var):
+                continue
+            backends = [
+                self._resolve_backend(store_type)[0]
+                for store_type, store_plane in _PLANE_OF.items()
+                if store_plane == plane
+            ]
+            if not all(isinstance(b, str) for b in backends):
+                continue
+            if any(b in _PG_DSN_BACKENDS for b in backends):
+                continue
+            _WARNED_UNUSED_PLANE_DSNS.add(plane)
+            # Not the backend values: one that is no registered name can be a
+            # credential written where a name belongs.
+            logger.warning(
+                "registry_plane_dsn_unused",
+                plane=plane,
+                env_var=env_var,
+                source=config_source,
+                hint=(
+                    f"{env_var} is set but no {plane} store selects the"
+                    " postgres or pgvector backend, so it is never read and the"
+                    f" {plane} stores run on the backends config.yaml names"
+                    " (sqlite where it names none). An environment variable"
+                    " never selects a backend: set 'backend: postgres' under"
+                    f" '{plane}:' in config.yaml, or unset the variable."
+                ),
+            )
 
     @classmethod
     def from_config_dict(
@@ -1180,7 +1312,7 @@ class StoreRegistry:
         # Plane-aware resolution: TRELLIS_KNOWLEDGE_PG_DSN for the
         # knowledge plane, TRELLIS_OPERATIONAL_PG_DSN for the
         # operational plane.
-        if backend in {"postgres", "pgvector"} and "dsn" not in params:
+        if backend in _PG_DSN_BACKENDS and "dsn" not in params:
             dsn = _resolve_plane_pg_dsn(store_type)
             if not dsn:
                 plane_env = _PLANE_PG_DSN_ENV[plane]

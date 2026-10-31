@@ -51,7 +51,7 @@ def _apply_overlay_row(stores_dir: Path, *, kind: str, key: str, target: str) ->
 
 
 def _write_config(tmp_path: Path, classify_block: dict[str, Any] | None) -> Path:
-    data: dict[str, Any] = {"stores": {}}
+    data: dict[str, Any] = {"knowledge": {}}
     if classify_block is not None:
         data["classify"] = classify_block
     config_dir = tmp_path / ".trellis"

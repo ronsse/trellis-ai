@@ -249,25 +249,46 @@ def test_a_plugin_constructor_taking_kwargs_receives_every_key(tmp_path: Path) -
     ],
     ids=["flow_dsn", "bare"],
 )
-def test_an_unknown_store_type_is_logged_without_repeating_it(
+def test_an_unknown_store_type_is_refused_without_repeating_it(
     tmp_path: Path, config: str
 ) -> None:
-    with capture_logs() as logs:
+    with capture_logs() as logs, pytest.raises(ConfigError) as info:
         _load(tmp_path, config)
 
-    [warning] = [e for e in logs if e["event"] == "registry_config_unknown_store_type"]
-    assert warning["store_type"].endswith("-character key, not shown>")
+    assert "-character key, not shown>" in str(info.value)
+    assert _hits(str(info.value)) == 0
+    assert _hits(repr(info.value.setting)) == 0
     assert _hits(repr(logs)) == 0
 
 
 def test_an_unknown_store_type_shaped_like_a_name_is_still_named(
     tmp_path: Path,
 ) -> None:
-    with capture_logs() as logs:
+    with pytest.raises(ConfigError) as info:
         _load(tmp_path, "knowledge:\n  grpah:\n    backend: sqlite\n")
 
-    [warning] = [e for e in logs if e["event"] == "registry_config_unknown_store_type"]
-    assert warning["store_type"] == "grpah"
+    assert "'grpah'" in str(info.value)
+    assert info.value.setting == "knowledge.grpah"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        f"{_SENTINEL}: sqlite\n",
+        f"postgresql://u:{_SENTINEL}@h/db: x\n",
+    ],
+    ids=["bare", "dsn"],
+)
+def test_an_unknown_top_level_key_is_refused_without_repeating_it(
+    tmp_path: Path, config: str
+) -> None:
+    with capture_logs() as logs, pytest.raises(ConfigError) as info:
+        _load(tmp_path, config)
+
+    assert "-character key, not shown>" in str(info.value)
+    assert _hits(str(info.value)) == 0
+    assert _hits(repr(info.value.setting)) == 0
+    assert _hits(repr(logs)) == 0
 
 
 # ``urlparse`` needs ``//`` to find a host: without it the user name is the

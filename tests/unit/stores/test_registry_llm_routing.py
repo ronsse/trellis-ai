@@ -61,7 +61,7 @@ def _registry(tmp_path: Path, llm_block: dict[str, Any]) -> StoreRegistry:
     config_dir = tmp_path / ".trellis"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.yaml").write_text(
-        yaml.safe_dump({"stores": {}, "llm": llm_block})
+        yaml.safe_dump({"knowledge": {}, "llm": llm_block})
     )
     return StoreRegistry.from_config_dir(
         config_dir=config_dir, data_dir=tmp_path / "data"
