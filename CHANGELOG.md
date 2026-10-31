@@ -29,6 +29,19 @@ All notable changes to Trellis will be documented in this file.
   say the table has "no estimate".** It prints each arm's outcome mean per
   build; what it omits is an interval and a p-value. `analyze value`'s help no
   longer says the system has no withhold arm and points to `analyze holdout`.
+
+- **On Postgres, a node, alias or stale-owner replacement queued behind a lock
+  could stamp its version earlier than the version it was waiting to close.**
+  `upsert_node` (through `_write_node_version`), `upsert_alias` and
+  `bind_alias_if_absent` each read the clock before acquiring their row or
+  advisory lock, the order [#768](https://github.com/ronsse/trellis-ai/pull/768)
+  fixed in `upsert_edge`: a queued writer's
+  `valid_to` could land before the winner's `valid_from`, so an `as_of` read in
+  that gap served two current-looking versions of one node or alias. All three
+  now read the clock after the lock is granted, matching `upsert_edge`.
+  `upsert_nodes_bulk` reads its existing rows with no lock at all and is
+  unchanged here.
+
 - **A body that is not valid UTF-8 answers 422, not 500.** Pre-existing, and
   distinct from #741: a body sent with no JSON content type (`text/plain`, say)
   reaches the validation error with the raw, undecodable bytes as `input`, and
