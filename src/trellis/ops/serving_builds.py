@@ -110,7 +110,7 @@ def _text(value: Any) -> str | None:
     return None
 
 
-def _stamp_fields(event: Event) -> tuple[str | None, str | None, bool]:
+def stamp_fields(event: Event) -> tuple[str | None, str | None, bool]:
     """``(version, commit, stamp_stale)`` off one row, never raising.
 
     A row whose metadata or stamp is not the shape the writer emits reads as
@@ -136,7 +136,7 @@ def summarize_serving_builds(pack_events: Iterable[Event]) -> ServingBuildsRepor
     seen: dict[tuple[str | None, str | None], list[datetime]] = {}
     stale: set[tuple[str | None, str | None]] = set()
     for event in pack_events:
-        version, commit, stamp_stale = _stamp_fields(event)
+        version, commit, stamp_stale = stamp_fields(event)
         key = (version, commit)
         seen.setdefault(key, []).append(_as_utc(event.occurred_at))
         if stamp_stale:
@@ -200,5 +200,6 @@ __all__ = [
     "ServingBuildsReport",
     "build_label",
     "mixed_builds_reason",
+    "stamp_fields",
     "summarize_serving_builds",
 ]
