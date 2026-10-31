@@ -2301,6 +2301,55 @@ class TestAShrunkDocumentLeavesNoSurplusChunks:
         assert again.counts()["skipped_unchanged"] == 3
         assert again.counts()["updated"] == 0
 
+    def test_a_gap_inside_the_declared_range_does_not_hide_the_rows_above_it(
+        self, registry, vault, monkeypatch
+    ):
+        """A clean shrink deletes every declared row past the new end.
+
+        The probe upward from the declared end only finds rows the parent no
+        longer declares; the declared range itself is covered by the loop, gap
+        or no gap. A row above a missing one is still the old document's text.
+        """
+        store = registry.knowledge.document_store
+        parent_id, before = self._seed_long_then_shrink(registry, vault, monkeypatch)
+        kept = len(chunk_spans(_long_markdown(_topics("newword", 6))))
+        gap = chunk_doc_id(parent_id, kept + 1)
+        assert len(before) > kept + 3
+        store.delete(gap)
+        assert store.get(chunk_doc_id(parent_id, kept + 2)) is not None
+
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert _chunk_ids(store, parent_id) == [
+            chunk_doc_id(parent_id, i) for i in range(kept)
+        ]
+
+    def test_redaction_warnings_for_two_kept_chunks_list_in_ascending_order(
+        self, registry, vault, monkeypatch
+    ):
+        """The delete runs top down; the report lists what it kept bottom up."""
+        store = registry.knowledge.document_store
+        vectors = registry.knowledge.vector_store
+        parent_id, before = self._seed_long_then_shrink(registry, vault, monkeypatch)
+        kept = len(chunk_spans(_long_markdown(_topics("newword", 6))))
+        low, high = chunk_doc_id(parent_id, kept + 1), chunk_doc_id(parent_id, kept + 3)
+        assert len(before) > kept + 3
+        make_tombstone(store, vectors, low)
+        make_tombstone(store, vectors, high)
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert [
+            w["doc_id"] for w in report.warnings if w["kind"] == "redaction_tombstone"
+        ] == [low, high]
+        assert is_redaction_tombstone(store.get(low))
+        assert is_redaction_tombstone(store.get(high))
+        assert _chunk_ids(store, parent_id) == [
+            *(chunk_doc_id(parent_id, i) for i in range(kept)),
+            low,
+            high,
+        ]
+
     def test_a_clean_chunked_record_costs_one_read_past_its_last_chunk(
         self, registry, vault, monkeypatch
     ):

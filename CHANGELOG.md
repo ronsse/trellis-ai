@@ -100,9 +100,12 @@ All notable changes to Trellis will be documented in this file.
   - With reconcile on, a record whose own parent row is stored but not landed is
     no longer judged again. It keeps the verdict that row was stored with
     (`reconciliation`, `supersedes_doc_id`, `updates_doc_id`), is written again,
-    and its supersession is applied. Before, a judge that answered no-op dropped
-    the record with its chunks missing and the session was watermarked, and a
-    retry with no judge lost the supersession the first run had claimed.
+    and its supersession is applied, to a target that still reads as current
+    only (an archived, superseded or deleted one is left alone, as in the repair
+    above, and a deleted one counts no failure). Before, a judge that answered
+    no-op dropped the record with its chunks missing and the session was
+    watermarked, and a retry with no judge lost the supersession the first run
+    had claimed.
   - Limit: a process kill between a batch's records and its training pairs loses
     that batch's keep pairs when reconcile is on, because the retry no-ops those
     records. It is bounded by `checkpoint_every` sessions and costs training
@@ -119,10 +122,13 @@ All notable changes to Trellis will be documented in this file.
     next update.
 
   A clean run writes the same records and documents (metadata and lifecycle
-  included), the same events in the same order, and the same report at any
-  `checkpoint_every`, with one exception: `distill_unavailable` warnings are added
-  while sessions are judged and near-duplicate warnings when a batch is written,
-  so a run that has both lists them in a different order. The sweep's own flushed
+  included) and the same report at any `checkpoint_every`, with one exception:
+  `distill_unavailable` warnings are added while sessions are judged and
+  near-duplicate warnings when a batch is written, so a run that has both lists
+  them in a different order. It emits the same events for each document, but not
+  in the same sequence: they interleave batch by batch instead of arriving in
+  blocks, and `CORPUS_SYNCED` fires once per batch that writes a record rather
+  than once per sweep. The sweep's own flushed
   memories stay hidden from later sessions' reconcile, so which memories are
   written and how they are judged do not change. A dry run still makes one pass
   and saves nothing.

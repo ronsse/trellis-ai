@@ -749,13 +749,22 @@ def _delete_surplus_chunks(
     stop = max(kept, old_chunk_count)
     while doc_store.get(chunk_doc_id(parent_doc_id, stop)) is not None:
         stop += 1
-    for index in range(stop - 1, kept - 1, -1):
-        orphan_id = chunk_doc_id(parent_doc_id, index)
-        orphan = doc_store.get(orphan_id)
-        if orphan is not None and is_redaction_tombstone(orphan):
-            report.warnings.append(_redaction_tombstone_warning(relpath, orphan_id))
-            continue
-        _delete_doc_and_vector(doc_store, vector_store, orphan_id)
+    # The warnings are met top down and reported bottom up, the order the
+    # report has always listed them in.
+    kept_tombstones: list[str] = []
+    try:
+        for index in range(stop - 1, kept - 1, -1):
+            orphan_id = chunk_doc_id(parent_doc_id, index)
+            orphan = doc_store.get(orphan_id)
+            if orphan is not None and is_redaction_tombstone(orphan):
+                kept_tombstones.append(orphan_id)
+                continue
+            _delete_doc_and_vector(doc_store, vector_store, orphan_id)
+    finally:
+        report.warnings.extend(
+            _redaction_tombstone_warning(relpath, orphan_id)
+            for orphan_id in reversed(kept_tombstones)
+        )
 
 
 def _write_chunks(

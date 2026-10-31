@@ -1308,3 +1308,110 @@ class TestAnUnlandedRecordKeepsItsVerdict:
         assert stored["metadata"]["supersedes_doc_id"] == self._NEIGHBOUR
         assert _superseded_by(registry, self._NEIGHBOUR) == parent["doc_id"]
         assert stored["metadata"]["chunk_count"] == len(_chunk_rows(registry)) >= 2
+
+    # -- the bypass stamps a target only while it still reads as current ------
+
+    def _retry_with_the_target_changed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        change: Any,
+    ) -> tuple[MagicMock, dict[str, Any], Any]:
+        """Run 1 half-writes a superseding capture; *change* then edits the target.
+
+        Returns the registry, the stored parent, and the retry's report.
+        """
+        reply = candidates_json(good_candidate(memory=_varied_memory(1)))
+        registry, root, wm, _ = self._half_written(
+            tmp_path, monkeypatch, replies=[reply, _SUPERSEDE], seed_before=True
+        )
+        parent = self._parent_of_the_capture(registry)
+        assert parent["metadata"]["supersedes_doc_id"] == self._NEIGHBOUR
+        assert _superseded_by(registry, self._NEIGHBOUR) is None
+        change(registry)
+        retry = FakeLLMClient([reply])
+        report = run_capture(
+            registry, transcripts_root=root, watermark_path=wm, llm_client=retry
+        )
+        assert len(retry.calls) == 1  # the bypass: no reconcile judge
+        return registry, parent, report
+
+    @pytest.mark.parametrize("state", ["archived", "deprecated"])
+    def test_the_bypass_does_not_restamp_a_retired_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+    ) -> None:
+        def retire(registry: MagicMock) -> None:
+            record = Lifecycle(state=state, deprecation_reason="retired")  # type: ignore[arg-type]
+            TestRepairLeavesATargetAlone._set_lifecycle(
+                registry, self._NEIGHBOUR, record.model_dump(mode="json")
+            )
+            if state == "archived":
+                # The canary: the query reaches the target, and only the state
+                # withholds it (a deprecated one is still served).
+                assert self._NEIGHBOUR not in TestRepairLeavesATargetAlone._pack(
+                    registry, "old"
+                )
+
+        registry, parent, report = self._retry_with_the_target_changed(
+            tmp_path, monkeypatch, retire
+        )
+
+        target = registry.knowledge.document_store.get(self._NEIGHBOUR)
+        assert target["metadata"]["lifecycle"]["state"] == state
+        assert _superseded_by(registry, self._NEIGHBOUR) is None
+        if state == "archived":
+            assert self._NEIGHBOUR not in TestRepairLeavesATargetAlone._pack(
+                registry, "old"
+            )
+        assert report.supersessions_failed == 0
+        # The row keeps the claim it was stored with, as it would on main.
+        stored = registry.knowledge.document_store.get(parent["doc_id"])["metadata"]
+        assert stored["supersedes_doc_id"] == self._NEIGHBOUR
+        assert stored["reconciliation"] == "supersede"
+        assert stored["chunk_count"] == len(_chunk_rows(registry)) >= 2
+
+    def test_the_bypass_keeps_the_successor_a_target_already_has(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        third = "capture:claude-code:third"
+
+        def resupersede(registry: MagicMock) -> None:
+            _seed(registry, third, "A third memory, unrelated to the others.")
+            record = Lifecycle(state="superseded", superseded_by=third)
+            TestRepairLeavesATargetAlone._set_lifecycle(
+                registry, self._NEIGHBOUR, record.model_dump(mode="json")
+            )
+
+        registry, _, report = self._retry_with_the_target_changed(
+            tmp_path, monkeypatch, resupersede
+        )
+
+        assert _superseded_by(registry, self._NEIGHBOUR) == third
+        assert report.supersessions_failed == 0
+
+    def test_the_bypass_counts_no_failure_for_a_target_deleted_since(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry, parent, report = self._retry_with_the_target_changed(
+            tmp_path,
+            monkeypatch,
+            lambda registry: registry.knowledge.document_store.delete(self._NEIGHBOUR),
+        )
+
+        assert report.supersessions_failed == 0
+        assert not [w for w in report.warnings if "supersede" in str(w.get("kind"))]
+        stored = registry.knowledge.document_store.get(parent["doc_id"])["metadata"]
+        assert stored["supersedes_doc_id"] == self._NEIGHBOUR
+        assert stored["reconciliation"] == "supersede"
+        assert stored["chunk_count"] == len(_chunk_rows(registry)) >= 2
+
+    def test_the_bypass_still_stamps_a_target_that_reads_as_current(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard narrows the stamp; it must not switch it off."""
+        registry, parent, report = self._retry_with_the_target_changed(
+            tmp_path, monkeypatch, lambda registry: None
+        )
+
+        assert _superseded_by(registry, self._NEIGHBOUR) == parent["doc_id"]
+        assert report.supersessions_failed == 0

@@ -163,7 +163,9 @@ def adjudicate(
     Its stored parent already records what an earlier judge decided, so the
     candidate takes that verdict, its marker and the ids it names, and goes
     straight to the writer, which completes the chunk rows; the stale-mark is
-    then applied by :func:`apply_supersessions` like any other survivor's.
+    then applied by :func:`apply_supersessions` like any other survivor's, but
+    only to a target that still reads as current (an archived, superseded or
+    deleted one is left alone and counts no failure, as in the repair below).
     Judging it again would be a second verdict on a record that already has one:
     a NOOP would drop it with its chunks still missing, and a run with no judge
     would stamp ``add`` over a stored ``supersede`` and never mark the target.
@@ -207,6 +209,17 @@ def adjudicate(
             if exact_id == candidate.doc_id:
                 # Already in ``existing`` and ``index``, which loaded it.
                 _take_stored_verdict(candidate, exact)
+                target_id = candidate.supersedes_doc_id
+                if target_id:
+                    # The stamp rewrites the target's lifecycle record, so it
+                    # goes only to one that still reads as current, as in
+                    # _repair_supersession. The row keeps its stored claim.
+                    target = doc_store.get(target_id)
+                    if (
+                        target is None
+                        or lifecycle_state_of(target.get("metadata")) != "current"
+                    ):
+                        candidate.supersedes_doc_id = None
                 survivors.append(candidate)
                 continue
 
