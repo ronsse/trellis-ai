@@ -20,6 +20,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
@@ -99,7 +100,7 @@ def _doc_ids(path: Path) -> set[str]:
 def test_command_is_registered() -> None:
     result = runner.invoke(app, ["admin", "backup", "--help"])
     assert result.exit_code == 0
-    assert "--output" in result.output
+    assert "--output" in plain(result.output)
 
 
 class TestLiveStore:
