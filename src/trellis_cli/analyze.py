@@ -1951,10 +1951,10 @@ def _render_holdout_guardrails(report: HoldoutReport) -> None:
     console.print(f"    [dim]{escape(block.note)}[/dim]")
 
 
-def _render_holdout_header(
+def _render_holdout_title(
     report: HoldoutReport | HoldoutOperationalReport, qualifiers: str
 ) -> None:
-    """The title, window, row counts and funnel both modes open with.
+    """The title and windows both modes open with.
 
     ``qualifiers`` is the markup after the rate in the title: the full report
     names its outcome and cut-off handling, the operational one neither.
@@ -1974,6 +1974,11 @@ def _render_holdout_header(
             f"  [yellow]window[/yellow] evidence covers "
             f"{report.effective_window_days:g} of {report.window_days} days"
         )
+
+
+def _render_holdout_header(report: HoldoutReport, qualifiers: str) -> None:
+    """The title, window, row counts and funnel of the full report."""
+    _render_holdout_title(report, qualifiers)
     rows = report.rows
     console.print(
         f"  PACK_ASSEMBLED rows {rows.scanned}: {rows.without_holdout_key} without "
@@ -2034,8 +2039,23 @@ def _render_holdout(report: HoldoutReport) -> None:
 
 def _render_holdout_operational(report: HoldoutOperationalReport) -> None:
     """The operational view: counts fixed by each task's first pack, no outcome."""
-    _render_holdout_header(report, "operational")
+    _render_holdout_title(report, "operational")
     f = report.funnel
+    console.print()
+    console.print(
+        "  [bold]Funnel[/bold] (sub-agent joins, admitted on their first pack)"
+    )
+    console.print(
+        f"    {f.no_outcome} without an outcome, "
+        f"{f.no_retrieval} without a pack ({f.no_retrieval_never_called} never "
+        f"retrieved, {f.no_retrieval_errored} errored, "
+        f"{f.no_retrieval_unparsed} unparsed, {f.no_retrieval_empty_answer} "
+        f"empty answer), {f.first_pack_not_found} first pack not found, "
+        f"{f.first_pack_old_build} from a build without the holdout, "
+        f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
+        f"first pack, {f.pre_treatment_excluded} first retrieval after a stop "
+        "hook's feedback or a commit"
+    )
     console.print(
         f"    eligible {f.eligible} "
         f"({f.pre_treatment_unknown} with no retrieval timing)"
@@ -2064,15 +2084,11 @@ def _render_holdout_operational(report: HoldoutOperationalReport) -> None:
         )
     s = d.sessions
     swhy = s.not_measurable.get
-    reaching = _per_30_days(
-        s.reaching_retrieval_per_30d, swhy("reaching_retrieval_per_30d")
-    )
+    with_pack = _per_30_days(s.with_first_pack_per_30d, swhy("with_first_pack_per_30d"))
     eligible = _per_30_days(s.eligible_per_30d, swhy("eligible_per_30d"))
     console.print(
-        f"    main sessions {s.rolled_up} rolled up ({s.not_finished} not finished "
-        f"and {s.without_main_join} without a main join left out): reaching a "
-        f"retrieval {s.reaching_retrieval} ({reaching}), with a non-empty pack "
-        f"{s.eligible} ({eligible})"
+        f"    main transcripts with a first pack {s.with_first_pack} "
+        f"({with_pack}), with a non-empty first pack {s.eligible} ({eligible})"
     )
     console.print(f"    [dim]{escape(s.note)}[/dim]")
     console.print()
@@ -2162,8 +2178,10 @@ def holdout(
         "--operational",
         help=(
             "Check the experiment is running without reading its outcomes: the "
-            "funnel, arm counts and ratio checks, covariate coverage, scan and "
-            "volume, each fixed by a task's first pack. No outcome value is "
+            "funnel, arm counts and ratio checks and covariate coverage, each "
+            "fixed by a task's first pack (and the scan's cap and whether it "
+            "bit). A task is admitted on its first pack, so its counts can "
+            "differ from the full report's. No outcome value is "
             "read (only whether a join has an outcome block), and no mean, "
             "estimate, CI, p-value, power, SD, guardrail or fit is computed. "
             "--outcome, --itt, --permutations, --bootstraps, --power-sims, "
@@ -2217,9 +2235,9 @@ def holdout(
     writes nothing, not even a meta-trace.
 
     With --operational the report holds only what shows the experiment is
-    running (funnel, arm counts, arm-ratio checks, coverage, scan, volume),
-    each fixed by a task's first pack; the outcome-derived figures are not
-    computed.
+    running (funnel, arm counts, arm-ratio checks, coverage), each fixed by a
+    task's first pack; the outcome-derived figures are not computed and no
+    pack count is reported.
     """
     from trellis.analyze.holdout import (  # noqa: PLC0415
         HoldoutAnalysisError,

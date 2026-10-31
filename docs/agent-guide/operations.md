@@ -3630,43 +3630,73 @@ due. The outcome-derived figures are never computed, not computed and hidden: th
 report is its own model (`mode: "operational"`), with no field that could carry
 one.
 
-What the mode guarantees is narrower than "no outcome read". Every figure that
-carries an arm or a build is fixed by a task's first pack (its arm, size, build
-and time), its brief, and when capture finished with it, or counts tasks as they
-arrive. The one fact read from after the first pack is whether the task's join
-carries an outcome block at all: a join without one is dropped before
-eligibility (`funnel.no_outcome`), so a missing block moves `eligible_by_arm`,
-and the arm-ratio check needs that. The block's contents are never read, nor is
-`ended_on_error`, the session's tool-call count, its hook feedback, a later
-pack's arm or build, or the unparsed-pack-id count of an eligible task. So
-neither one report nor the differences between reports over several windows
-(`--until`, `--days`, or stored nightly output) can recover a cut-off, a missing
-outcome field, a session's length or a pack count per task by arm. The full
-report makes no such promise, and the bound is on the report, not the store: a
-reader of the events can still read them.
+**The rule.** An operational figure depends only on values fixed when a task's
+first pack was assembled, and on capture sweep times, which no one task drives.
+The first pack's values are its time, its arm draw, its build stamp and rate,
+and, from the join, the agent type, the brief and covariates and the two timing
+flags set before the first retrieval. Everything after it is post-treatment and
+is never read: pack count, later packs, when a join was written, whether it was
+written again, a session's length and every outcome value. Pooling does not
+make a post-treatment figure safe, because a pooled count differenced against
+`eligible_by_arm` across windows recovers it by arm, so pooled counts of them
+are absent too. Neither one report nor the differences between reports over
+several windows (`--until`, `--days`, or stored nightly output) vary with those
+values.
 
-It keeps `status`, the window and task-window fields, `rate`, `settle_hours`,
-`rows`, `scan` and `notes`; the `funnel` up to eligibility, without the
-cut-off, outcome-missing, analysed, post-hoc, hook-feedback-seen and unparsed
-pack id counts; the first two `exclusions` (the population and the
-pre-treatment rule), without the cut-off one; and `descriptive`: the eligible
-task count and rate, `eligible_by_arm`, `arm_ratio` (with its p and the
-pause-and-fix note), the top-parent share and `sessions`. `rows` counts every
-pack assembled in the window by the draw that pack received, and a pack's arm
-is drawn per pack, so a later pack's arm does not follow its task's.
-`sessions` counts main sessions, with no arm. It adds `covariate_coverage`, how
-many eligible tasks carry each adjustment's covariates, with no fit. It drops
-`seed`, `inference`, `covariate_adjusted`, `power`, `guardrails`, the `outcome`
-and `itt` echoes, and from `descriptive` every outcome mean or SD, the MDE and
-sample-size horizons, and every count that follows the first pack: analysed
-tasks, packs per task, tasks with several packs or both arms, the post-hoc
-share, and the cut-offs split by arm. `--outcome` and `--itt` are accepted and
-change nothing; `--permutations`, `--bootstraps`, `--power-sims`,
-`--planned-*` and `--seed` are validated as for the full report and then
-unused, so one command line exits alike with and without `--operational`. With
-`--by-commit`, `by_commit` holds counts only: per build the eligible tasks that
-were `served` and `withheld`, each under its first pack's build. The text and
-JSON are an inspection aid, not a pause control: nothing here stops a run.
+**Two disclosed exceptions.** Whether a task's join carries an outcome block at
+all is read, as presence only: a join without one is dropped before eligibility
+(`funnel.no_outcome`), which moves `eligible_by_arm`. And `scan.truncated`
+with `scan.covered_since` is a coarse pooled function of how many events of
+every type the window holds, pack volume included, so a store busy enough to
+reach the per-type scan limit moves it. Beyond these two the report does not
+promise that a figure is recoverable or not: it promises the rule, and a figure
+that breaks it is a defect. The bound is on the report, not the store: a reader
+of the events can still read them. Two assumptions are not covered by the
+tests' fixtures: capture writes a task's first join on the first sweep that
+sees its transcript, so the join exists by the time a settled sweep admits it;
+and `task_window_since` is read from the times of rate-keyed pack rows without
+regard to arm, so a later pack could move it only at a build where the rate
+changed.
+
+**First-pack admission.** A task is windowed on its first pack's time and
+admitted once a completed sweep ran `settle_hours` after that pack. The full
+report windows on the first pack too but admits on the latest join, which
+capture writes again whenever a session continues, so a continued session moves
+the night it counts. The two anchors differ, so operational `eligible`, the
+funnel counts and `sessions` can differ from the full report's on the same
+night. They are not the same number and neither stands in for the other; the
+full report's counts are the preregistered ones.
+
+It keeps `status`, the window and task-window fields, `rate`, `settle_hours` and
+`notes`; `scan` reduced to `limit`, `truncated` and `covered_since`, with no
+`scanned`, `matched` or `dropped`, which count packs; the `funnel` stages from
+the sub-agent joins admitted on their first pack up to eligibility, without the
+join, session, outside-window and unfinished counts, and without the cut-off,
+outcome-missing, analysed, post-hoc, hook-feedback-seen and unparsed pack id
+counts; the first two `exclusions` (the population and the pre-treatment rule),
+without the cut-off one; and `descriptive`: the eligible task count and rate,
+`eligible_by_arm`, `arm_ratio` (with its p and the pause-and-fix note), the
+top-parent share and `sessions`. The `arm_ratio` populations are `assigned`, the
+first pack of each admitted join at the rate, main transcripts and joins with no
+outcome block included, which keeps the sample-ratio check; `tasks`, the
+eligible tasks; and `assigned YYYY-Wnn`, the first packs by week. No pack row
+count is reported: the `rows` block and the `rows YYYY-Wnn` populations are
+gone, because packs per task by arm is the input of the recall guardrail.
+`sessions` counts main transcripts on their own first pack (`with_first_pack`,
+and `eligible` when that pack is non-empty), with no arm and no roll-up of
+sub-agent joins. It adds `covariate_coverage`, how many eligible tasks carry
+each adjustment's covariates, with no fit. It drops `seed`, `inference`,
+`covariate_adjusted`, `power`, `guardrails`, the `outcome` and `itt` echoes, and
+from `descriptive` every outcome mean or SD, the MDE and sample-size horizons,
+and every count that follows the first pack: analysed tasks, packs per task,
+tasks with several packs or both arms, the post-hoc share, and the cut-offs
+split by arm. `--outcome` and `--itt` are accepted and change nothing;
+`--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` are
+validated as for the full report and then unused, so one command line exits
+alike with and without `--operational`. With `--by-commit`, `by_commit` holds
+counts only: per build the eligible tasks that were `served` and `withheld`,
+each under its first pack's build. The text and JSON are an inspection aid, not
+a pause control: nothing here stops a run.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no

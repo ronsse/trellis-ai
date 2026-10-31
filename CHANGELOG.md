@@ -8,20 +8,26 @@ All notable changes to Trellis will be documented in this file.
 
 - **`trellis analyze holdout --operational` reports the experiment's health
   without reading an outcome.** A pack holdout needs a check that it is running
-  (arm counts and their ratio, the funnel, covariate coverage, scan and volume,
-  per-build counts) that does not expose the results it is meant to leave blind.
-  The flag emits only figures fixed by each task's first pack, or counting tasks
-  as they arrive, from a separate report model that has no outcome-mean,
-  estimate, interval, p-value, power, MDE, guardrail or covariate-fit field, no
-  cut-off, analysed or post-hoc count and no pack count per task, so neither one
-  report nor the differences between reports over several windows recover them
-  by arm. The one fact it reads from after the first pack is whether a join
-  carries an outcome block at all; a join without one is dropped before
-  eligibility, which moves the arm counts. The inference options are validated
-  as for the full report, so a command line exits alike with and without the
-  flag. With `--by-commit` the table is eligible-task counts per build and arm.
-  Default output and exit codes are unchanged, and there is no REST or OpenAPI
-  surface for the flag yet.
+  (arm counts and their ratio, the funnel, covariate coverage, per-build
+  counts) that does not expose the results it is meant to leave blind. The flag
+  emits a separate report model with no outcome-mean, estimate, interval,
+  p-value, power, MDE, guardrail or covariate-fit field, no cut-off, analysed or
+  post-hoc count, and no pack row count. Every figure depends only on values
+  fixed when a task's first pack was assembled (that pack's time, arm draw,
+  build and rate, and the join's agent type, brief and the two timing flags set
+  before the first retrieval) and on capture sweep times; pack count, later
+  packs, join time, re-emitted joins, session length and outcome values are
+  never read, so reports over several windows, or stored nightly, do not vary
+  with them. Two exceptions are disclosed: whether a join carries an outcome
+  block (presence only; a join without one is dropped before eligibility), and
+  `scan.truncated` with `scan.covered_since`, a coarse function of how many
+  events the window holds. A task is admitted and windowed on its first pack, so
+  operational `eligible` can differ from the full report's on the same night.
+  The arm-ratio check runs on `assigned`, the first pack of each admitted join
+  at the rate. The inference options are validated as for the full report, so a
+  command line exits alike with and without the flag. With `--by-commit` the
+  table is eligible-task counts per build and arm. Default output and exit codes
+  are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
 ### Fixed
 

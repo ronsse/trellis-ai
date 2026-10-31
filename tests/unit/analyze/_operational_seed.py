@@ -4,11 +4,17 @@
 :class:`PostTreatment` names: the outcome magnitudes (turns, commits, PRs, tool
 errors, tokens), which tasks are cut off, where the zeros and the missing
 field fall, how many tool calls a session made, how much hook feedback it drew,
-what its later packs were and how many pack ids the capture could not parse.
-Every arm, build, covariate and timing flag a first pack settles, and which
-joins carry an outcome block at all, are fixed by the task's index, so two
+what its later packs were, how many packs it drew, how long after its first
+pack its join was written, whether the join was written again, whether it ended
+interrupted and how many pack ids the capture could not parse. Every arm, build,
+covariate and timing flag a first pack settles, which joins carry an outcome
+block at all, and when capture swept, are fixed by the task's index, so two
 stores that differ only in a :class:`PostTreatment` differ only in values a
 treatment could have moved.
+
+A join is written before the first sweep that could admit its task (at most 25
+minutes after the first pack, where the nightly tests settle for 30), because a
+join written later would be missing from the night a sweep admitted it.
 """
 
 from __future__ import annotations
@@ -30,6 +36,10 @@ COMMIT_B = "9f8e7d6c5b4a"
 #: Tasks written by :func:`seed_store`, by the analysis's own reckoning:
 #: 2 parents x 2 weeks x 6 tasks, then the odd ones.
 TASKS = 24
+#: Window ends that admit the seed's tasks a few at a time.
+WINDOW_ENDS = [MONDAY + timedelta(minutes=40 * step) for step in range(13)] + [
+    MONDAY + timedelta(hours=9 * step) for step in range(1, 40)
+]
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,16 @@ class PostTreatment:
     later_pack_other_build: bool = False
     later_packs_everywhere: bool = False
     unparsed_pack_ids: int = 0
+    #: Minutes from a task's first pack to its join, for (served, withheld) tasks.
+    join_lag_minutes: tuple[int, int] = (10, 10)
+    #: Write the join again 30 hours on, for tasks of this arm: ``none``,
+    #: ``served``, ``withheld`` or ``all``. The second join differs in every
+    #: post-treatment value.
+    reemit_in: str = "none"
+    #: Mark the outcome ``ended_interrupted``, for tasks of this arm (same values).
+    interrupted_in: str = "none"
+    #: Packs drawn after the first, for (served, withheld) tasks, in their arm.
+    extra_packs: tuple[int, int] = (0, 0)
 
 
 def seed_store(
@@ -89,6 +109,9 @@ def seed_store(
                 )
                 if index == post.missing_turns_at:
                     outcome["assistant_turns"] = None
+                arm_name = "withheld" if withheld else "served"
+                if post.interrupted_in in (arm_name, "all"):
+                    outcome["ended_interrupted"] = True
                 start = MONDAY + timedelta(weeks=week, hours=slot, minutes=index)
                 pack_ids = [
                     log.pack(
@@ -98,6 +121,15 @@ def seed_store(
                         metadata=provenance(commit),
                     )
                 ]
+                pack_ids.extend(
+                    log.pack(
+                        at=start + timedelta(minutes=2 + extra),
+                        withheld=withheld,
+                        items=2,
+                        metadata=provenance(commit),
+                    )
+                    for extra in range(post.extra_packs[int(withheld)])
+                )
                 if index % 5 == 4 or post.later_packs_everywhere:
                     later_commit = COMMIT_B if post.later_pack_other_build else commit
                     pack_ids.append(
@@ -110,33 +142,48 @@ def seed_store(
                             metadata=provenance(later_commit),
                         )
                     )
+                timing = (
+                    timing_payload(
+                        hook_before=False,
+                        commit_before=False,
+                        hook_messages=post.hook_messages,
+                        ordinal=post.first_retrieval_ordinal,
+                        calls=post.tool_calls,
+                    )
+                    if index % 4
+                    else None
+                )
+                covariates = (
+                    covariates_payload(
+                        brief_chars=100 + 7 * index,
+                        agent_type="a" * 11 + str(index % 2) if index % 2 else None,
+                    )
+                    if index % 3
+                    else None
+                )
+                lag = timedelta(minutes=post.join_lag_minutes[int(withheld)])
                 log.join(
                     f"task-{index:03d}",
-                    at=start + timedelta(hours=1),
+                    at=start + lag,
                     pack_ids=pack_ids,
                     parent=parent,
                     outcome=None if index == 11 else outcome,
                     pack_ids_unparsed=post.unparsed_pack_ids,
-                    timing=(
-                        timing_payload(
-                            hook_before=False,
-                            commit_before=False,
-                            hook_messages=post.hook_messages,
-                            ordinal=post.first_retrieval_ordinal,
-                            calls=post.tool_calls,
-                        )
-                        if index % 4
-                        else None
-                    ),
-                    covariates=(
-                        covariates_payload(
-                            brief_chars=100 + 7 * index,
-                            agent_type="a" * 11 + str(index % 2) if index % 2 else None,
-                        )
-                        if index % 3
-                        else None
-                    ),
+                    timing=timing,
+                    covariates=covariates,
                 )
+                if post.reemit_in in (arm_name, "all"):
+                    again = dict(outcome, assistant_turns=999, input_tokens=77_777)
+                    log.join(
+                        f"task-{index:03d}",
+                        at=start + timedelta(hours=30),
+                        pack_ids=pack_ids,
+                        parent=parent,
+                        outcome=None if index == 11 else again,
+                        pack_ids_unparsed=post.unparsed_pack_ids,
+                        timing=timing,
+                        covariates=covariates,
+                    )
                 index += 1
     main = log.task(start=MONDAY + timedelta(days=2), parent=None, arms=[False])
     log.task(
@@ -147,3 +194,5 @@ def seed_store(
         covariates=covariates_payload(),
     )
     log.sweep()
+    for end in WINDOW_ENDS:
+        log.sweep(at=end - timedelta(seconds=1))

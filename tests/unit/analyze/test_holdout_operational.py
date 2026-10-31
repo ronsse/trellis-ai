@@ -13,7 +13,16 @@ between reports over several windows. Four guards, each of a different kind:
   post-treatment);
 * the outcome readers and the inference stages patched to raise, so the mode
   is shown not to compute an outcome value rather than to hide one;
-* an event log that raises on any read of a post-treatment key of a join.
+* an event log that raises on any read of a post-treatment key of a join, by
+  subscript, iteration or copy as much as by ``.get``;
+* one store grown night by night, whose stored reports must equal a retro
+  ``--until`` report and must not differ between stores that differ only in
+  post-treatment values.
+
+The rule they pin: a figure depends only on values fixed when a task's first
+pack was assembled and on capture sweep times. The disclosed exceptions are
+whether a join carries an outcome block, and ``scan.truncated`` (a coarse
+function of event volume), neither of which the fixtures move.
 
 Every id, commit and word the fixtures write is synthetic.
 """
@@ -29,11 +38,19 @@ from typing import Any
 
 import pytest
 
-from tests.unit.analyze._holdout_fixture import DAYS, MONDAY, UNTIL, HoldoutLog
+from tests.unit.analyze._holdout_fixture import (
+    DAYS,
+    MONDAY,
+    UNTIL,
+    HoldoutLog,
+    outcome_payload,
+    provenance,
+)
 from tests.unit.analyze._operational_seed import (
     COMMIT_A,
     COMMIT_B,
     TASKS,
+    WINDOW_ENDS,
     PostTreatment,
     seed_store,
 )
@@ -70,7 +87,6 @@ VARIANTS: list[dict[str, Any]] = [
 #: Paths of free-keyed maps (their keys are labels, not fields): the walker
 #: allows any key under them and requires scalar values.
 FREE_KEYED = {
-    "rows.by_rate",
     "descriptive.not_measurable",
     "descriptive.sessions.not_measurable",
 }
@@ -94,22 +110,14 @@ ALLOWED = {
     "rate",
     "settle_hours",
     "notes",
-    # rows: the PACK_ASSEMBLED rows scanned, by holdout key and rate
-    "rows",
-    "rows.scanned",
-    "rows.without_holdout_key",
-    "rows.by_rate",
-    "rows.at_rate",
-    "rows.withheld_at_rate",
-    # funnel: every stage count up to the first pack's eligibility, pooled
+    # funnel: the sub-agent joins admitted on their first pack, by stage
     "funnel",
     *_under(
         "funnel.",
-        "joins_scanned sessions main_sessions no_outcome no_retrieval "
-        "no_retrieval_never_called no_retrieval_errored "
-        "no_retrieval_unparsed no_retrieval_empty_answer "
-        "first_pack_not_found outside_window first_pack_old_build "
-        "other_rate empty_first_pack unfinished pre_treatment_excluded "
+        "no_outcome no_retrieval no_retrieval_never_called "
+        "no_retrieval_errored no_retrieval_unparsed no_retrieval_empty_answer "
+        "first_pack_not_found first_pack_old_build other_rate "
+        "empty_first_pack pre_treatment_excluded "
         "pre_treatment_excluded_after_commit eligible pre_treatment_unknown",
     ),
     # exclusions: what each rule removed, pooled
@@ -133,9 +141,8 @@ ALLOWED = {
     ),
     *_under(
         "descriptive.sessions.",
-        "rolled_up not_finished without_main_join reaching_retrieval "
-        "reaching_retrieval_per_30d eligible eligible_per_30d note "
-        "not_measurable",
+        "with_first_pack with_first_pack_per_30d eligible eligible_per_30d "
+        "note not_measurable",
     ),
     # covariate coverage: eligible tasks carrying a covariate, with no fit
     "covariate_coverage",
@@ -151,13 +158,9 @@ ALLOWED = {
         "build first_seen last_seen served withheld",
     ),
     "by_commit.note",
-    # scan: how much of the window the read covered
+    # scan: the cap and whether it bit (a disclosed coarse function of volume)
     "scan",
-    *_under(
-        "scan.",
-        "limit scanned matched dropped truncated truncated_event_types "
-        "covered_since note",
-    ),
+    *_under("scan.", "limit truncated covered_since"),
 }
 
 #: Allowed paths a report need not carry: free-keyed map entries.
@@ -231,7 +234,7 @@ def test_every_key_is_allowlisted_and_the_allowlist_is_not_stale(
     seen = set(_walk(payload))
     assert seen - ALLOWED - CONDITIONAL == set()
     assert (ALLOWED - seen) == set(), "allowlist names a key the report lacks"
-    assert len(seen) >= 80  # a hand-read floor (81 listed): the walk visited the tree
+    assert len(seen) >= 69  # a hand-read floor (71 listed): the walk visited the tree
 
 
 def test_the_key_walker_flags_a_leaked_outcome_field(
@@ -307,6 +310,20 @@ POST_TREATMENT: dict[str, PostTreatment] = {
     "hook feedback": PostTreatment(hook_messages=4),
     "later packs from another build": PostTreatment(later_pack_other_build=True),
     "unparsed pack ids": PostTreatment(unparsed_pack_ids=2),
+    "later packs in the same arm": PostTreatment(
+        later_packs_everywhere=True, later_pack_same_arm=True
+    ),
+    "later packs in the other arm": PostTreatment(later_packs_everywhere=True),
+    "more packs for the withheld arm": PostTreatment(extra_packs=(0, 5)),
+    "more packs for the served arm": PostTreatment(extra_packs=(5, 0)),
+    "joins written later for the withheld arm": PostTreatment(
+        join_lag_minutes=(10, 25)
+    ),
+    "joins written later for the served arm": PostTreatment(join_lag_minutes=(25, 10)),
+    "withheld joins written again": PostTreatment(reemit_in="withheld"),
+    "served joins written again": PostTreatment(reemit_in="served"),
+    "interrupted in the withheld arm": PostTreatment(interrupted_in="withheld"),
+    "interrupted in the served arm": PostTreatment(interrupted_in="served"),
     "all at once": PostTreatment(
         magnitude=2,
         cut_offs_in="served",
@@ -316,13 +333,28 @@ POST_TREATMENT: dict[str, PostTreatment] = {
         first_retrieval_ordinal=1,
         hook_messages=2,
         later_pack_other_build=True,
+        later_packs_everywhere=True,
         unparsed_pack_ids=1,
+        extra_packs=(2, 3),
+        join_lag_minutes=(25, 12),
+        reemit_in="all",
+        interrupted_in="all",
     ),
 }
-#: Window ends that admit the seed's tasks a few at a time.
-WINDOW_ENDS = [MONDAY + timedelta(minutes=40 * step) for step in range(13)] + [
-    MONDAY + timedelta(hours=9 * step) for step in range(1, 40)
-]
+#: Knobs the full report cannot see at its default window: where a join is
+#: written, and whether it is written again, move only the join's own time.
+NO_FULL_SIGNAL = {
+    "joins written later for the withheld arm",
+    "joins written later for the served arm",
+    "interrupted in the withheld arm",
+    "interrupted in the served arm",
+}
+#: A sweep settles a task 30 minutes after its first pack, so each window end in
+#: :data:`WINDOW_ENDS` admits the tasks whose first pack is 30 minutes older.
+NIGHT: dict[str, Any] = {"settle_hours": 0.5}
+#: Window lengths other than the default, short enough that ``since`` crosses
+#: events.
+SHORT_DAYS = (4, 1)
 
 
 @pytest.mark.parametrize("name", POST_TREATMENT)
@@ -336,9 +368,10 @@ def test_reports_over_stores_that_differ_in_post_treatment_values_are_identical(
             _operational(other, **options)
         ), options
     # The knob is live: the full report over the same two stores differs.
-    assert json.dumps(_full(base, by_commit=True).model_dump()) != json.dumps(
-        _full(other, by_commit=True).model_dump()
-    )
+    if name not in NO_FULL_SIGNAL:
+        assert json.dumps(_full(base, by_commit=True).model_dump()) != json.dumps(
+            _full(other, by_commit=True).model_dump()
+        )
 
 
 @pytest.mark.parametrize("name", POST_TREATMENT)
@@ -355,9 +388,90 @@ def test_differencing_windows_recovers_no_post_treatment_value_by_arm(
     base, other = make_log(), make_log(post=POST_TREATMENT[name])
     for end in WINDOW_ENDS:
         for options in ({}, {"by_commit": True}):
-            assert _bytes(_operational(base, until=end, **options)) == _bytes(
-                _operational(other, until=end, **options)
+            assert _bytes(_operational(base, until=end, **NIGHT, **options)) == _bytes(
+                _operational(other, until=end, **NIGHT, **options)
             ), (end, options)
+    # A shorter ``--days`` moves ``since`` across the events too.
+    for end in WINDOW_ENDS[::3]:
+        for days in SHORT_DAYS:
+            assert _bytes(_operational(base, until=end, days=days, **NIGHT)) == _bytes(
+                _operational(other, until=end, days=days, **NIGHT)
+            ), (end, days)
+
+
+def _grow_nightly(source: HoldoutLog, path: Path, nights: list[Any]) -> list[str]:
+    """The reports a store grown event by event gives, one per night.
+
+    Each night the store holds what was written before it and nothing later,
+    as a stored nightly report was computed. The same night's retro
+    ``--until`` report over the finished store must be those bytes.
+    """
+    events = sorted(
+        source.event_log.get_events(order="asc", limit=100_000),
+        key=lambda event: event.occurred_at,
+    )
+    grown = SQLiteEventLog(path)
+    reports: list[str] = []
+    taken = 0
+    try:
+        for night in nights:
+            while taken < len(events) and events[taken].occurred_at < night:
+                grown.append(events[taken])
+                taken += 1
+            options = {**WINDOW, **NIGHT, "until": night, "by_commit": True}
+            stored = _bytes(holdout.analyze_holdout_operational(grown, **options))
+            assert stored == _bytes(
+                holdout.analyze_holdout_operational(source.event_log, **options)
+            ), night
+            reports.append(stored)
+    finally:
+        grown.close()
+    return reports
+
+
+@pytest.mark.parametrize("name", POST_TREATMENT)
+def test_a_store_grown_night_by_night_gives_the_same_reports_whatever_follows(
+    make_log: Callable[..., HoldoutLog], tmp_path: Path, name: str
+) -> None:
+    """Stored nightly reports are byte-identical across post-treatment values."""
+    nights = WINDOW_ENDS[::2]
+    base = _grow_nightly(make_log(), tmp_path / "grown-base.db", nights)
+    other = _grow_nightly(
+        make_log(post=POST_TREATMENT[name]), tmp_path / "grown-other.db", nights
+    )
+    assert base == other
+    assert len(set(base)) >= 10  # a hand-read floor: eligibility grows 10+ times
+
+
+def test_a_task_is_admitted_on_its_first_pack_and_the_full_report_on_its_latest_join(
+    tmp_path: Path,
+) -> None:
+    """One task, joined again after a sweep: the two reports admit it differently."""
+    event_log = SQLiteEventLog(tmp_path / "differ.db")
+    log = HoldoutLog(event_log)
+    try:
+        start = MONDAY
+        pack = log.pack(
+            at=start, withheld=False, items=3, metadata=provenance(COMMIT_A)
+        )
+        for hours in (1, 3):
+            log.join(
+                "task-000",
+                at=start + timedelta(hours=hours),
+                pack_ids=[pack],
+                parent="parent-a",
+                outcome=outcome_payload(turns=5),
+            )
+        log.sweep(at=start + timedelta(hours=4))
+        window = {"days": 3, "until": start + timedelta(days=1), "settle_hours": 3.0}
+        operational = holdout.analyze_holdout_operational(event_log, **window)
+        full = holdout.analyze_holdout(event_log, **window, **FAST)
+    finally:
+        event_log.close()
+    assert operational.funnel.eligible == 1
+    assert full.funnel.eligible == 0
+    assert full.funnel.unfinished == 1
+    assert any("first pack" in note for note in operational.notes)
 
 
 def test_the_windows_admit_tasks_a_few_at_a_time(
@@ -365,11 +479,13 @@ def test_the_windows_admit_tasks_a_few_at_a_time(
 ) -> None:
     """The window ends are not vacuous: eligibility grows across them step by step."""
     log = make_log()
-    counts = [_operational(log, until=end).funnel.eligible for end in WINDOW_ENDS]
+    counts = [
+        _operational(log, until=end, **NIGHT).funnel.eligible for end in WINDOW_ENDS
+    ]
     assert counts == sorted(counts)
     assert counts[0] == 0
     assert counts[-1] == TASKS
-    assert len(set(counts)) >= 10  # a hand-read floor: 24 tasks over 52 ends
+    assert len(set(counts)) >= 10  # a hand-read floor: 12 first packs over 13 ends
 
 
 def test_outcome_and_itt_are_accepted_and_change_nothing(
@@ -412,6 +528,10 @@ def _forbid_outcome_computation(monkeypatch: pytest.MonkeyPatch) -> None:
         "_report",
         "_unit",
         "_post_hoc",
+        # Join-time admission and roll-up: the full report's, never this mode's.
+        "_arrival",
+        "_finished",
+        "_tally_sessions",
     ):
         monkeypatch.setattr(holdout, name, _raise)
 
@@ -442,6 +562,11 @@ class _Sealed(dict[str, Any]):
     pop = setdefault = copy = _refuse
 
 
+def _refuse(self: Any, *_args: Any, **_kwargs: Any) -> Any:
+    msg = f"gated read: {type(self).__name__} was read past what the first pack fixes"
+    raise AssertionError(msg)
+
+
 class _TimingGate(dict[str, Any]):
     """``retrieval_timing``, readable only at the two flags set before the arm."""
 
@@ -458,9 +583,27 @@ class _TimingGate(dict[str, Any]):
     def __getitem__(self, key: str) -> Any:
         return self.get(key)
 
+    def __contains__(self, key: object) -> bool:
+        return self.get(str(key), None) is not None
+
+    items = keys = values = __iter__ = copy = _refuse  # type: ignore[assignment]
+
+
+class _PackIds(list[Any]):
+    """A join's ``pack_ids``, readable at index 0 and nowhere else."""
+
+    def __getitem__(self, index: Any) -> Any:
+        if isinstance(index, int) and index == 0:
+            return super().__getitem__(0)
+        msg = "gated read: pack_ids past the first pack"
+        raise AssertionError(msg)
+
+    __iter__ = __len__ = __reversed__ = __contains__ = _refuse  # type: ignore[assignment]
+    index = count = copy = _refuse  # type: ignore[assignment]
+
 
 class _JoinGate(dict[str, Any]):
-    """A join whose post-treatment keys raise when read."""
+    """A join whose post-treatment keys raise when read, however they are read."""
 
     def get(self, key: str, default: Any = None) -> Any:
         value = super().get(key, default)
@@ -468,10 +611,19 @@ class _JoinGate(dict[str, Any]):
             return _Sealed(value)
         if key == "retrieval_timing" and isinstance(value, dict):
             return _TimingGate(value)
+        if key == "pack_ids" and isinstance(value, list):
+            return _PackIds(value)
         if key == "pack_ids_unparsed" and super().get("pack_ids"):
             msg = "gated read: pack_ids_unparsed of a join that retrieved"
             raise AssertionError(msg)
         return value
+
+    def __getitem__(self, key: str) -> Any:
+        if key not in self:
+            raise KeyError(key)
+        return self.get(key)
+
+    items = keys = values = __iter__ = copy = _refuse  # type: ignore[assignment]
 
 
 class _GatedLog:
@@ -500,14 +652,22 @@ def test_operational_mode_reads_no_post_treatment_key_of_a_join(
     """The report is the same when every post-treatment read of a join raises.
 
     That is the outcome block's contents (its presence is readable), every
-    ``retrieval_timing`` key but the two flags set before the arm, and the
-    unparsed-pack-id count of a join that retrieved.
+    ``retrieval_timing`` key but the two flags set before the arm, every pack
+    id after the first, and the unparsed-pack-id count of a join that
+    retrieved. Subscripts, iteration, ``dict()`` and ``len`` raise as ``.get``
+    does, so a read that skips ``.get`` is caught.
     """
     log = make_log()
     expected = _bytes(_operational(log, **options))
     gated = _GatedLog(log.event_log)
     report = holdout.analyze_holdout_operational(gated, **{**WINDOW, **options})
     assert _bytes(report) == expected
+    for end in WINDOW_ENDS[::6]:
+        assert _bytes(
+            holdout.analyze_holdout_operational(
+                gated, **{**WINDOW, **NIGHT, **options, "until": end}
+            )
+        ) == _bytes(_operational(log, until=end, **NIGHT, **options)), end
     # The gate bites: the full analysis reads those keys and trips it.
     with pytest.raises(AssertionError, match="gated read"):
         holdout.analyze_holdout(gated, **{**WINDOW, **FAST, **options})
@@ -536,20 +696,26 @@ def test_operational_figures_equal_the_full_reports(
         "task_window_days",
         "rate",
         "settle_hours",
-        "rows",
-        "scan",
     ):
         assert operational[key] == full[key], key
-    # The funnel and exclusions are the full report's up to the cut-off stage.
+    # The scan keeps its cap and whether it bit, and none of its counts.
+    for key, value in operational["scan"].items():
+        assert value == full["scan"][key], key
+    # Everything is swept and nothing is joined twice at this window, so the two
+    # admissions agree here; they part when a join is written again.
     for key, value in operational["funnel"].items():
         assert value == full["funnel"][key], key
     assert operational["exclusions"] == full["exclusions"][:2]
-    shared = operational["descriptive"].keys() - {"sessions", "not_measurable"}
+    shared = {"eligible_tasks", "eligible_per_30d", "eligible_by_arm"}
+    shared |= {"top_parent_share"}
     for key in shared:
         assert operational["descriptive"][key] == full["descriptive"][key], key
-    sessions = operational["descriptive"]["sessions"]
-    for key in sessions.keys() - {"note", "not_measurable"}:
-        assert sessions[key] == full["descriptive"]["sessions"][key], key
+    tasks = [
+        c for c in operational["descriptive"]["arm_ratio"] if c["population"] == "tasks"
+    ]
+    assert tasks == [
+        c for c in full["descriptive"]["arm_ratio"] if c["population"] == "tasks"
+    ]
     # Coverage is over every eligible task, where the full report's is over the
     # analysed ones, so only the names and the total can agree.
     eligible = operational["descriptive"]["eligible_tasks"]
@@ -570,6 +736,9 @@ def test_operational_figures_equal_the_full_reports(
     expected = [note.replace(named, "figures per 30 days") for note in full["notes"]]
     assert operational["notes"][-1] == holdout._OPERATIONAL_NOTE
     assert all(note in expected for note in operational["notes"][:-1])
+    for note in (holdout._OPERATIONAL_NOTE,):
+        assert "can differ from the full report's" in note
+        assert "disclosed exceptions" in note
     assert holdout._OPERATIONAL_NOTE not in full["notes"]
 
 
@@ -581,6 +750,11 @@ def test_the_funnel_stops_at_eligibility_and_counts_a_missing_outcome_block(
     assert funnel.eligible == TASKS
     assert funnel.no_outcome == 1
     assert {
+        "joins_scanned",
+        "sessions",
+        "main_sessions",
+        "outside_window",
+        "unfinished",
         "cut_offs_excluded",
         "outcome_missing",
         "analysed",
@@ -668,3 +842,31 @@ def test_options_are_validated_as_the_full_analysis_does(
             _full(log, **options)
     with pytest.raises(holdout.HoldoutAnalysisError, match="settle-hours"):
         _operational(log, settle_hours=-1.0)
+
+
+def test_the_arm_ratio_runs_on_first_packs_and_no_pack_row_count_is_reported(
+    make_log: Callable[..., HoldoutLog],
+) -> None:
+    """``assigned`` is one first pack per join at the rate; ``rows`` is gone."""
+    report = _operational(make_log(), by_commit=True)
+    dumped = report.model_dump()
+    assert "rows" not in dumped
+    assert set(dumped["scan"]) == {"limit", "truncated", "covered_since"}
+    checks = report.descriptive.arm_ratio
+    assert [c.population for c in checks[:2]] == ["assigned", "tasks"]
+    assert all(c.population.startswith("assigned 20") for c in checks[2:])
+    # 24 eligible tasks, the sub-agent join with no outcome block, the main one.
+    assert checks[0].n == TASKS + 2
+    assert sum(c.n for c in checks[2:]) == checks[0].n
+    assert checks[1].n == TASKS
+
+
+def test_main_transcripts_are_counted_on_their_own_first_pack(
+    make_log: Callable[..., HoldoutLog],
+) -> None:
+    sessions = _operational(make_log()).descriptive.sessions
+    assert sessions.with_first_pack == 1
+    assert sessions.eligible == 1
+    assert set(sessions.model_dump()).isdisjoint(
+        {"rolled_up", "not_finished", "without_main_join", "reaching_retrieval"}
+    )

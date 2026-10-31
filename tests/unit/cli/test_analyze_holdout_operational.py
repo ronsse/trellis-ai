@@ -109,8 +109,35 @@ def test_operational_text_prints_counts_and_no_outcome_figure() -> None:
         "post-hoc",
         "span builds",
         "outcome's field",
+        # figures that count packs or follow a join's time are the full report's
+        "pack rows",
+        "rows scanned",
+        "joins scanned",
+        "outside the window",
+        "unfinished",
+        "rolled up",
+        "not finished",
     ):
         assert absent not in flat, absent
+    assert "admitted on their first pack" in flat
+    assert "main transcripts with a first pack" in flat
+
+
+@pytest.mark.usefixtures("seeded")
+def test_operational_json_carries_no_pack_count_or_join_time_figure() -> None:
+    _, as_json = _run("--operational")
+    payload = _payload(as_json)
+    assert "rows" not in payload
+    assert set(payload["scan"]) == {"limit", "truncated", "covered_since"}
+    assert {"joins_scanned", "sessions", "outside_window", "unfinished"}.isdisjoint(
+        payload["funnel"]
+    )
+    assert {"rolled_up", "not_finished", "reaching_retrieval"}.isdisjoint(
+        payload["descriptive"]["sessions"]
+    )
+    populations = [c["population"] for c in payload["descriptive"]["arm_ratio"]]
+    assert populations[:2] == ["assigned", "tasks"]
+    assert not any(name.startswith("rows") for name in populations)
 
 
 @pytest.mark.usefixtures("seeded")
@@ -176,7 +203,9 @@ def test_an_invalid_inference_option_exits_alike_with_and_without_the_flag(
 @pytest.mark.usefixtures("seeded")
 def test_help_describes_the_flag_and_no_longer_denies_the_means() -> None:
     holdout_help = runner.invoke(app, ["analyze", "holdout", "--help"])
-    flat = _flat(holdout_help)
+    # The help is a table, so a wrapped phrase carries the cell border between
+    # its words.
+    flat = " ".join(_flat(holdout_help).replace("│", " ").split())
     assert "--operational" in flat
     assert "No estimate" not in flat
     assert "No outcome value is read" in flat
