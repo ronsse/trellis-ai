@@ -4,6 +4,19 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
+  `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
+  only, so `make test` and a bare `pytest` stay one process. Same legs, same
+  selection. A parametrized sensitivity REST write test used a bare `object()`
+  sentinel with `ids=repr`, so its test id carried a memory address that differed
+  per process, and xdist aborts at collection when two workers disagree about
+  which tests exist; the sentinel now has a stable repr.
+- **`pytest` no longer inherits `-v` from `addopts`.** CI and `make test` pass
+  `-v` explicitly, so their output is unchanged; a bare targeted run prints a
+  dot per test instead of a line per test. Pass `-v` for the old output.
+
 ### Fixed
 
 - **A body that is not valid UTF-8 answers 422, not 500.** Pre-existing, and
