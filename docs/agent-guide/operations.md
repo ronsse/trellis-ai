@@ -3890,7 +3890,10 @@ many of the session's `tool_calls` were to a Trellis MCP tool (any server whose 
 holds `trellis`; a `Bash` call to the `trellis` CLI is not one). A join written before
 it lacks the key, and a rejoin writes that join again with the count, read from the
 unchanged transcript. A missing key means unknown, not `0`: a session that made no
-Trellis call reads `0`. No report or analysis reads the count yet.
+Trellis call reads `0`. No report or analysis reads the count. A whole-history rejoin
+adds one event per session, and those count against the holdout's scan limit, so compare
+the `--dry-run` count with the limit first, and pass `--limit` if the sum exceeds it:
+the report states the truncation, and its figures move.
 
 ```bash
 trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]

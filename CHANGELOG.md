@@ -58,15 +58,18 @@ All notable changes to Trellis will be documented in this file.
   `tool_calls`, whose MCP server name holds `trellis` (`mcp__trellis__*`, a
   connector or plugin carrying it in a longer name), so a tool added later is
   counted without a list to edit. A record written into the file again counts
-  once, as `tool_calls` does; a `Bash` call to the `trellis` CLI and another
-  server's same-named tool are not counted. A session that made no Trellis call
+  once, as `tool_calls` does; a `Bash` call to the `trellis` CLI and a tool on a
+  server without the word in its name are not counted. A session that made no Trellis call
   reads `0`; a join written before this key lacks it, which reads as unknown.
   `trellis-session-capture --rejoin-since` fills it on joins already written,
   from unchanged transcripts, with no change to what it selects: the join
   differs from a new parse by the key, so it is written again. A sweep that
-  parses a changed transcript does the same. Only captured: no report, analysis
-  or per-arm view reads the count, and the existing holdout report is
-  byte-identical with and without it. Nothing about packs or serving changes.
+  parses a changed transcript does the same. The rule is a substring of the
+  server part, so a third-party server carrying the word is counted too. Only
+  captured: no report or analysis reads the count, and a join carrying the key
+  reads the same as one without it. The rejoin itself stamps each join anew, so
+  its sessions read as unfinished in the holdout report until a later sweep
+  settles them, as with any rejoin. Nothing about packs or serving changes.
 
 - **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
 

@@ -21,6 +21,7 @@ from tests.unit.analyze._holdout_fixture import (
     HoldoutLog,
     seed_experiment,
     seed_guardrails,
+    seed_late_build,
 )
 from trellis.analyze.holdout import OUTCOMES, HoldoutReport, analyze_holdout
 from trellis.stores.base.event_log import EventType
@@ -45,7 +46,8 @@ def _store(path: Path, log_type: type[HoldoutLog]) -> tuple[SQLiteEventLog, Hold
     log = log_type(event_log)
     seed_experiment(log, effect=0.8, seed=11, parents=3, weeks=2, per_stratum=6)
     seed_guardrails(log)
-    log.sweep()
+    # Main sessions, or the roll-up that iterates the outcome dict never runs.
+    seed_late_build(log)
     return event_log, log
 
 
@@ -99,6 +101,7 @@ def test_the_report_is_identical_with_the_key_on_every_join(
     with_key = _report(keyed, outcome=outcome, itt=itt, by_commit=True)
 
     assert without.funnel.analysed > 0
+    assert without.descriptive.sessions.analysed > 0
     assert with_key.model_dump_json() == without.model_dump_json()
     assert "memory_tool_calls" not in with_key.model_dump_json()
 
@@ -123,7 +126,7 @@ def test_a_report_does_change_when_an_outcome_it_reads_changes(
         moved = _MoreTurns(event_log)
         seed_experiment(moved, effect=0.8, seed=11, parents=3, weeks=2, per_stratum=6)
         seed_guardrails(moved)
-        moved.sweep()
+        seed_late_build(moved)
         assert _report(moved).model_dump_json() != baseline
     finally:
         event_log.close()
