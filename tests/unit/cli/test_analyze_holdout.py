@@ -261,7 +261,7 @@ def test_every_cli_default_is_the_library_default() -> None:
     command = {
         name: parameter.default.default
         for name, parameter in inspect.signature(holdout).parameters.items()
-        if name != "output_format"
+        if name not in {"output_format", "operational"}
     }
 
     assert command == library

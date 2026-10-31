@@ -4,6 +4,26 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis analyze holdout --operational` reports the experiment's health
+  without reading an outcome.** A pack holdout needs a check that it is running
+  (arm counts and their ratio, the funnel, capture health, covariate coverage,
+  scan and volume, per-build counts) that does not expose the results it is
+  meant to leave blind. The flag emits only those fields, from a separate report
+  model that has no outcome-mean, estimate, interval, p-value, power, MDE,
+  guardrail or covariate-fit field, and it skips the outcome computations rather
+  than filtering their output. With `--by-commit` the table is eligible-task
+  counts per build and arm. Default output and exit codes are unchanged, and
+  there is no REST or OpenAPI surface for the flag yet.
+
+### Fixed
+
+- **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
+  say the table has "no estimate".** It prints each arm's outcome mean per
+  build; what it omits is an interval and a p-value. `analyze value`'s help no
+  longer says the system has no withhold arm and points to `analyze holdout`.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added

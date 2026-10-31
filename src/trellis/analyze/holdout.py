@@ -106,8 +106,20 @@ the build that wrote the pack that sets the task's arm (``pack_ids[0]``), the
 ``(version, commit)`` pair of its ``write_provenance``, named as ``analyze
 health`` names a serving build. It is descriptive: a serving change that lands
 mid-window mixes builds inside each arm, and the table shows how, so a reader
-can judge whether a deploy confounds the comparison. It adds no estimate and
-changes no other figure.
+can judge whether a deploy confounds the comparison. It adds each arm's
+outcome mean per build, with no interval and no p-value, and changes no other
+figure.
+
+**Operational mode.** :func:`analyze_holdout_operational` answers "is the
+experiment running?" without reading its outcomes. It returns a
+:class:`HoldoutOperationalReport`, a separate model that has no field for an
+outcome mean, estimate, interval, outcome p-value, power, SD, guardrail or
+covariate fit, and it never calls an :data:`OUTCOMES` reader: whether a task
+has the outcome is asked of :func:`_outcome_present`, which checks the fields
+exist and are counts and returns no value. The cut-off flag is the one
+outcome field read (it sets the funnel's exclusion). Its per-build table counts
+eligible tasks rather than analysed ones, so no subtraction of two counts
+yields a cut-off count by arm.
 
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
@@ -122,7 +134,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from statistics import NormalDist
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import numpy as np
 import numpy.typing as npt
@@ -246,6 +258,12 @@ _NO_COVARIATES = (
 )
 _BRIEF_LENGTH = "brief_length"
 _BRIEF_LENGTH_AND_AGENT_TYPE = "brief_length_and_agent_type"
+#: ``(name, preregistered, with_agent_type)`` of each covariate adjustment, in
+#: the order the report lists them.
+_ADJUSTMENT_SPECS = (
+    (_BRIEF_LENGTH, True, False),
+    (_BRIEF_LENGTH_AND_AGENT_TYPE, False, True),
+)
 
 
 class HoldoutAnalysisError(ValueError):
@@ -644,6 +662,115 @@ class HoldoutByCommit(TrellisModel):
     note: str
 
 
+class HoldoutOperationalSessions(TrellisModel):
+    """:class:`HoldoutSessions` without the figures that read an outcome."""
+
+    rolled_up: int
+    not_finished: int
+    without_main_join: int
+    reaching_retrieval: int
+    reaching_retrieval_per_30d: float | None
+    eligible: int
+    eligible_per_30d: float | None
+    note: str
+    not_measurable: dict[str, str] = Field(default_factory=dict)
+
+
+class HoldoutOperationalDescriptive(TrellisModel):
+    """:class:`HoldoutDescriptive` without the figures that read an outcome.
+
+    ``analysed_tasks`` counts eligible tasks that are not cut-offs (unless
+    ``itt``) and carry the outcome's field; the field's value is not read.
+    Nothing here splits cut-offs, or tasks lacking the outcome, by arm.
+    """
+
+    eligible_tasks: int
+    eligible_per_30d: float | None
+    analysed_tasks: int
+    analysed_per_30d: float | None
+    packs_per_task: float | None
+    tasks_with_several_packs: int
+    post_hoc_share: float | None
+    post_hoc_note: str
+    eligible_by_arm: ArmCounts
+    tasks_with_both_arms: int
+    arm_ratio: list[ArmRatioCheck]
+    top_parent_share: float | None
+    sessions: HoldoutOperationalSessions
+    not_measurable: dict[str, str] = Field(default_factory=dict)
+
+
+class HoldoutCovariateCoverage(TrellisModel):
+    """How many analysed tasks carry the covariates an adjustment needs.
+
+    The counts :class:`HoldoutAdjustment` reports as ``n_used`` and
+    ``n_missing_covariate``, with no fit.
+    """
+
+    name: str
+    preregistered: bool
+    n_used: int
+    n_missing_covariate: int
+
+
+class HoldoutBuildCountRow(TrellisModel):
+    """The eligible tasks attributed to one build, split by arm, as counts."""
+
+    build: str
+    first_seen: str
+    last_seen: str
+    served: int
+    withheld: int
+
+
+class HoldoutOperationalByCommit(TrellisModel):
+    """:class:`HoldoutByCommit` as counts of eligible tasks, with no outcome."""
+
+    rows: list[HoldoutBuildCountRow]
+    units_spanning_builds: int
+    note: str
+
+
+class HoldoutOperationalReport(TrellisModel):
+    """Whether the experiment is running, with no outcome read.
+
+    Every field is a count, a rate, a window, a configuration echo or a
+    note. There is no outcome mean, estimate, interval, outcome p-value,
+    power, SD, guardrail or covariate fit, and the seed is left out because
+    nothing here is random.
+    """
+
+    status: str = "ok"
+    mode: str = "operational"
+    window_days: int
+    effective_window_days: float
+    since: str
+    until: str
+    task_window_since: str
+    task_window_days: float
+    rate: float | None
+    outcome: str
+    itt: bool
+    settle_hours: float
+    rows: HoldoutRows
+    funnel: HoldoutFunnel
+    exclusions: list[HoldoutExclusion]
+    descriptive: HoldoutOperationalDescriptive
+    covariate_coverage: list[HoldoutCovariateCoverage]
+    #: Set only when ``by_commit`` is asked for, and absent from a dump
+    #: otherwise, as in :class:`HoldoutReport`.
+    by_commit: HoldoutOperationalByCommit | None = None
+    scan: ScanCoverage
+    notes: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_unrequested_by_commit(self, handler: Any) -> dict[str, Any]:
+        dumped: dict[str, Any] = handler(self)
+        if self.by_commit is None:
+            dumped.pop("by_commit", None)
+        return dumped
+
+
 class HoldoutReport(TrellisModel):
     status: str = "ok"
     window_days: int
@@ -691,12 +818,15 @@ _TOKEN_FIELDS = (
 )
 
 
-def _count(value: object) -> float | None:
+def _is_count(value: object) -> TypeGuard[int | float]:
+    """Whether ``value`` is a finite, non-negative number that is not a bool."""
     if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    if not math.isfinite(value) or value < 0:
-        return None
-    return float(value)
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+def _count(value: object) -> float | None:
+    return float(value) if _is_count(value) else None
 
 
 def _log1p_count(value: object) -> float | None:
@@ -726,6 +856,28 @@ OUTCOMES: dict[str, Callable[[Mapping[str, Any]], float | None]] = {
     "log1p_commits": lambda outcome: _log1p_count(outcome.get("commits")),
     "any_commit": _any_commit,
 }
+
+
+#: The ``SessionOutcome`` fields each outcome reads; an outcome is present
+#: when any of them is a count. ``tests/unit/analyze`` pins this against
+#: :data:`OUTCOMES` over a grid of values.
+_OUTCOME_FIELDS: dict[str, tuple[str, ...]] = {
+    "log1p_turns": ("assistant_turns",),
+    "prs_created": ("prs_created",),
+    "log1p_tokens": _TOKEN_FIELDS,
+    "commits": ("commits",),
+    "log1p_commits": ("commits",),
+    "any_commit": ("commits",),
+}
+
+
+def _outcome_present(name: str, outcome: Mapping[str, Any]) -> bool:
+    """Whether :data:`OUTCOMES` ``[name]`` would read a value from ``outcome``.
+
+    Answers from the fields' validity alone and never forms the value, so the
+    operational mode can count analysed tasks without computing an outcome.
+    """
+    return any(_is_count(outcome.get(field_)) for field_ in _OUTCOME_FIELDS[name])
 
 
 # ---------------------------------------------------------------------------
@@ -1323,12 +1475,27 @@ def _task_window_start(
 
 
 def _task_window_note(
-    *, days: int, truncated: bool, task_start: datetime, task_days: float, rate: float
+    *,
+    days: int,
+    truncated: bool,
+    task_start: datetime,
+    task_days: float,
+    rate: float,
+    horizons: bool = True,
 ) -> str:
-    """Why the task figures divide by fewer days than the window holds."""
+    """Why the task figures divide by fewer days than the window holds.
+
+    ``horizons`` names the MDE horizons the full report prints; the operational
+    report prints none, so its note leaves them out.
+    """
     before = "the scanned part of the window" if truncated else "the window"
+    figures = (
+        "figures per 30 days and the task MDE horizons"
+        if horizons
+        else ("figures per 30 days")
+    )
     return (
-        "The task figures per 30 days and the task MDE horizons divide by the "
+        f"The task {figures} divide by the "
         f"{round(task_days, 2):g} days from {task_start.isoformat()} to the window "
         f"end, not by the {days}-day window: the window's first row at rate "
         f"{rate:g} was written then, and no pack row before {before} shows that "
@@ -1447,6 +1614,307 @@ def analyze_holdout(
         seed=seed,
         limit=limit,
     )
+    ev = _gather(
+        event_log,
+        days=days,
+        until=until,
+        rate=rate,
+        settle_hours=settle_hours,
+        limit=limit,
+    )
+    sessions = _sessions(
+        event_log,
+        ev.joins,
+        ev.packs,
+        ev.sweeps,
+        ev.settle,
+        ev.evidence_start,
+        ev.end,
+        ev.effective_days,
+        outcome,
+    )
+
+    return _report(
+        units=ev.units,
+        rows=ev.rows,
+        funnel=ev.funnel,
+        scan=ev.scan,
+        notes=ev.notes,
+        sweeps=ev.sweeps,
+        sessions=sessions,
+        options={
+            "days": days,
+            "since": ev.since,
+            "end": ev.end,
+            "effective_days": ev.effective_days,
+            "task_since": ev.task_start,
+            "task_days": ev.task_days,
+            "rate": ev.rate,
+            "outcome": outcome,
+            "itt": itt,
+            "by_commit": by_commit,
+            "permutations": permutations,
+            "bootstraps": bootstraps,
+            "power_sims": power_sims,
+            "planned_mde": planned_mde,
+            "planned_n": planned_n,
+            "settle_hours": settle_hours,
+            "seed": seed,
+        },
+    )
+
+
+_OPERATIONAL_NOTE = (
+    "Operational view: no outcome mean, estimate, interval, outcome p-value, "
+    "power, SD, guardrail or covariate fit was computed. analysed counts the "
+    "tasks that carry the outcome's field, never its value, and cut-offs are "
+    "counted pooled over both arms, as the funnel counts them."
+)
+_OPERATIONAL_BY_COMMIT_NOTE = (
+    "Counts only; no outcome is read. Each eligible task is counted once, "
+    "under the build stamped on the first pack of its join (the pack that "
+    "sets its arm), and a task whose packs span several builds is also "
+    "counted in units_spanning_builds. Eligible tasks include cut-offs and "
+    "tasks without the outcome, so these counts exceed the analysed counts "
+    "of the full table. A build is the stamped (version, commit) pair, named "
+    "as analyze health names a serving build; a pack with no usable stamp "
+    f"reads {NO_PROVENANCE_LABEL!r}."
+)
+_OPERATIONAL_SESSIONS_NOTE = (
+    "Main sessions count packs from every build and rate, so their figures "
+    "per 30 days divide by the whole {days:g}-day window, not by the task "
+    "window."
+)
+
+
+def analyze_holdout_operational(
+    event_log: EventLog,
+    *,
+    days: int = 60,
+    until: datetime | None = None,
+    rate: float | None = None,
+    outcome: str = DEFAULT_OUTCOME,
+    itt: bool = False,
+    by_commit: bool = False,
+    settle_hours: float = DEFAULT_SETTLE_HOURS,
+    limit: int = DEFAULT_SCAN_LIMIT,
+) -> HoldoutOperationalReport:
+    """Say whether the holdout is running, without reading its outcomes.
+
+    Reads the same rows, joins and sweeps as :func:`analyze_holdout` and
+    returns its funnel, arm counts, arm-ratio checks, capture and covariate
+    coverage, scan and volume fields. No outcome value is computed: the
+    :data:`OUTCOMES` readers are not called, an outcome's presence is read
+    from the validity of its fields, and the one outcome field consulted is
+    the cut-off flag the funnel's exclusion already sets. ``outcome`` and
+    ``itt`` therefore only change how many tasks count as analysed.
+
+    Args:
+        event_log: Operational event log, as for :func:`analyze_holdout`.
+        days: Window length.
+        until: Window end (default: now).
+        rate: The ``holdout_rate`` to analyse (default: the single one present).
+        outcome: A key of :data:`OUTCOMES`; names the field whose presence
+            makes a task analysed.
+        itt: Keep usage-limit cut-offs in the analysed count.
+        by_commit: Add the per-build counts of eligible tasks
+            (:class:`HoldoutOperationalByCommit`).
+        settle_hours: Hours a completed sweep must follow a task's latest join.
+        limit: Per-event-type scan limit.
+
+    Returns:
+        A :class:`HoldoutOperationalReport`.
+
+    Raises:
+        HoldoutAnalysisError: An option is out of range, or several rates
+            are present and ``rate`` names none of them.
+    """
+    _validate(
+        days=days,
+        rate=rate,
+        outcome=outcome,
+        permutations=1,
+        bootstraps=1,
+        power_sims=1,
+        planned_mde=DEFAULT_PLANNED_MDE,
+        planned_n=DEFAULT_PLANNED_N,
+        settle_hours=settle_hours,
+        seed=DEFAULT_SEED,
+        limit=limit,
+    )
+    ev = _gather(
+        event_log,
+        days=days,
+        until=until,
+        rate=rate,
+        settle_hours=settle_hours,
+        limit=limit,
+        horizons=False,
+    )
+    funnel = ev.funnel
+    kept = ev.units if itt else [unit for unit in ev.units if not unit.cut_off]
+    analysed = [unit for unit in kept if _outcome_present(outcome, unit.outcome)]
+    funnel.cut_offs_excluded = 0 if itt else len(ev.units) - len(kept)
+    funnel.outcome_missing = len(kept) - len(analysed)
+    funnel.analysed = len(analysed)
+
+    tally = _tally_sessions(
+        event_log, ev.joins, ev.packs, ev.sweeps, ev.settle, ev.evidence_start, ev.end
+    )
+    reaching_per_30d = _per_30d(tally.reaching, ev.effective_days)
+    session_eligible_per_30d = _per_30d(len(tally.eligible), ev.effective_days)
+    sessions = HoldoutOperationalSessions(
+        rolled_up=tally.rolled_up,
+        not_finished=tally.not_finished,
+        without_main_join=tally.without_main_join,
+        reaching_retrieval=tally.reaching,
+        reaching_retrieval_per_30d=reaching_per_30d,
+        eligible=len(tally.eligible),
+        eligible_per_30d=session_eligible_per_30d,
+        note=_OPERATIONAL_SESSIONS_NOTE.format(days=round(ev.effective_days, 2)),
+        not_measurable=_reasons(
+            {
+                "reaching_retrieval_per_30d": (reaching_per_30d, _EMPTY_WINDOW),
+                "eligible_per_30d": (session_eligible_per_30d, _EMPTY_WINDOW),
+            }
+        ),
+    )
+    arm_ratio = _arm_ratio(ev.rows, ev.units, ev.rate)
+    units = ev.units
+    eligible_per_30d = _per_30d(len(units), ev.task_days)
+    analysed_per_30d = _per_30d(len(analysed), ev.task_days)
+    by_parent = Counter(unit.parent for unit in units)
+    top_share = _share(max(by_parent.values()), len(units)) if units else None
+    packs_per_task = sum(unit.packs for unit in units) / len(units) if units else None
+    post_hoc_share, post_hoc_note = _post_hoc_share(funnel)
+    descriptive = HoldoutOperationalDescriptive(
+        eligible_tasks=len(units),
+        eligible_per_30d=eligible_per_30d,
+        analysed_tasks=len(analysed),
+        analysed_per_30d=analysed_per_30d,
+        packs_per_task=packs_per_task,
+        tasks_with_several_packs=sum(unit.packs > 1 for unit in units),
+        post_hoc_share=post_hoc_share,
+        post_hoc_note=post_hoc_note,
+        eligible_by_arm=_arm_counts(units),
+        tasks_with_both_arms=sum(unit.both_arms for unit in units),
+        arm_ratio=arm_ratio,
+        top_parent_share=top_share,
+        sessions=sessions,
+        not_measurable=_reasons(
+            {
+                "eligible_per_30d": (eligible_per_30d, _EMPTY_WINDOW),
+                "analysed_per_30d": (analysed_per_30d, _EMPTY_WINDOW),
+                "top_parent_share": (top_share, _NO_ELIGIBLE),
+                "packs_per_task": (packs_per_task, _NO_ELIGIBLE),
+                "post_hoc_share": (post_hoc_share, post_hoc_note),
+            }
+        ),
+    )
+    coverage = [
+        HoldoutCovariateCoverage(
+            name=name,
+            preregistered=preregistered,
+            n_used=sum(_has_covariates(unit, with_agent_type) for unit in analysed),
+            n_missing_covariate=sum(
+                not _has_covariates(unit, with_agent_type) for unit in analysed
+            ),
+        )
+        for name, preregistered, with_agent_type in _ADJUSTMENT_SPECS
+    ]
+    notes = ev.notes + _notes(
+        ev.rows,
+        funnel,
+        ev.rate,
+        ev.sweeps,
+        arm_ratio,
+        None,
+        ev.scan,
+        settle_hours,
+        tally.not_finished,
+        tally.without_main_join,
+        None,
+    )
+    return HoldoutOperationalReport(
+        window_days=days,
+        effective_window_days=round(ev.effective_days, 2),
+        since=ev.since.isoformat(),
+        until=ev.end.isoformat(),
+        task_window_since=ev.task_start.isoformat(),
+        task_window_days=round(ev.task_days, 2),
+        rate=ev.rate,
+        outcome=outcome,
+        itt=itt,
+        settle_hours=settle_hours,
+        rows=ev.rows.report(ev.rate),
+        funnel=funnel,
+        exclusions=_exclusions(funnel, itt),
+        descriptive=descriptive,
+        covariate_coverage=coverage,
+        by_commit=_operational_by_commit(units) if by_commit else None,
+        scan=ev.scan,
+        notes=[*notes, _OPERATIONAL_NOTE],
+    )
+
+
+def _operational_by_commit(units: Sequence[_Unit]) -> HoldoutOperationalByCommit:
+    """The eligible tasks per build and arm, in the order builds were first seen."""
+    by_build: dict[BuildKey, list[_Unit]] = {}
+    for unit in units:
+        by_build.setdefault(unit.build, []).append(unit)
+    ordered = sorted(
+        by_build.items(), key=lambda item: min(u.first_pack_at for u in item[1])
+    )
+    return HoldoutOperationalByCommit(
+        rows=[
+            HoldoutBuildCountRow(
+                build=build_label(*build),
+                first_seen=min(u.first_pack_at for u in members).isoformat(),
+                last_seen=max(u.first_pack_at for u in members).isoformat(),
+                served=sum(not u.withheld for u in members),
+                withheld=sum(u.withheld for u in members),
+            )
+            for build, members in ordered
+        ],
+        units_spanning_builds=sum(unit.spans_builds for unit in units),
+        note=_OPERATIONAL_BY_COMMIT_NOTE,
+    )
+
+
+@dataclass
+class _Evidence:
+    """What both modes read before any outcome: the scan, rows, funnel and units."""
+
+    units: list[_Unit]
+    rows: _Rows
+    funnel: HoldoutFunnel
+    scan: ScanCoverage
+    notes: list[str]
+    sweeps: dict[str, datetime]
+    joins: dict[str, Event]
+    packs: dict[str, Event]
+    settle: timedelta
+    since: datetime
+    end: datetime
+    evidence_start: datetime
+    effective_days: float
+    rate: float | None
+    task_start: datetime
+    task_days: float
+
+
+def _gather(
+    event_log: EventLog,
+    *,
+    days: int,
+    until: datetime | None,
+    rate: float | None,
+    settle_hours: float,
+    limit: int,
+    horizons: bool = True,
+) -> _Evidence:
+    """Scan the log and build every eligible unit; reads no outcome value."""
+
     end = _as_utc(until) if until is not None else datetime.now(tz=UTC)
     since = end - timedelta(days=days)
     pack_scan = scan_events(
@@ -1485,6 +1953,7 @@ def analyze_holdout(
                 task_start=task_start,
                 task_days=task_days,
                 rate=rate,
+                horizons=horizons,
             )
         )
 
@@ -1503,45 +1972,23 @@ def analyze_holdout(
         )
         if unit is not None:
             units.append(unit)
-    sessions = _sessions(
-        event_log,
-        latest_joins,
-        packs,
-        sweeps,
-        settle,
-        evidence_start,
-        end,
-        effective_days,
-        outcome,
-    )
-
-    return _report(
+    return _Evidence(
         units=units,
         rows=rows,
         funnel=funnel,
         scan=scan,
         notes=notes,
         sweeps=sweeps,
-        sessions=sessions,
-        options={
-            "days": days,
-            "since": since,
-            "end": end,
-            "effective_days": effective_days,
-            "task_since": task_start,
-            "task_days": task_days,
-            "rate": rate,
-            "outcome": outcome,
-            "itt": itt,
-            "by_commit": by_commit,
-            "permutations": permutations,
-            "bootstraps": bootstraps,
-            "power_sims": power_sims,
-            "planned_mde": planned_mde,
-            "planned_n": planned_n,
-            "settle_hours": settle_hours,
-            "seed": seed,
-        },
+        joins=latest_joins,
+        packs=packs,
+        settle=settle,
+        since=since,
+        end=end,
+        evidence_start=evidence_start,
+        effective_days=effective_days,
+        rate=rate,
+        task_start=task_start,
+        task_days=task_days,
     )
 
 
@@ -1793,6 +2240,55 @@ def _non_empty_pack(
     return False
 
 
+@dataclass
+class _SessionTally:
+    """The main sessions' counts, and the payloads of each eligible one."""
+
+    rolled_up: int = 0
+    not_finished: int = 0
+    without_main_join: int = 0
+    reaching: int = 0
+    eligible: list[Sequence[Mapping[str, Any]]] = field(default_factory=list)
+
+
+def _tally_sessions(
+    event_log: EventLog,
+    joins: Mapping[str, Event],
+    packs: dict[str, Event],
+    sweeps: Mapping[str, datetime],
+    settle: timedelta,
+    start: datetime,
+    end: datetime,
+) -> _SessionTally:
+    """Roll joins up to main sessions and count them; reads no outcome."""
+    tally = _SessionTally()
+    groups: dict[str, list[Event]] = {}
+    for session_id, join in joins.items():
+        parent = (join.payload or {}).get("parent_session_id")
+        key = parent if isinstance(parent, str) and parent else session_id
+        groups.setdefault(key, []).append(join)
+    for key, members in groups.items():
+        if not start <= max(_as_utc(m.occurred_at) for m in members) < end:
+            continue
+        if key not in {m.entity_id for m in members}:
+            tally.without_main_join += 1
+            continue
+        if not all(_finished(m, sweeps, settle) for m in members):
+            tally.not_finished += 1
+            continue
+        tally.rolled_up += 1
+        payloads = [m.payload or {} for m in members]
+        if any(
+            _pack_ids(p) or (_count(p.get("retrieval_results")) or 0) > 0
+            for p in payloads
+        ):
+            tally.reaching += 1
+        if not any(_non_empty_pack(event_log, packs, p) for p in payloads):
+            continue
+        tally.eligible.append(payloads)
+    return tally
+
+
 def _sessions(
     event_log: EventLog,
     joins: Mapping[str, Event],
@@ -1805,35 +2301,15 @@ def _sessions(
     outcome: str,
 ) -> HoldoutSessions:
     """Main sessions with their sub-agent tasks rolled up (:class:`HoldoutSessions`)."""
-    groups: dict[str, list[Event]] = {}
-    for session_id, join in joins.items():
-        parent = (join.payload or {}).get("parent_session_id")
-        key = parent if isinstance(parent, str) and parent else session_id
-        groups.setdefault(key, []).append(join)
-    rolled_up = not_finished = without_main_join = reaching = eligible = 0
-    values: list[float] = []
-    for key, members in groups.items():
-        if not start <= max(_as_utc(m.occurred_at) for m in members) < end:
-            continue
-        if key not in {m.entity_id for m in members}:
-            without_main_join += 1
-            continue
-        if not all(_finished(m, sweeps, settle) for m in members):
-            not_finished += 1
-            continue
-        rolled_up += 1
-        payloads = [m.payload or {} for m in members]
-        if any(
-            _pack_ids(p) or (_count(p.get("retrieval_results")) or 0) > 0
-            for p in payloads
-        ):
-            reaching += 1
-        if not any(_non_empty_pack(event_log, packs, p) for p in payloads):
-            continue
-        eligible += 1
-        value = _rolled_outcome(payloads, OUTCOMES[outcome])
-        if value is not None:
-            values.append(value)
+    tally = _tally_sessions(event_log, joins, packs, sweeps, settle, start, end)
+    rolled_up, not_finished = tally.rolled_up, tally.not_finished
+    without_main_join, reaching = tally.without_main_join, tally.reaching
+    eligible = len(tally.eligible)
+    values = [
+        value
+        for payloads in tally.eligible
+        if (value := _rolled_outcome(payloads, OUTCOMES[outcome])) is not None
+    ]
     sd = float(np.std(values, ddof=1)) if len(values) >= _PAIR else None
     sd_reason = (
         "needs 2 main sessions with a non-empty pack whose joins all carry the "
@@ -2305,7 +2781,8 @@ def _report(
         power,
         scan,
         options["settle_hours"],
-        sessions,
+        sessions.not_finished,
+        sessions.without_main_join,
         covariate_adjusted.note,
     )
     return HoldoutReport(
@@ -2322,26 +2799,7 @@ def _report(
         settle_hours=options["settle_hours"],
         rows=rows.report(rate),
         funnel=funnel,
-        exclusions=[
-            HoldoutExclusion(
-                name="non_ephemeral",
-                timing="population",
-                applied=True,
-                excluded=None,
-                note=_NON_EPHEMERAL_NOTE,
-            ),
-            _pre_treatment_exclusion(funnel),
-            HoldoutExclusion(
-                name="cut_offs",
-                timing="post-treatment",
-                applied=not itt,
-                excluded=funnel.cut_offs_excluded,
-                note=(
-                    "Usage-limit cut-offs, read as outcome.ended_on_error; "
-                    + ("kept (ITT sensitivity analysis)." if itt else "excluded.")
-                ),
-            ),
-        ],
+        exclusions=_exclusions(funnel, itt),
         descriptive=descriptive,
         inference=inference,
         covariate_adjusted=covariate_adjusted,
@@ -2351,6 +2809,30 @@ def _report(
         scan=scan,
         notes=notes,
     )
+
+
+def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
+    """The three pre-registered exclusions, in the order the report lists them."""
+    return [
+        HoldoutExclusion(
+            name="non_ephemeral",
+            timing="population",
+            applied=True,
+            excluded=None,
+            note=_NON_EPHEMERAL_NOTE,
+        ),
+        _pre_treatment_exclusion(funnel),
+        HoldoutExclusion(
+            name="cut_offs",
+            timing="post-treatment",
+            applied=not itt,
+            excluded=funnel.cut_offs_excluded,
+            note=(
+                "Usage-limit cut-offs, read as outcome.ended_on_error; "
+                + ("kept (ITT sensitivity analysis)." if itt else "excluded.")
+            ),
+        ),
+    ]
 
 
 def _pre_treatment_decided(funnel: HoldoutFunnel) -> int:
@@ -2556,6 +3038,13 @@ def _arm_balance_r2(
     return min(1.0, max(0.0, 1.0 - residual_ss(design) / within))
 
 
+def _has_covariates(unit: _Unit, with_agent_type: bool) -> bool:
+    """Whether the unit carries every covariate the adjustment needs."""
+    return unit.brief_chars is not None and (
+        not with_agent_type or unit.agent_type is not None
+    )
+
+
 def _adjustment(
     name: str,
     *,
@@ -2590,12 +3079,7 @@ def _adjustment(
     :data:`_MAX_ARM_R2` of the arm's within-stratum variance.
     """
     keep = np.array(
-        [
-            unit.brief_chars is not None
-            and (not with_agent_type or unit.agent_type is not None)
-            for unit in analysed
-        ],
-        dtype=bool,
+        [_has_covariates(unit, with_agent_type) for unit in analysed], dtype=bool
     )
     used = int(keep.sum())
     missing = len(analysed) - used
@@ -2742,10 +3226,7 @@ def _covariate_adjusted(
             options=options,
         )
         for index, (name, preregistered, with_agent_type) in enumerate(
-            [
-                (_BRIEF_LENGTH, True, False),
-                (_BRIEF_LENGTH_AND_AGENT_TYPE, False, True),
-            ]
+            _ADJUSTMENT_SPECS
         )
     ]
     measured = any(a.inference is not None for a in adjustments)
@@ -2812,12 +3293,14 @@ def _notes(
     rate: float | None,
     sweeps: Mapping[str, datetime],
     arm_ratio: Sequence[ArmRatioCheck],
-    power: HoldoutPower,
+    power: HoldoutPower | None,
     scan: ScanCoverage,
     settle_hours: float,
-    sessions: HoldoutSessions,
-    covariate_note: str,
+    sessions_not_finished: int,
+    sessions_without_main_join: int,
+    covariate_note: str | None,
 ) -> list[str]:
+    """The report's notes; ``None`` for *power* or *covariate_note* leaves it out."""
     notes: list[str] = []
     keyed = sum(HOLDOUT_KEY in (e.payload or {}) for e in rows.window)
     if rows.window and not keyed:
@@ -2862,11 +3345,11 @@ def _notes(
             "pack id the capture could not parse, so the first parsed pack, "
             "which sets the arm, may not be the task's first call."
         )
-    if sessions.not_finished or sessions.without_main_join:
+    if sessions_not_finished or sessions_without_main_join:
         notes.append(
             "Main sessions left out of the session figures: "
-            f"{sessions.not_finished} not finished yet, "
-            f"{sessions.without_main_join} with no join for the main transcript."
+            f"{sessions_not_finished} not finished yet, "
+            f"{sessions_without_main_join} with no join for the main transcript."
         )
     failing = [
         check.population for check in arm_ratio if check.p_value < ARM_RATIO_PAUSE_P
@@ -2876,11 +3359,12 @@ def _notes(
             "Arm ratio off the rate (binomial p < 0.001) for: "
             f"{', '.join(failing)}. The pre-registration says pause and fix."
         )
-    if power.status == "ok" and power.mde_at_target_power is None:
+    if power and power.status == "ok" and power.mde_at_target_power is None:
         notes.append("Simulated power stays below the target across the shifts tried.")
     if scan.truncated and scan.note:
         notes.append(scan.note)
-    notes.append(covariate_note)
+    if covariate_note is not None:
+        notes.append(covariate_note)
     return notes
 
 
@@ -2908,12 +3392,18 @@ __all__ = [
     "HoldoutCovariateAdjusted",
     "HoldoutDescriptive",
     "HoldoutExclusion",
+    "HoldoutBuildCountRow",
+    "HoldoutCovariateCoverage",
     "HoldoutFunnel",
     "HoldoutGuardrail",
     "HoldoutGuardrailArm",
     "HoldoutGuardrails",
     "HoldoutHorizon",
     "HoldoutInference",
+    "HoldoutOperationalByCommit",
+    "HoldoutOperationalDescriptive",
+    "HoldoutOperationalReport",
+    "HoldoutOperationalSessions",
     "HoldoutPower",
     "HoldoutReport",
     "HoldoutSecondaryInference",
@@ -2921,6 +3411,7 @@ __all__ = [
     "HoldoutSessions",
     "analytic_mde",
     "analyze_holdout",
+    "analyze_holdout_operational",
     "binomial_two_sided",
     "bootstrap_ci",
     "n_for_mde",

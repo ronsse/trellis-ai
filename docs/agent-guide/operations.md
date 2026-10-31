@@ -3456,7 +3456,7 @@ even a meta-trace.
 
 ```bash
 trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--itt] \
-    [--by-commit] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
+    [--by-commit] [--operational] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
     [--planned-n N] [--settle-hours H] [--seed N] [--limit N] [--format text|json]
 ```
 
@@ -3467,7 +3467,8 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
-| `--by-commit` | off | Add `by_commit`, a descriptive per-build table of the analysed tasks; no estimate, and no other figure changes |
+| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean; no interval or p-value, and no other figure changes |
+| `--operational` | off | Report only what shows the experiment is running, with no outcome read; see [`--operational`](#operational-mode) |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
 | `--power-sims` | `600` | Simulated experiments per power estimate |
@@ -3621,6 +3622,30 @@ from more than one build is counted once, under its first pack's build, and also
 `units_spanning_builds`, so the table never sums to more than the analysed
 tasks. The commit is the one the build stamped at install, so an editable
 install on a moved working tree names the commit it was installed at.
+
+<a id="operational-mode"></a>
+`--operational` checks that the experiment is running without opening its
+results, so a reader can ask the question before the pre-registered analysis is
+due. The outcome-derived figures are never computed, not computed and hidden: the
+report is its own model (`mode: "operational"`), with no field that could carry
+one. It keeps `status`, the window and task-window fields, `rate`, `rows`,
+`funnel`, `exclusions`, `scan` and `notes`, and the `descriptive` counts: eligible
+and analysed tasks and their rates, packs per task, `eligible_by_arm`,
+`tasks_with_both_arms`, `arm_ratio` (with its p and the pause-and-fix note), the
+top-parent share and `sessions` counts. It adds `covariate_coverage`, how many
+analysed tasks carry each adjustment's covariates, with no fit. It drops `seed`,
+`inference`, `covariate_adjusted`, `power` and `guardrails`, and from
+`descriptive` every outcome mean or SD, the MDE and sample-size horizons, the
+cut-off share and the cut-offs and analysed counts split by arm. A task counts as
+analysed when it carries the outcome's field and is not a cut-off (unless
+`--itt`); the field's value is not read. The funnel's pooled `cut_offs_excluded`
+stays, as it is a count over both arms together.
+`--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` do
+nothing with it. With `--by-commit`, `by_commit` holds counts only: per build the
+eligible tasks that were `served` and `withheld`, so the table cannot be
+subtracted from the analysed counts into cut-offs by arm. Exit codes are those of
+the full report in both formats. The text and JSON are an inspection aid, not a
+pause control: nothing here stops a run.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
