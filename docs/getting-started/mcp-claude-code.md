@@ -19,7 +19,7 @@ trellis admin quickstart
 
 `quickstart` does two things:
 
-1. Initializes SQLite stores under `~/.trellis/` (or `$TRELLIS_CONFIG_DIR` / `$TRELLIS_DATA_DIR`, if set).
+1. Initializes SQLite stores under `~/.trellis/` (or under `$TRELLIS_CONFIG_DIR` / `$TRELLIS_DATA_DIR` when set). It records the data directory in `config.yaml` as `data_dir`, and from then on that key decides where the stores are: `$TRELLIS_DATA_DIR` only chooses the directory while `config.yaml` has no `data_dir`, so it cannot redirect a config that already names one.
 2. Prints the command that registers `trellis-mcp` with Claude Code. It does not run it; run it once yourself:
 
    ```bash

@@ -202,6 +202,87 @@ _PG_DSN_BACKENDS = frozenset({"postgres", "pgvector"})
 # a second registry to resolve its data dir, and a server reloads the config.
 _WARNED_UNUSED_PLANE_DSNS: set[str] = set()
 
+# ``(config.yaml data_dir, TRELLIS_DATA_DIR)`` pairs, resolved, whose override
+# this process already warned about: the CLI builds a second registry to
+# resolve its data dir, and a server reloads the config.
+_WARNED_DATA_DIR_ENV: set[tuple[str, str]] = set()
+
+
+def _directory_key(path: Path) -> str:
+    """``path`` as the filesystem sees it, so two spellings of one directory agree.
+
+    Symlinks, a trailing slash, ``.`` and ``..`` and a relative form all fold
+    into one string. Nothing here expands ``~``, because nothing that opens the
+    stores does: ``~/data`` in ``config.yaml`` is a directory named ``~`` under
+    the working directory, and is compared as that.
+    """
+    import os  # noqa: PLC0415
+
+    try:
+        return str(path.resolve())
+    except (OSError, RuntimeError):  # a symlink loop: fall back to the spelling
+        return os.path.abspath(path)  # noqa: PTH100
+
+
+def _env_data_dir_overridden_by(config_data_dir: Path) -> Path | None:
+    """The ``TRELLIS_DATA_DIR`` directory ``config.yaml``'s ``data_dir`` overrides.
+
+    ``None`` when the variable is unset or empty, or names the same directory
+    as the key. Advisory, so wrapped whole rather than guarded by a list of
+    exception types: the registry is built on the way into every write, and
+    one escaped exception here would fail them all.
+    """
+    import os  # noqa: PLC0415
+
+    try:
+        raw = os.environ.get("TRELLIS_DATA_DIR")
+        if not raw:
+            return None
+        env_data_dir = Path(raw)
+        if _directory_key(env_data_dir) == _directory_key(config_data_dir):
+            return None
+    except Exception:  # advisory probe; never fail a write
+        return None
+    return env_data_dir
+
+
+def _warn_env_data_dir_overridden(
+    config_path: Path, config_data_dir: Path, env_data_dir: Path
+) -> None:
+    """Warn, once per process and pair of directories, that the variable lost.
+
+    ``config.yaml``'s ``data_dir`` beats ``TRELLIS_DATA_DIR`` (settled in #666
+    and #874), so a restored or cloned deployment with the variable pointed at
+    the copy keeps opening, and writing to, the original while the copy looks
+    untouched. A ``warning``, not ``info``: the CLI's default level hides
+    ``info``. The structlog sink is stderr, so ``--format json`` stdout and
+    MCP frames stay clean.
+    """
+    try:
+        pair = (_directory_key(config_data_dir), _directory_key(env_data_dir))
+        if pair in _WARNED_DATA_DIR_ENV:
+            return
+        _WARNED_DATA_DIR_ENV.add(pair)
+        logger.warning(
+            "registry_data_dir_env_ignored",
+            config_key="data_dir",
+            config_file=str(config_path),
+            config_data_dir=str(config_data_dir),
+            env_var="TRELLIS_DATA_DIR",
+            env_data_dir=str(env_data_dir),
+            hint=(
+                f"'data_dir' in {config_path} is {config_data_dir}, and a"
+                " data_dir in config.yaml beats TRELLIS_DATA_DIR, so"
+                f" TRELLIS_DATA_DIR={env_data_dir} is ignored: every surface"
+                f" opens, and writes to, the stores in {config_data_dir}. To use"
+                f" {env_data_dir}, edit or remove 'data_dir' in config.yaml; to"
+                " keep the stores in use, unset TRELLIS_DATA_DIR."
+            ),
+        )
+    except Exception:  # advisory log line; never fail a write
+        return
+
+
 # Operator-controlled toggle for the connectivity-ping branch in
 # :meth:`StoreRegistry.validate`. Read at validate-time, not import-time,
 # so a process can flip the env var between runs without reload.
@@ -929,6 +1010,8 @@ class StoreRegistry:
         else:
             self._config = raw_config
         self._stores_dir = stores_dir
+        self._data_dir_origin: str | None = None
+        self._ignored_env_data_dir: Path | None = None
         self._embedding_config = embedding_config or {}
         self._retrieval_config = retrieval_config or {}
         self._llm_config = llm_config or {}
@@ -945,6 +1028,26 @@ class StoreRegistry:
     def stores_dir(self) -> Path | None:
         """Return the base directory for store files, or ``None``."""
         return self._stores_dir
+
+    @property
+    def data_dir_origin(self) -> str | None:
+        """What decided the data directory.
+
+        ``"config.yaml"`` for its ``data_dir`` key, ``"TRELLIS_DATA_DIR"``,
+        ``"argument"`` for :meth:`from_config_dir`'s ``data_dir`` parameter or
+        ``"default"`` for the config dir's ``data/``. ``None`` for a registry
+        not built by :meth:`from_config_dir`.
+        """
+        return self._data_dir_origin
+
+    @property
+    def ignored_env_data_dir(self) -> Path | None:
+        """The ``TRELLIS_DATA_DIR`` that ``config.yaml``'s ``data_dir`` overrode.
+
+        Set only when the variable is set and names a different directory from
+        the key, the one case where the variable is silently ignored.
+        """
+        return self._ignored_env_data_dir
 
     @property
     def classify_config(self) -> dict[str, Any]:
@@ -984,10 +1087,16 @@ class StoreRegistry:
             config_dir = Path(
                 os.environ.get("TRELLIS_CONFIG_DIR", str(Path.home() / ".trellis"))
             )
-        if data_dir is None:
+        if data_dir is not None:
+            data_dir_origin = "argument"
+        else:
+            data_dir_origin = (
+                "TRELLIS_DATA_DIR" if "TRELLIS_DATA_DIR" in os.environ else "default"
+            )
             data_dir = Path(
                 os.environ.get("TRELLIS_DATA_DIR", str(config_dir / "data"))
             )
+        ignored_env_data_dir: Path | None = None
 
         # Try to load store config from config.yaml
         store_config: dict[str, Any] = {}
@@ -1077,6 +1186,12 @@ class StoreRegistry:
                     )
                     raise ConfigError(msg, setting="data_dir")
                 data_dir = Path(raw_data_dir)
+                data_dir_origin = "config.yaml"
+                ignored_env_data_dir = _env_data_dir_overridden_by(data_dir)
+                if ignored_env_data_dir is not None:
+                    _warn_env_data_dir_overridden(
+                        config_path, data_dir, ignored_env_data_dir
+                    )
 
         stores_dir = data_dir / "stores"
         registry = cls(
@@ -1087,6 +1202,8 @@ class StoreRegistry:
             llm_config=llm_config,
             classify_config=classify_config,
         )
+        registry._data_dir_origin = data_dir_origin
+        registry._ignored_env_data_dir = ignored_env_data_dir
         registry._warn_unused_plane_dsns(str(config_path))
         return registry
 

@@ -126,8 +126,9 @@ def test_the_stores_guard_checks_and_names_the_registry_s_directory(
 
     assert result.exit_code == 1
     assert result.stdout == ""
-    message = f"Stores not initialized at {keyed / 'stores'}. Run 'trellis admin init'"
-    assert message in plain(result.stderr)
+    # The key supplied this path, so the line says so (and what to do about it).
+    message = f"Stores not initialized at {keyed / 'stores'}. That path comes from"
+    assert message in " ".join(plain(result.stderr).split())
     assert not keyed.exists()  # stopped before the registry could create it
 
 

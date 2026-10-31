@@ -97,6 +97,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A `data_dir` in `config.yaml` quietly beat `TRELLIS_DATA_DIR`, so a restored
+  store or a cloned config could write into the original while the copy looked
+  untouched.** The precedence is unchanged and intended: an absolute `data_dir`
+  in `config.yaml` wins over the variable. What was missing was any sign of it.
+  When the variable is set and names a different directory, building the store
+  registry now logs a `registry_data_dir_env_ignored` warning to stderr, once per
+  process, naming the `data_dir` key and both paths. `admin health` shows the
+  same two paths in a `data_dir_disagreement` field (JSON) or two lines under the
+  table (text). The same directory spelled another way (trailing slash, symlink,
+  `..`) does not warn, and neither stdout nor an exit code changes. "Stores not
+  initialized at PATH" now names the `data_dir` key when that key supplied the
+  path, and no longer offers `admin init` as the only remedy: for a moved or
+  restored store, change `data_dir`, since `init` creates an empty `stores/`
+  at the configured path. The docs that implied the variable selects the data
+  directory (`mcp-claude-code.md`, `scheduled-curation.md`, `running-trellis.md`)
+  are corrected.
+
 - **The session-capture sweep keeps its progress as it goes.** `run_capture`
   held every record until the end of the run and saved the watermark last, so a
   kill, or one store error, discarded all the judging done so far and the
