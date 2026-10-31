@@ -63,6 +63,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
+  could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
+  interpolated the id into the path of `get_entity`, `get_trace` and
+  `record_feedback` as it was given: `get_entity("tbl#col")` requested
+  `/entities/tbl` (a `#` starts the URL fragment) and returned that entity with a
+  200, `get_trace("t?1")` returned trace `t`, and `a/../b` was collapsed to `b`
+  before it was sent. Every path id now goes through one `path_id()` helper
+  (`trellis_sdk._http`) that encodes it as a single path segment, and
+  `tests/unit/sdk/test_path_id_rule.py` fails when a client builds a path from an
+  unencoded value. An id that was already legal in a path (`entity:abc`, `a+b`)
+  keeps its wire form. A `/` in an id is now sent as `%2F`, which the server
+  decodes before it routes. A trace id or pack id containing `/` still cannot be
+  routed, because `GET /traces/{trace_id}` and `POST /packs/{pack_id}/feedback`
+  are not `:path` routes; the SDK now sends it as one segment, so a trace id
+  reads as not found and a pack id raises, instead of reaching a different
+  route. No server change.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and
