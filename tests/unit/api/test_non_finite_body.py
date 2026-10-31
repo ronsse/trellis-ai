@@ -10,11 +10,21 @@ caller's malformed body. A missing-field error echoes the whole body as
 its ``input``, so a non-finite number anywhere in a body missing a field
 reaches that renderer.
 
+A body that is not valid UTF-8 has the same shape of defect for a
+different reason. FastAPI's own routing already turns a JSON body's
+decode failure into a 422 or 400 before this handler ever sees it
+(:class:`TestUndecodableJsonBodyIsAlreadyOutOfScope`), but a body sent
+with no JSON content type — ``text/plain``, say — reaches a model with no
+JSON parse to fail on first, so the validation error's ``input`` is the
+raw, undecodable ``bytes`` themselves. ``jsonable_encoder``'s default
+``bytes`` encoder is a strict ``.decode()``, which raises
+``UnicodeDecodeError``, and the catch-all answers 500 again.
+
 :func:`~trellis_api.middleware.request_validation_error_handler` keeps
-FastAPI's 422 and renders a non-finite float anywhere in the error payload
-as the token the caller sent. Every finite case stays byte-identical to
-FastAPI's default handler, which :class:`TestFiniteErrorsMatchFastApisDefault`
-pins.
+FastAPI's 422 and renders a non-finite float, or undecodable bytes,
+anywhere in the error payload as the token or text the caller sent. Every
+finite, decodable case stays byte-identical to FastAPI's default handler,
+which :class:`TestFiniteErrorsMatchFastApisDefault` pins.
 
 The client is built by :func:`~trellis_api.app.create_app`, so "the handler
 exists" and "the handler is wired" are the same test.
@@ -59,7 +69,11 @@ INGEST_BULK = "/api/v1/ingest/bulk"
 #: The bare tokens Python's ``json`` module accepts, sent exactly as written.
 NON_FINITE = ["NaN", "Infinity", "-Infinity"]
 
+#: Not valid UTF-8: a lone UTF-16 BOM with no bytes behind it.
+NON_UTF8_BODY = b"\xff\xfe"
+
 _JSON = {"content-type": "application/json"}
+_TEXT_PLAIN = {"content-type": "text/plain"}
 
 
 def _measurement_body(value: str) -> str:
@@ -256,6 +270,91 @@ class TestFiniteErrorsMatchFastApisDefault:
         assert ours.status_code == default.status_code == 422
         assert ours.headers["content-type"] == default.headers["content-type"]
         assert ours.content == default.content
+
+
+class TestUndecodableBodyAnswers422:
+    """A body that is not valid UTF-8 answers 422, not 500.
+
+    Only a route reached with no JSON content type exposes this: FastAPI's
+    own body parsing (``fastapi.routing``) already converts a JSON body's
+    decode failure into a 422 or a 400 before this handler runs, so that
+    path never carries undecodable bytes as far as ``jsonable_encoder``.
+    """
+
+    @pytest.mark.parametrize("path", [FEEDBACK, PACK_FEEDBACK, MEASUREMENTS])
+    def test_answers_422_echoing_the_text_and_records_nothing(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        logs: list[dict[str, Any]],
+        path: str,
+    ) -> None:
+        resp = client.post(path, content=NON_UTF8_BODY, headers=_TEXT_PLAIN)
+        # One assertion, so a failure shows the status and the log together.
+        assert (resp.status_code, _unhandled(logs)) == (422, [])
+        [error] = resp.json()["detail"]
+        assert error["loc"] == ["body"]
+        assert error["input"] == NON_UTF8_BODY.decode(errors="backslashreplace")
+        _assert_nothing_recorded(registry)
+
+    def test_the_echoed_text_carries_only_what_the_caller_sent(
+        self, client: TestClient
+    ) -> None:
+        """Leak check: the rendered text names exactly the bytes sent, in order.
+
+        ``unicode_escape`` is ``backslashreplace``'s own inverse, so decoding
+        the echoed text with it and re-encoding to raw bytes must reproduce
+        the request body exactly — nothing invented, nothing dropped.
+        """
+        resp = client.post(FEEDBACK, content=NON_UTF8_BODY, headers=_TEXT_PLAIN)
+        [error] = resp.json()["detail"]
+        roundtrip = error["input"].encode("ascii").decode("unicode_escape")
+        assert roundtrip.encode("latin-1") == NON_UTF8_BODY
+
+    def test_decodable_bytes_stay_byte_identical_to_fastapis_default(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Valid-UTF-8 bytes routed the same way are unaffected by the new encoder."""
+        app = create_app()
+        app.add_exception_handler(
+            RequestValidationError,
+            request_validation_exception_handler,  # type: ignore[arg-type]
+        )
+        default_client = TestClient(app, raise_server_exceptions=False)
+        body = b"not a json object, but plain decodable text"
+        ours = client.post(FEEDBACK, content=body, headers=_TEXT_PLAIN)
+        default = default_client.post(FEEDBACK, content=body, headers=_TEXT_PLAIN)
+        assert ours.status_code == default.status_code == 422
+        assert ours.content == default.content
+
+
+class TestUndecodableJsonBodyIsAlreadyOutOfScope:
+    """A JSON-content-type body never reaches this handler's bytes path.
+
+    FastAPI's routing parses the body before validation runs: a
+    ``json.JSONDecodeError`` becomes a 422 with ``input: {}`` (not the raw
+    bytes), and any other decode failure (what a non-UTF-8 byte raises)
+    becomes a 400 — both outside :func:`request_validation_error_handler`,
+    and both pre-existing. Pinned so a future change to that routing is
+    caught here rather than reopening the 500 this PR closes elsewhere.
+    """
+
+    @pytest.mark.parametrize("path", [FEEDBACK, MEASUREMENTS])
+    def test_invalid_json_syntax_in_a_valid_utf8_body_answers_422(
+        self, client: TestClient, path: str
+    ) -> None:
+        resp = client.post(path, content=b"{not valid json", headers=_JSON)
+        assert resp.status_code == 422, resp.text
+        [error] = resp.json()["detail"]
+        assert error["type"] == "json_invalid"
+
+    @pytest.mark.parametrize("path", [FEEDBACK, MEASUREMENTS])
+    def test_non_utf8_bytes_under_json_content_type_never_answers_500(
+        self, client: TestClient, logs: list[dict[str, Any]], path: str
+    ) -> None:
+        resp = client.post(path, content=NON_UTF8_BODY, headers=_JSON)
+        assert resp.status_code in (400, 422), resp.text
+        assert _unhandled(logs) == []
 
 
 class TestMeasurementValue:

@@ -63,12 +63,14 @@ It replies `Trace saved: <trace_id>`.
 | `started_at` | ISO 8601 datetime | optional; defaults to ingest time |
 | `schema_version` | string | never set it; it has a default |
 
-### Gotchas: the four mistakes behind most rejections
+### Gotchas: the mistakes behind most rejections
 
 | Rejected | Write instead |
 |---|---|
 | `"description": "ran the tests"` | `"name": "Bash", "args": {"command": "make test"}` |
 | `"output": "12 passed"` | `"result": {"summary": "12 passed"}` |
+| `"action": "ran the tests"` | `"name": "Bash", "args": {"command": "make test"}` |
+| `"observation": "12 passed"` | `"result": {"summary": "12 passed"}` |
 | `"result": "12 passed"` | `"result": {"summary": "12 passed"}` |
 | a step without `step_type` | `"step_type": "tool_call"` |
 
