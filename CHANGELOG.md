@@ -4,6 +4,28 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The session-capture sweep keeps its progress as it goes.** `run_capture`
+  held every record until the end of the run and saved the watermark last, so a
+  kill, or one store error, discarded all the judging done so far and the
+  `CAPTURE_SWEEP_COMPLETED` event never fired. Judged sessions are now written in
+  batches of `checkpoint_every` (default 5, a keyword of `run_capture`): the
+  batch's records land, then supersessions and training pairs, then the cursors
+  and the watermark, in that order, so a cursor is never saved before its records.
+  A record that fails to write counts its session in `sessions_errored` and leaves
+  it un-watermarked for the next sweep; the other records and sessions continue,
+  and the sweep event still fires with the errors counted. A NUL
+  character in a judged field of the reply no longer reaches the store (SQLite
+  keeps it, and a Postgres text column refuses it); it is stripped where the
+  reply is parsed. A clean run writes the same
+  records, in the same order, as before, with the same report and the same
+  near-duplicate warnings; the sweep's own flushed memories stay hidden from later
+  sessions' reconcile, so which memories are written and how they are judged do
+  not change. A dry run still makes one pass and saves nothing. `CORPUS_SYNCED` now
+  fires once per batch rather than once per sweep. `sync_records` gains optional
+  `on_record_error` and `minhash` arguments; without them it behaves as before.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added

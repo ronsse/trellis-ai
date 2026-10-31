@@ -67,6 +67,8 @@ from trellis.mcp.reconcile import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     from trellis.llm import LLMClient
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.vector import VectorStore
@@ -83,8 +85,15 @@ _LIST_PAGE_SIZE = 500
 _NEAR_CEILING = 0.999
 
 
-def _load_existing(registry: StoreRegistry, id_prefix: str) -> dict[str, str]:
-    """Return ``{doc_id: content}`` for stored captures under *id_prefix*."""
+def _load_existing(
+    registry: StoreRegistry,
+    id_prefix: str,
+    hidden_doc_ids: AbstractSet[str] = frozenset(),
+) -> dict[str, str]:
+    """Return ``{doc_id: content}`` for stored captures under *id_prefix*.
+
+    A doc id in *hidden_doc_ids* is left out; see :func:`adjudicate`.
+    """
     doc_store = registry.knowledge.document_store
     existing: dict[str, str] = {}
     offset = 0
@@ -95,7 +104,11 @@ def _load_existing(registry: StoreRegistry, id_prefix: str) -> dict[str, str]:
         offset += len(page)
         for doc in page:
             doc_id = doc.get("doc_id", "")
-            if doc_id.startswith(id_prefix) and not is_chunk_doc_id(doc_id):
+            if (
+                doc_id.startswith(id_prefix)
+                and not is_chunk_doc_id(doc_id)
+                and doc_id not in hidden_doc_ids
+            ):
                 existing[doc_id] = doc.get("content", "")
         if len(page) < _LIST_PAGE_SIZE:
             break
@@ -110,6 +123,7 @@ def adjudicate(
     id_prefix: str,
     report: CaptureReport,
     dry_run: bool,
+    hidden_doc_ids: AbstractSet[str] = frozenset(),
 ) -> list[CandidateMemory]:
     """Reconcile candidates against stored captures; return the survivors.
 
@@ -122,13 +136,20 @@ def adjudicate(
     ``MEMORY_OP_JUDGED`` emit. The model is still called and the verdicts are
     still computed, reported and returned: a dry run that stopped adjudicating
     would preview a *different* sweep from the one it is previewing.
+
+    ``hidden_doc_ids`` are documents this sweep wrote itself at an earlier
+    checkpoint. A sweep that writes once, at its end, never shows its own
+    candidates to a later session's adjudication, and one that checkpoints must
+    not start to: the ids are left out of the stored captures compared against
+    and out of the exact-duplicate check, so a candidate is reconciled against
+    what was stored before the sweep began and nothing else.
     """
     doc_store = registry.knowledge.document_store
     event_log = registry.operational.event_log
     model_id = configured_model_id(registry)
     timeout = reconcile_timeout_seconds(registry)
 
-    existing = _load_existing(registry, id_prefix)
+    existing = _load_existing(registry, id_prefix, hidden_doc_ids)
     index = MinHashIndex()
     for doc_id, content in existing.items():
         index.add(doc_id, content)
@@ -137,7 +158,11 @@ def adjudicate(
     for candidate in candidates:
         chash = content_hash(candidate.content)
         exact = doc_store.get_by_hash(chash)
-        if exact is not None and str(exact.get("doc_id", "")).startswith(id_prefix):
+        if (
+            exact is not None
+            and str(exact.get("doc_id", "")).startswith(id_prefix)
+            and str(exact.get("doc_id", "")) not in hidden_doc_ids
+        ):
             candidate.reconciliation = ReconcileDecision.NOOP.value
             report.candidates_reconciled_noop += 1
             continue
