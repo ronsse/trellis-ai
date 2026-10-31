@@ -89,6 +89,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=4.0",
+    "pytest-xdist>=3.5",
     "hypothesis>=6.92",
     # THE source of truth for both tool versions. .pre-commit-config.yaml
     # mirrors these (its `rev:` cannot reference a file) and the workflows
@@ -268,7 +269,7 @@ pythonpath = ["src", "."]
 # (and TRELLIS_TEST_<NAME> env var) wired in tests/conftest.py that relaxes
 # its corresponding "not <marker>" constraint. See docs/agent-guide/testing.md.
 addopts = """\
-    -v --tb=short \
+    --tb=short \
     -m "not live and not slow and not neo and not neo4j and not arcadedb \
     and not postgres and not pgvector"\
 """
