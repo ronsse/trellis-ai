@@ -28,6 +28,18 @@ All notable changes to Trellis will be documented in this file.
   `registry_plane_dsn_unused` once per plane per process, naming the plane, the
   variable and the file, never the DSN. A plane with at least one Postgres store
   stays silent, since a plane may legitimately run some stores on SQLite.
+
+- **The AST rule tests share one parse per source.** `ast.parse` called from test
+  code is now memoised by its source text (`tests/ast_rules.py`, installed from
+  `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
+  test. Only callers under `tests` get a shared tree: pytest's assertion rewriter,
+  `ast.literal_eval`, `scripts/` and `src/` keep the real `ast.parse`. Shared
+  trees must not be edited, and a session fixture plus
+  `tests/unit/test_ast_parse_memo.py` fail the run if one is. That check found one
+  existing rule, `test_error_describe_not_quote_rule.py`, rewriting a tree in
+  place through `ast.NodeTransformer`; it now transforms a copy. Test-suite
+  change only; nothing under `src/` is touched.
+
 - **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
   `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
   only, so `make test` and a bare `pytest` stay one process. Same legs, same
@@ -85,6 +97,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
+  could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
+  interpolated the id into the path of `get_entity`, `get_trace` and
+  `record_feedback` as it was given: `get_entity("tbl#col")` requested
+  `/entities/tbl` (a `#` starts the URL fragment) and returned that entity with a
+  200, `get_trace("t?1")` returned trace `t`, and `a/../b` was collapsed to `b`
+  before it was sent. Every path id now goes through one `path_id()` helper
+  (`trellis_sdk._http`) that encodes it as a single path segment, and
+  `tests/unit/sdk/test_path_id_rule.py` fails when a client builds a path from an
+  unencoded value. An id that was already legal in a path (`entity:abc`, `a+b`)
+  keeps its wire form. A `/` in an id is now sent as `%2F`, which the server
+  decodes before it routes. A trace id or pack id containing `/` still cannot be
+  routed, because `GET /traces/{trace_id}` and `POST /packs/{pack_id}/feedback`
+  are not `:path` routes; the SDK now sends it as one segment, so a trace id
+  reads as not found and a pack id raises, instead of reaching a different
+  route. No server change.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and
