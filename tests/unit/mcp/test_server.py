@@ -535,7 +535,7 @@ class TestSaveExperience:
     def test_documented_minimal_trace_is_valid(self) -> None:
         doc = inspect.getdoc(save_experience)
         assert doc is not None
-        marker = "Example minimal valid trace:\n"
+        marker = "Example valid trace:\n"
         assert marker in doc
 
         result = save_experience(doc.split(marker, maxsplit=1)[1])
@@ -553,7 +553,7 @@ class TestSaveExperience:
         """
         doc = inspect.getdoc(save_experience)
         assert doc is not None
-        payload = json.loads(doc.split("Example minimal valid trace:\n", maxsplit=1)[1])
+        payload = json.loads(doc.split("Example valid trace:\n", maxsplit=1)[1])
         payload["definitely_not_a_trace_field"] = "anything"
 
         with pytest.raises(McpError) as excinfo:
