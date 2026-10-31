@@ -28,4 +28,6 @@ jobs:
       - run: pip install -e ".[${{ matrix.extras }}]"
       # `-n auto` is set here and nowhere else: not in pyproject addopts or the
       # Makefile, so a local `make test` stays one process.
-      - run: pytest tests/ -v -n auto
+      - run: PYTHONPATH=.github/diag pytest tests/ -v -n auto -p width_detector
+      - if: always()
+        run: cat /tmp/width_det.txt
