@@ -433,8 +433,10 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         """Write one node version on ``conn``: close the current row (if
         any) and insert the new one. One attempt — callers retry.
         """
-        now = utc_now()
         existing = self._fetch_current_node_for_update(conn, node_id)
+        # Read the clock under the lock, so versions are stamped in the
+        # order they commit.
+        now = utc_now()
         if existing:
             check_node_role_immutable(node_id, existing, node_role)
             created_at = existing["created_at"]
@@ -741,8 +743,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         match_confidence: float = 1.0,
         is_primary: bool = False,
     ) -> str:
-        now = utc_now()
-
         # Hold one connection across the resolve+update+insert so the
         # SCD-2 close-and-reinsert is transactionally consistent.
         with self._conn() as conn:
@@ -751,6 +751,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (_alias_lock_key(source_system, raw_id),),
                 )
+            # Read the clock under the lock, so versions are stamped in the
+            # order they commit.
+            now = utc_now()
             existing = self._resolve_alias_for_update(conn, source_system, raw_id)
             if existing:
                 alias_id = existing["alias_id"]
@@ -803,13 +806,15 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         stale_owner_name_key: str | None = None,
     ) -> AliasBindResult:
         """Atomically claim the current-alias key or replace a stale owner."""
-        now = utc_now()
         alias_id = generate_ulid()
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (_alias_lock_key(source_system, raw_id),),
             )
+            # Read the clock under the lock, so versions are stamped in the
+            # order they commit.
+            now = utc_now()
             cur.execute(
                 """
                 INSERT INTO entity_aliases

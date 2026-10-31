@@ -258,6 +258,25 @@ def _wait_for_select_for_update_lock_wait(dsn: str, table: str) -> bool:
     return False
 
 
+def _wait_for_advisory_lock_queue(dsn: str, holder_pid: int) -> bool:
+    """Poll until some backend queues behind ``holder_pid``'s advisory lock
+    (10 s cap).
+    """
+    deadline = time.monotonic() + 10
+    with psycopg.connect(dsn, autocommit=True) as watcher:
+        while time.monotonic() < deadline:
+            queued = watcher.execute(
+                "SELECT count(*) > 0 FROM pg_locks"
+                " WHERE locktype = 'advisory' AND NOT granted"
+                " AND %s = ANY(pg_blocking_pids(pid))",
+                (holder_pid,),
+            ).fetchone()[0]
+            if queued:
+                return True
+            time.sleep(0.01)
+    return False
+
+
 def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
     """Count the raw rows, any version, each table still holds for a node."""
     queries = {
@@ -535,6 +554,60 @@ class TestPostgresGraphStore:
         current = [v for v in history if v["valid_to"] is None]
         assert len(current) == 1
         assert current[0]["properties"] == {"writer": "a"}
+
+    def test_write_node_version_stamps_its_version_after_the_lock_wait(
+        self, store
+    ) -> None:
+        """A writer that waits for the node row lock stamps its version
+        after the wait.
+
+        A clock read before ``FOR UPDATE`` lets a queued writer close the
+        current version at an earlier time than that version's
+        ``valid_from``, so an ``as_of`` read in the gap serves two versions
+        of one node.
+        """
+        from trellis.core.base import utc_now
+
+        node_id = "race-node-synthetic-clock"
+        store.upsert_node(node_id, "synthetic_type", {"writer": "seed"})
+
+        outcome: dict[str, Any] = {}
+
+        def call_upsert() -> None:
+            try:
+                outcome["node_id"] = store.upsert_node(
+                    node_id, "synthetic_type", {"writer": "queued"}
+                )
+            except Exception as exc:
+                outcome["node_id"] = exc
+
+        writer = threading.Thread(target=call_upsert)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT 1 FROM nodes WHERE node_id = %s AND valid_to IS NULL"
+                " FOR UPDATE",
+                (node_id,),
+            )
+            writer.start()
+            waited = _wait_for_select_for_update_lock_wait(PG_DSN, "nodes")
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert waited, "upsert_node did not wait for the row lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["node_id"], Exception), outcome["node_id"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM nodes"
+                " WHERE node_id = %s ORDER BY valid_from",
+                (node_id,),
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
 
     def test_upsert_node_other_unique_violation_is_not_retried(
         self, store, monkeypatch
@@ -1161,6 +1234,142 @@ class TestPostgresGraphStore:
             ("unity_catalog", "main.analytics.orders"),
             ("dbt", "model.project.orders"),
         }
+
+    def test_upsert_alias_stamps_its_version_after_the_lock_wait(self, store) -> None:
+        """A writer that waits for the alias lock stamps its version after
+        the wait.
+
+        A clock read before the lock lets a queued writer close the
+        winner's version at an earlier time than that version's
+        ``valid_from``, so an ``as_of`` read in the gap serves two versions
+        of one alias.
+        """
+        from trellis.core.base import utc_now
+        from trellis.stores.postgres.graph import _alias_lock_key
+
+        source_system = "unity_catalog"
+        raw_id = "main.analytics.race_clock_synthetic"
+        store.upsert_node("race-alias-synthetic-entity", "table", {})
+        store.upsert_alias(
+            "race-alias-synthetic-entity", source_system, raw_id, raw_name="seed"
+        )
+
+        outcome: dict[str, Any] = {}
+
+        def call_upsert() -> None:
+            try:
+                outcome["alias_id"] = store.upsert_alias(
+                    "race-alias-synthetic-entity",
+                    source_system,
+                    raw_id,
+                    raw_name="queued",
+                )
+            except Exception as exc:
+                outcome["alias_id"] = exc
+
+        writer = threading.Thread(target=call_upsert)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_alias_lock_key(source_system, raw_id),),
+            )
+            writer.start()
+            queued = _wait_for_advisory_lock_queue(PG_DSN, holder.info.backend_pid)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert queued, "upsert_alias did not wait for the alias lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["alias_id"], Exception), outcome["alias_id"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM entity_aliases"
+                " WHERE source_system = %s AND raw_id = %s ORDER BY valid_from",
+                (source_system, raw_id),
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
+
+    def test_bind_alias_if_absent_stamps_its_version_after_the_lock_wait(
+        self, store
+    ) -> None:
+        """A stale-owner replacement that waits for the alias lock stamps
+        the closed winner version after the wait.
+
+        A clock read before the lock lets a queued replacement close the
+        current winner's version at an earlier time than that version's
+        ``valid_from``, so an ``as_of`` read in the gap serves two versions
+        of one alias key.
+        """
+        from trellis.core.base import utc_now
+        from trellis.schemas.well_known import normalize_entity_name
+        from trellis.stores.base.graph import AliasBindStatus
+        from trellis.stores.postgres.graph import _alias_lock_key
+
+        source_system = "unity_catalog"
+        raw_id = "main.analytics.race_rebind_synthetic"
+        owner_id = "race-alias-synthetic-owner"
+        claimant_id = "race-alias-synthetic-claimant"
+
+        store.upsert_node(owner_id, "table", {"name": "Owner One"})
+        store.upsert_node(claimant_id, "table", {"name": "Claimant"})
+
+        seed = store.bind_alias_if_absent(owner_id, source_system, raw_id)
+        assert seed.status == AliasBindStatus.BOUND
+
+        # Rename the owner so its current name no longer matches the stale
+        # key the queued caller passes -- that mismatch is what routes the
+        # queued call down the stale-owner-replace branch.
+        store.upsert_node(owner_id, "table", {"name": "Owner One Renamed"})
+        stale_key = normalize_entity_name("Owner One")
+
+        outcome: dict[str, Any] = {}
+
+        def call_bind() -> None:
+            try:
+                outcome["result"] = store.bind_alias_if_absent(
+                    claimant_id,
+                    source_system,
+                    raw_id,
+                    raw_name="queued",
+                    stale_owner_name_key=stale_key,
+                )
+            except Exception as exc:
+                outcome["result"] = exc
+
+        writer = threading.Thread(target=call_bind)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_alias_lock_key(source_system, raw_id),),
+            )
+            writer.start()
+            queued = _wait_for_advisory_lock_queue(PG_DSN, holder.info.backend_pid)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert queued, "bind_alias_if_absent did not wait for the alias lock"
+        assert not writer.is_alive()
+        result = outcome["result"]
+        assert not isinstance(result, Exception), result
+        assert result.status == AliasBindStatus.REBOUND
+
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM entity_aliases"
+                " WHERE source_system = %s AND raw_id = %s ORDER BY valid_from",
+                (source_system, raw_id),
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
 
     def test_compact_versions_drops_old_closed_rows(self, store) -> None:
         """Gap 4.2 — Postgres SCD2 retention."""
