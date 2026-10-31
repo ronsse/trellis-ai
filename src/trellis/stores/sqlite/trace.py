@@ -9,10 +9,48 @@ import structlog
 
 from trellis.errors import StoreError
 from trellis.schemas.trace import Trace
-from trellis.stores.base.trace import TraceStore
+from trellis.stores.base.trace import TraceStore, as_utc
 from trellis.stores.sqlite.base import SQLiteStoreBase
 
 logger = structlog.get_logger(__name__)
+
+#: The instant of a row's ``created_at`` text as fixed-width UTC,
+#: ``YYYY-MM-DDTHH:MM:SS.ffffff``, so plain string order is chronological order
+#: whatever offset (or none) the text was written with. A naive text is read as
+#: UTC, as :func:`~trellis.stores.base.trace.as_utc` does.
+#:
+#: Python writes ``created_at`` with ``isoformat()``, so the fraction is absent
+#: or exactly six digits, which fixes where the offset starts. The offset is
+#: handed to ``strftime`` with the fraction cut off because ``strftime`` rounds
+#: to the millisecond, and a ``.9996`` would otherwise carry into the next
+#: second. The fraction is re-attached verbatim, so the key keeps the
+#: microsecond. Text ``strftime`` cannot read (an offset beyond +/-14:00, or one
+#: with seconds) falls back to the raw text, so such a row stays visible
+#: ordered by its wall clock, as it was before, instead of dropping out of every
+#: bounded query on a NULL. ``append`` never writes one.
+_CREATED_AT_UTC_SQL = """COALESCE(
+    strftime(
+        '%Y-%m-%dT%H:%M:%S',
+        substr(created_at, 1, 19)
+        || substr(
+            created_at,
+            CASE WHEN substr(created_at, 20, 1) = '.' THEN 27 ELSE 20 END
+        )
+    )
+    || '.'
+    || substr(
+        CASE WHEN substr(created_at, 20, 1) = '.'
+            THEN substr(created_at, 21, 6) ELSE '' END
+        || '000000',
+        1, 6
+    ),
+    created_at
+)"""
+
+
+def _instant_key(moment: datetime) -> str:
+    """*moment* in the form ``_CREATED_AT_UTC_SQL`` yields, for a bound."""
+    return as_utc(moment).isoformat(timespec="microseconds")[: -len("+00:00")]
 
 
 class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
@@ -47,6 +85,42 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
             CREATE INDEX IF NOT EXISTS idx_traces_outcome ON traces(outcome_status);
         """)
         self._conn.commit()
+        self._migrate_add_created_at_utc()
+
+    def _migrate_add_created_at_utc(self) -> None:
+        """Additive migration: index ``created_at`` by instant, not by text.
+
+        ``created_at`` is TEXT, and rows written by earlier builds carry
+        whatever offset (or none) the trace came with, so comparing and
+        ordering the text is wrong across offsets. A virtual generated column
+        derives the instant from that text on read, which covers the old rows
+        without touching one: no stored value is rewritten, and an older build
+        that opens the file afterwards still reads and writes it (its
+        ``INSERT`` names its columns). Idempotent.
+        """
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_xinfo(traces)")
+        }
+        if "created_at_utc" not in columns:
+            logger.info("migrating_trace_schema_add_created_at_utc")
+            try:
+                self._conn.execute(
+                    "ALTER TABLE traces ADD COLUMN created_at_utc TEXT "
+                    f"GENERATED ALWAYS AS ({_CREATED_AT_UTC_SQL}) VIRTUAL"
+                )
+            except sqlite3.OperationalError:
+                # A concurrent opener may have added it first.
+                now = {
+                    row["name"]
+                    for row in self._conn.execute("PRAGMA table_xinfo(traces)")
+                }
+                if "created_at_utc" not in now:
+                    raise
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_created_at_utc "
+            "ON traces(created_at_utc)"
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Append
@@ -75,7 +149,9 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
                         agent_id,
                         outcome_status,
                         trace.model_dump_json(),
-                        trace.created_at.isoformat(),
+                        # The column is the instant in UTC; ``trace_json``
+                        # keeps the trace exactly as it was given.
+                        as_utc(trace.created_at).isoformat(),
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -125,11 +201,11 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
             conditions.append("agent_id = ?")
             params.append(agent_id)
         if since is not None:
-            conditions.append("created_at >= ?")
-            params.append(since.isoformat())
+            conditions.append("created_at_utc >= ?")
+            params.append(_instant_key(since))
         if until is not None:
-            conditions.append("created_at <= ?")
-            params.append(until.isoformat())
+            conditions.append("created_at_utc <= ?")
+            params.append(_instant_key(until))
 
         where = ""
         if conditions:
@@ -137,7 +213,10 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
 
         params.append(limit)
 
-        sql = f"SELECT trace_json FROM traces {where} ORDER BY created_at DESC LIMIT ?"
+        sql = (
+            f"SELECT trace_json FROM traces {where} "
+            "ORDER BY created_at_utc DESC LIMIT ?"
+        )
         cursor = self._conn.execute(sql, params)
         return [
             Trace.model_validate_json(row["trace_json"]) for row in cursor.fetchall()
