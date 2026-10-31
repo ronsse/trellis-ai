@@ -323,10 +323,10 @@ def sync_records(
             caller that writes incrementally keeps the records that landed.
             Unset, the first error propagates as it always did. Records
             already applied are not rolled back, and neither is any part of
-            the failed one that was written before it raised. A failed
-            record's chunks are written before its parent document, so one
-            that raised mid-chunks has no parent (or an old one) and the next
-            sync writes it again rather than skipping it as stored.
+            the failed one that was written before it raised. A record that
+            raised after its parent was written is not skipped as stored by
+            the next sync: :func:`record_landed` reads its chunk rows, finds
+            one missing or different, and the record is written again.
         minhash: The near-duplicate index to compare against and add to.
             A caller that syncs one source in several calls passes the same
             index to each, so a near-duplicate is still warned about across
@@ -426,6 +426,35 @@ def sync_records(
     return report
 
 
+def record_landed(doc_store: DocumentStore, doc_id: str, content: str) -> bool:
+    """Whether the chunk rows the write path makes of *content* are all stored.
+
+    The parent row is written first, so a stored parent carrying *content*'s
+    hash proves only that the run reached it. For a record that chunks, this
+    recomputes the spans :func:`sync_records` would write with
+    :func:`chunk_spans` and reads each ``#chunk-i`` row: a row that is absent,
+    or whose hash is not that of its span, means the record has not landed and
+    the caller must write it again, not skip it. A record that does not chunk
+    has no rows to read and reads as landed.
+
+    A chunk that is a redaction tombstone counts as landed. The write path
+    leaves it alone and warns (#1034), so a retry could not change it and
+    a record carrying one would otherwise be rewritten by every sync.
+
+    Compares rows, not vectors: a chunk written and then not embedded, because
+    the run died between the two, reads as landed here.
+    """
+    for span in chunk_spans(content):
+        row = doc_store.get(chunk_doc_id(doc_id, span.index))
+        if row is None:
+            return False
+        if is_redaction_tombstone(row):
+            continue
+        if row.get("content_hash") != content_hash(content[span.start : span.end]):
+            return False
+    return True
+
+
 def _redaction_tombstone_warning(path: str, doc_id: str) -> dict[str, Any]:
     """The report entry for a row the sync left alone because it is redacted."""
     return {"kind": "redaction_tombstone", "path": path, "doc_id": doc_id}
@@ -449,6 +478,12 @@ def _plan_record(
     the file's hash, so without this it planned as ``update`` and wrote the
     redacted text straight back (#1034). Bringing the id back is a deliberate
     act (``reingest_redacted`` on ``put_document``); a sync does not make it.
+
+    **A matching hash is not by itself a skip.** The parent is written before
+    its chunks, so a stored parent whose hash matches may belong to a run that
+    died between two chunk writes. The skip also needs
+    :func:`record_landed`; a record whose chunks are not all there plans as
+    ``update`` and the normal write path rewrites the parent and the chunks.
     """
     chash = content_hash(content)
 
@@ -457,7 +492,9 @@ def _plan_record(
         if is_redaction_tombstone(existing):
             report.warnings.append(_redaction_tombstone_warning(source_key, doc_id))
             return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
-        if existing.get("content_hash") == chash:
+        if existing.get("content_hash") == chash and record_landed(
+            doc_store, doc_id, content
+        ):
             return FileOutcome(relpath=source_key, doc_id=doc_id, action="skip")
         return FileOutcome(relpath=source_key, doc_id=doc_id, action="update")
 
@@ -547,13 +584,22 @@ def _apply_record(
     # `content_type` → `document_form` key; see trellis.schemas.document_metadata.
     metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
 
-    # The chunks go in BEFORE the parent, so the parent is the commit marker: a
-    # run that dies between two chunk writes leaves no parent (or, for an
-    # update, the parent still holding the old hash), and the next sync plans
-    # the record as ``new`` / ``update`` and writes the rest, whereas a parent
-    # written first reads as "landed" to :func:`_plan_record` and to the
-    # capture sweep's exact-duplicate check, both of which skip a stored parent
-    # whose chunks never arrived.
+    # Through the seam, even though the unchunked branch below re-embeds and
+    # would rebuild the row wholesale anyway: ``run_embed_on_ingest`` is
+    # gated on ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with
+    # that flag off the embed is not a mirror at all. The seam's mirror is
+    # unconditional. It also reaches the case the embed never covers — a
+    # document that has just *become* chunked keeps the whole-document
+    # vector row written by an earlier unchunked run, and nothing here
+    # re-embeds it (#567).
+    put_document(
+        doc_store,
+        vector_store,
+        outcome.doc_id,
+        text,
+        metadata,
+        preserve_updated_at=False,
+    )
     outcome.chunks_written = _write_chunks(
         registry,
         parent_doc_id=outcome.doc_id,
@@ -572,22 +618,6 @@ def _apply_record(
         },
         mirror=mirror,
         report=report,
-    )
-    # Through the seam, even though the unchunked branch below re-embeds and
-    # would rebuild the row wholesale anyway: ``run_embed_on_ingest`` is
-    # gated on ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with
-    # that flag off the embed is not a mirror at all. The seam's mirror is
-    # unconditional. It also reaches the case the embed never covers — a
-    # document that has just *become* chunked keeps the whole-document
-    # vector row written by an earlier unchunked run, and nothing here
-    # re-embeds it (#567).
-    put_document(
-        doc_store,
-        vector_store,
-        outcome.doc_id,
-        text,
-        metadata,
-        preserve_updated_at=False,
     )
     for index in range(len(spans), old_chunk_count):
         orphan_id = chunk_doc_id(outcome.doc_id, index)

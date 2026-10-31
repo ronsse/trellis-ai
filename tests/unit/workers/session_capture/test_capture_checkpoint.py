@@ -17,6 +17,9 @@ import pytest
 import trellis.ingest_corpus.sync as sync_module
 from trellis.core.document_write import put_document
 from trellis.retrieve.lifecycle import declared_successor
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import KeywordSearch
+from trellis.schemas.classification import Lifecycle
 from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture import capture, reconcile_pass
 from trellis_workers.session_capture.capture import run_capture
@@ -605,7 +608,7 @@ def test_a_checkpoint_does_not_show_a_later_session_the_sweeps_own_memories(
 
 
 # ---------------------------------------------------------------------------
-# The parent is the commit marker
+# A stored parent is not a landed record
 # ---------------------------------------------------------------------------
 
 
@@ -620,24 +623,7 @@ def _chunk_rows(registry: MagicMock) -> list[dict]:
     return [d for d in docs if "#chunk-" in d["doc_id"]]
 
 
-@pytest.mark.parametrize(
-    "reconcile", [False, True], ids=["reconcile_off", "reconcile_on"]
-)
-def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reconcile: bool
-) -> None:
-    """A parent stored without its chunks must not read as landed to the retry.
-
-    Run 1 dies on a chunk write. The parent is written after its chunks, so it
-    does not exist; the retry stores the whole record, in either reconcile mode,
-    and only then watermarks the session.
-    """
-    if reconcile:
-        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-    registry = _registry(tmp_path)
-    root, wm = tmp_path / "projects", tmp_path / "wm.json"
-    (path,) = _sessions(root, 1)
-    reply = candidates_json(_big_candidate())
+def _fail_chunks(patch: pytest.MonkeyPatch) -> None:
     real = sync_module.put_document
 
     def flaky(doc_store, vector_store, doc_id, content, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -646,8 +632,31 @@ def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
             raise RuntimeError(msg)
         return real(doc_store, vector_store, doc_id, content, *args, **kwargs)
 
+    patch.setattr(sync_module, "put_document", flaky)
+
+
+@pytest.mark.parametrize(
+    "reconcile", [False, True], ids=["reconcile_off", "reconcile_on"]
+)
+def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reconcile: bool
+) -> None:
+    """A parent stored without its chunks must not read as landed to the retry.
+
+    Run 1 dies on a chunk write, after the parent is stored. The retry finds the
+    parent's chunk rows missing, so neither the write's same-hash skip nor
+    reconcile's exact-duplicate drop applies; it stores the whole record, in
+    either reconcile mode, and only then watermarks the session.
+    """
+    if reconcile:
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+    registry = _registry(tmp_path)
+    root, wm = tmp_path / "projects", tmp_path / "wm.json"
+    (path,) = _sessions(root, 1)
+    reply = candidates_json(_big_candidate())
+
     with monkeypatch.context() as patch:
-        patch.setattr(sync_module, "put_document", flaky)
+        _fail_chunks(patch)
         first = run_capture(
             registry,
             transcripts_root=root,
@@ -657,7 +666,8 @@ def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
 
     assert first.sessions_errored == 1
     assert _cursors(wm, [path]) == [False]
-    assert _stored(registry) == []
+    assert len(_stored(registry)) == 1  # the parent, with no chunk behind it
+    assert _chunk_rows(registry) == []
 
     second = run_capture(
         registry,
@@ -668,6 +678,7 @@ def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
 
     assert second.sessions_errored == 0
     assert second.memories_written == 1
+    assert second.candidates_reconciled_noop == 0
     assert _cursors(wm, [path]) == [True]
     (parent,) = [d for d in _stored(registry) if "#chunk-" not in d["doc_id"]]
     assert parent["metadata"]["chunk_count"] == len(_chunk_rows(registry)) >= 2
@@ -675,6 +686,47 @@ def test_a_record_whose_chunk_fails_is_written_again_by_the_retry(
         event_type=EventType.MEMORY_STORED, limit=10
     )
     assert len(stored_events) == 1
+
+
+@pytest.mark.parametrize(
+    "reconcile", [False, True], ids=["reconcile_off", "reconcile_on"]
+)
+def test_a_record_with_all_its_chunks_is_still_dropped_as_a_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reconcile: bool
+) -> None:
+    """The check does not turn every re-judged chunked memory into a rewrite."""
+    if reconcile:
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+    registry = _registry(tmp_path)
+    root, wm = tmp_path / "projects", tmp_path / "wm.json"
+    _sessions(root, 1)
+    reply = candidates_json(_big_candidate())
+    run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=FakeLLMClient([reply]),
+    )
+    rows = _documents(registry)
+
+    wm.unlink()  # a reset cursor judges the session again
+    second = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=FakeLLMClient([reply]),
+    )
+
+    assert second.memories_written == 0
+    assert (
+        second.candidates_reconciled_noop,
+        second.memories_skipped_unchanged,
+    ) == ((1, 0) if reconcile else (0, 1))
+    assert _documents(registry) == rows
+    stored = registry.operational.event_log.get_events(
+        event_type=EventType.MEMORY_STORED, limit=10
+    )
+    assert len(stored) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -980,3 +1032,146 @@ def test_two_transcripts_with_one_session_id_are_the_same_run_at_any_cadence(
     assert arms["once"][1]["candidates_reconciled_noop"] == 0
     assert arms["once"][3] == ["keep", "keep"]
     assert arms["each"] == arms["once"]
+
+
+class TestRepairLeavesATargetAlone:
+    """The repair stamps a supersession; it must not undo what an operator did."""
+
+    _OLD = "capture:claude-code:old-y"
+
+    def _first(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        refuse: bool = False,
+    ) -> tuple[MagicMock, Path, Path, Path]:
+        """A sweep whose capture supersedes the seeded memory, or fails to."""
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+        registry = _registry(tmp_path)
+        root, wm = tmp_path / "projects", tmp_path / "wm.json"
+        _seed(registry, self._OLD, _NEAR_MEMORY)
+        path = _session(root, "sess-a")
+        replies = [candidates_json(good_candidate()), _SUPERSEDE]
+        with monkeypatch.context() as patch:
+            if refuse:
+
+                def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
+                    msg = "store blip"
+                    raise RuntimeError(msg)
+
+                patch.setattr(reconcile_pass, "mark_document_superseded", boom)
+            run_capture(
+                registry,
+                transcripts_root=root,
+                watermark_path=wm,
+                llm_client=FakeLLMClient(list(replies)),
+            )
+        return registry, root, wm, path
+
+    @staticmethod
+    def _set_lifecycle(registry: MagicMock, doc_id: str, record: dict) -> None:
+        docs = registry.knowledge.document_store
+        doc = docs.get(doc_id)
+        put_document(
+            docs,
+            registry.knowledge.vector_store,
+            doc_id,
+            doc["content"],
+            {**doc["metadata"], "lifecycle": record},
+            preserve_updated_at=True,
+        )
+
+    @staticmethod
+    def _resweep(registry, root, wm, *, dry_run=False):  # type: ignore[no-untyped-def]
+        wm.unlink(missing_ok=True)  # a reset cursor judges the session again
+        return run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=wm,
+            dry_run=dry_run,
+            llm_client=FakeLLMClient([candidates_json(good_candidate())]),
+        )
+
+    @staticmethod
+    def _pack(registry: MagicMock, query: str) -> list[str]:
+        docs = registry.knowledge.document_store
+        builder = PackBuilder(strategies=[KeywordSearch(docs)], document_store=docs)
+        return [i.item_id for i in builder.build(query, clearance="restricted").items]
+
+    def test_repair_does_not_unarchive_an_archived_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry, root, wm, _ = self._first(tmp_path, monkeypatch)
+        self._set_lifecycle(
+            registry,
+            self._OLD,
+            {"state": "archived", "deprecation_reason": "operator retired it"},
+        )
+        self._resweep(registry, root, wm)
+        stored = registry.knowledge.document_store.get(self._OLD)
+        assert stored["metadata"]["lifecycle"]["state"] == "archived"
+
+    def test_archived_target_does_not_return_to_a_pack(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The query matches only the target, so its successor withholds nothing."""
+        registry, root, wm, _ = self._first(tmp_path, monkeypatch)
+        archived = Lifecycle(state="archived", deprecation_reason="retention")
+        self._set_lifecycle(registry, self._OLD, archived.model_dump(mode="json"))
+        assert self._OLD not in self._pack(registry, "starts")
+
+        self._resweep(registry, root, wm)
+
+        assert self._OLD not in self._pack(registry, "starts")
+
+    def test_a_target_deleted_after_a_good_supersession_is_not_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry, root, wm, _ = self._first(tmp_path, monkeypatch)
+        doc = _doc_of_session(registry, "sess-a")
+        assert doc["metadata"]["supersedes_doc_id"] == self._OLD
+        registry.knowledge.document_store.delete(self._OLD)
+
+        report = self._resweep(registry, root, wm)
+
+        after = registry.knowledge.document_store.get(doc["doc_id"])["metadata"]
+        assert report.supersessions_failed == 0
+        assert after["supersedes_doc_id"] == self._OLD
+        assert after["reconciliation"] == "supersede"
+
+    def test_dry_run_stamps_nothing_then_live_repairs_and_keeps_the_clock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry, root, wm, path = self._first(tmp_path, monkeypatch, refuse=True)
+        docs = registry.knowledge.document_store
+        before = docs.get(self._OLD)
+        assert _superseded_by(registry, self._OLD) is None
+        raw = wm.read_bytes() if wm.exists() else None
+
+        dry = run_capture(
+            registry,
+            transcripts_root=tmp_path / "projects",
+            watermark_path=wm,
+            dry_run=True,
+            llm_client=FakeLLMClient([candidates_json(good_candidate())]),
+        )
+
+        assert dry.candidates_reconciled_noop == 1
+        assert docs.get(self._OLD) == before
+        assert (wm.read_bytes() if wm.exists() else None) == raw
+
+        run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=wm,
+            llm_client=FakeLLMClient([candidates_json(good_candidate())]),
+        )
+
+        after = docs.get(self._OLD)
+        assert (
+            _superseded_by(registry, self._OLD)
+            == (_doc_of_session(registry, "sess-a")["doc_id"])
+        )
+        assert after["updated_at"] == before["updated_at"]
+        assert _cursors(wm, [path]) == [True]

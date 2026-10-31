@@ -11,8 +11,9 @@ implementation to drift.
 Behaviour, per candidate, only when ``TRELLIS_ENABLE_RECONCILE_ON_WRITE`` is
 set (off by default — the same flag #263 gates ``save_memory`` with):
 
-* **Exact duplicate** already stored under this source's prefix → dropped
-  (deterministic NOOP; no model call, no event).
+* **Exact duplicate** already stored under this source's prefix, with every
+  chunk row it should have → dropped (deterministic NOOP; no model call, no
+  event). One whose chunks are not all stored is not a duplicate yet.
 * **Near duplicate** → the local model judges ADD / UPDATE / SUPERSEDE / NOOP
   exactly as ``save_memory`` does; NOOP drops the candidate, SUPERSEDE stamps
   a successor marker, UPDATE stamps an addendum marker. Each non-fallback
@@ -52,6 +53,7 @@ from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import is_chunk_doc_id
+from trellis.ingest_corpus.sync import record_landed
 from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
     RECONCILIATION_KEY,
@@ -66,7 +68,7 @@ from trellis.mcp.reconcile import (
     marker_for_fallback,
     reconcile_timeout_seconds,
 )
-from trellis.retrieve.lifecycle import declared_successor
+from trellis.schemas.classification import lifecycle_state_of
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -131,8 +133,8 @@ def adjudicate(
 
     Mutates each surviving candidate's ``reconciliation`` marker (and
     ``updates_doc_id`` / ``supersedes_doc_id`` where applicable) so the writer
-    can stamp it into document metadata. Reads the document store; never
-    writes to it.
+    can stamp it into document metadata. Reads the document store; its only
+    write is the supersession repair of an exact duplicate, below.
 
     ``dry_run`` withholds the one remaining side effect — the
     ``MEMORY_OP_JUDGED`` emit. The model is still called and the verdicts are
@@ -145,6 +147,14 @@ def adjudicate(
     not start to: the ids are left out of the stored captures compared against
     and out of the exact-duplicate check, so a candidate is reconciled against
     what was stored before the sweep began and nothing else.
+
+    **An exact duplicate counts only once it has landed.** The writer puts a
+    document's parent row before its chunks, so a stored parent with this
+    content may be one a run died in the middle of. :func:`record_landed` reads
+    its chunk rows; when one is missing or different the candidate is not a
+    duplicate of anything, skips the exact-duplicate branch, and goes through the
+    near-duplicate judge like any other, whose verdicts are unchanged. The writer
+    then rewrites the parent and its chunks.
 
     **An exact duplicate also repairs the supersession it names.** A document
     that claims ``supersedes_doc_id`` was written by an earlier sweep whose
@@ -172,6 +182,9 @@ def adjudicate(
             exact is not None
             and str(exact.get("doc_id", "")).startswith(id_prefix)
             and str(exact.get("doc_id", "")) not in hidden_doc_ids
+            and record_landed(
+                doc_store, str(exact.get("doc_id", "")), candidate.content
+            )
         ):
             candidate.reconciliation = ReconcileDecision.NOOP.value
             report.candidates_reconciled_noop += 1
@@ -364,6 +377,15 @@ def _repair_supersession(
     already declares a successor, this document or another, is left alone, and
     a withdrawn claim leaves no key to act on a second time. Live runs only;
     the caller skips a dry run.
+
+    Acts only on a target that reads as current. One that is archived or
+    superseded is left as it is, because the stamp rewrites the lifecycle record
+    and would return an archived document to packs. One that is gone is left
+    alone too: the supersession was good when it was applied, and a target
+    deleted afterwards is neither a failure nor a claim to strip. A target an
+    operator restored (``state == "current"``) reads the same as one never
+    stamped, so a re-sweep supersedes it again; the store cannot tell the two
+    apart and this does not try to.
     """
     metadata = stored.get("metadata") or {}
     match_id = metadata.get(SUPERSEDES_DOC_KEY)
@@ -371,7 +393,7 @@ def _repair_supersession(
         return
     doc_store = registry.knowledge.document_store
     target = doc_store.get(match_id)
-    if target is not None and declared_successor(target.get("metadata")) is not None:
+    if target is None or lifecycle_state_of(target.get("metadata")) != "current":
         return
     _stamp_or_withdraw(
         doc_store,

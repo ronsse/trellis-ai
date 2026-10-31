@@ -68,23 +68,34 @@ All notable changes to Trellis will be documented in this file.
   - A session with a record that failed to write emits no training pairs in that
     run; its retry emits them once the session completes, so a retry cannot
     count a landed record's pair twice.
-  - A record's chunks are written before its parent document, here and in corpus
-    sync, so the parent says the record landed. A record that died between two
-    chunk writes has no parent and is written again by the next sweep, where it
-    used to be skipped as already stored with its chunks missing. Within one
-    document the parent row is now stamped after its chunks, not before. Removing
-    a shrunk document's surplus chunks and its whole-document vector row still
-    run after the parent, so a failure there is not retried.
+  - A stored parent no longer counts as a landed record by itself, here and in
+    corpus sync. The parent is still written before its chunks, but the sync's
+    same-hash skip and reconcile's exact-duplicate drop now also read the chunk
+    rows the write would produce (`record_landed` in `trellis.ingest_corpus.sync`)
+    and treat the record as landed only when each `#chunk-i` row exists with its
+    span's text. A record that died between two chunk writes is written again by
+    the next sync or sweep, where it used to be skipped as already stored with its
+    chunks missing, so a retry now lands memories a failed sweep used to drop. A
+    record that does not chunk reads no extra row. No retrieval code changes.
+    Removing a shrunk document's surplus chunks and its whole-document vector row
+    still run after the parent, so a failure there is not retried.
   - With reconcile on, a supersession that raised, or was lost to a kill, is
     applied by the retry: an exact-duplicate no-op whose stored document names a
     `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
     while applying supersessions no longer blocks the batch's training pairs; the
-    sessions that claimed a supersession stay un-watermarked.
+    sessions that claimed a supersession stay un-watermarked. The repair leaves an
+    archived, superseded or deleted target alone, so it cannot return an archived
+    document to packs or count a target deleted after a good supersession as a
+    failure.
   - Limit: a process kill between a batch's records and its training pairs loses
     that batch's keep pairs when reconcile is on, because the retry no-ops those
     records. It is bounded by `checkpoint_every` sessions and costs training
     data only. With reconcile off, a kill between the pairs and the watermark
-    save emits that batch's keep pairs a second time.
+    save emits that batch's keep pairs a second time. A kill between a chunk's
+    write and its embed leaves that chunk without a vector row, which the
+    row-based check does not see. A retry whose judge words the memory
+    differently does not find the stored one as an exact duplicate, so the
+    supersession repair does not run for it.
 
   A clean run writes the same records and documents (metadata and lifecycle
   included), the same events in the same order, and the same report at any

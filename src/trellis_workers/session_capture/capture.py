@@ -827,15 +827,20 @@ def _checkpoint(
 
     * **A record that fails to write** counts its session in
       ``sessions_errored`` and leaves it un-watermarked. The batch's other
-      records are written. A record whose chunks fail leaves no parent document
-      (:func:`~trellis.ingest_corpus.sync._apply_record` writes the parent
-      last), so the retry stores it afresh. Of the failed session's own
-      candidates, those that did land still get their supersession, because
-      the retry would drop them as exact duplicates. The session gets **no
-      training pairs** in this run, ``keep`` and ``discard`` alike: it has no
-      watermark, the retry judges it afresh and emits its own once it completes,
-      and a ``keep`` pair emitted now would be emitted a second time then when
-      reconcile is off.
+      records are written. A record whose chunks fail may already have its
+      parent document (:func:`~trellis.ingest_corpus.sync._apply_record` writes
+      the parent first), and the retry does not take that for landed: both the
+      write's same-hash skip and reconcile's exact-duplicate check read the
+      chunk rows (:func:`~trellis.ingest_corpus.sync.record_landed`), find one
+      missing or different, and write the record again. Of the failed
+      session's own candidates, those that did land still get their
+      supersession, because the retry would drop them as exact duplicates. The
+      session gets **no training pairs** in this run, ``keep`` and ``discard``
+      alike: it has no watermark, the retry judges it afresh and emits its own
+      once it completes, and a ``keep`` pair emitted now would be emitted a
+      second time then when reconcile is off. With reconcile on the retry
+      drops each of its landed candidates as an exact duplicate, which emits no
+      pair, so those candidates get a ``keep`` pair from neither run.
     * **A failure outside any one record** (the write seam itself raising)
       errors every session of the batch and skips the batch's supersessions and
       pairs, since which records landed is not known. Nothing is watermarked.
@@ -863,7 +868,13 @@ def _checkpoint(
     is bounded by ``checkpoint_every`` sessions and is training data only, so
     nothing is built to recover it. A kill between the pairs and the watermark
     save does the opposite when reconcile is off: the retry emits that batch's
-    ``keep`` pairs a second time.
+    ``keep`` pairs a second time (reconcile off, as before checkpoints). A kill
+    between a chunk's write and its embed leaves that chunk with no vector row,
+    and :func:`~trellis.ingest_corpus.sync.record_landed` compares rows, not
+    vectors, so the retry reads the record as landed. A retry whose judge words
+    the memory differently finds no exact duplicate, so the supersession repair
+    (exact-match only) does not run for it; it supersedes the target only if the
+    judge says so again.
 
     A dry run writes nothing durable, so it makes no mid-sweep checkpoint and
     skips the supersessions, the pairs and the watermark here.

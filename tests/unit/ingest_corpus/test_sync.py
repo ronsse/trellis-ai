@@ -1933,99 +1933,195 @@ class TestRedactedChunksSurviveMoveAndPrune:
             assert docs.get(chunk_doc_id(gone_id, index)) is None
 
 
-class TestParentIsTheCommitMarker:
-    """A document's parent row is written after its chunks.
+class TestAStoredParentIsNotALandedRecord:
+    """The parent is written before its chunks, so a matching hash proves little.
 
-    A parent stored without its chunks reads as "landed" to the sync's own
-    same-hash skip, so a run that died between two chunk writes would have been
-    skipped by every later run, with the document's text in one row and no
-    chunk to serve it.
+    A run that dies between two chunk writes leaves a parent whose hash matches
+    the source and chunks that are missing or still the previous version's.
+    :func:`record_landed` reads those rows, so the next sync writes the record
+    again instead of skipping it as stored.
     """
 
     @staticmethod
-    def _fail_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_chunk(monkeypatch: pytest.MonkeyPatch, index: int) -> None:
         import trellis.ingest_corpus.sync as sync_module
 
         real = sync_module.put_document
 
         def flaky(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if is_chunk_doc_id(doc_id):
+            if doc_id.endswith(f"#chunk-{index}"):
                 msg = "transient store error"
                 raise RuntimeError(msg)
             return real(doc_store, vector_store, doc_id, *args, **kwargs)
 
         monkeypatch.setattr(sync_module, "put_document", flaky)
 
-    def test_the_parent_is_written_after_every_chunk(
-        self, registry, vault, monkeypatch
-    ):
-        import trellis.ingest_corpus.sync as sync_module
-
-        (vault / "long.md").write_text(_long_markdown())
-        order: list[str] = []
-        real = sync_module.put_document
-
-        def spy(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
-            order.append(doc_id)
-            return real(doc_store, vector_store, doc_id, *args, **kwargs)
-
-        monkeypatch.setattr(sync_module, "put_document", spy)
-        sync_corpus(registry, vault, source_system="obsidian")
-
-        parent_id = corpus_doc_id("obsidian", "long.md")
-        mine = [doc_id for doc_id in order if doc_id.startswith(parent_id)]
-        assert mine[-1] == parent_id
-        assert len(mine) >= 3
-        assert all(is_chunk_doc_id(doc_id) for doc_id in mine[:-1])
-
-    def test_a_chunk_that_fails_leaves_no_parent_and_the_rerun_writes_all(
-        self, registry, vault, monkeypatch
-    ):
-        (vault / "long.md").write_text(_long_markdown())
-        parent_id = corpus_doc_id("obsidian", "long.md")
-        store = registry.knowledge.document_store
-
-        with monkeypatch.context() as patch:
-            self._fail_chunks(patch)
-            with pytest.raises(RuntimeError):
-                sync_corpus(registry, vault, source_system="obsidian")
-        assert store.get(parent_id) is None
-
-        report = sync_corpus(registry, vault, source_system="obsidian")
-
+    @staticmethod
+    def _assert_consistent(store, parent_id: str, topics: tuple[str, ...]) -> None:
         parent = store.get(parent_id)
+        assert parent["content"] == _long_markdown(topics)
         count = parent["metadata"]["chunk_count"]
-        assert count >= 2
-        assert all(
-            store.get(chunk_doc_id(parent_id, index)) is not None
-            for index in range(count)
-        )
-        long_file = next(f for f in report.files if f.relpath == "long.md")
-        assert long_file.action == "new"
-        assert long_file.chunks_written == count
+        assert count >= 3
+        rows = [store.get(chunk_doc_id(parent_id, i)) for i in range(count)]
+        assert all(row is not None for row in rows)
+        text = "".join(row["content"] for row in rows)
+        assert all(topic in text for topic in topics)
+        stale = {"kubernetes", "grapes", "violins"} - set(topics)
+        assert not any(old in text for old in stale)
+        assert store.get(chunk_doc_id(parent_id, count)) is None
 
-    def test_an_edit_whose_chunks_fail_keeps_the_old_parent_and_the_rerun_updates(
+    def test_a_new_document_whose_second_chunk_fails_is_written_in_full_by_the_rerun(
         self, registry, vault, monkeypatch
     ):
         (vault / "long.md").write_text(_long_markdown())
         parent_id = corpus_doc_id("obsidian", "long.md")
         store = registry.knowledge.document_store
-        sync_corpus(registry, vault, source_system="obsidian")
-        old_hash = store.get(parent_id)["content_hash"]
 
-        edited = _long_markdown() + "\n\nA section added after the first sync.\n"
-        (vault / "long.md").write_text(edited)
         with monkeypatch.context() as patch:
-            self._fail_chunks(patch)
+            self._fail_chunk(patch, 1)
             with pytest.raises(RuntimeError):
                 sync_corpus(registry, vault, source_system="obsidian")
-        assert store.get(parent_id)["content_hash"] == old_hash
+        assert store.get(parent_id) is not None
+        assert store.get(chunk_doc_id(parent_id, 1)) is None
 
         report = sync_corpus(registry, vault, source_system="obsidian")
 
         long_file = next(f for f in report.files if f.relpath == "long.md")
         assert long_file.action == "update"
-        parent = store.get(parent_id)
-        assert parent["content"].rstrip().endswith("after the first sync.")
-        last = chunk_doc_id(parent_id, parent["metadata"]["chunk_count"] - 1)
-        assert "after the first sync." in store.get(last)["content"]
+        self._assert_consistent(store, parent_id, ("kubernetes", "grapes", "violins"))
+
+    def test_an_edit_that_dies_part_way_through_its_chunks_is_repaired_by_the_rerun(
+        self, registry, vault, monkeypatch
+    ):
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        edited = ("pears", "plums", "cellos")
+        (vault / "long.md").write_text(_long_markdown(edited))
+        with monkeypatch.context() as patch:
+            self._fail_chunk(patch, 3)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+        # The state the retry meets: the new parent, a new chunk 1, an old chunk 3.
+        assert store.get(parent_id)["content"] == _long_markdown(edited)
+        assert "pears" in store.get(chunk_doc_id(parent_id, 1))["content"]
+        assert "grapes" in store.get(chunk_doc_id(parent_id, 3))["content"]
+
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        long_file = next(f for f in report.files if f.relpath == "long.md")
+        assert long_file.action == "update"
+        self._assert_consistent(store, parent_id, edited)
+
+    def test_an_edit_that_dies_and_is_reverted_ends_as_the_old_text(
+        self, registry, vault, monkeypatch
+    ):
+        parent_id = corpus_doc_id("obsidian", "long.md")
+        store = registry.knowledge.document_store
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        (vault / "long.md").write_text(_long_markdown(("pears", "plums", "cellos")))
+        with monkeypatch.context() as patch:
+            self._fail_chunk(patch, 3)
+            with pytest.raises(RuntimeError):
+                sync_corpus(registry, vault, source_system="obsidian")
+
+        (vault / "long.md").write_text(_long_markdown())
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        self._assert_consistent(store, parent_id, ("kubernetes", "grapes", "violins"))
+        again = sync_corpus(registry, vault, source_system="obsidian")
+        assert again.counts()["skipped_unchanged"] == 3
+
+    def test_a_clean_resync_of_a_chunked_corpus_writes_nothing_and_emits_nothing(
+        self, registry, vault, monkeypatch
+    ):
+        import trellis.ingest_corpus.sync as sync_module
+
+        (vault / "long.md").write_text(_long_markdown())
+        first = sync_corpus(registry, vault, source_system="obsidian")
+        assert first.counts()["ingested"] == 3
+        events = registry.operational.event_log
+        before_events = len(events.get_events(limit=1000))
+        before_rows = sorted(
+            (d["doc_id"], d["updated_at"])
+            for d in registry.knowledge.document_store.list_documents(limit=1000)
+        )
+        writes: list[str] = []
+        real = sync_module.put_document
+
+        def spy(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
+            writes.append(doc_id)
+            return real(doc_store, vector_store, doc_id, *args, **kwargs)
+
+        monkeypatch.setattr(sync_module, "put_document", spy)
+        second = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert writes == []
+        assert second.counts()["skipped_unchanged"] == 3
+        assert second.counts()["ingested"] == second.counts()["updated"] == 0
+        assert sum(f.chunks_written for f in second.files) == 0
+        # Only the sync's own summary event is new.
+        assert len(events.get_events(limit=1000)) == before_events + 1
+        assert (
+            sorted(
+                (d["doc_id"], d["updated_at"])
+                for d in registry.knowledge.document_store.list_documents(limit=1000)
+            )
+            == before_rows
+        )
+
+    def test_a_restricted_documents_chunks_are_never_served_to_an_internal_caller(
+        self, registry, monkeypatch
+    ):
+        """At every write boundary, so a chunk never lands before its parent."""
+        import trellis.ingest_corpus.sync as sync_module
+        from trellis.ingest_corpus.models import SyncRecord
+        from trellis.ingest_corpus.sync import sync_records
+        from trellis.retrieve.pack_builder import PackBuilder
+        from trellis.retrieve.strategies import KeywordSearch
+
+        docs = registry.knowledge.document_store
+
+        def internal_pack() -> list[str]:
+            builder = PackBuilder(strategies=[KeywordSearch(docs)], document_store=docs)
+            return [
+                i.item_id
+                for i in builder.build("kubernetes", clearance="internal").items
+            ]
+
+        seen: list[tuple[str, list[str]]] = []
+        real = sync_module.put_document
+
+        def spy(doc_store, vector_store, doc_id, *args, **kwargs):  # type: ignore[no-untyped-def]
+            out = real(doc_store, vector_store, doc_id, *args, **kwargs)
+            seen.append((doc_id, internal_pack()))
+            return out
+
+        monkeypatch.setattr(sync_module, "put_document", spy)
+        record = SyncRecord(
+            doc_id="corpus:obsidian:secret",
+            source_key="secret.md",
+            content=_long_markdown(),
+            handler_metadata={"data_classification": {"sensitivity": "restricted"}},
+        )
+        sync_records(
+            registry,
+            [record],
+            source_system="obsidian",
+            id_prefix="corpus:obsidian:",
+            root_label="vault",
+            requested_by="test",
+        )
+
+        assert len(seen) >= 4  # the parent and at least three chunks
+        assert [pack for _, pack in seen] == [[] for _ in seen]
+        assert seen[0][0] == "corpus:obsidian:secret"
+        assert (
+            PackBuilder(strategies=[KeywordSearch(docs)], document_store=docs)
+            .build("kubernetes", clearance="restricted")
+            .items
+        )
