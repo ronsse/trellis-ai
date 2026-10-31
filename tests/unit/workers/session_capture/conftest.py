@@ -529,6 +529,7 @@ def worked_session(session_id: str = "sess-worked-0001") -> list[dict[str, Any]]
 #: counts a second time.
 WORKED_OUTCOME: dict[str, Any] = {
     "tool_calls": 6,
+    "memory_tool_calls": 0,
     "tool_errors": 2,
     "assistant_turns": 6,
     "assistant_turns_with_usage": 6,
@@ -630,6 +631,7 @@ def delegating_session(
 #: What :func:`delegating_session` parses to, parent and child apart.
 PARENT_OUTCOME: dict[str, Any] = {
     "tool_calls": 1,
+    "memory_tool_calls": 0,
     "tool_errors": 0,
     "assistant_turns": 2,
     "assistant_turns_with_usage": 2,
@@ -648,6 +650,7 @@ PARENT_OUTCOME: dict[str, Any] = {
 }
 CHILD_OUTCOME: dict[str, Any] = {
     "tool_calls": 2,
+    "memory_tool_calls": 0,
     "tool_errors": 0,
     "assistant_turns": 3,
     "assistant_turns_with_usage": 3,

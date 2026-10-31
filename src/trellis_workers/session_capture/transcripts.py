@@ -92,7 +92,7 @@ from trellis_workers.session_capture.models import (
     ROLE_USER,
     SessionDigest,
 )
-from trellis_workers.session_capture.outcome import OutcomeTally
+from trellis_workers.session_capture.outcome import OutcomeTally, trellis_tool_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -280,15 +280,11 @@ def _errored_result_ids(content: Any) -> list[str | None]:
 def _is_pack_tool(name: str) -> bool:
     """Whether *name* is a Trellis retrieval tool that prints a pack id.
 
-    MCP tools are named ``mcp__<server>__<tool>``. The local stdio server
-    is ``trellis`` and the claude.ai connector carries ``trellis`` inside a
-    longer server name, so the server is matched on containing it. A
-    same-named tool on any other server served no Trellis pack.
+    The server is matched by :func:`trellis_tool_name`, the rule the
+    outcome's memory-tool count uses. A same-named tool on any other server
+    served no Trellis pack.
     """
-    if not name.startswith("mcp__"):
-        return False
-    server, _, tool = name.removeprefix("mcp__").rpartition("__")
-    return "trellis" in server.lower() and tool in _PACK_TOOLS
+    return trellis_tool_name(name) in _PACK_TOOLS
 
 
 def _unwrap(text: str) -> str:

@@ -3885,6 +3885,13 @@ to the pack holdout's pre-treatment exclusion for good. A watermark reset is not
 remedy: it re-runs distillation through the judge and can write near-duplicate
 memories.
 
+A count added inside `outcome` is such a key too. `outcome.memory_tool_calls` is how
+many of the session's `tool_calls` were to a Trellis MCP tool (any server whose name
+holds `trellis`; a `Bash` call to the `trellis` CLI is not one). A join written before
+it lacks the key, and a rejoin writes that join again with the count, read from the
+unchanged transcript. A missing key means unknown, not `0`: a session that made no
+Trellis call reads `0`. No report or analysis reads the count yet.
+
 ```bash
 trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]
 ```
