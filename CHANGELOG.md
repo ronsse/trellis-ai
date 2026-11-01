@@ -13,10 +13,15 @@ All notable changes to Trellis will be documented in this file.
   badged "unlabelled (internal)" with a title saying an `external` key cannot read it, and a
   bare `{"sensitivity": "public"}` that an `external` key does not read is badged as such.
   Lowering a label, or making a document readable by `external` keys, asks first and names who
-  can read it before and after; raising applies at once. To make that possible for every key,
+  can read it before and after; raising applies at once. A chunk is badged with the label it
+  reads (its parent document's, raised to its own), and a stored record that cannot be parsed is
+  badged "corrupt label (reads as restricted)". To make that possible for every key,
   `GET /documents` rows and `GET /documents/{id}` carry `label` (`sensitivity`, `stored`,
-  `external_readable`), computed from the stored row before an `external` key's metadata is cut
-  down, for rows the caller may already read. No pack, search or write route changes.
+  `corrupt`, `external_readable`), computed from the stored row before an `external` key's
+  metadata is cut down, for rows the caller may already read; `external_readable` is the same
+  test the read gate applies, so it is false for a chunk. The "readable by" wording holds when
+  auth is required; with auth off every caller holds every scope. No pack, search or write
+  route changes.
 
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.

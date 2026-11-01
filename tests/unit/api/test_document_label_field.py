@@ -3,12 +3,16 @@
 A key that reads only ``public`` documents is sent metadata cut down to a title
 and a form, so the page could not work the label out from ``metadata``: it
 would have shown every document that key reads as unlabelled. Each row carries
-``label`` (``sensitivity``, ``stored``, ``external_readable``), computed from
-the stored row before the cut, and only for rows the caller already passed the
-read gate for.
+``label`` (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``),
+computed from the stored row before the cut, and only for rows the caller
+already passed the read gate for. ``external_readable`` is compared, row by row,
+with what an ``external`` key is actually served, and a row whose ``metadata``
+is not an object answers an admin key as it did before the field existed.
 """
 
 from __future__ import annotations
+
+import urllib.parse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,9 +23,20 @@ from trellis.schemas.classification import public_label_record
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 
-PUBLIC = {"sensitivity": "public", "external_readable": True, "stored": True}
-UNLABELLED = {"sensitivity": "internal", "external_readable": False, "stored": False}
-BARE_PUBLIC = {"sensitivity": "public", "external_readable": False, "stored": True}
+PUBLIC = {
+    "sensitivity": "public",
+    "external_readable": True,
+    "stored": True,
+    "corrupt": False,
+}
+UNLABELLED = {
+    "sensitivity": "internal",
+    "external_readable": False,
+    "stored": False,
+    "corrupt": False,
+}
+BARE_PUBLIC = {**PUBLIC, "external_readable": False}
+RESTRICTED_CHUNK = {**UNLABELLED, "sensitivity": "restricted"}
 
 
 @pytest.fixture
@@ -121,3 +136,138 @@ def test_detail_label_for_a_read_key_matches_the_list(client) -> None:
     headers = _headers(reg, ["read"])
     body = http.get("/api/v1/documents/doc-unlabelled", headers=headers).json()
     assert body["document"]["label"] == UNLABELLED
+
+
+def _by_id(http, headers, doc_id):
+    return http.get(
+        "/api/v1/documents/" + urllib.parse.quote(doc_id, safe=""), headers=headers
+    )
+
+
+def _seed_chunks(reg) -> None:
+    docs = reg.knowledge.document_store
+    secret = {**public_label_record(), "sensitivity": "restricted"}
+    docs.put("p-secret", "parent text", {"data_classification": secret})
+    docs.put("p-open", "parent text", {"title": "Open parent"})
+    docs.put("p-secret#chunk-0", "chunk text", {"parent_doc_id": "p-secret"})
+    docs.put("p-open#chunk-0", "chunk text", {"parent_doc_id": "p-open"})
+    docs.put(
+        "p-secret#chunk-1",
+        "chunk text",
+        {"parent_doc_id": "p-secret", "data_classification": public_label_record()},
+    )
+
+
+def test_a_chunk_is_labelled_as_its_parent_reads(client) -> None:
+    """A chunk with no label of its own reads its parent's, not ``internal``."""
+    http, reg = client
+    _seed_chunks(reg)
+    admin = _headers(reg, ["admin"])
+    listed = http.get(
+        "/api/v1/documents?limit=100&include_chunks=true", headers=admin
+    ).json()["documents"]
+    labels = {row["doc_id"]: row["label"] for row in listed}
+    assert labels["p-secret#chunk-0"] == RESTRICTED_CHUNK
+    assert labels["p-open#chunk-0"] == UNLABELLED
+    # A chunk's own public record cannot lower its parent's label.
+    assert labels["p-secret#chunk-1"] == {**BARE_PUBLIC, "sensitivity": "restricted"}
+    for doc_id in ("p-secret#chunk-0", "p-open#chunk-0", "p-secret#chunk-1"):
+        detail = _by_id(http, admin, doc_id).json()["document"]["label"]
+        assert detail == labels[doc_id], doc_id
+
+
+def _seed_matrix(reg) -> None:
+    docs = reg.knowledge.document_store
+    exact = public_label_record()
+    docs.put("m-exact", "alpha text", {"title": "t", "data_classification": exact})
+    docs.put("m-bare", "alpha text", {"data_classification": {"sensitivity": "public"}})
+    docs.put(
+        "m-extra",
+        "alpha text",
+        {"data_classification": {"sensitivity": "public", "unknown_field": 1}},
+    )
+    docs.put("m-unlabelled", "alpha text", {"title": "t"})
+    docs.put("m-corrupt", "alpha text", {"data_classification": "oops"})
+    docs.put("m-exact#chunk-0", "alpha chunk", {"parent_doc_id": "m-exact"})
+    docs.put(
+        "m-exact#chunk-1",
+        "alpha chunk",
+        {"parent_doc_id": "m-exact", "data_classification": exact},
+    )
+
+
+def test_external_readable_is_what_an_external_key_is_actually_served(client) -> None:
+    http, reg = client
+    _seed_matrix(reg)
+    admin = _headers(reg, ["admin"])
+    external = _headers(reg, ["read", "external"])
+    query = "/api/v1/documents?limit=100&include_chunks=true"
+    rows = http.get(query, headers=admin).json()["documents"]
+    said = {row["doc_id"]: row["label"]["external_readable"] for row in rows}
+    served = {
+        r["doc_id"] for r in http.get(query, headers=external).json()["documents"]
+    }
+    for doc_id, readable in said.items():
+        status = _by_id(http, external, doc_id).status_code
+        assert readable == (doc_id in served) == (status == 200), doc_id
+    # The kinds the comparison is about were all in play: exact (readable),
+    # bare, extra-key, unlabelled, corrupt and chunk rows (each not).
+    assert said["m-exact"] is True
+    for doc_id in (
+        "m-bare",
+        "m-extra",
+        "m-unlabelled",
+        "m-corrupt",
+        "m-exact#chunk-0",
+        "m-exact#chunk-1",
+    ):
+        assert said[doc_id] is False, doc_id
+
+
+def test_a_corrupt_stored_record_is_flagged_and_a_chosen_restricted_is_not(
+    client,
+) -> None:
+    http, reg = client
+    docs = reg.knowledge.document_store
+    docs.put("c-str", "x", {"data_classification": "oops"})
+    docs.put("c-value", "x", {"data_classification": {"sensitivity": "secret"}})
+    docs.put("c-none", "x", {"data_classification": None})
+    docs.put(
+        "c-chosen",
+        "x",
+        {"data_classification": {**public_label_record(), "sensitivity": "restricted"}},
+    )
+    labels = _labels(http, _headers(reg, ["admin"]))
+    for doc_id in ("c-str", "c-value", "c-none"):
+        assert labels[doc_id] == {
+            "sensitivity": "restricted",
+            "stored": True,
+            "corrupt": True,
+            "external_readable": False,
+        }, doc_id
+    assert labels["c-chosen"]["corrupt"] is False
+    assert labels["doc-unlabelled"]["corrupt"] is False
+
+
+@pytest.mark.parametrize("raw", ["[1,2]", '"str"', "5", "true"])
+def test_a_row_whose_metadata_is_not_an_object_still_answers_an_admin_key(
+    client, raw
+) -> None:
+    """These rows answered 200 before ``label`` existed; the label must not 500."""
+    http, reg = client
+    docs = reg.knowledge.document_store
+    docs.put("bad", "plain text", {})
+    conn = docs._conn if hasattr(docs, "_conn") else docs._get_conn()
+    conn.execute("UPDATE documents SET metadata_json=? WHERE doc_id='bad'", (raw,))
+    conn.commit()
+    stored = docs.get("bad")
+    admin = _headers(reg, ["admin"])
+    resp = _by_id(http, admin, "bad")
+    assert resp.status_code == 200, resp.text
+    document = resp.json()["document"]
+    assert document["label"] == UNLABELLED
+    assert {k: v for k, v in document.items() if k != "label"} == stored
+    listed = http.get("/api/v1/documents?limit=100", headers=admin)
+    assert listed.status_code == 200, listed.text
+    row = next(r for r in listed.json()["documents"] if r["doc_id"] == "bad")
+    assert row["label"] == UNLABELLED
