@@ -11,6 +11,7 @@ import stat
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -2127,7 +2128,32 @@ _AFTER_EVERY_VERSION = datetime(9999, 12, 31, tzinfo=UTC)
 
 #: Stores a graph copy does not touch. ``migrate-graph`` reads and writes the
 #: graph and nothing else, so a success line must not read as "the store moved".
-_MIGRATE_GRAPH_NOT_MOVED = ("documents", "traces", "event_log", "vectors", "feedback")
+_MIGRATE_GRAPH_NOT_MOVED = (
+    "documents",
+    "traces",
+    "event_log",
+    "vectors",
+    "blobs",
+    "feedback",
+)
+
+#: Why a clean run can still leave current rows behind. The migrator reads edges
+#: and aliases through the current nodes (``get_edges(node, "outgoing")`` and
+#: ``get_aliases(node)``), so a row attached to an id with no current node is
+#: never read.
+_MIGRATE_GRAPH_UNREACHED_NOTE = (
+    "edges and aliases are read through the current nodes, so an edge whose "
+    "source id, or an alias whose owner id, has no current node is not copied; "
+    "the edges are counted, the aliases are not"
+)
+
+
+@dataclass(frozen=True)
+class _LeftBehind:
+    """What the source still holds after a finished copy; ``None`` is "not counted"."""
+
+    version_rows: dict[str, int] | None
+    edges_not_reached: int | None
 
 
 def _count_source_version_rows(store: Any) -> dict[str, int] | None:
@@ -2138,26 +2164,52 @@ def _count_source_version_rows(store: Any) -> dict[str, int] | None:
     means the store could not say: a backend that does not implement it, or a
     read that failed. The caller reports "not counted" for that, never ``0``,
     which would claim no history was left. The copy has finished by the time
-    this runs and the count is advisory, so a failure here is logged and never
-    fails it.
+    this runs and the count is advisory, so a failure here, in the read or in
+    shaping its result, is logged and never fails it.
     """
     try:
         counted = store.compact_versions(_AFTER_EVERY_VERSION, dry_run=True)
+        rows = {
+            "nodes": counted.nodes_compacted,
+            "edges": counted.edges_compacted,
+            "aliases": counted.aliases_compacted,
+        }
     except Exception as exc:
         logger.warning(
             "migrate_graph_version_count_failed", error_class=type(exc).__name__
         )
         return None
-    return {
-        "nodes": counted.nodes_compacted,
-        "edges": counted.edges_compacted,
-        "aliases": counted.aliases_compacted,
-    }
+    return rows
 
 
-def _migrate_graph_scope(
-    report: Any, uncopied: dict[str, int] | None
-) -> dict[str, Any]:
+def _count_current_edges_not_reached(store: Any, report: Any) -> int | None:
+    """Count current source edges the run never read.
+
+    ``count_edges()`` is current edges only (``valid_to IS NULL``) on every
+    backend, and the migrator reads each current edge at most once, through its
+    source node, so the difference is the current edges attached to an id with
+    no current node (plus the edges of a node whose ``get_edges`` step failed,
+    which ``step_failures`` names). ``None`` means "not counted", never ``0``,
+    for the same reason as :func:`_count_source_version_rows`.
+    """
+    try:
+        unreached = int(max(store.count_edges() - report.edges_read, 0))
+    except Exception as exc:
+        logger.warning(
+            "migrate_graph_edge_count_failed", error_class=type(exc).__name__
+        )
+        return None
+    return unreached
+
+
+def _count_left_behind(store: Any, report: Any) -> _LeftBehind:
+    return _LeftBehind(
+        version_rows=_count_source_version_rows(store),
+        edges_not_reached=_count_current_edges_not_reached(store, report),
+    )
+
+
+def _migrate_graph_scope(report: Any, left: _LeftBehind) -> dict[str, Any]:
     """What a ``migrate-graph`` run did and did not carry over.
 
     Built from what the run read, so the JSON payload and the text lines
@@ -2172,16 +2224,20 @@ def _migrate_graph_scope(
             "edges": report.edges_written,
             "aliases": report.aliases_written,
         },
-        "source_version_rows_counted": uncopied is not None,
-        "source_version_rows_not_copied": uncopied,
+        "source_version_rows_counted": left.version_rows is not None,
+        "source_version_rows_not_copied": left.version_rows,
+        "current_edges_not_reached_counted": left.edges_not_reached is not None,
+        "current_edges_not_reached": left.edges_not_reached,
+        "unreached_note": _MIGRATE_GRAPH_UNREACHED_NOTE,
+        "timestamps_preserved": False,
         # The ABC's ``upsert_node``, ``upsert_edge`` and ``upsert_alias`` take no
         # timestamp, so the destination stamps every row it writes
-        # (``test_the_graph_abc_accepts_no_timestamp_to_carry_over``).
-        "timestamps_preserved": False,
+        # (``test_the_graph_abc_accepts_no_timestamp_to_carry_over``). Which
+        # columns a row has differs by table and backend, so none is listed.
         "timestamps_note": (
-            "created_at, updated_at and valid_from are set on the destination "
-            "when each row is written, and edge and alias ids are new; the "
-            "source's values are not carried over"
+            "the destination sets each row's timestamps (for example created_at "
+            "and valid_from) when it writes the row, and edge and alias ids are "
+            "new; the source's values are not carried over"
         ),
         "not_moved": list(_MIGRATE_GRAPH_NOT_MOVED),
     }
@@ -2208,6 +2264,15 @@ def _migrate_graph_scope_lines(scope: dict[str, Any], *, dry_run: bool) -> list[
             "Source version rows not copied (closed history): "
             f"nodes={left['nodes']} edges={left['edges']} aliases={left['aliases']}."
         )
+    unreached = scope["current_edges_not_reached"]
+    if unreached is None:
+        lines.append(
+            "Current edges not reached: not counted (the source store could not "
+            "report them)."
+        )
+    else:
+        lines.append(f"Current edges not reached: {unreached}.")
+    lines.append(f"Not reached: {scope['unreached_note']}.")
     lines.append(f"Timestamps are not preserved: {scope['timestamps_note']}.")
     lines.append("Not moved by this command: " + ", ".join(scope["not_moved"]) + ".")
     return lines
@@ -2267,20 +2332,28 @@ def migrate_graph(
 ) -> None:
     """Copy current graph data (nodes + edges + aliases) between backends.
 
-    This moves the current graph only. Closed history rows (the SCD-2
+    This copies current graph rows only. Closed history rows (the SCD-2
     versions behind ``as_of`` reads and node history) are not copied, and the
     run counts them when the source store can. Timestamps are not preserved:
-    the destination sets ``created_at``, ``updated_at`` and ``valid_from`` when
-    it writes each row. Documents, traces, the event log, vectors and feedback
-    are not moved by this command, and no Trellis command moves them. Every
-    run, in either ``--format``, states these limits beside its counts.
+    the destination sets each row's timestamps when it writes the row. Edges
+    and aliases are read through the current nodes, so one attached to an id
+    with no current node is not copied; the run counts those edges, and
+    aliases have no count. Documents, traces, the event log, vectors, blobs,
+    feedback and the policy file are not moved by this command, and none of
+    them has a migration tool. A run that finishes states these limits beside
+    its counts in either ``--format``. A run aborted by a store error (exit 5)
+    prints text in either format and no JSON, and the destination may hold a
+    partial copy. ``--dry-run`` still creates the destination database
+    and its schema, and a read-only snapshot cannot be the source.
 
     POC scope: current versions only, in-memory snapshot up to
     ``--max-nodes``. Idempotent on retry — a destination that already
     has a row with the same ``node_id`` (or alias source/raw_id) is
     skipped, not overwritten. An edge already on the destination is
     skipped too, so a re-run does not backfill provenance onto an edge
-    an earlier copy wrote without it.
+    an earlier copy wrote without it. A re-run therefore adds rows the
+    destination lacks; it neither updates a row that changed on the source
+    nor removes one deleted there.
 
     Both ``--from-config`` and ``--to-config`` accept a YAML file with
     a single ``graph:`` block matching the shape used in
@@ -2343,8 +2416,9 @@ def migrate_graph(
                     "failures in one pass.[/yellow]"
                 )
                 raise typer.Exit(code=EXIT_STORE) from exc
-            # Read while the source is still open; the copy never wrote to it.
-            uncopied = _count_source_version_rows(src_store)
+            # Read while the source is still open. The migration writes no
+            # rows to the source (opening it can still run schema setup).
+            left = _count_left_behind(src_store, report)
         finally:
             # Close in dest-first order so the source connection survives
             # if the dest close blows up — diagnostics may need to
@@ -2389,7 +2463,7 @@ def migrate_graph(
         # disagree. A ``status`` of "error" beside an exit code of 0 would
         # have been a third signal, not a fix.
         payload["status"] = "error" if failed else "ok"
-        payload["copy_scope"] = _migrate_graph_scope(report, uncopied)
+        payload["copy_scope"] = _migrate_graph_scope(report, left)
         emit_json(payload, indent=2)
     else:
         if report.dry_run:
@@ -2397,7 +2471,7 @@ def migrate_graph(
         else:
             console.print(f"[green]{report.summary()}[/green]")
         _print_migrate_graph_scope(
-            _migrate_graph_scope(report, uncopied), dry_run=report.dry_run
+            _migrate_graph_scope(report, left), dry_run=report.dry_run
         )
         if failed:
             console.print()

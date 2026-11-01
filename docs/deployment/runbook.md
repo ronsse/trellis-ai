@@ -15,13 +15,17 @@ runs; this one describes *how* to operate it once it's running.
 ## Moving an existing SQLite deployment
 
 Changing a store's `backend` in `config.yaml` points Trellis at the new
-store; it does not copy what the old one held. The only data-moving command
-is `trellis admin migrate-graph`, and it copies the **current graph only**:
+store; it does not copy what the old one held. The one migration tool is
+`trellis admin migrate-graph`, and it copies **current graph rows** only:
 closed SCD-2 versions are not copied (the run counts them), timestamps are
-not preserved (the destination stamps each row it writes), and documents,
-traces, the event log, vectors and feedback are not moved by it. No Trellis
-command moves those stores, so data already in them stays in the SQLite
-files. Details and the JSON shape:
+not preserved (the destination sets them when it writes each row), and an
+edge or alias attached to an id with no current node is not copied (the run
+counts those edges; aliases have no count). A re-run adds missing rows and
+does not update or remove existing ones, and `--dry-run` still creates the
+destination database. Documents, traces, the event log, vectors, blobs and
+feedback are not moved by it and have no migration tool, so data already in
+them stays in the SQLite files or the local blob directory. Details, the
+JSON shape and the exit codes:
 [`trellis admin migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
 
 ## Environment variables

@@ -218,42 +218,55 @@ rendered as a visible error rather than a silent empty list.
 
 ### `trellis admin migrate-graph`
 
-Copy the **current** graph (nodes, edges, aliases) from one graph store to another.
+Copy the **current** graph rows (nodes, edges, aliases) from one graph store to another.
 
 ```bash
 trellis admin migrate-graph --from-config FROM.yaml --to-config TO.yaml \
   [--dry-run] [--max-nodes N] [--continue-on-error] [--format text|json] [--no-meta-trace]
 ```
 
-Each YAML file holds a single `graph:` block in the shape `recommended-config.yaml` uses. A destination row that already exists is skipped, so a re-run is safe.
+Each YAML file holds a single `graph:` block in the shape `recommended-config.yaml` uses. A destination row that already exists is skipped. A re-run therefore adds the rows the destination lacks and nothing else: it does not update a row that changed on the source and does not remove one deleted there, and when nothing is missing it exits `0` with `current_rows_copied` all `0` while the destination keeps its old values. Use a re-run to finish an interrupted copy, not to catch up a destination while the source keeps taking writes.
 
-**What it does not move.** A successful run is a copy of the current graph, not of the store:
+**What it does not copy.** A clean run is a copy of some current graph rows, not of the store:
 
 - **Closed history is not copied.** Only current rows (`valid_to IS NULL`) are read. A node with three versions arrives with one, so `as_of` reads and `get_node_history` on the destination start at the copy. The run counts the closed rows it left behind (nodes, edges and aliases) with `compact_versions(dry_run=True)` on the source, which deletes nothing. If the source store cannot report that count, `source_version_rows_counted` is `false` and the count is `null`: it is never printed as `0`.
-- **Timestamps are not preserved.** `upsert_node`, `upsert_edge` and `upsert_alias` take no clock, so the destination sets `created_at`, `updated_at` and `valid_from` when it writes each row. Edge and alias ids are new; node ids are kept.
-- **Only the graph moves.** Documents, traces, the event log, vectors and feedback are not moved by this command, and no Trellis command moves them. `trellis admin backup` copies SQLite stores to a directory; it does not load them into another backend. To keep a SQLite store's history intact, leave it on SQLite.
+- **Timestamps are not preserved.** `upsert_node`, `upsert_edge` and `upsert_alias` take no clock, so the destination sets each row's timestamps (for example `created_at` and `valid_from`) when it writes the row. Edge and alias ids are new; node ids are kept.
+- **Edges and aliases are read through the current nodes.** An edge whose source id, or an alias whose owner id, has no current node is never read, so a run can finish with `status: ok`, `errors: []` and fewer current rows on the destination than the source holds. The stores accept such rows; this page does not say which write paths produce them. The run counts the edges it did not reach (`current_edges_not_reached`: the source's current edge count less the edges the run read, `null` when the source cannot report it). Aliases have no count. An edge whose source is a current node is copied even when its target is not one.
+- **Only the graph moves.** Documents, traces, the event log, vectors, blobs and feedback are not moved by this command, and none of them has a migration tool, nor does the policy file (`policies.json`). `trellis admin backup` copies SQLite stores, the policy file and the feedback log to a directory; it does not load them into another backend. `trellis admin reconcile-feedback` replays `pack_feedback.jsonl` rows the configured event log lacks; it writes events and does not move the feedback store. To keep a SQLite store's history intact, leave it on SQLite.
 
-The statement is part of every run's output, in both formats, not only when history was lost. `--format json` adds one key, `copy_scope`, and keeps every existing key; `status` is `ok` on a clean copy:
+**Source and destination.** The migration writes no rows to the source. Opening a SQLite source still runs its schema setup and sets the journal mode, so a read-only snapshot cannot be the source (the run exits `1` with a traceback). `--dry-run` writes no rows to the destination but does create its database file and schema.
+
+**What a run states.** A run that finishes, in either `--format`, states these limits beside its counts, whether or not anything was lost. `--format json` adds one key, `copy_scope`, and keeps every existing key; `status` is `ok` on a clean copy:
 
 ```json
 {
   "status": "ok",
-  "nodes_read": 2, "nodes_written": 2,
+  "nodes_read": 4, "nodes_written": 4,
   "copy_scope": {
     "copies": "current graph rows only (nodes, edges, aliases)",
-    "current_rows_copied": {"nodes": 2, "edges": 1, "aliases": 1},
+    "current_rows_copied": {"nodes": 4, "edges": 3, "aliases": 2},
     "source_version_rows_counted": true,
-    "source_version_rows_not_copied": {"nodes": 1, "edges": 1, "aliases": 1},
+    "source_version_rows_not_copied": {"nodes": 3, "edges": 2, "aliases": 1},
+    "current_edges_not_reached_counted": true,
+    "current_edges_not_reached": 0,
+    "unreached_note": "edges and aliases are read through the current nodes, so an edge whose source id, or an alias whose owner id, has no current node is not copied; the edges are counted, the aliases are not",
     "timestamps_preserved": false,
-    "timestamps_note": "created_at, updated_at and valid_from are set on the destination when each row is written, and edge and alias ids are new; the source's values are not carried over",
-    "not_moved": ["documents", "traces", "event_log", "vectors", "feedback"]
+    "timestamps_note": "the destination sets each row's timestamps (for example created_at and valid_from) when it writes the row, and edge and alias ids are new; the source's values are not carried over",
+    "not_moved": ["documents", "traces", "event_log", "vectors", "blobs", "feedback"]
   }
 }
 ```
 
-Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy".
+Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy". A run that finishes with errors (`--continue-on-error`) carries `copy_scope` beside `status: "error"`.
 
-**Exit codes** (the same under both formats): `0` for a clean copy; `5` when a step failed (`errors` is non-empty, or a store write aborted the run); `2` for an unusable `--from-config` or `--to-config`; `1` when the source has more current nodes than `--max-nodes`.
+**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`) after printing text, a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`, in **both** formats. There is no JSON and no `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets a parse failure and must read the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` exits `1` after one line of text in both formats, before anything is written.
+
+**Exit codes** (the same under both formats, as observed through the installed `trellis` entry point):
+
+- `0`: a clean copy.
+- `5`: a step failed (`errors` is non-empty, or a store write aborted the run), or the config named a backend that does not exist, a key the backend does not accept, or a backend that is not installed (a `CONFIG_ERROR` or `BACKEND_NOT_INSTALLED` line, or a JSON error object under `--format json`).
+- `2`: a `--from-config` or `--to-config` file that is missing, unreadable, invalid YAML or lacking a `graph:` block with a `backend` key, and an unknown option (`--from` and `--to` are not options).
+- `1`: a source over `--max-nodes`, and two cases the command does not handle and that end in a Python traceback: a `db_path` under a regular file, and a SQLite source that is read-only.
 
 ### `trellis admin show-prompt`
 

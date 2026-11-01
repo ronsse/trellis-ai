@@ -56,25 +56,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **`trellis admin migrate-graph` now says it copies the current graph only.** The command
-  reads current rows and writes them through the destination's `upsert_*` methods, so a node
-  with two SCD-2 versions arrives with one, every row's `created_at`, `updated_at` and
-  `valid_from` (and every edge and alias id) is minted by the destination, and no store but
-  the graph is touched. A clean run reported `status: ok` and said none of that. Every run
-  now states it, in both formats and whether or not history was lost. `--format json` gains
-  one key, `copy_scope`: `current_rows_copied` (nodes, edges, aliases written, or that would
-  be written under `--dry-run`), `source_version_rows_not_copied` (the source's closed rows,
-  counted with `compact_versions(dry_run=True)`, which deletes nothing),
-  `source_version_rows_counted`, `timestamps_preserved: false` with a note, and `not_moved`
-  (documents, traces, event log, vectors, feedback). A source that cannot give the count
-  reports `null` and `source_version_rows_counted: false`, never `0`. Existing keys keep
-  their meaning, `status` is still `ok` on a clean copy, and exit codes are unchanged and
-  independent of `--format`. The text form prints four lines after the summary. The help,
-  README, `docs/agent-guide/operations.md` (a new `migrate-graph` section) and the
-  deployment pages that send a reader from SQLite to another backend state the same limits.
-  Checked sqlite to sqlite; the Postgres, Neo4j and ArcadeDB paths, including their
-  `compact_versions` counts, were not run. It adds no migration command and changes
-  nothing about what is copied.
+- **`trellis admin migrate-graph` now says what it copies and what it leaves behind.** The
+  command reads current rows and writes them through the destination's `upsert_*` methods, so a
+  node with three SCD-2 versions arrives with one, the destination sets each row's timestamps
+  and mints every edge and alias id, edges and aliases are read through the current nodes (one
+  attached to an id with no current node is never read), and no store but the graph is touched.
+  A clean run reported `status: ok` and said none of that. A run that finishes now states it,
+  in both formats and whether or not anything was lost. `--format json` gains one key,
+  `copy_scope`: `current_rows_copied` (nodes, edges, aliases written, or that would be
+  written under `--dry-run`), `source_version_rows_not_copied` (the source's closed rows,
+  counted with `compact_versions(dry_run=True)`, which deletes nothing) with
+  `source_version_rows_counted`, `current_edges_not_reached` (the source's current edge count
+  less the edges the run read) with `current_edges_not_reached_counted`, `unreached_note`
+  (aliases have no count), `timestamps_preserved: false` with a note, and `not_moved`
+  (documents, traces, event log, vectors, blobs, feedback). A source that cannot give a count
+  reports `null` and a `false` flag, never `0`. Existing keys keep their meaning, `status` is
+  still `ok` on a clean copy, and exit codes are unchanged and independent of `--format`. The
+  text form prints six lines after the summary. A run that aborts on a store error (exit 5)
+  prints text in both formats, no JSON and no `copy_scope`, and the destination may hold a
+  partial copy; a source over `--max-nodes` exits 1 before writing anything. A re-run adds
+  missing rows and neither updates nor removes existing ones, and `--dry-run` creates the
+  destination database. The help, README, `docs/agent-guide/operations.md` (a new
+  `migrate-graph` section, including the exit codes as observed through the entry point, two of
+  which end in a traceback) and the deployment pages that send a reader from SQLite to another
+  backend state the same limits. Checked sqlite to sqlite only: the Postgres and Neo4j paths
+  were not run, and ArcadeDB inherits the Bolt `compact_versions`, which has no ArcadeDB test and
+  no live run here. It adds no migration command and changes nothing about
+  what is copied or any exit code.
 - **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
   say the table has "no estimate".** It prints each arm's outcome mean per
   build; what it omits is an interval and a p-value. `analyze value`'s help no

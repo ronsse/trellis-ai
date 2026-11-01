@@ -135,14 +135,18 @@ selects the backend. Add the `knowledge:` block from
 [`neo4j-auradb.md` Step 3](./neo4j-auradb.md#step-3--configure-trellis)
 (graph and vector on `neo4j`), or copy block #3's `knowledge:` from
 [`recommended-config.yaml`](./recommended-config.yaml), which also
-moves documents to Postgres and blobs to S3 and lists the variables
-those need.
+selects Postgres for documents and S3 for blobs and lists the variables
+those need. Selecting a backend does not copy data: what already sits in the
+SQLite document store or the local blob directory stays there, and no Trellis
+migration tool moves it. Copy a blob directory into the bucket with your own
+file tooling.
 
-Pointing Trellis at a new backend does not copy data already in SQLite. To bring an
-existing graph across, see
+Pointing Trellis at a new graph backend does not copy a graph already in
+SQLite. To bring one across, see
 [`trellis admin migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph):
-it copies the current graph only (no closed versions, new timestamps), and no
-command moves documents, traces, the event log, vectors or feedback.
+it copies current graph rows only (no closed versions, new timestamps), and
+documents, traces, the event log, vectors, blobs and feedback have no
+migration tool.
 
 Pair with managed Postgres (RDS / Cloud SQL / Neon) for the
 operational plane the same way the AuraDB doc shows in

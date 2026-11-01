@@ -210,7 +210,7 @@ The pattern is identical each time: **the machine prepares, the human commits.**
 
 ## Minimal single-host setup
 
-The smallest real deployment is two processes on one host: the API/UI in one, a curation loop in the other. SQLite stores are fine for a single host; switch backends per [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) when you outgrow it. A switch does not copy existing data: `trellis admin migrate-graph` moves the current graph only, and no command moves documents, traces, the event log, vectors or feedback ([details](../agent-guide/operations.md#trellis-admin-migrate-graph)).
+The smallest real deployment is two processes on one host: the API/UI in one, a curation loop in the other. SQLite stores are fine for a single host; switch backends per [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) when you outgrow it. A switch does not copy existing data: `trellis admin migrate-graph` copies current graph rows only, and documents, traces, the event log, vectors, blobs and feedback have no migration tool ([details](../agent-guide/operations.md#trellis-admin-migrate-graph)).
 
 > Want the containerized Postgres + pgvector shape instead — an offline rehearsal of the AWS ECS + RDS deployment? See [`../deployment/local-compose.md`](../deployment/local-compose.md) for the one-command `docker compose up` path and its smoke checklist.
 

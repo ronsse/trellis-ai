@@ -173,14 +173,20 @@ file order, so give both entries the same `driver_config`.
 1. In the AuraDB console, **Create new instance** → Pro tier in the
    same region.
 2. Use AuraDB's built-in **Database export/import** to move the data,
-   OR use Trellis's `trellis admin migrate-graph --from <free-uri>
-   --to <pro-uri>` (Phase 2.3 of the hardening plan). The Trellis command
-   copies the current graph only: closed SCD-2 versions are not copied,
-   timestamps are not preserved, and it moves nothing outside the graph
+   OR use Trellis's `trellis admin migrate-graph --from-config free.yaml
+   --to-config pro.yaml`, where each file is a YAML file with a `graph:` block
+   for that instance. The Trellis command copies current graph rows only:
+   closed SCD-2 versions are not copied, timestamps are not preserved, an edge
+   or alias attached to an id with no current node is not copied, and it moves
+   nothing outside the graph
    (see [`migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph)).
 3. Update env vars / config. **Pro changes the user from instance ID
    back to `neo4j`** — adjust accordingly.
-4. Retire the Free instance once Pro is verified.
+4. Retire the Free instance once Pro is verified. If you copied with
+   `migrate-graph` and the Free instance took writes afterwards, a re-run
+   adds rows that are new there but does not update rows that changed or
+   remove rows deleted there, so stop writes to Free, or compare the two,
+   before you retire it.
 
 ## Multi-writer caveat
 

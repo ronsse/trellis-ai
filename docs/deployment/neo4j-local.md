@@ -80,9 +80,9 @@ EOF
 * Trace, document, and event-log stores stay on SQLite; the blob store
   stays on the local filesystem.
 * Pointing `graph` at Neo4j does not carry over a graph already in SQLite.
-  `trellis admin migrate-graph` copies the current graph only, without closed
-  SCD-2 versions or the original timestamps, and no command moves SQLite
-  documents, traces, events, vectors or feedback
+  `trellis admin migrate-graph` copies current graph rows only, without closed
+  SCD-2 versions or the original timestamps, and SQLite documents, traces,
+  events, vectors, blobs and feedback have no migration tool
   ([details](../agent-guide/operations.md#trellis-admin-migrate-graph)).
 * Never write `${TRELLIS_NEO4J_URI}` or any other `${VAR}` into
   `config.yaml`. It is read as plain YAML and never expanded: a value

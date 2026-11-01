@@ -319,10 +319,10 @@ trellis classify backfill --dry-run  # re-tag stored documents (preview first)
 trellis admin check-extractors       # readiness diagnostic for tiered extraction
 trellis admin migrate-graph \
   --from-config sqlite.yaml \
-  --to-config aura.yaml      # copies the current graph only (SQLite↔Postgres↔Neo4j)
+  --to-config aura.yaml      # copies current graph rows, not history (SQLite↔Postgres↔Neo4j)
 ```
 
-`migrate-graph` moves the **current graph only**. Closed SCD-2 versions are not copied (the run counts them), so `as_of` reads and node history on the destination start from the copy. Timestamps are not preserved: the destination stamps each row it writes. Documents, traces, the event log, vectors and feedback are not moved by it, and no Trellis command moves them. See [`docs/agent-guide/operations.md`](docs/agent-guide/operations.md#trellis-admin-migrate-graph).
+`migrate-graph` copies **current graph rows** and nothing else. Closed SCD-2 versions are not copied (the run counts them), so `as_of` reads and node history on the destination start from the copy. Timestamps are not preserved: the destination sets each row's timestamps when it writes the row. Edges and aliases are read through the current nodes, so one attached to an id with no current node is not copied (the run counts those edges; aliases have no count). A re-run adds missing rows and does not update or remove existing ones. Documents, traces, the event log, vectors, blobs and feedback are not moved by it and have no migration tool. See [`docs/agent-guide/operations.md`](docs/agent-guide/operations.md#trellis-admin-migrate-graph).
 
 **REST API** — `trellis admin serve` or `trellis-api`. OpenAPI at `/docs`, UI at `/`.
 
@@ -439,7 +439,7 @@ Backends are wired from `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config
 | Vector | `sqlite` | **`arcadedb`** (native HNSW) | `pgvector`, `neo4j` (HNSW on `:Node`) |
 | Blob | `local` | `s3` | — |
 
-Changing a store's `backend` points Trellis at the new store; it does not copy what the old one held. The only command that moves data is `trellis admin migrate-graph`, and it copies the current graph only. Documents, traces, the event log, vectors and feedback have no migration command, so data already in them stays where it is ([details](docs/agent-guide/operations.md#trellis-admin-migrate-graph)).
+Changing a store's `backend` points Trellis at the new store; it does not copy what the old one held. `trellis admin migrate-graph` copies current graph rows between graph backends and nothing else: no history, new timestamps, and nothing attached to an id with no current node. Documents, traces, the event log, vectors, blobs and feedback have no migration tool, so data already in them stays where it is ([details](docs/agent-guide/operations.md#trellis-admin-migrate-graph)).
 
 For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — four shapes: ArcadeDB (blessed), Neo4j local, Neo4j cloud (AuraDB + Postgres) and Postgres-only. The REST API (`trellis-api` or `trellis admin serve`) builds every store when it starts, so a missing DSN or bucket stops startup instead of failing the first request. `TRELLIS_VALIDATE_CONNECTIVITY=1` also checks each cached Bolt driver (Neo4j, ArcadeDB graph) with one round-trip.
 

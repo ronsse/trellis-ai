@@ -38,9 +38,9 @@
 #     arcadedata/arcadedb:latest
 #
 # Switching an existing SQLite install to this shape does not copy its data.
-# `trellis admin migrate-graph` copies the current graph only (no closed SCD-2
-# versions, new timestamps); no command moves documents, traces, the event log,
-# vectors or feedback. See docs/agent-guide/operations.md.
+# `trellis admin migrate-graph` copies current graph rows only (no closed SCD-2
+# versions, new timestamps); documents, traces, the event log, vectors, blobs and
+# feedback have no migration tool. See docs/agent-guide/operations.md.
 #
 # Required env vars:
 #   TRELLIS_ARCADEDB_URI=bolt://localhost:7687

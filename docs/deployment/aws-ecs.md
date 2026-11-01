@@ -191,9 +191,9 @@ browser).
 - Horizontal scaling / multiple Fargate tasks
 - Prometheus metrics / custom CloudWatch metrics
 - Postgres migration framework (tables autocreate; safe for greenfield)
-- Moving an existing SQLite store into RDS. `trellis admin migrate-graph` copies the
-  current graph only, without closed SCD-2 versions or the original timestamps, and no
-  command moves documents, traces, the event log, vectors or feedback. See
+- Moving an existing SQLite store into RDS. `trellis admin migrate-graph` copies current
+  graph rows only, without closed SCD-2 versions or the original timestamps, and documents,
+  traces, the event log, vectors, blobs and feedback have no migration tool. See
   [`migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
 - Multi-tenancy
 
