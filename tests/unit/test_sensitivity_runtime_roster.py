@@ -61,6 +61,14 @@ FRAMEWORK_HANDLERS: frozenset[str] = frozenset(
     }
 )
 
+#: Served only where an optional extra is installed, named one by one, so these
+#: may be absent and "rostered but not served" does not apply. ``/metrics``, from
+#: the ``observability`` extra, holds no store content and is gated by
+#: ``_require_metrics_access``, pinned in ``tests/unit/api/test_metrics_gate.py``.
+OPTIONAL_EXTRA_HANDLERS: frozenset[str] = frozenset(
+    {"prometheus_fastapi_instrumentator.instrumentation:metrics"}
+)
+
 #: Handlers rostered for more than one route (a method on a path), with how
 #: many. Hand read: one, ``PUT`` and ``POST`` on ``/settings/{name}``. Anything
 #: else serving a second path, or a second method, is a new surface and fails
@@ -109,7 +117,9 @@ def rest_violations(
 ) -> list[str]:
     """``roster`` is keyed on full module paths (see :func:`full_roster`)."""
     paths_allowed = MULTI_PATH if multi_path is None else multi_path
-    allowed = set(roster) | APP_OWN_ROUTES | FRAMEWORK_HANDLERS
+    allowed = (
+        set(roster) | APP_OWN_ROUTES | FRAMEWORK_HANDLERS | OPTIONAL_EXTRA_HANDLERS
+    )
     found = [
         f"{route}: served, not a handler a person rostered" for route in unexplained
     ]

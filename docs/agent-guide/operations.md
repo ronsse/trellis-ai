@@ -5071,7 +5071,7 @@ All three validate at startup — an unrecognized value crashes
 |---------|--------|---------|--------|
 | `TRELLIS_UI_ENABLED` | `true` / `false` | `true` | `false`: `/ui` is not mounted and `/` redirects to `/api/version` instead of `/ui/`. |
 | `TRELLIS_OPS_DETAIL` | `authenticated` / `public` | `authenticated` | Who sees the per-backend `/readyz` breakdown (backend names, latencies, raw error strings). The `{"status": ...}` line is always public, so orchestrator probes need zero credentials. `public` restores the pre-gating full body for everyone. |
-| `TRELLIS_METRICS_PUBLIC` | `true` / `false` | `true` | `false`: `/metrics` requires a valid credential (any scope) and returns 401 otherwise. `true` keeps it open for credential-less Prometheus scrape jobs. |
+| `TRELLIS_METRICS_PUBLIC` | `true` / `false` | `true` | `false`: `/metrics` requires a valid credential of any scope and returns 401 otherwise; an `external` key gets 403. `true` keeps it open for credential-less Prometheus scrape jobs. |
 
 "Authenticated" for `/readyz` detail and gated `/metrics` means
 *any* valid credential — no specific scope is required. The check

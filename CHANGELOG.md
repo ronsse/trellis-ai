@@ -19,6 +19,8 @@ All notable changes to Trellis will be documented in this file.
   `external` scope is ignored, so a stored list `["read", "External"]` is the same key;
   a single string `"read,external"` is neither scope (the key has no `read`, clearance
   `internal`, and every route answers 403).
+  With `TRELLIS_METRICS_PUBLIC=false`, `/metrics` answers this key 403; the default leaves
+  `/metrics` open to every caller, this key included.
 
   What the key receives does not depend on anything it may not read, and every rule below
   applies to this key alone. **The public path never ranks a hidden row.** The label is a
