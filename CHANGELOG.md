@@ -364,19 +364,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **One unreadable document row no longer fails every read by an `external`
-  key on SQLite.** The label predicate the public path runs through
-  `DocumentStore.list_documents` raised on a row whose `metadata_json` is not
-  JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is not
-  UTF-8, or is nested past the parser's limit, so a pack, `GET /search` and
-  `GET /documents` answered 500 for every external key while one such row
-  existed, whoever it belonged to. It also read a JSON string whose text is the
-  public label record as that record, so such a row matched the filter (the
-  later per-row gate withheld it). The public filter is now a
-  `trellis.stores.base.document.ReadableMatch`, a dict that only a readable row
-  can match: the SQLite store withholds the row, serves every other row, and
-  records it as a `public_read_unparseable_row` warning (the event a by-id read
-  of the same row already uses). Postgres needed no change: its predicate is
+- **A document row whose metadata cannot be read no longer fails every read by
+  an `external` key on SQLite.** The label predicate the public path runs
+  through `DocumentStore.list_documents` raised on a row whose `metadata_json`
+  is not JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is
+  not UTF-8, has bytes after a NUL, is JSON5 rather than JSON, or is nested past
+  the parser's limit, so a pack, `GET /search` and `GET /documents` answered 500
+  for every external key while one such row existed, whoever it belonged to. It
+  also read a JSON string whose text is the public label record as that record,
+  so such a row matched the filter (the later per-row gate withheld it). The
+  public filter is now a `trellis.stores.base.document.ReadableMatch`, a dict
+  that only a readable row can match: the SQLite store parses the column as the
+  read that follows does (`json.loads`), withholds a row that does not parse as an
+  object, serves every other row (a row holding `NaN` is readable), and records
+  each withheld row as a `public_read_unparseable_row` warning (the event a
+  by-id read of the same row already uses). **Not covered:** a row labelled
+  public whose `doc_id`, `content` or `created_at` is not valid UTF-8 still
+  makes every external read answer 500 while it exists, on SQLite as before.
+  Postgres needed no change for unreadable metadata: its predicate is
   `metadata -> key = value`, which is NULL, not an error, on a row that is not
   an object. Every other read is unchanged, row by row: a plain dict filter, a
   scalar filter, no filter and every call by a key above `public` answer as
@@ -836,15 +841,16 @@ All notable changes to Trellis will be documented in this file.
 ### Changed
 
 - **BREAKING: `trellis admin list-proposals` (a `--limit` below 1, reached by a
-  direct call of the command body) and `trellis admin show-proposal` (a blank
-  id) exit 2, not 1.** Both are a refused request, as `generate-proposals
-  --dry-run` is, so they now answer with `EXIT_VALIDATION` in both formats (the
-  JSON payload is unchanged: `{"status": "error", "error": "validation_error",
-  ...}`). `list-proposals --limit 0` on the command line already exited 2
-  (Typer's `min=1` refuses it before the command runs), so for a shell caller
-  only `show-proposal ""` moves. An id that names no proposal still exits 1: the
-  lookup ran and found nothing. A script that treated exit 1 from either call
-  as "the request was refused" must read 2; none in this repository does.
+  direct call of the command body) and `trellis admin show-proposal` (a blank or
+  whitespace-only id) exit 2, not 1.** Both are a refused request, as
+  `generate-proposals --dry-run` is, so they now answer with `EXIT_VALIDATION`
+  in both formats (the JSON payload is unchanged: `{"status": "error", "error":
+  "validation_error", ...}`). `list-proposals --limit 0` on the command line
+  already exited 2 (Typer's `min=1` refuses it before the command runs), so for
+  a shell caller only `show-proposal ""` and a whitespace-only id move. An id
+  that names no proposal still exits 1: the lookup ran and found nothing. A
+  script that treated exit 1 from either call as "the request was refused" must
+  read 2; none in this repository does.
 
 
 - **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers

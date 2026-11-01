@@ -28,8 +28,8 @@ Exit codes follow :mod:`trellis_cli.exit_codes`:
 * :data:`EXIT_VALIDATION` (2) — a refused request: ``generate-proposals
   --dry-run`` (the generator cannot honour it; the run is refused, not
   ignored), ``list-proposals`` with a ``--limit`` below 1 and
-  ``show-proposal`` with a blank id. An id that names no proposal is a
-  lookup that found nothing, and stays :data:`EXIT_INTERNAL`.
+  ``show-proposal`` with a blank or whitespace-only id. An id that names no
+  proposal is a lookup that found nothing, and stays :data:`EXIT_INTERNAL`.
 * :data:`EXIT_STORE` (5) — backend / EventLog failure during read.
 
 This module is the first CLI surface to actually consume the
@@ -410,7 +410,7 @@ def show_proposal_command(
     output_format: str,
 ) -> None:
     """CLI body for ``show-proposal``."""
-    if not proposal_id:
+    if not proposal_id.strip():
         _refuse_invalid_argument("proposal_id is required", output_format)
         raise typer.Exit(code=EXIT_VALIDATION)
 

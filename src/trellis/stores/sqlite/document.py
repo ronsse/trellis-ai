@@ -167,35 +167,62 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
 _METADATA_MATCH_CLOSED_FN = "trellis_metadata_matches_closed"
 
 
+#: Python frames the closed predicate sits below a plain read when it parses a
+#: row, so it hits the parser's depth limit first and never passes a row that
+#: :meth:`SQLiteDocumentStore._row_to_dict` then fails to parse.
+_PARSE_FRAME_MARGIN = 16
+
+
+def _parse_with_margin(text: str, frames: int = _PARSE_FRAME_MARGIN) -> Any:
+    """``json.loads(text)``, ``frames`` Python frames deeper than the caller.
+
+    On CPython 3.11 the JSON parser's depth limit is the interpreter's remaining
+    recursion depth, and the SQL callback runs a frame or two shallower than the
+    list comprehension that later parses the same row. The margin makes the
+    callback the stricter of the two, so a row it passes is a row that parse
+    accepts (``tests/unit/stores/test_sqlite_readable_match.py``, depth sweep).
+    """
+    if frames:
+        return _parse_with_margin(text, frames - 1)
+    return json.loads(text)
+
+
 def _metadata_matches_closed(
-    readable: bytes | None, doc_id: str, key: str, expected_json: str
+    raw: bytes | None, doc_id: bytes | None, key: str, expected_json: str
 ) -> bool:
     """SQL callback for a :class:`ReadableMatch` filter: unreadable never matches.
 
-    ``readable`` is the row's metadata as UTF-8 bytes when the stored column is
-    valid JSON *and* an object, and NULL otherwise (the caller's ``CASE`` makes
-    it so, because SQLite's own ``json_extract`` raises ``malformed JSON`` on the
-    column before any callback runs). Bytes, not text, because a column that is
-    JSON but not UTF-8 cannot be handed to a callback as text: CPython raises
-    while converting the argument, before this runs.
+    ``raw`` and ``doc_id`` are the row's columns as bytes (the caller casts
+    them): CPython raises while converting a text value that is not UTF-8,
+    before any callback runs, so a text argument would fail every read that
+    scans such a row. SQLite's own ``json_valid`` and ``json_extract`` are not
+    used either, because they judge JSON by a stricter grammar than the
+    ``json.loads`` that reads the row afterwards (``NaN``, a NUL tail), and a
+    row that one accepts and the other refuses fails the read or is withheld
+    wrongly.
 
-    A row that is NULL here, does not decode, or does not parse is a row whose
-    label cannot be read, so it is withheld and recorded; a readable row is judged
-    exactly as :func:`_metadata_matches` judges it. Recorded under the event
-    :func:`~trellis.retrieve.sensitivity.read_document_row` uses for a by-id read
-    of the same row, so a corrupt row is one signal on every surface. Never an
-    exception: one raised here reaches the caller as an opaque ``OperationalError``
-    and fails every read that scans the row.
+    The row is parsed here exactly as :meth:`SQLiteDocumentStore._row_to_dict`
+    parses it. A row that does not decode, does not parse or is not an object
+    is a row whose label cannot be read: it is withheld and recorded under the
+    event :func:`~trellis.retrieve.sensitivity.read_document_row` uses for a
+    by-id read of the same row, so a corrupt row is one signal on every
+    surface. A readable row is judged as :func:`_metadata_matches` judges it.
+    Never an exception: one raised here reaches the caller as an opaque
+    ``OperationalError`` and fails every read that scans the row.
     """
+    # The filter value is ours, not the row's: a bad one is a bug and must raise.
+    expected = json.loads(expected_json)
+    error = "unreadable_metadata"
     try:
-        if readable is None:
-            error = "unreadable_metadata"
-        else:
-            return _metadata_matches(readable.decode("utf-8"), key, expected_json)
+        parsed = None if raw is None else _parse_with_margin(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
         # ``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both ValueErrors.
         error = type(exc).__name__
-    logger.warning("public_read_unparseable_row", doc_id=doc_id, error=error)
+    else:
+        if isinstance(parsed, dict):
+            return bool(parsed.get(key) == expected)
+    shown = None if doc_id is None else doc_id.decode("utf-8", errors="replace")
+    logger.warning("public_read_unparseable_row", doc_id=shown, error=error)
     return False
 
 
@@ -429,11 +456,14 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         filter_params: list[Any] = []
 
         if filters:
-            # A ``ReadableMatch`` goes first: it is the term that must not let
-            # an unreadable row reach a later one (``json_extract`` raises on
-            # a column that is not JSON), and SQLite evaluates a ``WHERE`` in
-            # the order it is written. The sort is stable, so every other
-            # filter keeps its order.
+            # A ``ReadableMatch`` goes first. Its predicate calls no ``json_*``
+            # function, so it cannot raise on a row that is not JSON, but a
+            # ``json_extract`` term beside it can. SQLite is not documented to
+            # evaluate ``WHERE`` terms in the order written; this relies on the
+            # order it is seen to use, and the tests that put a scalar or a
+            # ``content_tags`` filter beside the marker (and a copy without this
+            # sort) are what pin it. The sort is stable, so every other filter
+            # keeps its order.
             for key, value in sorted(
                 filters.items(), key=lambda kv: not isinstance(kv[1], ReadableMatch)
             ):
@@ -441,11 +471,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     doc_id = column.removesuffix("metadata_json") + "doc_id"
                     filter_conditions.append(
                         f"{_METADATA_MATCH_CLOSED_FN}("
-                        f"CASE WHEN json_valid({column}) THEN"
-                        f" CASE WHEN json_type({column}) = 'object'"
-                        f" THEN CAST(json_extract({column}, '$') AS BLOB)"
-                        " END END,"
-                        f" {doc_id}, ?, ?)"
+                        f"CAST({column} AS BLOB), CAST({doc_id} AS BLOB), ?, ?)"
                     )
                     filter_params.extend([key, encode_filter_value(key, value)])
                 elif key == "content_tags" and isinstance(value, dict):

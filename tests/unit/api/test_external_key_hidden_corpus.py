@@ -434,6 +434,53 @@ class TestACorruptHiddenRowDoesNotAnswerByTheQueriedWord:
                 assert not differences(base[call], result), (name, tag, call)
 
 
+def _hidden_row_with_an_id_that_is_not_utf8(reg: StoreRegistry) -> None:
+    conn = reg.knowledge.document_store._get_conn()
+    conn.execute(
+        "INSERT INTO documents VALUES (CAST(x'ff' AS TEXT), 'tomatoes failover',"
+        " 'h', ?, '2020', '2020')",
+        ('{"title": "closed"}',),
+    )
+    conn.commit()
+
+
+class TestAHiddenRowWithAnIdThatIsNotUtf8:
+    """CPython cannot pass such an id to a SQL callback, so it must not be passed."""
+
+    @pytest.fixture(scope="class")
+    def outcomes(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> dict[str, dict[str, Any]]:
+        monkeypatch = pytest.MonkeyPatch()
+        root = tmp_path_factory.mktemp("docid")
+        try:
+            return {
+                name: _capture(
+                    root / name,
+                    monkeypatch,
+                    seed,
+                    ["read", "external"],
+                    raise_server_exceptions=False,
+                    walk=False,
+                    calls=CORRUPT_CALLS,
+                )
+                for name, seed in (
+                    ("row", _hidden_row_with_an_id_that_is_not_utf8),
+                    ("base", lambda reg: None),
+                )
+            }
+        finally:
+            monkeypatch.undo()
+
+    def test_no_call_fails_and_every_call_answers_the_world_without_the_row(
+        self, outcomes: dict[str, dict[str, Any]]
+    ) -> None:
+        statuses = {c: r["status"] for c, r in outcomes["row"].items()}
+        assert statuses == dict.fromkeys(CORRUPT_CALLS, 200)
+        for call, result in outcomes["row"].items():
+            assert not differences(outcomes["base"][call], result), call
+
+
 #: What a ``read`` key (clearance ``internal``) gets from the same calls over a
 #: store holding one corrupt row, as ``(status, body names the row)`` per call.
 #: Measured on the commit before the public filter learned to withhold an

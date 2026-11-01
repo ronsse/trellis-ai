@@ -300,11 +300,17 @@ class TestRefusedRequestsExitTwo:
         assert result.exit_code == EXIT_VALIDATION, result.output
 
     @pytest.mark.parametrize("fmt", ["text", "json"])
+    @pytest.mark.parametrize("proposal_id", ["", "   ", "\t"])
     def test_show_proposal_blank_id_exits_two(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fmt: str,
+        proposal_id: str,
     ) -> None:
+        """A whitespace-only id names nothing either, so it is refused like ``""``."""
         _init_stores(tmp_path, monkeypatch)
-        result = _invoke(["show-proposal", "", "--format", fmt])
+        result = _invoke(["show-proposal", proposal_id, "--format", fmt])
         assert result.exit_code == EXIT_VALIDATION, result.output
 
     def test_an_id_that_names_no_proposal_stays_exit_one(
