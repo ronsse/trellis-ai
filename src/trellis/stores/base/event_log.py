@@ -108,8 +108,9 @@ class EventType(StrEnum):
     #: reader may take it for a served pack. The payload is ``{key_id,
     #: surface, route, item_count, item_ids, item_ids_truncated}``;
     #: ``item_ids`` is capped at ``MAX_LOGGED_ITEM_IDS`` and ``item_count`` is
-    #: the true count (``None`` when the route's answer is not a list of rows
-    #: this log can count), so a cut is visible. No document text, no query or
+    #: the count of ids the boundary could name (REST: the items in the
+    #: answer's body; MCP: the pack ids the answer printed), or ``None`` when
+    #: the route or tool names none, so a cut is visible. No document text, no query or
     #: intent text, no secret. ``entity_id`` carries the key id. A call with
     #: no key (local or anonymous) records nothing.
     KEY_READ = "access.key_read"

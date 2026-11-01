@@ -170,6 +170,69 @@ class TestNothingIsReadFromTheAnswer:
         assert row.payload["item_ids"] == [HOSTILE_ID]
         self._assert_clean(world)
 
+    def test_get_context_sectioned(self, world) -> None:
+        with as_http(["read"]):
+            text = _call(
+                world,
+                "get_context",
+                lambda: get_context(HOSTILE_QUERY, sections=[{"name": "A"}]),
+            )
+        assert PROBE in text, "control: the hostile excerpt was served"
+        self._assert_clean(world)
+
+
+CROWD_QUERY = "walrus nebula crowded entry"
+CROWD_BODY = f"{CROWD_QUERY} " + "padding words " * 15
+BUDGETS = (120, 300, 400)
+SHAPES: dict[str, list[dict[str, Any]] | None] = {
+    "flat": None,
+    "sectioned": [{"name": "A", "max_items": 10}],
+}
+
+
+class TestOnlyWhatTheAnswerPrinted:
+    """A formatter stops listing items when its token budget runs out.
+
+    The row names the pack ids the answer printed, not every id the pack held.
+    """
+
+    @pytest.fixture
+    def crowd(self, world) -> StoreRegistry:
+        for n in range(8):
+            world.knowledge.document_store.put(
+                f"crowd-doc-{n}", CROWD_BODY, {"title": f"Crowd {n}"}
+            )
+        return world
+
+    def _read(self, world, max_tokens, sections) -> tuple[str, dict[str, Any]]:
+        extra = {} if sections is None else {"sections": sections}
+        with as_http(["read"]):
+            text = _call(
+                world,
+                "get_context",
+                lambda: get_context(CROWD_QUERY, max_tokens=max_tokens, **extra),
+            )
+        return text, _rows(world)[-1].payload
+
+    @pytest.mark.parametrize("shape", sorted(SHAPES))
+    @pytest.mark.parametrize("max_tokens", BUDGETS)
+    def test_every_logged_id_is_in_the_answer(self, crowd, shape, max_tokens) -> None:
+        text, payload = self._read(crowd, max_tokens, SHAPES[shape])
+        ids = payload["item_ids"]
+        assert ids, "served items are still recorded"
+        assert all(f"`{i}`" in text for i in ids)
+        assert payload["item_count"] == len(ids)
+
+    @pytest.mark.parametrize("shape", sorted(SHAPES))
+    def test_a_tight_budget_logs_fewer_than_an_open_one(self, crowd, shape) -> None:
+        sections = SHAPES[shape]
+        _, full = self._read(crowd, None, sections)
+        counts = [
+            self._read(crowd, budget, sections)[1]["item_count"] for budget in BUDGETS
+        ]
+        assert all(count <= full["item_count"] for count in counts)
+        assert min(counts) < full["item_count"], "control: the budget cut items"
+
 
 class TestNotRecorded:
     def test_stdio_has_no_key_and_records_nothing(self, world) -> None:

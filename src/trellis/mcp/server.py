@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 from pydantic import ValidationError
 
 from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
-from trellis.core.access_log import note_served_items
+from trellis.core.access_log import note_printed_items, note_served_items
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     describe_validation_error,
@@ -1604,7 +1604,7 @@ def _flat_context(
         # One shape for all empty packs also keeps the look-alike rule
         # above true by construction: a withheld pack and a genuinely empty
         # one take this same path, so neither can differ by its header.
-        # The ids this answer serves, named before formatting (none here).
+        # Nothing is served here, so the count is a real zero.
         note_served_items([])
         formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
         result = formatter(
@@ -1632,8 +1632,6 @@ def _flat_context(
         }
         for item in pack.items
     ]
-    # The ids this answer serves, from the pack's own items, not its text.
-    note_served_items(item.item_id for item in pack.items)
     formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
     result = formatter(
         item_dicts,
@@ -1647,6 +1645,9 @@ def _flat_context(
         # footer stays the last thing read (see ``_advisories_block``).
         advisories=pack.advisories,
     )
+    # The pack's own ids, kept only if the formatter printed them: it stops
+    # listing items when the token budget runs out.
+    note_printed_items(result, (item.item_id for item in pack.items))
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
@@ -1732,11 +1733,6 @@ def _sectioned_context(
                 public_only=is_public_only(current_clearance()),
             )
             axis_note = _axis_note(axes)
-        note_served_items(
-            item.item_id
-            for section in sectioned_pack.sections
-            for item in section.items
-        )
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,
@@ -1747,6 +1743,14 @@ def _sectioned_context(
             ),
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
+        )
+        note_printed_items(
+            result,
+            (
+                item.item_id
+                for section in sectioned_pack.sections
+                for item in section.items
+            ),
         )
         banner = _context_banner(registry)
         if banner:

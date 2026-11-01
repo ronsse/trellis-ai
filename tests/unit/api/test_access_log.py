@@ -23,6 +23,8 @@ from trellis.core import access_log
 from trellis.ops.capture_health import accept_events_for, check_capture_health
 from trellis.ops.write_health import summarize_write_health
 from trellis.retrieve.effectiveness import analyze_effectiveness
+from trellis.schemas.enums import TraceSource
+from trellis.schemas.trace import Trace, TraceContext
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.access_log import ITEM_ROUTES, items_from_body
@@ -172,6 +174,66 @@ class TestRecorded:
         assert last.payload["route"] == "GET /api/v1/events"
         assert last.payload["item_count"] is None
         assert last.payload["item_ids"] == []
+
+
+class TestEveryAllowlistedRouteNamesItsIds:
+    """The id field of each route is read from the route's real answer."""
+
+    NODE = "ent-zebra-1"
+
+    def _seed(self, world: World) -> str:
+        world.registry.knowledge.graph_store.upsert_node(
+            self.NODE, "entity", {"name": "zebra"}
+        )
+        trace = Trace(
+            source=TraceSource.AGENT,
+            intent="a task",
+            steps=[],
+            context=TraceContext(agent_id="a-1", domain="d"),
+        )
+        world.registry.operational.trace_store.append(trace)
+        return trace.trace_id
+
+    def _read(self, world: World, path: str, **params: str) -> Any:
+        resp = world.client.get(path, params=params, headers=world.headers["read"])
+        assert resp.status_code == 200, resp.text
+        (row,) = world.rows()
+        assert row.payload["route"].startswith("GET /api/v1/")
+        return resp.json(), row.payload
+
+    def test_graph_search(self, world: World) -> None:
+        self._seed(world)
+        body, payload = self._read(world, "/api/v1/graph/search", q="zebra")
+        named = [r["entity_id"] for r in body["results"]]
+        assert self.NODE in named
+        assert payload["route"] == "GET /api/v1/graph/search"
+        assert payload["item_ids"] == named
+        assert payload["item_count"] == len(named)
+
+    def test_entities(self, world: World) -> None:
+        self._seed(world)
+        body, payload = self._read(world, f"/api/v1/entities/{self.NODE}")
+        assert body["entity"]["node_id"] == self.NODE
+        assert payload["route"] == "GET /api/v1/entities/{entity_id:path}"
+        assert payload["item_ids"] == [self.NODE]
+        assert payload["item_count"] == 1
+
+    def test_traces(self, world: World) -> None:
+        trace_id = self._seed(world)
+        body, payload = self._read(world, "/api/v1/traces")
+        named = [t["trace_id"] for t in body["traces"]]
+        assert trace_id in named
+        assert payload["route"] == "GET /api/v1/traces"
+        assert payload["item_ids"] == named
+        assert payload["item_count"] == len(named)
+
+    def test_one_trace(self, world: World) -> None:
+        trace_id = self._seed(world)
+        body, payload = self._read(world, f"/api/v1/traces/{trace_id}")
+        assert body["trace"]["trace_id"] == trace_id
+        assert payload["route"] == "GET /api/v1/traces/{trace_id}"
+        assert payload["item_ids"] == [trace_id]
+        assert payload["item_count"] == 1
 
 
 class TestNotRecorded:

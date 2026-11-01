@@ -11,9 +11,11 @@ All notable changes to Trellis will be documented in this file.
   enable it) writes one `access.key_read` event per authenticated read by an API key, on REST
   (every `GET /api/v1/...` plus `POST /packs` and `POST /packs/sectioned`, answered 200) and
   on MCP (each tool registered at the `read` scope). A row holds the key id, the surface,
-  the route template or tool name, the true count of items returned and the first 25 ids,
-  with `item_ids_truncated` beside them. Ids come from an allowlist of item-serving REST
-  routes and from ids the MCP tools name before formatting; any other route or tool records
+  the route template or tool name, the count of items it could name and the first 25 ids,
+  with `item_ids_truncated` beside them: on REST the items in the answer's body, on MCP the
+  pack ids the answer printed (a formatter that runs out of token budget drops the rest, and
+  those are not counted). Ids come from an allowlist of item-serving REST
+  routes and from ids the MCP tools already hold, kept only if the answer prints them; any other route or tool records
   `item_count: null`. It holds no document text, query or intent text, or secret. A call
   with no key id (auth mode `off`, an anonymous call, the legacy shared secret, stdio)
   records nothing. Rows are written after the response by one bounded background writer

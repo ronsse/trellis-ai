@@ -40,6 +40,7 @@ what a response carried, it does not shape one.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import contextvars
 import threading
 import time
@@ -133,11 +134,42 @@ def end_served_items(token: contextvars.Token[ServedItems | None]) -> None:
         return
 
 
+def served_ids_in(text: str, item_ids: Iterable[str]) -> list[str]:
+    """The ids in ``item_ids`` that ``text`` prints as `` `id` ``, each once, in order.
+
+    The ids are the caller's own (a pack's items); ``text`` is only searched
+    for them, never read for ids. A formatter stops listing items when its token
+    budget runs out, so this is the set the reader actually received.
+
+    Known bound: an item's body that quotes another item's id in backticks makes
+    that id count as printed even if its own entry was cut.
+    """
+    return [i for i in dict.fromkeys(item_ids) if i and f"`{i}`" in text]
+
+
+def note_printed_items(text: str, item_ids: Iterable[str]) -> None:
+    """A read tool names the pack ids its finished answer printed. No-op, no holder.
+
+    ``item_ids`` are ids the tool already holds as structured data; only those
+    that ``text`` prints in backticks are recorded (:func:`served_ids_in`). Never
+    raises, and does no work when no holder is open.
+    """
+    try:
+        holder = _served.get()
+        if holder is not None:
+            holder.add(served_ids_in(text, item_ids))
+    except Exception:  # advisory; a tool must not fail on its own log
+        return
+
+
 def note_served_items(item_ids: Iterable[str]) -> None:
     """A read tool names the ids it served. A no-op with no holder open.
 
-    Called with ids a tool already holds as structured data, never parsed out
-    of what it will print, so no document text can reach a row. Never raises.
+    For a tool whose formatter reports which ids it served (``get_items``), and
+    for an empty answer. Called with ids the tool already holds as structured
+    data, never parsed out of what it printed, so no document text can reach a
+    row. A pack tool uses :func:`note_printed_items`, because its formatter can
+    drop items for budget after they were chosen. Never raises.
     """
     try:
         holder = _served.get()
@@ -165,7 +197,11 @@ def build_payload(
     item_ids: list[str],
     item_count: int | None,
 ) -> dict[str, Any]:
-    """The ``access.key_read`` payload. ``item_count`` is the true count."""
+    """The ``access.key_read`` payload; ``item_count`` is the caller's count.
+
+    REST counts the items in the answer's body; MCP counts the pack ids the
+    answer printed.
+    """
     kept = clip_item_ids(item_ids)
     return {
         "key_id": key_id,
@@ -357,6 +393,8 @@ class AccessLogWriter:
                 count_unrecorded(dropped=1)
                 return False
         except Exception:  # advisory; a read must never fail on its own log
+            with contextlib.suppress(Exception):
+                count_unrecorded(dropped=1)
             return False
         return True
 

@@ -8,6 +8,7 @@ uvicorn server, not only the in-process client.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -26,7 +27,13 @@ import trellis_api.access_log as rest_log
 from trellis.core import access_log
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_api.access_log import ITEM_ROUTES, AccessLogMiddleware
+from trellis_api.access_log import (
+    ITEM_ROUTES,
+    MAX_BODY_BYTES,
+    AccessLogMiddleware,
+    extract_ids,
+    items_from_body,
+)
 
 ANSWER = {"results": [{"doc_id": "d1"}, {"doc_id": "d2"}]}
 
@@ -77,6 +84,12 @@ def build_app() -> FastAPI:
     def events() -> JSONResponse:
         return JSONResponse(
             {"events": [{"entity_id": "ent-1"}], "results": [{"doc_id": "x"}]}
+        )
+
+    @router.get("/shaped")
+    def shaped() -> JSONResponse:
+        return JSONResponse(
+            {"items": [{"item_id": "leak-1"}], "results": [{"doc_id": "leak-2"}]}
         )
 
     @router.get("/documents/{doc_id:path}")
@@ -146,6 +159,21 @@ class TestWhatIsRecorded:
         assert row.payload["item_count"] is None
         assert row.payload["item_ids"] == []
         assert "ent-1" not in str(row.payload)
+
+    def test_an_off_list_route_with_an_items_shaped_body_records_null(
+        self, registry
+    ) -> None:
+        TestClient(build_app()).get("/api/v1/shaped", headers=KEY)
+        (row,) = rows(registry)
+        assert row.payload["item_count"] is None
+        assert row.payload["item_ids"] == []
+        assert "leak" not in str(row.payload)
+
+    def test_a_body_with_no_allowlisted_spec_names_nothing(self) -> None:
+        body = json.dumps(
+            {"items": [{"item_id": "leak-1"}], "results": [{"doc_id": "leak-2"}]}
+        ).encode()
+        assert items_from_body(body, None) == ([], None)
 
     def test_the_route_is_the_template_and_the_id_is_the_answers(
         self, registry
@@ -219,6 +247,79 @@ def _drive(body: bytes | list[bytes], *, status: int = 200) -> list[str]:
 
     asyncio.run(AccessLogMiddleware(app)(_scope(), _noop_receive, send))
     return order
+
+
+class TestBodyBound:
+    @staticmethod
+    def _body(total: int) -> bytes:
+        base = {"results": [{"doc_id": "d1"}], "pad": ""}
+        size = len(json.dumps(base).encode())
+        return json.dumps({**base, "pad": "x" * (total - size)}).encode()
+
+    def test_a_body_over_the_cap_records_null(self, registry) -> None:
+        body = self._body(MAX_BODY_BYTES + 1)
+        assert len(body) == MAX_BODY_BYTES + 1
+        _drive(body)
+        (row,) = rows(registry)
+        assert row.payload["item_count"] is None
+        assert row.payload["item_ids"] == []
+
+    def test_a_body_that_only_crosses_the_cap_across_chunks_records_null(
+        self, registry
+    ) -> None:
+        body = self._body(MAX_BODY_BYTES + 1)
+        half = len(body) // 2
+        _drive([body[:half], body[half:]])
+        (row,) = rows(registry)
+        assert row.payload["item_count"] is None
+
+    def test_a_body_exactly_at_the_cap_is_still_read(self, registry) -> None:
+        body = self._body(MAX_BODY_BYTES)
+        assert len(body) == MAX_BODY_BYTES
+        _drive(body)
+        (row,) = rows(registry)
+        assert row.payload["item_ids"] == ["d1"]
+        assert row.payload["item_count"] == 1
+
+    def test_an_entry_is_charged_for_its_body(self, registry, monkeypatch) -> None:
+        writer = access_log.get_writer()
+        sizes: list[int] = []
+        real = writer.submit
+
+        def spy(entry: Any) -> bool:
+            sizes.append(entry.size)
+            return real(entry)
+
+        monkeypatch.setattr(writer, "submit", spy)
+        body = json.dumps(ANSWER).encode() + b" " * 5000
+        _drive(body)
+        rows(registry)
+        assert sizes == [access_log.ENTRY_OVERHEAD_BYTES + len(body)]
+
+
+class TestExtractIds:
+    SPEC: tuple[tuple[str, ...], str] = (("results", "*"), "doc_id")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"results": [{"doc_id": 5}]},
+            {"results": [{"doc_id": ""}]},
+            {"results": [{"doc_id": None}]},
+            {"results": [{"doc_id": ["d1"]}]},
+            {"results": [{"doc_id": "ok"}, {"doc_id": 7}]},
+            {"results": ["d1"]},
+            {"results": "d1"},
+            {"results": [{"other": "d1"}]},
+            {"other": []},
+        ],
+    )
+    def test_a_shape_that_is_not_the_route_s_is_unknown(self, payload) -> None:
+        assert extract_ids(payload, *self.SPEC) == ([], None)
+
+    def test_the_expected_shape_is_counted(self) -> None:
+        assert extract_ids(ANSWER, *self.SPEC) == (["d1", "d2"], 2)
+        assert extract_ids({"results": []}, *self.SPEC) == ([], 0)
 
 
 class TestOrderingAndOff:
@@ -383,6 +484,12 @@ class TestWriter:
         assert access_log.pending_unrecorded() == (1, 0)
         blocked.release.set()
         assert writer.wait_idle(5)
+
+    def test_a_submit_that_raises_counts_the_read_as_dropped(self, blocked) -> None:
+        writer = access_log.AccessLogWriter()
+        broken = SimpleNamespace(size="not a number")
+        assert writer.submit(broken) is False  # type: ignore[arg-type]
+        assert access_log.pending_unrecorded() == (1, 0)
 
     def test_dropped_reads_surface_when_the_store_can_next_write(
         self, registry

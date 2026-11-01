@@ -3,11 +3,13 @@
 A FastMCP middleware: it runs around a tool call, outside the tool. For a read
 tool called by a key (:func:`trellis.mcp.auth.current_principal_id`, ``None``
 under stdio or with enforcement off, so a keyless call records nothing) it
-opens a holder before the tool runs; the tool names the ids it served into the
-holder (:func:`trellis.core.access_log.note_served_items`) from the structured
-pack or items it already holds, before any formatting, and the middleware hands
-the result to the writer thread as the tool returns. The tool's answer is
-passed through untouched, and nothing is parsed out of it.
+opens a holder before the tool runs; once the answer is formatted the tool names
+the ids it served into the holder: the pack ids it already holds as structured
+data, kept only if the answer prints them as `` `id` ``
+(:func:`trellis.core.access_log.note_printed_items`), because a formatter drops
+items when its token budget runs out. The middleware hands the result to the
+writer thread as the tool returns. The tool's answer is passed through
+untouched; known ids are looked up in it, and no id is read out of it.
 
 * **Off is a pass-through.** The knob is read before the holder is opened; off
   opens nothing and the tool's ``note_served_items`` call finds no holder.
