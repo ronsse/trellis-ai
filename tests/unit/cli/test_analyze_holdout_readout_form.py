@@ -420,3 +420,77 @@ def test_the_same_pairs_do_differ_when_the_window_is_settled(
         assert changed_json["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
     if variant == "missing":
         assert changed_json["funnel"]["outcome_missing"] == CHANGED_TASKS
+
+
+def _fresh_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> StoreRegistry:
+    """A second, empty store the CLI reads next; the autouse one is left alone."""
+    data_dir = tmp_path / name / "data"
+    stores_dir = data_dir / "stores"
+    stores_dir.mkdir(parents=True)
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+    _reset_registry()
+    return StoreRegistry(stores_dir=stores_dir)
+
+
+def _swapped(argv: list[str], option: str, value: str | None) -> list[str]:
+    """``argv`` with ``option``'s value replaced, or the option dropped."""
+    index = argv.index(option)
+    head, tail = argv[:index], argv[index + 2 :]
+    return head + ([] if value is None else [option, value]) + tail
+
+
+def test_the_rate_error_of_a_checked_read_is_the_same_whatever_the_pack_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    argv = _swapped(READOUT, "--rate", None)
+    seen: dict[str, list[str]] = {"text": [], "json": []}
+    for name, calls in (("one", 1), ("three", 3)):
+        registry = _fresh_store(monkeypatch, tmp_path, name)
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, withheld_calls=calls)
+        log.task(start=MONDAY + timedelta(hours=300), arms=[False], rate=0.5)
+        log.sweep(at=UNTIL - timedelta(hours=1))
+        text = runner.invoke(app, argv)
+        machine = runner.invoke(app, [*argv, "--format", "json"])
+        registry.close()
+        assert text.exit_code == machine.exit_code
+        assert machine.exit_code != EXIT_OK
+        seen["text"].append(_flat(text))
+        seen["json"].append(_payload(machine)["message"])
+
+    assert seen["text"][0] == seen["text"][1]
+    assert seen["json"][0] == seen["json"][1]
+    assert "Several holdout rates" in seen["json"][0]
+    assert "rows" not in seen["json"][0]
+    assert "rows" not in seen["text"][0]
+
+
+def test_a_truncated_checked_read_is_the_same_refusal_whatever_the_pack_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    argv = _swapped(READOUT, "--limit", "14")
+    payloads: list[dict[str, Any]] = []
+    texts: list[str] = []
+    for name, calls in (("one", 1), ("three", 3)):
+        registry = _fresh_store(monkeypatch, tmp_path, name)
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, withheld_calls=calls)
+        log.sweep()
+        text = runner.invoke(app, argv)
+        machine = runner.invoke(app, [*argv, "--format", "json"])
+        registry.close()
+        assert text.exit_code == machine.exit_code == EXIT_OK
+        payloads.append(_payload(machine))
+        texts.append(_flat(text))
+
+    assert set(payloads[0]) == REFUSAL_KEYS
+    assert payloads[0]["settled_window"]["settled"] is False
+    assert payloads[0]["settled_window"]["needs_sweep_after"] is None
+    assert "--limit" in payloads[0]["settled_window"]["reason"]
+    assert "INCOMPLETE READ" in texts[0]
+    assert "re-run once" not in texts[0]
+    drop = lambda p: {k: v for k, v in p.items() if k != "generated_at"}  # noqa: E731
+    assert drop(payloads[0]) == drop(payloads[1])
+    assert texts[0] == texts[1]

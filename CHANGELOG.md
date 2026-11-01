@@ -16,14 +16,25 @@ All notable changes to Trellis will be documented in this file.
   allow-list, not the report with fields nulled: `status` `window not settled`,
   what the caller asked (outcome, rate as given, `--until`, the window bounds,
   ITT and the settle allowance), the planned MDE and N, `settled_window`
-  (`settled: false`, `reason`, `needs_sweep_after`) and one note naming
-  `--operational`. Every other key is absent, not null, and none of it is
-  computed, so a figure added to the report later cannot reach a refused read,
-  and a read that has not settled does not move with a task's outcome, its pack
-  calls, when its join was written or its tool-call count. It is not free of
-  behaviour: `needs_sweep_after` is one timestamp read off the latest unfinished
-  join, and `reason` gains one constant clause, with no count in it, when such a
-  join exists. `--by-commit` on that read prints the refusal, not a table;
+  (`checked`, `settled: false`, `reason`, `needs_sweep_after`, `latest_sweep`)
+  and one note naming `--operational`. Every other key is absent, not null.
+  The evidence is gathered first, so the funnel counts and the task units are
+  computed and then discarded, none of it published; the descriptive block,
+  the by-build table, the guardrails, the power figures and the inference
+  never run. A figure added to the report later cannot reach a refused read,
+  and the refusal does not move with a task's outcome, its pack calls or its
+  tool-call count. It is not free of behaviour: `needs_sweep_after` is one
+  timestamp read off the latest unfinished join, `latest_sweep` moves with the
+  sweeps' own times (not with the sessions they parsed), and `reason` carries
+  no count but moves with which sources have an in-scope task, the sweep times
+  and, as one constant clause, whether an in-scope task is unfinished. A join
+  needs an outcome block to be in scope, read as presence only, so a missing
+  block can turn a refusal into a full report; that is accepted, because the
+  analysed set never holds such a task and capture always writes the block. A
+  checked read whose event scan was truncated is refused too, with one constant
+  clause naming `--limit` and no count; whether a scan truncates still moves
+  with row volume. A checked read that finds several holdout rates names them
+  without row counts. `--by-commit` on that read prints the refusal, not a table;
   `--operational` is the early check and gives per-build counts with no settled
   window. A read with no `--until` is unchanged in JSON, and its text prints a
   `window not checked` line. The window is also unsettled

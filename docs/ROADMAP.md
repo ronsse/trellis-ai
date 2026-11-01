@@ -105,7 +105,7 @@ the read. The withholding rate is an owner setting and is not part of it.
   have not settled, and `--settle-hours 0` settles on one sweep. An unsettled read is refused:
   it reports `status == "window not settled"` and `settled_window.settled: false` with the
   sweep time it needs and a reason, and carries no other figure, count or table (the keys are
-  absent). Its `needs_sweep_after` and `reason` are the only values that move with the store. To
+  absent). Its `needs_sweep_after`, `latest_sweep` and `reason` are the only values that move with the store, and a missing outcome block can still turn a refusal into a full report (accepted). A checked read whose event scan was truncated is refused too. To
   check early that the experiment is running, use `trellis analyze holdout --operational`, which
   reads no outcome. A later run of the same command reads the same window, so it must give the
   same pack rows while `scan.truncated` is `false`; raise `--limit` if it is not.

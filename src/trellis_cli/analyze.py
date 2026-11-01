@@ -1966,11 +1966,12 @@ def _render_holdout_refusal(refusal: HoldoutRefusal) -> None:
         "  [bold]INCOMPLETE READ: window not settled.[/bold] "
         f"{escape(settled.reason or '')}"
     )
-    console.print(
-        "    re-run once a completed sweep has reached "
-        f"{escape(settled.needs_sweep_after or '')} (latest sweep "
-        f"{escape(settled.latest_sweep or 'none')})"
-    )
+    if settled.needs_sweep_after:
+        console.print(
+            "    re-run once a completed sweep has reached "
+            f"{escape(settled.needs_sweep_after)} (latest sweep "
+            f"{escape(settled.latest_sweep or 'none')})"
+        )
     for note in refusal.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
 

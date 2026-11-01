@@ -3860,8 +3860,9 @@ is also unsettled while any in-window, in-rate task is unfinished, whatever its 
 stamped after its source's last sweep (a join-only re-parse, or a long task the second sweep
 rewrote) is dropped from the read, so `reason` says so and a later sweep that runs
 `--settle-hours` after the latest such join settles it. A join-only re-parse must therefore
-precede the settling sweeps. Only sources that wrote an in-scope task (an in-window, in-rate task
-whose join has an outcome block) are waited on, so a retired source whose tasks are outside the
+precede the settling sweeps. Only sources that wrote an in-scope task (a task with a parent session, in the
+window and at the rate, whose first pack is non-empty, served or withheld, and whose join has an
+outcome block) are waited on, so a retired source whose tasks are outside the
 analysis does not hold the read open, and a stopped source with an in-scope task does, named in
 `reason`, at any distance from `--until`. There is no override flag.
 
@@ -3871,8 +3872,9 @@ Until the window settles the read is refused. The payload is an allow-list: `sta
 constants; `settled_window` carries `checked`, `settled: false`, `needs_sweep_after`,
 `latest_sweep` and `reason`; and one note names `--operational` as the early check. Every other
 key (`funnel`, `descriptive`, `by_commit`, `guardrails`, `power`, `inference`,
-`covariate_adjusted`, `sessions`, `scan` and the rest) is absent, not `null`, and none of it is
-computed, so nothing in it can move with a store. The text prints an `INCOMPLETE READ` line,
+`covariate_adjusted`, `sessions`, `scan` and the rest) is absent, not `null`. The evidence is
+gathered before the check, so the funnel counts and the task units are computed and then
+discarded and none of it is published; the rest never runs. The text prints an `INCOMPLETE READ` line,
 the time a completed sweep must reach and the note, and no table: `--by-commit` on such a read
 prints the refusal. The exit code is `0` either way and does not depend on `--format`.
 
@@ -3886,18 +3888,36 @@ and join times, the timing's tool-call and hook-message counts and an outcome bl
 the CLI in both formats and the REST route read them the same, and the same pairs read settled
 differ (all but the join-time pair), so the comparison is not vacuous.
 
-The read is not free of behaviour, and two values still move with the store. `needs_sweep_after`
+The read is not free of behaviour, and three values still move with the store. `needs_sweep_after`
 is one timestamp, the latest of the window end (for a source with no sweep after it), each
 source's first sweep after the window end plus `--settle-hours`, and the latest unfinished
 in-scope join plus `--settle-hours`, so it moves with when the latest unfinished join was
-written. `reason` carries no count, task id or join time; it moves only with which sources
+written. `latest_sweep` moves with the sweeps' own times, not with the sessions they parsed.
+`reason` carries no count, task id or join time; it moves only with which sources
 wrote an in-scope task (and so have to be waited on), the times of the sweeps it names, and whether
 an in-scope task is unfinished at all, which adds one fixed clause. Those are the only ways, and
-`tests/unit/analyze/test_holdout_readout_form.py` shows a pair that differs only in them. A rate
-that cannot be resolved (several rates in the window and no `--rate`) still raises its error
-before the check, as it does for a settled read; that follows the configured rates, not what a
-task did. A read with no `--until` does not run the check and is not changed, and neither is a
-settled read. The refusal fires for a window the sweeps have not settled, whatever its distance
+`tests/unit/analyze/test_holdout_readout_form.py` shows a pair that differs only in them.
+
+A join is in scope only if it has an outcome block, and scope reads that block's presence, not its
+contents. A missing block can therefore turn a refusal into a full report: a second source with no
+sweep whose one in-window task has no block is not waited on, and neither is an unfinished join
+that has none. That is accepted. The analysed set never holds a task without a block, so the block
+changes who is waited on and nothing the read analyses, and current capture always writes it. A
+test pins the flip and names it as accepted.
+
+A checked read whose event scan was truncated (`--limit` cut off the oldest events before the
+window start) is refused too, and `reason` gains one fixed clause naming `--limit`, with no count.
+Without that, a task making more pack calls could move where the scan stops, and with it which
+unfinished task a read sees. Whether a scan truncates still moves with row volume, so that is a
+residual: the read turns on whether the cap was reached, not on a figure. Sliding `--until` and
+reading `needs_sweep_after` can narrow that pooled timestamp to a few unfinished tasks. It shows no
+arm. That was read from the code and not run.
+
+A rate that cannot be resolved (several rates in the window and no `--rate`) still raises its error
+before the check, as it does for a settled read. A checked read lists the rates without row counts,
+so the message follows the configured rates, not what a task did; which rates it names still
+depends on a row existing at that rate. A read with no `--until` does not run the check and keeps
+its message with the counts, and is not otherwise changed, and neither is a settled read. The refusal fires for a window the sweeps have not settled, whatever its distance
 from the data's last sweep, so it is not a horizon gate, and `--settle-hours 0` settles on one
 sweep. With daily sweeps (say at 10:00Z, as an example only) and `--until 2026-12-23T22:47:00Z`,
 the first sweep at or after the horizon is the next morning's and the earliest complete read

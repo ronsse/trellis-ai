@@ -22,6 +22,7 @@ import trellis_api.app as app_module
 from tests.unit.analyze._holdout_fixture import (
     BEHAVIOUR_FLAT,
     BEHAVIOUR_VARIANTS,
+    MONDAY,
     REFUSAL_KEYS,
     UNTIL,
     HoldoutLog,
@@ -477,3 +478,38 @@ def test_the_same_pairs_do_differ_when_the_holdout_window_is_settled(
     assert flat["settled_window"]["settled"] is True
     assert "funnel" in flat
     assert flat != changed
+
+
+def _two_rate_read(client, tmp_path, name, *, calls):
+    registry = StoreRegistry(stores_dir=tmp_path / name)
+    try:
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, withheld_calls=calls)
+        log.task(start=MONDAY + timedelta(hours=300), arms=[False], rate=0.5)
+        log.sweep(at=UNTIL - timedelta(hours=1))
+        app_module._registry = registry
+        analyze._CACHE.clear()
+        params = {k: v for k, v in _HOLDOUT_FAST.items() if k != "rate"}
+        resp = client.get("/api/v1/analyze/holdout", params=params)
+        assert resp.status_code == 200
+        return _without_clock(resp.json()["data"])
+    finally:
+        registry.close()
+
+
+def test_the_rate_error_of_a_checked_read_is_the_same_whatever_the_pack_calls(
+    client, tmp_path
+):
+    one = _two_rate_read(client, tmp_path, "one", calls=1)
+    three = _two_rate_read(client, tmp_path, "three", calls=3)
+
+    assert one["status"] == "error"
+    assert "Several holdout rates" in one["message"]
+    assert "rows" not in one["message"]
+    assert one == three
+
+
+def test_the_holdout_description_mentions_the_refusal(client):
+    entry = analyze._REPORTS["holdout"]
+
+    assert "refusal" in entry.description

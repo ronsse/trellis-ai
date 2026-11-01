@@ -128,20 +128,30 @@ Only sources with such a task are waited on, and a sweep that parsed no
 session and lost some to an error settles nothing.
 
 A checked read whose window is not settled is refused: :func:`analyze_holdout`
-returns a :class:`HoldoutRefusal` before it builds the funnel, the
-descriptive block, the by-build table, the guardrails, the power figures or
-the inference, so none of them is computed. The refusal is an allow-list.
-Its keys are absent, not ``None``, and it carries only what the caller asked
-(``outcome``, ``rate`` as given, the window bounds, ``itt``, ``settle_hours``),
-the planned MDE and N, ``settled_window`` and one note that names
-``--operational`` for an early view of uptake. ``reason`` carries no count of
-tasks, no join time and no outcome. The one value in it that moves with the
-data is ``needs_sweep_after``, a single pooled timestamp that moves with the
-latest unfinished task's last join, so the read is not free of behaviour. A
-read taken after the window settles is the readout. Without ``until`` the
-check does not run and nothing is refused. ``settle_hours=0`` settles on one
-sweep. An early check of whether the experiment is running is
-``--operational``.
+returns a :class:`HoldoutRefusal`. The evidence is gathered before the check,
+so the funnel counts and the task units are computed and then discarded; the
+descriptive block, the by-build table, the guardrails, the power figures and
+the inference never run, and none of it is published. The refusal is an
+allow-list. Its keys are absent, not ``None``, and it carries only what the
+caller asked (``outcome``, ``rate`` as given, the window bounds, ``itt``,
+``settle_hours``), the planned MDE and N, ``settled_window`` and one note that
+names ``--operational`` for an early view of uptake. ``reason`` carries no
+count of tasks, no join time and no outcome. Three values in it still move
+with the store: ``needs_sweep_after``, a single pooled timestamp that moves
+with the latest unfinished task's last join; ``latest_sweep``, which moves
+with the sweeps' own times and not with the sessions they parsed; and
+``reason``, which moves with which source has no sweep, those sweep times,
+whether some in-scope task is unfinished and which sources have an in-scope
+task at all. That set reads whether a join has an outcome block, as presence
+only, so a missing block can turn a refusal into a full report. That is
+accepted: the analysed set does not depend on the block's contents, and
+current capture always writes it. A checked read whose event scan was
+truncated is refused too, with a constant clause naming ``--limit``; whether
+a scan truncates still moves with row volume. A checked read that finds
+several holdout rates names them without row counts. A read taken after the
+window settles is the readout. Without ``until`` the check does not run and
+nothing is refused. ``settle_hours=0`` settles on one sweep. An early check of
+whether the experiment is running is ``--operational``.
 
 **Operational mode.** :func:`analyze_holdout_operational` answers "is the
 experiment running?" without reading its outcomes. It returns a
@@ -202,6 +212,7 @@ item text leaves this module, and a non-significant result reads
 from __future__ import annotations
 
 import math
+import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -261,7 +272,7 @@ NO_BOTH_ARM_STRATUM = "no stratum with both arms"
 WINDOW_NOT_SETTLED = "window not settled"
 #: The note on that refusal.
 _REFUSAL_NOTE = (
-    f"{WINDOW_NOT_SETTLED}: no figure was computed. Run `trellis analyze "
+    f"{WINDOW_NOT_SETTLED}: no figure is published. Run `trellis analyze "
     "holdout --operational` for whether the experiment is running, which needs "
     "no settled window."
 )
@@ -1009,15 +1020,21 @@ class HoldoutRefusal(TrellisModel):
     omission. It holds what the caller asked (``outcome``, ``rate`` as given
     and ``None`` when not given, ``itt``, ``settle_hours``, the window the
     caller's ``days`` and ``until`` fix), the planned MDE and N, and
-    ``settled_window``. It reads no pack, join or outcome beyond the settled
-    check itself, and reports no count of tasks, so it does not move with a
-    task's length, its pack calls or its outcome.
+    ``settled_window``. The evidence behind it is gathered, so the funnel
+    counts and task units are computed and then discarded: none of it is
+    published, and the refusal reports no count of tasks, so it does not move
+    with a task's length, its pack calls or its outcome.
 
-    ``settled_window.needs_sweep_after`` is the one value that moves with the
-    data: a single timestamp, pooled over the unfinished tasks, that moves with
-    the latest of their last joins. ``reason`` says which sweeps are missing
-    and carries no count, so it moves only with which source has no sweep, the
-    sweeps' own times and whether some in-scope task is unfinished.
+    Three values in ``settled_window`` still move with the store.
+    ``needs_sweep_after`` is a single timestamp, pooled over the unfinished
+    tasks, that moves with the latest of their last joins. ``latest_sweep``
+    moves with the sweeps' own times, not with the sessions they parsed.
+    ``reason`` says which sweeps are missing and carries no count, so it moves
+    only with which source has no sweep, the sweeps' own times, whether some
+    in-scope task is unfinished, which sources have an in-scope task (a join
+    needs an outcome block to be in scope, read as presence only) and whether
+    the scan was truncated. A missing outcome block can therefore turn a
+    refusal into a full report; that is accepted.
     """
 
     status: str = WINDOW_NOT_SETTLED
@@ -1047,9 +1064,15 @@ _TOKEN_FIELDS = (
 
 
 def _is_count(value: object) -> TypeGuard[int | float]:
-    """Whether ``value`` is a finite, non-negative number that is not a bool."""
+    """Whether ``value`` is a finite, non-negative number that is not a bool.
+
+    An int too large for a float is not a count: ``math.isfinite`` raises on
+    it, and the comparison below is exact for an int, so it cannot.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
+    if isinstance(value, int):
+        return 0 <= value <= sys.float_info.max
     return math.isfinite(value) and value >= 0
 
 
@@ -1502,7 +1525,10 @@ def _rate_value(payload: Mapping[str, Any] | None) -> float | None:
     value = (payload or {}).get(HOLDOUT_RATE_KEY)
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value)
+    try:
+        return float(value)
+    except OverflowError:
+        return None
 
 
 def _rate_label(payload: Mapping[str, Any] | None) -> str:
@@ -1614,6 +1640,13 @@ _UNFINISHED_REASON = (
     "h after their latest join"
 )
 
+#: The clause for a checked read whose event scan was truncated. A constant:
+#: it carries no count of rows or events.
+_TRUNCATED_REASON = (
+    "the event scan was cut off by --limit before it reached the start of the "
+    "window, so the window was not read in full; raise --limit"
+)
+
 
 def _settled_window(
     sweep_events: Sequence[Event],
@@ -1622,6 +1655,7 @@ def _settled_window(
     end: datetime,
     settle: timedelta,
     checked: bool,
+    truncated: bool = False,
 ) -> HoldoutSettledWindow:
     """Whether every source's sweeps have settled past the window end.
 
@@ -1634,6 +1668,11 @@ def _settled_window(
     after its source's last sweep (a re-parse, or a long task the second
     sweep rewrote) is dropped from the read, so a read that dropped it is
     not the readout. A later sweep settles it.
+
+    A checked read whose event scan was truncated is not settled either: the
+    scan kept the newest events and stopped short of the window start, so
+    which unfinished task it saw depends on how many rows were written, and
+    the clause that says so is a constant (:data:`_TRUNCATED_REASON`).
     """
     sweeps = _completed_sweeps(sweep_events)
     every = [at for times in sweeps.values() for at in times]
@@ -1672,11 +1711,13 @@ def _settled_window(
         stamped = max(_as_utc(join.occurred_at) for join in scope.unfinished)
         needs.append(stamped + settle)
         reasons.append(_UNFINISHED_REASON.format(hours=hours))
-    settled = not needs
+    if truncated:
+        reasons.append(_TRUNCATED_REASON)
+    settled = not needs and not truncated
     return HoldoutSettledWindow(
         checked=True,
         settled=settled,
-        needs_sweep_after=None if settled else max(needs).isoformat(),
+        needs_sweep_after=max(needs).isoformat() if needs else None,
         latest_sweep=latest,
         reason=None if settled else "; ".join(reasons),
     )
@@ -2695,7 +2736,7 @@ def _gather(
             packs.setdefault(event.entity_id, event)
         if evidence_start <= _as_utc(event.occurred_at) < end:
             rows.window.append(event)
-    rate, notes = _resolve_rate(rows, rate)
+    rate, notes = _resolve_rate(rows, rate, counts=until is None)
     task_start = _task_window_start(event_log, rows, rate, evidence_start)
     task_days = max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS
     if task_start > evidence_start and rate is not None:
@@ -2737,6 +2778,7 @@ def _gather(
         end=end,
         settle=settle,
         checked=until is not None,
+        truncated=scan.truncated,
     )
     return _Evidence(
         units=units,

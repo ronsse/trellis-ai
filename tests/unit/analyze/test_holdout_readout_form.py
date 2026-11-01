@@ -27,10 +27,12 @@ from tests.unit.analyze._holdout_fixture import (
     provenance,
     seed_arm_shift,
     seed_random_outcomes,
+    timing_payload,
 )
 from trellis.analyze import holdout
 from trellis.analyze.holdout import (
     WINDOW_NOT_SETTLED,
+    HoldoutAnalysisError,
     HoldoutRefusal,
     HoldoutReport,
     analytic_mde,
@@ -1043,3 +1045,210 @@ def test_randomly_drawn_outcomes_do_move_a_settled_read(
         "descriptive.analysed_tasks",
         "inference.difference",
     } <= moved
+
+
+# ---------------------------------------------------------------------------
+# What a checked read still reads off the store, and the three ways it differs
+# from the figures it withholds.
+# ---------------------------------------------------------------------------
+
+
+def _two_rate_store(log: HoldoutLog, *, calls: int) -> None:
+    """Rates 0.2 and 0.5 in the window; the withheld arm made ``calls`` pack calls."""
+    seed_arm_shift(log, withheld_calls=calls)
+    log.task(start=MONDAY + timedelta(hours=300), arms=[False], rate=0.5)
+    log.sweep(at=UNTIL - timedelta(hours=1))
+
+
+def _rate_error(log: HoldoutLog, **kwargs: Any) -> str:
+    with pytest.raises(HoldoutAnalysisError) as raised:
+        _analyze(log, **kwargs)
+    return str(raised.value)
+
+
+def test_a_checked_read_names_its_rates_without_row_counts(tmp_path: Path) -> None:
+    """Several rates in the window: the checked error follows the rates, not the calls.
+
+    A row count would move with how many pack calls a task made, so a checked
+    read lists the rates alone. Which rates it lists still depends on a row
+    existing at that rate. A read without ``until`` keeps its counts.
+    """
+    checked: list[str] = []
+    unchecked: list[str] = []
+    for name, calls in (("one", 1), ("three", 3)):
+        event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+        log = HoldoutLog(event_log)
+        _two_rate_store(log, calls=calls)
+        checked.append(_rate_error(log))
+        unchecked.append(_rate_error(log, until=None, days=3650))
+        event_log.close()
+
+    assert checked[0] == checked[1]
+    assert "0.2" in checked[0]
+    assert "0.5" in checked[0]
+    assert "rows" not in checked[0]
+    assert "Name the one to analyse with --rate" in checked[0]
+    assert all("rows)" in message for message in unchecked)
+    assert unchecked[0] != unchecked[1]
+
+
+def _truncated_read(tmp_path: Path, name: str, calls: int, **kwargs: Any) -> Any:
+    event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+    log = HoldoutLog(event_log)
+    seed_arm_shift(log, withheld_calls=calls)
+    log.sweep()
+    result = _analyze(log, rate=0.2, **kwargs)
+    event_log.close()
+    return result
+
+
+def test_a_checked_read_whose_scan_was_truncated_is_refused(tmp_path: Path) -> None:
+    """A settled store read through a cut-off scan is a refusal, with a constant clause.
+
+    The scan keeps the newest events, so one task making more pack calls moves
+    the point where it stops, and with it which unfinished task a read sees.
+    The read is refused instead, and the clause carries no count.
+    """
+    reads = [
+        _truncated_read(tmp_path, name, calls, limit=14)
+        for name, calls in (("one", 1), ("three", 3))
+    ]
+
+    for read in reads:
+        assert isinstance(read, HoldoutRefusal)
+        window = read.settled_window
+        assert window.checked is True
+        assert window.settled is False
+        assert window.needs_sweep_after is None
+        assert window.reason == holdout._TRUNCATED_REASON
+        assert "--limit" in window.reason
+        assert not any(ch.isdigit() for ch in window.reason)
+        assert set(read.model_dump(mode="json")) == REFUSAL_KEYS
+    assert _without_clock(reads[0].model_dump(mode="json")) == _without_clock(
+        reads[1].model_dump(mode="json")
+    )
+
+
+def test_only_a_checked_read_with_a_cut_off_scan_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The truncation clause is not vacuous: only a checked, cut-off read refuses."""
+    whole = _truncated_read(tmp_path, "whole", 1)
+    unchecked = _truncated_read(
+        tmp_path, "unchecked", 1, limit=14, until=None, days=3650
+    )
+
+    assert isinstance(whole, HoldoutReport)
+    assert whole.settled_window.settled is True
+    assert isinstance(unchecked, HoldoutReport)
+    assert unchecked.settled_window.checked is False
+
+
+def test_a_truncated_read_that_is_also_unsettled_says_both(tmp_path: Path) -> None:
+    event_log = SQLiteEventLog(tmp_path / "both.db")
+    log = HoldoutLog(event_log)
+    seed_arm_shift(log)
+    log.sweep(at=UNTIL - timedelta(hours=1))
+    read = _analyze(log, rate=0.2, limit=14)
+    event_log.close()
+
+    assert isinstance(read, HoldoutRefusal)
+    window = read.settled_window
+    assert window.needs_sweep_after is not None
+    assert window.reason is not None
+    assert window.reason.endswith(holdout._TRUNCATED_REASON)
+    assert "no completed" in window.reason
+
+
+_HUGE = 10**400
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "pack_ids_unparsed",
+        "brief_chars",
+        "hook_feedback_messages",
+        "sessions_errored",
+        "holdout_rate",
+    ],
+)
+def test_an_int_too_large_for_a_float_is_not_a_count_and_not_a_crash(
+    tmp_path: Path, site: str
+) -> None:
+    """``math.isfinite`` and ``float`` raise on it; the read refuses instead."""
+    event_log = SQLiteEventLog(tmp_path / "huge.db")
+    log = HoldoutLog(event_log)
+    seed_arm_shift(log)
+    at = MONDAY + timedelta(hours=300)
+    pack = log.pack(
+        at=at, withheld=False, items=3, rate=_HUGE if site == "holdout_rate" else 0.2
+    )
+    timing = timing_payload(hook_before=False)
+    if site == "hook_feedback_messages":
+        timing["hook_feedback_messages"] = _HUGE
+    log.join(
+        "task-huge",
+        at=at + timedelta(hours=1),
+        pack_ids=[pack],
+        parent="parent-a",
+        outcome=outcome_payload(turns=5),
+        pack_ids_unparsed=_HUGE if site == "pack_ids_unparsed" else 0,
+        timing=timing,
+        covariates=covariates_payload(
+            brief_chars=_HUGE if site == "brief_chars" else 400
+        ),
+    )
+    log.sweep(
+        at=UNTIL - timedelta(hours=1),
+        sessions_parsed=0,
+        sessions_errored=_HUGE if site == "sessions_errored" else 0,
+    )
+
+    read = _analyze(log, rate=0.2)
+    event_log.close()
+
+    assert isinstance(read, HoldoutRefusal)
+    assert read.settled_window.settled is False
+
+
+def _codex_join(log: HoldoutLog, *, with_block: bool) -> None:
+    """One in-window, in-rate task from a source that has no sweep."""
+    at = MONDAY + timedelta(hours=300)
+    pack = log.pack(at=at, withheld=False, items=3, rate=0.2)
+    log.join(
+        "task-codex",
+        at=at + timedelta(hours=1),
+        pack_ids=[pack],
+        parent="parent-x",
+        outcome=outcome_payload(turns=5) if with_block else None,
+        source_system="codex",
+    )
+
+
+def test_a_missing_outcome_block_can_turn_a_refusal_into_a_full_report(
+    tmp_path: Path,
+) -> None:
+    """Pins an accepted behaviour: scope reads whether a join has an outcome block.
+
+    A second source with no sweep, whose one in-window task has no outcome
+    block, is not waited on, so a read that its block would have refused is a
+    full report. That is accepted: scope reads the block's presence only, the
+    analysed set never contains a task without one, and current capture
+    always writes it. A block that is present is waited on.
+    """
+    reads = {}
+    for with_block in (True, False):
+        event_log = SQLiteEventLog(tmp_path / f"codex-{with_block}.db")
+        log = HoldoutLog(event_log)
+        seed_arm_shift(log)
+        _codex_join(log, with_block=with_block)
+        log.sweep()
+        reads[with_block] = _analyze(log, rate=0.2)
+        event_log.close()
+
+    assert isinstance(reads[True], HoldoutRefusal)
+    assert reads[True].settled_window.reason is not None
+    assert "codex" in reads[True].settled_window.reason
+    assert isinstance(reads[False], HoldoutReport)
+    assert reads[False].settled_window.settled is True
