@@ -51,8 +51,10 @@ stratum, arm labels attached, and recomputes the weights per replicate.
 and never replace it: the outcome is regressed, both arms pooled, on the
 stratum indicators and a covariate set, and the within-stratum permutation
 test and stratified bootstrap run on the residuals. The first adjusts for
-``log1p`` of the task's brief length (the pre-registered covariate) and the
-second, exploratory, adds the sub-agent's type. Both come from the join's
+``log1p`` of the task's brief length and the second adds the sub-agent's
+type; both are pre-registered secondary analyses and neither is decisive.
+Each reports the tasks it used and the tasks it dropped for a missing
+covariate. Both come from the join's
 ``covariates`` block, which capture writes. The fit never contains the arm,
 so the residuals do not depend on the assignment and the permutation test is
 exact under the sharp null. A task missing a covariate is dropped from that
@@ -107,8 +109,21 @@ the build that wrote the pack that sets the task's arm (``pack_ids[0]``), the
 health`` names a serving build. It is descriptive: a serving change that lands
 mid-window mixes builds inside each arm, and the table shows how, so a reader
 can judge whether a deploy confounds the comparison. It adds each arm's
-outcome mean per build, with no interval and no p-value, and changes no other
-figure.
+outcome mean and the served-minus-withheld difference per build, with no
+interval and no p-value, labelled descriptive and non-decisive; it changes no
+other figure. A build serving fewer than five withheld analysed tasks is
+pooled into one ``other`` row, whose difference is computed over the pooled
+tasks.
+
+**Settled window.** A read given ``until`` is complete only once the capture
+sweeps have settled past it: the first completed sweep at or after ``until``
+writes the joins of the last tasks, and a sweep ``settle_hours`` after that
+one finishes them. Until then ``settled_window`` says so and names the time
+a sweep must reach, the primary and both adjustments read
+:data:`WINDOW_NOT_SETTLED`, and the by-build means and differences are
+withheld, so a read taken early cannot be mistaken for the readout. Without
+``until`` the check does not run. The descriptive and guardrail figures still
+print on an incomplete read.
 
 **Operational mode.** :func:`analyze_holdout_operational` answers "is the
 experiment running?" without reading its outcomes. It returns a
@@ -223,6 +238,8 @@ NO_TASKS = "no tasks"
 NO_WITHHELD_ARM = "no withheld arm"
 NO_SERVED_ARM = "no served arm"
 NO_BOTH_ARM_STRATUM = "no stratum with both arms"
+#: ``inference.status`` of a read whose window the capture sweeps have not settled.
+WINDOW_NOT_SETTLED = "window not settled"
 
 _DAY_SECONDS = 86_400
 #: Events read per page when the operational report pages the joins and sweeps.
@@ -252,8 +269,18 @@ _EMPTY_WINDOW = "the evidence window is empty"
 #: A build as ``analyze health`` keys one: the stamped ``(version, commit)``,
 #: each ``None`` when the row carries no usable value.
 BuildKey = tuple[str | None, str | None]
+#: A build serving fewer withheld analysed tasks than this joins the pooled row.
+BY_COMMIT_POOL_THRESHOLD = 5
+#: The pooled row's ``build``.
+OTHER_BUILD = "other"
+BY_COMMIT_VERDICT = "descriptive, not decisive"
 _BY_COMMIT_NOTE = (
-    "Descriptive only; carries no inference. Each analysed task is counted "
+    "Descriptive and non-decisive; carries no inference and cannot overturn "
+    "or rescue the primary. difference is the served mean minus the withheld "
+    "mean of each row's tasks, null when an arm holds none. A build serving "
+    f"fewer than {BY_COMMIT_POOL_THRESHOLD} withheld analysed tasks is pooled "
+    f"into one row named {OTHER_BUILD!r}, whose difference is computed over "
+    "the pooled tasks. Each analysed task is counted "
     "once, under the build stamped on the first pack of its join (the pack "
     "that sets its arm), and a task whose packs span several builds is also "
     "counted in units_spanning_builds. A build is the stamped (version, "
@@ -304,7 +331,7 @@ _BRIEF_LENGTH_AND_AGENT_TYPE = "brief_length_and_agent_type"
 #: the order the report lists them.
 _ADJUSTMENT_SPECS = (
     (_BRIEF_LENGTH, True, False),
-    (_BRIEF_LENGTH_AND_AGENT_TYPE, False, True),
+    (_BRIEF_LENGTH_AND_AGENT_TYPE, True, True),
 )
 
 
@@ -523,9 +550,36 @@ class HoldoutDescriptive(TrellisModel):
     arm_ratio: list[ArmRatioCheck]
     top_parent_share: float | None
     mde_by_horizon: list[HoldoutHorizon]
+    #: The withheld share ``mde_by_horizon`` and ``n_for_10pct_effect`` size at:
+    #: the analysed ``--rate`` when it lies in (0, 1), else the planned 0.5.
+    mde_withheld_share: float
     n_for_10pct_effect: int | None
     sessions: HoldoutSessions
     not_measurable: dict[str, str] = Field(default_factory=dict)
+
+
+class HoldoutSettledWindow(TrellisModel):
+    """Whether the capture sweeps have settled past a read's ``--until``.
+
+    Computed from the sweeps in the event log and nothing else. A task whose
+    first pack came just before ``until`` is joined by the first completed
+    sweep at or after it, and counts as finished only when a later sweep ran
+    ``settle_hours`` after that join. Until then the window is incomplete
+    and the primary is refused (``inference.status`` reads
+    :data:`WINDOW_NOT_SETTLED`). Not checked when no ``until`` was given: a
+    window ending now always holds unfinished tasks. Several source systems
+    must each be settled.
+
+    ``needs_sweep_after`` is the time a completed sweep must reach for the
+    window to settle, and ``None`` when it has. The read is repeatable only
+    from then on.
+    """
+
+    checked: bool
+    settled: bool | None
+    needs_sweep_after: str | None
+    latest_sweep: str | None
+    reason: str | None
 
 
 class HoldoutInference(TrellisModel):
@@ -546,6 +600,10 @@ class HoldoutInference(TrellisModel):
     strata_both_arms: int
     strata_one_arm: int
     tasks_in_one_arm_strata: int
+    #: The share of the estimator's total weight (``n1*n0/n`` summed over the
+    #: strata) held by the heaviest stratum: a weight share, not a task share.
+    #: ``None`` whenever the primary does not run.
+    top_stratum_weight_share: float | None = None
 
 
 class HoldoutSecondaryInference(TrellisModel):
@@ -688,12 +746,18 @@ class HoldoutBuildRow(TrellisModel):
     last_seen: str
     served: HoldoutBuildArm
     withheld: HoldoutBuildArm
+    #: Served mean minus withheld mean; ``None`` when either arm is empty.
+    #: Descriptive: it has no p-value and decides nothing.
+    difference: float | None = None
 
 
 class HoldoutByCommit(TrellisModel):
     """The analysed tasks per serving build: descriptive, never an estimate.
 
-    Rows are in first-seen order. A task whose packs span several builds is
+    Rows are in first-seen order, the pooled ``other`` row last. A build
+    serving fewer than :data:`BY_COMMIT_POOL_THRESHOLD` withheld analysed
+    tasks is pooled into it, and ``pooled_builds`` counts those builds.
+    A task whose packs span several builds is
     counted once, under the build of its first pack (the one that sets its
     arm), and again in ``units_spanning_builds``. ``build`` is the
     ``(version, commit)`` label ``analyze health`` gives the same stamp.
@@ -702,6 +766,9 @@ class HoldoutByCommit(TrellisModel):
     rows: list[HoldoutBuildRow]
     units_spanning_builds: int
     note: str
+    verdict: str = BY_COMMIT_VERDICT
+    pool_threshold: int = BY_COMMIT_POOL_THRESHOLD
+    pooled_builds: int = 0
 
 
 class HoldoutOperationalSessions(TrellisModel):
@@ -880,6 +947,7 @@ class HoldoutReport(TrellisModel):
     exclusions: list[HoldoutExclusion]
     descriptive: HoldoutDescriptive
     inference: HoldoutInference
+    settled_window: HoldoutSettledWindow
     covariate_adjusted: HoldoutCovariateAdjusted
     power: HoldoutPower
     guardrails: HoldoutGuardrails
@@ -969,6 +1037,23 @@ class _Design:
     total_weight: float
 
 
+def _stratum_weights(
+    served: npt.NDArray[np.bool_], codes: npt.NDArray[np.intp]
+) -> npt.NDArray[np.float64]:
+    """Each stratum's weight in the estimator, ``n1 * n0 / n``.
+
+    Zero for a stratum holding one arm, and for a code no task carries. The
+    estimator and the share of weight a stratum holds both read this.
+    """
+    groups = int(codes.max()) + 1 if codes.size else 0
+    n = np.bincount(codes, minlength=groups).astype(float)
+    n1 = np.bincount(codes, weights=served.astype(float), minlength=groups)
+    present = n > 0
+    weights = np.zeros(groups)
+    weights[present] = n1[present] * (n[present] - n1[present]) / n[present]
+    return weights
+
+
 def _design(
     y: npt.NDArray[np.float64],
     served: npt.NDArray[np.bool_],
@@ -976,10 +1061,8 @@ def _design(
 ) -> _Design:
     groups = int(codes.max()) + 1 if codes.size else 0
     n = np.bincount(codes, minlength=groups).astype(float)
-    n1 = np.bincount(codes, weights=served.astype(float), minlength=groups)
     present = n > 0
-    weights = np.zeros(groups)
-    weights[present] = n1[present] * (n[present] - n1[present]) / n[present]
+    weights = _stratum_weights(served, codes)
     means = np.zeros(groups)
     means[present] = (
         np.bincount(codes, weights=y, minlength=groups)[present] / n[present]
@@ -1201,23 +1284,44 @@ def _t_quantile(p: float, df: float) -> float:
     return z + g1 / df + g2 / df**2 + g3 / df**3 + g4 / df**4
 
 
-def analytic_mde(sd: float, n: float) -> float | None:
-    """The prestudy's MDE: ``(t(0.975) + t(0.80)) * sd * sqrt(4 / n)``.
+def analytic_mde(sd: float, n: float, share: float = _PLANNED_SHARE) -> float | None:
+    """The prestudy's MDE: ``(t(0.975) + t(0.80)) * sd * sqrt(1 / (n * p * (1 - p)))``.
 
-    The two-sample formula for ``n`` units split 50/50, two-sided at
-    :data:`ALPHA` with :data:`TARGET_POWER`, its t quantiles at ``n - 2``
-    degrees of freedom. ``None`` below :data:`MIN_FORMULA_N` units, where
-    the prestudy leaves it undefined.
+    The two-sample formula for ``n`` units of which a share ``p`` is
+    withheld, two-sided at :data:`ALPHA` with :data:`TARGET_POWER`, its t
+    quantiles at ``n - 2`` degrees of freedom. ``p`` defaults to the 50/50
+    split the prestudy sized at, where the variance factor is ``4 / n``; a
+    run at another assignment rate passes its own share, because the same
+    ``n`` buys a larger MDE the further the split is from even. ``None``
+    below :data:`MIN_FORMULA_N` units, where the prestudy leaves it
+    undefined.
+
+    Raises:
+        ValueError: ``share`` is not strictly between 0 and 1.
     """
+    if not 0.0 < share < 1.0:
+        message = f"share must be strictly between 0 and 1, got {share:g}"
+        raise ValueError(message)
     if n < MIN_FORMULA_N:
         return None
     df = n - _PAIR
     multiplier = _t_quantile(1 - ALPHA / 2, df) + _t_quantile(TARGET_POWER, df)
-    return multiplier * sd * math.sqrt(4 / n)
+    return multiplier * sd * math.sqrt(1 / (n * share * (1 - share)))
 
 
-def n_for_mde(sd: float, effect: float) -> int:
-    """The smallest N whose :func:`analytic_mde` at ``sd`` is at most ``effect``.
+def share_for_rate(rate: float | None) -> float:
+    """The withheld share the power figures size at for an assignment ``rate``.
+
+    The rate itself when it is strictly between 0 and 1, otherwise the
+    :data:`_PLANNED_SHARE` the prestudy sized at.
+    """
+    return rate if rate is not None and 0.0 < rate < 1.0 else _PLANNED_SHARE
+
+
+def n_for_mde(sd: float, effect: float, share: float = _PLANNED_SHARE) -> int:
+    """The smallest N whose :func:`analytic_mde` is at most ``effect``.
+
+    Read at ``sd`` and the withheld ``share``.
 
     Raises:
         ValueError: ``effect`` is not positive.
@@ -1227,7 +1331,7 @@ def n_for_mde(sd: float, effect: float) -> int:
         raise ValueError(message)
 
     def reaches(n: int) -> bool:
-        mde = analytic_mde(sd, n)
+        mde = analytic_mde(sd, n, share)
         return mde is not None and mde <= effect
 
     low, high = MIN_FORMULA_N - 1, MIN_FORMULA_N
@@ -1381,9 +1485,9 @@ def _iso_week(moment: datetime) -> str:
     return f"{year}-W{week:02d}"
 
 
-def _latest_sweeps(events: Sequence[Event]) -> dict[str, datetime]:
-    """The latest completed, non-dry-run capture sweep per source system."""
-    latest: dict[str, datetime] = {}
+def _completed_sweeps(events: Sequence[Event]) -> dict[str, list[datetime]]:
+    """Every completed, non-dry-run capture sweep per source system, oldest first."""
+    found: dict[str, list[datetime]] = {}
     for event in events:
         payload = event.payload or {}
         if payload.get("dry_run") is True:
@@ -1393,10 +1497,78 @@ def _latest_sweeps(events: Sequence[Event]) -> dict[str, datetime]:
             if not event.entity_id:
                 continue
             source = event.entity_id.removeprefix("capture:")
-        at = _as_utc(event.occurred_at)
-        if source not in latest or at > latest[source]:
-            latest[source] = at
-    return latest
+        found.setdefault(source, []).append(_as_utc(event.occurred_at))
+    return {source: sorted(times) for source, times in found.items()}
+
+
+def _latest_sweeps(events: Sequence[Event]) -> dict[str, datetime]:
+    """The latest completed, non-dry-run capture sweep per source system."""
+    return {source: times[-1] for source, times in _completed_sweeps(events).items()}
+
+
+def _join_source(join: Event) -> str:
+    source = (join.payload or {}).get("source_system")
+    return source if isinstance(source, str) and source else _SOURCE_SYSTEM_DEFAULT
+
+
+def _settled_window(
+    sweep_events: Sequence[Event],
+    joins: Sequence[Event],
+    *,
+    end: datetime,
+    settle: timedelta,
+    checked: bool,
+) -> HoldoutSettledWindow:
+    """Whether every source's sweeps have settled past the window end.
+
+    For each source system the scan holds a join from (the default source
+    when it holds none): the first completed sweep at or after ``end`` writes
+    the joins of the tasks still running at it, and the window is settled
+    once a later sweep ran ``settle`` after that one. A source with no sweep
+    at or after ``end`` has not started to settle.
+    """
+    sweeps = _completed_sweeps(sweep_events)
+    every = [at for times in sweeps.values() for at in times]
+    latest = max(every).isoformat() if every else None
+    if not checked:
+        return HoldoutSettledWindow(
+            checked=False,
+            settled=None,
+            needs_sweep_after=None,
+            latest_sweep=latest,
+            reason=None,
+        )
+    needs: list[datetime] = []
+    reasons: list[str] = []
+    for source in sorted(
+        {_join_source(join) for join in joins} or {_SOURCE_SYSTEM_DEFAULT}
+    ):
+        times = sweeps.get(source, [])
+        first = next((at for at in times if at >= end), None)
+        if first is None:
+            needs.append(end)
+            reasons.append(
+                f"no completed {source} sweep has run at or after the window "
+                f"end {end.isoformat()}; the first writes the joins of the "
+                f"last tasks and one {settle.total_seconds() / 3600:g} h after "
+                "it settles them"
+            )
+        elif not any(at >= first + settle for at in times):
+            needs.append(first + settle)
+            reasons.append(
+                f"the first {source} sweep at or after the window end ran "
+                f"{first.isoformat()} and no completed sweep has run "
+                f"{settle.total_seconds() / 3600:g} h after it, so the joins "
+                "it wrote are not yet finished"
+            )
+    settled = not needs
+    return HoldoutSettledWindow(
+        checked=True,
+        settled=settled,
+        needs_sweep_after=None if settled else max(needs).isoformat(),
+        latest_sweep=latest,
+        reason=None if settled else "; ".join(reasons),
+    )
 
 
 def _pack_ids(payload: Mapping[str, Any]) -> list[str]:
@@ -1503,10 +1675,7 @@ def _pre_treatment_excluded(payload: Mapping[str, Any], funnel: _AnyFunnel) -> b
 
 def _swept(join: Event, sweeps: Mapping[str, datetime], at: datetime) -> bool:
     """A completed sweep for the join's source system ran at or after ``at``."""
-    source = (join.payload or {}).get("source_system")
-    swept = sweeps.get(
-        source if isinstance(source, str) and source else _SOURCE_SYSTEM_DEFAULT
-    )
+    swept = sweeps.get(_join_source(join))
     return swept is not None and swept >= at
 
 
@@ -1750,6 +1919,7 @@ def analyze_holdout(
         notes=ev.notes,
         sweeps=ev.sweeps,
         sessions=sessions,
+        settled_window=ev.settled_window,
         options={
             "days": days,
             "since": ev.since,
@@ -1761,6 +1931,7 @@ def analyze_holdout(
             "outcome": outcome,
             "itt": itt,
             "by_commit": by_commit,
+            "window_unsettled": ev.settled_window.settled is False,
             "permutations": permutations,
             "bootstraps": bootstraps,
             "power_sims": power_sims,
@@ -2353,6 +2524,7 @@ class _Evidence:
     rate: float | None
     task_start: datetime
     task_days: float
+    settled_window: HoldoutSettledWindow
 
 
 def _gather(
@@ -2411,6 +2583,13 @@ def _gather(
     latest_joins = _latest_joins(join_scan.events)
     sweeps = _latest_sweeps(sweep_scan.events)
     settle = timedelta(hours=settle_hours)
+    settled_window = _settled_window(
+        sweep_scan.events,
+        list(latest_joins.values()),
+        end=end,
+        settle=settle,
+        checked=until is not None,
+    )
     units: list[_Unit] = []
     for join in latest_joins.values():
         funnel.sessions += 1
@@ -2435,6 +2614,7 @@ def _gather(
         rate=rate,
         task_start=task_start,
         task_days=task_days,
+        settled_window=settled_window,
     )
 
 
@@ -2657,12 +2837,13 @@ def _horizons(
     *,
     log_scale: bool,
     sd_reason: str,
+    share: float = _PLANNED_SHARE,
 ) -> list[HoldoutHorizon]:
     """The analytic MDE after each of :data:`HORIZON_DAYS` days of evidence."""
     horizons: list[HoldoutHorizon] = []
     for days in HORIZON_DAYS:
         n = None if per_30d is None else per_30d * days / 30
-        mde = None if sd is None or n is None else analytic_mde(sd, n)
+        mde = None if sd is None or n is None else analytic_mde(sd, n, share)
         reason = None
         if sd is None:
             reason = sd_reason
@@ -2686,18 +2867,23 @@ def _horizons(
 
 
 def _n_for_ten_percent(
-    sd: float | None, mean: float | None, *, log_scale: bool, sd_reason: str
+    sd: float | None,
+    mean: float | None,
+    *,
+    log_scale: bool,
+    sd_reason: str,
+    share: float = _PLANNED_SHARE,
 ) -> tuple[int | None, str]:
     """N for a 10% effect: x0.9 on a log1p outcome, else 10% of ``mean``."""
     if sd is None:
         return None, sd_reason
     if log_scale:
-        return n_for_mde(sd, -math.log(1 - _TEN_PERCENT)), ""
+        return n_for_mde(sd, -math.log(1 - _TEN_PERCENT), share), ""
     if mean is None:
         return None, "no analysed task in the served arm"
     if mean <= 0:
         return None, "the served mean is 0, so 10% of it is zero"
-    return n_for_mde(sd, _TEN_PERCENT * mean), ""
+    return n_for_mde(sd, _TEN_PERCENT * mean, share), ""
 
 
 def _reasons(figures: Mapping[str, tuple[object, str]]) -> dict[str, str]:
@@ -2918,8 +3104,13 @@ def _descriptive(
     analysed_per_30d = _per_30d(len(analysed), window_days)
     log_scale = _log_scale(options["outcome"])
     served_mean = float(y[served].mean()) if served.any() else None
+    share = share_for_rate(options["rate"])
     n_10, n_10_reason = _n_for_ten_percent(
-        sd_within, served_mean, log_scale=log_scale, sd_reason=spread_reason
+        sd_within,
+        served_mean,
+        log_scale=log_scale,
+        sd_reason=spread_reason,
+        share=share,
     )
     post_hoc_share, post_hoc_note = _post_hoc_share(funnel)
     figures: dict[str, tuple[object, str]] = {
@@ -2981,7 +3172,9 @@ def _descriptive(
             served_mean,
             log_scale=log_scale,
             sd_reason=spread_reason,
+            share=share,
         ),
+        mde_withheld_share=share,
         n_for_10pct_effect=n_10,
         sessions=sessions,
         not_measurable=_reasons(figures),
@@ -2995,13 +3188,47 @@ def _build_arm(values: Sequence[float]) -> HoldoutBuildArm:
     )
 
 
+def _build_row(
+    build: str,
+    members: Sequence[tuple[_Unit, float]],
+    *,
+    hide_outcomes: bool,
+) -> HoldoutBuildRow:
+    served = _build_arm([v for u, v in members if not u.withheld])
+    withheld = _build_arm([v for u, v in members if u.withheld])
+    difference = (
+        None
+        if served.outcome_mean is None or withheld.outcome_mean is None
+        else served.outcome_mean - withheld.outcome_mean
+    )
+    if hide_outcomes:
+        served = HoldoutBuildArm(n=served.n, outcome_mean=None)
+        withheld = HoldoutBuildArm(n=withheld.n, outcome_mean=None)
+        difference = None
+    return HoldoutBuildRow(
+        build=build,
+        first_seen=min(u.first_pack_at for u, _ in members).isoformat(),
+        last_seen=max(u.first_pack_at for u, _ in members).isoformat(),
+        served=served,
+        withheld=withheld,
+        difference=difference,
+    )
+
+
 def _by_commit(
-    analysed: Sequence[_Unit], y: npt.NDArray[np.float64]
+    analysed: Sequence[_Unit],
+    y: npt.NDArray[np.float64],
+    *,
+    hide_outcomes: bool = False,
 ) -> HoldoutByCommit:
     """The analysed tasks per build and arm, in the order builds were first seen.
 
     ``y`` is the analysed tasks' outcome column, in the order of ``analysed``,
-    so each mean reads the column the primary estimate reads.
+    so each mean reads the column the primary estimate reads. A build with
+    fewer than :data:`BY_COMMIT_POOL_THRESHOLD` withheld tasks joins one
+    ``other`` row, last, whose figures are computed over the pooled tasks.
+    ``hide_outcomes`` keeps every count and drops every mean and difference,
+    for a read whose window is not settled.
     """
     by_build: dict[BuildKey, list[tuple[_Unit, float]]] = {}
     for unit, value in zip(analysed, y.tolist(), strict=True):
@@ -3009,19 +3236,34 @@ def _by_commit(
     ordered = sorted(
         by_build.items(), key=lambda item: min(u.first_pack_at for u, _ in item[1])
     )
-    return HoldoutByCommit(
-        rows=[
-            HoldoutBuildRow(
-                build=build_label(*build),
-                first_seen=min(u.first_pack_at for u, _ in members).isoformat(),
-                last_seen=max(u.first_pack_at for u, _ in members).isoformat(),
-                served=_build_arm([v for u, v in members if not u.withheld]),
-                withheld=_build_arm([v for u, v in members if u.withheld]),
+    standing = [
+        (build, members)
+        for build, members in ordered
+        if sum(u.withheld for u, _ in members) >= BY_COMMIT_POOL_THRESHOLD
+    ]
+    pooled = [
+        (build, members)
+        for build, members in ordered
+        if sum(u.withheld for u, _ in members) < BY_COMMIT_POOL_THRESHOLD
+    ]
+    rows = [
+        _build_row(build_label(*build), members, hide_outcomes=hide_outcomes)
+        for build, members in standing
+    ]
+    if pooled:
+        rows.append(
+            _build_row(
+                OTHER_BUILD,
+                [member for _, members in pooled for member in members],
+                hide_outcomes=hide_outcomes,
             )
-            for build, members in ordered
-        ],
+        )
+    return HoldoutByCommit(
+        rows=rows,
         units_spanning_builds=sum(unit.spans_builds for unit in analysed),
         note=_BY_COMMIT_NOTE,
+        pool_threshold=BY_COMMIT_POOL_THRESHOLD,
+        pooled_builds=len(pooled),
     )
 
 
@@ -3265,6 +3507,7 @@ def _report(
     notes: list[str],
     sweeps: Mapping[str, datetime],
     sessions: HoldoutSessions,
+    settled_window: HoldoutSettledWindow,
     options: dict[str, Any],
 ) -> HoldoutReport:
     rate: float | None = options["rate"]
@@ -3346,10 +3589,15 @@ def _report(
         exclusions=_exclusions(funnel, itt),
         descriptive=descriptive,
         inference=inference,
+        settled_window=settled_window,
         covariate_adjusted=covariate_adjusted,
         power=power,
         guardrails=_guardrails(units, analysed, options["outcome"]),
-        by_commit=_by_commit(analysed, y) if options["by_commit"] else None,
+        by_commit=(
+            _by_commit(analysed, y, hide_outcomes=options["window_unsettled"])
+            if options["by_commit"]
+            else None
+        ),
         scan=scan,
         notes=notes,
     )
@@ -3476,8 +3724,11 @@ def _inference(
         two_arm = (n1 > 0) & (n1 < n)
         both, one = int(two_arm.sum()), int((~two_arm).sum())
         in_one = int(n[~two_arm].sum())
+    unsettled: bool = options["window_unsettled"]
     status = "ok"
-    if not y.size:
+    if unsettled:
+        status = WINDOW_NOT_SETTLED
+    elif not y.size:
         status = NO_TASKS
     elif served.all():
         status = NO_WITHHELD_ARM
@@ -3485,9 +3736,11 @@ def _inference(
         status = NO_SERVED_ARM
     elif not both:
         status = NO_BOTH_ARM_STRATUM
-    difference = p_value = None
+    difference = p_value = top_weight_share = None
     interval = None
     if status == "ok":
+        weights = _stratum_weights(served, _codes(strata))
+        top_weight_share = float(weights.max() / weights.sum())
         difference = weighted_difference(y, served, strata)
         p_value = permutation_p_value(
             y, served, strata, permutation_rng, options["permutations"]
@@ -3502,8 +3755,12 @@ def _inference(
     return HoldoutInference(
         status=status,
         verdict=verdict,
-        mean_served=float(y[served].mean()) if served.any() else None,
-        mean_withheld=float(y[~served].mean()) if (~served).any() else None,
+        mean_served=(
+            float(y[served].mean()) if served.any() and not unsettled else None
+        ),
+        mean_withheld=(
+            float(y[~served].mean()) if (~served).any() and not unsettled else None
+        ),
         difference=difference,
         ci_low=None if interval is None else interval[0],
         ci_high=None if interval is None else interval[1],
@@ -3515,6 +3772,7 @@ def _inference(
         strata_both_arms=both,
         strata_one_arm=one,
         tasks_in_one_arm_strata=in_one,
+        top_stratum_weight_share=top_weight_share,
     )
 
 
@@ -3803,7 +4061,7 @@ def _power(
     options: Mapping[str, Any],
 ) -> HoldoutPower:
     planned_mde: float = options["planned_mde"]
-    share = rate if rate is not None and 0.0 < rate < 1.0 else _PLANNED_SHARE
+    share = share_for_rate(rate)
     result = HoldoutPower(
         status="ok",
         planned_mde=planned_mde,
@@ -3931,6 +4189,7 @@ __all__ = [
     "NO_EFFECT_VERDICT",
     "NO_SERVED_ARM",
     "NO_TASKS",
+    "OTHER_BUILD",
     "NO_WITHHELD_ARM",
     "OUTCOMES",
     "POWER_PERMUTATIONS",
@@ -3953,6 +4212,7 @@ __all__ = [
     "HoldoutGuardrails",
     "HoldoutHorizon",
     "HoldoutInference",
+    "HoldoutSettledWindow",
     "HoldoutOperationalByCommit",
     "HoldoutOperationalDescriptive",
     "HoldoutOperationalReport",
@@ -3962,12 +4222,15 @@ __all__ = [
     "HoldoutSecondaryInference",
     "HoldoutRows",
     "HoldoutSessions",
+    "BY_COMMIT_POOL_THRESHOLD",
+    "WINDOW_NOT_SETTLED",
     "analytic_mde",
     "analyze_holdout",
     "analyze_holdout_operational",
     "binomial_two_sided",
     "bootstrap_ci",
     "n_for_mde",
+    "share_for_rate",
     "permutation_p_value",
     "permute_within_strata",
     "simulate_power",

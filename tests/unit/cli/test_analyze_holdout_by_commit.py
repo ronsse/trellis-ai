@@ -56,6 +56,16 @@ def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegist
     return StoreRegistry(stores_dir=stores_dir)
 
 
+@pytest.fixture(autouse=True)
+def _every_build_stands_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These cases are about the table's shape, which pooling would blur.
+
+    The pooling rule has its own tests, run at the real threshold, in
+    ``tests/unit/analyze/test_holdout_readout_form.py``.
+    """
+    monkeypatch.setattr("trellis.analyze.holdout.BY_COMMIT_POOL_THRESHOLD", 0)
+
+
 @pytest.fixture
 def log(_temp_stores: StoreRegistry) -> HoldoutLog:
     return HoldoutLog(_temp_stores.operational.event_log)
@@ -112,7 +122,7 @@ def test_the_flag_adds_the_table_to_json_and_text(log: HoldoutLog) -> None:
     assert table["units_spanning_builds"] == 0
     assert "no inference" in table["note"]
     flat = _flat(text)
-    assert "By serving build (descriptive, no inference)" in flat
+    assert "By serving build (descriptive, non-decisive, no inference)" in flat
     assert BUILD_A in flat
     assert BUILD_B in flat
     # The table follows the descriptive block and precedes the exclusions.

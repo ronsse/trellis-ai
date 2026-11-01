@@ -28,6 +28,9 @@ MONDAY = datetime(2026, 8, 3, 9, 0, tzinfo=UTC)
 #: on 2026-07-30, before :data:`MONDAY`.
 UNTIL = datetime(2026, 9, 28, tzinfo=UTC)
 DAYS = 60
+#: Hours after :data:`UNTIL` of the two sweeps that settle its window: the first
+#: sweep at or after the end, then one past the three-hour settle allowance.
+SETTLING_SWEEP_HOURS_AFTER_UNTIL = (1, 25)
 #: Where the :data:`DAYS`-day window ending at :data:`UNTIL` opens.
 WINDOW_START = UNTIL - timedelta(days=DAYS)
 #: 20 days into that window: :func:`seed_late_build`'s first row at rate 0.5.
@@ -349,10 +352,22 @@ class HoldoutLog:
         dry_run: bool = False,
         source_system: str = SOURCE_SYSTEM,
     ) -> None:
-        """A completed capture sweep, by default four hours after the latest join."""
-        if at is None:
-            assert self.latest_join is not None, "write a task before the sweep"
-            at = self.latest_join + timedelta(hours=4)
+        """A completed capture sweep, by default four hours after the latest join.
+
+        A sweep with no ``at`` is the last one the test needs, so it also
+        settles the window ending at :data:`UNTIL`: the first sweep after it
+        and one past the settle allowance (a read is incomplete until both
+        exist). Pass ``at`` to place a single sweep exactly.
+        """
+        if at is not None:
+            self._sweep_at(at, dry_run, source_system)
+            return
+        assert self.latest_join is not None, "write a task before the sweep"
+        self._sweep_at(self.latest_join + timedelta(hours=4), dry_run, source_system)
+        for hours in SETTLING_SWEEP_HOURS_AFTER_UNTIL:
+            self._sweep_at(UNTIL + timedelta(hours=hours), dry_run, source_system)
+
+    def _sweep_at(self, at: datetime, dry_run: bool, source_system: str) -> None:
         self.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SWEEP_COMPLETED,

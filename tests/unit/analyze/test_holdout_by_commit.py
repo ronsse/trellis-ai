@@ -45,6 +45,16 @@ COMMIT_B = "9f8e7d6c5b4"
 BUILD_B = build_label("0.0.0", COMMIT_B)
 
 
+@pytest.fixture(autouse=True)
+def _every_build_stands_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These cases are about attribution, which pooling would blur.
+
+    The pooling rule has its own file, ``test_holdout_by_commit_pooling.py``,
+    that runs at the real threshold.
+    """
+    monkeypatch.setattr(holdout, "BY_COMMIT_POOL_THRESHOLD", 0)
+
+
 @pytest.fixture
 def log(tmp_path: Path):
     event_log = SQLiteEventLog(tmp_path / "events.db")

@@ -106,6 +106,7 @@ if TYPE_CHECKING:
         HoldoutOperationalReport,
         HoldoutReport,
         HoldoutSecondaryInference,
+        HoldoutSettledWindow,
     )
     from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
@@ -1816,7 +1817,8 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
         )
     console.print(
         f"    task MDE ({report.power.target_power:.0%} power, alpha "
-        f"{report.inference.alpha:g} two-sided, 50/50 split, within-parent SD, "
+        f"{report.inference.alpha:g} two-sided, "
+        f"{d.mde_withheld_share:g} withheld share, within-parent SD, "
         "N = analysed tasks per 30 days x days / 30):"
     )
     _render_horizons(d.mde_by_horizon, "the served mean")
@@ -1829,7 +1831,7 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
 
 _ADJUSTMENT_LABELS = {
     "brief_length": "brief-length (pre-registered)",
-    "brief_length_and_agent_type": "brief-length and agent type (exploratory)",
+    "brief_length_and_agent_type": "brief-length and agent type (pre-registered)",
 }
 
 
@@ -1878,6 +1880,9 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
     inference = report.inference
     console.print()
     console.print(f"  [bold]Inference: {escape(inference.verdict)}[/bold]")
+    settled = report.settled_window
+    if settled.checked:
+        _render_settled_window(settled)
     console.print(
         f"    mean served {_num(inference.mean_served)}, withheld "
         f"{_num(inference.mean_withheld)}"
@@ -1898,6 +1903,11 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
         f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
         "zero weight"
     )
+    if inference.top_stratum_weight_share is not None:
+        console.print(
+            "    heaviest stratum holds "
+            f"{inference.top_stratum_weight_share:.1%} of the estimator's weight"
+        )
     _render_holdout_secondary(report)
     power = report.power
     console.print()
@@ -1924,32 +1934,61 @@ def _guardrail_arm(arm: HoldoutGuardrailArm, reads: str) -> str:
     return f"{_fig(arm.value, arm.not_measurable)} ({detail})"
 
 
+def _render_settled_window(settled: HoldoutSettledWindow) -> None:
+    """The settled-window line: complete, or why the read is incomplete."""
+    if settled.settled:
+        console.print(
+            "    window settled: the capture sweeps have run past the window end"
+        )
+        return
+    console.print(
+        "    [bold]INCOMPLETE READ: window not settled.[/bold] "
+        f"{escape(settled.reason or '')}"
+    )
+    console.print(
+        "    re-run once a completed sweep has reached "
+        f"{escape(settled.needs_sweep_after or '')} (latest sweep "
+        f"{escape(settled.latest_sweep or 'none')})"
+    )
+
+
 def _render_holdout_by_commit(report: HoldoutReport) -> None:
     """The per-build table of the analysed tasks, descriptive only."""
+    from trellis.analyze.holdout import OTHER_BUILD  # noqa: PLC0415
+
     table = report.by_commit
     if table is None:
         return
     console.print()
-    console.print("  [bold]By serving build[/bold] (descriptive, no inference)")
+    console.print(
+        "  [bold]By serving build[/bold] (descriptive, non-decisive, no inference)"
+    )
     width = max([len("build"), *(len(row.build) for row in table.rows)])
     if not table.rows:
         console.print("    no analysed task")
     else:
         console.print(
             f"    {'build'.ljust(width)}  {'first':10}  {'last':10}  "
-            f"{'served n/mean':13}  withheld n/mean"
+            f"{'served n/mean':13}  {'withheld n/mean':15}  served - withheld"
         )
     for row in table.rows:
         served = f"{row.served.n} / {_num(row.served.outcome_mean)}"
         withheld = f"{row.withheld.n} / {_num(row.withheld.outcome_mean)}"
         console.print(
             f"    {escape(row.build.ljust(width))}  {escape(row.first_seen[:10])}  "
-            f"{escape(row.last_seen[:10])}  {served:13}  {withheld}"
+            f"{escape(row.last_seen[:10])}  {served:13}  {withheld:15}  "
+            f"{_num(row.difference)}"
         )
     console.print(
         f"    {table.units_spanning_builds} task(s) span builds, each counted "
         "under its first pack's build"
     )
+    if table.pooled_builds:
+        console.print(
+            f"    {table.pooled_builds} build(s) with fewer than "
+            f"{table.pool_threshold} withheld tasks are pooled in "
+            f"'{escape(OTHER_BUILD)}'"
+        )
     console.print(f"    [dim]{escape(table.note)}[/dim]")
 
 

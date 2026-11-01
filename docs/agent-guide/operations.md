@@ -3538,7 +3538,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
-| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean; no interval or p-value, and no other figure changes |
+| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean and the served-minus-withheld difference, builds under 5 withheld tasks pooled as `other`; descriptive and non-decisive, with no interval or p-value, and no other figure changes |
 | `--operational` | off | Report only what shows the experiment is running, reading no outcome value; see [`--operational`](#operational-mode) |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
@@ -3640,7 +3640,10 @@ an id). The exact specification:
   differ by Monte Carlo noise. It is `null` when the fit is refused for too few
   residual degrees of freedom or for no stratum holding both arms.
 - **Covariates.** `log1p(brief_chars)` (`brief_length`, pre-registered), and
-  that plus the sub-agent type (`brief_length_and_agent_type`, exploratory).
+  that plus the sub-agent type (`brief_length_and_agent_type`, also pre-registered).
+  Both are secondary and non-decisive, and each reports `n_used` and
+  `n_missing_covariate`, the analysed tasks it fitted and the ones it dropped for a
+  missing covariate.
 - **Fit.** Least squares of the outcome on one indicator per stratum (parent
   session x ISO week), the covariates and, for the agent type, one indicator per
   level. Types with fewer than 3 tasks pool into a single level first, and the
@@ -3672,8 +3675,8 @@ an id). The exact specification:
   under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
   the unadjusted run, where they are outcome means.
 
-`--by-commit` adds a descriptive table of how the analysed tasks split across the
-builds that served them, so a reader can judge whether a deploy inside the window
+`--by-commit` adds a descriptive, non-decisive table of how the analysed tasks split across the
+builds that served them (`verdict` reads `descriptive, not decisive`), so a reader can judge whether a deploy inside the window
 confounds the comparison. It is not a second estimate: no p-value, interval or
 verdict per build, and every other figure is what it is without the flag (the
 JSON carries no `by_commit` key unless it is passed, and the text table follows
@@ -3693,6 +3696,48 @@ from more than one build is counted once, under its first pack's build, and also
 `units_spanning_builds`, so the table never sums to more than the analysed
 tasks. The commit is the one the build stamped at install, so an editable
 install on a moved working tree names the commit it was installed at.
+
+Each `by_commit` row also carries `difference`, the served mean minus the withheld mean of the
+tasks it counts, `null` (never 0) when either arm holds none, and `by_commit.verdict` names the
+table descriptive and non-decisive: it describes heterogeneity across builds and cannot overturn
+or rescue the primary, which averages over the build mix in the window. A build serving fewer than
+`pool_threshold` (5) withheld analysed tasks joins one final row named `other`, whose figures and
+difference are computed over the pooled tasks, and `pooled_builds` counts the builds in it. The
+rows are counts and means of the same tasks as the primary, so `--operational` still prints none
+of them.
+
+**Pinned readout and the settled window.** The experiment is read once, at its horizon, with
+
+```bash
+trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-commit --limit 20000 --format json
+```
+
+`settled_window` says whether that read is complete. A task whose first pack came just before
+`--until` is joined by the first completed capture sweep at or after it, and counts as finished
+only when a later sweep ran `--settle-hours` after that join. Until then `settled_window.settled`
+is `false`, `needs_sweep_after` names the time a completed sweep must reach, `reason` says why, the
+text prints an `INCOMPLETE READ` line, `inference.status` (and each adjustment's) reads
+`window not settled` with no estimate, p-value, interval or arm mean, and `by_commit` keeps its
+counts but drops its means and differences. The exit code is `0` either way and does not depend on
+`--format`. Without `--until` the check does not run (`checked: false`). With daily sweeps at
+10:00Z and `--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is 2026-12-24
+10:00Z and the earliest complete read follows the 2026-12-25 10:00Z sweep. The descriptive and
+guardrail blocks still print on an incomplete read, and a source system whose sweeps have stopped
+keeps the read incomplete.
+
+A later run of the same command reads the same window: the window is bounded by `--until`, and
+`--limit 20000` is the per-event-type scan cap. The scan reads newest first from now and the cap
+drops the oldest rows, so a later run reproduces the same pack rows only while `scan.truncated` is
+`false`; once enough events accumulate to truncate it, the window start moves and the figures can
+change, so raise `--limit`. Joins and sweeps after `--until` are read on purpose, so a task still
+running at the horizon appears in a later run once its join is written.
+
+`inference.top_stratum_weight_share` is the share of the estimator's weight (`n1*n0/n` summed over
+the strata, not a share of tasks) held by the heaviest stratum, `null` when the primary does not
+run. The descriptive block's MDE and N-for-10% size at the analysed `--rate`
+(`descriptive.mde_withheld_share`): `(t(.975) + t(.80)) * sd * sqrt(1 / (n * p * (1 - p)))`,
+which is the 50/50 `sqrt(4 / n)` at `p = 0.5`. The main-session MDE keeps the planned 50/50 split,
+because main sessions pool packs from every rate.
 
 <a id="operational-mode"></a>
 `--operational` checks that the experiment is running without opening its

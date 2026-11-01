@@ -6,6 +6,20 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze holdout` reads as the one-shot readout.** With
+  `--by-commit`, each build's row carries the served-minus-withheld mean
+  difference (null when an arm is empty), builds serving fewer than 5 withheld
+  tasks pool into one `other` row, and the table is labelled descriptive and
+  non-decisive. `inference.top_stratum_weight_share` reports the heaviest
+  stratum's share of the estimator's weight. A read given `--until` whose
+  capture sweeps have not settled past it reports `settled_window.settled:
+  false` and `inference.status == "window not settled"` instead of a result.
+  The agent-type secondary is marked pre-registered, and the analytic MDE and
+  N-for-a-10%-effect now size at the analysed `--rate` instead of assuming a
+  50/50 split (`analytic_mde` takes a `share`, default 0.5, so existing calls
+  are unchanged). The primary estimator, strata, exclusions, assignment and
+  serving are untouched; `--operational` prints none of the new figures.
+
 - **`trellis analyze holdout --operational` reports the experiment's health
   without reading an outcome.** A pack holdout needs a check that it is running
   (arm counts and their ratio, the funnel, covariate coverage, per-build
