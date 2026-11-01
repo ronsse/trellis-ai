@@ -6,6 +6,49 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
+  on a rerun.** The miner read the newest `--limit` traces and only then kept the
+  failure/partial ones, so a run of recent successes hid every older failure and the command
+  reported nothing found (`--dry-run` shared the shape). `--limit` now counts failure/partial
+  traces: the store is read newest first in widening reads (the first at least 100 wide, then
+  doubling) until it holds enough to analyse (`max(min(--limit, 20), --min-traces)`, since at
+  most 20 are shown to the model), the store ends, or the new `--scan-cap` (default 5,000
+  traces) is reached. The read has no cursor because `until` is inclusive and traces can share a
+  `created_at`; a scan that reaches the cap reads up to three times `--scan-cap` rows in all.
+  Both formats carry an `outcome` that says why a run produced nothing: `no_failures` (the
+  store was read to its end), `read_bound_hit` (the cap stopped the read short of what it
+  wanted, so older traces were not read; not the same as none), `below_min_traces`,
+  `skipped_unchanged`, `no_candidates` (the model returned none) and `llm_error`, with
+  `traces_examined`, `scan_cap` and `read_bound_hit`; text output names every outcome,
+  including those two. `failure_traces_in_scope` is the failures found (at most `--limit`),
+  and the read stops once it has enough to analyse, so it is not a count of the store's
+  failures. A malformed model reply still raises.
+  `--limit` below `--min-traces` is refused (exit `2`, both formats) and so is `--min-traces 0`;
+  zero failures found is `no_failures` whatever the minimum is. A failed model call reports
+  `status: "partial"` beside `outcome: "llm_error"` in JSON; the exit is `0` for every outcome
+  in both formats unless `--strict` is given, which exits `1` on `llm_error` in both. The
+  default exit is unchanged from before, a choice that can be revisited.
+  Each mined candidate event now records `source_digest`, a digest of the (at most 20) newest
+  failure traces the model was shown and the `--domain` scope, plus `mining_run_id` and
+  `run_candidate_count`. A run's events are written only after every item in the reply has
+  validated, and a later run skips only when some one run has all its declared events among
+  the newest 200 for that digest, so a run cut off by a failed write is retried and a run of
+  more than 200 candidates mines again each time. A skip asks no model, writes nothing and
+  reports `skipped_unchanged` with `already_mined_candidate_ids`, in text and JSON;
+  `--dry-run` reports it as `would_mine: false`. A new failure among the newest 20 changes the
+  digest, so the next run mines again. A new success does not, unless it pushes a failure out of
+  the read window; the shrunken set is a different input and mines again. Failures beyond the
+  newest 20 are not paged. The key is the input, not the output: two candidates with different
+  wording are never judged to mean the same thing; `no_candidates` and `llm_error` write nothing,
+  so they leave nothing to skip against and every scheduled run pays for the call again; and
+  candidates minted before this change carry no digest, so the first rerun over the same
+  failures mints once more.
+  `PrecedentMiner.mine` and `.plan` return the report the command prints.
+  `generate_precedent_candidates` still returns a list of candidates, but `limit` changed
+  meaning (it counts failures, not traces read, and at most 20 are analysed), it raises
+  `ValueError` for a `limit` or `scan_cap` below 1, and it returns `[]` on a skip, the same
+  `[]` as a run that found nothing.
+
 - **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
   (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
   its criteria, so archived, too-young and wrong-state rows used up the window and a
