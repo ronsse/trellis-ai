@@ -101,6 +101,51 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
+
+Answers "what did this key read, and when did it last run?" from `access.key_read`
+events. One row is written per authenticated read by an API key:
+
+- **REST:** any `GET` under `/api/v1/` and `POST /api/v1/packs` and `/api/v1/packs/sectioned`,
+  when the answer is 200.
+- **MCP:** each tool registered at the `read` scope (`tests/unit/mcp/test_access_log.py`
+  pins the list against `server.py`).
+
+Payload: `{key_id, surface, route, item_count, item_ids, item_ids_truncated}`. `route` is the
+matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name.
+`item_ids` keeps the first 25 ids; `item_count` is the true count, so a cut is visible
+(`item_ids_truncated`). `item_count` is `null` when the answer cannot be counted: an MCP tool
+whose markdown carries no item lines, or a REST answer over 1 MiB. REST ids come from the
+JSON answer and MCP ids from the item lines of the markdown, so retrieval is not touched. A row
+carries no document text, no query or intent text and no secret.
+
+A call with no key id records nothing: auth mode `off`, an anonymous call, the legacy shared
+secret, and stdio.
+
+```bash
+trellis admin access-log --hours 168 --format json
+trellis admin access-log --key-id <id>
+```
+
+One entry per key that read inside the window: `reads`, `items_returned`, `by_surface`,
+`last_read_at`, plus the key's current `name` and `revoked` flag read from the key store (the
+store is never written). A key with no read inside the window is absent. `log_failures` counts
+`access.log_failed` events in the window and `truncated` is `true` when the scan cap hid older
+reads. Exit codes: 0, 2 for `--hours` outside (0, 2160], 5 for a store failure, in both formats.
+
+`GET /api/v1/access-log/keys?hours=&key_id=` returns the same document; it needs the `admin`
+scope and an `external` key is refused. A read through it is itself logged for the key that made it.
+
+**Off switch.** `TRELLIS_ACCESS_LOG=0` (also `false`, `no`, `off`; settings key `access_log`,
+default on) writes no row of any type.
+
+**It is advisory.** The step is wrapped whole, so a read never fails because it could not be
+logged. A failure emits `access.log_failed` (`{surface, error_type}`, the class name only) and
+a `warning` log line, at most once a minute per process, and the report above counts them.
+
+**Retention.** Nothing in this repository deletes events, `RETENTION_PRUNED` archives documents,
+so `access.key_read` rows accrue like every other type. Size is one row per keyed read.
+
 ### `trellis admin backup`
 
 Copy the SQLite stores to a directory while they are in use.

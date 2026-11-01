@@ -1814,6 +1814,78 @@ components:
           title: Trace Id
       title: IngestResponse
       type: object
+    KeyReadReport:
+      additionalProperties: false
+      description: Per-key last-used time and read counts over a window.
+      properties:
+        covered_since:
+          title: Covered Since
+          type: string
+        keys:
+          items:
+            $ref: '#/components/schemas/KeyReadSummary'
+          title: Keys
+          type: array
+        log_failures:
+          title: Log Failures
+          type: integer
+        since:
+          title: Since
+          type: string
+        truncated:
+          title: Truncated
+          type: boolean
+        window_hours:
+          title: Window Hours
+          type: number
+      required:
+      - since
+      - window_hours
+      - keys
+      - log_failures
+      - truncated
+      - covered_since
+      title: KeyReadReport
+      type: object
+    KeyReadSummary:
+      additionalProperties: false
+      description: One key's reads within a window.
+      properties:
+        by_surface:
+          additionalProperties:
+            type: integer
+          title: By Surface
+          type: object
+        items_returned:
+          title: Items Returned
+          type: integer
+        key_id:
+          title: Key Id
+          type: string
+        last_read_at:
+          title: Last Read At
+          type: string
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        reads:
+          title: Reads
+          type: integer
+        revoked:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Revoked
+      required:
+      - key_id
+      - reads
+      - items_returned
+      - last_read_at
+      - by_surface
+      title: KeyReadSummary
+      type: object
     LearningCandidateListResponse:
       additionalProperties: false
       description: 'Most-recent learning-candidate artifact, or why none could be served.
@@ -3403,6 +3475,57 @@ info:
   version: 0.2.0
 openapi: 3.1.0
 paths:
+  /api/v1/access-log/keys:
+    get:
+      description: 'Per key: reads, items returned and last read inside the window.
+
+
+        A key last used before the window is absent. ``truncated`` says the scan
+
+        cap bit and older reads in the window are missing; ``log_failures`` counts
+
+        reads the log failed to record.'
+      operationId: key_reads_api_v1_access_log_keys_get
+      parameters:
+      - description: Window, hours
+        in: query
+        name: hours
+        required: false
+        schema:
+          default: 168.0
+          description: Window, hours
+          exclusiveMinimum: 0
+          maximum: 2160.0
+          title: Hours
+          type: number
+      - description: Only this key
+        in: query
+        name: key_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Only this key
+          title: Key Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyReadReport'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Key Reads
+      tags:
+      - access-log
   /api/v1/admin/jobs:
     get:
       description: 'List every catalog job, joined with its schedule row and last-run status.

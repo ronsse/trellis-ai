@@ -6,6 +6,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Per-key access log: what did this key read, and when did it last run?** Each
+  authenticated read by an API key writes one `access.key_read` event, on REST (every
+  `GET /api/v1/...` plus `POST /packs` and `POST /packs/sectioned`) and on MCP (each tool
+  registered at the `read` scope). A row holds the key id, the surface, the route or tool
+  name, the true count of items returned, and the first 25 returned item ids with
+  `item_ids_truncated` beside them. It holds no document text, no query or intent text
+  and no secret. A call with no key id (auth mode `off`, an anonymous call, the legacy
+  shared secret, stdio) records nothing. `trellis admin access-log [--hours] [--key-id]
+  [--format json]` and the admin-only `GET /api/v1/access-log/keys` read it back as one row
+  per key: reads, items returned, surfaces and last read time over a window (an
+  `external` key is refused the route). `TRELLIS_ACCESS_LOG=0` (settings key `access_log`,
+  default on) writes no row of any type. The step is advisory: a read never fails because
+  of it, and a failure leaves an `access.log_failed` event (at most one a minute per
+  process), counted by the report beside the per-key numbers. The log is written at the
+  transport boundary; retrieval, `PACK_ASSEMBLED` and every pack are unchanged, and nothing
+  that reads events by type sees either new type. The event log has no pruning path, so
+  these rows accrue like every other event. See `docs/agent-guide/operations.md`.
+
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
   A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled

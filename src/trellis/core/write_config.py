@@ -175,6 +175,15 @@ MINHASH_SEED_MAX_DOCS_ENV = "TRELLIS_MINHASH_SEED_MAX_DOCS"
 #: never start withholding packs.
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 
+#: Record one ``access.key_read`` event per authenticated read by an API key
+#: (REST and MCP; :mod:`trellis.core.access_log`).  **Default on**, unlike
+#: every flag above: it adds one row per keyed read and changes nothing a
+#: caller is served.  Set to a falsy spelling (``0``/``false``/``no``/``off``)
+#: and no row is written at all -- the step is skipped before it reads
+#: anything.  Any other value reads as on.
+ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
+_FALSY = frozenset({"0", "false", "no", "off"})
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -417,6 +426,7 @@ class WriteBehaviourConfig:
     pack_holdout_rate: float = 0.0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
+    access_log: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WriteBehaviourConfig:
@@ -436,6 +446,7 @@ class WriteBehaviourConfig:
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
+            access_log=src.get(ACCESS_LOG_ENV, "").strip().lower() not in _FALSY,
         )
 
     @classmethod
@@ -630,10 +641,12 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "pack_holdout_rate": PACK_HOLDOUT_RATE_ENV,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
+    "access_log": ACCESS_LOG_ENV,
 }
 
 
 __all__ = [
+    "ACCESS_LOG_ENV",
     "CLASSIFY_ON_INGEST_FLAG",
     "DEFAULT_RECONCILE_MODEL",
     "DEFAULT_RECONCILE_TIMEOUT_S",

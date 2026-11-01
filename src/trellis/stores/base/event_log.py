@@ -101,6 +101,26 @@ class EventType(StrEnum):
     #: ``entity_id`` carries the pack_id.
     PUBLIC_PACK_SERVED = "pack.public_served"
 
+    #: One authenticated read by an API key, on REST or MCP: what the key was
+    #: served. Recorded at the transport boundary
+    #: (:mod:`trellis.core.access_log`), never by retrieval, and deliberately
+    #: not ``PACK_ASSEMBLED``: no holdout, dedup, attribution or promotion
+    #: reader may take it for a served pack. The payload is ``{key_id,
+    #: surface, route, item_count, item_ids, item_ids_truncated}``;
+    #: ``item_ids`` is capped at ``MAX_LOGGED_ITEM_IDS`` and ``item_count`` is
+    #: the true count (``None`` when the route's answer is not a list of rows
+    #: this log can count), so a cut is visible. No document text, no query or
+    #: intent text, no secret. ``entity_id`` carries the key id. A call with
+    #: no key (local or anonymous) records nothing.
+    KEY_READ = "access.key_read"
+
+    #: The access-log step failed (``trellis.core.access_log``). The step is
+    #: advisory and wrapped whole, so a failure never fails the read; this row
+    #: is how an operator learns reads went unrecorded. At most one per
+    #: minute per process. Payload: ``{surface, error_type}``, the exception
+    #: class name only (a message can carry a DSN).
+    ACCESS_LOG_FAILED = "access.log_failed"
+
     # Graph
     LINK_CREATED = "link.created"
     LINK_REMOVED = "link.removed"

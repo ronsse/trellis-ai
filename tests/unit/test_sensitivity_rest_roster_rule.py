@@ -93,6 +93,7 @@ HANDS_REGISTRY = frozenset(
 KNOWN_GAPS: frozenset[str] = frozenset()
 
 ROSTER: dict[str, str] = {
+    "access_log:key_reads": ADMIN,  # GET /access-log/keys
     "admin:health": ADMIN,  # GET /health
     "admin:stats": ADMIN,  # GET /stats
     "admin:runtime": ADMIN,  # GET /runtime

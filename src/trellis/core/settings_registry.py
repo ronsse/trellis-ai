@@ -579,6 +579,26 @@ _SPECS: tuple[SettingSpec, ...] = (
         minimum_exclusive=True,
     ),
     SettingSpec(
+        name="access_log",
+        label="Per-key access log",
+        type="bool",
+        default=True,
+        description=(
+            "Records one access.key_read event for every read an API key "
+            "makes over REST or MCP: the key id, the route or tool, how "
+            "many items came back and the first few ids. It holds no "
+            "document text, no query text and no secret. On by default. "
+            "Off writes no row at all. Calls with no key record nothing "
+            "either way, and what a read returns is the same on or off."
+        ),
+        surfaces=("mcp", "api"),
+        restart_required=False,
+        risk="low",
+        group="ops",
+        settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["access_log"],
+    ),
+    SettingSpec(
         name="graph_seeding",
         label="Graph seeding",
         type="bool",

@@ -756,3 +756,29 @@ class TestResolveWriteBehaviourSeam:
             entry.get("event") == "write_behaviour_settings_read_failed"
             for entry in logs
         )
+
+
+class TestAccessLogKnob:
+    """``access_log`` is the one knob that ships on, so it reads off-spellings."""
+
+    def test_ships_on(self) -> None:
+        assert WriteBehaviourConfig().access_log is True
+        assert WriteBehaviourConfig.from_env({}).access_log is True
+
+    @pytest.mark.parametrize("spelling", ["0", "false", "no", "off", "OFF", " False "])
+    def test_off_spellings_turn_it_off(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["access_log"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).access_log is False
+
+    @pytest.mark.parametrize("spelling", ["", "   ", "1", "true", "maybe"])
+    def test_anything_else_leaves_it_on(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["access_log"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).access_log is True
+
+    def test_turning_it_off_moves_only_its_own_field(self) -> None:
+        config = WriteBehaviourConfig.from_env({ENV_VAR_BY_FIELD["access_log"]: "0"})
+        defaults = WriteBehaviourConfig().as_dict()
+        changed = {
+            name for name, value in config.as_dict().items() if value != defaults[name]
+        }
+        assert changed == {"access_log"}

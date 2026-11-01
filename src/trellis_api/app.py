@@ -18,6 +18,7 @@ from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.write_provenance import get_write_provenance
 from trellis.errors import ConfigError, TrellisError
 from trellis.stores.registry import StoreRegistry
+from trellis_api.access_log import AccessLogMiddleware
 from trellis_api.auth import check_bind_is_safe, require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
@@ -226,6 +227,7 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     _bind_host, _bind_port = host, port
 
     from trellis_api.routes import (  # noqa: PLC0415
+        access_log,
         admin,
         analyze,
         classify_rules,
@@ -258,6 +260,10 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     # Request-ID correlation — runs before everything so health,
     # version, and /api/v1 routes all log with the same request_id.
     app.add_middleware(BaseHTTPMiddleware, dispatch=request_id_middleware)
+
+    # Per-key access log: one ``access.key_read`` row per authenticated read
+    # by a real key. Advisory, wrapped whole -- see ``trellis_api.access_log``.
+    app.add_middleware(AccessLogMiddleware)
 
     # The structured-500 / TrellisError / non-finite-422 handlers — shared
     # with the in-process testing shim, see register_exception_handlers.
@@ -315,6 +321,7 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     #                                   (route-level deps in
     #                                   routes/policies.py)
     #   settings                     -> admin (both GET and PUT/POST)
+    #   access-log                   -> admin
     #   classify_rules               -> read on GET /classify/rules, plus
     #                                   admin on the candidate list and
     #                                   mine/apply/revoke/dismiss
@@ -332,6 +339,12 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     )
     app.include_router(
         settings.router, prefix="/api/v1", tags=["settings"], dependencies=admin_auth
+    )
+    app.include_router(
+        access_log.router,
+        prefix="/api/v1",
+        tags=["access-log"],
+        dependencies=admin_auth,
     )
     app.include_router(
         ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=ingest_auth

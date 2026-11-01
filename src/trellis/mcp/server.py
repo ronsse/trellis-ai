@@ -86,6 +86,7 @@ from trellis.llm.egress import EgressGate, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp import supersession as _supersession
+from trellis.mcp.access_log import AccessLogMiddleware
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
     HttpSettings,
@@ -651,6 +652,8 @@ class _ExplainArgumentRejections(Middleware):
 
 
 mcp.add_middleware(_ExplainArgumentRejections(mcp))
+# The lambda is late binding: ``_get_registry`` is defined below this line.
+mcp.add_middleware(AccessLogMiddleware(lambda: _get_registry()))  # noqa: PLW0108
 
 
 _registry: StoreRegistry | None = None
