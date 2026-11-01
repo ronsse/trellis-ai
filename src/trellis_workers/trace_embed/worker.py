@@ -48,6 +48,7 @@ from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
+from trellis.stores.base.trace import as_utc
 from trellis_workers.trace_embed.handler import (
     TraceSummaryIngestHandler,
     build_trace_summary_command,
@@ -273,9 +274,11 @@ def collect_candidates(
             # position rather than stepping over the rest of the cluster.
             window *= 2
             continue
-        upper = min(t.created_at for t in page)
+        upper = min(as_utc(t.created_at) for t in page)
 
-    ordered = sorted(seen.values(), key=lambda t: (t.created_at, t.trace_id))
+    # By instant: a trace read back keeps the ``created_at`` it was appended
+    # with, naive or offset, and a naive one does not compare with an aware one.
+    ordered = sorted(seen.values(), key=lambda t: (as_utc(t.created_at), t.trace_id))
     if after is not None:
         # ``since`` is inclusive, so the cursor's own trace comes back. Drop
         # everything at or before it — it is confirmed done by definition.

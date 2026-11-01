@@ -9,7 +9,7 @@ import structlog
 
 from trellis.errors import StoreError
 from trellis.schemas.trace import Trace
-from trellis.stores.base.trace import TraceStore
+from trellis.stores.base.trace import TraceStore, as_utc
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -76,7 +76,10 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
                         agent_id,
                         outcome_status,
                         trace.model_dump_json(),
-                        trace.created_at,
+                        # A naive datetime would be bound as ``timestamp`` and
+                        # read in the session's time zone; the other stores
+                        # and the embed worker read it as UTC.
+                        as_utc(trace.created_at),
                     ),
                 )
         except psycopg.errors.UniqueViolation as exc:
@@ -133,10 +136,10 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
             params.append(agent_id)
         if since is not None:
             conditions.append("created_at >= %s")
-            params.append(since)
+            params.append(as_utc(since))
         if until is not None:
             conditions.append("created_at <= %s")
-            params.append(until)
+            params.append(as_utc(until))
 
         where = ""
         if conditions:

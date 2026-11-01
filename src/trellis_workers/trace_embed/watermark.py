@@ -43,6 +43,8 @@ from typing import Any
 
 import structlog
 
+from trellis.stores.base.trace import as_utc
+
 logger = structlog.get_logger(__name__)
 
 __all__ = ["TraceCursor", "TraceEmbedWatermark"]
@@ -59,6 +61,12 @@ class TraceCursor:
 
     created_at: datetime
     trace_id: str
+
+    def __post_init__(self) -> None:
+        # Aware UTC always, so two cursors compare by instant. A cursor file an
+        # earlier build wrote from a naive trace holds a naive stamp, and it
+        # would otherwise raise against the aware one a newer pass computes.
+        object.__setattr__(self, "created_at", as_utc(self.created_at))
 
     def to_json(self) -> dict[str, str]:
         return {"created_at": self.created_at.isoformat(), "trace_id": self.trace_id}
