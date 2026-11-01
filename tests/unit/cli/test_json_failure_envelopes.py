@@ -334,6 +334,47 @@ def _adr_refuses_to_overwrite(tmp_path, monkeypatch):
     return args, "Refusing to overwrite existing ADR", EXIT_INTERNAL
 
 
+def _adr_args(output: Path, *extra: str) -> list[str]:
+    args = ["admin", "draft-promotion-adr", _CANDIDATE_ID, "--no-meta-trace"]
+    return [*args, "--output", str(output), *extra]
+
+
+def _adr_refuses_a_dangling_link(tmp_path, monkeypatch):
+    _seed_candidate(tmp_path)
+    link = tmp_path / "adr.md"
+    link.symlink_to(tmp_path / "gone" / "adr.md")
+    return _adr_args(link), "Refusing to overwrite existing ADR", EXIT_INTERNAL
+
+
+def _adr_refuses_a_link_loop(tmp_path, monkeypatch):
+    _seed_candidate(tmp_path)
+    first, second = tmp_path / "a.md", tmp_path / "b.md"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    return _adr_args(first), "Refusing to overwrite existing ADR", EXIT_INTERNAL
+
+
+def _adr_cannot_write_through_a_link_loop(tmp_path, monkeypatch):
+    _seed_candidate(tmp_path)
+    first, second = tmp_path / "a.md", tmp_path / "b.md"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    return _adr_args(first, "--force"), "Could not write the ADR", EXIT_VALIDATION
+
+
+def _adr_cannot_write_under_a_regular_file(tmp_path, monkeypatch):
+    _seed_candidate(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    args = _adr_args(blocker / "adr.md", "--force")
+    return args, "Could not write the ADR", EXIT_VALIDATION
+
+
+def _generate_proposals_dry_run(tmp_path, monkeypatch):
+    args = ["admin", "generate-proposals", "--dry-run"]
+    return args, "--dry-run is not supported", EXIT_VALIDATION
+
+
 def _learning_params_unusable(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -378,6 +419,15 @@ CASES: dict[str, Setup] = {
     "show-proposal-blank-id": _show_proposal_blank_id,
     "draft-promotion-adr-candidate-not-found": _adr_candidate_not_found,
     "draft-promotion-adr-refuses-to-overwrite": _adr_refuses_to_overwrite,
+    "draft-promotion-adr-refuses-a-dangling-link": _adr_refuses_a_dangling_link,
+    "draft-promotion-adr-refuses-a-link-loop": _adr_refuses_a_link_loop,
+    "draft-promotion-adr-cannot-write-through-a-link-loop": (
+        _adr_cannot_write_through_a_link_loop
+    ),
+    "draft-promotion-adr-cannot-write-under-a-regular-file": (
+        _adr_cannot_write_under_a_regular_file
+    ),
+    "generate-proposals-dry-run": _generate_proposals_dry_run,
     "analyze-learning-candidates-unusable-learning-params": _learning_params_unusable,
     "worker-curate-unusable-learning-params": _worker_curate_learning_params_unusable,
 }
@@ -454,6 +504,23 @@ def test_a_forced_overwrite_leaves_stdout_one_json_object(tmp_path: Path) -> Non
     payload = json.loads(machine.stdout)
     assert payload["status"] == "ok"
     assert payload["candidate_id"] == _CANDIDATE_ID
+
+
+def test_a_forced_draft_writes_through_a_dangling_link_to_a_reachable_target(
+    tmp_path: Path,
+) -> None:
+    """The link is the operator's choice of destination; ``--force`` honours it."""
+    _seed_candidate(tmp_path)
+    target_dir = tmp_path / "docs"
+    target_dir.mkdir()
+    link = tmp_path / "adr.md"
+    link.symlink_to(target_dir / "adr.md")
+
+    result = runner.invoke(app, [*_adr_args(link, "--force"), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "ok"
+    assert (target_dir / "adr.md").is_file()
 
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
