@@ -6,9 +6,11 @@ cannot promise that, however the page is cut afterwards: a hidden row can
 outrank a public one, and a hidden row moves the corpus statistics (document
 frequency, vector width) every score is computed from. So the public path
 never ranks, matches or counts a hidden row, and does not search the store. The
-label filter still scans hidden rows, so status and body depend on hidden rows only
-through a store fault (a row the store cannot read fails the read, whatever the
-query holds), and the time a read takes grows with them:
+label filter still scans hidden rows, so the time a read takes grows with them, but
+status and body do not: a row whose metadata the store cannot read does not match
+the filter (:class:`~trellis.stores.base.document.ReadableMatch`), is withheld and
+warned about, and does not fail the read, whatever the query holds (a public row
+whose own text columns are not UTF-8 still does; see the operations guide):
 
 * **Which rows.** One read, :func:`read_public_documents`: the newest
   :data:`PUBLIC_ROW_CEILING` documents the label predicate selects
@@ -55,6 +57,7 @@ from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
     public_label_record,
 )
+from trellis.stores.base.document import ReadableMatch
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -140,10 +143,12 @@ def public_label_filter() -> dict[str, Any]:
     the gate cannot disagree about what "public" is. A document whose record
     reads ``public`` and carries anything more (regulatory tags, a jurisdiction,
     another classifier) or less (bare frontmatter) does not match and is not
-    served: the predicate fails closed. ``tests/unit/retrieve/
+    served: the predicate fails closed. A row whose metadata cannot be read at all
+    does not match either (the value is a ``ReadableMatch``), instead of failing the
+    read. ``tests/unit/retrieve/
     test_public_label_pin.py`` pins a literal record against both.
     """
-    return {DATA_CLASSIFICATION_KEY: public_label_record()}
+    return {DATA_CLASSIFICATION_KEY: ReadableMatch(public_label_record())}
 
 
 def query_words(query: str) -> list[str]:
