@@ -19,10 +19,12 @@ from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
+from trellis_workers.learning.miner import MiningReport
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,6 +66,16 @@ class _CountingLLM:
         return LLMResponse(content=self._content, model=model or "test-model")
 
 
+class _FailingLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, **_kwargs: Any) -> LLMResponse:
+        self.calls += 1
+        msg = "model unreachable"
+        raise RuntimeError(msg)
+
+
 @pytest.fixture
 def stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegistry:
     data_dir = tmp_path / "data"
@@ -84,7 +96,12 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> _CountingLLM:
     return stub
 
 
-def _seed(stores: StoreRegistry, statuses: list[OutcomeStatus]) -> None:
+def _seed(
+    stores: StoreRegistry,
+    statuses: list[OutcomeStatus],
+    *,
+    domain: str = "mining",
+) -> None:
     """Append one trace per status, oldest first."""
     for i, status in enumerate(statuses):
         stores.operational.trace_store.append(
@@ -92,7 +109,7 @@ def _seed(stores: StoreRegistry, statuses: list[OutcomeStatus]) -> None:
                 source=TraceSource.AGENT,
                 intent=f"task-{i}",
                 outcome=Outcome(status=status, summary=f"outcome {i}"),
-                context=TraceContext(domain="mining"),
+                context=TraceContext(domain=domain),
                 created_at=_EPOCH + timedelta(minutes=i),
             )
         )
@@ -301,3 +318,359 @@ class TestColour:
 
         out = " ".join(assert_coloured(result.stdout).split())
         assert first["candidates"][0]["precedent_id"] in out
+
+
+class TestScopeAndLimitReachTheMiner:
+    def test_a_real_run_is_scoped_to_its_domain(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4, domain="mining")
+
+        elsewhere = _json(_run("--domain", "other", "--format", "json"))
+        here = _json(_run("--domain", "mining", "--format", "json"))
+
+        assert elsewhere["outcome"] == "no_failures"
+        assert elsewhere["domain"] == "other"
+        assert here["outcome"] == "mined"
+        assert llm.calls == 1
+
+    def test_a_dry_run_is_scoped_to_its_domain(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4, domain="mining")
+
+        elsewhere = _json(_run("--dry-run", "--domain", "other", "--format", "json"))
+        here = _json(_run("--dry-run", "--domain", "mining", "--format", "json"))
+
+        assert elsewhere["failure_traces_in_scope"] == 0
+        assert elsewhere["would_mine"] is False
+        assert here["failure_traces_in_scope"] == 4
+        assert here["would_mine"] is True
+
+    def test_a_real_run_counts_failures_against_its_limit(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 10)
+
+        data = _json(_run("--limit", "4", "--min-traces", "3", "--format", "json"))
+
+        assert data["failure_traces_in_scope"] == 4
+
+    def test_a_dry_run_counts_failures_against_its_limit(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 10)
+
+        data = _json(
+            _run("--dry-run", "--limit", "4", "--min-traces", "3", "--format", "json")
+        )
+
+        assert data["failure_traces_in_scope"] == 4
+
+
+class TestArgumentsThatCannotMine:
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_a_limit_below_min_traces_is_refused_in_both_formats(
+        self, stores: StoreRegistry, llm: _CountingLLM, fmt: str
+    ) -> None:
+        _seed(stores, [F] * 10)
+
+        result = _run("--limit", "2", "--min-traces", "5", "--format", fmt)
+
+        assert result.exit_code == 2
+        assert llm.calls == 0
+        if fmt == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["status"] == "error"
+            assert "--limit (2)" in data["message"]
+        else:
+            assert "--limit (2) is below --min-traces (5)" in _flat(result)
+
+    def test_a_dry_run_refuses_it_too(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 10)
+
+        result = _run("--dry-run", "--limit", "2", "--min-traces", "5")
+
+        assert result.exit_code == 2
+
+    @pytest.mark.parametrize(
+        "args", [["--limit", "0"], ["--min-traces", "0"], ["--scan-cap", "0"]]
+    )
+    def test_a_zero_that_can_read_or_mine_nothing_is_a_usage_error(
+        self, stores: StoreRegistry, llm: _CountingLLM, args: list[str]
+    ) -> None:
+        _seed(stores, [F] * 4)
+
+        result = _run(*args)
+
+        assert result.exit_code == 2
+        assert llm.calls == 0
+        # Refused by the option's own range, not by the --limit/--min-traces
+        # cross-check, which would otherwise answer a zero limit.
+        assert "is below --min-traces" not in result.output
+
+
+class TestAFailedModelCall:
+    def test_json_says_partial_and_names_the_outage(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        failing = _FailingLLM()
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda _c, *, command: failing
+        )
+        _seed(stores, [F] * 4)
+
+        result = _run("--format", "json")
+
+        data = json.loads(result.stdout.strip())
+        assert result.exit_code == 0
+        assert data["status"] == "partial"
+        assert data["outcome"] == "llm_error"
+        assert data["candidate_count"] == 0
+        assert failing.calls == 1
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_the_exit_code_is_the_same_in_both_formats(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _c, *, command: _FailingLLM(),
+        )
+        _seed(stores, [F] * 4)
+
+        default = _run("--format", fmt)
+        strict = _run("--strict", "--format", fmt)
+
+        assert default.exit_code == 0
+        assert strict.exit_code == 1
+
+    def test_strict_does_not_fail_a_run_that_worked(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+
+        result = _run("--strict", "--format", "json")
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout.strip())["status"] == "ok"
+
+    def test_a_model_that_returns_nothing_is_not_a_failed_call(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _c, *, command: _CountingLLM("[]"),
+        )
+        _seed(stores, [F] * 4)
+
+        result = _run("--strict", "--format", "json")
+
+        data = json.loads(result.stdout.strip())
+        assert result.exit_code == 0
+        assert data["status"] == "ok"
+        assert data["outcome"] == "no_candidates"
+
+    def test_a_cut_off_read_stays_ok(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4 + [S] * 12)
+
+        result = _run("--scan-cap", "8", "--strict", "--format", "json")
+
+        data = json.loads(result.stdout.strip())
+        assert result.exit_code == 0
+        assert data["status"] == "ok"
+        assert data["outcome"] == "read_bound_hit"
+
+
+class TestTextNamesEveryOutcome:
+    def test_a_model_that_returns_nothing_says_so_in_text(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _c, *, command: _CountingLLM("[]"),
+        )
+        _seed(stores, [F] * 4)
+
+        out = _flat(_run())
+
+        assert "no candidates:" in out
+        assert "the next run asks again" in out
+        assert "llm error" not in out
+
+    def test_an_outage_says_so_in_text(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _c, *, command: _FailingLLM(),
+        )
+        _seed(stores, [F] * 4)
+
+        out = _flat(_run())
+
+        assert "llm error:" in out
+        assert "the model call failed" in out
+        assert "no candidates" not in out
+
+    def test_a_real_run_says_it_mined(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+
+        out = _flat(_run())
+
+        assert "mined: 1 candidate(s) from 4 failure/partial trace(s)" in out
+
+    def test_a_dry_run_says_what_a_run_would_do(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+
+        out = _flat(_run("--dry-run"))
+
+        assert "would mine: a real run would show the model 4" in out
+
+    def test_a_dry_run_says_what_it_found_when_it_would_skip(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+        _run("--format", "json")
+
+        out = _flat(_run("--dry-run"))
+
+        assert "skipped:" in out
+        assert "already mined" in out
+
+    def test_a_read_to_its_end_below_the_minimum_says_so(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F, F, S, S])
+
+        out = _flat(_run())
+
+        assert "Below --min-traces (3): the store was read to its end." in out
+
+    def test_the_cut_off_sentence_rides_on_a_run_that_mined(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 2 + [S] * 20 + [F] * 3)
+
+        out = _flat(_run("--scan-cap", "22", "--min-traces", "3", "--limit", "10"))
+
+        assert "mined: 1 candidate(s)" in out
+        assert "read stopped at the 22-trace cap" in out
+
+    def test_the_cut_off_sentence_is_not_said_of_an_uncut_read(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+
+        assert "trace cap" not in _flat(_run())
+
+    @pytest.mark.parametrize(
+        ("outcome", "fragment"),
+        [
+            ("mined", "mined: 1 candidate(s) from 0"),
+            ("would_mine", "would mine: a real run would show the model 0"),
+            ("skipped_unchanged", "were already mined into 0 candidate(s)"),
+            ("no_failures", "No failure/partial traces: read 9 trace(s)"),
+            ("below_min_traces", "only 2 were kept, so nothing was mined"),
+            ("no_candidates", "returned none; nothing was written"),
+            ("llm_error", "the model call failed; nothing was written"),
+            ("no_llm", "No model is configured"),
+            ("read_bound_hit", "read stopped at the 50-trace cap"),
+        ],
+    )
+    def test_each_outcome_has_its_own_sentence(
+        self, outcome: Any, fragment: str
+    ) -> None:
+        # ``read_to_end`` is False here, so a below-minimum run caused by a
+        # small ``--limit`` (reachable only through the API) is not said to
+        # have read the store to its end.
+        report = MiningReport(
+            outcome=outcome,
+            failures_in_scope=2,
+            traces_examined=9,
+            scan_cap=50,
+            read_bound_hit=outcome == "read_bound_hit",
+            candidates=(_one_candidate(),) if outcome == "mined" else (),
+        )
+
+        with worker.console.capture() as captured:
+            worker._print_mining_outcome(report, min_traces=3)
+
+        assert fragment in " ".join(plain(captured.get()).split())
+
+
+def _one_candidate() -> Any:
+    from trellis.schemas.precedent import Precedent
+
+    return Precedent(
+        precedent_id="p1",
+        source_trace_ids=[],
+        title="t",
+        description="d",
+        promoted_by="precedent_miner",
+    )
+
+
+class TestSkipOutputNamesWhatWasAnalysed:
+    def test_the_skip_counts_the_traces_the_model_was_shown(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 25)
+        first = _json(_run("--format", "json"))
+
+        again = _run()
+
+        out = _flat(again)
+        assert first["failure_traces_in_scope"] == 25
+        assert "these 20 failure/partial trace(s) were already mined" in out
+        assert "these 25" not in out
+
+    def test_the_skip_ids_survive_markup_characters(
+        self, stores: StoreRegistry, llm: _CountingLLM
+    ) -> None:
+        _seed(stores, [F] * 4)
+        digest = _json(_run("--dry-run", "--format", "json"))["source_digest"]
+        stores.operational.event_log.emit(
+            EventType.PRECEDENT_CANDIDATE_MINED,
+            source="precedent_miner",
+            entity_id="cand-[x] :fire:",
+            entity_type="precedent",
+            payload={
+                "source_digest": digest,
+                "mining_run_id": "run-1",
+                "run_candidate_count": 1,
+            },
+        )
+
+        out = _flat(_run())
+
+        assert "cand-[x] :fire:" in out
+
+    def test_a_candidate_title_survives_markup_characters(
+        self, stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reply = json.dumps(
+            [{"title": "Retry [config] :fire: loop", "description": "d"}]
+        )
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _c, *, command: _CountingLLM(reply),
+        )
+        _seed(stores, [F] * 4)
+
+        out = _flat(_run())
+
+        assert "Retry [config] :fire: loop" in out

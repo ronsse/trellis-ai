@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import trellis_workers.learning.miner as miner_module
 from trellis.llm import LLMResponse, Message
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.precedent import Precedent
@@ -699,7 +700,9 @@ class TestLimitCountsFailures:
         scan = scan_failure_traces(spy, domain=None, limit=3)  # type: ignore[arg-type]
 
         assert len(scan.traces) == 3
-        assert len(spy.limits) == 1
+        # One read, 100 wide though ``limit`` is 3, plus the row that says
+        # whether the store goes on.
+        assert spy.limits == [101]
 
 
 def _is_f(trace: Trace) -> bool:
@@ -973,3 +976,560 @@ class TestRerunMintsNoDuplicates:
         assert (
             event_log.get_events(event_type=EventType.PRECEDENT_CANDIDATE_MINED) == []
         )
+
+
+# ---------------------------------------------------------------------------
+# A run is judged by its events as a whole
+# ---------------------------------------------------------------------------
+
+_THREE_ITEMS_SECOND_MALFORMED = json.dumps(
+    [
+        {"title": "A", "description": "d", "pattern": "p"},
+        {"title": "B", "description": "d", "pattern": ["x", "y"]},
+        {"title": "C", "description": "d"},
+    ]
+)
+
+_TWO_ITEMS = json.dumps(
+    [
+        {"title": "A", "description": "d", "pattern": "p", "confidence": 0.5},
+        {"title": "B", "description": "d", "pattern": "q", "confidence": 0.6},
+    ]
+)
+
+
+def _mined_events(event_log: SQLiteEventLog) -> list[Any]:
+    return event_log.get_events(event_type=EventType.PRECEDENT_CANDIDATE_MINED)
+
+
+class TestRunCompleteness:
+    """A run cut off part-way is not a record a later run may skip against."""
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_item_mints_nothing_and_the_next_run_asks_again(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        from trellis.extract.telemetry import ExtractionFailureError
+
+        _seed_timeline(trace_store, statuses=[F] * 5)
+
+        bad = PrecedentMiner(
+            trace_store,
+            event_log=event_log,
+            llm=_StubLLM(_THREE_ITEMS_SECOND_MALFORMED),
+        )
+        with pytest.raises(ExtractionFailureError):
+            await bad.mine()
+        assert _mined_events(event_log) == []
+
+        llm = _CountingLLM(_MOCK_JSON)
+        good = await PrecedentMiner(trace_store, event_log=event_log, llm=llm).mine()
+
+        assert good.outcome == "mined"
+        assert len(llm.prompts) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_emit_part_way_is_retried_not_skipped(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 5)
+        real_emit = event_log.emit
+        calls = {"n": 0}
+
+        def flaky_emit(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                msg = "disk full"
+                raise RuntimeError(msg)
+            return real_emit(*args, **kwargs)
+
+        monkeypatch.setattr(event_log, "emit", flaky_emit)
+        cut_off = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+        )
+        with pytest.raises(RuntimeError, match="disk full"):
+            await cut_off.mine()
+        assert len(_mined_events(event_log)) == 1
+
+        llm = _CountingLLM(_TWO_ITEMS)
+        retry = await PrecedentMiner(trace_store, event_log=event_log, llm=llm).mine()
+
+        assert retry.outcome == "mined"
+        assert len(llm.prompts) == 1
+        assert len(_mined_events(event_log)) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_complete_run_skips_and_names_only_its_own_candidates(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 5)
+        real_emit = event_log.emit
+        calls = {"n": 0}
+
+        def flaky_emit(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                msg = "disk full"
+                raise RuntimeError(msg)
+            return real_emit(*args, **kwargs)
+
+        monkeypatch.setattr(event_log, "emit", flaky_emit)
+        with pytest.raises(RuntimeError):
+            await PrecedentMiner(
+                trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+            ).mine()
+        monkeypatch.setattr(event_log, "emit", real_emit)
+
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+        )
+        complete = await miner.mine()
+        skipped = await miner.mine()
+
+        assert skipped.outcome == "skipped_unchanged"
+        # Three events exist; the orphan from the cut-off run is not named.
+        assert len(_mined_events(event_log)) == 3
+        assert set(skipped.already_mined) == {
+            c.precedent_id for c in complete.candidates
+        }
+        assert len(skipped.already_mined) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_runs_events_share_an_id_and_declare_its_size(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 5)
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+        )
+        await miner.mine()
+        trace_store.append(_make_trace(status=F, created_at=_EPOCH + timedelta(days=1)))
+        await miner.mine()
+
+        events = _mined_events(event_log)
+
+        assert len(events) == 4
+        by_run: dict[str, list[Any]] = {}
+        for event in events:
+            by_run.setdefault(event.payload["mining_run_id"], []).append(event)
+        assert len(by_run) == 2
+        assert all(len(group) == 2 for group in by_run.values())
+        assert all(e.payload["run_candidate_count"] == 2 for e in events)
+
+    @pytest.mark.asyncio
+    async def test_a_run_larger_than_the_lookup_cannot_be_shown_complete(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(miner_module, "_RUN_LOOKUP_LIMIT", 1)
+        _seed_timeline(trace_store, statuses=[F] * 5)
+        llm = _CountingLLM(_TWO_ITEMS)
+
+        miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+        await miner.mine()
+        second = await miner.mine()
+
+        # Two events, one readable: the run is not provably whole.
+        assert second.outcome == "mined"
+        assert len(llm.prompts) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_run_as_large_as_the_lookup_is_complete(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(miner_module, "_RUN_LOOKUP_LIMIT", 2)
+        _seed_timeline(trace_store, statuses=[F] * 5)
+
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+        )
+        await miner.mine()
+
+        assert (await miner.mine()).outcome == "skipped_unchanged"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source", "event_type"),
+        [
+            ("someone_else", EventType.PRECEDENT_CANDIDATE_MINED),
+            ("precedent_miner", EventType.PRECEDENT_PROMOTED),
+        ],
+    )
+    async def test_only_the_miners_candidate_events_count(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        source: str,
+        event_type: EventType,
+    ) -> None:
+        traces = _seed_timeline(trace_store, statuses=[F] * 4)
+        event_log.emit(
+            event_type,
+            source=source,
+            entity_id="not-a-mined-candidate",
+            entity_type="precedent",
+            payload={
+                "source_digest": compute_source_digest(traces, None),
+                "mining_run_id": "r1",
+                "run_candidate_count": 1,
+            },
+        )
+
+        report = await PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm()
+        ).mine()
+
+        assert report.outcome == "mined"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("extra", "entity_id"),
+        [
+            ({}, "earlier-build"),
+            ({"run_candidate_count": 1}, "no-run-id"),
+            ({"mining_run_id": "r1"}, "no-count"),
+            ({"mining_run_id": "r1", "run_candidate_count": True}, "bool-count"),
+            ({"mining_run_id": 7, "run_candidate_count": 1}, "int-run-id"),
+            ({"mining_run_id": "r1", "run_candidate_count": 1}, None),
+        ],
+        ids=[
+            "digest_only",
+            "no_run_id",
+            "no_count",
+            "bool_count",
+            "non_str_run_id",
+            "no_candidate_id",
+        ],
+    )
+    async def test_an_event_that_cannot_be_judged_is_not_a_record_to_skip_against(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        extra: dict[str, Any],
+        entity_id: str | None,
+    ) -> None:
+        traces = _seed_timeline(trace_store, statuses=[F] * 4)
+        event_log.emit(
+            EventType.PRECEDENT_CANDIDATE_MINED,
+            source="precedent_miner",
+            entity_id=entity_id,
+            entity_type="precedent",
+            payload={"source_digest": compute_source_digest(traces, None), **extra},
+        )
+
+        report = await PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm()
+        ).mine()
+
+        assert report.outcome == "mined"
+
+    def test_the_newest_complete_run_is_the_one_named(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Two whole runs over the same input (one written by a build that did
+        # not skip) and a lookup that holds only one run's worth: it must be
+        # the newest events it reads, not the oldest.
+        monkeypatch.setattr(miner_module, "_RUN_LOOKUP_LIMIT", 2)
+        traces = _seed_timeline(trace_store, statuses=[F] * 4)
+        digest = compute_source_digest(traces, None)
+        for run_id, ids in (("old", ("o1", "o2")), ("new", ("n1", "n2"))):
+            for candidate_id in ids:
+                event_log.emit(
+                    EventType.PRECEDENT_CANDIDATE_MINED,
+                    source="precedent_miner",
+                    entity_id=candidate_id,
+                    entity_type="precedent",
+                    payload={
+                        "source_digest": digest,
+                        "mining_run_id": run_id,
+                        "run_candidate_count": 2,
+                    },
+                )
+
+        report = PrecedentMiner(trace_store, event_log=event_log).plan()
+
+        assert report.outcome == "skipped_unchanged"
+        assert report.already_mined == ("n1", "n2")
+
+
+# ---------------------------------------------------------------------------
+# How much of the store a run reads, and what it shows the model
+# ---------------------------------------------------------------------------
+
+
+class TestScanStopsWhenItHasEnough:
+    def test_a_large_default_limit_does_not_walk_the_ladder_for_failures_it_cannot_use(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        # 21 failures newest, then 6,000 older successes: 20 is all the model
+        # is ever shown, so one 100-wide read is enough and no bound is hit.
+        _seed_timeline(trace_store, statuses=[S] * 6_000 + [F] * 21)
+        spy = _SpyTraceStore(trace_store)
+
+        scan = scan_failure_traces(spy, domain=None, limit=100)  # type: ignore[arg-type]
+
+        assert spy.limits == [101]
+        assert len(scan.traces) == 21
+        assert scan.examined == 100
+        assert scan.bound_hit is False
+        assert scan.exhausted is False
+
+    def test_min_traces_above_twenty_raises_the_target(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        # 30 failures sit 150 successes back; a minimum of 25 needs them all.
+        _seed_timeline(trace_store, statuses=[F] * 30 + [S] * 150)
+        spy = _SpyTraceStore(trace_store)
+
+        scan = scan_failure_traces(spy, domain=None, limit=100, min_traces=25)  # type: ignore[arg-type]
+
+        assert spy.limits == [101, 201]
+        assert len(scan.traces) == 30
+
+    def test_the_read_widens_by_doubling_to_the_failures(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 3 + [S] * 450)
+        spy = _SpyTraceStore(trace_store)
+
+        scan = scan_failure_traces(spy, domain=None, limit=3)  # type: ignore[arg-type]
+
+        assert spy.limits == [101, 201, 401, 801]
+        assert scan.examined == 453
+        assert len(scan.traces) == 3
+
+    def test_the_cap_ends_the_widening_and_is_not_exhaustion(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[S] * 400)
+        spy = _SpyTraceStore(trace_store)
+
+        scan = scan_failure_traces(spy, domain=None, limit=5, scan_cap=150)  # type: ignore[arg-type]
+
+        assert spy.limits == [101, 151]
+        assert scan.examined == 150
+        assert scan.bound_hit is True
+        assert scan.exhausted is False
+
+    @pytest.mark.parametrize(("limit", "scan_cap"), [(0, 100), (-1, 100), (5, 0)])
+    def test_a_scan_that_cannot_read_anything_is_refused(
+        self, trace_store: SQLiteTraceStore, limit: int, scan_cap: int
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[S] * 3)
+
+        with pytest.raises(ValueError, match="at least 1"):
+            scan_failure_traces(
+                trace_store, domain=None, limit=limit, scan_cap=scan_cap
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_api_refuses_what_it_cannot_read_instead_of_reporting_it_read(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+
+        with pytest.raises(ValueError, match="at least 1"):
+            await miner.mine(limit=0)
+        with pytest.raises(ValueError, match="at least 1"):
+            await miner.mine(scan_cap=0)
+        with pytest.raises(ValueError, match="at least 1"):
+            miner.plan(limit=0)
+
+    @pytest.mark.asyncio
+    async def test_generate_honours_the_scan_cap(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 5 + [S] * 30)
+        llm = _CountingLLM(_MOCK_JSON)
+
+        result = await PrecedentMiner(
+            trace_store, llm=llm
+        ).generate_precedent_candidates(scan_cap=20)
+
+        assert result == []
+        assert llm.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_a_model_is_shown_at_most_twenty_of_the_newest_failures(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        traces = _seed_timeline(trace_store, statuses=[F] * 25)
+        llm = _CountingLLM(_MOCK_JSON)
+
+        report = await PrecedentMiner(trace_store, llm=llm).mine()
+
+        newest_twenty = [t.trace_id for t in traces][::-1][:20]
+        assert report.failures_in_scope == 25
+        assert [t.trace_id for t in report.analyzed] == newest_twenty
+        assert "Analyze these 20 failed/partial traces" in llm.prompts[0]
+        assert len(report.candidates[0].source_trace_ids) == 20
+
+    @pytest.mark.asyncio
+    async def test_an_older_failure_beyond_the_newest_twenty_is_not_a_new_input(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        # Disclosed, not paged: failures past the newest 20 are never shown,
+        # so adding one changes nothing the model would see.
+        _seed_timeline(trace_store, statuses=[F] * 25)
+        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        await miner.mine()
+
+        trace_store.append(_make_trace(status=F, created_at=_EPOCH - timedelta(days=1)))
+        again = await miner.mine()
+
+        assert again.failures_in_scope == 26
+        assert again.outcome == "skipped_unchanged"
+
+    @pytest.mark.asyncio
+    async def test_a_limit_below_twenty_caps_what_is_shown(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 25)
+
+        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(limit=5)
+
+        assert report.failures_in_scope == 5
+        assert len(report.analyzed) == 5
+
+    @pytest.mark.asyncio
+    async def test_without_a_model_the_outcome_is_no_llm(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 5)
+
+        report = await PrecedentMiner(trace_store).mine(scan_cap=77)
+
+        assert report.outcome == "no_llm"
+        assert report.scan_cap == 77
+        assert report.candidates == ()
+
+
+class TestMinTracesAndLimit:
+    @pytest.mark.asyncio
+    async def test_a_minimum_of_zero_over_no_failures_asks_nothing(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[S] * 3)
+        llm = _CountingLLM(_MOCK_JSON)
+
+        miner = PrecedentMiner(trace_store, llm=llm)
+        mined = await miner.mine(min_traces=0)
+        planned = miner.plan(min_traces=0)
+
+        assert mined.outcome == "no_failures"
+        assert planned.outcome == "no_failures"
+        assert llm.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_a_minimum_of_zero_over_a_cut_off_read_is_not_no_failures(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 3 + [S] * 30)
+
+        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(
+            min_traces=0, scan_cap=10
+        )
+
+        assert report.outcome == "read_bound_hit"
+
+    @pytest.mark.asyncio
+    async def test_a_limit_below_the_minimum_reads_no_further_than_it_needs(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        # The API does not refuse it (the CLI does): it reports below the
+        # minimum, and does not claim the store was read to its end.
+        _seed_timeline(trace_store, statuses=[F] * 10)
+        llm = _CountingLLM(_MOCK_JSON)
+
+        report = await PrecedentMiner(trace_store, llm=llm).mine(min_traces=5, limit=2)
+
+        assert report.outcome == "below_min_traces"
+        assert report.failures_in_scope == 2
+        assert report.read_to_end is False
+        assert llm.prompts == []
+
+    @pytest.mark.parametrize(
+        ("count", "scan_cap", "exhausted", "bound_hit"),
+        [(5, 100, True, False), (10, 6, False, True), (10, 100, False, False)],
+        ids=["store_ended", "cap_stopped_it", "enough_found"],
+    )
+    def test_a_scan_keeps_no_more_than_the_limit_however_it_stopped(
+        self,
+        trace_store: SQLiteTraceStore,
+        count: int,
+        scan_cap: int,
+        exhausted: bool,
+        bound_hit: bool,
+    ) -> None:
+        # Only the API can ask for a limit below the minimum, and the three
+        # ways a scan ends must all honour the limit it was given.
+        _seed_timeline(trace_store, statuses=[F] * count)
+
+        scan = scan_failure_traces(
+            trace_store, domain=None, limit=2, scan_cap=scan_cap, min_traces=8
+        )
+
+        assert len(scan.traces) == 2
+        assert (scan.exhausted, scan.bound_hit) == (exhausted, bound_hit)
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_did_reach_the_end_says_so(
+        self, trace_store: SQLiteTraceStore
+    ) -> None:
+        _seed_timeline(trace_store, statuses=[F] * 3)
+
+        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(
+            min_traces=5, limit=2
+        )
+
+        assert report.outcome == "below_min_traces"
+        assert report.read_to_end is True
+
+
+class TestANewSuccessAndTheReadWindow:
+    @pytest.mark.asyncio
+    async def test_a_new_success_mines_again_only_by_aging_a_failure_out(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        # Behaviour pinned, not endorsed: the input is the failures the read
+        # window holds, so a failure ageing out of it changes the digest. No
+        # subset check, because the next run is still a different question.
+        _seed_timeline(trace_store, statuses=[S, F, S, F, S, F])
+        llm = _CountingLLM(_MOCK_JSON)
+        miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+        kwargs = {"min_traces": 2, "scan_cap": 6}
+        assert (await miner.mine(**kwargs)).outcome == "mined"
+
+        # Pushes the oldest *success* out of the window: same failures.
+        trace_store.append(_make_trace(status=S, created_at=_EPOCH + timedelta(days=1)))
+        assert (await miner.mine(**kwargs)).outcome == "skipped_unchanged"
+
+        # Pushes the oldest *failure* out: the shrunken set is a new input.
+        trace_store.append(_make_trace(status=S, created_at=_EPOCH + timedelta(days=2)))
+        again = await miner.mine(**kwargs)
+
+        assert again.outcome == "mined"
+        assert again.failures_in_scope == 2
+        assert len(llm.prompts) == 2

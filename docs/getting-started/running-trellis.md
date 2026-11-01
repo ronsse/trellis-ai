@@ -183,10 +183,10 @@ This is a data-plane tagging pass (re-running it overwrites tags — reversible)
 
 ```bash
 trellis worker mine-precedents [--domain D] [--min-traces 3] \
-  [--limit 100] [--scan-cap 5000] [--dry-run] [--format text|json]
+  [--limit 100] [--scan-cap 5000] [--strict] [--dry-run] [--format text|json]
 ```
 
-Mines precedent candidates from failure/partial traces (wraps `PrecedentMiner.mine`). Candidates are **surfaced** (the miner emits `PRECEDENT_CANDIDATE_MINED` events) but **not auto-promoted** into the graph — review before acting. `--limit` counts failure/partial traces, read newest first up to `--scan-cap` traces; a run that stopped at the cap says `read_bound_hit`, which is not "no failures". A rerun over the same failure traces skips (`skipped_unchanged`) instead of minting duplicate candidates. `--dry-run` reports how many failure/partial traces are in scope, and whether a run would skip, without calling the LLM. Like `enrich`, it requires a configured LLM client and exits loudly when none is present. The full outcome list is in [`operations.md`](../agent-guide/operations.md#trellis-worker-mine-precedents).
+Mines precedent candidates from failure/partial traces (wraps `PrecedentMiner.mine`). Candidates are **surfaced** (the miner emits `PRECEDENT_CANDIDATE_MINED` events) but **not auto-promoted** into the graph — review before acting. `--limit` counts failure/partial traces (at most 20, the newest, are shown to the model per run), read newest first up to `--scan-cap` traces; a run that stopped at the cap says `read_bound_hit`, which is not "no failures". A rerun over the same failure traces skips (`skipped_unchanged`) instead of minting duplicate candidates, but only against a run that wrote all of its candidates. A failed model call exits 0 (`status: partial`) unless `--strict`. `--dry-run` reports how many failure/partial traces are in scope, and whether a run would skip, without calling the LLM. Like `enrich`, it requires a configured LLM client and exits loudly when none is present. The full outcome list is in [`operations.md`](../agent-guide/operations.md#trellis-worker-mine-precedents).
 
 **What it writes/emits:** precedent candidates, as `PRECEDENT_CANDIDATE_MINED` events.
 

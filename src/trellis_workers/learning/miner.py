@@ -54,11 +54,16 @@ DEFAULT_TRACE_SCAN_CAP = 5_000
 # run of tiny reads that each widen by one doubling.
 _SCAN_FIRST_WINDOW = 100
 
-# Most failure traces shown to the LLM in one request.
+# Most failure traces shown to the LLM in one request. Older failures beyond
+# these are not paged: a later run sees them only once newer ones age out of
+# the newest-first read.
 _MAX_ANALYZED = 20
 
-# Most earlier candidates a skipped run names back to the operator.
-_PRIOR_CANDIDATES_SHOWN = 20
+#: Newest candidate events one rerun check reads for a digest. A run counts as
+#: complete only when every event it declared is among them, so a run that
+#: minted more candidates than this can never be shown complete and mines again
+#: on every run. That is the safe direction: a duplicate, never a lost run.
+_RUN_LOOKUP_LIMIT = 200
 
 _FAILURE_STATUSES = (OutcomeStatus.FAILURE, OutcomeStatus.PARTIAL)
 
@@ -81,10 +86,11 @@ class FailureScan:
 
     ``traces`` is newest first and holds at most the ``limit`` asked for.
     ``examined`` is how many traces were read, failures or not. The two flags
-    say why the scan stopped short of ``limit`` failures, and are never both
-    true: ``exhausted`` means the store held nothing older than what was read,
-    ``bound_hit`` means the read stopped at ``scan_cap`` traces with older ones
-    left unread. A scan that found ``limit`` failures sets neither.
+    say why the scan stopped before it held enough failures to analyse (see
+    :func:`scan_failure_traces`), and are never both true: ``exhausted`` means
+    the store held nothing older than what was read, ``bound_hit`` means the
+    read stopped at ``scan_cap`` traces with older ones left unread. A scan
+    that held enough sets neither.
     """
 
     traces: list[Trace]
@@ -103,36 +109,51 @@ def scan_failure_traces(
     domain: str | None,
     limit: int,
     scan_cap: int = DEFAULT_TRACE_SCAN_CAP,
+    min_traces: int = 1,
 ) -> FailureScan:
-    """Read newest-first until ``limit`` failure/partial traces are found.
+    """Read newest-first until there are enough failure/partial traces to analyse.
 
     ``limit`` counts failures. Filtering the newest ``limit`` traces would count
     the successes too, so a run of recent successes hides every older failure.
     ``TraceStore.query`` has no outcome filter and a trace's outcome lives in
-    its JSON, so this widens the read instead: the newest ``limit`` traces,
-    then twice that, up to ``scan_cap``. A widening read, not a cursor, because
-    ``until`` is inclusive and traces can share a ``created_at``, which would
-    leave a cursor on a row it had already read. The cost is that a scan reaching
-    the cap reads about twice ``scan_cap`` rows in all.
+    its JSON, so this widens the read instead: the first read is the newest
+    ``max(limit, 100)`` traces (at most ``scan_cap``), then twice that, up to
+    ``scan_cap``. A widening read, not a cursor, because ``until`` is inclusive
+    and traces can share a ``created_at``, which would leave a cursor on a row
+    it had already read. The cost is that a scan reaching the cap reads up to
+    three times ``scan_cap`` rows in all.
+
+    The read stops once it holds ``max(min(limit, 20), min_traces)`` failures:
+    at most 20 are ever shown to the model, so reading on for the rest of a
+    large ``limit`` would cost a full ladder and change nothing. ``traces``
+    can still hold more than that, up to ``limit``, because a read keeps every
+    failure in its window. ``bound_hit`` therefore means fewer than that many
+    were found by the cap.
+
+    Raises:
+        ValueError: ``limit`` or ``scan_cap`` is below 1. Neither can read
+            anything, and returning an empty scan would let a caller report
+            that the store was read to its end.
     """
-    if limit < 1:
-        return FailureScan(traces=[], examined=0, exhausted=False, bound_hit=False)
-    cap = max(scan_cap, 1)
-    window = min(max(limit, _SCAN_FIRST_WINDOW), cap)
+    if limit < 1 or scan_cap < 1:
+        msg = f"limit and scan_cap must be at least 1, got {limit} and {scan_cap}"
+        raise ValueError(msg)
+    want = max(min(limit, _MAX_ANALYZED), min_traces)
+    window = min(max(limit, _SCAN_FIRST_WINDOW), scan_cap)
     while True:
         # One row past the window says whether the store has more behind it, so
-        # a store of exactly ``cap`` traces is not reported as cut off.
+        # a store of exactly ``scan_cap`` traces is not reported as cut off.
         batch = trace_store.query(domain=domain, limit=window + 1)
         more_behind = len(batch) > window
         read = batch[:window]
         failures = [t for t in read if _is_failure(t)]
-        if len(failures) >= limit:
+        if len(failures) >= want:
             return FailureScan(failures[:limit], len(read), False, False)
         if not more_behind:
-            return FailureScan(failures, len(read), True, False)
-        if window >= cap:
-            return FailureScan(failures, len(read), False, True)
-        window = min(window * 2, cap)
+            return FailureScan(failures[:limit], len(read), True, False)
+        if window >= scan_cap:
+            return FailureScan(failures[:limit], len(read), False, True)
+        window = min(window * 2, scan_cap)
 
 
 def compute_source_digest(analyzed: Sequence[Trace], domain: str | None) -> str:
@@ -160,8 +181,16 @@ class MiningReport:
     cap short of ``min_traces`` failures, so older ones were not looked at),
     ``below_min_traces``, ``skipped_unchanged`` (these traces were mined
     before), ``no_candidates`` (the model returned none) and ``llm_error``.
-    ``read_bound_hit`` also rides on a ``mined`` run that stopped short of
-    ``limit`` failures at the cap.
+    ``no_candidates`` and ``llm_error`` write nothing, so they leave nothing for
+    a later run to skip against: every scheduled run pays for the call again.
+    ``read_bound_hit`` also rides on a ``mined`` run that stopped short of the
+    failures it wanted at the cap.
+
+    ``failures_in_scope`` is the failures found, at most ``limit``; the read
+    stops once it has enough to analyse, so it is not a count of the store's
+    failures. ``analyzed`` is the (at most 20) newest of them, the ones the
+    model is shown. ``read_to_end`` is true when the read reached the end of
+    the store, so "the store holds no more" is only said when it is true.
     """
 
     outcome: MiningOutcome
@@ -173,6 +202,7 @@ class MiningReport:
     already_mined: tuple[str, ...] = ()
     candidates: tuple[Precedent, ...] = ()
     analyzed: tuple[Trace, ...] = ()
+    read_to_end: bool = False
 
 
 class PrecedentMiner:
@@ -263,7 +293,11 @@ class PrecedentMiner:
         every other outcome says why it would not.
         """
         scan = scan_failure_traces(
-            self._trace_store, domain=domain, limit=limit, scan_cap=scan_cap
+            self._trace_store,
+            domain=domain,
+            limit=limit,
+            scan_cap=scan_cap,
+            min_traces=min_traces,
         )
         found = len(scan.traces)
         report = MiningReport(
@@ -272,17 +306,21 @@ class PrecedentMiner:
             traces_examined=scan.examined,
             scan_cap=scan_cap,
             read_bound_hit=scan.bound_hit,
+            read_to_end=scan.exhausted,
         )
+        # Nothing found is never "below the minimum", whatever the minimum is.
+        if not found:
+            if scan.bound_hit:
+                return replace(report, outcome="read_bound_hit")
+            return report
         if found < min_traces:
             if scan.bound_hit:
                 return replace(report, outcome="read_bound_hit")
-            if found:
-                return replace(report, outcome="below_min_traces")
-            return report
+            return replace(report, outcome="below_min_traces")
 
         analyzed = tuple(scan.traces[:_MAX_ANALYZED])
         digest = compute_source_digest(analyzed, domain)
-        already = self._candidates_mined_from(digest)
+        already = self._earlier_run_over(digest)
         return replace(
             report,
             outcome="skipped_unchanged" if already else "would_mine",
@@ -304,6 +342,12 @@ class PrecedentMiner:
         A run over the same failure traces as an earlier one that minted
         candidates asks nothing and mints nothing: ``skipped_unchanged``. A new
         failure among the newest analysed changes the input, so it mines again.
+        A new success does not, unless it pushes a failure out of the read
+        window (see :func:`scan_failure_traces`): the shrunken set is a
+        different input and mines again.
+
+        Raises:
+            ValueError: ``limit`` or ``scan_cap`` is below 1.
         """
         llm = self._llm
         if llm is None:
@@ -344,15 +388,23 @@ class PrecedentMiner:
         precedents (lessons learned). :meth:`mine` is the same run with its
         reasoning attached.
 
+        ``limit`` changed meaning: it counts failure/partial traces, not
+        traces read (see :func:`scan_failure_traces`), and at most 20 of them
+        are shown to the model. A run over the same failures as an earlier
+        complete run returns ``[]`` without asking the model, the same ``[]``
+        as a run that found nothing; call :meth:`mine` to tell them apart.
+
         Args:
             domain: Optional domain filter.
             min_traces: Minimum failure traces required.
-            limit: Max failure/partial traces to analyze. Counts failures, not
-                traces read; see :func:`scan_failure_traces`.
-            scan_cap: Most traces read looking for them.
+            limit: Max failure/partial traces to find, at least 1.
+            scan_cap: Most traces read looking for them, at least 1.
 
         Returns:
             List of generated Precedent objects.
+
+        Raises:
+            ValueError: ``limit`` or ``scan_cap`` is below 1.
         """
         report = await self.mine(
             domain=domain, min_traces=min_traces, limit=limit, scan_cap=scan_cap
@@ -406,8 +458,8 @@ class PrecedentMiner:
             )
         # GRACEFUL-DEGRADATION: precedent mining is a best-effort
         # background pass — an LLM outage must not crash the miner job
-        # (workers run on cron); the empty list signals "no candidates
-        # this round" and the next run retries.
+        # (workers run on cron); ``None`` signals "the call failed" (reported
+        # as ``llm_error``) and the next run retries.
         except Exception:
             logger.exception("precedent_generation_llm_error")
             return None
@@ -429,8 +481,18 @@ class PrecedentMiner:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _candidates_mined_from(self, digest: str) -> tuple[str, ...]:
-        """Ids of earlier candidates minted over exactly this input, if any.
+    def _earlier_run_over(self, digest: str) -> tuple[str, ...]:
+        """Ids of the newest *complete* earlier run over exactly this input.
+
+        A run is the candidate events sharing one ``mining_run_id``; each
+        carries ``run_candidate_count``, how many the run meant to write. It is
+        complete when that many are present, so a run cut off by a failed emit
+        is not a record to skip against and the next run retries.
+
+        Reads the newest ``_RUN_LOOKUP_LIMIT`` events for the digest. A run
+        that minted more than that cannot be shown complete, so it mines again
+        on every run. An event carrying the digest but no run id (written by
+        a build that predates it) cannot be judged and does not count.
 
         Empty without an event log: with nothing recorded there is nothing to
         compare against, and a run cannot skip on a record it cannot read. A
@@ -444,9 +506,28 @@ class PrecedentMiner:
             event_type=EventType.PRECEDENT_CANDIDATE_MINED,
             source=MINER_EVENT_SOURCE,
             payload_filters={"source_digest": digest},
-            limit=_PRIOR_CANDIDATES_SHOWN,
+            limit=_RUN_LOOKUP_LIMIT,
+            order="desc",
         )
-        return tuple(e.entity_id for e in events if e.entity_id)
+        ids_by_run: dict[str, list[str]] = {}
+        declared: dict[str, int] = {}
+        for event in events:
+            run_id = event.payload.get("mining_run_id")
+            count = event.payload.get("run_candidate_count")
+            if (
+                not isinstance(run_id, str)
+                or not isinstance(count, int)
+                or isinstance(count, bool)
+                or not event.entity_id
+            ):
+                continue
+            ids_by_run.setdefault(run_id, []).append(event.entity_id)
+            declared[run_id] = count
+        # Newest run first, because the read was newest first.
+        for run_id, ids in ids_by_run.items():
+            if len(ids) >= declared[run_id]:
+                return tuple(reversed(ids))
+        return ()
 
     def _parse_candidates(
         self,
@@ -463,6 +544,11 @@ class PrecedentMiner:
         errors. The caller — :meth:`generate_precedent_candidates` —
         decides whether to degrade gracefully (POC directive: no silent
         ``return []``).
+
+        Two passes: every item is validated before any event is written, so a
+        malformed item raises with nothing minted. The events then carry one
+        ``mining_run_id`` and the run's ``run_candidate_count``, so a run cut
+        off part-way (a failed emit) is recognisable as incomplete.
         """
         parse_result = parse_json_response(response)
         if parse_result.outcome is JSONParseOutcome.MALFORMED:
@@ -540,7 +626,9 @@ class PrecedentMiner:
 
             precedents.append(precedent)
 
-            if self._event_log is not None:
+        if self._event_log is not None:
+            run_id = generate_ulid()
+            for precedent in precedents:
                 self._event_log.emit(
                     EventType.PRECEDENT_CANDIDATE_MINED,
                     source=MINER_EVENT_SOURCE,
@@ -552,6 +640,9 @@ class PrecedentMiner:
                         "confidence": precedent.confidence,
                         # What a rerun compares against to skip these traces.
                         **({"source_digest": source_digest} if source_digest else {}),
+                        # What tells it the run it matched wrote everything.
+                        "mining_run_id": run_id,
+                        "run_candidate_count": len(precedents),
                     },
                 )
 
