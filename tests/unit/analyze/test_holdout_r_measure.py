@@ -22,6 +22,7 @@ from tests.unit.analyze._holdout_fixture import (
     UNTIL,
     HoldoutLog,
     outcome_payload,
+    unchecked_window,
 )
 from trellis.analyze import holdout
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -243,14 +244,8 @@ class TestPrBaseRate:
 
 
 class TestMainSessions:
-    def test_rolled_up_sessions_are_counted_and_powered(self, log: HoldoutLog) -> None:
-        """Nine finished sessions S1-S9, each commented with what it adds.
-
-        Reaching a retrieval: 8 (all but S4). A non-empty pack: S1, S2, S6,
-        S7, S8, S9. Analysed (every join carries an outcome holding the
-        turns): S1, S2, S6, S8, whose rolled turns are 60, 20, 40 and 21.
-        """
-
+    @staticmethod
+    def _seed_sessions_s1_to_s9(log: HoldoutLog) -> None:
         def day(index: int) -> datetime:
             return MONDAY + timedelta(days=index)
 
@@ -296,6 +291,20 @@ class TestMainSessions:
             parent=s9,
             outcome=no_turns,
         )
+
+    def test_rolled_up_sessions_are_counted_and_powered(self, log: HoldoutLog) -> None:
+        """Nine finished sessions S1-S9, each commented with what it adds.
+
+        Reaching a retrieval: 8 (all but S4). A non-empty pack: S1, S2, S6,
+        S7, S8, S9. Analysed (every join carries an outcome holding the
+        turns): S1, S2, S6, S8, whose rolled turns are 60, 20, 40 and 21.
+        """
+
+        self._seed_sessions_s1_to_s9(log)
+
+        def day(index: int) -> datetime:
+            return MONDAY + timedelta(days=index)
+
         # Left out: a sub whose main transcript never joined ...
         log.task(start=day(8), parent="parent-orphan", items=2, turns=5)
         # ... and a session whose sub joined an hour before the only sweep.
@@ -307,14 +316,27 @@ class TestMainSessions:
         log.task(start=UNTIL + timedelta(hours=1), parent=s11, turns=5)
         log.sweep(at=sweep_at)
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         s = report.descriptive.sessions
         assert (s.rolled_up, s.not_finished, s.without_main_join) == (9, 1, 1)
-        assert (s.reaching_retrieval, s.eligible, s.analysed) == (8, 6, 4)
+        assert (s.reaching_retrieval, s.eligible) == (8, 6)
         assert s.reaching_retrieval_per_30d == pytest.approx(8 * 30 / DAYS)
         assert s.eligible_per_30d == pytest.approx(6 * 30 / DAYS)
-        assert s.analysed_per_30d == pytest.approx(4 * 30 / DAYS)
+        assert s.analysed == 4
+        assert any("no join for the main transcript" in n for n in report.notes)
+
+    def test_a_settled_read_powers_the_rolled_up_sessions(
+        self, log: HoldoutLog
+    ) -> None:
+        """S1-S9 of the test above, read once the window has settled."""
+        self._seed_sessions_s1_to_s9(log)
+        log.sweep()
+
+        s = _analyze(log).descriptive.sessions
+
+        assert s.analysed == 4
         sd = statistics.stdev(math.log1p(turns) for turns in (60, 20, 40, 21))
         assert s.outcome_sd == pytest.approx(sd)
         horizons = s.mde_by_horizon
@@ -324,7 +346,6 @@ class TestMainSessions:
         assert horizons[1].not_measurable == "N 4 is below 6, the formula's minimum"
         assert horizons[2].mde == pytest.approx(_exact_mde(sd, 6), rel=1e-3)
         assert horizons[2].ratio == pytest.approx(math.exp(_exact_mde(sd, 6)), rel=1e-3)
-        assert any("no join for the main transcript" in n for n in report.notes)
 
     def test_a_session_counts_packs_from_any_build_and_rate(
         self, log: HoldoutLog
@@ -379,7 +400,8 @@ class TestFunnelNotes:
         )
         log.sweep()  # a claude-code sweep only, 4 h after the latest join
 
-        report = _analyze(log, settle_hours=1.5)
+        with unchecked_window():
+            report = _analyze(log, settle_hours=1.5)
 
         assert (report.funnel.unfinished, report.funnel.eligible) == (1, 1)
         note = next(n for n in report.notes if "not finished" in n)

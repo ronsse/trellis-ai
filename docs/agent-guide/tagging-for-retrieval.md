@@ -146,7 +146,7 @@ above), and `trellis worker enrich` drives `EnrichmentService` off the `llm:`
 block rather than a keyword pipeline.
 
 To see which domains actually exist in a deployment, run
-[`trellis analyze domains`](operations.md#analyze-domains) — a read-only usage
+[`trellis analyze domains`](operations.md#trellis-analyze-domains) — a read-only usage
 report across traces, documents, and pack feedback.
 
 ## Choosing the Right Affinity

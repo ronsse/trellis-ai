@@ -64,7 +64,7 @@ numbers back into [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md)
 1. Create `eval/scenarios/<name>/scenario.py`.
 2. Expose a single `run(registry: StoreRegistry) -> ScenarioReport`.
    `ScenarioReport` is `dataclass`-shaped; see
-   [`eval/runner.py`](../../eval/runner.py).
+   `eval/runner.py`.
 3. Generators go in `eval/generators/`, fixtures in `eval/datasets/`.
    Generators must be deterministic given a seed; large datasets are
    fetched at runtime, not committed.
@@ -72,7 +72,7 @@ numbers back into [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md)
    the strategy doc with the actual numbers and which Phase 3 item
    became actionable.
 
-The minimal template is [`_example/scenario.py`](../../eval/scenarios/_example/scenario.py).
+The minimal template is `_example/scenario.py`.
 
 ## What the runner does *not* do
 
@@ -90,7 +90,7 @@ The minimal template is [`_example/scenario.py`](../../eval/scenarios/_example/s
 ## CI posture
 
 The repo's CI runs the smoke test in
-[`tests/unit/eval/test_runner_smoke.py`](../../tests/unit/eval/test_runner_smoke.py),
+`tests/unit/eval/test_runner_smoke.py`,
 which exercises discovery + execution against the `_example` scenario
 only. Heavyweight scenarios run on `workflow_dispatch` or a scheduled
 workflow — never per-push. Plan §6 has the per-scenario wall-time

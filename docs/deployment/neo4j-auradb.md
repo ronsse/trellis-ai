@@ -234,8 +234,8 @@ How Trellis handles this:
 * **Eval scenarios** ([`eval/scenarios/`](../../eval/)) use the production
   default name (`trellis_node_embeddings`) at `dim=3` —
   `DEFAULT_EMBEDDING_DIM` in
-  [`multi_backend_equivalence/scenario.py`](../../eval/scenarios/multi_backend_equivalence/scenario.py)
-  and [`populated_graph_performance/scenario.py`](../../eval/scenarios/populated_graph_performance/scenario.py)
+  `multi_backend_equivalence/scenario.py`
+  and `populated_graph_performance/scenario.py`
   is deliberately aligned with the contract suite's `DIMS = 3` so the
   shared pgvector `vectors` table on the Neon test DB carries one
   consistent column dim across unit-test and eval workloads. (Same rule
@@ -297,11 +297,10 @@ DROP INDEX trellis_test_node_embeddings IF EXISTS
 Re-run the workload that needs the slot; its `CREATE VECTOR INDEX … IF
 NOT EXISTS` will now succeed and provision asynchronously.
 
-The eval loader does this automatically — see
-[`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py)
-lines 103–117 (`_wipe_and_drop_test_index`), which wipes the database
-and drops `trellis_test_node_embeddings` before re-creating
-`trellis_node_embeddings` at the `--embedding-dim` value (default `16`,
+The eval loader did this automatically: `_wipe_and_drop_test_index` in
+`scripts/load_eval_dataset_to_aura.py` (since removed from this repository)
+wiped the database and dropped `trellis_test_node_embeddings` before
+re-creating `trellis_node_embeddings` at the `--embedding-dim` value (default `16`,
 pass `3` to match the scenario defaults). There is no equivalent helper
 on the unit-test side: the contract suite assumes a clean instance, so
 if you've just run the loader the first vector test pays the

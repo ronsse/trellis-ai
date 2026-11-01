@@ -8,7 +8,7 @@
 - [`../../src/trellis/mutate/commands.py`](../../src/trellis/mutate/commands.py) — `Operation.RETENTION_PRUNE` enum verb, registered with an empty required-args schema and **no handler**
 - [`../../src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py) — `RedactionApplyHandler` (#302), the governance template Option A is modeled on
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `Lifecycle` staleness states (candidate-set input); `ContentTags.signal_quality`
-- [`../../src/trellis_workers/maintenance/retention.py`](../../src/trellis_workers/maintenance/retention.py) — orphaned `RetentionWorker` / `StalenessDetector` (266 lines; `KEEP — VALIDATE` in the orphan audit)
+- `src/trellis_workers/maintenance/retention.py` (since removed) — orphaned `RetentionWorker` / `StalenessDetector` (266 lines; `KEEP — VALIDATE` in the orphan audit)
 - [`./audit-trellis-workers-orphan-decision-frames.md`](./audit-trellis-workers-orphan-decision-frames.md) — the orphan audit's decision frame for that module
 - [`./adr-tag-vocabulary-split.md`](./adr-tag-vocabulary-split.md) — why `Lifecycle` is a separate axis from `signal_quality`
 

@@ -165,10 +165,10 @@ their tool of choice in the meantime.
 
 - [`docs/design/plan-program-level-eval.md`](../design/plan-program-level-eval.md)
   — the full design.
-- [`eval/scenarios/agent_loop_convergence/`](../../eval/scenarios/agent_loop_convergence/)
+- `eval/scenarios/agent_loop_convergence/`
   — the legacy single-axis convergence scenario. The master borrows
   its per-round loop verbatim.
-- [`eval/scenarios/_convergence_common.py`](../../eval/scenarios/_convergence_common.py)
+- `eval/scenarios/_convergence_common.py`
   — the shared dataclasses (`_AxisTrack`, `_NineAxisRound`,
   `_MultiAxisStats`). New convergence scenarios should compose on top
   of these, not duplicate them.
