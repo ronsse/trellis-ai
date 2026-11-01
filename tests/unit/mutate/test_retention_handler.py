@@ -21,7 +21,7 @@ wrong about the live corpus:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, get_args
 
@@ -31,6 +31,8 @@ from tests.document_recency import fake_document_clock, keyword_recency_ratio
 from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
+from trellis.mutate import handlers as handlers_module
+from trellis.mutate import retention as retention_module
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     MAX_RETENTION_REASON_CHARS,
@@ -1863,3 +1865,931 @@ class TestTheRestoredGuardIsProvenanceIndependent:
         assert report.candidates == []
         assert report.skipped_restored == 1
         assert report.unselectable_lifecycle_states == [CURRENT_STATE]
+
+
+class TestEntityScanPaging:
+    """The entity scan pages the graph, so ``max_items`` bounds what is
+    *selected*, not what is *looked at*.
+
+    The scan once asked the graph for its newest ``max_items`` rows and only
+    then dropped the archived, the too-young and the wrong-state ones, so
+    those rows used up the window: a second prune pass over the same graph
+    archived nothing, and the report read ``scan_truncated=False`` beside
+    eligible rows it had never reached.
+    """
+
+    @staticmethod
+    def _clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        holder: dict[str, Any] = {"base": now, "now": now}
+        monkeypatch.setattr(
+            "trellis.stores.sqlite.graph.utc_now", lambda: holder["now"]
+        )
+        return holder
+
+    @staticmethod
+    def _node(
+        registry: StoreRegistry,
+        clock: dict[str, Any],
+        node_id: str,
+        *,
+        age_days: int,
+        mint: bool = False,
+        state: str | None = None,
+    ) -> str:
+        """Seed one node stamped ``age_days`` old (older sorts later)."""
+        clock["now"] = clock["base"] - timedelta(days=age_days)
+        props: dict[str, Any] = {"name": node_id}
+        if mint:
+            props[EXTRACTION_STATUS_PROPERTY] = EXTRACTION_STATUS_UNCONFIRMED
+        if state is not None:
+            props[LIFECYCLE_KEY] = {"state": state}
+        return registry.knowledge.graph_store.upsert_node(
+            node_id=node_id, node_type="concept", properties=props
+        )
+
+    @staticmethod
+    def _is_archived_node(registry: StoreRegistry, node_id: str) -> bool:
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        return (node["properties"].get(LIFECYCLE_KEY) or {}).get(
+            "state"
+        ) == ARCHIVED_STATE
+
+    def test_unconfirmed_mint_prune_makes_progress_across_passes(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        ids = [
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+            for i in range(6)
+        ]
+        executor = build_curate_executor(registry, clearance="restricted")
+        criteria = {"unconfirmed_mints": True, "older_than_days": 30, "max_items": 2}
+
+        for done in (2, 4, 6):
+            result = executor.execute(_prune(criteria, dry_run=False))
+            assert result.status == CommandStatus.SUCCESS, result.message
+            archived = [n for n in ids if self._is_archived_node(registry, n)]
+            # ``max_items`` still bounds what one pass archives.
+            assert len(archived) == done
+
+    def test_old_mints_reached_when_newest_window_is_young(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(2):
+            self._node(registry, clock, f"young{i}", age_days=1 + i, mint=True)
+        for i in range(3):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30, max_items=2),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["old0", "old1"]
+        assert report.scan_truncated is False
+
+    def test_lifecycle_entity_beyond_first_window_reached(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"fresh{i}", age_days=1 + i)
+        self._node(registry, clock, "stale", age_days=90, state="deprecated")
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["deprecated"], older_than_days=30, max_items=3
+            ),
+            registry,
+        )
+
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            ("stale", "lifecycle_stale")
+        ]
+
+    def test_fewer_eligible_than_max_items_is_a_complete_scan(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "young", age_days=1, mint=True)
+        for i in range(3):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+        self._node(registry, clock, "plain", age_days=200)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30, max_items=10),
+            registry,
+        )
+
+        assert len(report.candidates) == 3
+        assert report.scan_truncated is False
+        # The four mints; a mint-only pass never reads the plain node.
+        assert report.entities_scanned == 4
+
+    def test_a_mint_scan_counts_skips_only_for_mints(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Walking every node must not widen what a mint-only pass reports.
+
+        The store used to answer the mint predicate itself, so an archived
+        non-mint never reached the counters; the walk sees it and has to drop
+        it unremarked.
+        """
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "other", age_days=90, state=ARCHIVED_STATE)
+        self._node(registry, clock, "kept", age_days=91, state=CURRENT_STATE)
+        self._node(registry, clock, "m0", age_days=92, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert [c.item_id for c in report.candidates] == ["m0"]
+        assert report.skipped_already_archived == 0
+        assert report.skipped_restored == 0
+
+    @pytest.mark.parametrize(
+        ("nodes", "truncated"), [(4, False), (5, True)], ids=["exactly-cap", "past-cap"]
+    )
+    @pytest.mark.parametrize(
+        "criteria",
+        [{"unconfirmed_mints": True}, {"lifecycle_states": ["deprecated"]}],
+        ids=["mint-only", "lifecycle"],
+    )
+    def test_the_cap_reports_only_when_rows_were_left_unread(
+        self,
+        criteria: dict[str, Any],
+        nodes: int,
+        truncated: bool,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 4)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 3)
+        clock = self._clock(monkeypatch)
+        for i in range(nodes):
+            self._node(
+                registry, clock, f"y{i}", age_days=1 + i, mint=True, state="deprecated"
+            )
+
+        report = resolve_candidates(
+            RetentionCriteria(older_than_days=30, **criteria), registry
+        )
+
+        assert report.candidates == []
+        assert report.entities_scanned == min(nodes, 4)
+        assert report.scan_truncated is truncated
+
+    def test_a_cap_that_hides_eligible_rows_says_so_to_the_operator(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 3)
+        monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", 3)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"y{i}", age_days=1 + i, mint=True)
+        self._node(registry, clock, "old", age_days=90, mint=True)
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"unconfirmed_mints": True, "older_than_days": 30})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        # The entity scan can stop for three reasons, so the message says it
+        # stopped early rather than that a cap ended it.
+        assert "entity scan stopped early (the 3-entity cap," in (result.message or "")
+        assert "scan capped" not in (result.message or "")
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[0].payload["scan_truncated"] is True
+        assert events[0].payload["scan_truncated_planes"] == ["entity"]
+
+    def test_dry_run_reads_only(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"unconfirmed_mints": True, "older_than_days": 30, "max_items": 2})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        graph = registry.knowledge.graph_store
+        assert [len(graph.get_node_history(f"m{i}")) for i in range(3)] == [1, 1, 1]
+        assert not any(self._is_archived_node(registry, f"m{i}") for i in range(3))
+
+    def test_a_row_deleted_between_pages_does_not_hide_the_next_one(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An offset walk over a list that shrinks skips the row that slid up.
+
+        Page one reads the two newest; deleting one of them before page two
+        moves every later row up a place, so a plain ``offset += len(page)``
+        resumes one row too far on.
+        """
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        # Deprecated rows, not mints: a pass that also named ``unconfirmed_mints``
+        # would read the mints in one query before it walked, and the walk
+        # would skip them, so only a lifecycle-only pass tests the walk.
+        ids = [
+            self._node(registry, clock, f"m{i}", age_days=90 + i, state="deprecated")
+            for i in range(6)
+        ]
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def shrinking(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) == 2:
+                assert graph.delete_node("m0")
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", shrinking)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        # ``m0`` was selected from page one before it was deleted; ``m2`` is
+        # the row a plain offset walk would have stepped over.
+        assert sorted(c.item_id for c in report.candidates) == sorted(ids)
+        assert len(calls) > 2
+        # Each node counts once, though the walk re-reads rows after the
+        # step-back.
+        assert report.entities_scanned == len(ids)
+
+    def test_rows_archived_between_pages_do_not_move_the_walk(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Archiving keeps a node current and keeps its place in the order."""
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        # Deprecated rows, not mints: see the deleted-between-pages test.
+        for i in range(6):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, state="deprecated")
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def archiving(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) == 2:
+                # One row already read, one not yet reached.
+                for node_id in ("m0", "m4"):
+                    node = graph.get_node(node_id)
+                    assert node is not None
+                    graph.upsert_node(
+                        node_id=node_id,
+                        node_type="concept",
+                        properties={
+                            **node["properties"],
+                            LIFECYCLE_KEY: {"state": ARCHIVED_STATE},
+                        },
+                    )
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", archiving)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        # ``m0`` was selected from page one before it was archived; ``m4``
+        # was archived before its page was read.
+        assert sorted(c.item_id for c in report.candidates) == [
+            "m0",
+            "m1",
+            "m2",
+            "m3",
+            "m5",
+        ]
+        assert report.skipped_already_archived == 1
+
+    @pytest.mark.parametrize(
+        ("page", "nodes", "deleted"),
+        [(2, 3, 1), (2, 4, 2), (500, 501, 1)],
+        ids=["one-past-a-page", "two-deleted", "501-nodes"],
+    )
+    def test_a_deletion_at_the_end_of_the_graph_leaves_no_row_unread(
+        self,
+        page: int,
+        nodes: int,
+        deleted: int,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The last read can come back empty and still owe the walk a row.
+
+        With ``page + 1`` nodes the second read starts at the very end. A node
+        deleted behind the cursor between the two reads moves the last row up
+        into the page already read, so the second read is empty, and its total
+        is what shows that one row is still unread.
+        """
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", page)
+        clock = self._clock(monkeypatch)
+        # Deprecated rows, not mints: see the deleted-between-pages test.
+        ids = [
+            self._node(
+                registry, clock, f"m{i:03d}", age_days=90 + i, state="deprecated"
+            )
+            for i in range(nodes)
+        ]
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def shrinking(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) == 2:
+                for node_id in ids[:deleted]:
+                    assert graph.delete_node(node_id)
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", shrinking)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                lifecycle_states=["deprecated"], older_than_days=30, max_items=1000
+            ),
+            registry,
+        )
+
+        assert sorted(c.item_id for c in report.candidates) == sorted(ids)
+        assert report.entities_scanned == nodes
+        assert report.scan_truncated is False
+
+    def test_a_mint_pass_reaches_old_mints_behind_more_plain_nodes_than_the_cap(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plain nodes cost a mint-only pass nothing: the store filters them out.
+
+        Six young plain nodes sit in front of two old mints with a cap of four.
+        A walk would spend the cap on the plain ones and stop; the mint read
+        never meets them.
+        """
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 4)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        for i in range(6):
+            self._node(registry, clock, f"plain{i}", age_days=1 + i)
+        for i in range(2):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+        graph = registry.knowledge.graph_store
+        query_limits: list[int] = []
+        real_query = graph.query
+
+        def counting_query(**kwargs: Any) -> Any:
+            query_limits.append(kwargs["limit"])
+            return real_query(**kwargs)
+
+        def no_walk(**kwargs: Any) -> Any:
+            pytest.fail("a mint-only pass must not page the graph")
+
+        monkeypatch.setattr(graph, "query", counting_query)
+        monkeypatch.setattr(graph, "search_nodes", no_walk)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert [c.item_id for c in report.candidates] == ["old0", "old1"]
+        assert report.scan_truncated is False
+        assert report.entities_scanned == 2
+        # One read, one row past the cap so exactly-cap reads as complete.
+        assert query_limits == [5]
+
+    def test_a_lifecycle_pass_behind_more_nodes_than_the_cap_says_it_was_cut_off(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same graph as above, asked for a lifecycle state, is not reached.
+
+        The newest rows use the cap first and the store cannot filter on
+        lifecycle, so the pass reports the cut instead of a clean zero.
+        """
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 4)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        clock = self._clock(monkeypatch)
+        for i in range(6):
+            self._node(registry, clock, f"plain{i}", age_days=1 + i)
+        self._node(registry, clock, "old", age_days=90, state="deprecated")
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        limits: list[int] = []
+
+        def recording(**kwargs: Any) -> Any:
+            limits.append(kwargs["limit"])
+            return real(**kwargs)
+
+        monkeypatch.setattr(graph, "search_nodes", recording)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        assert report.candidates == []
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+        # The cap ends the walk before a read that could return nothing.
+        assert limits == [2, 2]
+
+    @pytest.mark.parametrize(
+        "criteria",
+        [{"unconfirmed_mints": True}, {"lifecycle_states": ["deprecated"]}],
+        ids=["mint-only", "lifecycle"],
+    )
+    def test_max_items_bounds_what_one_read_finds(
+        self,
+        criteria: dict[str, Any],
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Four eligible rows arrive together; the pass keeps only the first two."""
+        clock = self._clock(monkeypatch)
+        for i in range(4):
+            self._node(
+                registry, clock, f"m{i}", age_days=90 + i, mint=True, state="deprecated"
+            )
+
+        report = resolve_candidates(
+            RetentionCriteria(older_than_days=30, max_items=2, **criteria), registry
+        )
+
+        assert [c.item_id for c in report.candidates] == ["m0", "m1"]
+        assert report.scan_truncated is False
+
+    def test_more_mints_than_the_cap_reports_truncated_on_the_entity_plane(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 3)
+        clock = self._clock(monkeypatch)
+        for i in range(5):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert [c.item_id for c in report.candidates] == ["m0", "m1", "m2"]
+        assert report.entities_scanned == 3
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    @pytest.mark.parametrize(
+        "props",
+        [{"mint": True}, {}, {"state": "superseded"}],
+        ids=["old-mint", "old-plain-node", "other-state"],
+    )
+    def test_a_lifecycle_only_pass_selects_nothing_it_did_not_name(
+        self,
+        props: dict[str, Any],
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each criterion selects on its own terms, and only when it was asked for.
+
+        An old mint is a candidate of ``unconfirmed_mints`` and an old node
+        with no state is a candidate of nothing; neither is a
+        ``deprecated`` node, so a pass naming only ``deprecated`` leaves both,
+        and a node in some other state, alone. The named one beside them shows
+        the pass was selecting at all.
+        """
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "other", age_days=90, **props)
+        self._node(registry, clock, "named", age_days=91, state="deprecated")
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            ("named", "lifecycle_stale")
+        ]
+        assert report.entities_scanned == 2
+
+    def test_an_oscillating_total_cannot_loop_the_walk(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A store whose total keeps falling and rising is stopped by the budget.
+
+        Each fall steps the cursor back and each rise lets it advance again, so
+        the walk revisits the same rows. Only the read budget ends it, and it
+        reports the cut. The fake raises rather than looping so a regression
+        fails here instead of hanging.
+        """
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 20)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 3)
+        budget = 4 * 20 // 3
+        clock = self._clock(monkeypatch)
+        for i in range(10):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, state="deprecated")
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+        calls: list[int] = []
+
+        def oscillating(**kwargs: Any) -> Any:
+            calls.append(kwargs["offset"])
+            if len(calls) > budget + 1:
+                pytest.fail("the walk did not stop at its read budget")
+            rows, _ = real(**kwargs)
+            return rows, 10 if len(calls) % 2 else 4
+
+        monkeypatch.setattr(graph, "search_nodes", oscillating)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        assert len(calls) == budget
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    def test_an_empty_page_the_total_contradicts_is_not_a_complete_scan(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 3)
+        clock = self._clock(monkeypatch)
+        for i in range(10):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, state="deprecated")
+        graph = registry.knowledge.graph_store
+        real = graph.search_nodes
+
+        def gives_out(**kwargs: Any) -> Any:
+            rows, total = real(**kwargs)
+            return ([] if kwargs["offset"] >= 3 else rows), total
+
+        monkeypatch.setattr(graph, "search_nodes", gives_out)
+
+        report = resolve_candidates(
+            RetentionCriteria(lifecycle_states=["deprecated"], older_than_days=30),
+            registry,
+        )
+
+        assert report.entities_scanned == 3
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    @pytest.mark.parametrize(
+        "criteria",
+        [{"unconfirmed_mints": True}, {"lifecycle_states": ["deprecated"]}],
+        ids=["mint-only", "lifecycle"],
+    )
+    def test_documents_that_fill_max_items_leave_no_room_for_an_entity(
+        self,
+        criteria: dict[str, Any],
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            _put_doc(registry, f"d{i}", signal_quality="noise")
+        self._node(registry, clock, "old", age_days=90, mint=True, state="deprecated")
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                noise_documents=True, older_than_days=30, max_items=3, **criteria
+            ),
+            registry,
+        )
+
+        assert [c.kind for c in report.candidates] == ["document"] * 3
+        assert report.entities_scanned == 0
+
+    def test_the_message_does_not_blame_a_cap_the_scan_never_hit(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A store that answers ``([], 7)`` stopped the scan, and no cap did."""
+        graph = registry.knowledge.graph_store
+        monkeypatch.setattr(graph, "search_nodes", lambda **_: ([], 7))
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"lifecycle_states": ["deprecated"], "older_than_days": 30})
+        )
+
+        message = result.message or ""
+        assert result.status == CommandStatus.SUCCESS
+        assert "scan capped" not in message
+        assert "entity scan stopped early" in message
+        assert "the read budget" in message
+        assert "store totals that disagreed" in message
+
+    @staticmethod
+    def _small_graph(monkeypatch: pytest.MonkeyPatch, cap: int, page: int) -> None:
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", cap)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", page)
+
+    def test_a_pass_naming_both_criteria_still_reaches_old_mints_behind_the_cap(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mints keep the reach the mint read gave them when a state is named too.
+
+        Twenty-five young plain nodes sit in front of five old mints with a cap
+        of twenty. A walk alone spends the cap on the plain rows and never
+        arrives; the mint read does not meet them, and the walk after it skips
+        what the mint read already counted.
+        """
+        self._small_graph(monkeypatch, cap=20, page=5)
+        clock = self._clock(monkeypatch)
+        for i in range(25):
+            self._node(registry, clock, f"plain{i:02d}", age_days=1 + i // 5)
+        for i in range(5):
+            self._node(registry, clock, f"old{i}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True,
+                lifecycle_states=["deprecated"],
+                older_than_days=30,
+            ),
+            registry,
+        )
+
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            (f"old{i}", "unconfirmed_mint") for i in range(5)
+        ]
+        # The five mints and fifteen walked rows fill the budget of twenty;
+        # the graph holds thirty, so the walk's half is cut off and says so.
+        assert report.entities_scanned == 20
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    @pytest.mark.parametrize(
+        ("max_items", "expected"),
+        [
+            (3, ["m0", "m1", "m2"]),
+            (5, ["m0", "m1", "m2", "s0", "s1"]),
+        ],
+        ids=["mints-fill-it", "walk-adds-the-rest"],
+    )
+    def test_mints_are_selected_before_newer_stale_rows(
+        self,
+        max_items: int,
+        expected: list[str],
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Three stale rows newer than three mints do not outrank the mints."""
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"s{i}", age_days=40 + i, state="deprecated")
+        for i in range(3):
+            self._node(registry, clock, f"m{i}", age_days=100 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True,
+                lifecycle_states=["deprecated"],
+                older_than_days=30,
+                max_items=max_items,
+            ),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == expected
+        assert [c.reason_code for c in report.candidates] == [
+            "unconfirmed_mint" if c.item_id.startswith("m") else "lifecycle_stale"
+            for c in report.candidates
+        ]
+
+    def test_a_row_both_reads_reach_is_counted_and_classified_once(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mint in a wanted state is a mint, and the walk does not add it again."""
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "both", age_days=90, mint=True, state="deprecated")
+        self._node(
+            registry, clock, "gone", age_days=91, mint=True, state=ARCHIVED_STATE
+        )
+        self._node(registry, clock, "stale", age_days=92, state="deprecated")
+        self._node(registry, clock, "plain", age_days=93)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True,
+                lifecycle_states=["deprecated"],
+                older_than_days=30,
+            ),
+            registry,
+        )
+
+        assert [(c.item_id, c.reason_code) for c in report.candidates] == [
+            ("both", "unconfirmed_mint"),
+            ("stale", "lifecycle_stale"),
+        ]
+        # Four distinct nodes, two of them read by both reads.
+        assert report.entities_scanned == 4
+        assert report.skipped_already_archived == 1
+        assert report.scan_truncated is False
+        assert report.scan_truncated_planes == []
+
+    @pytest.mark.parametrize("state", ["current", "archived"])
+    def test_an_unselectable_state_beside_mints_takes_the_mint_read_alone(
+        self, state: str, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a selectable state sends the pass through the walk."""
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "old", age_days=90, mint=True)
+        graph = registry.knowledge.graph_store
+
+        def no_walk(**kwargs: Any) -> Any:
+            pytest.fail("no selectable state, so the graph must not be paged")
+
+        monkeypatch.setattr(graph, "search_nodes", no_walk)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True, lifecycle_states=[state], older_than_days=30
+            ),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["old"]
+
+    def test_a_mint_read_that_used_the_whole_budget_leaves_the_walk_cut_off(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No budget is left for a walk, so the pass reports it and does not read."""
+        self._small_graph(monkeypatch, cap=3, page=2)
+        clock = self._clock(monkeypatch)
+        for i in range(3):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+        self._node(registry, clock, "stale", age_days=95, state="deprecated")
+        graph = registry.knowledge.graph_store
+
+        def no_read(**kwargs: Any) -> Any:
+            pytest.fail("a walk with no budget must not read")
+
+        monkeypatch.setattr(graph, "search_nodes", no_read)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True,
+                lifecycle_states=["deprecated"],
+                older_than_days=30,
+                max_items=10,
+            ),
+            registry,
+        )
+
+        assert [c.item_id for c in report.candidates] == ["m0", "m1", "m2"]
+        assert report.entities_scanned == 3
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    def test_a_pass_cut_off_by_both_reads_names_the_entity_plane_once(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._small_graph(monkeypatch, cap=3, page=2)
+        clock = self._clock(monkeypatch)
+        for i in range(5):
+            self._node(registry, clock, f"m{i}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                unconfirmed_mints=True,
+                lifecycle_states=["deprecated"],
+                older_than_days=30,
+                max_items=10,
+            ),
+            registry,
+        )
+
+        # The mint read stopped at the cap, and the walk then had no budget.
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["entity"]
+
+    def test_a_node_young_by_valid_from_is_not_old_by_created_at(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A node rewritten yesterday keeps its first ``created_at`` and is not stale.
+
+        ``created_at`` survives every new version and ``valid_from`` is the
+        version being read, so age is read from the second.
+        """
+        clock = self._clock(monkeypatch)
+        self._node(registry, clock, "rewritten", age_days=90, mint=True)
+        self._node(registry, clock, "rewritten", age_days=1, mint=True)
+        node = registry.knowledge.graph_store.get_node("rewritten")
+        assert node is not None
+        assert node["created_at"] < node["valid_from"]
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30), registry
+        )
+
+        assert report.candidates == []
+
+    def test_a_document_and_a_node_sharing_an_id_are_selected_once(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = self._clock(monkeypatch)
+        _put_doc(registry, "shared", signal_quality="noise")
+        self._node(registry, clock, "shared", age_days=90, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(
+                noise_documents=True, unconfirmed_mints=True, older_than_days=30
+            ),
+            registry,
+        )
+
+        assert [(c.item_id, c.kind) for c in report.candidates] == [
+            ("shared", "document")
+        ]
+
+    def test_filling_max_items_with_the_last_mint_the_cap_allows_is_not_a_cut(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Twenty-one mints, a cap of twenty and ``max_items`` of twenty.
+
+        The pass found what it was asked for; the mint beyond the cap is a row
+        it never needed, so the flag stays false.
+        """
+        self._small_graph(monkeypatch, cap=20, page=5)
+        clock = self._clock(monkeypatch)
+        for i in range(21):
+            self._node(registry, clock, f"m{i:02d}", age_days=90 + i, mint=True)
+
+        report = resolve_candidates(
+            RetentionCriteria(unconfirmed_mints=True, older_than_days=30, max_items=20),
+            registry,
+        )
+
+        assert len(report.candidates) == 20
+        assert report.scan_truncated is False
+        assert report.scan_truncated_planes == []
+
+
+class TestScanTruncatedPlanes:
+    """A capped scan names the plane it capped, in the payload and the message."""
+
+    @staticmethod
+    def _capped_documents(
+        registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(retention_module, "MAX_DOCUMENTS_SCANNED", 2)
+        monkeypatch.setattr(handlers_module, "MAX_DOCUMENTS_SCANNED", 2)
+        monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
+        for i in range(4):
+            _put_doc(registry, f"d{i}")
+
+    def test_a_document_cap_is_named_on_the_document_plane(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._capped_documents(registry, monkeypatch)
+
+        report = resolve_candidates(RetentionCriteria(noise_documents=True), registry)
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"noise_documents": True})
+        )
+
+        assert report.scan_truncated is True
+        assert report.scan_truncated_planes == ["document"]
+        assert "scan capped at 2 documents" in (result.message or "")
+        assert "entities" not in (result.message or "")
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[0].payload["scan_truncated_planes"] == ["document"]
+
+    def test_both_planes_are_named_when_both_were_capped(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._capped_documents(registry, monkeypatch)
+        monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 2)
+        monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", 2)
+        graph = registry.knowledge.graph_store
+        for i in range(4):
+            graph.upsert_node(
+                node_id=f"m{i}",
+                node_type="concept",
+                properties={
+                    "name": f"m{i}",
+                    EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED,
+                },
+            )
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            _prune({"noise_documents": True, "unconfirmed_mints": True})
+        )
+
+        assert "scan capped at 2 documents and entity scan stopped early" in (
+            result.message or ""
+        )
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        assert events[0].payload["scan_truncated_planes"] == ["document", "entity"]

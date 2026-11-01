@@ -4,6 +4,56 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
+  (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
+  its criteria, so archived, too-young and wrong-state rows used up the window and a
+  prune found nothing while eligible nodes sat further back, still reporting
+  `scan_truncated: false`. The scan now depends on the criteria. A pass that names
+  `--unconfirmed-mints` first makes one store-side read of the unconfirmed mints, at most
+  `MAX_ENTITIES_SCANNED` (20,000) of them; on SQLite and Postgres plain nodes cost that read
+  nothing. A pass that also names a selectable lifecycle state (`draft`, `deprecated`,
+  `superseded`) and still has room under `max_items` then pages the graph (`search_nodes`,
+  newest first, 500 a read) until it has `max_items` candidates or has read 20,000 distinct
+  nodes, because the store cannot filter on lifecycle. So a pass naming both keeps the mints'
+  priority and reach (they are read first and the paging skips what that read already
+  counted), and a pass naming a lifecycle state alone only pages. `current` or `archived`
+  beside `--unconfirmed-mints` selects no state, so that pass takes the mint read alone. The
+  newest rows use the paging budget first, so a graph above the cap can stay truncated
+  however often the pass is run. On the Bolt backends (Neo4j, ArcadeDB) the mint read is
+  weaker: `query` reads the newest `limit * 4` nodes before it filters, so 100 plain nodes
+  ahead of one mint at a cap of 20 give no candidate with `scan_truncated` false and the
+  mint unread. That comes from reading the code, not from a live Bolt run.
+  On the entity plane `scan_truncated` is `true` when rows may have been left unread: the
+  cap was reached, the walk's read budget ran out, or the store's total contradicted its
+  pages. A pass that names only `--unconfirmed-mints` has read every mint when it is
+  `false`, never the whole graph, and on Bolt `false` does not prove every mint was read. A
+  pass that pages and finds fewer than `max_items` candidates has read the whole graph only
+  when it is `false`. The document plane is unchanged and can also read `true` when the
+  corpus holds exactly `MAX_DOCUMENTS_SCANNED` documents. The audit payload gains
+  `scan_truncated_planes`. The operator message keeps `scan capped at … documents` for the
+  document plane. For the entity plane it says `entity scan stopped early` and names the
+  three causes (the cap, the read budget, store totals that disagreed), because the cap is
+  only one of them, and it no longer says "re-run to continue", because archived rows keep
+  using scan budget.
+  A node deleted between two reads of the walk no longer hides the one behind it; the walk
+  steps back and re-reads, so it can take more than the 40 reads a clean 20,000-node walk
+  needs, and stops at a budget of 160 reads (`4 * MAX_ENTITIES_SCANNED // 500`). Two narrow
+  windows remain, both needing a concurrent write and both failing safe to the next pass: a
+  deletion behind the cursor paired with an insert ahead of it between two reads leaves the
+  total unchanged, and a deletion between the count and the page select of one
+  `search_nodes` call is seen a read late and stepped back from the wrong start, so a live
+  row can be missed with `scan_truncated` false (reproduced on a fake store only).
+  `entities_scanned` counts the distinct rows read: the mint rows on a mint-only pass, each
+  node the walk read on a lifecycle pass, and each row once when both reads reach it. It
+  used to add the rows of the mint query to the rows of the lifecycle window, so a mint in
+  both counted twice. A pass whose documents already fill `max_items` no longer adds an
+  entity past it (three noise documents and one old mint at `max_items=3` selected four
+  before, and select three now). A later prune may see more candidates than before; nothing
+  in this repository runs it on a schedule, and `max_items` still bounds what one pass
+  archives.
+
 ### Changed
 
 - **The repeated-rejection health signal is rated against each tool's attempts and

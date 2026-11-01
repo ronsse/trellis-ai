@@ -158,7 +158,17 @@ UNSELECTABLE_STATES: frozenset[LifecycleState] = frozenset(
 #: bites, the resolver says so rather than silently returning a short list.
 MAX_DOCUMENTS_SCANNED = 20_000
 
-#: Page size for that scan.
+#: Hard ceiling on graph nodes read per resolution pass, independent of
+#: ``max_items`` — the entity counterpart of :data:`MAX_DOCUMENTS_SCANNED`.
+#: ``GraphStore`` has no lifecycle or age predicate, so a pass that names
+#: lifecycle states pages every current node (``search_nodes``) and filters
+#: client-side; a pass that names ``unconfirmed_mints`` asks the store for the
+#: mints themselves (``query``) first, which on SQLite and Postgres means plain
+#: nodes cost that read nothing. Either way the cap bounds the distinct rows
+#: one pass reads, and when it leaves rows unread the report says so.
+MAX_ENTITIES_SCANNED = 20_000
+
+#: Page size for both scans.
 _SCAN_PAGE = 500
 
 #: Cap on ``already_archived_ids`` — a follow-up pointer for vector
@@ -224,6 +234,15 @@ class ResolutionReport(TrellisModel):
     ``scan_truncated`` exists so a capped scan is never mistaken for an
     exhaustive one — the "no silent caps" rule. When it is ``True`` the
     candidate set is a prefix of the real population, not the whole of it.
+    ``scan_truncated_planes`` names which scan the cap ended. A pass that
+    stops because ``max_items`` was reached is not truncated: it found what
+    it was asked for. On the entity plane the flag is true only when the cap
+    left rows unread; the document plane can also read true when the corpus
+    holds exactly the cap, since it cannot tell a full last page from a
+    longer corpus. A pass that reads mints and then walks can be cut off by
+    either read, and names ``entity`` once. A mint-only pass reads every mint
+    when the flag is false, not the whole graph, and on the Bolt backends it
+    does not prove even that, because ``query`` filters after its own window.
     ``unselectable_lifecycle_states`` is the same rule one level up: a zero
     that was *guaranteed by the criteria* must not read as a zero the corpus
     produced.
@@ -233,6 +252,7 @@ class ResolutionReport(TrellisModel):
     documents_scanned: int = 0
     entities_scanned: int = 0
     scan_truncated: bool = False
+    scan_truncated_planes: list[CandidateKind] = Field(default_factory=list)
     skipped_already_archived: int = 0
     skipped_confirmed: int = 0
     skipped_restored: int = 0
@@ -514,6 +534,7 @@ def _resolve_documents(
         hit_cap = report.documents_scanned >= MAX_DOCUMENTS_SCANNED
         if hit_cap and len(page) == _SCAN_PAGE:
             report.scan_truncated = True
+            report.scan_truncated_planes.append("document")
             logger.warning(
                 "retention_scan_truncated",
                 scanned=report.documents_scanned,
@@ -535,6 +556,86 @@ def _count_precedent_node_skip(report: ResolutionReport, node: dict[str, Any]) -
         report.skipped_precedent += 1
 
 
+def _classify_entity(
+    node: dict[str, Any],
+    props: dict[str, Any],
+    criteria: RetentionCriteria,
+    wanted_states: set[LifecycleState],
+    cutoff: datetime,
+    report: ResolutionReport,
+) -> ReasonCode | None:
+    """Return why a graph node is a candidate, or ``None``; counts its skips."""
+    status = props.get(EXTRACTION_STATUS_PROPERTY)
+    # Read once and used by both the guards and the criterion below: two reads
+    # of one bag is how a guard and its criterion start disagreeing.
+    node_state = _lifecycle_state(props)
+    if is_promoted_precedent_document(node["node_id"]):
+        # The node shares its id with the document row skipped in
+        # ``_resolve_documents``, and the pair must not be split: an
+        # archived node beside a ``demoted`` row cannot be restored
+        # (``RetentionRestoreHandler`` reads the row first, finds it not
+        # archived and never reaches the node) or reinstated. Keyed on the
+        # id, not on ``seen``, so it holds when the row is absent or the
+        # document scan stopped at its cap before reaching it.
+        _count_precedent_node_skip(report, node)
+    elif status == EXTRACTION_STATUS_CONFIRMED:
+        # Never a candidate, on any criterion: confirmation is the signal
+        # that a human decided this entity is real.
+        report.skipped_confirmed += 1
+    elif node_state == ARCHIVED_STATE:
+        report.skipped_already_archived += 1
+    elif node_state == CURRENT_STATE:
+        report.skipped_restored += 1
+    elif _is_older_than(node.get("valid_from") or node.get("created_at"), cutoff):
+        if criteria.unconfirmed_mints and status == EXTRACTION_STATUS_UNCONFIRMED:
+            return "unconfirmed_mint"
+        if node_state in wanted_states:
+            return "lifecycle_stale"
+    return None
+
+
+def _consider_entity(
+    node: dict[str, Any],
+    criteria: RetentionCriteria,
+    wanted_states: set[LifecycleState],
+    cutoff: datetime,
+    report: ResolutionReport,
+    seen: set[str],
+) -> None:
+    """Classify one node the entity scan read and record it if it qualifies."""
+    node_id = node.get("node_id")
+    if not node_id or node_id in seen:
+        return
+    props = node.get("properties") or {}
+    reason = _classify_entity(node, props, criteria, wanted_states, cutoff, report)
+    if reason is None:
+        return
+    seen.add(node_id)
+    report.candidates.append(
+        RetentionCandidate(
+            item_id=node_id,
+            kind="entity",
+            reason_code=reason,
+            name=props.get("name"),
+        )
+    )
+
+
+def _mark_entity_scan_truncated(report: ResolutionReport) -> None:
+    report.scan_truncated = True
+    if "entity" in report.scan_truncated_planes:
+        # A pass that reads mints and then walks can be cut off by both reads;
+        # the plane is named once.
+        return
+    report.scan_truncated_planes.append("entity")
+    logger.warning(
+        "retention_scan_truncated",
+        scanned=report.entities_scanned,
+        cap=MAX_ENTITIES_SCANNED,
+        plane="entity",
+    )
+
+
 def _resolve_entities(
     criteria: RetentionCriteria,
     registry: StoreRegistry,
@@ -548,82 +649,180 @@ def _resolve_entities(
 
     ``wanted_states`` arrives already stripped of :data:`UNSELECTABLE_STATES`
     by :func:`resolve_candidates` — the one place that subtraction happens.
+
+    Two reads, because the store can answer one question and not the other.
+    ``unconfirmed_mints`` is a property ``GraphStore.query`` filters in the
+    store, so a pass that names it reads the mints first
+    (:func:`_query_unconfirmed_mints`): they keep their priority and their
+    reach, and on SQLite and Postgres plain nodes never reach the cap. Lifecycle
+    lives in the property bag, which the store cannot filter, so a pass that
+    names a selectable state walks the graph (:func:`_walk_entities`). A pass
+    that names both reads the mints, and walks only if ``max_items`` is not yet
+    full. The two reads share ``seen``, so a row is selected once, and
+    ``visited``, so a row both of them reach is counted and classified once.
+    ``current`` or ``archived`` alone selects no state, so ``--unconfirmed-mints``
+    with only those takes the mint read alone.
     """
+    if remaining() <= 0:
+        # The documents already filled ``max_items``; an entity read would
+        # only add a candidate past it.
+        return
     graph = registry.knowledge.graph_store
-
-    rows: list[dict[str, Any]] = []
+    visited: set[str] = set()
     if criteria.unconfirmed_mints:
-        rows.extend(
-            graph.query(
-                properties={EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED},
-                limit=criteria.max_items,
-            )
+        _query_unconfirmed_mints(
+            graph, criteria, report, cutoff, seen, remaining, wanted_states, visited
         )
-    if wanted_states:
-        # Lifecycle lives in the property bag; query by type-free scan and
-        # filter client-side, mirroring the document path.
-        rows.extend(graph.query(limit=criteria.max_items))
+    if wanted_states and remaining() > 0:
+        _walk_entities(
+            graph, criteria, report, cutoff, seen, remaining, wanted_states, visited
+        )
 
-    for node in rows:
+
+def _query_unconfirmed_mints(
+    graph: Any,
+    criteria: RetentionCriteria,
+    report: ResolutionReport,
+    cutoff: datetime,
+    seen: set[str],
+    remaining: Any,
+    wanted_states: set[LifecycleState],
+    visited: set[str],
+) -> None:
+    """One bounded read of the unconfirmed mints, then the usual gates.
+
+    Asks for one row more than :data:`MAX_ENTITIES_SCANNED`, so a store that
+    holds exactly the cap reads as complete and only a longer list reads as
+    truncated. The extra row is not walked. Each row read is added to
+    ``visited``, which the walk of the same pass shares, so a mint is counted
+    and classified once. On the Bolt backends ``query`` reads ``limit * 4``
+    newest nodes before it applies the property filter, so there the read
+    reaches mints only among the newest ``4 * (cap + 1)`` nodes, and a shorter
+    answer, with ``scan_truncated`` false, does not prove it found them all;
+    that store-side cap is not this module's to lift.
+    """
+    rows = graph.query(
+        properties={EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED},
+        limit=MAX_ENTITIES_SCANNED + 1,
+    )
+    for node in rows[:MAX_ENTITIES_SCANNED]:
         report.entities_scanned += 1
-        node_id = node.get("node_id")
-        if not node_id or node_id in seen:
-            continue
-        if is_promoted_precedent_document(node_id):
-            # The node shares its id with the document row skipped in
-            # ``_resolve_documents``, and the pair must not be split: an
-            # archived node beside a ``demoted`` row cannot be restored
-            # (``RetentionRestoreHandler`` reads the row first, finds it not
-            # archived and never reaches the node) or reinstated. Keyed on the
-            # id, not on ``seen``, so it holds when the row is absent or the
-            # document scan stopped at its cap before reaching it.
-            _count_precedent_node_skip(report, node)
-            continue
-        props = node.get("properties") or {}
-
-        if props.get(EXTRACTION_STATUS_PROPERTY) == EXTRACTION_STATUS_CONFIRMED:
-            # Never a candidate, on any criterion: confirmation is the
-            # signal that a human decided this entity is real.
-            report.skipped_confirmed += 1
-            continue
-        node_state = _lifecycle_state(props)
-        if node_state == ARCHIVED_STATE:
-            report.skipped_already_archived += 1
-            continue
-        if node_state == CURRENT_STATE:
-            report.skipped_restored += 1
-            continue
-
-        reason: ReasonCode | None = None
-        if (
-            criteria.unconfirmed_mints
-            and props.get(EXTRACTION_STATUS_PROPERTY) == EXTRACTION_STATUS_UNCONFIRMED
-            and _is_older_than(node.get("valid_from") or node.get("created_at"), cutoff)
-        ):
-            reason = "unconfirmed_mint"
-        elif (
-            wanted_states
-            # ``node_state``, not a second ``_lifecycle_state(props)`` call:
-            # the guards above already read the state, and two reads of one
-            # bag is how a guard and its criterion start disagreeing.
-            and node_state in wanted_states
-            and _is_older_than(node.get("valid_from") or node.get("created_at"), cutoff)
-        ):
-            reason = "lifecycle_stale"
-
-        if reason is None:
-            continue
-
-        seen.add(node_id)
-        report.candidates.append(
-            RetentionCandidate(
-                item_id=node_id,
-                kind="entity",
-                reason_code=reason,
-                name=props.get("name") if isinstance(props, dict) else None,
-            )
-        )
+        if node.get("node_id"):
+            visited.add(node["node_id"])
+        _consider_entity(node, criteria, wanted_states, cutoff, report, seen)
         if remaining() <= 0:
+            return
+    if len(rows) > MAX_ENTITIES_SCANNED:
+        _mark_entity_scan_truncated(report)
+
+
+def _walk_entities(
+    graph: Any,
+    criteria: RetentionCriteria,
+    report: ResolutionReport,
+    cutoff: datetime,
+    seen: set[str],
+    remaining: Any,
+    wanted_states: set[LifecycleState],
+    visited: set[str],
+) -> None:
+    """Page the graph newest-first for a pass that names a lifecycle state.
+
+    Stops when ``max_items`` candidates are found, the graph ends, or
+    :data:`MAX_ENTITIES_SCANNED` distinct nodes have been read. ``visited``
+    arrives holding the rows the mint read of the same pass already counted and
+    classified (empty when there was none); the walk skips them, so each row
+    counts once and a mint is selected under its own criterion, and they use
+    the same budget. A pass whose mint read used the whole budget reports the
+    cut without a read: it cannot tell a graph of exactly that many mints from
+    a longer one, so it fails safe. The limit used to be
+    handed to the store before the archived, too-young and wrong-state rows
+    were dropped, so those rows used up the window and a prune stalled once
+    the newest ``max_items`` nodes were all ineligible. The newest rows use the
+    budget first, so a graph larger than the cap can stay truncated however
+    often the pass is run: the flag says so, and a re-run does not help.
+
+    The walk pages with ``search_nodes``, which orders by ``(created_at,
+    node_id)`` so a page boundary is stable while the graph does not change.
+    Archiving keeps a node current at the same place in that order, so this
+    pass's own writes cannot move it. A deletion behind the cursor shifts
+    every later row up a place, and the page read next then starts too far
+    on; its total shows the fall, so the walk steps back by that much and
+    skips rows it has already seen. A deletion behind the cursor paired with
+    an insert ahead of it between two pages leaves the total unchanged and is
+    not detected; the next pass reaches that row.
+
+    There is a second window, inside one ``search_nodes`` call. The store
+    counts the rows and then selects the page in two statements, so a deletion
+    between them returns a total that already shows it beside a page that does
+    not. The walk sees the fall a read late and steps back from the wrong start,
+    so a live row can be missed with ``scan_truncated`` false. It needs a
+    concurrent delete, it was reproduced on a fake store only, and neither
+    alternative tried for the step-back closed it. The next pass reads that row
+    unless the same delete races it again, so it fails safe.
+
+    Two bounds keep a store that misreports from looping the walk: a read
+    budget of ``4 * MAX_ENTITIES_SCANNED // _SCAN_PAGE`` (a clean walk needs
+    at most ``MAX_ENTITIES_SCANNED // _SCAN_PAGE``, and each step-back adds a
+    re-read), and the cap itself. Either reports truncated, as does an empty
+    page while the total still shows rows unread. All three are conservative:
+    a row deleted at the cap under a race can read truncated with every live
+    row read.
+    """
+    offset = 0
+    last_total: int | None = None
+    reads = 0
+    max_reads = 4 * MAX_ENTITIES_SCANNED // _SCAN_PAGE
+
+    if len(visited) >= MAX_ENTITIES_SCANNED:
+        _mark_entity_scan_truncated(report)
+        return
+
+    while remaining() > 0:
+        if reads >= max_reads:
+            _mark_entity_scan_truncated(report)
+            return
+        reads += 1
+        start = offset
+        page, total = graph.search_nodes(
+            limit=min(_SCAN_PAGE, MAX_ENTITIES_SCANNED - len(visited)),
+            offset=start,
+        )
+        # A fall in the total since the last read is the number of rows that
+        # moved up past the cursor.
+        fall = last_total - total if last_total is not None else 0
+        if not page and fall <= 0:
+            # Empty beyond the last row is the end. Empty while the total
+            # still counts rows not read is a store that does not agree with
+            # itself, which is not a complete scan.
+            if len(visited) < total:
+                _mark_entity_scan_truncated(report)
+            return
+        offset = start + len(page)
+        if fall > 0:
+            # The cursor moves back by the same amount, also when the page is
+            # empty: the deletion can have been of the last rows, and the one
+            # now at ``start - fall`` is still unread.
+            offset = max(0, start - fall)
+        last_total = total
+
+        for node in page:
+            node_id = node.get("node_id")
+            if node_id:
+                if node_id in visited:
+                    # Re-read after the walk stepped back over a deletion, or
+                    # already read, counted and classified by the mint read.
+                    continue
+                visited.add(node_id)
+            report.entities_scanned += 1
+            _consider_entity(node, criteria, wanted_states, cutoff, report, seen)
+            if remaining() <= 0:
+                return
+
+        if offset >= total:
+            return
+        if len(visited) >= MAX_ENTITIES_SCANNED:
+            _mark_entity_scan_truncated(report)
             return
 
 
@@ -631,6 +830,7 @@ __all__ = [
     "ARCHIVED_STATE",
     "CURRENT_STATE",
     "MAX_DOCUMENTS_SCANNED",
+    "MAX_ENTITIES_SCANNED",
     "UNSELECTABLE_STATES",
     "CandidateKind",
     "ReasonCode",
