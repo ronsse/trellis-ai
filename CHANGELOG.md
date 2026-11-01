@@ -4,6 +4,22 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis analyze learning-candidates` says what its candidates are.** `--format json`
+  reported only `candidate_count`, which includes every `investigate_noise` row, so a long
+  list could not be told apart from a backlog of promotable knowledge. The JSON now also
+  carries `by_recommendation_type` (a count per `recommendation_type`; a type with no
+  candidate is absent) and `promotion_ready_count` (how many pass `is_promotion_ready`, the
+  predicate the digest and `curate review-ready` already use), both over the `candidates`
+  list the command prints. The text output prints the same, and now says `0 candidates
+  promotion-ready` where it used to print nothing. The count describes one run's list: a
+  different `--min-support`, `--days` or `--output-dir` changes it, and it is narrower than
+  what `curate promote-learning` accepts, so the help text and the operations guide say so.
+  No existing key, candidate, exit code or promotion changes. The text table now escapes the
+  recommendation and item type it prints, so a type containing `[...]` is no longer
+  deleted by Rich.
+
 ### Fixed
 
 - **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
