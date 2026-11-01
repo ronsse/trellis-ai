@@ -23,7 +23,12 @@ import yaml
 import trellis.mcp.server as server_mod
 from tests.llm_routes import per_consumer_config, route_from
 from trellis.ingest_corpus.models import chunk_doc_id
-from trellis.llm.egress import EGRESS_WITHHELD_REASON, EgressGate, may_reach_route
+from trellis.llm.egress import (
+    EGRESS_WITHHELD_REASON,
+    EgressGate,
+    EgressVerdict,
+    may_reach_route,
+)
 from trellis.llm.routing import (
     LLMConsumer,
     LLMRoutingError,
@@ -600,8 +605,28 @@ class TestPerConsumerConfig:
             assert route.local is ((member is target) == local)
 
 
-class TestPermitsStored:
-    """``permits_stored``: a gate over a document named by id, failing closed."""
+class _FlakyStore:
+    """A real store that raises for chosen ids and delegates for the rest."""
+
+    def __init__(self, inner: SQLiteDocumentStore, failing: dict[str, Exception]):
+        self._inner = inner
+        self._failing = failing
+
+    def get(self, doc_id: str) -> Any:
+        if doc_id in self._failing:
+            raise self._failing[doc_id]
+        return self._inner.get(doc_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class TestStoredVerdict:
+    """``stored_verdict``: a gate over a document named by id, failing closed.
+
+    WITHHELD is a property of the row and holds on a retry; UNREADABLE is a
+    store that could not answer. Both keep the content off the route.
+    """
 
     def test_the_label_on_the_stored_row_decides(
         self, store: SQLiteDocumentStore
@@ -610,27 +635,93 @@ class TestPermitsStored:
         store.put("plain", "body", {})
         store.put("shared", "body", _label("public"))
         gate = EgressGate(store, local=False)
-        assert gate.permits_stored("secret") is False
-        assert gate.permits_stored("plain") is True
-        assert gate.permits_stored("shared") is True
+        assert gate.stored_verdict("secret") is EgressVerdict.WITHHELD
+        assert gate.stored_verdict("plain") is EgressVerdict.PERMITTED
+        assert gate.stored_verdict("shared") is EgressVerdict.PERMITTED
 
     def test_an_id_with_no_row_names_nothing_that_carries_a_label(
         self, store: SQLiteDocumentStore
     ) -> None:
-        assert EgressGate(store, local=False).permits_stored("entity:x") is True
+        gate = EgressGate(store, local=False)
+        assert gate.stored_verdict("entity:x") is EgressVerdict.PERMITTED
 
-    def test_a_chunk_shaped_id_with_no_parent_row_is_withheld(
+    def test_a_chunk_shaped_id_with_no_parent_row_is_withheld_not_unreadable(
         self, store: SQLiteDocumentStore
     ) -> None:
         orphan = chunk_doc_id("gone", 0)
-        assert EgressGate(store, local=False).permits_stored(orphan) is False
+        gate = EgressGate(store, local=False)
+        assert gate.stored_verdict(orphan) is EgressVerdict.WITHHELD
 
-    def test_a_row_that_cannot_be_read_is_withheld(self) -> None:
+    def test_a_chunk_of_a_labelled_parent_is_withheld_and_of_a_plain_one_is_not(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("secret-parent", "body", _label("restricted"))
+        store.put("plain-parent", "body", {})
+        store.put(chunk_doc_id("secret-parent", 0), "c", {})
+        store.put(chunk_doc_id("plain-parent", 0), "c", {})
+        gate = EgressGate(store, local=False)
+        assert (
+            gate.stored_verdict(chunk_doc_id("secret-parent", 0))
+            is EgressVerdict.WITHHELD
+        )
+        assert (
+            gate.stored_verdict(chunk_doc_id("plain-parent", 0))
+            is EgressVerdict.PERMITTED
+        )
+
+    def test_a_chunk_whose_parent_fetch_fails_is_unreadable_not_withheld(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put(chunk_doc_id("parent", 0), "c", {})
+        flaky = _FlakyStore(store, {"parent": RuntimeError("store down")})
+        gate = EgressGate(flaky, local=False)  # type: ignore[arg-type]
+        assert (
+            gate.stored_verdict(chunk_doc_id("parent", 0)) is EgressVerdict.UNREADABLE
+        )
+
+    def test_a_store_that_cannot_answer_is_unreadable_not_withheld(self) -> None:
         broken = MagicMock()
         broken.get.side_effect = RuntimeError("store down")
-        assert EgressGate(broken, local=False).permits_stored("any") is False
+        assert EgressGate(broken, local=False).stored_verdict("any") is (
+            EgressVerdict.UNREADABLE
+        )
+
+    def test_a_row_whose_own_bytes_do_not_parse_is_withheld(self) -> None:
+        bad = MagicMock()
+        bad.get.side_effect = json.JSONDecodeError("bad", "{", 0)
+        assert EgressGate(bad, local=False).stored_verdict("any") is (
+            EgressVerdict.WITHHELD
+        )
+
+    def test_a_row_with_non_mapping_metadata_is_withheld(self) -> None:
+        odd = MagicMock()
+        odd.get.return_value = {"metadata": ["not", "a", "mapping"]}
+        assert EgressGate(odd, local=False).stored_verdict("any") is (
+            EgressVerdict.WITHHELD
+        )
 
     def test_a_local_gate_reads_nothing(self) -> None:
         untouched = MagicMock()
-        assert EgressGate(untouched, local=True).permits_stored("any") is True
+        gate = EgressGate(untouched, local=True)
+        assert gate.stored_verdict("any") is EgressVerdict.PERMITTED
         untouched.get.assert_not_called()
+
+    def test_the_lazy_gate_opens_the_store_only_on_a_route_that_reads_it(
+        self,
+    ) -> None:
+        opened: list[str] = []
+
+        def open_store() -> Any:
+            opened.append("opened")
+            return MagicMock()
+
+        local = MagicMock()
+        local.llm_route.return_value = SimpleNamespace(local=True)
+        cloud = MagicMock()
+        cloud.llm_route.return_value = SimpleNamespace(local=False)
+        consumer = LLMConsumer.PRECEDENT_MINING
+
+        assert EgressGate.for_route_lazy(local, consumer, open_store).local is True
+        assert opened == []
+        assert EgressGate.for_route_lazy(cloud, consumer, open_store).local is False
+        assert opened == ["opened"]

@@ -16,6 +16,7 @@ from trellis.extract.telemetry import (
     emit_extraction_failure,
 )
 from trellis.llm import Message
+from trellis.llm.egress import EgressVerdict
 from trellis.llm.json_response import (
     JSONParseOutcome,
     coerce_finite_float,
@@ -74,6 +75,7 @@ MiningOutcome = Literal[
     "skipped_unchanged",
     "no_failures",
     "below_min_traces",
+    "all_withheld",
     "read_bound_hit",
     "no_candidates",
     "llm_error",
@@ -193,11 +195,18 @@ class MiningReport:
     model is shown. ``read_to_end`` is true when the read reached the end of
     the store, so "the store holds no more" is only said when it is true.
 
-    ``egress_withheld`` counts failure traces left out of ``analyzed`` because
-    one of their evidence documents is labelled above ``internal`` and the
-    route is not declared local (:mod:`trellis.llm.egress`). They are not shown
-    to the model, take no seat among the analysed 20 and are not counted in
-    ``failures_in_scope``; no model was asked about them and nothing failed.
+    ``egress_withheld`` counts failure traces kept from the model because one of
+    their evidence documents is labelled above ``internal`` (or is a chunk whose
+    parent row is gone) and the route is not declared local
+    (:mod:`trellis.llm.egress`). ``egress_unreadable`` counts those kept back
+    because a store could not answer, which is a fault and not a label. The
+    scan reads before the filter, so a withheld trace still counts against
+    ``limit`` and can take a seat among the newest: fewer than ``limit`` traces
+    can reach the model, and ``failures_in_scope`` counts only those that can.
+    Neither count is a model failure: nothing was asked about them. When every
+    failure found was kept back the outcome is ``all_withheld``, never
+    ``no_failures``; ``below_min_due_to_egress`` is true when ``below_min_traces``
+    holds only because of them.
     """
 
     outcome: MiningOutcome
@@ -211,6 +220,8 @@ class MiningReport:
     analyzed: tuple[Trace, ...] = ()
     read_to_end: bool = False
     egress_withheld: int = 0
+    egress_unreadable: int = 0
+    below_min_due_to_egress: bool = False
 
 
 class PrecedentMiner:
@@ -232,14 +243,15 @@ class PrecedentMiner:
         event_log: EventLog | None = None,
         llm: LLMClient | None = None,
         *,
-        egress: EgressGate | None = None,
+        egress: EgressGate,
     ) -> None:
         self._trace_store = trace_store
         self._event_log = event_log
         self._llm = llm
-        # ``None`` is no gate at all: a caller that sends to a route not
-        # declared local must pass ``EgressGate.for_route`` (``worker
-        # mine-precedents`` does).
+        # Required, with no default: a miner built without a gate would send
+        # every trace to a route not declared local. ``worker mine-precedents``
+        # passes ``EgressGate.for_route``; a caller that really sends nowhere
+        # off the host passes ``EgressGate(None, local=True)``.
         self._egress = egress
 
     # ------------------------------------------------------------------
@@ -308,8 +320,9 @@ class PrecedentMiner:
 
         A failure trace naming an evidence document labelled above ``internal``
         is withheld while the route is not declared local, and counted in
-        ``egress_withheld``. The ``min_traces`` check and the digest see only
-        what remains, so a run over unlabelled traces is unchanged.
+        ``egress_withheld``; one a store could not be asked about is counted in
+        ``egress_unreadable``. The ``min_traces`` check and the digest see only
+        what remains.
         """
         scan = scan_failure_traces(
             self._trace_store,
@@ -318,7 +331,7 @@ class PrecedentMiner:
             scan_cap=scan_cap,
             min_traces=min_traces,
         )
-        permitted, withheld = self._withhold_labelled(scan.traces)
+        permitted, withheld, unreadable = self._screen_for_route(scan.traces)
         found = len(permitted)
         report = MiningReport(
             outcome="no_failures",
@@ -328,16 +341,25 @@ class PrecedentMiner:
             read_bound_hit=scan.bound_hit,
             read_to_end=scan.exhausted,
             egress_withheld=withheld,
+            egress_unreadable=unreadable,
         )
         # Nothing found is never "below the minimum", whatever the minimum is.
         if not found:
             if scan.bound_hit:
                 return replace(report, outcome="read_bound_hit")
+            # Traces were found and every one was kept from the model: that is
+            # not an empty store, and a green "no failures" would say it is.
+            if withheld or unreadable:
+                return replace(report, outcome="all_withheld")
             return report
         if found < min_traces:
             if scan.bound_hit:
                 return replace(report, outcome="read_bound_hit")
-            return replace(report, outcome="below_min_traces")
+            return replace(
+                report,
+                outcome="below_min_traces",
+                below_min_due_to_egress=found + withheld + unreadable >= min_traces,
+            )
 
         analyzed = tuple(permitted[:_MAX_ANALYZED])
         digest = compute_source_digest(analyzed, domain)
@@ -502,21 +524,34 @@ class PrecedentMiner:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _withhold_labelled(self, traces: Sequence[Trace]) -> tuple[list[Trace], int]:
-        """``(traces the route may be shown, how many were withheld)``."""
+    def _screen_for_route(
+        self, traces: Sequence[Trace]
+    ) -> tuple[list[Trace], int, int]:
+        """``(traces the route may be shown, withheld, unreadable)``.
+
+        A trace is judged by every document it cites. One withheld citation
+        withholds it whatever else failed to read; otherwise one unreadable
+        citation makes it unreadable.
+        """
         gate = self._egress
-        if gate is None:
-            return list(traces), 0
-        kept = [
-            t
-            for t in traces
-            if all(
-                gate.permits_stored(ref.evidence_id)
-                for ref in t.evidence_used
-                if ref.evidence_id
-            )
-        ]
-        return kept, len(traces) - len(kept)
+        kept: list[Trace] = []
+        withheld = unreadable = 0
+        for trace in traces:
+            verdicts = set()
+            for ref in trace.evidence_used:
+                if not ref.evidence_id:
+                    continue
+                verdict = gate.stored_verdict(ref.evidence_id)
+                verdicts.add(verdict)
+                if verdict is EgressVerdict.WITHHELD:
+                    break
+            if EgressVerdict.WITHHELD in verdicts:
+                withheld += 1
+            elif EgressVerdict.UNREADABLE in verdicts:
+                unreadable += 1
+            else:
+                kept.append(trace)
+        return kept, withheld, unreadable
 
     def _earlier_run_over(self, digest: str) -> tuple[str, ...]:
         """Ids of the newest *complete* earlier run over exactly this input.

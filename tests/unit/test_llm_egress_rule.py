@@ -76,7 +76,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src"
 
 #: Calls that answer "may this content reach this route?".
 _PREDICATE_NAMES = frozenset(
-    {"may_reach_route", "permits", "permits_metadata", "permits_stored"}
+    {"may_reach_route", "permits", "permits_metadata", "stored_verdict"}
 )
 
 #: The module that defines the predicate; it may build gates however it likes.
@@ -87,13 +87,21 @@ _EGRESS_MODULE = "trellis/llm/egress.py"
 class Entry:
     """A function that hands stored content to an inner sender.
 
-    ``via`` names one helper the entry calls and that itself calls the
-    predicate, for the two entry points whose check sits one hop away.
+    ``via`` names the helper the entry calls and that itself calls the
+    predicate, or a chain of them (outermost first) when the check sits more
+    than one hop away.
     """
 
     module: str
     function: str
-    via: str | None = None
+    via: str | tuple[str, ...] | None = None
+
+    @property
+    def chain(self) -> tuple[str, ...]:
+        """The helpers, outermost first, between this entry and the predicate."""
+        if self.via is None:
+            return ()
+        return (self.via,) if isinstance(self.via, str) else self.via
 
 
 _SERVER_EXTRACTION = Entry("trellis/mcp/server.py", "_emit_memory_stored_and_enrich")
@@ -110,14 +118,17 @@ _CAPTURE_RECONCILE = Entry(
     "adjudicate",
     via="_load_existing",
 )
-# ``plan`` picks the traces ``mine`` hands to ``_ask_llm``, so its helper is the gate.
-_MINER_PLAN = Entry(
-    "trellis_workers/learning/miner.py", "plan", via="_withhold_labelled"
+# ``mine`` hands traces to ``_ask_llm`` that ``plan`` picked, and ``plan`` screens
+# them through ``_screen_for_route``, which asks the predicate.
+_MINER_MINE = Entry(
+    "trellis_workers/learning/miner.py",
+    "mine",
+    via=("plan", "_screen_for_route"),
 )
 _CAPTURE_DISTILL = Entry(
     "trellis_workers/session_capture/capture.py",
     "_capture_session",
-    via="_session_may_reach_route",
+    via="_session_egress_verdict",
 )
 
 #: Inner sender -> the entry points that reach it. Hand-written.
@@ -131,7 +142,7 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
     ("trellis_workers/session_capture/distill.py", "distill_session"): (
         _CAPTURE_DISTILL,
     ),
-    ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_PLAN,),
+    ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_MINE,),
 }
 
 #: Inner senders that do not send a stored, labelled document, each with why.
@@ -142,6 +153,7 @@ _SINK_NAMES = frozenset(
     {
         "judge_reconcile",
         "distill_session",
+        "_ask_llm",
         "run_memory_extraction",
         "EnrichmentService",
         "build_llm_facet_classifier",
@@ -175,8 +187,10 @@ _SENDER_FLOOR = 5
 _ENTRY_FLOOR = 8
 #: Hand-read: judge_reconcile x2, run_memory_extraction x2, EnrichmentService x2,
 #: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1,
-#: distill_session x1.
-_SINK_CALL_FLOOR = 10
+#: distill_session x1, ``_ask_llm`` x1 (in ``PrecedentMiner.mine``).
+_SINK_CALL_FLOOR = 11
+#: Hand-read: ``trellis worker mine-precedents`` builds the only ``PrecedentMiner``.
+_MINER_CONSTRUCTION_FLOOR = 1
 
 
 def _calls_with_scope(
@@ -242,6 +256,54 @@ def _calls_any(nodes: list[ast.AST], names: frozenset[str] | set[str]) -> bool:
     )
 
 
+def _chain_violations(
+    tree: ast.Module | None,
+    where: str,
+    functions: list[ast.AST],
+    chain: tuple[str, ...],
+) -> list[str]:
+    """Each link of ``chain`` must be called by the one before; the last asks."""
+    caller = functions
+    for helper_name in chain:
+        if not _calls_any(caller, {helper_name}):
+            return [f"{where}: does not call its gate helper {helper_name}"]
+        caller = _functions(tree, helper_name) if tree is not None else []
+    if not _calls_any(caller, _PREDICATE_NAMES):
+        return [f"{where}: helper {chain[-1]} never calls the predicate"]
+    return []
+
+
+def miner_construction_violations(root: Path) -> tuple[int, list[str]]:
+    """``(PrecedentMiner calls seen, calls whose ``egress`` is not a route gate)``.
+
+    A new ``PrecedentMiner(...)`` in ``src/`` must hand the miner a gate built
+    from the route its client is built from: ``egress=EgressGate.for_route(...)``
+    or ``for_route_lazy(...)``. A missing keyword is a ``TypeError`` at run time;
+    this makes it a failure here, and refuses a gate built any other way.
+    """
+    seen = 0
+    problems: list[str] = []
+    for path, tree in iter_modules(root):
+        module = _relative(root, path)
+        names = construction_names("PrecedentMiner", tree)
+        for call, _scope in _calls_with_scope(tree):
+            if name_of(call.func) not in names:
+                continue
+            seen += 1
+            egress = [k.value for k in call.keywords if k.arg == "egress"]
+            routed = (
+                len(egress) == 1
+                and isinstance(egress[0], ast.Call)
+                and name_of(egress[0].func) in {"for_route", "for_route_lazy"}
+            )
+            if not routed:
+                problems.append(
+                    f"{module}:{call.lineno}: PrecedentMiner built without "
+                    f"egress=EgressGate.for_route(...)"
+                )
+    return seen, problems
+
+
 def entry_violations(root: Path, entries: set[Entry]) -> list[str]:
     """Entry points that do not pass the predicate, as readable lines."""
     trees = {_relative(root, path): tree for path, tree in iter_modules(root)}
@@ -252,17 +314,11 @@ def entry_violations(root: Path, entries: set[Entry]) -> list[str]:
         functions = _functions(tree, entry.function) if tree is not None else []
         if not functions:
             problems.append(f"{where}: no such function; the roster is stale")
-        elif entry.via is None:
+        elif not entry.chain:
             if not _calls_any(functions, _PREDICATE_NAMES):
                 problems.append(f"{where}: sends content and never calls the predicate")
         else:
-            helper = _functions(tree, entry.via) if tree is not None else []
-            if not _calls_any(functions, {entry.via}):
-                problems.append(f"{where}: does not call its gate helper {entry.via}")
-            elif not _calls_any(helper, _PREDICATE_NAMES):
-                problems.append(
-                    f"{where}: helper {entry.via} never calls the predicate"
-                )
+            problems += _chain_violations(tree, where, functions, entry.chain)
     return problems
 
 
@@ -362,6 +418,20 @@ def test_every_caller_of_a_sender_is_a_rostered_entry_point() -> None:
 
 def test_the_gate_is_opened_only_by_a_route_declaration() -> None:
     assert gate_opening_violations(_SRC) == []
+
+
+def test_every_miner_is_built_with_a_route_gate() -> None:
+    seen, problems = miner_construction_violations(_SRC)
+    assert problems == []
+    assert_hand_read_floor(
+        seen,
+        _MINER_CONSTRUCTION_FLOOR,
+        subject="PrecedentMiner",
+        sole_site_reason=(
+            "src/ builds exactly one PrecedentMiner, in mine_precedents_cmd; "
+            "the constructor's own class body is not a call"
+        ),
+    )
 
 
 def test_the_scan_still_finds_what_a_person_counted() -> None:
@@ -616,3 +686,57 @@ def test_the_known_evasions_are_named_not_caught(tmp_path: Path) -> None:
         0,
         [],
     )
+
+
+def test_a_new_caller_of_the_mining_sender_is_reported(tmp_path: Path) -> None:
+    source = (
+        "class Other:\n"
+        "    async def sneaky(self, miner, traces):\n"
+        "        return await miner._ask_llm(traces)\n"
+    )
+    seen, problems = sink_caller_violations(_corpus(tmp_path, job=source), set(), {})
+    assert seen == 1
+    assert len(problems) == 1
+    assert "sneaky" in problems[0]
+    assert "_ask_llm" in problems[0]
+
+
+def test_a_miner_built_without_a_route_gate_is_reported(tmp_path: Path) -> None:
+    source = (
+        "def bare(t):\n    return PrecedentMiner(t)\n"
+        "def borrowed(t, g):\n    return PrecedentMiner(t, egress=g)\n"
+        "def routed(t, r):\n"
+        "    return PrecedentMiner(t, egress=EgressGate.for_route(r, X, None))\n"
+        "def lazy(t, r):\n"
+        "    return PrecedentMiner(t, egress=EgressGate.for_route_lazy(r, X, f))\n"
+    )
+    seen, problems = miner_construction_violations(_corpus(tmp_path, job=source))
+    assert seen == 4
+    assert [problem.split(":")[1] for problem in problems] == ["2", "4"]
+
+
+_CHAIN = """
+def screen(x):
+    return x.stored_verdict("a")
+
+
+def plan(x):
+    return screen(x)
+
+
+def mine(x):
+    plan(x)
+    return x.generate(messages=[])
+"""
+
+
+def test_a_gate_chain_that_reaches_the_predicate_passes(tmp_path: Path) -> None:
+    entry = Entry("job.py", "mine", via=("plan", "screen"))
+    assert entry_violations(_corpus(tmp_path, job=_CHAIN), {entry}) == []
+
+
+def test_a_broken_link_in_a_gate_chain_is_reported(tmp_path: Path) -> None:
+    broken = _CHAIN.replace("    return screen(x)\n", "    return x\n")
+    entry = Entry("job.py", "mine", via=("plan", "screen"))
+    problems = entry_violations(_corpus(tmp_path, job=broken), {entry})
+    assert problems == ["job.py::mine: does not call its gate helper screen"]
