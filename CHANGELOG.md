@@ -36,10 +36,11 @@ All notable changes to Trellis will be documented in this file.
   A differential test builds stores that hold the same public documents, one also holding
   documents the key may not read (and, in a third, public documents that a lifecycle gate
   withholds, and in a fourth a graph node the intent names), and asserts every REST and MCP
-  surface the key can reach answers alike apart from ids and clocks. It fails if a count is added back or the text is taken from the vector
-  row. A runtime walk of the real app's routes and the server's registered tools requires
-  each to be rostered, which the two source rules cannot do for a route added with
-  `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`.
+  surface the key can reach answers alike apart from ids and clocks. It fails if a count is
+  added back or the text is taken from the vector row. A runtime walk of the real app's
+  routes and the server's registered tools requires each to be rostered, which the two
+  source rules cannot do for a route added with `add_api_route`, `@app.get` or
+  `mcp.tool(fn, ...)`.
 
   No other caller changes. The test in `test_public_clearance.py` that compares a non-public
   caller with and without the new branch is a weak check: it patches the dispatch predicate
