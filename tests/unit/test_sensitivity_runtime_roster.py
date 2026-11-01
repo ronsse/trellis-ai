@@ -201,16 +201,16 @@ def real_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAP
 
 def test_every_route_the_app_serves_is_rostered(real_app: FastAPI) -> None:
     handlers, unexplained = served_handlers(real_app)
-    # Hand read: 76 rostered handler functions, one of which serves two routes.
+    # Hand read: 79 rostered handler functions, one of which serves two routes.
     assert_hand_read_floor(
         len(handlers),
-        76,
+        79,
         subject="handlers the running app serves",
         hint="a router was not walked, or the route object's shape changed",
     )
     assert_hand_read_floor(
         sum(len(paths) for paths in handlers.values()),
-        77,
+        80,
         subject="routes the running app serves through those handlers",
         hint="a router was not walked, or the route object's shape changed",
     )
@@ -222,7 +222,7 @@ def test_every_surface_the_server_registers_is_rostered() -> None:
     registered = registered_surfaces(mcp)
     assert_hand_read_floor(
         len([name for name in registered if name.startswith("tool:")]),
-        16,
+        18,
         subject="tools the running server lists",
         hint="the listing was filtered, or a provider was not read",
     )

@@ -278,13 +278,15 @@ class TestListCandidates:
     ) -> None:
         """Same issue #869 F4 guard, reached through ``key_name`` instead
 
-        of ``candidate_id``: an admin key minted with a NUL in its own
+        of ``candidate_id``: an admin key stored with a NUL in its own
         name (the ``dismissed_by``/``key_name`` fallback when no
         ``key_id`` -- here both are present, but the payload walk checks
-        every field) lands in the audit payload the same way.
+        every field) lands in the audit payload the same way. No surface
+        mints such a name now, but a key stored earlier can still hold one.
         """
         monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
-        token, record = generate_api_key("bad\x00name", [SCOPE_ADMIN])
+        token, record = generate_api_key("name", [SCOPE_ADMIN])
+        record = record.model_copy(update={"name": "bad\x00name"})
         registry.operational.api_key_store.create(record)
         _emit_tag_keyword_candidate(registry)
 

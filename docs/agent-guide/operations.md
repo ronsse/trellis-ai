@@ -5191,6 +5191,101 @@ trellis admin api-keys list --format json
 trellis admin api-keys revoke <KEY_ID> --format json
 ```
 
+### API key management
+
+Keys can be listed, minted and revoked from the REST API and the UI's **Keys**
+tab as well as the CLI. Every surface goes through the same governed path
+(`Operation.API_KEY_MINT` / `API_KEY_REVOKE`, `build_api_keys_executor`), so a
+denying policy blocks all of them alike and one scope check decides what is
+valid: `external` is accepted only as `read,external`, and
+`trellis admin api-keys create`, `POST /api-keys` and the UI refuse
+`read,admin,external` with the same message.
+
+| Surface | List | Mint | Revoke |
+|---|---|---|---|
+| REST (admin scope) | `GET /api/v1/api-keys` | `POST /api/v1/api-keys` `{"name", "scopes"}` (201) | `DELETE /api/v1/api-keys/{key_id}` |
+| CLI | `trellis admin api-keys list` | `trellis admin api-keys create` | `trellis admin api-keys revoke <KEY_ID>` |
+| MCP (admin scope) | `list_api_keys` | none, by design | `revoke_api_key` |
+| UI | Keys tab | Keys tab, with scope presets | Keys tab, typed confirmation |
+
+- **The token is returned once**, in the mint response (`token`, with a
+  `Cache-Control: no-store` header). Only a hash is stored, so a lost token is
+  revoked and replaced, never recovered. `GET /api-keys` and `list_api_keys`
+  return `key_id`, `name`, `scopes`, `created_at`, `revoked` and `revoked_at`,
+  never a hash or any part of a secret. The list also carries the scope
+  `presets` the UI offers.
+- **An `external` key is refused on every route and tool above.** They need the
+  `admin` scope, which an `external` key does not hold.
+- **No MCP tool mints a key.** A token is a credential, and a mint tool would
+  give an agent a way to widen its own access. Mint from the CLI, the REST route
+  or the UI.
+- **Mint and revoke need an identified admin credential.** Over REST, a stored key that
+  holds `admin` or the shared `TRELLIS_API_KEY` secret (which the server treats as
+  admin; the event names it `shared-secret`) may mint and revoke. An anonymous caller
+  may not: in `TRELLIS_AUTH_MODE=optional` with no key it gets 403 pointing at `trellis
+  admin api-keys`; in `off` the server ignores a presented key, so every REST caller is
+  anonymous (a stored key and the secret included) and the 403 points only at the CLI.
+  That is a change for those modes, where an anonymous caller otherwise holds every
+  scope. The MCP `revoke_api_key` tool is narrower: it needs a stored admin key and does
+  not accept the shared secret (the MCP verifier takes stored keys only); an
+  unidentified session is refused and pointed at the CLI. Listing is unchanged. The Keys
+  tab says so when no key is stored in the browser.
+- **The last admin.** A stored admin key cannot revoke itself, on REST or MCP. That is
+  the whole guard: the shared secret has no key id, so over REST it can revoke the only
+  stored admin, and the CLI can revoke any key. Unsetting the secret afterwards leaves
+  no REST or MCP admin, and the CLI is then the way back. Two admin keys revoking each
+  other at the same moment can also reach zero (read from the code, not reproduced).
+- **Errors.** An unknown key id answers 404, an already-revoked one 409, an
+  invalid scope list or name 400, and a policy that denies the operation 400 (as
+  the other write routes do). A store that is degraded or stale, a corrupt
+  `policies.json` and a duplicate answer 409. A server fault answers 500 with a
+  fixed message and no exception text. The CLI exits 2 for the first three, as
+  before, and 5 for a corrupt `policies.json`.
+- **Names** are 1 to 120 characters with no control character (NUL, newline,
+  ESC and the rest of Unicode category `C`, plus line and paragraph
+  separators), on every surface including the CLI. A name stored before the rule
+  still lists, and the CLI table prints control characters escaped.
+- **A caller cannot revoke the key it is authenticated with.** The REST route and
+  the MCP tool answer with a refusal (409 on REST) and the key stays live, so an
+  admin cannot lock itself out by a misclick. The CLI has no authenticated key
+  and can revoke any key, so it is the recovery path except in one case: a
+  corrupt `policies.json` fails Stage 2 closed (CLI exit 5, REST 409, the message
+  names the file), and until that file is fixed or removed no surface, the CLI
+  included, can mint or revoke.
+- **Audit events.** A mint emits `api_key.minted` and a revoke emits `api_key.revoked`,
+  from whichever surface did the work, the CLI included. The payload is `key_id`,
+  `name`, `scopes`, `minted_by` / `revoked_by` and, when the caller was an API key,
+  `actor_key_id` and `actor_key_name`. It never holds the token, the secret or its hash.
+  A refusal by the executor (unknown key, policy denial and the like) emits
+  `mutation.rejected` instead; the REST identity 403 and the MCP `unidentified_caller`
+  refusal never reach the executor, so they leave a warning log line
+  (`api_key_write_refused_unidentified`, no secret) and no event. The generic
+  `execute_mutation` tool and `POST /commands/batch` have no handler for these
+  operations, so neither can mint or revoke a key. Key operations are neither an accept
+  nor a reject for capture health: refusals do not raise the banner and a mint does not
+  clear one.
+- **A store failure on the audit write does not change the outcome.** If the key
+  store write succeeded and the event cannot be recorded because of a failure the
+  executor's emit guard lists, which is what both shipped event logs raise, the
+  operation answers success with the warning `audit_event_not_recorded` (a mint
+  still returns its token), and an error log names the command, key id and
+  operation, never a secret. Warnings (this one and any `warn`-verdict policy) are
+  in the REST body, the CLI's text and JSON, the MCP result and the Keys tab. The
+  CLI also succeeds and warns when the event log cannot be opened at all, so a
+  corrupt `events.db` cannot keep a compromised key live. A successful run that
+  tolerated a failed open always carries the warning, even if a later `api_key.*`
+  write landed, because the executor's own `mutation.executed` record is missing in
+  that case; a CLI refusal (`already_revoked`, `unknown_key_id`) changed nothing and
+  does not print it.
+- **Outside that list the operation reports a failure after the write.** An
+  environment-level failure the guard does not list, such as a broken import or
+  running out of memory, on the executor's `mutation.executed` emit answers REST 500
+  or CLI `store_error` although the key store write has committed. A mint then
+  returns no token and leaves a live key nobody holds; a revoke has taken effect.
+  Run `trellis admin api-keys list`, then revoke the orphan.
+- Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
+  limits.
+
 ### Production exposure
 
 Three env toggles control what an unauthenticated caller can reach.

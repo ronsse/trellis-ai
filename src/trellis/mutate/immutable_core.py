@@ -204,6 +204,10 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.SETTINGS_UPDATE,
         Operation.CLASSIFY_RULE_APPLY,
         Operation.CLASSIFY_RULE_REVOKE,
+        # A credential change: minting adds a standing grant and revoking
+        # closes one, neither of which a later read can undo.
+        Operation.API_KEY_MINT,
+        Operation.API_KEY_REVOKE,
     }
 )
 

@@ -60,6 +60,7 @@ EXPECTED_TABS = {
     "schedules",
     "tagrules",
     "settings",
+    "keys",
 }
 
 
