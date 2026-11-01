@@ -113,6 +113,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Review tab reads a fresh deployment as an empty queue, and a real failure there shows
+  its reason.** `GET /learning/candidates` answers `status: "error"` when no writer has
+  produced the artifact yet (`learning_artifacts_dir_missing`, `learning_candidates_missing`),
+  and the UI drew that as a failure: a red `!` on the count badge and an error body. Those two
+  codes now render as an empty state that keeps the server's hint (the directory looked in and
+  how to fill it) with a count of 0. `learning_candidates_unreadable`, `stores_dir_unconfigured`
+  and any code the page does not know still render as errors, and the error body now carries the
+  hint: it read `Failed to load undefined: undefined` since `reviewError` took a label, because
+  one call site still passed it a string. The REST response is unchanged (same `status`, `code`
+  and `hint`, so the OpenAPI spec and the CLI are untouched); a client that needs "not written
+  yet" still reads `code`. The Precedents tab's one line about waiting candidates still reads
+  `status: "error"` as "could not be checked".
+
 - **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
   deployment docs describe the scoped-key auth that is built.** The operator
   runbook listed both as server settings, and `trellis serve` and `trellis-api` honour them,

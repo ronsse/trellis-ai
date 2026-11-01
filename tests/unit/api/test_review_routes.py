@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.unit.api.test_ui_review_truth import needs_node, render_review_learning
 from trellis.auth import (
     SCOPE_ADMIN,
     SCOPE_READ,
@@ -492,6 +493,42 @@ class TestLearningCandidates:
         assert data["artifacts_dir"] == str(artifacts)
         assert data["candidate_count"] == 1
         assert data["candidates"][0]["candidate_id"] == "source_analysis:abc"
+
+    @needs_node
+    @pytest.mark.parametrize(
+        "scenario", ["no-dir", "empty-dir", "unreadable", "no-stores-dir"]
+    )
+    def test_the_review_tab_reads_each_real_answer_as_empty_or_error(
+        self, client, registry, tmp_path, scenario
+    ):
+        """The page's verdict on what this route answers, not on a copy of it.
+
+        A fresh deployment (no directory, or a directory no writer has filled)
+        is an empty Review section; an artifact that cannot be read, or no
+        directory to look in, is an error. Feeding the route's own JSON
+        through the page's loader keeps its list of "nothing written yet"
+        codes from drifting from the codes this route can emit.
+        """
+        empty = scenario in {"no-dir", "empty-dir"}
+        if scenario == "empty-dir":
+            (tmp_path / "learning").mkdir()
+        elif scenario == "unreadable":
+            (tmp_path / "learning").mkdir()
+            (tmp_path / "learning" / "intent_learning_candidates.json").write_text(
+                "{not json", encoding="utf-8"
+            )
+        elif scenario == "no-stores-dir":
+            app_module._registry = StoreRegistry()
+        answer = client.get("/api/v1/learning/candidates").json()
+        assert answer["status"] == "error"
+
+        shown = render_review_learning(answer, tmp_path)
+
+        assert (shown["count"]["text"] == "0") is empty
+        assert (shown["count"]["text"] == "!") is not empty
+        assert ("No learning candidates yet" in shown["body"]) is empty
+        assert ("var(--danger)" in shown["body"]) is not empty
+        assert answer["hint"] in shown["body"].replace("&#39;", "'")
 
     def test_promotable_flag_matches_prepare_learning_promotions(
         self, client, tmp_path, monkeypatch

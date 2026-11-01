@@ -3963,11 +3963,34 @@
         }
 
         // -- Section 2: Learning-promotion candidates --
+        // Of the four reasons the route answers status="error", these two mean
+        // only that no writer has produced the artifact yet -- the ordinary
+        // state of a fresh deployment, with nothing to review. The other two
+        // (no directory configured, an artifact that cannot be read) are
+        // failures, and so is any code not listed here: an unknown reason must
+        // read as an error, never as an empty queue.
+        const LEARNING_NOT_WRITTEN_CODES = [
+            'learning_artifacts_dir_missing',
+            'learning_candidates_missing',
+        ];
+
         async function loadReviewLearning() {
             const body = document.getElementById('review-learning-body');
             body.innerHTML = loadingHtml('Loading learning candidates...');
             try {
                 const data = await fetchJSON('/learning/candidates');
+                // Nothing written yet is an empty queue, not a failure. The
+                // hint still names the directory looked in and how to fill it,
+                // so a writer pointed somewhere else stays discoverable; the
+                // route's status is unchanged for every other caller.
+                if (data.status === 'error' && LEARNING_NOT_WRITTEN_CODES.includes(data.code)) {
+                    setCount('review-learning-count', (data.candidates || []).length);
+                    body.innerHTML = emptyStateHtml({
+                        title: 'No learning candidates yet',
+                        body: data.hint || 'No learning candidates have been written for review.',
+                    });
+                    return;
+                }
                 // The route answers 200 with status="error" (artifact
                 // missing/unreadable) rather than a fetch failure, so it
                 // never reaches the catch below; render it as an error, not
@@ -3977,7 +4000,7 @@
                     const msg = (data.hint || 'Could not read learning candidates.') +
                         (data.code ? ` (${data.code})` : '');
                     setCountError('review-learning-count', msg);
-                    body.innerHTML = reviewError(msg);
+                    body.innerHTML = reviewError(new Error(msg), 'learning candidates');
                     return;
                 }
                 const items = data.candidates || [];
