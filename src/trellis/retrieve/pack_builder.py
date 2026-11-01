@@ -92,8 +92,6 @@ from trellis.retrieve.parent_verdicts import (
     partition_by_parent_signal_quality,
 )
 from trellis.retrieve.public_pack import (
-    PUBLIC_WINDOW_CEILING,
-    PUBLIC_WINDOW_FACTOR,
     project_for_public,
     readable_stored_copy,
 )
@@ -2028,14 +2026,22 @@ class PackBuilder:
         return sectioned_pack
 
     def _public_strategies(self) -> list[SearchStrategy]:
-        """The axes a public-only caller runs: every one but the graph axis.
+        """The axes a public-only caller runs: the keyword and semantic axes.
 
-        The graph axis serves entities, which carry no document label and are
-        never served to a public-only caller, so it contributes no item. It
-        would still report on the graph (seeded or not, how many nodes
-        matched), which is a function of what the caller may not read.
+        An allow-list, not a deny-list. Only these two have a public-only read
+        (``public_result``) that ranks public documents alone, so a strategy
+        added later (a plugin, or the graph axis) does not run for this caller
+        until it has one: it is not in ``strategies_used``, and the pack's
+        ``axes`` block lists it as not run (``failed``), or reads the graph
+        axis ``"absent"``. The graph axis serves entities, which carry no
+        document label, and would report on the graph (seeded or not, how many
+        nodes matched), which is a function of what the caller may not read.
         """
-        return [s for s in self._strategies if s.name != GRAPH_STRATEGY_NAME]
+        return [
+            s
+            for s in self._strategies
+            if isinstance(s, (KeywordSearch, SemanticSearch))
+        ]
 
     def _search_public(
         self,
@@ -2050,56 +2056,43 @@ class PackBuilder:
     ) -> list[PackItem]:
         """One axis's items for a public-only caller: readable, refreshed, gated.
 
-        The page is filled from public documents only. A strategy ranks the
-        whole corpus, so a page of ``limit`` can hold fewer public rows than
-        exist because unreadable ones outrank them; filtering afterwards would
-        make how many a caller receives depend on what it may not read. So the
-        window is widened until ``limit`` rows survive, the strategy has
-        nothing further, or :data:`PUBLIC_WINDOW_CEILING` is reached. Each row
-        is rebuilt from its stored document (:func:`readable_stored_copy`)
-        before the archived and noise gates judge it, so a stale vector row
-        cannot carry text or a stamp the document no longer holds.
+        The strategy reads public documents alone (``public_result``): which
+        rows it ranks and the scores it ranks them by are functions of those
+        documents, so there is no window to widen and no hidden row to
+        outrank a public one. Each row is then rebuilt from its stored
+        document (:func:`readable_stored_copy`, which also re-applies the
+        label) before the archived and noise gates judge it, so a stale
+        vector row cannot carry text or a stamp the document no longer holds.
         """
-        post_filtered = bool(
-            filters and ("domain" in filters or "content_tags" in filters)
-        )
-        window = limit
-        previous_raw = -1
-        while True:
-            found, _axis_state, _skipped = _search_strategy(
-                strategy,
-                intent,
-                limit=window,
-                filters=(dict(filters) if filters else None),
-            )
-            readable = [
-                copy
-                for item in strip_non_servable(found)
-                if (
-                    copy := readable_stored_copy(
-                        clearance,
-                        item,
-                        parent_verdict_cache,
-                        excerpt_max_chars=self._excerpt_max_chars,
-                    )
+        if isinstance(strategy, KeywordSearch):
+            found = strategy.public_result(intent, limit=limit, filters=filters).items
+        elif isinstance(strategy, SemanticSearch):
+            found = strategy.public_result(
+                intent, self._document_store, limit=limit, filters=filters
+            ).items
+        else:  # pragma: no cover - _public_strategies never offers another
+            msg = f"strategy {strategy.name!r} has no public-only read"
+            raise TypeError(msg)
+        readable = [
+            copy
+            for item in strip_non_servable(found)
+            if (
+                copy := readable_stored_copy(
+                    clearance,
+                    item,
+                    parent_verdict_cache,
+                    excerpt_max_chars=self._excerpt_max_chars,
                 )
-                is not None
-            ]
-            kept, _gate_rejected = self._apply_collect_gates(
-                readable,
-                signal_quality_spec=signal_quality_spec,
-                strategy_name=strategy.name,
-                parent_verdict_cache=parent_verdict_cache,
             )
-            raw = len(found)
-            # A strategy that returned fewer rows than it was asked for has
-            # nothing further, unless it post-filters (the semantic axis
-            # over-fetches then slices), where only "no growth" says so.
-            exhausted = raw <= previous_raw or (raw < window and not post_filtered)
-            if len(kept) >= limit or exhausted or window >= PUBLIC_WINDOW_CEILING:
-                return kept[:limit]
-            previous_raw = raw
-            window = min(window * PUBLIC_WINDOW_FACTOR, PUBLIC_WINDOW_CEILING)
+            is not None
+        ]
+        kept, _gate_rejected = self._apply_collect_gates(
+            readable,
+            signal_quality_spec=signal_quality_spec,
+            strategy_name=strategy.name,
+            parent_verdict_cache=parent_verdict_cache,
+        )
+        return kept[:limit]
 
     def _collect_public_pool(
         self,

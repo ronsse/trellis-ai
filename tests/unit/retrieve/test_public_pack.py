@@ -20,7 +20,6 @@ from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.public_pack import (
-    PUBLIC_WINDOW_CEILING,
     project_for_public,
     public_search_page,
     readable_stored_copy,
@@ -274,20 +273,6 @@ class TestSearchPage:
         store.put(chunk_doc_id("p", 0), "alpha chunk", label("public"))
         ids = [r["doc_id"] for r in public_search_page(store, "alpha", limit=10)]
         assert ids == ["p"]
-
-    def test_the_window_stops_at_the_ceiling(self, store, monkeypatch) -> None:
-        calls: list[int] = []
-        real = store.search
-
-        def spy(query: str, *, limit: int, **kw: Any) -> Any:
-            calls.append(limit)
-            return real(query, limit=limit, **kw)
-
-        monkeypatch.setattr(store, "search", spy)
-        self._seed(store, hidden=40, public=0)
-        assert public_search_page(store, "alpha", limit=1) == []
-        assert max(calls) <= PUBLIC_WINDOW_CEILING
-        assert calls == sorted(calls)
 
     def test_the_result_is_json_serialisable(self, store) -> None:
         self._seed(store, hidden=2, public=2)

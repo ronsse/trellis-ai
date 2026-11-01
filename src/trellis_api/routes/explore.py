@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.retrieve.public_rank import PUBLIC_ROW_CEILING, public_keyword_rows
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_document_rows,
@@ -191,6 +192,14 @@ def list_documents(
     unavoidable: a capture still short of 2000 readable matches reports the
     readable ones it holds, a count that depends on how many hidden matches
     ranked ahead of them, with ``total_exact: false``.
+
+    A key that reads only ``public`` documents (an ``external`` key) is served
+    a search that never ranks a hidden row: the store is asked for documents
+    labelled ``public`` alone and they are ordered by BM25 computed over those
+    rows (``trellis.retrieve.public_rank``), so ``total``, the order and every
+    page are functions of the public documents. At most 2000 public matches are
+    held; past that ``total`` is clipped and ``total_exact`` is ``false``, and
+    which matches the 2000 are is chosen by the store's own rank.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
@@ -198,7 +207,15 @@ def list_documents(
     if is_public_only(gate.clearance):
         # A chunk is never served to a key that reads only ``public``.
         include_chunks = False
-    if q:
+    if q and is_public_only(gate.clearance):
+        # Public documents are read by predicate and ranked locally, so the
+        # capture holds public rows only: no hidden match can sit in it, move
+        # a score or shorten a page. Exact unless it reached the ceiling.
+        matches = [row for row, _score in public_keyword_rows(store, q)]
+        total_exact = len(matches) < PUBLIC_ROW_CEILING
+        total = len(matches)
+        docs = matches[offset : offset + limit]
+    elif q:
         matches, total_exact = _search_readable(store, gate, q, include_chunks)
         total = len(matches)
         docs = matches[offset : offset + limit]

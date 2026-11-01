@@ -4244,7 +4244,22 @@ paths:
 
         readable ones it holds, a count that depends on how many hidden matches
 
-        ranked ahead of them, with ``total_exact: false``.'
+        ranked ahead of them, with ``total_exact: false``.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        a search that never ranks a hidden row: the store is asked for documents
+
+        labelled ``public`` alone and they are ordered by BM25 computed over those
+
+        rows (``trellis.retrieve.public_rank``), so ``total``, the order and every
+
+        page are functions of the public documents. At most 2000 public matches are
+
+        held; past that ``total`` is clipped and ``total_exact`` is ``false``, and
+
+        which matches the 2000 are is chosen by the store''s own rank.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -6719,13 +6734,17 @@ paths:
 
         A key that reads only ``public`` documents (an ``external`` key) is served
 
-        a page filled from public documents alone, so ``limit`` is met whenever
+        a search that never ranks a hidden row: the store is asked for documents
 
-        that many exist however many hidden matches outrank them; it is never
+        labelled ``public`` alone and they are ordered by BM25 computed over those
 
-        served a chunk (``include_chunks`` is ignored and echoed ``false``), and
+        rows, ties by ``doc_id``, so the order and ``limit`` membership are
 
-        its rows carry only the allowlisted metadata.'
+        functions of the public documents (at most 2000 matches are held). It is
+
+        never served a chunk (``include_chunks`` is ignored and echoed ``false``),
+
+        and its rows carry only the allowlisted metadata.'
       operationId: search_api_v1_search_get
       parameters:
       - description: Search query

@@ -21,13 +21,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.unit.retrieve.test_sensitivity import _BODY, _strategy, label
+from tests.unit.retrieve.test_sensitivity import _BODY, label
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve import pack_builder as pack_builder_mod
 from trellis.retrieve import sensitivity as sensitivity_mod
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.sensitivity import item_readable, partition_by_clearance
+from trellis.retrieve.strategies import (
+    KeywordSearch,
+    SearchStrategy,
+    SemanticSearch,
+    StrategyResult,
+)
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.pack import PackItem, SectionRequest
 from trellis.stores.advisory_store import AdvisoryStore
@@ -38,6 +44,50 @@ from trellis.stores.sqlite.event_log import SQLiteEventLog
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+
+class _PoolKeyword(KeywordSearch):
+    """A keyword axis whose public-only read finds exactly ``items``.
+
+    The public path runs only the real keyword and semantic strategies (an
+    allow-list), so a stub of another class would not run at all and a test
+    built on it would pass without testing the gate. These keep the pool a test
+    plants and let the gate judge it.
+    """
+
+    def __init__(self, items: list[PackItem]) -> None:
+        super().__init__(None)
+        self._items = items
+
+    def public_result(self, query: str, **_: Any) -> StrategyResult:
+        return StrategyResult(items=list(self._items), skipped=[])
+
+    def search_result(self, query: str, **_: Any) -> StrategyResult:
+        return StrategyResult(items=list(self._items), skipped=[])
+
+
+class _PoolSemantic(SemanticSearch):
+    def __init__(self, items: list[PackItem]) -> None:
+        super().__init__(None)
+        self._items = items
+
+    def public_result(self, query: str, *_: Any, **__: Any) -> StrategyResult:
+        return StrategyResult(items=list(self._items), skipped=[])
+
+    def search_result(self, query: str, **_: Any) -> StrategyResult:
+        return StrategyResult(items=list(self._items), skipped=[])
+
+
+def _strategy(name: str, items: list[PackItem]) -> SearchStrategy:
+    if name == "keyword":
+        return _PoolKeyword(items)
+    if name == "semantic":
+        return _PoolSemantic(items)
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.return_value = items
+    return strategy
+
 
 PUB_CHUNK = chunk_doc_id("pub-parent", 1)
 UNLABELLED_PUB_CHUNK = chunk_doc_id("pub-parent", 0)

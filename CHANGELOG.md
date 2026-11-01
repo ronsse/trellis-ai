@@ -15,32 +15,64 @@ All notable changes to Trellis will be documented in this file.
   reason, the matching MCP tools raise a policy-denied error saying the same, and `get_items`
   answers a graph or trace id as it answers a missing one. `external` grants no write, is only
   valid as `read,external` (the CLI refuses it beside any other scope and stores nothing),
-  and a stored key that holds it beside a higher clearance reads at `public`. A stored scope
-  string is matched without regard to case, so `read,External` is the same key.
+  and a stored key that holds it beside a higher clearance reads at `public`. The case of an
+  `external` scope is ignored, so a stored list `["read", "External"]` is the same key;
+  a single string `"read,external"` is neither scope (the key has no `read`, clearance
+  `internal`, and every route answers 403).
 
   What the key receives does not depend on anything it may not read, and every rule below
-  applies to this key alone. An item's text and metadata are read from the stored document
-  row, never from the vector row, and cut as a pack cuts them; an item with no stored row is
-  withheld. Metadata is an allowlist, `title` and `document_form`, so a key a writer adds
-  later is not served until someone lists it. A chunk is never served (a pack, `/search`,
-  `GET /documents`, `get_items`), and a chunk id answers as a missing id. No count sees past
-  the filter: `withholding` keeps its keys and reads zero, `rejected_items` is empty,
-  `candidates_found` counts only what passed, no MCP surface prints a `**Withheld:**` line,
-  and the graph axis is not reported. `GET /search` fills its page from public documents
-  (reading the store's ranked list in widening windows, to a ceiling of 2000 rows), and a
-  document row carries no `rank`. `/api/version` gives the key the anonymous answer. Its pack
-  draws no holdout, reads and writes no session dedup, and emits `pack.public_served` (pack
-  id, served item ids, count, key id) instead of `PACK_ASSEMBLED`; the key cannot write a
-  feedback row, so no reader waits for one.
+  applies to this key alone. **The public path never ranks a hidden row.** The label is a
+  query predicate, so a document the key may not read is not in any result set and is in no
+  score's statistics. `DocumentStore.list_documents` gains an optional `filters` keyword (the
+  semantics `search` already had: equality on a top-level metadata key, in the query; `None`
+  keeps every existing caller's SQL and result), on the SQLite and Postgres stores. The
+  keyword axis asks `DocumentStore.search` for public rows (at most 2000), discards the
+  store's own rank, and scores them with BM25 computed over those rows alone (ties by
+  `doc_id`); `GET /search`, `GET /documents?q=` and a pack all read through that one function.
+  The semantic axis never calls `VectorStore.query` (two backends filter after an
+  over-fetch, so a hidden row still pushes a public one out): it reads the public document
+  ids, fetches each stored vector with `VectorStore.get`, computes cosine locally, and skips
+  a row whose vector is missing, unusable or the wrong width. Only those two axes run for this
+  key, by allow-list: a graph or plugin strategy is not asked, so a strategy added later fails
+  closed. One that did not run is listed in `axes.failed`, and `axes.graph` reads `"absent"`.
+  The gates (archived, noise, supersession, class prior) still run over the public candidates.
+
+  An item's text and metadata are read from the stored document row, never from the vector
+  row, and cut as a pack cuts them; an item with no stored row is withheld. Metadata is an
+  allowlist, `title` and `document_form`, so a key a writer adds later is not served until
+  someone lists it. A chunk is never served (a pack, `/search`, `GET /documents`,
+  `get_items`), and a chunk id answers as a missing id. No count sees past the filter:
+  `withholding` keeps its keys and reads zero, `rejected_items` is empty, `candidates_found`
+  counts only what passed, and no MCP surface prints a `**Withheld:**` line. A document row
+  carries no `rank`. `/api/version` gives the key the anonymous answer. Its pack draws no
+  holdout, reads and writes no session dedup, and emits `pack.public_served` (pack id, served
+  item ids, count, key id) instead of `PACK_ASSEMBLED`; the key cannot write a feedback row, so
+  no reader waits for one.
+
+  Limits of the read, all in `operations.md`. The predicate is equality on the whole stored
+  label record, so a document labelled `public` whose record also carries regulatory tags, a
+  jurisdiction or another classifier than the labelling path writes is not served (it fails
+  closed). A caller's filters (`domain`, tag filters) are matched against a public document's
+  own stored `domain` and tags, which the response drops, so a filter can test those fields of
+  a document labelled `public`. A public document whose embedding is older than its text lets
+  the old words move its semantic rank. The 2000-row ceiling counts public rows only; above
+  it the semantic read keeps the newest rows and the keyword read keeps the ones the store
+  ranks first (that rank is computed over the whole index, so only a key that can read more
+  than 2000 matching documents can reach it). A row whose stored metadata the store cannot
+  parse fails every read that touches it with a 500, for every key, and a hidden one is never
+  served but is observable by that failure.
 
   A differential test builds stores that hold the same public documents, one also holding
-  documents the key may not read (and, in a third, public documents that a lifecycle gate
-  withholds, and in a fourth a graph node the intent names), and asserts every REST and MCP
-  surface the key can reach answers alike apart from ids and clocks. It fails if a count is
-  added back or the text is taken from the vector row. A runtime walk of the real app's
-  routes and the server's registered tools requires each to be rostered, which the two
-  source rules cannot do for a route added with `add_api_route`, `@app.get` or
-  `mcp.tool(fn, ...)`.
+  documents the key may not read, and asserts every REST and MCP surface the key can reach
+  answers alike (the whole payload, apart from ids drawn per call and clocks). Its worlds
+  include a hidden document holding a public word, 1, 5 and 40 hidden documents that match
+  nothing, hidden rows with a malformed `auto_importance`, 2500 hidden rows, and a hidden
+  document whose vector is the query's own, and the walk covers `POST` bodies for the pack and
+  sectioned routes. A `read` key is run through the worlds that must differ, so no pair
+  passes for free. A runtime walk of the real app's routes and the server's registered
+  tools, resources and prompts requires each to be rostered by its full module path and for
+  the number of routes it was read for, which the two source rules cannot do for a route
+  added with `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`.
 
   No other caller changes. The test in `test_public_clearance.py` that compares a non-public
   caller with and without the new branch is a weak check: it patches the dispatch predicate
@@ -49,14 +81,16 @@ All notable changes to Trellis will be documented in this file.
   non-public path. The comparison that would is a base-versus-head run of the packs and
   `PACK_ASSEMBLED` payloads, made outside the suite.
 
-  It does not protect anything an existing key reads, nothing labels a document `public` for
-  you, and a `public` label is still a human decision. It is enforced only under auth mode
+  It does not protect anything an existing key reads, nothing labels a document `public`
+  for you, and a `public` label is still a human decision. It is enforced only under auth mode
   `required`; with auth `off`, or `optional` and no key sent, nothing is enforced, and
-  trusted-local and stdio MCP callers read at `restricted`. It does not equalise timing. Its
-  keyword order and the membership of a keyword-only pack can still move with documents the
-  key may not read, because the full-text score is computed over the whole index; the
-  semantic score is not. `operations.md` lists these. `tests/unit/test_sensitivity_rest_roster_rule.py`
-  and `tests/unit/test_sensitivity_surface_rule.py` fail a new read route or tool that is
+  trusted-local and stdio MCP callers read at `restricted`. A scoped token set as
+  `TRELLIS_API_KEY` is granted every scope over REST (the shared-secret check comes first)
+  while MCP keeps the token's scopes. It does not equalise timing. A title is served as
+  stored and uncapped (`metadata.title`), markup included; the MCP index lines flatten its
+  whitespace and cut it to 80 characters, nothing else.
+  `tests/unit/test_sensitivity_rest_roster_rule.py` and
+  `tests/unit/test_sensitivity_surface_rule.py` fail a new read route or tool that is
   neither refused nor listed as answering to this key. The ADR sentence saying there is no
   `public` clearance tier is corrected.
 

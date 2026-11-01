@@ -277,8 +277,8 @@ def seed_unreadable(registry: StoreRegistry, *, bulk: int = 30) -> None:
     """Documents a public caller may not read, all naming the query words.
 
     ``bulk`` unlabelled documents repeat the words more often than any public
-    one does, so they outrank the public documents on both axes and fill a
-    strategy's first window.
+    one does, so they would outrank the public documents on both axes of a ranking
+    over the whole corpus.
     """
     for doc_id, word, meta in (
         ("h-unlabelled", "unlabelledword", {"title": "Unlabelled"}),

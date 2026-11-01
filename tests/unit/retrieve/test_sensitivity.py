@@ -61,7 +61,7 @@ def label(level: str) -> dict[str, Any]:
     return {
         DATA_CLASSIFICATION_KEY: DataClassification(
             sensitivity=level,  # type: ignore[arg-type]
-            classified_by=["test"],
+            classified_by=["caller"],
         ).model_dump(mode="json")
     }
 

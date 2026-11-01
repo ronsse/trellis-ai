@@ -4419,10 +4419,36 @@ and nothing here applies: the caller reads as trusted. Trusted-local callers and
 MCP over stdio read at `restricted`. Deploy the keys behind `required`.
 
 The rule the tier is built on is that **what an `external` key receives does not
-depend on anything it may not read**. A pack, a search page and a document list
-answer the same whether or not the store also holds documents above `public`,
-apart from ids and clocks drawn per call. This holds as follows, and each point is
-a change for this key alone: every other key is served exactly what it was.
+depend on anything it may not read**. The public path therefore never ranks a
+hidden row: a pack, a search page and a document list are computed from the
+documents labelled `public` alone, so a document the key may not read is in no
+result set and in no score's statistics. Adding or removing such documents leaves
+every payload this key gets unchanged, apart from ids and clocks drawn per call.
+The residuals are listed under "does not guard" below (timing, a row the document
+store cannot parse, and which matches survive above the 2000-row ceiling). The
+points that follow are each a change for this key alone: every other key is served
+exactly what it was.
+
+- **The label is a query predicate, and only two axes run.** The document store is
+  asked for rows labelled `public` (`DocumentStore.search` and
+  `DocumentStore.list_documents` both take a `filters` argument, equality on a
+  top-level metadata key, evaluated in the query), so a hidden row is not read,
+  whatever its text holds. The label is the whole stored record that the labelling
+  paths write for `public` (`save_memory` / `save_knowledge` `sensitivity`, and
+  `curate classify-sensitivity`), and a store filter is equality on a key's whole
+  value, so a document labelled `public` whose record also carries regulatory tags, a
+  jurisdiction or another classifier is **not** served: the predicate fails closed.
+  The clearance check then judges every returned row a second time, so it can only
+  narrow. The keyword axis scores the returned rows with BM25 computed over those
+  rows alone (the store's own `rank` is discarded; ties break on `doc_id`). The
+  semantic axis never calls `VectorStore.query` (two backends filter after an
+  over-fetch, so a hidden row would still push a public one out): it lists the
+  public document ids, reads each stored vector with `VectorStore.get`, computes
+  cosine locally (ties on `doc_id`) and skips a row whose vector is missing,
+  unusable or the wrong width. Only those two axes run, by allow-list: a graph
+  strategy or a plugin strategy is not asked, so a strategy added later fails
+  closed. One that did not run is listed in `axes.failed`. Ranking quality on this
+  path differs from the internal path, by design.
 
 - **A chunk is never served to it.** A chunk is a slice of a document
   (`<parent>#chunk-N`). A pack, `GET /search`, `GET /documents`, MCP `search` and
@@ -4435,11 +4461,16 @@ a change for this key alone: every other key is served exactly what it was.
   excerpt is cut as a pack cuts it (`truncate_excerpt`, the configured excerpt
   limit). An item that has no stored row is withheld.
 - **Metadata is an allowlist: `title` and `document_form`, and nothing else.**
-  `title` is kept when it is a non-empty string. A legacy `content_type` outside
-  the facet vocabulary is shown as `document_form`. Every other key is dropped:
-  entity and trace ids, supersession and reconcile pointers, source paths, tags,
-  scoring and gating keys, lifecycle state, labels, shadow tags and anything a
-  writer adds later. A key a new writer adds is therefore not served until someone
+  `title` is kept when it is a non-empty string, as stored: it is not capped and not
+  stripped of markup, and MCP `index=True` lines flatten its whitespace and cut it
+  to 80 characters, nothing more. A legacy `content_type` outside the facet
+  vocabulary is shown as `document_form`. Every other key is dropped from what is
+  served: entity and trace ids, supersession and reconcile pointers, source paths,
+  tags, scoring and gating keys, lifecycle state, labels, shadow tags and anything a
+  writer adds later. Dropped from the response is not dropped from the query: a
+  caller's `domain` and tag filters are matched against the public document's own
+  stored metadata, which the response never shows, so a filter can test those
+  fields of a document labelled `public` (never of a document that is not). A key a new writer adds is therefore not served until someone
   adds it to `PUBLIC_METADATA_KEYS` (`trellis.retrieve.sensitivity`), and the strategy
   that found an item still reads as `strategy_source`. A sectioned pack routes an
   item to a section from the allowlisted metadata only, so a section's affinity,
@@ -4449,14 +4480,23 @@ a change for this key alone: every other key is served exactly what it was.
   or empty in every one of them, apart from `served_count`, which is what the
   caller was sent; `rejected_items` is empty; `candidates_found` counts only the
   items that passed the readable, archived, noise, supersession and class-prior
-  gates. No MCP surface prints a `**Withheld:**` line. The `axes` block reports no
-  graph axis, since a pack to this key never runs one and its report would
-  describe the graph. Over REST a document row carries no `rank` for this key (see
-  below), and `include_chunks` is echoed `false` whatever was asked.
-- **`GET /search` fills its page from public documents.** The store's ranked list
-  is read in widening windows until `limit` public rows survive, the store has
-  nothing further, or the window reaches 2000 rows, so a page is as long as it
-  would be if the unreadable documents did not exist.
+  gates. No MCP surface prints a `**Withheld:**` line. The `axes` block reads
+  `"graph": "absent"` for this key, since a pack to it never runs a graph axis and
+  a report of one would describe the graph. Over REST a document row carries no
+  `rank` for this key, and `include_chunks` is echoed `false` whatever was asked.
+- **`GET /search`, `GET /documents?q=` and a pack share one keyword read.** The page
+  is the first `limit` of the public matches, in the order above; nothing is read
+  past the public rows, so a page is as long as it would be if the unreadable
+  documents did not exist.
+- **The ceiling counts public rows only.** One read holds at most 2000 documents
+  labelled `public` (`PUBLIC_ROW_CEILING`), so whether it bites is a function of what
+  the key may read and nothing it may not. A hidden row cannot reach it. Above it,
+  the semantic read keeps the newest 2000 public documents, and the keyword read
+  keeps the 2000 the document store ranks first (that rank sees the whole index, so
+  which public matches are kept above the ceiling is the one place the store's rank
+  still enters; it can only be reached by a key that may read more than 2000
+  documents matching the query). `GET /documents?q=` reports `total_exact: false` at
+  the ceiling; a pack and `/search` carry no field for it.
 - **`/api/version` answers as an anonymous probe does** (no provenance and no
   write-behaviour settings unless `TRELLIS_OPS_DETAIL` is `public`), as `/readyz`
   does.
@@ -4485,8 +4525,11 @@ and `/classify/rules`. Over MCP `get_graph`, `get_lessons`, `get_file_context` a
 the scope satisfies `read` and no other scope, and minting it beside `ingest`,
 `mutate`, `admin`, `confidential` or `restricted` is refused. If a stored key
 somehow holds both, the lower clearance wins and the key stays read-only. A stored
-scope string is matched without regard to case or surrounding space (`read,External`
-holds `external`), so a hand-edited key row cannot fall back to `internal`. A label
+scope string is matched without regard to case or surrounding space, per list
+element: a stored list `["read", "External"]` holds `external`, so a hand-edited key
+row cannot fall back to `internal`. A single string `"read,external"` is neither
+scope (it holds no `read`, its clearance is `internal`, and every route answers
+403). A label
 is judged on the stored document row, never on the metadata a pack item carries.
 
 An existence probe by id stays closed: a document the key may not read, a chunk and
@@ -4501,25 +4544,24 @@ bound what an operator labels `public`, does not limit domains, and the `/ui`
 page and other routes that need no credential are unchanged. It also does not
 guard:
 
-- **Timing.** A request that has to scan past more unreadable documents takes
-  longer, and the response time says so. Latency is not equalised.
+- **Timing.** A request that has to read more documents takes longer. Latency is
+  not equalised.
 - **Auth modes.** The tier exists only under `required`, as above; nothing in `off`,
   or in `optional` with the key omitted, is enforced.
-- **Score and order from a corpus statistic.** The keyword axis ranks by FTS5
-  `bm25`, whose inverse document frequency is computed over every document in the
-  index, hidden ones included. Which public documents a keyword-only pack keeps,
-  and the order of a `GET /search` page, can therefore move when documents the key
-  may not read are added. Measured, not hypothetical: with forty hidden documents
-  sharing a term, three public documents changed order on `/search` and a keyword
-  pack swapped one of its two items. The semantic axis scores by cosine, which does
-  not depend on the corpus. The raw strategy score (`score_breakdown.original_score`) and the
-  full-text `rank` are removed from what this key sees, and the fused
-  `relevance_score` is rank-based, but the order itself is not made
-  corpus-independent. Fixing it would need a per-key index.
-- **A window ceiling.** The widening read stops at 2000 rows, so a corpus whose top
-  2000 matches are all unreadable returns an empty page.
-- **A strategy that fails on an unreadable row.** If a strategy raises because of
-  a malformed document the key may not read, the axis is reported as failed.
+- **A scoped token set as `TRELLIS_API_KEY`.** The REST shared-secret check runs
+  before the key store and grants every scope, so a token carrying only
+  `read,external` that is also the value of `TRELLIS_API_KEY` reads at `restricted`
+  over REST, while MCP over HTTP verifies tokens against the key store only and
+  keeps the scopes (`public`). Do not set `TRELLIS_API_KEY` to a scoped key.
+- **A stale embedding.** A public document whose embedding is older than its text is
+  ranked on the semantic axis by the old words, and those words move its rank (the
+  text served is always the stored text). Re-embed after an edit.
+- **A row the document store cannot parse.** A stored row whose `metadata_json` is
+  not JSON makes every read that touches it fail with a 500, for every key, because
+  the SQLite store cannot read it (a filtered query evaluates `json_extract` over
+  every row it visits, a listing parses every row it returns). The row is never
+  served, but a caller can tell that one exists. No `put` writes such a row; it is
+  a store fault. The failure is the whole request, not a failed axis.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would

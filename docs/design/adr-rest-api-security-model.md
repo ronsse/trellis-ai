@@ -261,18 +261,21 @@ to protect data that has no label. The posture that replaces it:
   there is nothing to switch on and nothing retroactively hidden. A document is
   withheld only when someone labelled it `confidential` or `restricted` and the
   caller lacks the scope. Keys minted with the scopes above reach `internal` at
-  the lowest. The one exception is the opt-in `external` scope (below the
-  `public` rung of the label vocabulary): a key minted `read,external` reads at
-  `public`, so it is served only a stored document someone labelled `public`,
+  the lowest. The one exception is the opt-in `external` scope, a clearance
+  below `internal`: a key minted `read,external` reads at `public` (the lowest
+  rung of the label vocabulary), so it is served only a stored document someone
+  labelled `public`,
   and nothing that cannot carry a label (see the operations guide's
   [Sensitivity clearance](../agent-guide/operations.md#sensitivity-clearance)).
-  Because a count of what a filter removed is an oracle over what it hides, that
-  key runs a separate pipeline in which nothing it receives depends on a
-  document it may not read: no chunk, text and metadata only from the stored row
-  (an allowlist of `title` and `document_form`), no count that sees past the
-  filter, and `pack.public_served` in place of `PACK_ASSEMBLED`. The tier holds
-  only under auth mode `required`, and it does not equalise timing or the
-  full-text score, which the operations guide lists.
+  Because a count of what a filter removed, and a score computed over the whole
+  corpus, are each an oracle over what it hides, that key runs a separate
+  pipeline that never ranks a hidden row: the label is a query predicate, only
+  the keyword and semantic axes run (by allow-list), and both are scored locally
+  over the public rows alone. It receives no chunk, text and metadata only from
+  the stored row (an allowlist of `title` and `document_form`), no count that
+  sees past the filter, and `pack.public_served` in place of `PACK_ASSEMBLED`.
+  The tier holds only under auth mode `required`, and it does not equalise
+  timing; the operations guide lists that and the other residuals.
 - **Clearance comes from existing key scopes.** `confidential` and `restricted`
   are two new scopes (`restricted` implies `confidential`; `admin` implies both),
   and `trellis.auth.clearance_of(scopes)` maps a scope set to its ceiling. No

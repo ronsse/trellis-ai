@@ -222,8 +222,15 @@ class DocumentStore(ABC):
         limit: int = 50,
         offset: int = 0,
         include_chunks: bool = True,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Paginated listing of documents.
+
+        ``filters`` has the semantics :meth:`search` documents, and is a query
+        predicate for the same reason: a listing that dropped rows after
+        ``LIMIT`` would let the rows it dropped decide how many came back.
+        ``None`` (the default) adds no predicate and runs the query every
+        existing caller has always run.
 
         ``include_chunks=False`` excludes chunk documents — the
         ``<parent>#chunk-N`` fragments corpus ingestion writes alongside

@@ -472,8 +472,11 @@ class TestAgainstTheOrdinaryPath:
     ) -> None:
         """The separate public pipeline must not drift from the ordinary one.
 
-        In a store holding only public documents the two differ by exactly the
-        chunk rows the public path never serves.
+        In a store holding only public documents an unbounded pack serves the
+        same documents on both paths, apart from the chunk rows the public path
+        never serves. The *order* is not compared: the public path scores the
+        public rows alone (BM25 and cosine computed locally), so it is allowed to
+        rank them differently from the ordinary path's whole-index scores.
         """
         unbounded = [
             f"flat-{i}"
@@ -491,7 +494,7 @@ class TestAgainstTheOrdinaryPath:
                 i["item_id"]
                 for i in captures[("read,external", "base")][name]["body"]["items"]
             ]
-            assert public == ordinary, name
+            assert sorted(public) == sorted(ordinary), name
 
 
 def _residual_probe(tmp_path, monkeypatch, *, hidden: bool) -> dict[str, list[str]]:
@@ -532,19 +535,16 @@ def _residual_probe(tmp_path, monkeypatch, *, hidden: bool) -> dict[str, list[st
         app_module._registry = None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known residual: the keyword axis ranks by FTS5 bm25, whose inverse "
-        "document frequency is a statistic of the whole corpus, so the order of "
-        "public documents (and which of them fit a limit) can move with documents "
-        "the key may not read. Documented in operations.md; if this starts "
-        "passing, remove that entry."
-    ),
-)
 def test_the_order_of_public_documents_does_not_move_with_the_hidden_corpus(
     tmp_path,
 ) -> None:
+    """The keyword axis once ranked by the store's whole-corpus BM25.
+
+    Hidden documents that repeat the query words moved the order of the public
+    ones. The public path now reads public rows by predicate and scores them
+    locally (``trellis.retrieve.public_rank``), so the order and which documents
+    fit a limit are functions of the public documents alone.
+    """
     monkeypatch = pytest.MonkeyPatch()
     try:
         without = _residual_probe(tmp_path / "a", monkeypatch, hidden=False)

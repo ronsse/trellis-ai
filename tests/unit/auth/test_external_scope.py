@@ -81,14 +81,25 @@ def test_a_read_key_still_satisfies_read_and_admin_still_everything() -> None:
 
 @pytest.mark.parametrize("spelling", ["External", "EXTERNAL", " external", "external "])
 def test_a_stored_external_scope_fails_closed_whatever_its_case(spelling: str) -> None:
-    """A hand-edited or imported record reading ``read,External`` is still the
-    narrow key: a mis-cased narrowing scope must not read as a plain read key."""
+    """A hand-edited or imported record whose scope list holds ``External`` as an
+    element is still the narrow key: a mis-cased narrowing scope must not read as
+    a plain read key."""
     granted = frozenset({SCOPE_READ, spelling})
     assert clearance_of(granted) == "public"
     assert is_public_only(clearance_of(granted))
     assert scopes_satisfy(granted, SCOPE_READ)
     for needed in (SCOPE_INGEST, SCOPE_MUTATE, SCOPE_ADMIN):
         assert not scopes_satisfy(granted, needed)
+
+
+def test_one_comma_joined_string_is_not_two_scopes() -> None:
+    """``read,external`` is the CLI's spelling of a *list*; stored as a single
+    element it is neither scope: no ``read`` (every route answers 403) and the
+    clearance of a key that holds nothing it recognises, ``internal``."""
+    granted = frozenset({"read,external"})
+    assert clearance_of(granted) == "internal"
+    assert not scopes_satisfy(granted, SCOPE_READ)
+    assert not is_public_only(clearance_of(granted))
 
 
 def test_a_stored_mis_cased_external_beside_admin_is_still_read_only() -> None:

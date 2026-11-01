@@ -25,11 +25,13 @@ from typing import TYPE_CHECKING, Any
 
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
-from trellis.retrieve.sensitivity import (
-    DocumentClearance,
-    item_readable,
-    public_metadata,
+from trellis.retrieve.public_rank import (
+    PUBLIC_ROW_CEILING,
+    public_keyword_rows,
+    public_label_filter,
+    read_public_documents,
 )
+from trellis.retrieve.sensitivity import item_readable, public_metadata
 from trellis.retrieve.strategies import RECENCY_CLOCK_METADATA_KEY
 from trellis.schemas.pack import PackItem
 
@@ -42,15 +44,6 @@ if TYPE_CHECKING:
 #: and are dropped again by :func:`project_for_public` once they have been
 #: promoted onto ``strategy_source``.
 _STRATEGY_STAMP_KEYS: tuple[str, ...] = ("source_strategy", RECENCY_CLOCK_METADATA_KEY)
-
-#: The first window a public-only search asks a strategy for, as a multiple of
-#: the caller's per-strategy limit, and the ceiling it may grow to. A strategy
-#: ranks the whole corpus and the readable rows are filtered afterwards, so a
-#: page asked for at ``limit`` can come back short of public rows only because
-#: unreadable rows outrank them. The window grows until the page is full of
-#: public rows or the strategy has nothing further, never past the ceiling.
-PUBLIC_WINDOW_FACTOR = 4
-PUBLIC_WINDOW_CEILING = 2000
 
 
 def readable_stored_copy(
@@ -98,31 +91,15 @@ def public_search_page(
 ) -> list[dict[str, Any]]:
     """Up to ``limit`` stored documents labelled ``public`` that match ``query``.
 
-    ``DocumentStore.search`` has only a ``limit``, so a page cut at ``limit``
-    and filtered afterwards comes back short of public rows whenever hidden
-    rows outrank them, and how short is a function of the hidden corpus. The
-    window is widened (:data:`PUBLIC_WINDOW_FACTOR` at a time, never past
-    :data:`PUBLIC_WINDOW_CEILING`) until it yields ``limit`` readable rows or
-    the store has no more matches. A chunk is never a result.
+    The one keyword read of the public path (see
+    :func:`~trellis.retrieve.public_rank.public_keyword_rows`): the store is
+    asked for public documents alone, and the order is BM25 over those rows,
+    ties by ``doc_id``. A chunk is never a result. Each row's ``rank`` is the
+    local score, which :func:`~trellis.retrieve.sensitivity.conceal_document_rows`
+    drops before anything is served.
     """
-    gate = DocumentClearance(document_store, "public")
-    window = limit
-    while True:
-        found = document_store.search(
-            query, limit=window, filters=dict(filters or {}), include_chunks=False
-        )
-        readable = [
-            row
-            for row in found
-            if gate.permits(row.get("doc_id", ""), row.get("metadata"))
-        ]
-        if (
-            len(readable) >= limit
-            or len(found) < window
-            or window >= PUBLIC_WINDOW_CEILING
-        ):
-            return readable[:limit]
-        window = min(window * PUBLIC_WINDOW_FACTOR, PUBLIC_WINDOW_CEILING)
+    rows = public_keyword_rows(document_store, query, filters=filters)
+    return [{**row, "rank": score} for row, score in rows[:limit]]
 
 
 def project_for_public(item: PackItem) -> PackItem:
@@ -146,9 +123,10 @@ def project_for_public(item: PackItem) -> PackItem:
 
 
 __all__ = [
-    "PUBLIC_WINDOW_CEILING",
-    "PUBLIC_WINDOW_FACTOR",
+    "PUBLIC_ROW_CEILING",
     "project_for_public",
+    "public_label_filter",
     "public_search_page",
+    "read_public_documents",
     "readable_stored_copy",
 ]

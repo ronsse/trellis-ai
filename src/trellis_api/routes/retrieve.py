@@ -192,10 +192,12 @@ def search(
     setting is echoed back on the response.
 
     A key that reads only ``public`` documents (an ``external`` key) is served
-    a page filled from public documents alone, so ``limit`` is met whenever
-    that many exist however many hidden matches outrank them; it is never
-    served a chunk (``include_chunks`` is ignored and echoed ``false``), and
-    its rows carry only the allowlisted metadata.
+    a search that never ranks a hidden row: the store is asked for documents
+    labelled ``public`` alone and they are ordered by BM25 computed over those
+    rows, ties by ``doc_id``, so the order and ``limit`` membership are
+    functions of the public documents (at most 2000 matches are held). It is
+    never served a chunk (``include_chunks`` is ignored and echoed ``false``),
+    and its rows carry only the allowlisted metadata.
     """
     registry = get_registry()
     filters: dict[str, Any] = {}
@@ -205,8 +207,8 @@ def search(
         registry.knowledge.document_store, request_clearance(ctx)
     )
     if is_public_only(readable.clearance):
-        # The page is filled from public documents only, so a hidden match
-        # that outranks them cannot shorten it; a chunk is never served.
+        # Public documents only are read and ranked, so a hidden match cannot
+        # outrank them or shorten the page; a chunk is never served.
         include_chunks = False
         results = public_search_page(
             registry.knowledge.document_store, q, limit=limit, filters=filters
