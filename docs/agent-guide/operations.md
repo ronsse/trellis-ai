@@ -3848,56 +3848,58 @@ trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-c
 ```
 
 `settled_window` says whether that read is complete, and it is checked only when `--until` is
-given (`checked: false` otherwise). A task whose first pack came just before `--until` is joined
+given (`checked: false` otherwise, and the text prints a `window not checked` line; the JSON of
+such a read is unchanged). A task whose first pack came just before `--until` is joined
 by the first completed capture sweep at or after it, and counts as finished only when a later
 sweep ran `--settle-hours` after that join. A sweep that parsed no session and lost some to an
 error (`sessions_parsed` 0, `sessions_errored` above 0) settles nothing, in this report and in
 `--operational`; a sweep that parsed none and lost none had nothing to do and counts. The window
 is also unsettled while any in-window, in-rate task is unfinished, whatever its source: a join
 stamped after its source's last sweep (a join-only re-parse, or a long task the second sweep
-rewrote) is dropped from the read, so `reason` names the count and a later sweep that runs
+rewrote) is dropped from the read, so `reason` says so and a later sweep that runs
 `--settle-hours` after the latest such join settles it. A join-only re-parse must therefore
-precede the settling sweeps. Only sources that wrote an in-window, in-rate task with an outcome
-are waited on, so a retired source whose tasks are outside the analysis does not hold the read open,
-and a stopped source with an analysed task does, named in `reason`. There is no override flag.
+precede the settling sweeps. Only sources that wrote an in-scope task (an in-window, in-rate task
+whose join has an outcome block) are waited on, so a retired source whose tasks are outside the
+analysis does not hold the read open, and a stopped source with an in-scope task does, named in
+`reason`, at any distance from `--until`. There is no override flag.
 
-Until the window settles, `settled_window.settled` is `false`, `needs_sweep_after` names the time a
-completed sweep must reach, `reason` says why, the text prints an `INCOMPLETE READ` line, and
-`inference.status` reads `window not settled`. The read carries nothing an outcome fixes, which is
-more than the values computed from one: who is analysed is decided by whether a session ended on a
-usage limit and whether a value exists, so a count of the analysed tasks gives the arms' outcomes
-back (eligible minus analysed is the cut-offs and the missing). Two stores that differ only in the
-withheld arm's outcome values, usage-limit flags or missing outcomes print the same unsettled
-read, which `tests/unit/analyze/test_holdout_readout_form.py` pins through the library, the CLI in
-both formats and the REST route.
+Until the window settles the read is refused. The payload is an allow-list: `status` reads
+`window not settled`; `window_days`, `since`, `until`, `rate` (as given, `null` when not given),
+`outcome`, `itt` and `settle_hours` say what was asked; `planned_mde` and `planned_n` are the
+constants; `settled_window` carries `checked`, `settled: false`, `needs_sweep_after`,
+`latest_sweep` and `reason`; and one note names `--operational` as the early check. Every other
+key (`funnel`, `descriptive`, `by_commit`, `guardrails`, `power`, `inference`,
+`covariate_adjusted`, `sessions`, `scan` and the rest) is absent, not `null`, and none of it is
+computed, so nothing in it can move with a store. The text prints an `INCOMPLETE READ` line,
+the time a completed sweep must reach and the note, and no table: `--by-commit` on such a read
+prints the refusal. The exit code is `0` either way and does not depend on `--format`.
 
-The values are `null`. The primary and each adjustment's `inference` and `unadjusted_same_subset`
-are refused. In `descriptive`, the outcome SDs, `between_parent_share`, `n_for_10pct_effect`, the PR
-base rate and `prs_created_mean`, the cut-off shares and `cut_offs_by_arm`, and every
-`mde_by_horizon` figure are `null`, and `not_measurable` says so. In `power`, `status` reads
-`window not settled` and `realised_sd`, `power_at_planned_mde` and `mde_at_target_power` are
-`null`. In `guardrails`, every measure but `recall_rate` (which reads pack ids, not an outcome) has
-a `null` value in both arms.
+Why a refusal rather than a read with the figures withheld: who is analysed is decided by whether
+a session ended on a usage limit and whether a value exists, and a count of tasks, a rate or a
+timestamp moves with how many pack calls a task made, how long it ran and when its join was
+written, so listing the keys to blank left each pass a key behind. `tests/unit/analyze/
+test_holdout_readout_form.py` pins the allow-list and compares whole payloads of store pairs
+that differ in the withheld arm's values, usage-limit flags and missing outcomes, its pack calls
+and join times, the timing's tool-call and hook-message counts and an outcome block. The library,
+the CLI in both formats and the REST route read them the same, and the same pairs read settled
+differ (all but the join-time pair), so the comparison is not vacuous.
 
-The counts of who is analysed are `null` too: in `funnel`, `analysed`, `cut_offs_excluded` and
-`outcome_missing`, and the `cut_offs` row of `exclusions` (`excluded`); in `descriptive`,
-`analysed_tasks`, `analysed_per_30d`, `analysed_by_arm` and `parents`, and `sessions.analysed` and
-its per-30-day rate and horizon `n`s; in `inference`, the four strata counts; in `power`,
-`realised_n`; in `guardrails`, `n` and `missing` of every measure but `recall_rate`, whose value,
-`n` and `missing` count eligible tasks and stay; in each `mde_by_horizon` entry, `n`. No covariate
-fit runs, so `covariate_adjusted` and each adjustment read `window not settled` with `n_used` and
-`n_missing_covariate` `null`. `by_commit`
-lists the eligible tasks of each commit, with every `n`, mean and difference `null`, and
-`units_spanning_builds` `null`. The re-call rate averages the eligible tasks instead of the analysed
-ones, which no outcome moves. The text prints `withheld` for a count. The keys all stay so no
-consumer loses one, and the exit code is `0` either way and does not depend on `--format`. The
-counts a window and a rate fix stay: `eligible_by_arm`, the rest of the funnel, the arm-ratio
-checks. A read with no `--until` does not run the check and is not changed, and neither is a
-settled read. An early check that the experiment is running is `--operational`, which reads no
-outcome. The refusal fires only for an `--until` close to the data's last sweep, so it is not a
-horizon gate, and `--settle-hours 0` settles on one sweep. With daily sweeps (say at 10:00Z, as an
-example only) and `--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is the next morning's and
-the earliest complete read follows the sweep after it.
+The read is not free of behaviour, and two values still move with the store. `needs_sweep_after`
+is one timestamp, the latest of the window end (for a source with no sweep after it), each
+source's first sweep after the window end plus `--settle-hours`, and the latest unfinished
+in-scope join plus `--settle-hours`, so it moves with when the latest unfinished join was
+written. `reason` carries no count, task id or join time; it moves only with which sources
+wrote an in-scope task (and so have to be waited on), the times of the sweeps it names, and whether
+an in-scope task is unfinished at all, which adds one fixed clause. Those are the only ways, and
+`tests/unit/analyze/test_holdout_readout_form.py` shows a pair that differs only in them. A rate
+that cannot be resolved (several rates in the window and no `--rate`) still raises its error
+before the check, as it does for a settled read; that follows the configured rates, not what a
+task did. A read with no `--until` does not run the check and is not changed, and neither is a
+settled read. The refusal fires for a window the sweeps have not settled, whatever its distance
+from the data's last sweep, so it is not a horizon gate, and `--settle-hours 0` settles on one
+sweep. With daily sweeps (say at 10:00Z, as an example only) and `--until 2026-12-23T22:47:00Z`,
+the first sweep at or after the horizon is the next morning's and the earliest complete read
+follows the sweep after it.
 
 A later run of the same command reads the same window: the window is bounded by `--until`, and
 `--limit 20000` is the per-event-type scan cap. The scan reads newest first from now and the cap
@@ -4365,7 +4367,7 @@ reads that stamp in three places (`src/trellis/analyze/holdout.py`):
    `trellis analyze holdout --settle-hours` (default 3) after the session's latest
    join, so every rewritten session reads `unfinished` until the next sweep that
    completes that long after the rejoin. A read given `--until` is also refused
-   (`settled_window.settled: false`, `reason` naming the count) while any in-window
+   (`settled_window.settled: false`, `reason` saying that in-window tasks are unfinished) while any in-window
    task is unfinished, so run the rejoin before the settling sweeps, at least 3
    hours before a sweep, and read the holdout only after that sweep. Without
    `--until` the refusal does not apply.

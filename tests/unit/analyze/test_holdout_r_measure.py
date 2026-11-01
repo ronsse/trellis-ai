@@ -22,6 +22,7 @@ from tests.unit.analyze._holdout_fixture import (
     UNTIL,
     HoldoutLog,
     outcome_payload,
+    unchecked_window,
 )
 from trellis.analyze import holdout
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -315,23 +316,15 @@ class TestMainSessions:
         log.task(start=UNTIL + timedelta(hours=1), parent=s11, turns=5)
         log.sweep(at=sweep_at)
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         s = report.descriptive.sessions
         assert (s.rolled_up, s.not_finished, s.without_main_join) == (9, 1, 1)
         assert (s.reaching_retrieval, s.eligible) == (8, 6)
         assert s.reaching_retrieval_per_30d == pytest.approx(8 * 30 / DAYS)
         assert s.eligible_per_30d == pytest.approx(6 * 30 / DAYS)
-        # The window is not settled (the only sweep ran before it ended), so the
-        # figures computed from an outcome are withheld, and so is every count of
-        # the analysed sessions, which an outcome fixes. The settled read below
-        # counts four.
-        assert s.analysed is None
-        assert s.analysed_per_30d is None
-        assert s.outcome_sd is None
-        assert all(
-            h.n is None and h.mde is None and h.ratio is None for h in s.mde_by_horizon
-        )
+        assert s.analysed == 4
         assert any("no join for the main transcript" in n for n in report.notes)
 
     def test_a_settled_read_powers_the_rolled_up_sessions(
@@ -407,7 +400,8 @@ class TestFunnelNotes:
         )
         log.sweep()  # a claude-code sweep only, 4 h after the latest join
 
-        report = _analyze(log, settle_hours=1.5)
+        with unchecked_window():
+            report = _analyze(log, settle_hours=1.5)
 
         assert (report.funnel.unfinished, report.funnel.eligible) == (1, 1)
         note = next(n for n in report.notes if "not finished" in n)

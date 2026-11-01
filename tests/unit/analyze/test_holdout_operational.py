@@ -57,6 +57,7 @@ from tests.unit.analyze._holdout_fixture import (
     HoldoutLog,
     outcome_payload,
     provenance,
+    unchecked_window,
 )
 from tests.unit.analyze._operational_seed import (
     COMMIT_A,
@@ -226,7 +227,13 @@ def _operational(log: HoldoutLog, **options: Any) -> holdout.HoldoutOperationalR
 
 
 def _full(log: HoldoutLog, **options: Any) -> holdout.HoldoutReport:
-    return holdout.analyze_holdout(log.event_log, **{**WINDOW, **FAST, **options})
+    """The full report of the window with the settled check skipped.
+
+    The window is not settled in most of these stores, and a checked read of an
+    unsettled window is refused, so no figure would be there to compare.
+    """
+    with unchecked_window():
+        return holdout.analyze_holdout(log.event_log, **{**WINDOW, **FAST, **options})
 
 
 def _bytes(report: holdout.HoldoutOperationalReport) -> str:
@@ -527,7 +534,8 @@ def test_a_task_is_admitted_on_its_first_pack_and_the_full_report_on_its_latest_
         log.sweep(at=start + timedelta(hours=4))
         window = {"days": 3, "until": start + timedelta(days=1), "settle_hours": 3.0}
         operational = holdout.analyze_holdout_operational(event_log, **window)
-        full = holdout.analyze_holdout(event_log, **window, **FAST)
+        with unchecked_window():
+            full = holdout.analyze_holdout(event_log, **window, **FAST)
     finally:
         event_log.close()
     assert operational.funnel.eligible == 1
@@ -1500,10 +1508,11 @@ def test_a_window_holding_only_a_later_pack_is_the_window_without_it(
         holdout.analyze_holdout_operational(with_later.event_log, **window)
     ) == _bytes(holdout.analyze_holdout_operational(without.event_log, **window))
     # The knob is live: the full report reads that row and differs.
-    assert (
-        holdout.analyze_holdout(with_later.event_log, **window, **FAST).model_dump()
-        != holdout.analyze_holdout(without.event_log, **window, **FAST).model_dump()
-    )
+    with unchecked_window():
+        assert (
+            holdout.analyze_holdout(with_later.event_log, **window, **FAST).model_dump()
+            != holdout.analyze_holdout(without.event_log, **window, **FAST).model_dump()
+        )
 
 
 def test_a_task_whose_join_is_written_after_its_sweep_enters_when_it_exists(
@@ -1680,7 +1689,8 @@ def test_a_task_whose_earliest_join_names_no_pack_is_read_from_the_join_that_doe
     log.sweep(at=MONDAY + timedelta(days=2))
     window: dict[str, Any] = {"days": 30, "until": MONDAY + timedelta(days=3)}
     operational = holdout.analyze_holdout_operational(log.event_log, **window)
-    full = holdout.analyze_holdout(log.event_log, **window, **FAST)
+    with unchecked_window():
+        full = holdout.analyze_holdout(log.event_log, **window, **FAST)
     assert (
         operational.funnel.no_retrieval,
         operational.funnel.eligible,
@@ -1935,7 +1945,8 @@ def test_a_settled_session_whose_joins_all_name_no_pack_counts_as_no_retrieval(
     log.sweep(at=MONDAY + timedelta(days=1))
     window: dict[str, Any] = {"days": 30, "until": MONDAY + timedelta(days=3)}
     operational = holdout.analyze_holdout_operational(log.event_log, **window)
-    full = holdout.analyze_holdout(log.event_log, **window, **FAST)
+    with unchecked_window():
+        full = holdout.analyze_holdout(log.event_log, **window, **FAST)
     assert operational.funnel.no_retrieval == full.funnel.no_retrieval == 4
     assert operational.funnel.eligible == full.funnel.eligible == 0
     unsettled = holdout.analyze_holdout_operational(
@@ -2029,7 +2040,8 @@ def test_a_rate_no_first_pack_was_written_at_is_named_by_first_pack_here_and_row
     operational = holdout.analyze_holdout_operational(
         log.event_log, rate=0.25, **window
     )
-    full = holdout.analyze_holdout(log.event_log, rate=0.25, **window, **FAST)
+    with unchecked_window():
+        full = holdout.analyze_holdout(log.event_log, rate=0.25, **window, **FAST)
     assert "No first pack in the window was written at rate 0.25." in operational.notes
     assert "No row in the window was written at rate 0.25." in full.notes
     # The helper's own default is the full report's wording.

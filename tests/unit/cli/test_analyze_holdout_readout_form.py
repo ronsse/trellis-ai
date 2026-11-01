@@ -16,9 +16,11 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from tests.unit.analyze._holdout_fixture import (
-    ARM_VARIANTS,
+    BEHAVIOUR_FLAT,
+    BEHAVIOUR_VARIANTS,
     CHANGED_TASKS,
     MONDAY,
+    REFUSAL_KEYS,
     UNTIL,
     HoldoutLog,
     provenance,
@@ -148,7 +150,7 @@ def test_the_pinned_command_parses_and_honours_its_limit(log: HoldoutLog) -> Non
     assert 20000 in {v for v in scan.values() if isinstance(v, int)}
 
 
-def test_an_early_read_is_incomplete_in_both_formats_with_one_exit(
+def test_an_early_read_is_refused_in_both_formats_with_one_exit(
     log: HoldoutLog,
 ) -> None:
     _seed(log)
@@ -158,14 +160,97 @@ def test_an_early_read_is_incomplete_in_both_formats_with_one_exit(
 
     assert text.exit_code == machine.exit_code == EXIT_OK
     payload = _payload(machine)
+    assert set(payload) == REFUSAL_KEYS
+    assert payload["status"] == "window not settled"
     assert payload["settled_window"]["settled"] is False
     assert payload["settled_window"]["needs_sweep_after"] == UNTIL.isoformat()
-    assert payload["inference"]["status"] == "window not settled"
-    assert payload["inference"]["difference"] is None
-    assert all(row["difference"] is None for row in payload["by_commit"]["rows"])
     flat = _flat(text)
     assert "INCOMPLETE READ: window not settled." in flat
     assert f"re-run once a completed sweep has reached {UNTIL.isoformat()}" in flat
+
+
+def test_by_commit_on_an_unsettled_read_prints_the_refusal_and_no_table(
+    log: HoldoutLog,
+) -> None:
+    """``--by-commit`` is in the pinned command, and a refusal has no table."""
+    _seed(log)
+    log.sweep(at=MONDAY + timedelta(days=2))
+
+    text, machine = _run()
+
+    assert "by_commit" not in _payload(machine)
+    flat = _flat(text)
+    assert "By serving build" not in flat
+    assert "--operational" in flat
+    assert "None" not in flat
+
+
+def test_an_unsettled_window_still_gives_per_commit_uptake_operationally(
+    log: HoldoutLog,
+) -> None:
+    """The count of tasks per build and arm needs no settled window."""
+    _seed(log)
+    log.sweep(at=MONDAY + timedelta(days=2))
+
+    argv = [
+        "analyze",
+        "holdout",
+        "--operational",
+        "--until",
+        UNTIL.isoformat(),
+        "--days",
+        "60",
+        "--rate",
+        "0.2",
+        "--by-commit",
+    ]
+    text = runner.invoke(app, argv)
+    machine = runner.invoke(app, [*argv, "--format", "json"])
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    payload = _payload(machine)
+    assert payload["mode"] == "operational"
+    assert "settled_window" not in payload
+    assert payload["status"] == "ok"
+    rows = payload["by_commit"]["rows"]
+    assert {row["build"] for row in rows} >= {build_label("0.0.0", OTHER_COMMIT)}
+    assert sum(row["served"] + row["withheld"] for row in rows) == 9
+    # Each task is counted under the build stamped on its first pack.
+    assert "first pack" in payload["by_commit"]["note"]
+    assert "By serving build (eligible task counts only)" in _flat(text)
+
+
+def test_a_read_with_no_until_says_in_text_that_the_window_was_not_checked(
+    log: HoldoutLog,
+) -> None:
+    _seed(log)
+    log.sweep()
+    argv = [
+        "analyze",
+        "holdout",
+        "--days",
+        "400",
+        "--rate",
+        "0.2",
+        "--limit",
+        "20000",
+        "--permutations",
+        "299",
+        "--bootstraps",
+        "100",
+        "--power-sims",
+        "20",
+    ]
+
+    text = runner.invoke(app, argv)
+    machine = runner.invoke(app, [*argv, "--format", "json"])
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    assert "window not checked" in _flat(text)
+    window = _payload(machine)["settled_window"]
+    assert window["checked"] is False
+    assert window["settled"] is None
+    assert "inference" in _payload(machine)
 
 
 def test_a_settled_read_is_reproduced_by_a_later_run(log: HoldoutLog) -> None:
@@ -213,7 +298,7 @@ def test_the_operational_read_prints_none_of_the_readout_form(log: HoldoutLog) -
 
 
 # ---------------------------------------------------------------------------
-# An unsettled read carries no figure computed from an outcome
+# An unsettled read is a refusal the store cannot move
 # ---------------------------------------------------------------------------
 
 #: The wall-clock stamps a read writes for itself: not a figure.
@@ -243,7 +328,7 @@ def _argv(outcome: str, *extra: str) -> list[str]:
     return [*argv, *extra]
 
 
-def _read_shifted(
+def _read_behaviour(
     monkeypatch: pytest.MonkeyPatch,
     root: Path,
     *,
@@ -266,93 +351,72 @@ def _read_shifted(
     return _without_clock(_payload(machine)), plain(text.stdout)
 
 
+@pytest.mark.parametrize("variant", sorted(BEHAVIOUR_VARIANTS))
 @pytest.mark.parametrize(
-    ("variant", "outcome", "itt"),
-    [
-        ("values", "log1p_turns", False),
-        ("values", "commits", False),
-        ("values", "prs_created", False),
-        ("cut_offs", "log1p_turns", False),
-        ("cut_offs", "commits", True),
-        ("missing", "log1p_turns", False),
-        ("missing", "prs_created", True),
-    ],
+    ("outcome", "itt"), [("log1p_turns", False), ("commits", True)]
 )
-def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
+def test_an_unsettled_read_prints_the_same_whatever_the_store_holds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     variant: str,
     outcome: str,
     itt: bool,
 ) -> None:
-    """Two stores that differ only in one arm's outcomes print the same read.
+    """Two stores that differ in what the sessions did print the same read.
 
-    The whole payload and the whole text are compared, as the whole of what
-    the command prints is what must not carry an outcome; a list of withheld
-    keys would only name the figures someone remembered. The outcome is the
-    value read, whether the session ended on a usage limit, and whether a
-    value exists at all, so a count of who was analysed moves with it.
+    The whole payload and the whole text are compared, as the whole of what the
+    command prints is what must not move. The pairs differ in the withheld
+    arm's values, cut-offs and missing outcomes, its pack calls and join times,
+    the timing's tool-call and hook-message counts, and an outcome block.
     """
-    flat_json, flat_text = _read_shifted(
-        monkeypatch, tmp_path / "flat", seed={}, settled=False, outcome=outcome, itt=itt
+    flat_json, flat_text = _read_behaviour(
+        monkeypatch,
+        tmp_path / "flat",
+        seed=BEHAVIOUR_FLAT,
+        settled=False,
+        outcome=outcome,
+        itt=itt,
     )
-    changed_json, changed_text = _read_shifted(
+    changed_json, changed_text = _read_behaviour(
         monkeypatch,
         tmp_path / "changed",
-        seed=ARM_VARIANTS[variant],
+        seed=BEHAVIOUR_VARIANTS[variant],
         settled=False,
         outcome=outcome,
         itt=itt,
     )
 
-    assert flat_json["settled_window"]["settled"] is False
+    assert set(flat_json) == REFUSAL_KEYS
+    assert "INCOMPLETE READ: window not settled." in flat_text
     assert flat_json == changed_json
     assert flat_text == changed_text
 
 
-@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
-def test_the_difference_does_move_a_settled_read(
+@pytest.mark.parametrize("variant", sorted(set(BEHAVIOUR_VARIANTS) - {"join_time"}))
+def test_the_same_pairs_do_differ_when_the_window_is_settled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
 ) -> None:
     """The comparison above is not vacuous: settled, the same stores differ."""
-    flat_json, flat_text = _read_shifted(
-        monkeypatch, tmp_path / "flat", seed={}, settled=True, outcome="commits"
+    flat_json, flat_text = _read_behaviour(
+        monkeypatch,
+        tmp_path / "flat",
+        seed=BEHAVIOUR_FLAT,
+        settled=True,
+        outcome="commits",
     )
-    changed_json, changed_text = _read_shifted(
+    changed_json, changed_text = _read_behaviour(
         monkeypatch,
         tmp_path / "changed",
-        seed=ARM_VARIANTS[variant],
+        seed=BEHAVIOUR_VARIANTS[variant],
         settled=True,
         outcome="commits",
     )
 
     assert flat_json["settled_window"]["settled"] is True
+    assert "funnel" in flat_json
     assert flat_json != changed_json
     assert flat_text != changed_text
     if variant == "cut_offs":
         assert changed_json["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
     if variant == "missing":
         assert changed_json["funnel"]["outcome_missing"] == CHANGED_TASKS
-
-
-def test_the_text_says_what_is_withheld_and_where_the_early_check_is(
-    log: HoldoutLog,
-) -> None:
-    seed_arm_shift(log, shift=2)
-    log.sweep(at=UNTIL - timedelta(hours=1))
-
-    text, machine = _run()
-
-    assert text.exit_code == machine.exit_code == EXIT_OK
-    flat = _flat(text)
-    assert "No figure computed from an outcome is printed on this read" in flat
-    assert "every count of who is analysed" in flat
-    assert "--operational" in flat
-    assert "cut-offs withheld" in flat
-    # A count the read declines to state prints as the word, never as None.
-    assert "None" not in flat
-    assert (
-        "cut-offs excluded withheld, outcome missing withheld, analysed withheld"
-        in flat
-    )
-    assert "analysed withheld" in flat

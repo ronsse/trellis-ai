@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
+from trellis.analyze import holdout
 from trellis.stores.base.event_log import Event, EventLog, EventType
 
 INTENT_MARKER = "intent-marker-not-for-output"
@@ -35,6 +38,24 @@ SETTLING_SWEEP_HOURS_AFTER_UNTIL = (1, 25)
 WINDOW_START = UNTIL - timedelta(days=DAYS)
 #: 20 days into that window: :func:`seed_late_build`'s first row at rate 0.5.
 KEYED_FROM = WINDOW_START + timedelta(days=20)
+
+
+@contextmanager
+def unchecked_window() -> Iterator[None]:
+    """Read a window that has not settled, with the settled-window check skipped.
+
+    A checked read of an unsettled window is refused and computes nothing, so a
+    test of what the full report counts there (the funnel's ``unfinished``
+    stage, say) reads the same window as an unchecked one. ``checked=False`` is
+    what a read with no ``until`` passes; the window itself is unchanged.
+    """
+    original = holdout._settled_window
+
+    def unchecked(*args: Any, **kwargs: Any) -> Any:
+        return original(*args, **{**kwargs, "checked": False})
+
+    with mock.patch.object(holdout, "_settled_window", unchecked):
+        yield
 
 
 #: The outcome fields a readout turns into a measured value.
@@ -308,12 +329,14 @@ class HoldoutLog:
         timing: dict[str, Any] | None = None,
         covariates: dict[str, Any] | None = None,
         pack_metadata: Sequence[dict[str, Any] | None] | None = None,
+        join_delay: timedelta = timedelta(0),
     ) -> str:
         """One task: a pack per entry of ``arms``, a minute apart, then its join.
 
         ``arms`` holds each call's ``withheld`` value in call order
         (``None`` for a row from a build before the holdout). The join is
-        written an hour after the last pack. ``pack_metadata`` holds each
+        written an hour after the last pack, and ``join_delay`` later still.
+        ``pack_metadata`` holds each
         pack row's event metadata in the same order. ``measures_missing``
         leaves every outcome count the readout reads as ``None``, so the task
         has an outcome block and no measured value.
@@ -351,7 +374,7 @@ class HoldoutLog:
             outcome.update(dict.fromkeys(_MEASURED_FIELDS))
         self.join(
             task_id,
-            at=start + timedelta(minutes=len(arms), hours=1),
+            at=start + timedelta(minutes=len(arms), hours=1) + join_delay,
             pack_ids=pack_ids,
             parent=parent,
             outcome=outcome,
@@ -564,6 +587,41 @@ ARM_VARIANTS: dict[str, dict[str, Any]] = {
 }
 
 
+#: The behaviour every pair of the unsettled-read guard starts from, so that a
+#: variant differs from it in one thing and the timing is present in both.
+BEHAVIOUR_FLAT: dict[str, Any] = {"tool_calls": 300, "hook_messages": 0}
+#: What a store pair may differ in, beyond the withheld arm's outcomes: how
+#: many pack calls its tasks made, when their joins were written, how many tool
+#: calls and hook messages the session timing counts, and whether the join
+#: carries an outcome block at all. Keyword arguments of :func:`seed_arm_shift`.
+BEHAVIOUR_VARIANTS: dict[str, dict[str, Any]] = {
+    **{name: {**BEHAVIOUR_FLAT, **kw} for name, kw in ARM_VARIANTS.items()},
+    "pack_calls": {**BEHAVIOUR_FLAT, "withheld_calls": 3},
+    "join_time": {**BEHAVIOUR_FLAT, "withheld_join_delay": timedelta(hours=3)},
+    "tool_call_count": {**BEHAVIOUR_FLAT, "tool_calls": 10},
+    "hook_feedback_messages": {**BEHAVIOUR_FLAT, "hook_messages": 7},
+    "no_outcome_block": {**BEHAVIOUR_FLAT, "outcome_block": False},
+}
+#: Every key a refused read publishes: the allow-list the guard holds it to.
+#: A key added to the refusal fails the guard until it is named here.
+REFUSAL_KEYS = frozenset(
+    {
+        "status",
+        "window_days",
+        "since",
+        "until",
+        "rate",
+        "outcome",
+        "itt",
+        "settle_hours",
+        "planned_mde",
+        "planned_n",
+        "settled_window",
+        "notes",
+    }
+)
+
+
 def seed_arm_shift(
     log: HoldoutLog,
     *,
@@ -571,6 +629,11 @@ def seed_arm_shift(
     cut_offs: bool = False,
     missing: bool = False,
     rate: float = 0.2,
+    withheld_calls: int | None = None,
+    withheld_join_delay: timedelta = timedelta(0),
+    tool_calls: int | None = None,
+    hook_messages: int = 0,
+    outcome_block: bool = True,
 ) -> None:
     """Ninety-three tasks over five parents and three builds; the withheld arm moved.
 
@@ -586,6 +649,14 @@ def seed_arm_shift(
     re-call rate, a guardrail's missing count, the parents and strata it spans,
     the main sessions) has something to differ on. The
     served arm, the builds and the timing are identical across calls.
+
+    The rest move behaviour, not an outcome. ``withheld_calls`` is how many
+    pack calls every withheld task made (left ``None``, the task's own one or
+    two) and ``withheld_join_delay`` how much later its join was written.
+    ``tool_calls`` and ``hook_messages`` fill every task's retrieval timing,
+    whose first retrieval is call 10 (left ``None``, no task carries one), and
+    ``outcome_block=False`` drops the outcome block from the withheld tasks'
+    joins.
     """
     commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
     hour = 0
@@ -595,10 +666,11 @@ def seed_arm_shift(
         withheld = k % 5 == 0
         move = shift if withheld else 0
         build = commits[0] if k < 15 else commits[1 if k < 28 else 2]
+        calls = withheld_calls if withheld and withheld_calls else 1 + changed
         log.task(
             start=MONDAY + timedelta(hours=hour),
             parent=parent,
-            arms=[withheld, withheld] if changed else [withheld],
+            arms=[withheld] * calls,
             turns=10 + (k * 7 + parent_index * 3) % 25 + move,
             prs_created=(k + parent_index) % 2 + move,
             commits=(k * 5 + parent_index) % 4 + move,
@@ -606,7 +678,17 @@ def seed_arm_shift(
             ended_on_error=cut_offs and changed,
             measures_missing=missing and changed,
             rate=rate,
-            pack_metadata=[provenance(build)] * (2 if changed else 1),
+            pack_metadata=[provenance(build)] * calls,
+            with_outcome=outcome_block or not withheld,
+            join_delay=withheld_join_delay if withheld else timedelta(0),
+            timing=None
+            if tool_calls is None
+            else timing_payload(
+                hook_before=False,
+                hook_messages=hook_messages,
+                calls=tool_calls,
+                ordinal=10,
+            ),
             covariates=None
             if changed
             else covariates_payload(

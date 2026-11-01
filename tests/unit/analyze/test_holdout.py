@@ -29,6 +29,7 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     seed_experiment,
     timing_payload,
+    unchecked_window,
 )
 from trellis.analyze.holdout import (
     DETECTED_VERDICT,
@@ -572,7 +573,8 @@ class TestFinished:
         log.task(start=sweep_at + timedelta(hours=1))
         log.sweep(at=sweep_at + timedelta(hours=12), dry_run=True)
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 2
         assert report.funnel.eligible == 2
@@ -581,7 +583,8 @@ class TestFinished:
         log.task(start=MONDAY)
         log.task(start=MONDAY + timedelta(hours=1))
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 2
         assert report.funnel.eligible == 0
@@ -829,7 +832,8 @@ class TestExclusions:
             timing=timing_payload(hook_before=True),
         )
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 1
         assert report.funnel.pre_treatment_excluded == 1

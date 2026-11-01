@@ -12,16 +12,21 @@ All notable changes to Trellis will be documented in this file.
   tasks pool into one `other` row, and the table is labelled descriptive and
   non-decisive. `inference.top_stratum_weight_share` reports the heaviest
   stratum's share of the estimator's weight. A read given `--until` whose
-  capture sweeps have not settled past it reports `settled_window.settled:
-  false` and `inference.status == "window not settled"` instead of a result,
-  and carries nothing an outcome fixes: the arm means, outcome SDs, MDE and
-  power figures and guardrail values are null, and so is every count of who is
-  analysed (the funnel's cut-offs excluded, outcome missing and analysed, the
-  per-arm, per-parent, per-stratum and per-build counts, the adjustments'
-  counts, the realised N and each guardrail's n), because those counts give the
-  arms' outcomes back (the keys stay, no covariate fit runs, and the by-build
-  table lists the eligible tasks). An early read cannot show the arms'
-  difference; `--operational` is the early check. The window is also unsettled
+  capture sweeps have not settled past it is refused. It publishes an
+  allow-list, not the report with fields nulled: `status` `window not settled`,
+  what the caller asked (outcome, rate as given, `--until`, the window bounds,
+  ITT and the settle allowance), the planned MDE and N, `settled_window`
+  (`settled: false`, `reason`, `needs_sweep_after`) and one note naming
+  `--operational`. Every other key is absent, not null, and none of it is
+  computed, so a figure added to the report later cannot reach a refused read,
+  and a read that has not settled does not move with a task's outcome, its pack
+  calls, when its join was written or its tool-call count. It is not free of
+  behaviour: `needs_sweep_after` is one timestamp read off the latest unfinished
+  join, and `reason` gains one constant clause, with no count in it, when such a
+  join exists. `--by-commit` on that read prints the refusal, not a table;
+  `--operational` is the early check and gives per-build counts with no settled
+  window. A read with no `--until` is unchanged in JSON, and its text prints a
+  `window not checked` line. The window is also unsettled
   while an in-window, in-rate task is
   unfinished (a join stamped after its source's last sweep), and only sources
   with such a task are waited on, so a retired source does not hold the read

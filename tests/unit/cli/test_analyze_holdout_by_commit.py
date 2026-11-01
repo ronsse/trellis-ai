@@ -181,13 +181,16 @@ def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike(
     assert "no analysed task" in _flat(text)
 
 
-def test_an_unsettled_empty_table_names_the_tasks_it_lists() -> None:
-    """With no sweep past the window end the table lists eligible tasks."""
+def test_an_unsettled_window_refuses_instead_of_listing_the_tasks() -> None:
+    """With no sweep past the window end there is no table, in either format."""
     text, machine = _run("--by-commit")
 
-    assert text.exit_code == machine.exit_code
-    assert _payload(machine)["by_commit"]["rows"] == []
-    assert "no eligible task" in _flat(text)
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    assert "by_commit" not in _payload(machine)
+    flat = _flat(text)
+    assert "INCOMPLETE READ: window not settled." in flat
+    assert "By serving build" not in flat
+    assert "--operational" in flat
 
 
 def test_a_build_is_labelled_as_health_labels_it_and_one_commit_is_one_row(

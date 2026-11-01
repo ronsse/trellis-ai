@@ -20,8 +20,9 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from tests.unit.analyze._holdout_fixture import (
-    ARM_VARIANTS,
-    CHANGED_TASKS,
+    BEHAVIOUR_FLAT,
+    BEHAVIOUR_VARIANTS,
+    REFUSAL_KEYS,
     UNTIL,
     HoldoutLog,
     seed_arm_shift,
@@ -383,7 +384,7 @@ def test_report_route_is_a_sync_handler():
 
 
 # ---------------------------------------------------------------------------
-# An unsettled holdout read carries no figure computed from an outcome.
+# An unsettled holdout read is a refusal the store cannot move.
 # ---------------------------------------------------------------------------
 
 _HOLDOUT_FAST = {
@@ -424,48 +425,55 @@ def _holdout_read(client, tmp_path, name, *, seed, settled, **params):
         registry.close()
 
 
+@pytest.mark.parametrize("variant", sorted(BEHAVIOUR_VARIANTS))
 @pytest.mark.parametrize(
-    ("variant", "outcome", "itt"),
-    [
-        ("values", "log1p_turns", False),
-        ("values", "commits", False),
-        ("values", "prs_created", False),
-        ("cut_offs", "log1p_turns", False),
-        ("cut_offs", "commits", True),
-        ("missing", "log1p_turns", False),
-        ("missing", "prs_created", True),
-    ],
+    ("outcome", "itt"), [("log1p_turns", False), ("commits", True)]
 )
-def test_an_unsettled_holdout_read_does_not_move_with_the_withheld_outcomes(
+def test_an_unsettled_holdout_read_answers_the_same_whatever_the_store_holds(
     client, tmp_path, variant, outcome, itt
 ):
-    """Two stores that differ only in one arm's outcomes answer the same.
+    """Two stores that differ in what the sessions did answer the same, whole.
 
-    The outcome is the value read, whether the session ended on a usage limit
-    and whether a value exists, so a count of who was analysed moves with it.
+    The pairs differ in the withheld arm's values, cut-offs and missing
+    outcomes, its pack calls and join times, the timing's tool-call and
+    hook-message counts, and an outcome block.
     """
     params = {"outcome": outcome, "itt": itt}
-    flat = _holdout_read(client, tmp_path, "flat", seed={}, settled=False, **params)
+    flat = _holdout_read(
+        client, tmp_path, "flat", seed=BEHAVIOUR_FLAT, settled=False, **params
+    )
     changed = _holdout_read(
-        client, tmp_path, "changed", seed=ARM_VARIANTS[variant], settled=False, **params
+        client,
+        tmp_path,
+        "changed",
+        seed=BEHAVIOUR_VARIANTS[variant],
+        settled=False,
+        **params,
     )
 
+    assert set(flat) == REFUSAL_KEYS
     assert flat["settled_window"]["settled"] is False
     assert flat == changed
 
 
-@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
-def test_the_difference_does_move_a_settled_holdout_read(client, tmp_path, variant):
+@pytest.mark.parametrize("variant", sorted(set(BEHAVIOUR_VARIANTS) - {"join_time"}))
+def test_the_same_pairs_do_differ_when_the_holdout_window_is_settled(
+    client, tmp_path, variant
+):
     """The comparison above is not vacuous: settled, the same stores differ."""
     params = {"outcome": "commits"}
-    flat = _holdout_read(client, tmp_path, "flat", seed={}, settled=True, **params)
+    flat = _holdout_read(
+        client, tmp_path, "flat", seed=BEHAVIOUR_FLAT, settled=True, **params
+    )
     changed = _holdout_read(
-        client, tmp_path, "changed", seed=ARM_VARIANTS[variant], settled=True, **params
+        client,
+        tmp_path,
+        "changed",
+        seed=BEHAVIOUR_VARIANTS[variant],
+        settled=True,
+        **params,
     )
 
     assert flat["settled_window"]["settled"] is True
+    assert "funnel" in flat
     assert flat != changed
-    if variant == "cut_offs":
-        assert changed["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
-    if variant == "missing":
-        assert changed["funnel"]["outcome_missing"] == CHANGED_TASKS

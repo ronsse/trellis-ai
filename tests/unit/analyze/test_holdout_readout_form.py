@@ -14,10 +14,12 @@ import numpy as np
 import pytest
 
 from tests.unit.analyze._holdout_fixture import (
-    ARM_VARIANTS,
+    BEHAVIOUR_FLAT,
+    BEHAVIOUR_VARIANTS,
     CHANGED_TASKS,
     DAYS,
     MONDAY,
+    REFUSAL_KEYS,
     UNTIL,
     HoldoutLog,
     covariates_payload,
@@ -29,6 +31,7 @@ from tests.unit.analyze._holdout_fixture import (
 from trellis.analyze import holdout
 from trellis.analyze.holdout import (
     WINDOW_NOT_SETTLED,
+    HoldoutRefusal,
     HoldoutReport,
     analytic_mde,
     analyze_holdout,
@@ -71,7 +74,8 @@ def _seed(
         )
 
 
-def _analyze(log: HoldoutLog, **kwargs: Any) -> HoldoutReport:
+def _analyze(log: HoldoutLog, **kwargs: Any) -> Any:
+    """A report, or a :class:`HoldoutRefusal` when the window has not settled."""
     options: dict[str, Any] = {
         "days": DAYS,
         "until": UNTIL,
@@ -386,34 +390,41 @@ def _one_task_log(log: HoldoutLog) -> None:
     _seed(log, [("a", False, 1), ("a", True, 2), ("a", False, 3), ("a", True, 4)])
 
 
-def test_a_read_before_any_sweep_past_until_is_incomplete(log: HoldoutLog) -> None:
+def test_a_read_before_any_sweep_past_until_is_a_refusal(log: HoldoutLog) -> None:
     _one_task_log(log)
     log.sweep(at=MONDAY + timedelta(days=1))
 
-    report = _analyze(log)
+    refusal = _analyze(log)
 
-    window = report.settled_window
+    assert isinstance(refusal, HoldoutRefusal)
+    window = refusal.settled_window
     assert window.checked
     assert window.settled is False
     assert window.needs_sweep_after == UNTIL.isoformat()
-    assert report.inference.status == WINDOW_NOT_SETTLED
-    assert report.inference.verdict == WINDOW_NOT_SETTLED
-    assert report.inference.difference is None
-    assert report.inference.p_value is None
-    assert report.inference.mean_served is None
-    assert report.by_commit is not None
-    row = report.by_commit.rows[-1]
-    # The table lists the eligible tasks, and states no n: a count of analysed
-    # tasks per arm is what an outcome fixes.
-    assert row.served.n is None
-    assert row.withheld.n is None
-    assert row.difference is None
-    assert row.served.outcome_mean is None
-    # Which tasks span builds is read off the analysed set, so it is withheld too.
-    assert report.by_commit.units_spanning_builds is None
+    assert refusal.status == WINDOW_NOT_SETTLED
+    assert any("--operational" in note for note in refusal.notes)
+    # An allow-list: the keys are absent, not null, so nothing a report adds
+    # reaches a refused read, and nothing under the window is computed.
+    assert set(refusal.model_dump()) == REFUSAL_KEYS
+    for absent in ("funnel", "descriptive", "by_commit", "inference", "guardrails"):
+        assert not hasattr(refusal, absent)
 
 
-def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
+def test_a_refusal_states_what_the_caller_asked(log: HoldoutLog) -> None:
+    _one_task_log(log)
+    log.sweep(at=MONDAY + timedelta(days=1))
+
+    refusal = _analyze(log, rate=0.5, outcome="prs_created", itt=True)
+
+    assert isinstance(refusal, HoldoutRefusal)
+    assert (refusal.outcome, refusal.rate, refusal.itt) == ("prs_created", 0.5, True)
+    assert (refusal.window_days, refusal.until) == (DAYS, UNTIL.isoformat())
+    assert refusal.since == (UNTIL - timedelta(days=DAYS)).isoformat()
+    assert refusal.planned_mde > 0
+    assert refusal.planned_n > 0
+
+
+def test_an_unsettled_read_is_refused_and_a_settled_one_adjusts(
     log: HoldoutLog,
 ) -> None:
     for i in range(12):
@@ -427,34 +438,16 @@ def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
         )
     log.sweep(at=MONDAY + timedelta(days=1))
 
-    block = _analyze(log).covariate_adjusted
+    assert isinstance(_analyze(log), HoldoutRefusal)
 
+    log.sweep(at=UNTIL + timedelta(hours=1))
+    log.sweep(at=UNTIL + timedelta(hours=4))
+    block = _analyze(log).covariate_adjusted
     assert [a.name for a in block.adjustments] == [
         "brief_length",
         "brief_length_and_agent_type",
     ]
-    assert block.status == WINDOW_NOT_SETTLED
-    for adjustment in block.adjustments:
-        # No fit runs: whether one is possible depends on which tasks are
-        # analysed, and that is what an unsettled window must not show. The
-        # counts a fit reports are withheld with the estimates.
-        assert adjustment.status == WINDOW_NOT_SETTLED
-        assert adjustment.n_used is None
-        assert adjustment.n_missing_covariate is None
-        for result in (adjustment.inference, adjustment.unadjusted_same_subset):
-            assert result is not None
-            assert result.status == WINDOW_NOT_SETTLED
-            assert result.difference is None
-            assert result.p_value is None
-            assert result.ci_low is None
-            assert result.mean_served is None
-            assert result.mean_residual_served is None
-            assert result.strata is None
-            assert result.strata_both_arms is None
-
-    log.sweep(at=UNTIL + timedelta(hours=1))
-    log.sweep(at=UNTIL + timedelta(hours=4))
-    settled = _analyze(log).covariate_adjusted.adjustments[0]
+    settled = block.adjustments[0]
     assert settled.inference is not None
     assert settled.inference.status == "ok"
     assert settled.inference.difference is not None
@@ -563,12 +556,22 @@ def test_every_source_system_must_settle() -> None:
 SETTLE = timedelta(hours=3)
 
 
-def _restamp(log: HoldoutLog, count: int, at: Any) -> None:
-    """Rewrite ``count`` joins at ``at``: a join-only re-parse, never backdated."""
+def _restamp(
+    log: HoldoutLog, count: int, at: Any, *, task_id: str | None = None
+) -> None:
+    """Rewrite ``count`` joins, or the one of ``task_id``, at ``at``.
+
+    A join-only re-parse, never backdated.
+    """
     joins = log.event_log.get_events(
         event_type=EventType.CAPTURE_SESSION_PACKS, limit=1000
     )
-    for join in joins[:count]:
+    chosen = (
+        joins[:count]
+        if task_id is None
+        else [join for join in joins if join.entity_id == task_id]
+    )
+    for join in chosen:
         log.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SESSION_PACKS,
@@ -597,10 +600,8 @@ def test_a_join_stamped_after_the_last_sweep_blocks_the_window(
     assert window.settled is False
     assert window.needs_sweep_after == (stamped + SETTLE).isoformat()
     assert window.reason is not None
-    assert "2 in-window tasks are not finished" in window.reason
-    assert report.funnel.unfinished == 2
-    assert report.inference.status == WINDOW_NOT_SETTLED
-    assert report.inference.difference is None
+    assert "not finished" in window.reason
+    assert isinstance(report, HoldoutRefusal)
 
     # A sweep that ran the settle allowance after the restamp finishes them.
     log.sweep(at=stamped + SETTLE)
@@ -635,25 +636,21 @@ def test_a_long_task_the_second_sweep_rewrote_blocks_the_window(
     assert window.needs_sweep_after == (last_sweep + SETTLE).isoformat()
 
 
-def test_a_join_outside_the_window_or_rate_holds_nothing_open(
-    log: HoldoutLog,
-) -> None:
+def test_a_join_outside_the_window_holds_nothing_open(log: HoldoutLog) -> None:
     _one_task_log(log)
     log.sweep()
-    # A task from a month before the window, restamped after the last sweep.
-    log.task(
+    assert _analyze(log).settled_window.settled is True
+    # A task from a month before the window, its join rewritten after the last
+    # sweep: were it in scope it would hold the window open.
+    old = log.task(
         start=UNTIL - timedelta(days=DAYS + 30),
         arms=[False],
         rate=0.5,
         pack_metadata=[provenance(COMMITS["a"])],
     )
-    _restamp(log, 5, UNTIL + timedelta(hours=40))
+    _restamp(log, 0, UNTIL + timedelta(hours=40), task_id=old)
 
-    report = _analyze(log)
-
-    assert report.settled_window.settled is False
-    # Only the four in-window tasks hold it open; the old one is not counted.
-    assert report.funnel.unfinished == 4
+    assert _analyze(log).settled_window.settled is True
 
 
 def _retired_source_join(log: HoldoutLog) -> None:
@@ -768,8 +765,8 @@ def test_an_errored_sweep_does_not_finish_a_join(log: HoldoutLog) -> None:
 
     report = _analyze(log)
 
-    assert report.funnel.unfinished == 1
     assert report.settled_window.settled is False
+    assert "not finished" in report.settled_window.reason
 
 
 def test_the_settle_clock_starts_at_the_first_sweep_not_the_window_end(
@@ -841,7 +838,7 @@ def test_one_commit_under_two_versions_is_one_row_that_stands(
 
 
 # ---------------------------------------------------------------------------
-# An unsettled read carries no figure computed from an outcome
+# An unsettled checked read is a refusal and the store cannot move it
 # ---------------------------------------------------------------------------
 
 #: The wall-clock stamps a read writes for itself: not a figure.
@@ -857,7 +854,7 @@ def _without_clock(node: Any) -> Any:
 
 
 def _differing_paths(left: Any, right: Any, path: str = "") -> list[str]:
-    """Every path at which two dumped reports differ, so a failure names them."""
+    """Every path at which two dumped reads differ, so a failure names them."""
     if isinstance(left, dict) and isinstance(right, dict):
         keys = sorted(set(left) | set(right))
         return [
@@ -876,84 +873,119 @@ def _differing_paths(left: Any, right: Any, path: str = "") -> list[str]:
     return [] if left == right else [path]
 
 
-def _arm_shifted_read(
-    log: HoldoutLog, *, seed: dict[str, Any], settled: bool, **kw: Any
+def _behaviour_read(
+    tmp_path: Path, name: str, seed: dict[str, Any], *, settled: bool, **kw: Any
 ) -> Any:
+    """One synthetic store, read once. Sweeps are written at fixed times, never
+    relative to a join, so two stores differ only in what ``seed`` varies."""
+    event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+    log = HoldoutLog(event_log)
     seed_arm_shift(log, **seed)
     if settled:
         log.sweep()
     else:
         log.sweep(at=UNTIL - timedelta(hours=1))
-    report = _analyze(log, rate=0.2, **kw)
-    assert report.settled_window.settled is settled
-    return _without_clock(report.model_dump(mode="json"))
+    result = _analyze(log, rate=0.2, **kw)
+    event_log.close()
+    assert result.settled_window.settled is settled
+    return _without_clock(result.model_dump(mode="json"))
 
 
+@pytest.mark.parametrize("variant", sorted(BEHAVIOUR_VARIANTS))
 @pytest.mark.parametrize(
-    ("variant", "outcome", "itt"),
-    [
-        ("values", "log1p_turns", False),
-        ("values", "commits", False),
-        ("values", "prs_created", False),
-        ("cut_offs", "log1p_turns", False),
-        ("cut_offs", "commits", True),
-        ("missing", "log1p_turns", False),
-        ("missing", "prs_created", True),
-    ],
+    ("outcome", "itt"), [("log1p_turns", False), ("commits", True)]
 )
-def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
+def test_an_unsettled_read_is_the_same_whatever_the_store_holds(
     tmp_path: Path, variant: str, outcome: str, itt: bool
 ) -> None:
-    """The rule: two stores that differ only in one arm's outcomes read the same.
+    """Two stores that differ in what the sessions did read the same, whole.
 
-    A list of withheld keys would only name the figures someone remembered;
-    this compares the whole payload, so a figure added later is caught too.
-    The outcome is the value read, whether the session ended on a usage limit
-    (which decides who is analysed) or whether a value exists at all, so a
-    count of who was analysed carries the outcome as much as a mean does.
+    The pairs vary the withheld arm's values, cut-offs and missing outcomes, how
+    many pack calls its tasks made, when their joins were written, the tool
+    calls and hook messages the timing counts, and whether the join has an
+    outcome block. The whole payload is compared: a list of keys would only
+    name the figures someone remembered, and three such lists each missed one.
     """
-    reads = []
-    for name, seed in (("flat", {}), ("changed", ARM_VARIANTS[variant])):
-        event_log = SQLiteEventLog(tmp_path / f"{name}.db")
-        reads.append(
-            _arm_shifted_read(
-                HoldoutLog(event_log),
-                seed=seed,
-                settled=False,
-                outcome=outcome,
-                itt=itt,
-            )
-        )
-        event_log.close()
+    flat = _behaviour_read(
+        tmp_path, "flat", BEHAVIOUR_FLAT, settled=False, outcome=outcome, itt=itt
+    )
+    changed = _behaviour_read(
+        tmp_path,
+        "changed",
+        BEHAVIOUR_VARIANTS[variant],
+        settled=False,
+        outcome=outcome,
+        itt=itt,
+    )
 
-    moved = _differing_paths(reads[0], reads[1])
+    assert set(flat) == REFUSAL_KEYS
+    moved = _differing_paths(flat, changed)
     assert not moved, "an unsettled read moved at:\n" + "\n".join(moved)
 
 
-@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
-def test_the_difference_does_move_a_settled_read(tmp_path: Path, variant: str) -> None:
-    """The differential above is not vacuous: settled, the same stores differ."""
-    reads = []
-    for name, seed in (("flat", {}), ("changed", ARM_VARIANTS[variant])):
-        event_log = SQLiteEventLog(tmp_path / f"{name}.db")
-        reads.append(_arm_shifted_read(HoldoutLog(event_log), seed=seed, settled=True))
-        event_log.close()
+#: A settled read of a store whose joins were written three hours later has
+#: every join finished, so it reads the same; the residual test below is where
+#: that variant moves a read.
+@pytest.mark.parametrize("variant", sorted(set(BEHAVIOUR_VARIANTS) - {"join_time"}))
+def test_the_same_pairs_do_differ_when_the_window_is_settled(
+    tmp_path: Path, variant: str
+) -> None:
+    """The guard is not vacuous: settled, the same pairs read differently."""
+    flat = _behaviour_read(tmp_path, "flat", BEHAVIOUR_FLAT, settled=True)
+    changed = _behaviour_read(
+        tmp_path, "changed", BEHAVIOUR_VARIANTS[variant], settled=True
+    )
 
-    assert reads[0] != reads[1]
-    if variant == "values":
-        assert (
-            reads[0]["inference"]["difference"] != reads[1]["inference"]["difference"]
-        )
-        assert (
-            reads[0]["guardrails"]["measures"][0]["withheld"]["value"]
-            != reads[1]["guardrails"]["measures"][0]["withheld"]["value"]
-        )
+    assert "funnel" in flat
+    assert flat != changed
     if variant == "cut_offs":
-        assert reads[0]["funnel"]["cut_offs_excluded"] == 0
-        assert reads[1]["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
+        assert flat["funnel"]["cut_offs_excluded"] == 0
+        assert changed["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
     if variant == "missing":
-        assert reads[0]["funnel"]["outcome_missing"] == 0
-        assert reads[1]["funnel"]["outcome_missing"] == CHANGED_TASKS
+        assert flat["funnel"]["outcome_missing"] == 0
+        assert changed["funnel"]["outcome_missing"] == CHANGED_TASKS
+    if variant == "no_outcome_block":
+        assert changed["funnel"]["no_outcome"] > flat["funnel"]["no_outcome"]
+    if variant == "pack_calls":
+        assert changed["descriptive"]["tasks_with_several_packs"] > 0
+
+
+def _unfinished_read(tmp_path: Path, name: str, restamped: int) -> Any:
+    event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+    log = HoldoutLog(event_log)
+    seed_arm_shift(log)
+    log.sweep(at=UNTIL - timedelta(hours=1))
+    # Joins rewritten after the last completed sweep: a re-parse.
+    _restamp(log, restamped, UNTIL - timedelta(minutes=30))
+    result = _analyze(log, rate=0.2)
+    event_log.close()
+    assert isinstance(result, HoldoutRefusal)
+    return _without_clock(result.model_dump(mode="json"))
+
+
+def test_the_one_residual_is_whether_a_join_was_written_after_the_last_sweep(
+    tmp_path: Path,
+) -> None:
+    """``needs_sweep_after`` and the reason's unfinished clause are all that move.
+
+    An in-scope join written after its source's last completed sweep holds the
+    window open, and what the operator needs is the sweep that would finish it,
+    so ``needs_sweep_after`` is a timestamp read off that join. It is the one
+    value a session's behaviour can move; the reason gains one constant clause
+    and no count.
+    """
+    none = _unfinished_read(tmp_path, "none", 0)
+    one = _unfinished_read(tmp_path, "one", 1)
+    many = _unfinished_read(tmp_path, "many", 40)
+
+    assert sorted(_differing_paths(none, one)) == [
+        "settled_window.needs_sweep_after",
+        "settled_window.reason",
+    ]
+    assert "not finished" not in none["settled_window"]["reason"]
+    assert "not finished" in one["settled_window"]["reason"]
+    # How many joins were rewritten is not in the read at all.
+    assert one == many
 
 
 def _random_read(
@@ -979,14 +1011,7 @@ def _random_read(
 def test_an_unsettled_read_ignores_outcomes_drawn_at_random(
     tmp_path: Path, structure: int, outcome: str, itt: bool
 ) -> None:
-    """Two stores with one layout and independently drawn outcomes read the same.
-
-    The pair of hand-built stores above names the outcomes it moves, and a
-    figure that none of them moves, such as the count of strata holding both
-    arms, passes unseen. Here cut-offs, missing values and counts fall in both
-    arms and on every parent, so a count that reads the analysed set differs
-    in some seed or none.
-    """
+    """Two stores with one layout and independently drawn outcomes read the same."""
     reads = [
         _random_read(
             tmp_path,
@@ -1018,44 +1043,3 @@ def test_randomly_drawn_outcomes_do_move_a_settled_read(
         "descriptive.analysed_tasks",
         "inference.difference",
     } <= moved
-
-
-def test_an_unsettled_read_keeps_the_keys_and_nulls_the_figures(
-    log: HoldoutLog,
-) -> None:
-    seed_arm_shift(log, shift=2)
-    log.sweep(at=UNTIL - timedelta(hours=1))
-
-    report = _analyze(log, rate=0.2)
-
-    d = report.descriptive
-    assert d.outcome_sd_within_parent is None
-    assert d.outcome_sd_total is None
-    assert d.cut_off_share is None
-    assert d.cut_offs_by_arm is None
-    assert d.n_for_10pct_effect is None
-    assert d.pr_base_rate_served is None
-    assert d.prs_created_mean is None
-    assert all(h.mde is None and h.ratio is None for h in d.mde_by_horizon)
-    assert report.power.status == WINDOW_NOT_SETTLED
-    assert report.power.realised_sd is None
-    assert report.power.power_at_planned_mde is None
-    assert report.power.mde_at_target_power is None
-    # The counts a rate and a window fix stay, and nothing an outcome fixes.
-    assert d.eligible_by_arm.served + d.eligible_by_arm.withheld == 93
-    assert d.analysed_tasks is None
-    assert d.analysed_by_arm is None
-    assert d.parents is None
-    assert report.funnel.analysed is None
-    assert report.funnel.cut_offs_excluded is None
-    assert report.funnel.outcome_missing is None
-    assert report.power.realised_n is None
-    assert report.inference.strata is None
-    assert report.inference.tasks_in_one_arm_strata is None
-    recall = next(m for m in report.guardrails.measures if m.name == "recall_rate")
-    assert recall.served.value is not None
-    others = [m for m in report.guardrails.measures if m.name != "recall_rate"]
-    assert others
-    for measure in others:
-        assert measure.served.value is None
-        assert measure.withheld is None or measure.withheld.value is None
