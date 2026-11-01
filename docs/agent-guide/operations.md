@@ -5089,17 +5089,22 @@ valid: `external` is accepted only as `read,external`, and
 - **No MCP tool mints a key.** A token is a credential, and a mint tool would
   give an agent a way to widen its own access. Mint from the CLI, the REST route
   or the UI.
-- **Mint and revoke need an identified admin credential, in every auth mode.**
-  The REST routes and `revoke_api_key` refuse a caller that is not a stored key
-  holding `admin`, or the shared `TRELLIS_API_KEY` secret (which the server
-  treats as admin; the audit event names it `shared-secret`). That includes the
-  anonymous caller of `TRELLIS_AUTH_MODE=off` or `optional`, which otherwise
-  holds every scope: it answers 403 and points at `trellis admin api-keys`. This
-  is a change for those modes, where an anonymous caller could not be told apart
-  from an admin. Listing is unchanged. The Keys tab says so when no key is
-  stored in the browser. Because a live admin is required and a caller cannot
-  revoke its own key, REST and MCP can never remove the last admin; only the CLI
-  can.
+- **Mint and revoke need an identified admin credential.** Over REST, a stored key that
+  holds `admin` or the shared `TRELLIS_API_KEY` secret (which the server treats as
+  admin; the event names it `shared-secret`) may mint and revoke. An anonymous caller
+  may not: in `TRELLIS_AUTH_MODE=optional` with no key it gets 403 pointing at `trellis
+  admin api-keys`; in `off` the server ignores a presented key, so every REST caller is
+  anonymous (a stored key and the secret included) and the 403 points only at the CLI.
+  That is a change for those modes, where an anonymous caller otherwise holds every
+  scope. The MCP `revoke_api_key` tool is narrower: it needs a stored admin key and does
+  not accept the shared secret (the MCP verifier takes stored keys only); an
+  unidentified session is refused and pointed at the CLI. Listing is unchanged. The Keys
+  tab says so when no key is stored in the browser.
+- **The last admin.** A stored admin key cannot revoke itself, on REST or MCP. That is
+  the whole guard: the shared secret has no key id, so over REST it can revoke the only
+  stored admin, and the CLI can revoke any key. Unsetting the secret afterwards leaves
+  no REST or MCP admin, and the CLI is then the way back. Two admin keys revoking each
+  other at the same moment can also reach zero (read from the code, not reproduced).
 - **Errors.** An unknown key id answers 404, an already-revoked one 409, an
   invalid scope list or name 400, and a policy that denies the operation 400 (as
   the other write routes do). A store that is degraded or stale, a corrupt
@@ -5117,15 +5122,18 @@ valid: `external` is accepted only as `read,external`, and
   corrupt `policies.json` fails Stage 2 closed (CLI exit 5, REST 409, the message
   names the file), and until that file is fixed or removed no surface, the CLI
   included, can mint or revoke.
-- **Audit events.** A mint emits `api_key.minted` and a revoke emits
-  `api_key.revoked`, from whichever surface did the work, the CLI included. The
-  payload is `key_id`, `name`, `scopes`, `minted_by` / `revoked_by` and, when the
-  caller was an API key, `actor_key_id` and `actor_key_name`. It never holds the
-  token, the secret or its hash. A refused attempt emits `mutation.rejected`
-  instead. The generic `execute_mutation` tool and `POST /commands/batch` have no
-  handler for these operations, so neither can mint or revoke a key. Key
-  operations are neither an accept nor a reject for capture health: refusals do
-  not raise the banner and a mint does not clear one.
+- **Audit events.** A mint emits `api_key.minted` and a revoke emits `api_key.revoked`,
+  from whichever surface did the work, the CLI included. The payload is `key_id`,
+  `name`, `scopes`, `minted_by` / `revoked_by` and, when the caller was an API key,
+  `actor_key_id` and `actor_key_name`. It never holds the token, the secret or its hash.
+  A refusal by the executor (unknown key, policy denial and the like) emits
+  `mutation.rejected` instead; the REST identity 403 and the MCP `unidentified_caller`
+  refusal never reach the executor, so they leave a warning log line
+  (`api_key_write_refused_unidentified`, no secret) and no event. The generic
+  `execute_mutation` tool and `POST /commands/batch` have no handler for these
+  operations, so neither can mint or revoke a key. Key operations are neither an accept
+  nor a reject for capture health: refusals do not raise the banner and a mint does not
+  clear one.
 - **A failed audit write never changes the outcome.** If the key store write
   succeeded and the event cannot be recorded, the operation answers success with
   the warning `audit_event_not_recorded` (a mint still returns its token), and an
@@ -5133,7 +5141,9 @@ valid: `external` is accepted only as `read,external`, and
   (this one and any `warn`-verdict policy) are in the REST body, the CLI's text
   and JSON, the MCP result and the Keys tab. The CLI also succeeds and warns when
   the event log cannot be opened at all, so a corrupt `events.db` cannot keep a
-  compromised key live.
+  compromised key live. A run that tolerated a failed open always carries the
+  warning, even if a later `api_key.*` write landed, because the executor's own
+  `mutation.executed` record is missing in that case.
 - Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
   limits.
 

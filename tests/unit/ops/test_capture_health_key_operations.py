@@ -98,3 +98,41 @@ def test_a_real_accept_is_found_behind_many_key_operations(
 
 def test_generate_api_key_is_unused_here() -> None:
     assert generate_api_key("k", ["read"])[1].name == "k"
+
+
+def test_an_exhausted_accept_search_keeps_the_banner(registry: StoreRegistry) -> None:
+    """More key accepts than the search reads must not read as "a real accept"."""
+    for _ in range(3):
+        _emit(registry, EventType.MUTATION_REJECTED, "evidence.ingest")
+    for _ in range(120):
+        _emit(registry, EventType.MUTATION_EXECUTED, "api_key.mint")
+    warning = check_capture_health(registry.operational.event_log, threshold=3)
+    assert warning is not None
+    assert warning.failing_surfaces == [LABEL]
+
+
+def test_an_unhashable_operation_is_a_real_operation_not_a_crash(
+    registry: StoreRegistry,
+) -> None:
+    for _ in range(3):
+        registry.operational.event_log.emit(
+            EventType.MUTATION_REJECTED,
+            "mutation_executor",
+            entity_id="x",
+            entity_type="t",
+            payload={
+                "operation": ["api_key.mint"],
+                "requested_by": LABEL,
+                "reason": "validate",
+            },
+        )
+    warning = check_capture_health(registry.operational.event_log, threshold=3)
+    assert warning is not None
+    registry.operational.event_log.emit(
+        EventType.MUTATION_EXECUTED,
+        "mutation_executor",
+        entity_id="x",
+        entity_type="t",
+        payload={"operation": {"nested": 1}, "requested_by": LABEL},
+    )
+    assert check_capture_health(registry.operational.event_log, threshold=3) is None

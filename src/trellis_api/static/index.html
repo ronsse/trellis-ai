@@ -2725,9 +2725,10 @@
             </p>
             <p class="field-hint" id="keys-identity-note" hidden>
                 No API key is stored in this browser. Minting and revoking need an
-                identified admin key, whatever the server&rsquo;s auth mode, so both will be
-                refused from this page until you save one (Save key, above). To bootstrap
-                the first key or remove the last admin, use
+                identified admin key, so both are refused from this page without one.
+                Save one above if the server enforces authentication; when its auth
+                mode is off a stored key is ignored and no key helps. To bootstrap the
+                first key or remove the last admin, use
                 <code>trellis admin api-keys</code> on the server host.
             </p>
             <div id="keys-token-panel"></div>
@@ -2875,11 +2876,20 @@
             if (res.status === 403) {
                 let detail = '';
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
-                // require_scope() is the only source of a 403 here, and it
-                // only ever fires when the key lacks admin scope (admin
-                // satisfies every other scope check) -- so this is proof,
-                // not a guess, and is the one place that can catch a 403
-                // from a tab the nav badges don't cover yet.
+                // Two things answer 403. require_scope() fires only when the
+                // key lacks admin scope (admin satisfies every other scope
+                // check), so it is proof the stored key is under-scoped, and
+                // this is the one place that catches a 403 from a tab the nav
+                // badges don't cover yet. The API-key routes' identity rule
+                // (_require_identified_admin) is the second: it refuses an
+                // anonymous caller and says nothing about a stored key's
+                // scope, so it marks itself with X-Trellis-Refusal and must
+                // neither badge the tabs nor raise the banner.
+                if (res.headers.get('X-Trellis-Refusal') === 'identified-admin-required') {
+                    const refusal = new Error('403 Forbidden (' + (detail || 'identity required') + ')');
+                    refusal.identityRefusal = detail || 'An identified admin API key is required.';
+                    throw refusal;
+                }
                 markKeyNonAdmin();
                 showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
                               + '. Other tabs may still work with this key — see the sidebar for which '
@@ -8536,8 +8546,9 @@
         // A refusal for want of an admin key is explained, not shown bare; any
         // other failure is shown as the server worded it.
         function keyWriteFailureText(err, verb) {
+            if (err.identityRefusal) return `${verb} refused: ${err.identityRefusal}`;
             if (isAdminScopeError(err)) {
-                return `${verb} refused: it needs an identified admin API key stored in this browser (Save key, above). Without one, use 'trellis admin api-keys' on the server host.`;
+                return `${verb} refused: the stored key does not have admin scope.`;
             }
             return `${verb} failed: ${err.message}`;
         }

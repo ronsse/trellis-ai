@@ -12,13 +12,20 @@ The token is generated outside the pipeline: only the hashed record enters a
 command, so no event or result can carry the secret. The full token appears
 in the mint response and nowhere else; the list never returns a hash.
 
-A caller cannot revoke the key it is authenticated with. Mint and revoke also
-require an *identified* credential that holds ``admin`` itself, whatever the
-auth mode: an anonymous caller (mode ``off``, or ``optional`` with no key) is
-granted every scope by ``authenticate`` but may not mint a durable credential or
-revoke one, and is pointed at ``trellis admin api-keys``. The CLI has no
-principal and remains the bootstrap and recovery path: with a live admin key
-required and self-revoke refused, REST and MCP cannot remove the last admin.
+A stored key cannot revoke itself. That is the whole last-admin guard: the shared
+secret has no key id, so it can revoke the only stored admin, and the CLI can
+revoke any key. If the secret is then unset, no REST or MCP admin is left and the
+CLI is the way back; two admin keys revoking each other at once can also reach
+zero (read from the code, not reproduced).
+
+Mint and revoke also require an *identified* credential that holds ``admin``
+itself: a stored admin key or the shared secret. An anonymous caller (mode
+``optional`` with no key) is granted every scope by ``authenticate`` but may not
+mint a durable credential or revoke one, and is pointed at ``trellis admin
+api-keys``. Mode ``off`` ignores a presented key, so every caller there is
+anonymous, a stored key and the secret included, and the refusal points only at
+the CLI. The refusal never reaches the executor, so it is logged (a warning, no
+secret) and not audited.
 
 A key operation that took effect always answers success. If its audit event
 could not be written the response carries ``warnings`` (``audit_event_not_recorded``)
@@ -29,6 +36,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from trellis.auth import (
@@ -48,6 +56,7 @@ from trellis_api.routes._principal import resolve_requested_by
 from trellis_wire.dtos import ApiKeyMintRequest
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
 
 _DEFAULT_ACTOR = "api:api-keys"
 
@@ -75,6 +84,12 @@ _SERVER_FAULT = (
 _SHARED_SECRET_NAME = "shared-secret"  # noqa: S105 -- a label, not a credential
 
 
+#: Marks this 403 as the identity rule, not ``require_scope``'s "lacks required
+#: scope": the UI must not read it as proof that the stored key is under-scoped.
+IDENTITY_REFUSAL_HEADER = "X-Trellis-Refusal"
+IDENTITY_REFUSAL_VALUE = "identified-admin-required"
+
+
 def _require_identified_admin(ctx: AuthContext, action: str) -> None:
     """Refuse (403) a mint or revoke from anything but an identified admin.
 
@@ -87,14 +102,30 @@ def _require_identified_admin(ctx: AuthContext, action: str) -> None:
     identified = ctx.key_id is not None or ctx.name == _SHARED_SECRET_NAME
     if identified and scopes_satisfy(ctx.scopes, SCOPE_ADMIN):
         return
-    raise HTTPException(
-        status_code=403,
-        detail=(
+    logger.warning(
+        "api_key_write_refused_unidentified",
+        action=action,
+        mode=ctx.mode,
+        key_id=ctx.key_id,
+        key_name=ctx.name,
+    )
+    if ctx.mode == "off":
+        detail = (
+            f"{action} is not available over REST while the server's auth mode "
+            "is off: it ignores a presented key, so it cannot tell who is asking. "
+            "Use 'trellis admin api-keys' on the server host."
+        )
+    else:
+        detail = (
             f"{action} needs an identified credential that holds the admin scope: "
             "present an admin API key. This server cannot tell who is asking "
             "otherwise, so to bootstrap or recover use 'trellis admin api-keys' "
             "on the server host."
-        ),
+        )
+    raise HTTPException(
+        status_code=403,
+        detail=detail,
+        headers={IDENTITY_REFUSAL_HEADER: IDENTITY_REFUSAL_VALUE},
     )
 
 

@@ -156,7 +156,11 @@ def guarded_audit_emit(command: Command, event_type: EventType, emit: Any) -> No
     """
     try:
         emit()
-    except _audit_emit_failure_classes() as exc:
+    # GRACEFUL-DEGRADATION: an advisory step on the write path is wrapped whole
+    # (#551), because one escaped exception of any class fails a write that has
+    # already landed. Not swallowed: logged at error and stated on the result.
+    # The log carries the class name only; a driver's text can hold values.
+    except Exception as exc:
         logger.error(  # noqa: TRY400 -- no traceback on purpose; see _emit_event
             "audit_emit_failed",
             command_id=command.command_id,
@@ -164,7 +168,6 @@ def guarded_audit_emit(command: Command, event_type: EventType, emit: Any) -> No
             event_type=event_type,
             target_id=command.target_id,
             error_type=type(exc).__name__,
-            error=str(exc) if isinstance(exc, TrellisError) else None,
         )
         warning = _AUDIT_EMIT_FAILED_TEMPLATE.format(
             event_type=event_type,

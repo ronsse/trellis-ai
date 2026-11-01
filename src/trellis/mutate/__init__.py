@@ -222,37 +222,57 @@ def build_api_keys_executor(
 
     ``tolerate_unopenable_event_log`` is for ``trellis admin api-keys``, the
     recovery path for a leaked key: with it set, an event log that cannot be
-    opened is replaced by a :class:`~trellis.stores.null.event_log.NullEventLog`
-    (logged at ``error``), so the key operation still runs and its result says
-    the audit record is missing. A corrupt ``policies.json`` is not tolerated:
-    Stage 2 stays fail-closed (``ConfigError``).
+    opened is replaced by a log that reads as empty and refuses every write
+    (logged at ``error``), so the key operation still runs and the executor's own
+    ``mutation.executed`` emit fails inside its guard. Every result of such an
+    executor therefore carries ``audit_event_not_recorded``, whether or not a
+    later ``api_key.*`` write, which goes to the registry's own log, succeeds. A corrupt
+    ``policies.json`` is not tolerated: Stage 2 stays fail-closed
+    (``ConfigError``).
     """
     from trellis.mutate.handlers import create_api_key_handlers  # noqa: PLC0415
     from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
 
-    event_log = _open_event_log(registry, tolerate=tolerate_unopenable_event_log)
     return MutationExecutor(
-        event_log=event_log,
+        event_log=_open_event_log(registry, tolerate=tolerate_unopenable_event_log),
         handlers=create_api_key_handlers(registry),
         policy_gate=build_policy_gate(registry),
     )
 
 
 def _open_event_log(registry: StoreRegistry, *, tolerate: bool) -> EventLog:
-    """The registry's event log, or a no-op one if ``tolerate`` and it will not open."""
+    """The registry's event log (``tolerate``: an unrecordable one on failure)."""
     try:
         return registry.operational.event_log
     # GRACEFUL-DEGRADATION: the caller opted in; the failure is logged at
-    # error here and stated on every result by the handlers' guarded emit.
+    # error here and stated on every result by the executor's guarded emit.
     except Exception as exc:
         if not tolerate:
             raise
-        from trellis.stores.null.event_log import NullEventLog  # noqa: PLC0415
-
         logger.error(  # noqa: TRY400 -- no traceback: a driver's text can carry values
             "api_keys_event_log_unopenable", error_type=type(exc).__name__
         )
-        return NullEventLog()
+        return _unrecordable_event_log()
+
+
+def _unrecordable_event_log() -> EventLog:
+    """A log that reads as empty and refuses every write.
+
+    Not a silent no-op: the executor's own ``mutation.executed`` emit then fails
+    inside its guard and puts ``audit_event_not_recorded`` on the result, so a
+    run that lost its record says so (#551). No ``MutationExecutor`` subclass is
+    needed for that, and ``test_policy_gate_rule.py`` forbids one.
+    """
+    from trellis.errors import StoreError  # noqa: PLC0415
+    from trellis.stores.base.event_log import Event  # noqa: PLC0415
+    from trellis.stores.null.event_log import NullEventLog  # noqa: PLC0415
+
+    class _UnrecordableEventLog(NullEventLog):
+        def _append(self, event: Event) -> None:  # noqa: ARG002
+            msg = "the event log could not be opened; this event was not recorded"
+            raise StoreError(msg)
+
+    return _UnrecordableEventLog()
 
 
 def redirect_unreachable_settings_update(result: CommandResult) -> CommandResult:

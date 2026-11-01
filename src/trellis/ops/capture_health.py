@@ -254,6 +254,12 @@ NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
 #: ``tests/unit/ops/test_capture_health_key_operations.py``.
 NON_CAPTURE_OPERATIONS: frozenset[str] = frozenset({"api_key.mint", "api_key.revoke"})
 
+
+def _is_key_operation(operation: object) -> bool:
+    """A key operation; a non-string ``operation`` (a hand-built payload) is not."""
+    return isinstance(operation, str) and operation in NON_CAPTURE_OPERATIONS
+
+
 #: How many of a surface's newest accepts are read when some may be key
 #: operations. Key operations are human-rate, so a few pages bound the walk.
 _ACCEPT_PAGE = 20
@@ -419,7 +425,7 @@ def _rejections_by_surface(
         for event in scan.events:
             if str(event.payload.get("reason") or "") == _REPLAY_REASON:
                 continue
-            if event.payload.get("operation") in NON_CAPTURE_OPERATIONS:
+            if _is_key_operation(event.payload.get("operation")):
                 continue
             name = str(event.payload.get(payload_key) or "") or _UNKNOWN_SURFACE
             label = _surface_label(name, payload_key)
@@ -487,7 +493,7 @@ def _has_capture_accept(
             order="desc",
             payload_filters=payload_filters,
         )
-        if any(e.payload.get("operation") not in NON_CAPTURE_OPERATIONS for e in page):
+        if any(not _is_key_operation(e.payload.get("operation")) for e in page):
             return True
         if len(page) < _ACCEPT_PAGE:
             return False
@@ -504,9 +510,10 @@ def _surface_has_accepts(
 ) -> bool:
     """Has this surface landed any write that clears its rejections?
 
-    Pushed into the backend with ``limit=1``: the question is existence,
-    and the accept volume of a healthy surface is exactly what must not be
-    pulled into a retrieval call.
+    The question is existence, and the accept volume of a healthy surface is
+    exactly what must not be pulled into a retrieval call, so
+    :func:`_has_capture_accept` reads one small page at a time, newest first,
+    and stops at the first accept that is not a key operation.
 
     Two rules, because there are two kinds of surface. A normal one is
     cleared by an accepted write **of its own** anywhere in the window. A

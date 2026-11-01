@@ -18,21 +18,25 @@ All notable changes to Trellis will be documented in this file.
   everywhere. A caller cannot revoke the key it is authenticated with (the CLI still can). An
   `external` key is refused on all of it. No change to the `trellis_api_keys` table.
 
-  **Behaviour to know before deploying.** (1) REST mint and revoke, and the MCP
-  `revoke_api_key`, need an identified credential that holds `admin` in every auth mode, or
-  the shared secret; the anonymous caller of `TRELLIS_AUTH_MODE=off` or `optional`, which
-  otherwise holds every scope, now gets 403 pointing at `trellis admin api-keys`. With that
-  and the self-revoke refusal, REST and MCP cannot remove the last admin; the CLI can.
-  (2) A failed audit write never changes the outcome: the key operation answers success with
-  the warning `audit_event_not_recorded` (a mint still returns its token), and warnings now
-  reach the REST body, the CLI text and JSON, MCP and the UI. A true server fault answers 500
-  with no exception text. (3) The CLI succeeds and warns when `events.db` is corrupt, so a
-  compromised key can still be revoked. A corrupt `policies.json` is the exception: it fails
-  closed (CLI exit 5, REST 409, the message names the file), and until that file is fixed
-  no surface can mint or revoke. (4) A key name is 1 to 120 characters with no control
-  character, on every surface. (5) Key operations are neither an accept nor a reject for
-  capture health. (6) **Deploy order:** once an `api_key.*` event exists, an older build's
-  `GET /api/v1/events` answers 500 on the unknown event type; redeploy every server before
+  **Behaviour to know before deploying.** (1) Mint and revoke over REST need an
+  identified admin credential: a stored key that holds `admin`, or the shared
+  `TRELLIS_API_KEY` secret. The anonymous caller of `optional` mode, which otherwise
+  holds every scope, gets 403 pointing at `trellis admin api-keys`; `off` mode ignores a
+  presented key, so there every REST caller is anonymous and the 403 points only at the
+  CLI. The MCP `revoke_api_key` needs a stored admin key and does not accept the shared
+  secret. A stored admin key cannot revoke itself; that is the whole last-admin guard,
+  so the shared secret and the CLI can remove the last admin, unsetting the secret
+  afterwards leaves no REST or MCP admin, and two admins revoking each other at once can
+  reach zero (read, not reproduced). (2) A failed audit write never changes the outcome:
+  the key operation answers success with the warning `audit_event_not_recorded` (a mint
+  still returns its token), and warnings now reach the REST body, the CLI text and JSON,
+  MCP and the UI. A true server fault answers 500 with no exception text. (3) The CLI
+  succeeds and warns when `events.db` is corrupt, so a compromised key can still be
+  revoked. A corrupt `policies.json` is the exception: it fails closed (CLI exit 5, REST
+  409, the message names the file), and until that file is fixed no surface can mint or
+  revoke. (4) A key name is 1 to 120 characters with no control character, on every
+  surface. (5) Key operations are neither an accept nor a reject for capture health. (6)
+  **Deploy order:** once an `api_key.*` event exists, an older build's `GET /api/v1/events` answers 500 on the unknown event type; redeploy every server before
   minting or revoking through the new build. A policy denial answers 400, like the other
   write routes.
 

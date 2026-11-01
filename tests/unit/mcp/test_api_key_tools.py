@@ -14,6 +14,7 @@ from trellis.mcp.auth import set_auth_enforced
 from trellis.mcp.server import mcp
 from trellis.stores.base.event_log import EventType
 
+from ...flaky_registry import FlakyRegistry
 from .conftest import unwrap_tool
 from .test_auth import _ctx, _token
 
@@ -148,3 +149,41 @@ class TestRevokeApiKey:
         record = temp_registry.operational.api_key_store.get(key_id)
         assert record is not None
         assert record.revoked_at is not None
+
+
+class TestRevokeApiKeyOutcomeHonesty:
+    def test_a_duplicate_result_is_not_reported_as_ok(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.mutate import CommandResult, CommandStatus
+        from trellis.mutate.executor import MutationExecutor
+
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        key_id = _seed(temp_registry, [SCOPE_READ], "victim")
+
+        def duplicate(self: MutationExecutor, command: object) -> CommandResult:
+            return CommandResult(
+                command_id=command.command_id,  # type: ignore[attr-defined]
+                status=CommandStatus.DUPLICATE,
+                operation=command.operation,  # type: ignore[attr-defined]
+            )
+
+        monkeypatch.setattr(MutationExecutor, "execute", duplicate)
+        payload = json.loads(revoke_api_key(key_id=key_id))
+        assert payload["status"] != "ok"
+        assert payload["status"] == "duplicate"
+
+    def test_an_unopenable_event_log_is_an_error_not_a_tolerated_revoke(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the CLI tolerates a failed open; this tool must refuse instead."""
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        key_id = _seed(temp_registry, [SCOPE_READ], "victim")
+        monkeypatch.setattr(
+            server_mod, "_registry", FlakyRegistry(temp_registry, fail_first=10**6)
+        )
+        payload = json.loads(revoke_api_key(key_id=key_id))
+        assert payload["status"] == "error"
+        record = temp_registry.operational.api_key_store.get(key_id)
+        assert record is not None
+        assert record.revoked_at is None

@@ -5389,6 +5389,7 @@ def revoke_api_key(key_id: str) -> str:
     """
     principal = current_principal_id()
     if principal is None:
+        logger.warning("api_key_write_refused_unidentified", action="revoke")
         return json.dumps(
             {
                 "status": "rejected",

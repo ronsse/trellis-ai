@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 
 import trellis_api
+from trellis_api.routes.api_keys import (
+    IDENTITY_REFUSAL_HEADER,
+    IDENTITY_REFUSAL_VALUE,
+)
 
 PAGE = (Path(trellis_api.__file__).parent / "static" / "index.html").read_text(
     encoding="utf-8"
@@ -85,7 +89,24 @@ def test_a_failed_mint_or_revoke_re_lists_so_no_stale_live_row_stays() -> None:
 
 def test_a_refusal_is_explained_rather_than_shown_bare() -> None:
     text = _body("keyWriteFailureText")
-    assert "identified admin API key" in text
-    assert "trellis admin api-keys" in text
+    assert "err.identityRefusal" in text
+    assert "does not have admin scope" in text
+    assert "Save key, above" not in text
     assert 'id="keys-identity-note"' in PAGE
+    note = PAGE[PAGE.index('id="keys-identity-note"') :][:900]
+    assert "trellis admin api-keys" in note
+    assert re.search(r"auth\s+mode is off", note)
     assert "keys-identity-note').hidden = !!getApiKey()" in _body("loadKeys")
+
+
+def test_the_identity_refusal_neither_badges_the_tabs_nor_raises_the_banner() -> None:
+    """A spelling pin, not a behaviour test: the browser drive is the evidence."""
+    assert IDENTITY_REFUSAL_HEADER in PAGE
+    assert IDENTITY_REFUSAL_VALUE in PAGE
+    body = _body("throwIfAuthRefused")
+    gate = body.index(IDENTITY_REFUSAL_HEADER)
+    mark = body.index("markKeyNonAdmin()")
+    assert gate < mark
+    before_mark = body[gate:mark]
+    assert "throw refusal" in before_mark
+    assert "showKeyBanner" not in before_mark
