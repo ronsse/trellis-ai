@@ -94,6 +94,51 @@ All notable changes to Trellis will be documented in this file.
   neither refused nor listed as answering to this key. The ADR sentence saying there is no
   `public` clearance tier is corrected.
 
+- **`trellis analyze holdout` reads as the one-shot readout.** With
+  `--by-commit`, each build's row carries the served-minus-withheld mean
+  difference (null when an arm is empty), builds serving fewer than 5 withheld
+  tasks pool into one `other` row, and the table is labelled descriptive and
+  non-decisive. `inference.top_stratum_weight_share` reports the heaviest
+  stratum's share of the estimator's weight. A read given `--until` whose
+  capture sweeps have not settled past it is refused. It publishes an
+  allow-list, not the report with fields nulled: `status` `window not settled`,
+  what the caller asked (outcome, rate as given, `--until`, the window bounds,
+  ITT and the settle allowance), the planned MDE and N, `settled_window`
+  (`checked`, `settled: false`, `reason`, `needs_sweep_after`, `latest_sweep`)
+  and one note naming `--operational`. Every other key is absent, not null.
+  The evidence is gathered first, so the funnel counts and the task units are
+  computed and then discarded, none of it published; the descriptive block,
+  the by-build table, the guardrails, the power figures and the inference
+  never run. A figure added to the report later cannot reach a refused read,
+  and the refusal does not move with a task's outcome, its pack calls or its
+  tool-call count. It is not free of behaviour: `needs_sweep_after` is one
+  timestamp read off the latest unfinished join, `latest_sweep` moves with the
+  sweeps' own times (not with the sessions they parsed), and `reason` carries
+  no count but moves with which sources have an in-scope task, the sweep times
+  and, as one constant clause, whether an in-scope task is unfinished. A join
+  needs an outcome block to be in scope, read as presence only, so a missing
+  block can turn a refusal into a full report; that is accepted, because the
+  analysed set never holds such a task and capture always writes the block. A
+  checked read whose event scan was truncated is refused too, with one constant
+  clause naming `--limit` and no count; whether a scan truncates still moves
+  with row volume. A checked read that finds several holdout rates names them
+  without row counts. `--by-commit` on that read prints the refusal, not a table;
+  `--operational` is the early check and gives per-build counts with no settled
+  window. A read with no `--until` is unchanged in JSON, and its text prints a
+  `window not checked` line. The window is also unsettled
+  while an in-window, in-rate task is
+  unfinished (a join stamped after its source's last sweep), and only sources
+  with such a task are waited on, so a retired source does not hold the read
+  open. A capture sweep that parsed no session and lost some to an error no
+  longer counts as a completed sweep, in this report and in `--operational`.
+  `--by-commit` keys a row on the commit, so one commit under two versions is
+  one row naming both, in the full read and in `--operational` alike. The
+  agent-type secondary is marked pre-registered, and the analytic MDE and
+  N-for-a-10%-effect now size at the analysed `--rate` instead of assuming a
+  50/50 split (`analytic_mde` takes a `share`, default 0.5, so existing calls
+  are unchanged). The primary estimator, strata, exclusions, assignment and
+  serving are untouched; `--operational` prints none of the new figures.
+
 - **Content labelled above `internal` no longer reaches a chat or generate LLM
   route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
   label, `EgressGate` for a stored document, a chunk judged by its parent's
@@ -259,6 +304,29 @@ All notable changes to Trellis will be documented in this file.
   siblings it raises on a failed read, so that `None` keeps meaning "no such pack".
 
 ### Fixed
+
+- **`trellis admin quickstart` no longer reports `ok` on a `config.yaml` the
+  registry refuses, `trellis admin migrate-graph` no longer tracebacks on a
+  graph store that will not open, and `trellis admin serve` reads
+  `TRELLIS_API_PORT` the way `trellis serve` does.**
+  - Quickstart answered `stores_already_initialized` from the file's presence
+    alone, so an unknown top-level key or an unresolved `${VAR}` exited `0`
+    with `status: ok`, wrote `.gitignore` and printed a register command for a
+    server whose every later command exits `5`. It now loads the registry for
+    the config directory first: the refusal is a `ConfigError`, exit `5`, in
+    both `--format`s, before anything else is written.
+  - `migrate-graph` let the sqlite backend's own errors out of
+    `_load_graph_store_from_yaml` (`sqlite3.DatabaseError` on a file that is not
+    a database, `OSError` on an unwritable or impossible path, `TypeError` on a
+    `db_path` of the wrong type) as a traceback and exit `1`, for the source
+    and the destination alike. They are now a `StoreError` (or a `ConfigError`
+    for the wrong-type case), exit `5`, in both formats. A driver error we do
+    not recognise is named by class only; its text can quote a host or a row.
+  - `trellis admin serve` took `TRELLIS_API_PORT` through Typer's `envvar=`,
+    so a non-integer value exited `2` with a usage error while `trellis serve`
+    and `trellis-api` exited `5`. It now goes through `resolve_api_port` and
+    exits `5` with the same message; `--port` still beats the variable. The
+    runbook's `TRELLIS_API_PORT` row is corrected to match.
 
 - **MCP `save_memory` refuses a `lifecycle` or `evidence_ref` in its `metadata`
   argument** (`INVALID_PARAMS`, whatever the value, nothing written, `data.field`

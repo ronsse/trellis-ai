@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
+from trellis.analyze import holdout
 from trellis.stores.base.event_log import Event, EventLog, EventType
 
 INTENT_MARKER = "intent-marker-not-for-output"
@@ -28,10 +31,41 @@ MONDAY = datetime(2026, 8, 3, 9, 0, tzinfo=UTC)
 #: on 2026-07-30, before :data:`MONDAY`.
 UNTIL = datetime(2026, 9, 28, tzinfo=UTC)
 DAYS = 60
+#: Hours after :data:`UNTIL` of the two sweeps that settle its window: the first
+#: sweep at or after the end, then one past the three-hour settle allowance.
+SETTLING_SWEEP_HOURS_AFTER_UNTIL = (1, 25)
 #: Where the :data:`DAYS`-day window ending at :data:`UNTIL` opens.
 WINDOW_START = UNTIL - timedelta(days=DAYS)
 #: 20 days into that window: :func:`seed_late_build`'s first row at rate 0.5.
 KEYED_FROM = WINDOW_START + timedelta(days=20)
+
+
+@contextmanager
+def unchecked_window() -> Iterator[None]:
+    """Read a window that has not settled, with the settled-window check skipped.
+
+    A checked read of an unsettled window is refused and computes nothing, so a
+    test of what the full report counts there (the funnel's ``unfinished``
+    stage, say) reads the same window as an unchecked one. ``checked=False`` is
+    what a read with no ``until`` passes; the window itself is unchanged.
+    """
+    original = holdout._settled_window
+
+    def unchecked(*args: Any, **kwargs: Any) -> Any:
+        return original(*args, **{**kwargs, "checked": False})
+
+    with mock.patch.object(holdout, "_settled_window", unchecked):
+        yield
+
+
+#: The outcome fields a readout turns into a measured value.
+_MEASURED_FIELDS = (
+    "assistant_turns",
+    "prs_created",
+    "commits",
+    "input_tokens",
+    "output_tokens",
+)
 
 
 def outcome_payload(
@@ -41,7 +75,7 @@ def outcome_payload(
     prs_created: int = 0,
     commits: int = 0,
     tokens: int | None = 10_000,
-    tool_errors: int = 0,
+    tool_errors: int | None = 0,
 ) -> dict[str, Any]:
     """A ``SessionOutcome.to_payload()`` dict, every field present."""
     return {
@@ -288,19 +322,24 @@ class HoldoutLog:
         prs_created: int = 0,
         commits: int = 0,
         tokens: int | None = 10_000,
-        tool_errors: int = 0,
+        tool_errors: int | None = 0,
         sectioned: bool = False,
         with_outcome: bool = True,
+        measures_missing: bool = False,
         timing: dict[str, Any] | None = None,
         covariates: dict[str, Any] | None = None,
         pack_metadata: Sequence[dict[str, Any] | None] | None = None,
+        join_delay: timedelta = timedelta(0),
     ) -> str:
         """One task: a pack per entry of ``arms``, a minute apart, then its join.
 
         ``arms`` holds each call's ``withheld`` value in call order
         (``None`` for a row from a build before the holdout). The join is
-        written an hour after the last pack. ``pack_metadata`` holds each
-        pack row's event metadata in the same order.
+        written an hour after the last pack, and ``join_delay`` later still.
+        ``pack_metadata`` holds each
+        pack row's event metadata in the same order. ``measures_missing``
+        leaves every outcome count the readout reads as ``None``, so the task
+        has an outcome block and no measured value.
         """
         self._tasks += 1
         task_id = f"task-{self._tasks:04d}"
@@ -331,9 +370,11 @@ class HoldoutLog:
             if with_outcome
             else None
         )
+        if outcome is not None and measures_missing:
+            outcome.update(dict.fromkeys(_MEASURED_FIELDS))
         self.join(
             task_id,
-            at=start + timedelta(minutes=len(arms), hours=1),
+            at=start + timedelta(minutes=len(arms), hours=1) + join_delay,
             pack_ids=pack_ids,
             parent=parent,
             outcome=outcome,
@@ -348,11 +389,45 @@ class HoldoutLog:
         at: datetime | None = None,
         dry_run: bool = False,
         source_system: str = SOURCE_SYSTEM,
+        sessions_parsed: int | None = None,
+        sessions_errored: int | None = None,
     ) -> None:
-        """A completed capture sweep, by default four hours after the latest join."""
-        if at is None:
-            assert self.latest_join is not None, "write a task before the sweep"
-            at = self.latest_join + timedelta(hours=4)
+        """A completed capture sweep, by default four hours after the latest join.
+
+        ``sessions_parsed`` and ``sessions_errored`` are the sweep's own
+        counters; left ``None`` the payload carries neither, as a sweep from
+        before capture wrote them.
+
+        A sweep with no ``at`` is the last one the test needs, so it also
+        settles the window ending at :data:`UNTIL`: the first sweep after it
+        and one past the settle allowance (a read is incomplete until both
+        exist). Pass ``at`` to place a single sweep exactly.
+        """
+        counters = {
+            "sessions_parsed": sessions_parsed,
+            "sessions_errored": sessions_errored,
+        }
+        if at is not None:
+            self._sweep_at(at, dry_run, source_system, counters)
+            return
+        assert self.latest_join is not None, "write a task before the sweep"
+        self._sweep_at(
+            self.latest_join + timedelta(hours=4), dry_run, source_system, counters
+        )
+        for hours in SETTLING_SWEEP_HOURS_AFTER_UNTIL:
+            self._sweep_at(
+                UNTIL + timedelta(hours=hours), dry_run, source_system, counters
+            )
+
+    def _sweep_at(
+        self,
+        at: datetime,
+        dry_run: bool,
+        source_system: str,
+        counters: dict[str, int | None],
+    ) -> None:
+        payload: dict[str, Any] = {"dry_run": dry_run, "source_system": source_system}
+        payload.update({key: n for key, n in counters.items() if n is not None})
         self.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SWEEP_COMPLETED,
@@ -361,7 +436,7 @@ class HoldoutLog:
                 entity_type="capture_sweep",
                 occurred_at=at,
                 recorded_at=at,
-                payload={"dry_run": dry_run, "source_system": source_system},
+                payload=payload,
             )
         )
 
@@ -497,3 +572,204 @@ def seed_late_build(
             ended_on_error=index > 8,
         )
     log.sweep()
+
+
+#: How many tasks :func:`seed_arm_shift` changes: three in each of the first
+#: three parents, the fourth parent's only task and one of the fifth's two.
+CHANGED_TASKS = 11
+#: How a second store differs from the first, by the one thing it changes in
+#: the withheld arm: the outcome values, which tasks ended on a usage limit, or
+#: which tasks have no measured outcome. Keyword arguments of the seed.
+ARM_VARIANTS: dict[str, dict[str, Any]] = {
+    "values": {"shift": 6},
+    "cut_offs": {"cut_offs": True},
+    "missing": {"missing": True},
+}
+
+
+#: The behaviour every pair of the unsettled-read guard starts from, so that a
+#: variant differs from it in one thing and the timing is present in both.
+BEHAVIOUR_FLAT: dict[str, Any] = {"tool_calls": 300, "hook_messages": 0}
+#: What a store pair may differ in, beyond the withheld arm's outcomes: how
+#: many pack calls its tasks made, when their joins were written, how many tool
+#: calls and hook messages the session timing counts, and whether the join
+#: carries an outcome block at all. Keyword arguments of :func:`seed_arm_shift`.
+BEHAVIOUR_VARIANTS: dict[str, dict[str, Any]] = {
+    **{name: {**BEHAVIOUR_FLAT, **kw} for name, kw in ARM_VARIANTS.items()},
+    "pack_calls": {**BEHAVIOUR_FLAT, "withheld_calls": 3},
+    "join_time": {**BEHAVIOUR_FLAT, "withheld_join_delay": timedelta(hours=3)},
+    "tool_call_count": {**BEHAVIOUR_FLAT, "tool_calls": 10},
+    "hook_feedback_messages": {**BEHAVIOUR_FLAT, "hook_messages": 7},
+    "no_outcome_block": {**BEHAVIOUR_FLAT, "outcome_block": False},
+}
+#: Every key a refused read publishes: the allow-list the guard holds it to.
+#: A key added to the refusal fails the guard until it is named here.
+REFUSAL_KEYS = frozenset(
+    {
+        "status",
+        "window_days",
+        "since",
+        "until",
+        "rate",
+        "outcome",
+        "itt",
+        "settle_hours",
+        "planned_mde",
+        "planned_n",
+        "settled_window",
+        "notes",
+    }
+)
+
+
+def seed_arm_shift(
+    log: HoldoutLog,
+    *,
+    shift: int = 0,
+    cut_offs: bool = False,
+    missing: bool = False,
+    rate: float = 0.2,
+    withheld_calls: int | None = None,
+    withheld_join_delay: timedelta = timedelta(0),
+    tool_calls: int | None = None,
+    hook_messages: int = 0,
+    outcome_block: bool = True,
+) -> None:
+    """Ninety-three tasks over five parents and three builds; the withheld arm moved.
+
+    Every figure is arithmetic on the task's index, so two calls differ in
+    nothing but the arguments. ``shift`` is added to each of the withheld
+    arm's four outcome counts (turns, PRs, commits, tool errors). ``cut_offs``
+    ends, and ``missing`` leaves with no measured outcome, every second
+    withheld task, the only task of the fourth parent and the withheld task of
+    the fifth, whose other task is served: the fourth parent's stratum
+    disappears and the fifth's drops from two arms to one. Those tasks carry no
+    covariates, record no tool errors and made two calls in both stores, so
+    each count that reads the analysed set (the covariate coverage, the
+    re-call rate, a guardrail's missing count, the parents and strata it spans,
+    the main sessions) has something to differ on. The
+    served arm, the builds and the timing are identical across calls.
+
+    The rest move behaviour, not an outcome. ``withheld_calls`` is how many
+    pack calls every withheld task made (left ``None``, the task's own one or
+    two) and ``withheld_join_delay`` how much later its join was written.
+    ``tool_calls`` and ``hook_messages`` fill every task's retrieval timing,
+    whose first retrieval is call 10 (left ``None``, no task carries one), and
+    ``outcome_block=False`` drops the outcome block from the withheld tasks'
+    joins.
+    """
+    commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
+    hour = 0
+
+    def one(parent: str, parent_index: int, k: int, *, changed: bool) -> None:
+        nonlocal hour
+        withheld = k % 5 == 0
+        move = shift if withheld else 0
+        build = commits[0] if k < 15 else commits[1 if k < 28 else 2]
+        calls = withheld_calls if withheld and withheld_calls else 1 + changed
+        log.task(
+            start=MONDAY + timedelta(hours=hour),
+            parent=parent,
+            arms=[withheld] * calls,
+            turns=10 + (k * 7 + parent_index * 3) % 25 + move,
+            prs_created=(k + parent_index) % 2 + move,
+            commits=(k * 5 + parent_index) % 4 + move,
+            tool_errors=None if changed else (k * 3 + parent_index) % 3 + move,
+            ended_on_error=cut_offs and changed,
+            measures_missing=missing and changed,
+            rate=rate,
+            pack_metadata=[provenance(build)] * calls,
+            with_outcome=outcome_block or not withheld,
+            join_delay=withheld_join_delay if withheld else timedelta(0),
+            timing=None
+            if tool_calls is None
+            else timing_payload(
+                hook_before=False,
+                hook_messages=hook_messages,
+                calls=tool_calls,
+                ordinal=10,
+            ),
+            covariates=None
+            if changed
+            else covariates_payload(
+                brief_chars=100 + (hour * 37) % 800, agent_type=f"kind-{k % 3}"
+            ),
+        )
+        hour += 1
+
+    parents = ("parent-a", "parent-b", "parent-c", "parent-d", "parent-e")
+    for parent_index, parent in enumerate(parents[:3]):
+        for k in range(30):
+            one(parent, parent_index, k, changed=k % 5 == 0 and k % 2 == 0)
+    one(parents[3], 3, 0, changed=True)
+    one(parents[4], 4, 0, changed=True)
+    one(parents[4], 4, 1, changed=False)
+    for parent in parents:
+        log.join(
+            parent,
+            at=MONDAY + timedelta(hours=hour),
+            pack_ids=[],
+            parent=None,
+            outcome=outcome_payload(turns=5),
+        )
+        hour += 1
+
+
+def seed_random_outcomes(
+    log: HoldoutLog, *, structure: int, outcomes: int, rate: float = 0.3
+) -> None:
+    """Eighty tasks over seven parents; ``outcomes`` alone draws what a task did.
+
+    ``structure`` draws everything a window and a rate fix: the parent, the arm,
+    the number of packs, the build and whether a covariate was recorded, and the
+    main session of each parent. ``outcomes`` draws the figures: the counts, a
+    missing tool-error count, a usage-limit cut-off, a missing measured outcome
+    and the main sessions' own. Two calls with the same ``structure`` differ in
+    outcomes only, and the draws are independent, so cut-offs and missing values
+    land in both arms and on any stratum, which a hand-built pair cannot promise.
+    """
+    layout = random.Random(structure)  # noqa: S311 - test RNG, not crypto
+    results = random.Random(outcomes)  # noqa: S311 - test RNG, not crypto
+    commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
+    hour = 0
+    for _ in range(80):
+        parent = f"parent-{layout.randrange(7)}"
+        withheld = layout.random() < 0.3
+        packs = layout.choice((1, 1, 2))
+        build = layout.choice(commits)
+        covered = layout.random() < 0.8
+        brief = layout.randrange(100, 900)
+        kind = layout.randrange(3)
+        cut_off = results.random() < 0.25
+        gone = results.random() < 0.1
+        no_errors = results.random() < 0.1
+        log.task(
+            start=MONDAY + timedelta(hours=hour),
+            parent=parent,
+            arms=[withheld] * packs,
+            turns=results.randrange(5, 60),
+            prs_created=results.randrange(0, 3),
+            commits=results.randrange(0, 5),
+            tool_errors=None if no_errors else results.randrange(0, 6),
+            ended_on_error=cut_off,
+            measures_missing=gone,
+            rate=rate,
+            pack_metadata=[provenance(build)] * packs,
+            covariates=(
+                covariates_payload(brief_chars=brief, agent_type=f"kind-{kind}")
+                if covered
+                else None
+            ),
+        )
+        hour += 1
+    for index in range(7):
+        log.join(
+            f"parent-{index}",
+            at=MONDAY + timedelta(hours=hour),
+            pack_ids=[],
+            parent=None,
+            outcome=outcome_payload(
+                turns=results.randrange(3, 30), ended_on_error=results.random() < 0.3
+            ),
+        )
+        hour += 1

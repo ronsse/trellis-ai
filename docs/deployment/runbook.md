@@ -51,7 +51,7 @@ The minimum set to bring up the API against Postgres + Neo4j:
 | `TRELLIS_KNOWLEDGE_PG_DSN`     | Yes       | DSN for the knowledge plane (graph / vector / document).                 |
 | `TRELLIS_OPERATIONAL_PG_DSN`   | Yes       | DSN for the operational plane (trace / event_log).                       |
 | `TRELLIS_API_HOST`             | No        | Bind address. **Defaults to `127.0.0.1`** — set `0.0.0.0` for containers, which the API then refuses to start on unless `TRELLIS_AUTH_MODE=required`. `trellis serve`, `trellis admin serve` and `trellis-api` all read it; the first two take `--host`, which beats it. |
-| `TRELLIS_API_PORT`             | No        | Default `8420`. Read by the same three entry points; `--port` beats it on the first two. A value that is not an integer from 0 to 65535 is a configuration error (exit `5`) from `trellis serve` and `trellis-api`; `trellis admin serve` rejects it as a usage error (exit `2`). |
+| `TRELLIS_API_PORT`             | No        | Default `8420`. Read by the same three entry points through `resolve_api_port`; `--port` beats it on the first two. A value that is not an integer from 0 to 65535 is a configuration error (exit `5`) from `trellis serve`, `trellis admin serve` and `trellis-api` alike. |
 | `TRELLIS_API_KEY`              | No        | Legacy shared secret: a token equal to it gets every scope. Prefer scoped keys. |
 | `TRELLIS_CONFIG_DIR`           | No        | Path to `config.yaml`. Defaults to `~/.trellis`.                         |
 

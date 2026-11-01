@@ -26,6 +26,7 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     seed_guardrails,
     seed_late_build,
+    unchecked_window,
 )
 from trellis.analyze import holdout
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -381,11 +382,16 @@ class TestTaskWindow:
     def test_a_truncated_scan_spans_the_scanned_part_without_a_window_note(
         self, log: HoldoutLog
     ) -> None:
-        """The scan's own note reports the truncation; nothing repeats it."""
+        """The scan's own note reports the truncation; nothing repeats it.
+
+        Read through ``unchecked_window``: a checked read whose scan was
+        truncated is refused and reports no figure.
+        """
         log.deployed_before_window()
         seed_late_build(log, early_arm=False)
 
-        report = _analyze(log, rate=0.5, limit=6)
+        with unchecked_window():
+            report = _analyze(log, rate=0.5, limit=6)
 
         assert report.scan.truncated
         assert report.task_window_since > report.since

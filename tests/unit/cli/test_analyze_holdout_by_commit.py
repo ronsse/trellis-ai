@@ -17,7 +17,13 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from tests.unit.analyze._holdout_fixture import MONDAY, HoldoutLog, provenance
+from tests.unit.analyze._holdout_fixture import (
+    MONDAY,
+    SETTLING_SWEEP_HOURS_AFTER_UNTIL,
+    UNTIL,
+    HoldoutLog,
+    provenance,
+)
 from trellis.ops.serving_builds import NO_PROVENANCE_LABEL, build_label
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK
@@ -54,6 +60,16 @@ def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegist
     _reset_registry()
 
     return StoreRegistry(stores_dir=stores_dir)
+
+
+@pytest.fixture(autouse=True)
+def _every_build_stands_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These cases are about the table's shape, which pooling would blur.
+
+    The pooling rule has its own tests, run at the real threshold, in
+    ``tests/unit/analyze/test_holdout_readout_form.py``.
+    """
+    monkeypatch.setattr("trellis.analyze.holdout.BY_COMMIT_POOL_THRESHOLD", 0)
 
 
 @pytest.fixture
@@ -112,7 +128,7 @@ def test_the_flag_adds_the_table_to_json_and_text(log: HoldoutLog) -> None:
     assert table["units_spanning_builds"] == 0
     assert "no inference" in table["note"]
     flat = _flat(text)
-    assert "By serving build (descriptive, no inference)" in flat
+    assert "By serving build (descriptive, non-decisive, no inference)" in flat
     assert BUILD_A in flat
     assert BUILD_B in flat
     # The table follows the descriptive block and precedes the exclusions.
@@ -151,20 +167,39 @@ def test_a_build_name_is_never_read_as_console_markup(log: HoldoutLog) -> None:
     assert MARKUP_BUILD in _flat(text)
 
 
-def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike() -> None:
+def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike(
+    log: HoldoutLog,
+) -> None:
+    for hours in SETTLING_SWEEP_HOURS_AFTER_UNTIL:
+        log.sweep(at=UNTIL + timedelta(hours=hours))
+
     text, machine = _run("--by-commit")
 
     assert text.exit_code == machine.exit_code
+    assert _payload(machine)["settled_window"]["settled"] is True
     assert _payload(machine)["by_commit"]["rows"] == []
     assert "no analysed task" in _flat(text)
 
 
-def test_a_build_is_the_version_and_commit_pair_labelled_as_health_labels_it(
+def test_an_unsettled_window_refuses_instead_of_listing_the_tasks() -> None:
+    """With no sweep past the window end there is no table, in either format."""
+    text, machine = _run("--by-commit")
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    assert "by_commit" not in _payload(machine)
+    flat = _flat(text)
+    assert "INCOMPLETE READ: window not settled." in flat
+    assert "By serving build" not in flat
+    assert "--operational" in flat
+
+
+def test_a_build_is_labelled_as_health_labels_it_and_one_commit_is_one_row(
     log: HoldoutLog,
 ) -> None:
     stamps = [
         {"write_provenance": {"version": "1.0.0", "commit": COMMIT_A}},
         {"write_provenance": {"version": "1.1.0", "commit": COMMIT_A}},
+        {"write_provenance": {"version": "2.0.0", "commit": COMMIT_B}},
         None,
     ]
     for hours, stamp in enumerate(stamps):
@@ -180,8 +215,8 @@ def test_a_build_is_the_version_and_commit_pair_labelled_as_health_labels_it(
 
     assert text.exit_code == machine.exit_code == EXIT_OK
     expected = [
-        build_label("1.0.0", COMMIT_A),
-        build_label("1.1.0", COMMIT_A),
+        f"1.0.0, 1.1.0 @ {COMMIT_A}",
+        build_label("2.0.0", COMMIT_B),
         NO_PROVENANCE_LABEL,
     ]
     table = _payload(machine)["by_commit"]
