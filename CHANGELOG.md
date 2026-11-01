@@ -42,8 +42,9 @@ All notable changes to Trellis will be documented in this file.
   Enrichment and shadow tags on a labelled document stop updating on a route that
   is not declared local; whatever tags it already carries keep being served
   unchanged. `ingest-corpus` sent a labelled document's text to the extractor
-  before and no longer does while the route is not local, so such a document
-  stops minting graph entities, which feeds the graph axis. With
+  before and no longer does, whatever the route is declared (the entities land in
+  the graph, which carries no label), so such a document stops minting graph
+  entities, which feeds the graph axis. With
   `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes; with it on and a route
   not declared local, a pair with a labelled side is not judged, the new memory
   is stored as a plain ADD and both rows stay current, so a pack can serve the
