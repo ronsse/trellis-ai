@@ -500,6 +500,27 @@ class EventType(StrEnum):
     #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
     WRITE_REJECTED = "write.rejected"
 
+    #: A call to a tool was accepted shortly after that tool's boundary
+    #: rejections, so those rejections count as recovered by the retry that
+    #: followed. Payload: ``tool``, ``rejected_attempts`` (how many tracked
+    #: rejections this acceptance follows) and ``window_s``. Carries nothing
+    #: about the call, the caller or the content. Paired by tool within a
+    #: window, not by caller (see
+    #: :class:`trellis.ops.write_health.RejectionRecoveryTracker`).
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_RECOVERED = "write.recovered"
+
+    #: A write tool returned success without writing, because what it was
+    #: asked to store already exists (an exact or near duplicate of a stored
+    #: memory). No ``MUTATION_EXECUTED`` accompanies such a reply, so without
+    #: this row the call is missing from the attempts a rejection rate is
+    #: divided by. Payload: ``tool`` and ``reason``, a closed slug (see
+    #: ``trellis.ops.write_health.NOOP_REASONS``). Carries no content and no
+    #: id. Rows from before this event existed are simply absent, so a rate
+    #: read over a window that still holds them overstates.
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_NOOP = "write.noop"
+
     #: Emitted by the API Review-queue endpoints (WP10) whenever a human
     #: operator acts on a governance surface from the UI inbox — approving
     #: or rejecting a tuner proposal, promoting learning candidates, or

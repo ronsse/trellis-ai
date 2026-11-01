@@ -114,7 +114,7 @@ In `--dry-run`, advisories are skipped wholesale (`"skipped_stages": ["advisorie
  "skipped_stages": ["advisories"], "dry_run": true}
 ```
 
-Each stage that runs still records its meta-Activity, as every other meta-traced dry run does, but no finding, because the noise-tag and learning findings name writes (the tags, the review files) that a dry run does not make; add `--no-meta-trace` for a dry run that writes nothing. A degraded advisory file still emits its `write.rejected` health event and exits 5, since a dry run is the usual health probe. `--reconcile-first` exits 2 under `--dry-run`, because the backfill writes events; preview it with `trellis admin reconcile-feedback --log-dir DIR --dry-run`.
+Each stage that runs still records its meta-Activity, as every other meta-traced dry run does, but no finding, because the noise-tag and learning findings name writes (the tags, the review files) that a dry run does not make; add `--no-meta-trace` for a dry run that writes nothing. A degraded advisory file still emits its `write.rejected` health event and exits 5, since a dry run is the usual health probe. `--reconcile-first` exits 2 under `--dry-run`, because the backfill writes events; preview it with `trellis admin reconcile-feedback --dry-run`.
 
 In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts; SIGINT/SIGTERM drains the current cycle and exits cleanly (no half-written artifact).
 
@@ -183,12 +183,12 @@ This is a data-plane tagging pass (re-running it overwrites tags — reversible)
 
 ```bash
 trellis worker mine-precedents [--domain D] [--min-traces 3] \
-  [--limit 100] [--dry-run] [--format text|json]
+  [--limit 100] [--scan-cap 5000] [--strict] [--dry-run] [--format text|json]
 ```
 
-Mines precedent candidates from failure/partial traces (wraps `PrecedentMiner.generate_precedent_candidates`). Candidates are **surfaced** (the miner emits `PRECEDENT_PROMOTED` events as it intends) but **not auto-promoted** into the graph — review before acting. `--dry-run` reports how many failure/partial traces are in scope without calling the LLM. Like `enrich`, it requires a configured LLM client and exits loudly when none is present.
+Mines precedent candidates from failure/partial traces (wraps `PrecedentMiner.mine`). Candidates are **surfaced** (the miner emits `PRECEDENT_CANDIDATE_MINED` events) but **not auto-promoted** into the graph — review before acting. `--limit` counts failure/partial traces (at most 20, the newest, are shown to the model per run), read newest first up to `--scan-cap` traces; a run that stopped at the cap says `read_bound_hit`, which is not "no failures". A rerun over the same failure traces skips (`skipped_unchanged`) instead of minting duplicate candidates, but only against a run that wrote all of its candidates. A failed model call exits 0 (`status: partial`) unless `--strict`. `--dry-run` reports how many failure/partial traces are in scope, and whether a run would skip, without calling the LLM. Like `enrich`, it requires a configured LLM client and exits loudly when none is present. The full outcome list is in [`operations.md`](../agent-guide/operations.md#trellis-worker-mine-precedents).
 
-**What it writes/emits:** precedent candidates and the miner's `PRECEDENT_PROMOTED` events.
+**What it writes/emits:** precedent candidates, as `PRECEDENT_CANDIDATE_MINED` events.
 
 ---
 
@@ -237,7 +237,7 @@ With no `--output-dir`, the learning-candidate artifacts land in `<data_dir>/lea
 
 ### Verification checklist
 
-After both processes are up, confirm the substrate is live and the workers run clean. Use an isolated config dir while testing so you don't touch production data:
+After both processes are up, confirm the substrate is live and the workers run clean. Use an isolated config dir while testing so you don't touch production data. The config dir must be fresh: `init` writes the data directory into its `config.yaml` as `data_dir`, and a `data_dir` already in a `config.yaml` beats `TRELLIS_DATA_DIR`. A config copied from a deployment keeps pointing at that deployment's data however the variable is set; `trellis admin health` prints both directories when they disagree.
 
 ```bash
 export TRELLIS_CONFIG_DIR=/tmp/trellis-check/config
@@ -257,8 +257,9 @@ trellis worker tune --dry-run --format json
 #   expect: {"enabled": false, ..., "auto_promoted": 0}
 
 # 4. Feedback reconciliation is wired
-trellis admin reconcile-feedback --log-dir /tmp/trellis-check/data --dry-run --format json
+trellis admin reconcile-feedback --dry-run --format json
 #   expect: {"status": "ok", "dry_run": true, "scanned": N, "would_emit": M}
+#   ("no_log" means no feedback has been recorded yet; it is not a pass)
 
 # 5. A real curate cycle writes the two human-review artifacts
 trellis worker curate --output-dir /tmp/trellis-check/review --format json

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 import typer
-from rich.markup import escape
 
 from trellis.stores.base import (
     ApiKeyStore,
@@ -20,6 +21,9 @@ from trellis.stores.registry import StoreRegistry
 from trellis.stores.schedule_store import ScheduleStore
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = structlog.get_logger(__name__)
 
@@ -40,6 +44,28 @@ def _reset_registry() -> None:
     """Reset the cached registry. Used by tests to avoid stale connections."""
     global _registry  # noqa: PLW0603
     _registry = None
+
+
+def _not_initialized_message(registry: StoreRegistry, stores_dir: Path) -> str:
+    """The guard's line, naming the ``data_dir`` key when the key chose the path.
+
+    ``init`` without ``--force`` leaves ``config.yaml`` alone and recreates
+    ``stores/`` where the key points, so it is the fix for a store that never
+    existed and the wrong one for a store that was moved or restored: it
+    would start an empty one at the old path.
+    """
+    where = str(stores_dir)
+    if registry.data_dir_origin != "config.yaml":
+        return f"Stores not initialized at {where}. Run 'trellis admin init' first."
+    config_path = get_config_dir() / "config.yaml"
+    return (
+        f"Stores not initialized at {where}."
+        f" That path comes from 'data_dir' in {config_path},"
+        " and TRELLIS_DATA_DIR does not override it."
+        " If the stores were moved or restored, change 'data_dir' to where they"
+        " are now."
+        " For a new install, run 'trellis admin init' to create it."
+    )
 
 
 def _get_registry() -> StoreRegistry:
@@ -63,9 +89,13 @@ def _get_registry() -> StoreRegistry:
             # stderr, not stdout: callers like the meta-trace wiring swallow
             # the Exit and continue, and ``--format json`` consumers parse
             # stdout — an error line there poisons the machine output.
+            # markup=False: the line is built from paths, rendered unstyled
+            # but for the colour, and unwrapped so a path stays copyable.
             build_console(stderr=True).print(
-                f"[red]Stores not initialized at {escape(str(stores_dir))}."
-                " Run 'trellis admin init' first.[/red]"
+                _not_initialized_message(registry, stores_dir),
+                style="red",
+                markup=False,
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         _registry = registry

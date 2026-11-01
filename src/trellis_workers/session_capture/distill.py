@@ -354,12 +354,22 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     ]
 
 
+def _without_nul(value: Any) -> Any:
+    """A reply string minus its NUL characters; any other value untouched.
+
+    A JSON ``\\u0000`` escape decodes to a real NUL, which SQLite stores and
+    Postgres refuses in a TEXT column. Stripped where the reply is parsed so
+    no later stage, the store write included, has to know about it.
+    """
+    return value.replace("\x00", "") if isinstance(value, str) else value
+
+
 def _coerce_candidate(item: Any, session_id: str) -> CandidateMemory | None:
     """Build a candidate from one model item; ``None`` if unusable."""
     if not isinstance(item, dict):
         return None
-    title = item.get("title")
-    memory = item.get("memory")
+    title = _without_nul(item.get("title"))
+    memory = _without_nul(item.get("memory"))
     if not isinstance(title, str) or not isinstance(memory, str):
         return None
     if not title.strip() or not memory.strip():
@@ -367,9 +377,9 @@ def _coerce_candidate(item: Any, session_id: str) -> CandidateMemory | None:
     confidence = coerce_finite_float(item.get("confidence", 0.5))
     if confidence is None:
         confidence = 0.5
-    memory_type = item.get("memory_type")
-    signal = item.get("signal")
-    evidence = item.get("evidence")
+    memory_type = _without_nul(item.get("memory_type"))
+    signal = _without_nul(item.get("signal"))
+    evidence = _without_nul(item.get("evidence"))
     return CandidateMemory(
         title=title.strip(),
         memory=memory.strip(),

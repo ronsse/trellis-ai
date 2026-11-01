@@ -1,4 +1,4 @@
-"""config.yaml is plain YAML: a literal ``${VAR}`` refuses, a flat ``stores:`` warns.
+"""config.yaml is plain YAML: a literal ``${VAR}`` refuses, and so does ``stores:``.
 
 ``StoreRegistry.from_config_dir`` expands nothing, so a value written as
 ``${TRELLIS_NEO4J_PASSWORD}`` used to reach the neo4j driver as those very
@@ -8,8 +8,8 @@ store is built.
 
 The flat ``stores:`` block, removed in 0.6.0, failed more quietly still:
 ``_extract_store_config`` never looked at it, so a store configured only
-there ran on its default backend with no signal at all. It now logs
-``registry_config_flat_stores_removed``.
+there ran on its default backend with no signal at all. A warning followed,
+then, since a warning is invisible to a health check, a ``ConfigError``.
 
 Fixture values are obvious fakes. A placeholder's default part is the
 sentinel ``SENTINEL123``, asserted *absent* from the error, because the
@@ -19,10 +19,8 @@ message renders only the variable name.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-from structlog.testing import capture_logs
 
 from trellis.errors import ConfigError
 from trellis.stores.registry import StoreRegistry
@@ -175,7 +173,7 @@ def test_a_config_without_placeholders_loads(tmp_path: Path) -> None:
     }
 
 
-# -- The removed flat ``stores:`` block warns ----------------------------
+# -- The removed flat ``stores:`` block refuses --------------------------
 
 _FLAT_STORES = """\
 stores:
@@ -186,49 +184,40 @@ stores:
 """
 
 
-def _load_capturing(
-    tmp_path: Path, text: str
-) -> tuple[StoreRegistry, list[dict[str, Any]]]:
-    with capture_logs() as logs:
-        registry = _load(tmp_path, text)
-    return registry, [
-        entry
-        for entry in logs
-        if entry["event"] == "registry_config_flat_stores_removed"
-    ]
+def test_a_flat_stores_block_refuses_naming_the_file_and_the_fix(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigError) as info:
+        _load(tmp_path, _FLAT_STORES)
+
+    assert info.value.setting == "stores"
+    message = str(info.value)
+    assert str(tmp_path / "config" / "config.yaml") in message
+    assert "'knowledge:'" in message
+    assert "'operational:'" in message
 
 
-def test_a_flat_stores_block_warns_once_naming_the_file(tmp_path: Path) -> None:
-    registry, warnings = _load_capturing(tmp_path, _FLAT_STORES)
+def test_a_flat_stores_block_beside_plane_blocks_still_refuses(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigError) as info:
+        _load(tmp_path, _FLAT_STORES + "knowledge:\n  vector:\n    backend: pgvector\n")
 
-    assert len(warnings) == 1
-    assert warnings[0]["log_level"] == "warning"
-    assert warnings[0]["source"] == str(tmp_path / "config" / "config.yaml")
-    assert "'knowledge:'" in warnings[0]["hint"]
-    assert "'operational:'" in warnings[0]["hint"]
-    # Still ignored, which is what the warning says.
-    assert registry._resolve_backend("graph")[0] == "sqlite"
-    assert registry._resolve_backend("trace")[0] == "sqlite"
+    assert info.value.setting == "stores"
 
 
-def test_a_flat_stores_block_beside_plane_blocks_still_warns(tmp_path: Path) -> None:
-    registry, warnings = _load_capturing(
-        tmp_path, _FLAT_STORES + "knowledge:\n  vector:\n    backend: pgvector\n"
-    )
-
-    assert len(warnings) == 1
-    assert registry._resolve_backend("vector")[0] == "pgvector"
-    assert registry._resolve_backend("graph")[0] == "sqlite"
+def test_an_empty_flat_stores_block_refuses_too(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        _load(tmp_path, "stores: {}\n")
 
 
-def test_plane_blocks_alone_do_not_warn(tmp_path: Path) -> None:
-    registry, warnings = _load_capturing(
+def test_plane_blocks_alone_load(tmp_path: Path) -> None:
+    registry = _load(
         tmp_path,
         "knowledge:\n  graph:\n    backend: neo4j\n"
         "operational:\n  trace:\n    backend: postgres\n",
     )
 
-    assert warnings == []
     assert registry._resolve_backend("graph")[0] == "neo4j"
     assert registry._resolve_backend("trace")[0] == "postgres"
 

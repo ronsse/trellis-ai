@@ -61,6 +61,479 @@ All notable changes to Trellis will be documented in this file.
   build; what it omits is an interval and a p-value. `analyze value`'s help no
   longer says the system has no withhold arm and points to `analyze holdout`.
 
+
+- **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
+  on a rerun.** The miner read the newest `--limit` traces and only then kept the
+  failure/partial ones, so a run of recent successes hid every older failure and the command
+  reported nothing found (`--dry-run` shared the shape). `--limit` now counts failure/partial
+  traces: the store is read newest first in widening reads (the first at least 100 wide, then
+  doubling) until it holds enough to analyse (`max(min(--limit, 20), --min-traces)`, since at
+  most 20 are shown to the model), the store ends, or the new `--scan-cap` (default 5,000
+  traces) is reached. The read has no cursor because `until` is inclusive and traces can share a
+  `created_at`; a scan that reaches the cap reads up to three times `--scan-cap` rows in all.
+  Both formats carry an `outcome` that says why a run produced nothing: `no_failures` (the
+  store was read to its end), `read_bound_hit` (the cap stopped the read short of what it
+  wanted, so older traces were not read; not the same as none), `below_min_traces`,
+  `skipped_unchanged`, `no_candidates` (the model returned none) and `llm_error`, with
+  `traces_examined`, `scan_cap` and `read_bound_hit`; text output names every outcome,
+  including those two. `failure_traces_in_scope` is the failures found (at most `--limit`),
+  and the read stops once it has enough to analyse, so it is not a count of the store's
+  failures. A malformed model reply still raises.
+  `--limit` below `--min-traces` is refused (exit `2`, both formats) and so is `--min-traces 0`;
+  zero failures found is `no_failures` whatever the minimum is. A failed model call reports
+  `status: "partial"` beside `outcome: "llm_error"` in JSON; the exit is `0` for every outcome
+  in both formats unless `--strict` is given, which exits `1` on `llm_error` in both. The
+  default exit is unchanged from before, a choice that can be revisited.
+  Each mined candidate event now records `source_digest`, a digest of the (at most 20) newest
+  failure traces the model was shown and the `--domain` scope, plus `mining_run_id` and
+  `run_candidate_count`. A run's events are written only after every item in the reply has
+  validated, and a later run skips only when some one run has all its declared events among
+  the newest 200 for that digest, so a run cut off by a failed write is retried and a run of
+  more than 200 candidates mines again each time. A skip asks no model, writes nothing and
+  reports `skipped_unchanged` with `already_mined_candidate_ids`, in text and JSON;
+  `--dry-run` reports it as `would_mine: false`. A new failure among the newest 20 changes the
+  digest, so the next run mines again. A new success does not, unless it pushes a failure out of
+  the read window; the shrunken set is a different input and mines again. Failures beyond the
+  newest 20 are not paged. The key is the input, not the output: two candidates with different
+  wording are never judged to mean the same thing; `no_candidates` and `llm_error` write nothing,
+  so they leave nothing to skip against and every scheduled run pays for the call again; and
+  candidates minted before this change carry no digest, so the first rerun over the same
+  failures mints once more.
+  `PrecedentMiner.mine` and `.plan` return the report the command prints.
+  `generate_precedent_candidates` still returns a list of candidates, but `limit` changed
+  meaning (it counts failures, not traces read, and at most 20 are analysed), it raises
+  `ValueError` for a `limit` or `scan_cap` below 1, and it returns `[]` on a skip, the same
+  `[]` as a run that found nothing.
+
+- **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
+  (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
+  its criteria, so archived, too-young and wrong-state rows used up the window and a
+  prune found nothing while eligible nodes sat further back, still reporting
+  `scan_truncated: false`. The scan now depends on the criteria. A pass that names
+  `--unconfirmed-mints` first makes one store-side read of the unconfirmed mints, at most
+  `MAX_ENTITIES_SCANNED` (20,000) of them; on SQLite and Postgres plain nodes cost that read
+  nothing. A pass that also names a selectable lifecycle state (`draft`, `deprecated`,
+  `superseded`) and still has room under `max_items` then pages the graph (`search_nodes`,
+  newest first, 500 a read) until it has `max_items` candidates or has read 20,000 distinct
+  nodes, because the store cannot filter on lifecycle. So a pass naming both keeps the mints'
+  priority and reach (they are read first and the paging skips what that read already
+  counted), and a pass naming a lifecycle state alone only pages. `current` or `archived`
+  beside `--unconfirmed-mints` selects no state, so that pass takes the mint read alone. The
+  newest rows use the paging budget first, so a graph above the cap can stay truncated
+  however often the pass is run. On the Bolt backends (Neo4j, ArcadeDB) the mint read is
+  weaker: `query` reads the newest `limit * 4` nodes before it filters, so 100 plain nodes
+  ahead of one mint at a cap of 20 give no candidate with `scan_truncated` false and the
+  mint unread. That comes from reading the code, not from a live Bolt run.
+  On the entity plane `scan_truncated` is `true` when rows may have been left unread: the
+  cap was reached, the walk's read budget ran out, or the store's total contradicted its
+  pages. A pass that names only `--unconfirmed-mints` has read every mint when it is
+  `false`, never the whole graph, and on Bolt `false` does not prove every mint was read. A
+  pass that pages and finds fewer than `max_items` candidates has read the whole graph only
+  when it is `false`. The document plane is unchanged and can also read `true` when the
+  corpus holds exactly `MAX_DOCUMENTS_SCANNED` documents. The audit payload gains
+  `scan_truncated_planes`. The operator message keeps `scan capped at … documents` for the
+  document plane. For the entity plane it says `entity scan stopped early` and names the
+  three causes (the cap, the read budget, store totals that disagreed), because the cap is
+  only one of them, and it no longer says "re-run to continue", because archived rows keep
+  using scan budget.
+  A node deleted between two reads of the walk no longer hides the one behind it; the walk
+  steps back and re-reads, so it can take more than the 40 reads a clean 20,000-node walk
+  needs, and stops at a budget of 160 reads (`4 * MAX_ENTITIES_SCANNED // 500`). Two narrow
+  windows remain, both needing a concurrent write and both failing safe to the next pass: a
+  deletion behind the cursor paired with an insert ahead of it between two reads leaves the
+  total unchanged, and a deletion between the count and the page select of one
+  `search_nodes` call is seen a read late and stepped back from the wrong start, so a live
+  row can be missed with `scan_truncated` false (reproduced on a fake store only).
+  `entities_scanned` counts the distinct rows read: the mint rows on a mint-only pass, each
+  node the walk read on a lifecycle pass, and each row once when both reads reach it. It
+  used to add the rows of the mint query to the rows of the lifecycle window, so a mint in
+  both counted twice. A pass whose documents already fill `max_items` no longer adds an
+  entity past it (three noise documents and one old mint at `max_items=3` selected four
+  before, and select three now). A later prune may see more candidates than before; nothing
+  in this repository runs it on a schedule, and `max_items` still bounds what one pass
+  archives.
+
+### Changed
+
+- **The repeated-rejection health signal is rated against each tool's attempts and
+  no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
+  reached three rejections, with no denominator, so a busy, healthy tool stayed at
+  `warn` for good; it counted error elements rather than calls (one bad trace with
+  many steps was many collisions); and its reason said the schema and its docs or
+  skill disagree. It now counts distinct rejected attempts and warns only when the
+  tool has at least 10 attempts in the window and the rejected share is above 5%
+  (named constants in `trellis.ops.write_health`, starting points rather than
+  tuned values). The floor can hide a low-volume total failure, which the docs now
+  say. The reason lists the schema, its docs, the rejection hint and caller
+  payloads as possibilities and says the cause is not established. Each
+  `repeated_collisions` row gains `tool`, `tool_attempts` and `rate`, and rows are
+  per tool; file conditions keep warning on recurrence alone. The default label is
+  "repeated rejection", not "schema collision".
+- **What counts as an attempt is stated per tool.** `save_experience` is rated on
+  `trace.ingest` accepts and `trace.ingest` executor rejections only, so a refused
+  extraction command is not a refused call. `mcp:record_feedback` has an accepted
+  call after all, the `FEEDBACK_RECORDED` event it emits with `source="mcp"`, so it
+  is rated against that and its rejections instead of being left unrated. A
+  `save_memory` call that answers a duplicate stored nothing and left no accepted
+  event, so a healthy tool read as mostly failing; it now emits a new `WRITE_NOOP`
+  event (`tool` and a closed `reason`, no content and no id) that the report counts
+  as an attempt, and `analyze health` prints that count. Replies, stores and return
+  values are unchanged, and a failed emit does not change the reply. Rows written
+  before the event existed are not there to count, so the `save_memory` rate
+  overstates until the window rolls past them.
+- **`trellis analyze health` reports how many rejected MCP writes were followed by
+  an accepted call.** New `WRITE_RECOVERED` event and `recovery` block
+  (`recovered_share`, `pending_rejections`, `by_tool`). It is an approximation that
+  can sit on either side of the truth, stated beside the number: a rejection is
+  paired with the next accepted call of the same tool within 120 seconds, held in
+  process memory only, and keying per tool is a choice (a stdio server serves one
+  process per client; an authenticated HTTP request carries a key id the pairing
+  does not use). "Accepted" means the call returned without raising. Rejections
+  still inside the window when the report is read are counted as pending and left
+  out of the share, and a rejection older than the window is not carried forward to
+  be claimed by a later accepted call. MCP boundary `WRITE_REJECTED` rows written by
+  this build carry `recovery_window_s`; older rows are left out of the denominator
+  and a window of only older rows reports `recovered_share: null`. What a capture
+  surface accepts is unchanged.
+- **`trellis analyze health` prints a bracketed rejection location as written.** A
+  taxonomy row such as `extra_forbidden@[red]steps[/red]` lost its text to Rich's
+  markup; the row is now escaped.
+
+- **BREAKING: `trellis admin health` exits 5 when a SQLite store file is damaged
+  or cannot be opened.**
+  A file that is present but is not a database (random bytes, a truncated or
+  mangled file) used to read `true` and exit 0, so a monitor on the exit code
+  never fired; the commands that open it printed a Python traceback. Each store
+  file that exists is now opened read-only and immutable (`mode=ro&immutable=1`:
+  no lock, no `-wal` or `-shm` file, never created, including the target of a
+  dangling symlink) and read once. A damaged one is `DAMAGED` in text output,
+  listed in a new `damaged` object in `--format json`, and exits 5 (`EXIT_STORE`)
+  in both formats. A path that is there but cannot be opened read-only (a file
+  this user may not read, a directory, a symlink loop, a symlink to a missing
+  file) reports `could not be opened read-only` and exits 5 too, so a monitor
+  that runs as a different user from the store's owner gets 5. A missing store
+  file still exits 0, because `trellis admin init` creates no store file and every
+  store is created on first use. New `--require-stores` exits 5 on a missing
+  SQLite store file for a monitor that runs against a deployment already in use.
+  A store on another backend is never a failure. An empty file is a valid empty
+  database and passes. The probe reads each file's first page: a file truncated
+  by less than a page, a good first page with the rest zeroed, and a good main
+  file beside a garbage `-wal` read healthy. It holds no lock, so a read beside a
+  writer's checkpoint or `VACUUM` can fail on a healthy file; a failed read is
+  retried up to 3 times, 0.1 s apart, and a file is reported damaged only if all
+  fail. That lowers the rate and does not remove it, and a repeat run settles it.
+  In one bounded stress against a synthetic WAL file (one writer at a time, about
+  15 s per run: automatic checkpoint, truncating checkpoint, schema churn, three
+  runs of `VACUUM`), about 661,000 probes saw 309 failed reads on healthy files,
+  and one probe, under the `VACUUM` writer, still reported damage.
+- **`trellis admin reconcile-feedback` finds the log without `--log-dir`, and no
+  longer reports a clean pass for a log it did not find or could not read.**
+  `--log-dir` is now optional and defaults to `<stores_dir>/feedback`, the
+  directory the MCP tool and the REST route write `pack_feedback.jsonl` to.
+  Before, it was required, and the data directory the docs named held no log, so
+  the command scanned zero rows and printed `"status": "ok"`. A directory with no
+  `pack_feedback.jsonl` now reports `"status": "no_log"` with `log_path` and a
+  message in both formats, and every report carries `log_path`. When a
+  `pack_feedback.jsonl` exists in the data directory instead, the default's message
+  names it and says `--log-dir <data_dir>` reads it; the default still reads only
+  `<stores_dir>/feedback`. **BREAKING:** `--log-dir` pointing at a directory
+  without the file exits 2 instead of 0 (the default directory with no log still
+  exits 0), so a scheduled job that passed the data directory now fails until it
+  drops the flag. The docs' CronJob and checklists, the GitHub Actions example
+  (`examples/integrations/github-actions/curation.yml`) and the built-in
+  `reconcile-feedback` scheduled job no longer pass `--log-dir`. **BREAKING:** a log
+  that is there but cannot be read (a dangling symlink or a symlink loop, a
+  directory, a file this user cannot open) now reports `"status": "unreadable"`
+  with `log_path` and exits 5 in both formats; it used to read `ok` with zero rows
+  (dangling symlink, loop) or print a traceback and exit 1 (directory, no
+  permission).
+- **`trellis-mcp` with an invalid `TRELLIS_MCP_TRANSPORT`, and `trellis serve` or
+  `trellis admin serve` over an unparseable `config.yaml`, exit 5 with the error
+  instead of a Python traceback** (exits 1 and 3 before). `trellis serve` and
+  `trellis admin serve` print one line on stdout. `trellis-mcp` writes two lines
+  to stderr: its start-up log line, then the error. `trellis-api` writes its
+  start-up log lines (three JSON lines in a bare install) and then the error. The
+  REST server now parses `config.yaml` before handing control to uvicorn, so the
+  typed error reaches the CLI boundary (and `trellis-api`'s wrapper) rather than
+  failing inside uvicorn's startup.
+- **A missing optional backend's install advice works without a source
+  checkout.** `BackendNotInstalledError` told a wheel install to run
+  `uv pip install -e ".[extra]"`, which fails outside a checkout. It now says
+  `pip install 'trellis-ai[extra]'` and, for a checkout, `pip install -e ".[extra]"`.
+
+- **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
+  A file that starts today can stop starting, including on a harmless stray key
+  such as `version: 1`; rename it `x-version` to keep it. Loading
+  `config.yaml` used to ignore an unknown top-level key (`knowlege:`, `storage:`),
+  and logged a warning for a store name no plane has, a store under the wrong
+  plane, or the removed flat `stores:` block, then served every store from the
+  SQLite default. Each of those now raises `ConfigError` naming the file and every
+  offending entry at that level, so the CLI exits 5 (`EXIT_STORE`), the REST layer answers
+  409 `config_error` when it surfaces inside a request, and the API refuses to start.
+  The accepted top-level keys are `knowledge`, `operational`, `embeddings`,
+  `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`,
+  `default_agent` and `format`, plus any key starting with `x-` (an anchor holder,
+  as in Compose). The message lists them. Keys are echoed only when they are plain
+  names. A plane whose value is not a mapping (`knowledge: [graph]`) is still a
+  warning, not a refusal.
+- **A plane DSN that no store reads now warns.** Setting `TRELLIS_KNOWLEDGE_PG_DSN`
+  or `TRELLIS_OPERATIONAL_PG_DSN` does not select Postgres: only a store whose
+  backend is `postgres` or `pgvector` reads it. When the variable is set and no
+  store of that plane uses either backend, the registry logs
+  `registry_plane_dsn_unused` once per plane per process, naming the plane, the
+  variable and the file, never the DSN. A plane with at least one Postgres store
+  stays silent, since a plane may legitimately run some stores on SQLite.
+
+- **The AST rule tests share one parse per source.** `ast.parse` called from test
+  code is now memoised by its source text (`tests/ast_rules.py`, installed from
+  `tests/conftest.py`), so the rules that scan `src/` stop re-parsing it in every
+  test. Only callers under `tests` get a shared tree: pytest's assertion rewriter,
+  `ast.literal_eval`, `scripts/` and `src/` keep the real `ast.parse`. Shared
+  trees must not be edited, and a session fixture plus
+  `tests/unit/test_ast_parse_memo.py` fail the run if one is. That check found one
+  existing rule, `test_error_describe_not_quote_rule.py`, rewriting a tree in
+  place through `ast.NodeTransformer`; it now transforms a copy. Test-suite
+  change only; nothing under `src/` is touched.
+
+- **CI's Tests workflow runs pytest under `pytest-xdist` (`-n auto`).** The
+  `dev` extra gains `pytest-xdist>=3.5`; the flag is on the `tests.yml` step
+  only, so `make test` and a bare `pytest` stay one process. Same legs, same
+  selection. A parametrized sensitivity REST write test used a bare `object()`
+  sentinel with `ids=repr`, so its test id carried a memory address that differed
+  per process, and xdist aborts at collection when two workers disagree about
+  which tests exist; the sentinel now has a stable repr.
+- **`pytest` no longer inherits `-v` from `addopts`.** CI and `make test` pass
+  `-v` explicitly, so their output is unchanged; a bare targeted run prints a
+  dot per test instead of a line per test. Pass `-v` for the old output.
+
+### Added
+
+- **The capture join's `outcome` counts a session's calls to Trellis's own tools.**
+  `outcome.memory_tool_calls` is the number of `tool_use` blocks, among
+  `tool_calls`, whose MCP server name holds `trellis` (`mcp__trellis__*`, a
+  connector or plugin carrying it in a longer name), so a tool added later is
+  counted without a list to edit. A record written into the file again counts
+  once, as `tool_calls` does; a `Bash` call to the `trellis` CLI and a tool on a
+  server without the word in its name are not counted. A session that made no Trellis call
+  reads `0`; a join written before this key lacks it, which reads as unknown.
+  `trellis-session-capture --rejoin-since` fills it on joins already written,
+  from unchanged transcripts, with no change to what it selects: the join
+  differs from a new parse by the key, so it is written again. A sweep that
+  parses a changed transcript does the same. The rule is a substring of the
+  server part, so a third-party server carrying the word is counted too. Only
+  captured: no report or analysis reads the count, and a join carrying the key
+  reads the same as one without it. The rejoin itself stamps each join anew, so
+  its sessions read as unfinished in the holdout report until a later sweep
+  settles them, as with any rejoin. Nothing about packs or serving changes.
+
+- **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
+
+### Changed
+
+- **A wrong MCP tool argument is now answered from the tool's own schema, and a
+  rejected write is recorded.** FastMCP validates a call's arguments before the
+  tool body runs, so a misspelt or mistyped argument came back as pydantic's own
+  text: no accepted parameter named, the caller's value quoted, and no
+  `WRITE_REJECTED` event because the body never ran. A middleware now rewrites
+  that failure: `unknown argument item_ids; record_feedback accepts [...]; did
+  you mean helpful_item_ids, ...?`, `missing required argument trace_json`, and,
+  for an object passed as `trace_json`, an instruction to pass a JSON string. The
+  accepted names are read off the live tool schema, and no value the caller sent
+  is repeated. The call is still rejected exactly as before: no alias is
+  accepted and nothing is coerced. `save_experience`, `save_knowledge`,
+  `save_memory` and `record_feedback` also emit `WRITE_REJECTED` for this class
+  (source `mcp:<tool>`, kinds from the existing taxonomy), the four tools that
+  already record their body-level rejections; `record_observation` and
+  `execute_mutation` get the message but no event, and a read tool likewise.
+  **The reported rejection rate will rise** once these rows appear, because a
+  previously invisible class now counts toward it (and toward `trellis analyze
+  health`'s warning threshold and the capture-health banner's three-rejection,
+  zero-accepted condition on a capture surface).
+
+- **A trace field rejected on one model that another declares is told where it
+  belongs.** The `extra_forbidden` hint advised free-form `metadata` for any
+  unknown field, so a caller who sent `domain`, `agent_id`, `started_at`,
+  `summary` or `status` at the top level followed it, kept the trace valid and
+  left `context.domain` (or the other declared field) empty. The hint now finds
+  the rejected name on a model reachable from `Trace` (read off the live
+  models, not a roster) and names that path, for example `domain belongs at
+  context.domain`; `artifacts` is pointed at `artifacts_produced`. A field no
+  model declares keeps the `metadata` advice. `Trace` and `TraceStep` still
+  reject every unknown field.
+
+- **`save_experience`'s `trace_json` description shows a complete trace.** The
+  example now carries step `args`, a `result` object with a `summary`, a step
+  recorded in `error`, and `outcome.status` with `outcome.summary`, and one line
+  lists every step field. The `record-after-task` skill's gotcha table gains the
+  `action` and `observation` step keys. The example's lead-in is now "Example
+  valid trace:".
+
+### Fixed
+
+- **SQLite trace queries compare `created_at` by instant, not as text.** The
+  column holds the writer's `isoformat()` string, so a trace stamped with a
+  non-UTC offset sorted and filtered by its digits: `query(since=...)` dropped
+  a `-11:00` trace that was newer than the bound and `ORDER BY` put zones out of
+  order. `TraceStore.query` now documents by-instant, inclusive bounds with a
+  naive stamp read as UTC, and `SQLiteTraceStore` filters and orders on a
+  generated `created_at_utc` column plus index, added to existing files on open
+  without rewriting any stored row. The key applies any offset Python can write
+  to the column text (sign, hours, minutes, seconds); an offset with its own
+  fraction moves it by under a second. Text Python cannot write is keyed
+  deterministically, by its raw digits for `2026-03-04T05:06:07.123+00:00` (so
+  it stays in a bounded query rather than disappearing) but not always:
+  `2026-03-04T05:06:00.5+5:0` becomes `2026-03-04T05:06:00.5+5:00`. A literal
+  `now` in an old row is kept away from `strftime`, which would otherwise refuse
+  to evaluate the column and fail every open. New rows are written as UTC text,
+  and a stamp `datetime` cannot name in UTC is clamped to its edge in the
+  column; `trace_json` keeps the original. The migration is best effort: a
+  read-only file, or one another connection holds the write lock on (including
+  an exclusive lock that also refuses the follow-up re-read of the columns),
+  still opens and `query` evaluates the same expression inline, unindexed, until
+  a later open succeeds (the attempt waits 250 ms, not the connection's ten
+  seconds). Known limits: an old row past what `datetime` can name in UTC
+  (`0001-01-01T00:00+05:30`, `9999-12-31T23:00-05:00`) can be missed by
+  `query(since=<its own stamp>)`, and rows this build appends are unaffected
+  because their stamp is clamped first. `trace_json` keeps an offset only to the
+  minute, as it always has, while the key keeps the second, so an offset with
+  seconds can make the embed walk skip a row within a minute of it; whole-minute
+  offsets are unaffected. The trace schema rejects such a string, and only an
+  in-process `datetime` with a sub-minute `tzinfo` writes one.
+  `idx_traces_created` stays, because an older build expects it, and
+  `SCHEMA_VERSION` is not bumped, matching the graph store. The trace-embed
+  worker and its cursor order and bound by instant too, so one naive trace among
+  aware ones no longer raises `TypeError` out of the pass on any backend;
+  `as_utc` clamps a stamp `datetime` cannot name in UTC (`datetime.min` at
+  `+05:30`) to the edge instead of raising `OverflowError`. The Postgres trace
+  store now binds `as_utc(...)` on `append` and `query`, so a naive stamp is
+  stored as UTC whatever the session time zone (no change under a UTC session;
+  stored rows are not rewritten). A cursor file written by this build holds an
+  aware stamp, so an older build reading it against a store whose traces are all
+  naive raises `TypeError`; that matters only where an older checkout shares the
+  cursor file. The event log has the same text comparison on `occurred_at`
+  (`stores/sqlite/event_log.py`); it is not changed here.
+
+- **A `data_dir` in `config.yaml` quietly beat `TRELLIS_DATA_DIR`, so a restored
+  store or a cloned config could write into the original while the copy looked
+  untouched.** The precedence is unchanged and intended: an absolute `data_dir`
+  in `config.yaml` wins over the variable. What was missing was any sign of it.
+  When the variable is set and names a different directory, building the store
+  registry now logs a `registry_data_dir_env_ignored` warning to stderr, once per
+  process, naming the `data_dir` key and both paths. `admin health` shows the
+  same two paths in a `data_dir_disagreement` field (JSON) or two lines under the
+  table (text). The same directory spelled another way (trailing slash, symlink,
+  `..`) does not warn, and neither stdout nor an exit code changes. "Stores not
+  initialized at PATH" now names the `data_dir` key when that key supplied the
+  path, and no longer offers `admin init` as the only remedy: for a moved or
+  restored store, change `data_dir`, since `init` creates an empty `stores/`
+  at the configured path. The docs that implied the variable selects the data
+  directory (`mcp-claude-code.md`, `scheduled-curation.md`, `running-trellis.md`)
+  are corrected.
+
+- **The session-capture sweep keeps its progress as it goes.** `run_capture`
+  held every record until the end of the run and saved the watermark last, so a
+  kill, or one store error, discarded all the judging done so far and the
+  `CAPTURE_SWEEP_COMPLETED` event never fired. Judged sessions are now written in
+  batches of `checkpoint_every` (default 5, a keyword of `run_capture`): the
+  batch's records land, then supersessions and training pairs, then the cursors
+  and the watermark, in that order, so a cursor is never saved before its records.
+  A record that fails to write counts its session in `sessions_errored` and leaves
+  it un-watermarked for the next sweep; the other records and sessions continue,
+  and the sweep event still fires with the errors counted. `sessions_errored`
+  therefore also counts store errors after the transcript parsed, so under strict
+  mode `trellis-session-capture` can now exit `EXIT_SESSIONS_ERRORED` for a store
+  error, which it could not before. A NUL character in a judged field of the reply
+  no longer reaches the store (SQLite keeps it, and a Postgres text column
+  refuses it); it is stripped where the reply is parsed. `CORPUS_SYNCED` now fires
+  once per batch rather than once per sweep. `sync_records` gains optional
+  `on_record_error` and `minhash` arguments; without them it behaves as before.
+
+  A failed batch is retried correctly, not just retried:
+  - A session with a record that failed to write emits no training pairs in that
+    run; its retry emits them once the session completes, so a retry cannot
+    count a landed record's pair twice.
+  - A stored parent no longer counts as a landed record by itself, here and in
+    corpus sync. The parent is still written before its chunks, but the sync's
+    same-hash skip and reconcile's exact-duplicate drop now also read the chunk
+    rows the write would produce (`record_landed` in `trellis.ingest_corpus.sync`)
+    and treat the record as landed only when each `#chunk-i` row exists with its
+    span's text. A record that died between two chunk writes is written again by
+    the next sync or sweep, where it used to be skipped as already stored with its
+    chunks missing, so a retry now lands memories a failed sweep used to drop. A
+    record that does not chunk reads no extra row. No retrieval code changes.
+  - Repairing a document whose content is unchanged keeps the parent's
+    `updated_at` (a metadata-only write), so a repair does not move its recency;
+    a chunk the repair restores gets a fresh stamp, and an edited document is
+    stamped as before.
+  - A document that shrank leaves no surplus chunks behind a crash. The delete
+    probes upward from the new chunk count until a row is absent and runs top
+    down (a redaction tombstone is kept), and `record_landed` also reads from the
+    new count upward, so a record with surplus rows is written again. A clean
+    chunked record costs one more read; a record that does not chunk costs none.
+  - Changing `CHUNK_TARGET_CHARS`, `CHUNK_MAX_CHARS`, `CHUNK_OVERLAP_CHARS` or the embed cap now
+    rewrites every chunked document once at the next sync, because the chunk
+    check recomputes spans.
+  - With reconcile on, a supersession that raised, or was lost to a kill, is
+    applied by the retry: an exact-duplicate no-op whose stored document names a
+    `supersedes_doc_id` that is not yet marked superseded now marks it. A raise
+    while applying supersessions no longer blocks the batch's training pairs; the
+    sessions that claimed a supersession stay un-watermarked. The repair leaves an
+    archived, superseded or deleted target alone, so it cannot return an archived
+    document to packs or count a target deleted after a good supersession as a
+    failure.
+  - With reconcile on, a record whose own parent row is stored but not landed is
+    no longer judged again. It keeps the verdict that row was stored with
+    (`reconciliation`, `supersedes_doc_id`, `updates_doc_id`), is written again,
+    and its supersession is applied, to a target that still reads as current
+    only (an archived, superseded or deleted one is left alone, as in the repair
+    above, and a deleted one counts no failure). Before, a judge that answered
+    no-op dropped the record with its chunks missing and the session was
+    watermarked, and a retry with no judge lost the supersession the first run
+    had claimed.
+  - Limit: a process kill between a batch's records and its training pairs loses
+    that batch's keep pairs when reconcile is on, because the retry no-ops those
+    records. It is bounded by `checkpoint_every` sessions and costs training
+    data only. With reconcile off, a kill between the pairs and the watermark
+    save emits that batch's keep pairs a second time. A kill between a chunk's
+    write and its embed leaves that chunk without a vector row, which the
+    row-based check does not see. A retry whose judge words the memory
+    differently does not find the stored one as an exact duplicate, so the
+    supersession repair does not run for it. A retry of a never-announced
+    document emits `MEMORY_STORED` with action `update`, not `new`. A kill before
+    the whole-document vector delete leaves the stale vector row; a crash during
+    a move leaves the old parent until a prune; a document that shrank to no
+    chunks and was killed before its chunks were deleted keeps them until its
+    next update.
+
+  A clean run writes the same records and documents (metadata and lifecycle
+  included) and the same report at any `checkpoint_every`, with one exception:
+  `distill_unavailable` warnings are added while sessions are judged and
+  near-duplicate warnings when a batch is written, so a run that has both lists
+  them in a different order. It emits the same events for each document, but not
+  in the same sequence: they interleave batch by batch instead of arriving in
+  blocks, and `CORPUS_SYNCED` fires once per batch that writes a record rather
+  than once per sweep. The sweep's own flushed
+  memories stay hidden from later sessions' reconcile, so which memories are
+  written and how they are judged do not change. A dry run still makes one pass
+  and saves nothing.
+
+
+- **The SDK sent an id containing `#`, `?`, `/` or `%` unencoded, so the server
+  could answer for a different row.** `TrellisClient` and `AsyncTrellisClient`
+  interpolated the id into the path of `get_entity`, `get_trace` and
+  `record_feedback` as it was given: `get_entity("tbl#col")` requested
+  `/entities/tbl` (a `#` starts the URL fragment) and returned that entity with a
+  200, `get_trace("t?1")` returned trace `t`, and `a/../b` was collapsed to `b`
+  before it was sent. Every path id now goes through one `path_id()` helper
+  (`trellis_sdk._http`) that encodes it as a single path segment, and
+  `tests/unit/sdk/test_path_id_rule.py` fails when a client builds a path from an
+  unencoded value. An id that was already legal in a path (`entity:abc`, `a+b`)
+  keeps its wire form. A `/` in an id is now sent as `%2F`, which the server
+  decodes before it routes. A trace id or pack id containing `/` still cannot be
+  routed, because `GET /traces/{trace_id}` and `POST /packs/{pack_id}/feedback`
+  are not `:path` routes; the SDK now sends it as one segment, so a trace id
+  reads as not found and a pack id raises, instead of reaching a different
+  route. No server change.
 - **On Postgres, a node, alias or stale-owner replacement queued behind a lock
   could stamp its version earlier than the version it was waiting to close.**
   `upsert_node` (through `_write_node_version`), `upsert_alias` and

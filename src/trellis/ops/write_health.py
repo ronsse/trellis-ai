@@ -20,8 +20,10 @@ Three pieces close that hole:
   tool. The event's ``source`` uses the same ``mcp:<tool>`` string the
   executor stores in ``requested_by``, so accept/reject join per tool.
 * :func:`summarize_backend_health` — the operator/grooming surface:
-  acceptance vs rejection rates per tool and stage, repeated schema
-  collisions, pack-attribution coverage, session-capture coverage
+  acceptance vs rejection rates per tool and stage, repeated rejections
+  rated against each tool's attempts, how many rejected writes were
+  followed by an accepted one, pack-attribution coverage, session-capture
+  coverage
   (:mod:`trellis.ops.capture_coverage`), and a deterministic
   ``ok | warn`` status with named reasons. ``trellis analyze health``
   is a thin shell over it.
@@ -35,9 +37,13 @@ could drift would recreate exactly that failure.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+import re
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from difflib import SequenceMatcher
 from enum import Enum
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
@@ -46,6 +52,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.pack_holdout import drop_holdout, is_holdout, unscanned_pack_ids
 from trellis.feedback.attribution import (
     StrayCitationTally,
@@ -124,6 +131,9 @@ RejectionKind = Literal[
 #: ``other`` rather than inventing a kind.
 _PYDANTIC_KIND_PREFIXES: tuple[tuple[str, str], ...] = (
     ("extra_forbidden", "extra_forbidden"),
+    # A tool call naming an argument the tool does not declare: the same
+    # failure as a forbidden key, one level up (``unexpected_keyword_argument``).
+    ("unexpected_keyword", "extra_forbidden"),
     ("enum", "enum"),
     ("missing", "missing"),
     ("json_invalid", "json_invalid"),
@@ -147,38 +157,110 @@ _DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 _MIN_ATTEMPTS_FOR_RATE = 5
 #: Warn when more than this fraction of attempts is rejected.
 _REJECTION_RATE_WARN = 0.10
-#: Warn when one (kind, loc) pair recurs this often — the signature of a
-#: standing conflict rather than a one-off.
+#: A ``(kind, loc)`` rejection is *repeated* only when it was hit by at least
+#: this many **distinct rejected attempts** (one ``WRITE_REJECTED`` event is
+#: one attempt, however many error elements it lists). Counting elements let
+#: one trace with many bad steps cross the line alone.
 _REPEAT_COLLISION_WARN = 3
+#: A repeated payload rejection also has to be a real share of its tool's
+#: attempts: ``count / attempts`` for that tool (accepted, no-op and rejected
+#: calls, see :func:`_call_attempts`) must exceed this.
+#: An absolute count has no denominator, so a busy healthy tool crosses it
+#: by volume alone and the signal sits at ``warn`` permanently.
+_COLLISION_RATE_WARN = 0.05
+#: Below this many attempts on the tool the collision is not rated at all:
+#: three rejections out of seven calls says nothing about the tool.
+_MIN_ATTEMPTS_FOR_COLLISION_RATE = 10
+#: These three numbers are starting points chosen by reading the code, not
+#: values fitted to a deployment's traffic. 5% sits under the overall
+#: ``_REJECTION_RATE_WARN`` because one ``(kind, loc)`` is a slice of all
+#: rejections; 10 attempts is twice ``_MIN_ATTEMPTS_FOR_RATE`` because a
+#: collision also needs ``_REPEAT_COLLISION_WARN`` rejections to exist. Tune
+#: them from the ``rate`` and ``tool_attempts`` every ``repeated_collisions``
+#: row now carries.
+#:
+#: The floor has a blind spot, and it is the price of not warning on three
+#: rejections out of seven. A tool that fails every call at low volume (nine
+#: of nine ``save_knowledge`` calls rejected, one under the floor) reads ok
+#: while other tools' traffic keeps the overall rate under its threshold, and
+#: one mistake spread over many ``loc`` values, each under 5% of the tool's
+#: attempts, reads ok too, because a collision is keyed by ``(kind, loc)``.
+#: ``by_tool`` and ``boundary_kinds`` still carry those counts.
+
+#: A rejection is counted as *recovered* when a call to the same tool was
+#: accepted within this many seconds after it (see
+#: :class:`RejectionRecoveryTracker`). It is meant to span one retry: the
+#: caller reads the error, corrects the payload, and calls again. Longer
+#: windows let an unrelated caller's accepted call stand in for the retry.
+RECOVERY_WINDOW_SECONDS = 120
+
+#: Said beside the recovered share, because the number cannot be read
+#: without it. See :class:`RejectionRecoveryTracker` for what the pairing
+#: keeps and what it cannot know.
+RECOVERY_APPROXIMATION_NOTE = (
+    "approximate, and it can sit on either side of the truth. A rejection "
+    "counts as recovered when any call to the same tool was accepted within "
+    "{window}s after it, by whichever caller; keying per tool is a choice "
+    "(stdio serves one process per client, and an authenticated HTTP request "
+    "carries a key id that this does not use). It overstates when another "
+    "caller's accepted call stands in for the retry. It understates when the "
+    "retry arrives after the window, goes through another tool or process, or "
+    "follows a server restart, which drops the in-memory pairing. Accepted "
+    "means the call returned without raising: a duplicate reply that wrote "
+    "nothing, or feedback reported as recorded while the event log was "
+    "unavailable, counts. Rejections still inside the window when this was "
+    "read are pending and are left out of the share."
+)
+
+#: Operation that stands for one *call*, for a tool whose one call fans out
+#: to several commands (see :class:`ToolWriteStats`). Rating a collision
+#: against every fanned-out command would divide by a number that grows with
+#: the payload and dilute the rate, and the same fan-out dilutes it from the
+#: other side when a rejected extraction command is counted as a rejected
+#: call, so for such a tool only that operation's accepts **and** rejections
+#: count. A tool absent here is rated against its totals, and those can miss
+#: the truth in either direction: a call that runs several commands counts
+#: several times (the rate understates), and a call that returned success
+#: without running one counts not at all (the rate overstates) unless it
+#: left a ``WRITE_NOOP`` row, which :func:`_call_attempts` adds back. Rows
+#: written before that event existed are not there to add, so a window that
+#: still holds them overstates until it rolls past them.
+_CALL_LEVEL_OPERATION = {"mcp:save_experience": "trace.ingest"}
 
 #: What a recurrence *means*, per :data:`RejectionKind` — a ``(label,
 #: explanation)`` pair rendered as ``repeated {label}: … — {explanation}``.
 #:
 #: ``repeated_collisions`` is a **routing** signal: it tells an operator
 #: which kind of repair to reach for. One sentence for every kind sent
-#: them to the wrong one (#485). The default below is the payload-schema
-#: reading the counter was written for, and it is sound *there* — an agent
-#: that keeps sending a field the model forbids is evidence the hint or
-#: the skill is wrong rather than the schema (#472/#473).
+#: them to the wrong one (#485).
 #:
-#: It is simply false for the two file conditions, which implicate no
-#: schema, no doc and no agent. They get a sentence **each** rather than
-#: one shared "this is a file problem" line, because their repairs differ
-#: from each other: ``config_unreadable`` needs a human to look at a
-#: damaged file, ``stale_write`` needs two writers separated. Note
-#: ``stale_write`` is the case the counter reads *best* — a single stale
-#: refusal needs nobody at all, and recurrence is exactly the condition
-#: that makes it worth saying — so explaining it as a schema disagreement
-#: mislabelled the one row carrying real signal.
+#: The default below is for the payload kinds, and it states no cause. It
+#: used to say that a recurring mistake means the schema and its docs/skill
+#: disagree; nothing in a rejection row can establish that. The same count
+#: is produced by a schema narrower than its docs, docs that misdescribe the
+#: schema, a hint that does not say what to send, and a caller whose own
+#: template is wrong. The row says how often and where, and the explanation
+#: says that, so the operator looks before choosing a repair.
+#:
+#: The two file conditions implicate no schema, no doc and no agent, so each
+#: gets a sentence of its own: ``config_unreadable`` needs a human to look
+#: at a damaged file, ``stale_write`` needs two writers separated. They are
+#: also not rated: their recurrence is the whole signal (a single stale
+#: refusal needs nobody at all), and a refused file is a condition of the
+#: file, not a share of any tool's calls.
 #:
 #: Kinds absent here take the default; that is the safe direction, since
 #: every kind but these two is a payload problem. The recovery advice the
 #: stores compute (#427, a ``shlex``-quoted ``mv``) rides the rejection
-#: ``msg`` and is dropped by ``collision_counts``, which keys on ``(kind,
-#: loc)`` alone — getting it to the boundaries is #459, not this.
+#: ``msg`` and is dropped when collisions are keyed by ``(tool, kind,
+#: loc)`` — getting it to the boundaries is #459, not this.
 _DEFAULT_COLLISION_REASON: tuple[str, str] = (
-    "schema collision",
-    "same mistake recurring means the schema and its docs/skill disagree",
+    "rejection",
+    (
+        "cause not established: the schema, its docs or skill, or the "
+        "rejection hint may be at fault, or callers may be sending a bad "
+        "payload; the row says how often and where, not which"
+    ),
 )
 _COLLISION_REASONS: dict[str, tuple[str, str]] = {
     "config_unreadable": (
@@ -479,6 +561,46 @@ _NARRATION_HINT = (
 )
 
 
+def _single_instance_models() -> list[tuple[str, type[BaseModel]]]:
+    """``(path, model)`` for ``Trace`` and each model nested under it by a plain field.
+
+    ``("", Trace)``, ``("context", TraceContext)``, ``("outcome", Outcome)``
+    today, read off the live annotations. List elements (``steps[]``,
+    ``artifacts_produced[]``…) are left out on purpose: they are records
+    *about* the run, and a loose run-level key that shares a name with one
+    (``started_at`` is on both ``context`` and every step) does not mean
+    the step's field.
+    """
+    found: list[tuple[str, type[BaseModel]]] = [("", Trace)]
+    seen: set[type[BaseModel]] = {Trace}
+    for path, model in found:
+        for name, field in model.model_fields.items():
+            nested = _unwrap_optional(field.annotation)
+            if _is_model(nested) and nested not in seen:
+                seen.add(nested)
+                found.append((f"{path}.{name}" if path else name, nested))
+    return found
+
+
+def _declared_elsewhere(target: _LocTarget) -> list[str]:
+    """Where the rejected name *is* declared, when a rejection is a misplacement.
+
+    Walks the models :func:`_single_instance_models` finds, so it covers
+    every one reachable from ``Trace`` without a roster: a top-level
+    ``domain`` resolves to ``context.domain``. Empty when the rejection
+    sits inside a list element or when no other single-instance model
+    declares the name — callers then fall back to the generic clause.
+    """
+    if target.field is None or "[]" in target.path:
+        return []
+    homes = []
+    for path, model in _single_instance_models():
+        if model is target.model or target.field not in model.model_fields:
+            continue
+        homes.append(f"{path}.{target.field}" if path else f"top-level {target.field}")
+    return homes
+
+
 def _extra_forbidden_hint(target: _LocTarget) -> str:
     if target.model is Outcome and (target.field or "").startswith("artifact"):
         # Hand-written on purpose: the generated form would list Outcome's
@@ -489,12 +611,33 @@ def _extra_forbidden_hint(target: _LocTarget) -> str:
             '"artifacts_produced": [{"artifact_id": ..., '
             '"artifact_type": ...}] — not inside outcome'
         )
+    if target.model is Trace and target.field == "artifacts":
+        # Hand-written: the one misplacement that is a *rename*, so no
+        # model declares the name and the walk below cannot find it.
+        return (
+            "artifacts is not accepted on Trace: the top-level field is "
+            'artifacts_produced: [{"artifact_id": ..., "artifact_type": ...}]'
+        )
     if target.model is TraceStep and target.field == "index":
         return (
             f"{target.path} is not accepted: steps are ordered by position, so drop it"
         )
     if target.model is TraceStep and target.field in _NARRATION_KEYS:
         return _NARRATION_HINT.format(loc=target.path)
+    homes = _declared_elsewhere(target)
+    if homes:
+        # Checked before the free-form clause on purpose: that clause is
+        # what sent a top-level ``domain`` into ``metadata``, where it was
+        # accepted and left ``context.domain`` empty.
+        where = (
+            f"belongs at {homes[0]}"
+            if len(homes) == 1
+            else f"is declared at {', '.join(homes)}; use the one that fits"
+        )
+        return (
+            f"{target.path} is not accepted on {target.model.__name__}: "
+            f"{target.field} {where}"
+        )
     return (
         f"{target.path} is not accepted: {target.model.__name__} accepts only "
         f"[{_fields(target.model)}]{_freeform_clause(target)}"
@@ -593,6 +736,245 @@ def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
     return hints
 
 
+#: An argument or location segment is echoed back only when it looks like
+#: one: a caller-chosen key is caller content, and a long or odd one is
+#: not something a reply should repeat.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+#: ``difflib`` ratio at which an accepted argument name is offered as a
+#: correction, and how many are offered.
+_SUGGESTION_CUTOFF = 0.6
+_MAX_SUGGESTIONS = 3
+
+#: JSON-schema scalar types in caller-facing words.
+_SCHEMA_TYPE_WORDS = {
+    "string": "a string",
+    "integer": "an integer",
+    "number": "a number",
+    "boolean": "a boolean",
+    "object": "an object",
+    "array": "an array",
+}
+
+
+def _safe_name(part: object) -> str:
+    text = str(part)
+    return text if _SAFE_NAME.fullmatch(text) else "<name not shown>"
+
+
+def _schema_phrase(prop: Mapping[str, Any]) -> str:
+    """The shape a tool parameter's JSON schema accepts, in caller-facing words."""
+    options = [
+        option
+        for option in prop.get("anyOf", [prop])
+        if isinstance(option, Mapping) and option.get("type") != "null"
+    ]
+    option = options[0] if len(options) == 1 else {}
+    word = _SCHEMA_TYPE_WORDS.get(str(option.get("type")))
+    if word is None:
+        return "a different type"
+    items = option.get("items")
+    if isinstance(items, Mapping) and items.get("type") in _SCHEMA_TYPE_WORDS:
+        return f"{word} of {items['type']}"
+    return word
+
+
+@dataclass(frozen=True)
+class ArgumentRejection:
+    """A tool call's argument failure, rewritten from the tool's own schema.
+
+    ``message`` is what the caller is told, ``hints`` the guidance clauses
+    inside it (what the ``WRITE_REJECTED`` event carries), ``rows`` the
+    taxonomy rows. None of the three quotes a value the caller sent.
+    """
+
+    message: str
+    hints: list[str]
+    rows: list[dict[str, str]]
+
+
+def _closest_names(name: str, accepted: list[str]) -> list[str]:
+    """Accepted argument names to offer for an unknown ``name``, best first.
+
+    A name that contains the unknown one, or is contained in it, is the
+    likeliest slip (``item_ids`` for ``helpful_item_ids``) and outranks any
+    spelling-distance match, which would otherwise surface an unrelated
+    parameter that merely shares letters. Ties keep declared order, so the
+    result does not depend on which candidate ``difflib`` happens to see first.
+    """
+    contained = [c for c in accepted if name in c or c in name]
+    if contained:
+        return contained[:_MAX_SUGGESTIONS]
+    scored = sorted(
+        (-SequenceMatcher(None, name, candidate).ratio(), index, candidate)
+        for index, candidate in enumerate(accepted)
+    )
+    return [c for score, _, c in scored if -score >= _SUGGESTION_CUTOFF][
+        :_MAX_SUGGESTIONS
+    ]
+
+
+def describe_argument_rejection(
+    tool: str, parameters: Mapping[str, Any], error: ValidationError
+) -> ArgumentRejection:
+    """Describe a failed tool-call validation by the tool's declared parameters.
+
+    FastMCP validates a call's arguments before the tool body runs, and
+    renders the failure as pydantic's own text: ``item_ids / Unexpected
+    keyword argument [... input_value=['a'] ...]``. That names no accepted
+    parameter and quotes what the caller sent. This reads the same failure
+    off ``errors(include_input=False)`` and the tool's JSON schema
+    (``parameters``) instead, so the accepted names are never a copy that
+    can drift from the signature. ``item_ids`` on ``record_feedback`` comes
+    back as ``unknown argument item_ids; record_feedback accepts [...]; did
+    you mean helpful_item_ids…?``.
+
+    A name the caller chose is echoed only if it is identifier-shaped
+    (:data:`_SAFE_NAME`). A value is never echoed.
+    """
+    properties = parameters.get("properties")
+    properties = properties if isinstance(properties, Mapping) else {}
+    accepted = [str(name) for name in properties]
+    problems: list[str] = []
+    rows: list[dict[str, str]] = []
+    unknown: list[str] = []
+    missing: list[str] = []
+    for err in error.errors(include_input=False):
+        loc = tuple(err.get("loc", ()))
+        kind = str(err.get("type", ""))
+        label = ".".join(_safe_name(part) for part in loc) or "<arguments>"
+        msg = sanitize_error_message(str(err.get("msg", "")))[:_MAX_MSG]
+        rows.append({"kind": _kind_for(kind), "loc": label, "msg": msg})
+        top = str(loc[0]) if loc else ""
+        if kind == "unexpected_keyword_argument":
+            unknown.append(top if _SAFE_NAME.fullmatch(top) else "")
+            problems.append(
+                f"unknown argument {unknown[-1]}"
+                if unknown[-1]
+                else "unknown argument (name not shown)"
+            )
+        elif kind == "missing_argument" and top in properties:
+            missing.append(top)
+            problems.append(f"missing required argument {top}")
+        elif (
+            len(loc) == 1 and top in properties and kind.endswith(("_type", "_parsing"))
+        ):
+            problems.append(f"{top} must be {_schema_phrase(properties[top])}")
+            if top == "trace_json" and kind == "string_type":
+                # Hand-written: an object where the schema wants a string is
+                # the one wrong-type call with a known cause and a known fix.
+                problems[-1] = (
+                    "trace_json must be a JSON string: serialize the trace "
+                    "object (e.g. json.dumps) rather than passing it as an object"
+                )
+        else:
+            problems.append(f"{label}: {msg}")
+
+    hints: list[str] = []
+    if unknown:
+        hints.append(f"{tool} accepts [{', '.join(accepted)}]")
+    if missing:
+        required = [n for n in parameters.get("required", []) if n in properties]
+        hints.append(f"required: [{', '.join(str(n) for n in required)}]")
+    named = [name for name in unknown if name]
+    for name in named:
+        close = _closest_names(name, accepted)
+        if not close:
+            continue
+        options = (
+            close[0] if len(close) == 1 else f"{', '.join(close[:-1])} or {close[-1]}"
+        )
+        suffix = f" for {name}" if len(named) > 1 else ""
+        hints.append(f"did you mean {options}{suffix}?")
+    return ArgumentRejection(
+        message="; ".join([*problems, *hints]), hints=hints, rows=rows
+    )
+
+
+def surface_label(tool: str) -> str:
+    """The ``mcp:<tool>`` label a rejection is counted under.
+
+    A bare tool name gets the ``mcp:`` prefix the executor's ``requested_by``
+    already carries; a colon-prefixed label (``config:policy_file``,
+    ``cli:…``) is already a surface and passes through. The one place both
+    the write side and the read side derive it, so they cannot drift.
+    """
+    return f"mcp:{tool}" if tool and ":" not in tool else tool
+
+
+class RejectionRecoveryTracker:
+    """Remember, per tool and in memory only, that a write was just rejected.
+
+    The pairing that says a rejected write was retried and accepted. It holds
+    a tool name, a count and a monotonic timestamp, and nothing else: no
+    payload, intent, session or caller identifier, and none of it is
+    persisted. Keying by tool is an **approximation**, and a chosen one. A
+    stdio server is one process per client, so its tracker sees a single
+    caller, but the HTTP server is stateless, every request is a fresh
+    session, and its caller's identity is exactly what must not be stored.
+    (Under enforced auth a request does carry a key id, ``current_principal_id``
+    in ``trellis.mcp.auth``; it is deliberately not used here.) So any
+    accepted call to the same tool within ``window_seconds`` of the last
+    rejection counts, whoever made it.
+
+    The reported share can therefore sit on either side of the truth, so it
+    is not an upper bound. It **overstates** when concurrent callers share a
+    tool and one caller's accepted call stands in for another's retry. It
+    **understates** when the retry comes after the window, goes through
+    another tool or another process (a second server worker holds its own
+    tracker), or follows a restart, which empties this dict. "Accepted"
+    means the call returned without raising, so a duplicate reply that wrote
+    nothing, and a feedback reply reporting that the event log was
+    unavailable, both count.
+
+    A count is only valid while it is fresh: a rejection noted after the
+    previous one has aged past the window starts a new count rather than
+    adding to a stale one, so a lone acceptance cannot recover a rejection
+    from long before.
+
+    Bounded by the tool labels the code itself passes in, not by caller
+    input. Thread-safe, since tool bodies may run on worker threads.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: int = RECOVERY_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.window_seconds = window_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        # label -> (rejections since the last claim, time of the latest one)
+        self._pending: dict[str, tuple[int, float]] = {}
+
+    def note_rejection(self, label: str) -> None:
+        """Record one rejected attempt on ``label``."""
+        with self._lock:
+            now = self._clock()
+            count, at = self._pending.get(label, (0, now))
+            if now - at > self.window_seconds:
+                # The previous rejection can no longer be recovered by the
+                # acceptance this one is waiting for; do not carry it over.
+                count = 0
+            self._pending[label] = (count + 1, now)
+
+    def claim_recovery(self, label: str) -> int:
+        """Rejected attempts on ``label`` that this acceptance recovers.
+
+        Clears the entry either way: an acceptance consumes the rejections
+        it follows, and a stale entry is dropped rather than kept. Returns
+        ``0`` when nothing was pending or the latest rejection is older than
+        the window.
+        """
+        with self._lock:
+            entry = self._pending.pop(label, None)
+            if entry is None:
+                return 0
+            count, at = entry
+            return count if self._clock() - at <= self.window_seconds else 0
+
+
 def record_write_rejection(
     event_log: EventLog | None,
     *,
@@ -602,6 +984,7 @@ def record_write_rejection(
     hints: list[str] | None = None,
     payload_chars: int | None = None,
     source: str | None = None,
+    recovery: RejectionRecoveryTracker | None = None,
 ) -> dict[str, Any]:
     """Emit a ``WRITE_REJECTED`` event for a boundary rejection, fail-soft.
 
@@ -609,6 +992,12 @@ def record_write_rejection(
     the caller can fold the classification into the error it is about to
     raise. Telemetry failure downgrades to a warning log — a broken event
     log must never escalate a rejected write into a crashed tool.
+
+    ``recovery`` is the tracker a later accepted call is paired against. When
+    given, the event carries ``recovery_window_s`` (the window the pairing
+    uses) so a reader can tell a rejection that was *tracked* from one
+    written by a build that did not track, and the rejection is noted only
+    once its event is on the log, so recovered can never outnumber tracked.
     """
     rows = (
         rejections
@@ -626,6 +1015,8 @@ def record_write_rejection(
         "rejections": rows,
         "hints": hints or [],
     }
+    if recovery is not None:
+        payload["recovery_window_s"] = recovery.window_seconds
     try:
         event_log.emit(
             EventType.WRITE_REJECTED,
@@ -634,17 +1025,80 @@ def record_write_rejection(
         )
     except Exception:
         logger.warning("write_health.emit_failed", tool=tool, exc_info=True)
+        return details
+    if recovery is not None:
+        recovery.note_rejection(surface_label(tool))
     return details
 
 
-#: Write surfaces whose writes never reach ``MutationExecutor``, so
-#: ``ToolWriteStats.accepted`` is structurally ``0`` for them rather than a
-#: reflection of zero activity. Hand-kept, like ``_NARRATION_KEYS`` above:
-#: a surface is added here only once its bypass is confirmed, not guessed
-#: from an observed zero. ``mcp:record_feedback`` is the only member today
-#: (see :class:`ServeAttributionReport` for where its signal is reported
-#: instead).
-_EXECUTOR_BYPASS_SURFACES = frozenset({"mcp:record_feedback"})
+def record_write_recovery(
+    event_log: EventLog | None,
+    *,
+    tool: str,
+    rejected_attempts: int,
+    window_seconds: int,
+) -> None:
+    """Emit ``WRITE_RECOVERED``: a call to ``tool`` was accepted right after rejections.
+
+    ``rejected_attempts`` is how many tracked rejections this acceptance
+    follows. Carries the tool and two integers, nothing about the call.
+    Fail-soft for the same reason as :func:`record_write_rejection`.
+    """
+    if event_log is None:
+        return
+    try:
+        event_log.emit(
+            EventType.WRITE_RECOVERED,
+            f"mcp:{tool}",
+            payload={
+                "tool": tool,
+                "rejected_attempts": rejected_attempts,
+                "window_s": window_seconds,
+            },
+        )
+    except Exception:
+        logger.warning("write_health.recovery_emit_failed", tool=tool, exc_info=True)
+
+
+#: Why a write tool answered success without writing. Closed, so a reader
+#: never has to interpret free text and the payload cannot carry content.
+NoopReason = Literal["exact_duplicate", "fuzzy_duplicate", "judged_covered"]
+
+#: The ``mcp:record_feedback`` surface and the ``source`` its accepted
+#: ``FEEDBACK_RECORDED`` events carry (``record_feedback`` in
+#: ``trellis.mcp.server``). The REST route and the reconcile command stamp a
+#: different source, so filtering on it isolates the MCP tool. The tool never
+#: reaches ``MutationExecutor``, so its accepted side is that event rather
+#: than ``MUTATION_EXECUTED``; ``tests/unit/mcp/test_write_recovery.py``
+#: drives the real tool, so a change of source breaks a test rather than the
+#: count.
+FEEDBACK_SURFACE = "mcp:record_feedback"
+_FEEDBACK_EVENT_SOURCE = "mcp"
+
+
+def record_write_noop(
+    event_log: EventLog | None, *, tool: str, reason: NoopReason
+) -> None:
+    """Emit ``WRITE_NOOP``: ``tool`` returned success without writing, fail-soft.
+
+    A duplicate reply stores nothing and so leaves no ``MUTATION_EXECUTED``;
+    without this row the call is missing from the attempts a rejection rate
+    divides by, and a healthy tool answering mostly duplicates reads as
+    mostly failing. The payload is the tool and a closed ``reason``: no
+    content, no document id, nothing about the caller. Fail-soft for the same
+    reason as :func:`record_write_rejection`: a broken event log must not
+    change the reply of a call that already succeeded.
+    """
+    if event_log is None:
+        return
+    try:
+        event_log.emit(
+            EventType.WRITE_NOOP,
+            f"mcp:{tool}",
+            payload={"tool": tool, "reason": reason},
+        )
+    except Exception:
+        logger.warning("write_health.noop_emit_failed", tool=tool, exc_info=True)
 
 
 class ToolWriteStats(TrellisModel):
@@ -656,19 +1110,85 @@ class ToolWriteStats(TrellisModel):
     inflates ``accepted`` by exactly that fan-out. ``accepted_by_operation``
     breaks the same total down by ``Operation`` name, so a reader can
     answer "how many traces" instead of only "how many writes" — empty
-    for a tool whose writes never reached the executor (e.g.
-    ``mcp:record_feedback``, which bypasses it; see
-    :class:`ServeAttributionReport` for that signal).
+    for a tool whose writes never reached the executor. The one such tool,
+    ``mcp:record_feedback``, counts an accepted call as a ``FEEDBACK_RECORDED``
+    event the tool itself emitted (``source="mcp"``), so its ``accepted`` is
+    calls and it has no operation breakdown.
+
+    ``noop`` counts calls that returned success without writing (a
+    duplicate ``save_memory``), from ``WRITE_NOOP``. They are attempts that
+    no command accounts for, so they sit beside ``accepted`` rather than in
+    it. ``executor_rejected_by_operation`` breaks the executor-stage
+    rejections down the same way ``accepted_by_operation`` does, so a
+    fan-out tool can be rated on its call-level operation alone.
     """
 
     accepted: int = 0
     accepted_by_operation: dict[str, int] = Field(default_factory=dict)
     boundary_rejected: int = 0
     executor_rejected: int = 0
+    executor_rejected_by_operation: dict[str, int] = Field(default_factory=dict)
+    noop: int = 0
 
     @property
     def attempts(self) -> int:
-        return self.accepted + self.boundary_rejected + self.executor_rejected
+        return (
+            self.accepted + self.noop + self.boundary_rejected + self.executor_rejected
+        )
+
+
+class ToolRecovery(TrellisModel):
+    """Tracked boundary rejections for one surface and how many were recovered."""
+
+    tracked: int = 0
+    recovered: int = 0
+    #: Tracked rejections still inside their recovery window when the report
+    #: was read, with no recovery after them. They can still be recovered, so
+    #: they are not in ``share``'s denominator.
+    pending: int = 0
+    #: ``recovered / (tracked - pending)``; ``None`` when nothing is left to
+    #: rate, whether because nothing was tracked or all of it is pending.
+    share: float | None = None
+
+
+class RecoveryReport(TrellisModel):
+    """How many rejected writes were followed by an accepted one.
+
+    Counted over **tracked** rejections only: ``WRITE_REJECTED`` rows that
+    carry ``recovery_window_s``, written by a build that pairs rejections
+    with later acceptances. A row from an older build has no such field and
+    is left out of both sides, so ``recovered_share`` is ``None`` (not
+    measured) rather than ``0.0`` (measured, none recovered) for a window
+    holding only old rows. ``recovered`` is capped at ``tracked`` per tool,
+    and that cap is the only way it can exceed what was tracked: a recovery
+    event in the window whose rejection row fell outside it (before the
+    window opened, or past the scan cap). Every other recovery was counted
+    after its rejection row was written, and a stale count is expired
+    rather than carried (see :class:`RejectionRecoveryTracker`).
+
+    ``pending`` counts tracked rejections whose window had not closed when
+    the report was read and that no recovery followed. The read has no end
+    time of its own, so its end is the moment it runs; a pending row is
+    therefore one that might still be recovered, and it is excluded from the
+    share rather than counted as a failure to recover. The server's clock
+    stamps the rows and the reader's clock decides what is pending, so a few
+    seconds of skew between them moves a row across that line.
+
+    The pairing is by tool within a short window, not by caller, and the
+    share can sit on either side of the truth; read :attr:`note` for why.
+    """
+
+    tracked_rejections: int = 0
+    recovered_rejections: int = 0
+    #: Tracked rejections still inside the window and not yet recovered.
+    pending_rejections: int = 0
+    #: ``recovered / (tracked - pending)``; ``None`` when that is zero.
+    recovered_share: float | None = None
+    window_seconds: int | None = None
+    by_tool: dict[str, ToolRecovery] = Field(default_factory=dict)
+    #: The approximation, stated beside the number it qualifies. Empty when
+    #: nothing was tracked, so a caveat does not print over no figure.
+    note: str = ""
 
 
 class WriteHealthReport(TrellisModel):
@@ -678,12 +1198,27 @@ class WriteHealthReport(TrellisModel):
     accepted: int
     boundary_rejected: int
     executor_rejected: int
+    #: Calls that returned success without writing (``WRITE_NOOP``), already
+    #: counted in ``attempts``. Rows from before that event existed are
+    #: absent, so ``attempts`` is short by their number until the window
+    #: rolls past them.
+    noop: int = 0
     attempts: int
     rejection_rate: float
     by_tool: dict[str, ToolWriteStats] = Field(default_factory=dict)
+    #: Counts error **elements**, not attempts: one rejected call listing
+    #: eight bad steps adds eight to ``steps[].result``. Read
+    #: ``repeated_collisions[].count`` for attempts.
     boundary_kinds: dict[str, int] = Field(default_factory=dict)
     executor_reasons: dict[str, int] = Field(default_factory=dict)
+    #: Rejections that recur on one tool: ``{kind, loc, tool, count,
+    #: tool_attempts, rate}``. ``count`` is distinct rejected attempts, not
+    #: error elements; ``rate`` is ``count / tool_attempts``. A file-condition
+    #: kind carries ``None`` for the last two, since it is not rated.
     repeated_collisions: list[dict[str, Any]] = Field(default_factory=list)
+    #: See :class:`RecoveryReport`. Absent on a report serialised before it
+    #: existed, which reads as nothing tracked.
+    recovery: RecoveryReport = Field(default_factory=RecoveryReport)
     #: Whether the EventLog reads behind these counts hit their cap, and
     #: what that excluded. A capped write-health report is a report whose
     #: window is shorter than ``window_days`` claims (#374).
@@ -891,6 +1426,238 @@ class BackendHealthReport(TrellisModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+@dataclass
+class _BoundaryTally:
+    """What one pass over ``WRITE_REJECTED`` events yields."""
+
+    #: Error **elements** per ``kind@loc`` label.
+    kinds: dict[str, int]
+    #: Distinct rejected *attempts* per (surface, kind, loc): an event lists
+    #: every error element, so a key is counted once per event however many
+    #: elements share it.
+    collision_attempts: dict[tuple[str, str, str], int]
+    #: Rejections per surface written by a build that tracks recovery.
+    tracked: dict[str, int]
+    tracked_windows: list[int]
+    #: ``(occurred_at, window_s)`` of each tracked rejection, per surface.
+    tracked_rows: dict[str, list[tuple[datetime, int]]]
+
+
+def _aware(moment: datetime) -> datetime:
+    """A stored timestamp as aware UTC (SQLite hands back a naive one)."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
+def _tally_boundary_rejections(
+    events: Iterable[Event], stats: Callable[[str], ToolWriteStats]
+) -> _BoundaryTally:
+    """Count each ``WRITE_REJECTED`` event once per tool and once per key."""
+    tally = _BoundaryTally(
+        kinds={},
+        collision_attempts={},
+        tracked={},
+        tracked_windows=[],
+        tracked_rows={},
+    )
+    for event in events:
+        surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
+        stats(surface).boundary_rejected += 1
+        window = event.payload.get("recovery_window_s")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            tally.tracked[surface] = tally.tracked.get(surface, 0) + 1
+            tally.tracked_windows.append(window)
+            tally.tracked_rows.setdefault(surface, []).append(
+                (_aware(event.occurred_at), window)
+            )
+        in_this_attempt: set[tuple[str, str]] = set()
+        for row in event.payload.get("rejections") or []:
+            kind = str(row.get("kind", "other"))
+            # List indices are collapsed (``steps.0.action`` and
+            # ``steps.1.action`` → ``steps[].action``) because they are the
+            # same schema disagreement. Un-normalized, one mistake made in
+            # eight steps of one payload presented as eight separate
+            # collisions, each undercounting it.
+            loc = normalize_loc(str(row.get("loc", "")))
+            label = f"{kind}@{loc}" if loc else kind
+            tally.kinds[label] = tally.kinds.get(label, 0) + 1
+            in_this_attempt.add((kind, loc))
+        for kind, loc in in_this_attempt:
+            key = (surface, kind, loc)
+            tally.collision_attempts[key] = tally.collision_attempts.get(key, 0) + 1
+    return tally
+
+
+@dataclass
+class _RecoveryTally:
+    """What one pass over ``WRITE_RECOVERED`` events yields."""
+
+    #: Rejected attempts recovered, per surface.
+    recovered: dict[str, int]
+    #: When the latest recovery on each surface was written. A recovery
+    #: consumes every rejection noted before it, so a tracked rejection at or
+    #: before this time is not pending.
+    latest_at: dict[str, datetime]
+
+
+def _tally_recoveries(events: Iterable[Event]) -> _RecoveryTally:
+    """Rejected attempts recovered, per surface, from ``WRITE_RECOVERED``."""
+    tally = _RecoveryTally(recovered={}, latest_at={})
+    for event in events:
+        # One malformed event must not fail health: skip it.
+        n = event.payload.get("rejected_attempts")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            continue
+        surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
+        tally.recovered[surface] = tally.recovered.get(surface, 0) + n
+        at = _aware(event.occurred_at)
+        if surface not in tally.latest_at or at > tally.latest_at[surface]:
+            tally.latest_at[surface] = at
+    return tally
+
+
+def _pending_by_surface(
+    boundary: _BoundaryTally, recoveries: _RecoveryTally, now: datetime
+) -> dict[str, int]:
+    """Tracked rejections still inside their window at ``now`` and unrecovered.
+
+    A rejection is pending when its own window has not closed and no
+    ``WRITE_RECOVERED`` on its surface was written at or after it. Derived
+    from row timestamps only, so it needs nothing the store does not hold.
+    """
+    pending: dict[str, int] = {}
+    for surface, rows in boundary.tracked_rows.items():
+        claimed_at = recoveries.latest_at.get(surface)
+        count = sum(
+            1
+            for at, window in rows
+            if (now - at).total_seconds() <= window
+            and (claimed_at is None or at > claimed_at)
+        )
+        if count:
+            pending[surface] = count
+    return pending
+
+
+def _rate_clause(item: Mapping[str, Any]) -> str:
+    """`` on <tool> (N% of M attempts)`` for a rated row; empty for a file kind."""
+    if item["rate"] is None:
+        return ""
+    return (
+        f" on {item['tool']} ({item['rate']:.0%} of {item['tool_attempts']} attempts)"
+    )
+
+
+def _call_attempts(surface: str, tool_stats: ToolWriteStats) -> int:
+    """Attempts on ``surface``: accepted calls plus rejected ones.
+
+    For a tool that fans out (:data:`_CALL_LEVEL_OPERATION`) both sides are
+    that operation's: its accepts and its executor rejections, so a rejected
+    extraction command is not counted as a rejected call. Any other tool uses
+    its totals. Calls that returned success without writing (``WRITE_NOOP``)
+    are attempts too. See :class:`ToolWriteStats`.
+    """
+    operation = _CALL_LEVEL_OPERATION.get(surface)
+    if operation:
+        accepted = tool_stats.accepted_by_operation.get(operation, 0)
+        executor_rejected = tool_stats.executor_rejected_by_operation.get(operation, 0)
+    else:
+        accepted = tool_stats.accepted
+        executor_rejected = tool_stats.executor_rejected
+    return accepted + tool_stats.noop + tool_stats.boundary_rejected + executor_rejected
+
+
+def _repeated_collisions(
+    collision_attempts: Mapping[tuple[str, str, str], int],
+    by_tool: Mapping[str, ToolWriteStats],
+) -> list[dict[str, Any]]:
+    """The ``(surface, kind, loc)`` rejections that recur, rated where they can be.
+
+    A file condition (:data:`_COLLISION_REASONS`) is warned on distinct
+    attempts alone. Any other kind must also be a share of its tool's
+    attempts above :data:`_COLLISION_RATE_WARN`, with at least
+    :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE` attempts to rate. The floor
+    hides a low-volume total failure and a kind spread over many ``loc``
+    values; see the note at :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE`.
+    """
+    rows: list[dict[str, Any]] = []
+    for (surface, kind, loc), count in collision_attempts.items():
+        if count < _REPEAT_COLLISION_WARN:
+            continue
+        if kind in _COLLISION_REASONS:
+            rows.append(
+                {
+                    "kind": kind,
+                    "loc": loc,
+                    "tool": surface,
+                    "count": count,
+                    "tool_attempts": None,
+                    "rate": None,
+                }
+            )
+            continue
+        tool_stats = by_tool.get(surface)
+        if tool_stats is None:
+            continue
+        tool_attempts = _call_attempts(surface, tool_stats)
+        if tool_attempts < _MIN_ATTEMPTS_FOR_COLLISION_RATE:
+            continue
+        share = count / tool_attempts
+        if share > _COLLISION_RATE_WARN:
+            rows.append(
+                {
+                    "kind": kind,
+                    "loc": loc,
+                    "tool": surface,
+                    "count": count,
+                    "tool_attempts": tool_attempts,
+                    "rate": round(share, 4),
+                }
+            )
+    rows.sort(key=lambda r: (-r["count"], r["tool"], r["kind"], r["loc"]))
+    return rows
+
+
+def _recovery_report(
+    tracked: Mapping[str, int],
+    recovered: Mapping[str, int],
+    pending: Mapping[str, int],
+    windows: list[int],
+) -> RecoveryReport:
+    """Pair tracked rejections with the recoveries emitted for the same tool.
+
+    ``recovered`` is capped at ``tracked`` and ``pending`` at what is left
+    after it, so the three never add past what was tracked. The share's
+    denominator leaves pending rejections out: they have not had their window.
+    """
+    by_tool: dict[str, ToolRecovery] = {}
+    for surface, count in sorted(tracked.items()):
+        done = min(recovered.get(surface, 0), count)
+        waiting = min(pending.get(surface, 0), count - done)
+        settled = count - waiting
+        by_tool[surface] = ToolRecovery(
+            tracked=count,
+            recovered=done,
+            pending=waiting,
+            share=round(done / settled, 4) if settled else None,
+        )
+    total = sum(t.tracked for t in by_tool.values())
+    done_total = sum(t.recovered for t in by_tool.values())
+    waiting_total = sum(t.pending for t in by_tool.values())
+    settled_total = total - waiting_total
+    window = max(windows) if windows else None
+    return RecoveryReport(
+        tracked_rejections=total,
+        recovered_rejections=done_total,
+        pending_rejections=waiting_total,
+        recovered_share=round(done_total / settled_total, 4) if settled_total else None,
+        window_seconds=window,
+        by_tool=by_tool,
+        note=RECOVERY_APPROXIMATION_NOTE.format(window=window) if total else "",
+    )
+
+
 def summarize_write_health(
     event_log: EventLog,
     *,
@@ -913,8 +1680,17 @@ def summarize_write_health(
     ``ToolWriteStats.accepted_by_operation`` keys that same total by the
     ``operation`` name ``MUTATION_EXECUTED`` already carries, so a reader
     can recover the per-kind count the flat total hides.
+
+    Two surfaces count a call rather than a command. ``mcp:record_feedback``
+    never reaches the executor, so its accepted side is the
+    ``FEEDBACK_RECORDED`` events the tool emits itself (``source="mcp"``). And
+    a call that returned success without writing (a duplicate ``save_memory``)
+    leaves a ``WRITE_NOOP`` row, counted as an attempt beside ``accepted``.
+    Both are absent from windows written before their events existed, which
+    makes a rate read over such a window overstate.
     """
-    since = datetime.now(tz=UTC) - timedelta(days=days)
+    now = datetime.now(tz=UTC)
+    since = now - timedelta(days=days)
     by_tool: dict[str, ToolWriteStats] = {}
 
     def stats(key: str) -> ToolWriteStats:
@@ -931,53 +1707,64 @@ def summarize_write_health(
             tool_stats.accepted_by_operation.get(operation, 0) + 1
         )
 
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    for event in feedback_scan.events:
+        if event.source == _FEEDBACK_EVENT_SOURCE:
+            stats(FEEDBACK_SURFACE).accepted += 1
+
+    noop_scan = scan_events(
+        event_log, event_type=EventType.WRITE_NOOP, since=since, limit=limit
+    )
+    for event in noop_scan.events:
+        stats(surface_label(str(event.payload.get("tool") or ""))).noop += 1
+
     executor_reasons: dict[str, int] = {}
     rejected_scan = scan_events(
         event_log, event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
     )
     for event in rejected_scan.events:
-        stats(str(event.payload.get("requested_by") or "")).executor_rejected += 1
+        tool_stats = stats(str(event.payload.get("requested_by") or ""))
+        tool_stats.executor_rejected += 1
+        operation = str(event.payload.get("operation") or "(unknown)")
+        tool_stats.executor_rejected_by_operation[operation] = (
+            tool_stats.executor_rejected_by_operation.get(operation, 0) + 1
+        )
         reason = str(event.payload.get("reason") or "failed")
         executor_reasons[reason] = executor_reasons.get(reason, 0) + 1
 
-    boundary_kinds: dict[str, int] = {}
-    collision_counts: dict[tuple[str, str], int] = {}
     boundary_scan = scan_events(
         event_log, event_type=EventType.WRITE_REJECTED, since=since, limit=limit
     )
-    for event in boundary_scan.events:
-        tool = str(event.payload.get("tool") or "")
-        stats(
-            f"mcp:{tool}" if tool and ":" not in tool else tool
-        ).boundary_rejected += 1
-        for row in event.payload.get("rejections") or []:
-            kind = str(row.get("kind", "other"))
-            # List indices are collapsed (``steps.0.action`` and
-            # ``steps.1.action`` → ``steps[].action``) because they are the
-            # same schema disagreement. Un-normalized, one mistake made in
-            # eight steps of one payload presented as eight separate
-            # "repeated schema collision" reasons, each undercounting it.
-            loc = normalize_loc(str(row.get("loc", "")))
-            label = f"{kind}@{loc}" if loc else kind
-            boundary_kinds[label] = boundary_kinds.get(label, 0) + 1
-            collision_counts[(kind, loc)] = collision_counts.get((kind, loc), 0) + 1
+    boundary = _tally_boundary_rejections(boundary_scan.events, stats)
+    recovered_scan = scan_events(
+        event_log, event_type=EventType.WRITE_RECOVERED, since=since, limit=limit
+    )
+    recoveries = _tally_recoveries(recovered_scan.events)
 
     accepted = sum(s.accepted for s in by_tool.values())
+    noop = sum(s.noop for s in by_tool.values())
     boundary_rejected = sum(s.boundary_rejected for s in by_tool.values())
     executor_rejected = sum(s.executor_rejected for s in by_tool.values())
-    attempts = accepted + boundary_rejected + executor_rejected
+    attempts = accepted + noop + boundary_rejected + executor_rejected
     rate = (boundary_rejected + executor_rejected) / attempts if attempts else 0.0
 
-    repeated = [
-        {"kind": kind, "loc": loc, "count": count}
-        for (kind, loc), count in sorted(
-            collision_counts.items(), key=lambda item: -item[1]
-        )
-        if count >= _REPEAT_COLLISION_WARN
-    ]
+    repeated = _repeated_collisions(boundary.collision_attempts, by_tool)
+    recovery = _recovery_report(
+        boundary.tracked,
+        recoveries.recovered,
+        _pending_by_surface(boundary, recoveries, now),
+        boundary.tracked_windows,
+    )
 
     scan = merge_coverage(
-        accepted_scan.coverage, rejected_scan.coverage, boundary_scan.coverage
+        accepted_scan.coverage,
+        feedback_scan.coverage,
+        noop_scan.coverage,
+        rejected_scan.coverage,
+        boundary_scan.coverage,
+        recovered_scan.coverage,
     )
 
     reasons: list[str] = []
@@ -999,9 +1786,9 @@ def summarize_write_health(
         )
         reasons.append(
             f"repeated {label}: {item['kind']} at {loc} "
-            f"x{item['count']} — {explanation}"
+            f"x{item['count']}{_rate_clause(item)} — {explanation}"
         )
-    if boundary_rejected > 0 and accepted == 0:
+    if boundary_rejected > 0 and accepted + noop == 0:
         reasons.append(
             f"{boundary_rejected} boundary rejection(s) and zero accepted "
             "writes in window — every write attempt is failing"
@@ -1012,12 +1799,14 @@ def summarize_write_health(
         accepted=accepted,
         boundary_rejected=boundary_rejected,
         executor_rejected=executor_rejected,
+        noop=noop,
         attempts=attempts,
         rejection_rate=round(rate, 4),
         by_tool=by_tool,
-        boundary_kinds=boundary_kinds,
+        boundary_kinds=boundary.kinds,
         executor_reasons=executor_reasons,
         repeated_collisions=repeated,
+        recovery=recovery,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

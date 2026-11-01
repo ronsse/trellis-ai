@@ -107,6 +107,27 @@ def _make_stale(registry: MagicMock, session_id: str) -> None:
     )
 
 
+def _make_count_stale(registry: MagicMock, session_id: str) -> None:
+    """Append a join as the build before ``memory_tool_calls`` wrote it.
+
+    Every other key, the outcome's own included, is the current one: only the
+    count is missing, so the join differs from a new parse by that key alone.
+    """
+    latest = _joins_of(registry, session_id)[-1]
+    latest["outcome"] = {
+        key: value
+        for key, value in latest["outcome"].items()
+        if key != "memory_tool_calls"
+    }
+    registry.operational.event_log.emit(
+        EventType.CAPTURE_SESSION_PACKS,
+        source="test",
+        entity_id=session_id,
+        entity_type="capture_session",
+        payload=latest,
+    )
+
+
 def _fixture(tmp_path: Path) -> tuple[MagicMock, Path, Path]:
     """Three pack-serving sessions, swept, two of them then made stale.
 
@@ -309,6 +330,127 @@ class TestDryRun:
             getattr(live, key) for key in counts
         ]
         assert dry.pack_joins_recorded == 3
+
+
+def _count_fixture(tmp_path: Path) -> tuple[MagicMock, Path]:
+    """Four swept sessions whose latest joins differ from a new parse by
+    ``memory_tool_calls`` alone, in three of them; the fourth is current.
+
+    ``sess-two`` made two Trellis calls and one other call, ``sess-none``
+    made one other call and no Trellis call, ``sess-silent`` made no call at
+    all, and ``sess-current`` made one Trellis call and keeps its join.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _pack_session(
+        root / "proj" / "sess-two.jsonl",
+        "sess-two",
+        ("get_context", A),
+        ("get_items", B),
+        error=True,
+    )
+    _pack_session(root / "proj" / "sess-none.jsonl", "sess-none", error=True)
+    _pack_session(root / "proj" / "sess-silent.jsonl", "sess-silent")
+    _pack_session(
+        root / "proj" / "sess-current.jsonl", "sess-current", ("get_context", C)
+    )
+    _sweep(registry, root, tmp_path / "wm.json")
+    for name in ("sess-two", "sess-none", "sess-silent"):
+        _make_count_stale(registry, name)
+    return registry, root
+
+
+class TestBackfillsTheMemoryToolCount:
+    """A join whose outcome predates ``memory_tool_calls`` is rewritten with it.
+
+    Selection is unchanged: the rejoin compares the whole payload with the
+    session's latest, so a join missing one key of its outcome differs from
+    every new parse and is written again, from the transcript as it stands.
+    """
+
+    def test_the_old_join_is_absent_the_new_one_is_filled_from_the_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        registry, root = _count_fixture(tmp_path)
+        for name in ("sess-two", "sess-none", "sess-silent"):
+            old = _joins_of(registry, name)[-1]["outcome"]
+            assert "memory_tool_calls" not in old
+            assert old.get("memory_tool_calls") is None
+            assert len(_joins_of(registry, name)) == 2
+
+        _rejoin(registry, root)
+
+        for name, count in (("sess-two", 2), ("sess-none", 0), ("sess-silent", 0)):
+            joins = _joins_of(registry, name)
+            assert len(joins) == 3
+            assert "memory_tool_calls" not in joins[1]["outcome"]
+            assert joins[2]["outcome"]["memory_tool_calls"] == count
+            assert type(joins[2]["outcome"]["memory_tool_calls"]) is int
+            # The rewrite changes nothing else about the join.
+            rest = {
+                k: v for k, v in joins[2]["outcome"].items() if k != "memory_tool_calls"
+            }
+            assert rest == joins[1]["outcome"]
+            assert {k: v for k, v in joins[2].items() if k != "outcome"} == {
+                k: v for k, v in joins[1].items() if k != "outcome"
+            }
+
+    def test_only_the_joins_lacking_the_key_are_selected(self, tmp_path: Path) -> None:
+        registry, root = _count_fixture(tmp_path)
+        current_before = _joins_of(registry, "sess-current")
+
+        report = _rejoin(registry, root)
+
+        assert _joins_of(registry, "sess-current") == current_before
+        assert report.sessions_scanned == 4
+        assert report.pack_joins_recorded == 3
+        assert report.pack_joins_unchanged == 1
+
+    def test_a_second_rejoin_writes_nothing(self, tmp_path: Path) -> None:
+        registry, root = _count_fixture(tmp_path)
+        _rejoin(registry, root)
+        joins = len(_events(registry, EventType.CAPTURE_SESSION_PACKS))
+
+        second = _rejoin(registry, root)
+
+        assert len(_events(registry, EventType.CAPTURE_SESSION_PACKS)) == joins
+        assert second.pack_joins_recorded == 0
+        assert second.pack_joins_unchanged == second.sessions_scanned == 4
+
+    def test_the_dry_run_selects_what_the_live_run_writes(self, tmp_path: Path) -> None:
+        live_registry, live_root = _count_fixture(tmp_path / "live")
+        dry_registry, dry_root = _count_fixture(tmp_path / "dry")
+        before = _events(dry_registry, EventType.CAPTURE_SESSION_PACKS)
+
+        dry = _rejoin(dry_registry, dry_root, dry_run=True)
+        live = _rejoin(live_registry, live_root)
+
+        assert _events(dry_registry, EventType.CAPTURE_SESSION_PACKS) == before
+        assert dry.dry_run is True
+        assert {**dry.to_payload(), "dry_run": False, "transcripts_root": ""} == {
+            **live.to_payload(),
+            "transcripts_root": "",
+        }
+        assert dry.pack_joins_recorded == 3
+
+    def test_the_cutoff_still_decides_which_transcripts_are_read(
+        self, tmp_path: Path
+    ) -> None:
+        registry, root = _count_fixture(tmp_path)
+        old = root / "proj" / "sess-two.jsonl"
+        _set_mtime(old, 1_000_000_000)
+        for path in root.glob("proj/*.jsonl"):
+            if path != old:
+                _set_mtime(path, 1_800_000_000)
+
+        report = _rejoin(
+            registry, root, since=datetime.fromtimestamp(1_700_000_000, tz=UTC)
+        )
+
+        assert report.pack_joins_recorded == 2
+        assert len(_joins_of(registry, "sess-two")) == 2
+        assert len(_joins_of(registry, "sess-none")) == 3
 
 
 class TestAsTheSweepParses:

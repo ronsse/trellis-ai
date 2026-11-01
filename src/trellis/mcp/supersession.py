@@ -306,6 +306,32 @@ def _t_doc_skip(
     return _ineligibility(doc, allowed=allowed)
 
 
+def stamp_in_place(
+    registry: StoreRegistry,
+    *,
+    doc_id: str,
+    successor: str,
+    clearance: Sensitivity,
+) -> bool:
+    """Whether ``doc_id`` already declares ``successor``, so stamping it writes nothing.
+
+    Read-only, and never raises: a document that cannot be read answers
+    ``False``, the side on which a stamp is expected to run and report for
+    itself. The check :func:`supersede_document` makes before it writes,
+    exposed so a caller can tell a stamp that wrote from one that did not.
+    """
+    try:
+        doc = visible_document(
+            registry.knowledge.document_store, doc_id, clearance=clearance
+        )
+        if doc is None:
+            return False
+        return declared_successor(dict(doc.get("metadata") or {})) == successor
+    except Exception:
+        logger.warning("supersession_stamp_probe_failed", target=doc_id, exc_info=True)
+        return False
+
+
 def supersede_document(
     registry: StoreRegistry,
     *,

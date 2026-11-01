@@ -24,7 +24,9 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 
 `init` writes the data directory into `config.yaml` as `data_dir`. Every surface that opens the stores (CLI commands, `admin health`, the MCP server, the REST API and the capture sweep) reads it from there first, then from `$TRELLIS_DATA_DIR`, then uses `data/` in the config dir. With `--force`, the `--data-dir` default above applies: `init` does not read the `config.yaml` it replaces.
 
-When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix for `Stores not initialized at PATH`.
+When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix when the stores were never created. The message names the `data_dir` key when that key supplied the path: if the stores were moved or restored, change `data_dir` to where they are now, because `init` without `--force` creates an empty `stores/` at the configured path and exits 0.
+
+`config.yaml` is read strictly. The top-level keys it accepts are `knowledge`, `operational`, `embeddings`, `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`, `default_agent` and `format`, plus any key starting with `x-`. An unknown key, a store name its plane does not have, a store placed under the other plane, or the removed flat `stores:` block raises `ConfigError` naming the file and each offending entry: the CLI exits 5 (`EXIT_STORE`), REST answers 409 `config_error` when it surfaces in a request, and the API refuses to start. Keys are echoed only when they are plain names. A plane DSN env var (`TRELLIS_KNOWLEDGE_PG_DSN` or `TRELLIS_OPERATIONAL_PG_DSN`) that no store of that plane reads logs a `registry_plane_dsn_unused` warning once per process.
 
 **JSON output (success):**
 
@@ -40,11 +42,17 @@ When `config.yaml` exists and `--force` is not given, `init` leaves the file alo
 
 ### `trellis admin health`
 
-Check health of Trellis stores. Read-only: it resolves each store's backend from `config.yaml` without opening the store, so it makes no connection and creates no file.
+Check health of Trellis stores. Read-only: it resolves each store's backend from `config.yaml` without building the store, so it makes no network connection and creates no file. A SQLite store file that exists is opened read-only (`mode=ro&immutable=1`: it is never created, takes no lock, and leaves no `-wal` or `-shm` file beside it) and must read as a database.
 
 ```bash
-trellis admin health [--format text|json]
+trellis admin health [--require-stores] [--format text|json]
 ```
+
+**Exit codes.** `0` unless a store file is damaged or cannot be opened, in which case `5` (`EXIT_STORE`) in both formats. A file that exists but is not a database (random bytes, a truncated or mangled file, a schema that is not valid text) is `DAMAGED` in text output and listed in a `damaged` object in JSON (`{"documents.db": "not a valid SQLite database"}`, absent when nothing is damaged); its `.db` key stays `true`, because the file is there. A path that is there but cannot be opened read-only (a file this user may not read, a directory, a symlink loop, a symlink whose target is missing) is reported the same way as `could not be opened read-only` and also exits `5`, so a monitor that runs as a different user from the store's owner gets `5`, not `0`. A missing store file exits `0`, because `admin init` creates none; pass `--require-stores` to exit `5` when any SQLite store file is missing, for a monitor that runs against a deployment already in use. A store on another backend has no `.db` key and is never a failure. An empty file is a valid empty database.
+
+**What the probe does not catch.** It reads each file's first page, so it finds a file that is not a database, not corruption deeper in one. A file truncated by less than a page, a good first page with the rest zeroed, and a good main file beside a garbage `-wal` all read healthy (an immutable open ignores the `-wal`).
+
+**It holds no lock, so a read beside a writer can be wrong.** Holding no lock is what keeps the probe from touching a live store, and it means a checkpoint or `VACUUM` rewriting pages mid-read can make a healthy file fail once. A failed read is retried up to 3 times, 0.1 s apart, and a file is reported damaged only if every attempt fails; a healthy file costs one. That lowers the rate and does not remove it, so a single `5` from a store that is being written is worth one repeat run before acting. In one bounded stress against a synthetic WAL file (a single hammering writer at a time, about 15 s per run: automatic checkpoint, truncating checkpoint, schema churn, and three runs of `VACUUM`), about 661,000 probes saw 309 failed reads on healthy files, and one probe, under the `VACUUM` writer, still reported damage after its three attempts. That is a measurement of that run, not a guarantee.
 
 **JSON output** (knowledge plane on Postgres, operational plane on SQLite):
 
@@ -66,6 +74,8 @@ trellis admin health [--format text|json]
 ```
 
 `backends` is always present and names the configured backend of each store health reports on: `document`, `graph`, `vector`, `event_log` and `trace`. The blob, outcome, parameter, tuner_state and api_key stores are not reported. Only a `sqlite` store gets a `.db` key, and `false` means its file does not exist. That file is the store's `db_path` when `config.yaml` sets one, otherwise the key's name under the stores directory. `trellis admin init` creates no store files: each is created the first time its store is used, so `false` is normal on a fresh install. A store on any other backend has no `.db` key, and text output lists it as, for example, `postgres (not checked)`. A value that names no registered backend (a typo, `null`, or a DSN written where a name belongs) is `null` in `backends` and `unknown backend (not checked)` in text output; health never prints the value. Health opens no connection, so it cannot tell you whether that store is reachable.
+
+When `TRELLIS_DATA_DIR` is set and names a different directory from the `data_dir` in `config.yaml`, the key wins and health says so: JSON output gains a `data_dir_disagreement` object (`in_use`, `in_use_from`, `ignored`, `ignored_from`) and text output prints the same two paths under the table. The field is absent when the variable is unset or names the same directory, however it is spelled (trailing slash, symlink, `..`). The same disagreement logs a `registry_data_dir_env_ignored` warning on stderr once per process, naming the `data_dir` key and both paths; it never changes an exit code or a command's stdout. The comparison does not expand `~`, because nothing that opens the stores does.
 
 ### `trellis admin stats`
 
@@ -90,6 +100,67 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > **Breaking, since #451:** `documents` used to be the row count. A consumer
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
+
+### `trellis admin backup`
+
+Copy the SQLite stores to a directory while they are in use.
+
+```bash
+trellis admin backup --output DIR [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output` | (required) | A new directory, or an existing empty one. A non-empty directory or a file is refused (exit 2) before any store is read, so two backups never mix. |
+| `--format` | `text` | Output format. The exit code does not depend on it. |
+
+**Do not copy the `.db` files with `cp`.** The SQLite stores run in WAL mode: a write is acknowledged once it is in the `-wal` file, and the main file lags behind until a checkpoint. A `cp` of the main file while a server runs drops those writes, and the copy still passes `PRAGMA integrity_check`, so nothing flags the loss. `admin backup` copies each store with SQLite's online backup API (`sqlite3.Connection.backup`), which reads one consistent snapshot of that store and is safe beside a running writer. Each copy is a single self-contained file with no `-wal` / `-shm` beside it.
+
+**What is copied.** The set of stores comes from the same resolution the rest of Trellis uses (`config.yaml` and the registry), not from a filename glob, so a store with an explicit `db_path` is found. Under `OUTPUT/stores/`:
+
+- one `.db` file per configured SQLite store that exists: `traces.db`, `documents.db`, `graph.db`, `vectors.db`, `events.db`, `outcomes.db`, `parameters.db`, `tuner_state.db` and `api_keys.db`;
+- `policies.json` when the policy file exists;
+- `feedback/pack_feedback.jsonl` when the feedback audit log exists.
+
+`OUTPUT/manifest.json` records, per store, the file, its size in bytes, the row count of every table (virtual-table shadow tables such as the full-text index's are left out), the `PRAGMA integrity_check` result of the **copy**, and the Trellis version and commit that wrote it. The JSON printed by `--format json` is the same document plus `output`.
+
+**What is not copied, and how it is reported.** Nothing is skipped silently:
+
+- A store on a backend other than SQLite (for example `postgres`, `pgvector`, `neo4j`, `arcadedb`) has status `skipped`. Use that backend's own tool: `pg_dump` for Postgres and pgvector, `neo4j-admin database dump` for Neo4j, ArcadeDB's `BACKUP DATABASE` command. A `null` event log has nothing to copy and is `not_applicable`, not a gap.
+- A local blob directory with files in it is `skipped`: this command does not copy the tree. Copy `stores/blobs/` with your file tooling, or rely on S3 bucket versioning for the `s3` backend.
+- `not_copied` lists every other entry under the stores directory, such as the JSON state files (`settings.json`, `advisories.json`, `schedule.json`) and any other directory. They are not copied, only named. `config.yaml` and `learning_params.yaml` live in the config directory, outside it, and are never copied: back them up yourself, because the restore below needs the `data_dir` line in `config.yaml`.
+
+**Exit codes.** `0` only when every configured store was copied and its copy passed `integrity_check`. `5` when a store failed (`status: error`), when something was skipped (`status: incomplete`), or when no store file was found at all (a wrong data directory looks like this). `2` when `--output` is refused. A backup that left data out never exits `0`.
+
+**The stores are copied one after another**, so the set is not a single instant. Each store is internally consistent; documents and events written between the first and last copy may not line up across stores. Stop the writers (the API, the MCP server, the capture sweep) first if the stores must agree with each other.
+
+**The output holds every memory and the API-key hashes.** The directory is created `0700` and each file `0600`. Keep it that way, and keep it off shared storage.
+
+#### Restoring a backup
+
+There is no restore command: a restore is placing files while nothing is writing to them.
+
+1. **Stop every process that opens the stores:** the API, the MCP server (including the HTTP container), the capture sweep and any scheduled job. A running server keeps the old files open and goes on writing to them.
+2. **Choose the target data directory** and make sure `OUTPUT/stores/` goes to `<data_dir>/stores/`. For an in-place restore, move the damaged `stores/` aside first rather than deleting it.
+3. **Copy `OUTPUT/stores/*` into `<data_dir>/stores/`**, then delete any `*.db-wal` and `*.db-shm` left beside a store you replaced: a stale `-wal` belongs to the old file and must not be applied to the restored one. If `config.yaml` gives a store an explicit `db_path`, copy that store's `.db` to that path instead, since the registry reads that path and not `stores/`.
+4. **Point Trellis at the target through `config.yaml`.** `trellis admin init` writes the data directory into `config.yaml` as `data_dir`, and a `data_dir` in `config.yaml` beats `$TRELLIS_DATA_DIR`: `StoreRegistry.from_config_dir` takes the environment variable first, then overwrites it with the config value when one is set. So exporting `TRELLIS_DATA_DIR=/restore/target` on a host whose `config.yaml` already names a `data_dir` changes nothing: every surface keeps opening, and writing to, the original stores, and the restored copy sits unread. Edit `data_dir` in `config.yaml` to the target (or remove the line and use the environment variable), and confirm with the drill below: `admin stats` must show the restored counts, not the old store's.
+5. **Start the writers** once the drill below passes.
+
+#### Restore drill
+
+Run this against a scratch directory before you need it, and again after changing the backup job. It touches only the scratch directory.
+
+```bash
+SCRATCH=$(mktemp -d)
+export TRELLIS_CONFIG_DIR="$SCRATCH/config"   # a scratch config, not the real one
+unset TRELLIS_DATA_DIR
+trellis admin init --data-dir "$SCRATCH/data"
+cp -r OUTPUT/stores/. "$SCRATCH/data/stores/"
+trellis admin stats --format json
+trellis retrieve search "<a word you know is stored>" --format json
+```
+
+Compare `admin stats` with the table counts in `OUTPUT/manifest.json`. `traces` is the `traces` table of `traces.db`, `events` the `events` table of `events.db` and `document_rows` the `documents` table of `documents.db`: each must be equal. `nodes` and `edges` count only the current version of each row, while the manifest counts every row of the `nodes` and `edges` tables, superseded versions included, so they may be lower than the manifest and never higher. The search must return a document you know was stored. A restore that opens but is short of rows, or answers from an empty store, is a failed drill.
 
 ### `GET /api/v1/loops`
 
@@ -3202,7 +3273,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
-| `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. `lifecycle_states` accepts the whole vocabulary but phase one **cannot select `archived` or `current`** — the first is already archived, the second is an explicit assertion that the item belongs in service — so naming either returns zero by construction. Those states are reported back on `unselectable_lifecycle_states` (in the `RETENTION_PRUNED` payload and the operator message) and skip the scan entirely, so an inert criterion never reads as an empty corpus ([#419](https://github.com/ronsse/trellis-ai/issues/419)). Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age, and neither is a promoted precedent: a document row or graph node whose id is in the `precedent://learning/` namespace is skipped before any criterion is read and counted in `skipped_precedent` (a node already archived counts in `skipped_already_archived` instead). A candidate that vanishes before it is written, including a node redacted while the run is in progress, is counted in `skipped`, not re-created. Emits `RETENTION_PRUNED` in both modes, and also when an applied run fails part-way, counting what it archived before the failure. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
+| `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. `lifecycle_states` accepts the whole vocabulary but phase one **cannot select `archived` or `current`** — the first is already archived, the second is an explicit assertion that the item belongs in service — so naming either returns zero by construction. Those states are reported back on `unselectable_lifecycle_states` (in the `RETENTION_PRUNED` payload and the operator message) and skip the scan entirely, so an inert criterion never reads as an empty corpus ([#419](https://github.com/ronsse/trellis-ai/issues/419)). Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age, and neither is a promoted precedent: a document row or graph node whose id is in the `precedent://learning/` namespace is skipped before any criterion is read and counted in `skipped_precedent` (a node already archived counts in `skipped_already_archived` instead). A candidate that vanishes before it is written, including a node redacted while the run is in progress, is counted in `skipped`, not re-created. The entity scan depends on the criteria. A pass that names `unconfirmed_mints` first makes one store-side read of the unconfirmed mints, at most `MAX_ENTITIES_SCANNED` (20,000); on SQLite and Postgres plain nodes cost that read nothing. A pass that also names a selectable lifecycle state (`draft`, `deprecated`, `superseded`) and still has room under `max_items` then pages the graph (`search_nodes`, newest first, 500 per read) until it has `max_items` candidates or has read 20,000 distinct nodes, because the store cannot filter on lifecycle: archived, too-young and wrong-state rows count against that read budget but no longer shrink the window. A pass naming both criteria therefore keeps the mints' priority and reach, a row both reads reach is selected and counted once, and a pass naming a lifecycle state alone only pages. `current` or `archived` beside `unconfirmed_mints` selects no state, so that pass takes the mint read alone. The newest rows use the paging budget first, so a graph above the cap can stay truncated however often the pass is run. The walk steps back and re-reads after a deletion behind its cursor, so it can take more than the 40 reads a clean walk needs; it stops at a budget of `4 * MAX_ENTITIES_SCANNED // 500` (160) reads. Two narrow windows remain, each needing a concurrent write and each failing safe to the next pass: a deletion behind the cursor paired with an insert ahead of it between two reads, and a deletion between the count and the page select of one `search_nodes` call, which can miss a live row with `scan_truncated` false (reproduced on a fake store only). On the entity plane `scan_truncated: true` means rows may have been left unread (the cap, the read budget, or a store whose total contradicts its pages). A pass that names only `unconfirmed_mints` has read every mint when it is `false`, never the whole graph; a pass that pages and finds fewer candidates than `max_items` has read the whole graph only when it is `false`. The report names the capped plane in `scan_truncated_planes` (`document`, `entity`); the operator message says `scan capped at … documents` for the document plane and `entity scan stopped early` for the entity plane, naming its three causes (the cap, the read budget, store totals that disagreed); the candidate set is then a prefix of the population, newest first. The document plane can also read `true` when the corpus holds exactly `MAX_DOCUMENTS_SCANNED` (20,000) documents. `entities_scanned` is the number of distinct nodes read, once each even when the mint read and the walk both reach a row. On the Bolt backends `query` reads `limit * 4` newest nodes before it applies the property filter, so a pass naming `unconfirmed_mints` there reaches mints only among the newest 80,004 nodes, and a shorter answer, with `scan_truncated` false, does not prove every mint was read: 100 plain nodes ahead of one mint at a cap of 20 give no candidate and no truncation. That comes from reading the code, not from a live Bolt run. Emits `RETENTION_PRUNED` in both modes, and also when an applied run fails part-way, counting what it archived before the failure. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
 | `retention.restore` | `item_ids`, `reason` | Return archived items to `Lifecycle.state="current"`. The governed inverse of `retention.prune`, and what makes phase-one archival's reversibility real — direct store writes are forbidden and there is no governed document-update verb. Takes **explicit ids** (they ride the `RETENTION_PRUNED` payload), not criteria: re-deriving the set would re-run the selection that was wrong. Ids that are not archived or name no item, including a node redacted while the command runs, are skipped (`skipped_ids`), not errors. A graph-node restore also re-stamps the node's vector row with its restored lifecycle (a document restore gets this for free from `put_document`'s mirror); a sync failure does not undo the restore — it is logged and appended to the result's warnings, the same way a `precedent.demote`/`precedent.reinstate` sync failure is. Emits `RETENTION_RESTORED` unconditionally — also when the command fails part-way (listing what it restored before the failure) and when every id in the batch was refused or skipped — the same audit-completeness posture as `RETENTION_PRUNED`. A precedent is **not** unconditionally restored to `"current"`: it comes back to whatever lifecycle state it held immediately before that archival, read from SCD-2 history, so a precedent that was demoted and then pruned comes back demoted — prune-then-restore is not a second, unaudited way to undo a demotion. Only a precedent outside the `precedent://learning/` namespace, or one archived before promoted precedents were exempted from `retention.prune`, can have been pruned; a promoted precedent in the namespace is never a prune candidate. When that pre-archival state cannot be read from history, that one item is refused individually -- named in `refused_ids` / `refused_items` and a warning -- while the rest of the batch still restores or is skipped; the batch result is SUCCESS, with a partial count in the message, whenever at least one id was restored or the batch has no refusals at all (an all-skipped batch still succeeds). It is REJECTED only when at least one id was refused *and* none was restored, naming every refused id *and* every skipped id in the message; the rejection code is the refusal code when every refused id carries the same one (for example `retention_restore_history_unavailable`), and `retention_restore_nothing_restored` when the codes are mixed. Two more refusals cover a document row that holds nothing servable, each through the same path (named in `refused_items` and the warnings, the rest of the batch still restores). `retention_restore_precedent_node_missing`: a promoted precedent's document row is archived while its graph node no longer exists, so a `current` row would have no node behind it. `retention_restore_redaction_tombstone`: the row is the blank archived row `redaction.apply` leaves (`deprecation_reason` `redacted` *and* empty content, so an ordinary note archived with that free-text reason still restores), in or out of the `precedent://learning/` namespace. This includes a redaction whose purge failed after the row was blanked, where the node is still live; re-run `redaction.apply` on it. The node check runs first, so a redacted precedent reports the missing node. |
 
 ### Batch Execution
@@ -3872,7 +3943,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
 | `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage that runs still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
-| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --log-dir DIR --dry-run`. |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --dry-run` (add `--log-dir <data_dir>` for a log kept in the data directory, which `--reconcile-first` also scans). |
 | `--skip-noise-tags` | off | Skip stage 1. |
 | `--skip-advisories` | off | Skip stages 2 + 3. |
 | `--skip-learning` | off | Skip stage 4. |
@@ -3913,22 +3984,45 @@ trellis worker enrich [--concurrency N] [--limit N] \
 
 ### `trellis worker mine-precedents`
 
-Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.generate_precedent_candidates`).
+Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.mine`; `generate_precedent_candidates` is the same run returning only the candidates).
 
 ```bash
 trellis worker mine-precedents [--domain D] [--min-traces N] \
-  [--limit N] [--dry-run] [--format text|json]
+  [--limit N] [--scan-cap N] [--strict] [--dry-run] [--format text|json]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--domain` | (all) | Restrict mining to this trace domain. |
-| `--min-traces` | `3` | Minimum failure/partial traces required to mine. |
-| `--limit` | `100` | Max traces to analyze. |
-| `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
+| `--min-traces` | `3` | Minimum failure/partial traces required to mine (at least 1). |
+| `--limit` | `100` | Max **failure/partial** traces to find (at least `--min-traces`; below it the command exits `2` in both formats). It counts failures, not traces read. At most 20 of them, the newest, are shown to the model per run; older ones are not paged. |
+| `--scan-cap` | `5000` | Most traces to read, newest first, looking for failure/partial ones. |
+| `--strict` | off | Exit `1` when the model call failed (`outcome: llm_error`), in both formats. Off by default: the failure is reported (`status: "partial"`) and the exit is `0`. |
+| `--dry-run` | off | Report how many failure/partial traces are in scope, and whether a run would skip them as already mined, without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
 Candidates are **surfaced** as `PRECEDENT_CANDIDATE_MINED` events (one per candidate) but **not promoted**: `get_lessons`, `trellis retrieve precedents` and `GET /precedents` read `PRECEDENT_PROMOTED` only and never serve a mined candidate, and nothing routes one into the Review queue yet. Older versions emitted candidates as `PRECEDENT_PROMOTED` with `source="precedent_miner"`; readers skip those rows. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+
+**How far it reads.** `TraceStore.query` has no outcome filter, so the miner reads the newest traces and keeps the failure/partial ones, widening the read (the first read is at least 100 wide, then it doubles) until it holds enough to analyse, the store ends, or `--scan-cap` traces have been read. "Enough" is `max(min(--limit, 20), --min-traces)`: at most 20 failures are shown to the model per run, so reading on for the rest of a large `--limit` would change nothing. A stretch of recent successes therefore no longer hides older failures. A scan that reaches the cap reads up to three times `--scan-cap` rows in all, because each widening re-reads the window before it; a store of exactly `--scan-cap` traces is not reported as cut off. `failure_traces_in_scope` is the failures found (at most `--limit`); because the read stops once it has enough, it is not a count of the store's failures.
+
+**Why a run produced nothing.** `--format json` carries `outcome` in both the dry-run and the real-run payload, with `traces_examined`, `scan_cap`, `read_bound_hit`, `skipped_unchanged`, `source_digest` and `already_mined_candidate_ids`; `would_mine` (dry run) is true only for `outcome: would_mine`. `outcome` is one of:
+
+| `outcome` | Meaning |
+|---|---|
+| `mined` | The model returned candidates; they were written. |
+| `would_mine` | Dry run only: a real run would ask the model. |
+| `skipped_unchanged` | The same failure traces were mined before; nothing was asked or written. |
+| `no_failures` | The store was read to its end and holds no failure/partial trace (zero found is this whatever `--min-traces` is). |
+| `below_min_traces` | The store was read to its end; it holds fewer than `--min-traces`. |
+| `read_bound_hit` | The read stopped at `--scan-cap` before it held enough failures. Older traces were not read, so this is **not** "no failures"; raise `--scan-cap`. |
+| `no_candidates` | The model answered and returned no usable candidate. |
+| `llm_error` | The model call failed; nothing was written. |
+
+`no_candidates` and `llm_error` write nothing, so they leave nothing for a later run to skip against: every scheduled run pays for the call again.
+
+`read_bound_hit: true` also appears on a `mined` run that found fewer failures than it wanted at the cap. Text output prints one sentence for every outcome. These are reports, not failures: the exit code is `0` for every outcome and is the same in both formats, and `status` is `"ok"` except on `llm_error`, where it is `"partial"` (the `trellis worker capture-sessions` convention). `--strict` makes `llm_error` exit `1` in both formats; unlike `capture-sessions` it is off by default, so a scheduled run does not go red on a model outage unless asked. A malformed model reply still raises, as before.
+
+**A rerun over unchanged failures mints nothing.** Each candidate event records `source_digest`, a digest of the (at most 20) newest failure traces the model was shown plus the `--domain` scope, and `mining_run_id` and `run_candidate_count`, which say which run wrote it and how many events that run meant to write. The events are written only after every item in the model's reply has validated. A run whose digest matches a *complete* earlier run (some one `mining_run_id` with all `run_candidate_count` events present) skips: no model call, no event, `outcome: skipped_unchanged`, and that run's ids in `already_mined_candidate_ids`. A run cut off part-way by a failed write is not complete, so the next run retries. The lookup reads the newest 200 events for the digest; a run that minted more than 200 candidates cannot be shown complete and mines again every time. A new failure among the newest 20 changes the digest, so the next run mines again. A new success does not, unless it pushes a failure out of the read window, which can only happen when the read stopped at `--scan-cap`: the failures the window holds are the input, so a shrunken set is a different input and mines again (there is no subset check). Failures beyond the newest 20 are not paged. The key is the input, not the output: it does not judge whether two candidates mean the same thing, and it cannot skip against a run that wrote nothing (a malformed reply, `no_candidates`, `llm_error`) or against candidates minted before the digest was recorded, which carry no key. There is no flag to force a re-mine of unchanged failures.
 
 ### `trellis worker capture-sessions`
 
@@ -3953,6 +4047,16 @@ again only when its file changes, so an old join would otherwise read as `unknow
 to the pack holdout's pre-treatment exclusion for good. A watermark reset is not the
 remedy: it re-runs distillation through the judge and can write near-duplicate
 memories.
+
+A count added inside `outcome` is such a key too. `outcome.memory_tool_calls` is how
+many of the session's `tool_calls` were to a Trellis MCP tool (any server whose name
+holds `trellis`; a `Bash` call to the `trellis` CLI is not one). A join written before
+it lacks the key, and a rejoin writes that join again with the count, read from the
+unchanged transcript. A missing key means unknown, not `0`: a session that made no
+Trellis call reads `0`. No report or analysis reads the count. A whole-history rejoin
+adds one event per session, and those count against the holdout's scan limit, so compare
+the `--dry-run` count with the limit first, and pass `--limit` if the sum exceeds it:
+the report states the truncation, and its figures move.
 
 ```bash
 trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]
@@ -4705,6 +4809,18 @@ Two properties worth knowing before you read a banner:
 
 The check is advisory telemetry and fails soft: if it raises, the pack is served unbannered (the `track_token_usage` GRACEFUL-DEGRADATION posture). Indeterminate presents as healthy. Run `trellis analyze health` for the full per-tool accept/reject breakdown and rejection-kind taxonomy.
 
+### Rejection rate and recovery in `trellis analyze health`
+
+`trellis analyze health` turns `warn` on a repeated rejection, and the report carries a `recovery` block beside it. The rule used to be an absolute count with no denominator, counted error elements rather than attempts, and said the cause was a schema that disagrees with its docs. A busy, healthy tool crossed it on volume alone and stayed at `warn`.
+
+* **Attempts, not error elements.** `repeated_collisions[].count` is the number of distinct rejected calls that hit a `(kind, loc)`, with list indices normalised (`steps.3.x` and `steps.7.x` are one location). A call that fails on twelve steps is one attempt. `boundary_kinds` is unchanged and still counts error elements, which is what a taxonomy wants.
+* **Rated per tool, with a floor.** A payload rejection warns only when it is repeated (`_REPEAT_COLLISION_WARN`, 3 attempts), the tool has at least `_MIN_ATTEMPTS_FOR_COLLISION_RATE` (10) attempts in the window, and the rejected share of them is strictly above `_COLLISION_RATE_WARN` (5%). Each row carries `tool`, `count`, `tool_attempts` and `rate`. The thresholds are starting points chosen from the shape of the code, not fitted to any deployment's traffic: tune them when a window of real data says they are wrong. The floor can hide a low-volume total failure: 9 of 9 `save_knowledge` calls rejected is under the 10-attempt floor and reads ok, and one kind spread over many `loc` values, each under 5% of the tool's attempts, does the same. The rate finds a repeated payload fault in a busy tool, not a tool that has stopped working.
+* **What counts as an attempt.** A tool's attempts are its accepted calls, its calls that answered success without writing, and its rejected calls. `save_experience` fans out (one call is a `trace.ingest` command plus one command per extracted entity and edge), so it counts only `trace.ingest` accepts **and** `trace.ingest` executor rejections: a rejected extraction command is not a rejected call, and a tool whose extraction commands are refused in bulk does not dilute the rate. Every other tool counts executed commands, so the rate can miss the truth in either direction. A call that runs several commands counts several times (the rate understates). A call that returns success without running one counts not at all (the rate overstates). `save_memory` answers a duplicate that way, so each such reply (exact, near-match, or judged already covered by the reconcile path) now emits `WRITE_NOOP` with the tool and a closed `reason` (`exact_duplicate`, `fuzzy_duplicate`, `judged_covered`) and no content or id; the report counts it as an attempt and prints the count as `noop`. A duplicate that stamps `supersedes` is counted once, by the write the stamp makes. **Rows from before the event existed are not there to count, so a window that still holds them overstates the `save_memory` rate until it rolls past them.**
+* **`mcp:record_feedback` is rated against its own event.** The tool runs no executor command, so its accepted call is the `FEEDBACK_RECORDED` event it emits with `source="mcp"`; the REST route and `trellis curate feedback` emit the same event type under other sources and are not counted here. It has no `accepted_by_operation`. A reply that says feedback was recorded while the event log was unavailable leaves no event and counts as no attempt. File conditions (`config_unreadable`, `stale_write`) are a condition of the file and not a share of any tool's calls: they warn on recurrence alone and `rate` and `tool_attempts` are `null`.
+* **The reason names possibilities, not a cause.** It reads `repeated rejection: <kind> at <loc> xN on <tool> (R% of A attempts) — cause not established: ...` and lists the schema, its docs or skill, the rejection hint, and callers sending a bad payload as candidates. The row says how often and where, not which.
+* **`recovery`: was a rejected write retried and accepted?** MCP boundary `WRITE_REJECTED` rows written by this build carry `recovery_window_s`. When the same MCP tool next returns without raising inside that window, the server emits `WRITE_RECOVERED` (`tool`, `rejected_attempts`, `window_s`, and nothing else). `recovery` reports `tracked_rejections`, `recovered_rejections`, `pending_rejections`, `recovered_share` and `by_tool`. **This is an approximation, and it can sit on either side of the truth.** The pairing is by tool within `RECOVERY_WINDOW_SECONDS` (120 s), held in process memory. Keying per tool is a choice and not a limit of the transport: a stdio server serves one process per client, and an authenticated HTTP request carries a key id (`current_principal_id`) that the pairing does not use. It overstates when another caller's accepted call of the same tool stands in for the retry. It understates when the retry arrives after the window, goes through another tool or process, or follows a server restart, which drops the pending rejections. "Accepted" means the call returned without raising: a duplicate reply that wrote nothing still emits `WRITE_RECOVERED`, and so does `record_feedback` answering "recorded" while the event log was unavailable. A rejection noted more than a window before the next one is dropped rather than carried, so a rejection from yesterday cannot be claimed by today's accepted call. `pending_rejections` counts tracked rejections whose window had not closed when the report was read and that no recovery followed; they can still be recovered, so they are left out of `recovered_share`'s denominator, and the share is `null` while only pending rows remain. The server's clock stamps the rows and the reader's clock decides what is pending, so a few seconds of skew can move a row across that line. `recovered` is capped at `tracked` per tool: that cap is the only way it can exceed it, and it applies when a recovery in the window belongs to a rejection written before the window opened. Nothing identifying is stored. Rows written before tracking lack `recovery_window_s` and stay out of the denominator, so a window of only old rows reports `recovered_share: null` ("not measured"), not 0.
+* The recovery share is reported and does not change `status`.
+
 ### Citing Pack Elements in Feedback
 
 Every pack-assembling tool — the three sectioned-context tools and the flat `get_context` / `search` paths alike (#392, decision-ledger D-4) — renders each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`. Empty packs are no exception: the header and footer appear at every holdout rate, so an empty pack's advisories can be cited too. Advisories sit above the footer, so the footer is the last thing in the response:
@@ -4734,7 +4850,7 @@ These element-level signals land in the `FEEDBACK_RECORDED` event payload so the
 
 The cited ids are *not* written as `items_served` — they are what the agent referenced, not what the pack contained. The payload leaves `items_served` empty so the reference-rate metric keeps joining against the pack's own `PACK_ASSEMBLED` `injected_item_ids`; synthesizing it from the citations would report a 100% reference rate for every attributed pack.
 
-The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback --log-dir <stores_dir>/feedback` (or `worker curate --reconcile-first`, which scans that directory) replays it.
+The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback` (which reads `<stores_dir>/feedback` by default; or `worker curate --reconcile-first`, which scans that directory) replays it.
 
 ### Retrieval Budgets
 

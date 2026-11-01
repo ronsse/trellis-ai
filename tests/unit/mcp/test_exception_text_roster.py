@@ -57,6 +57,11 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
         "never written into a reply itself, and the rebuilt message uses "
         "the safe helper."
     ),
+    "main": (
+        "exc.code is the error class's own constant, the message beside it goes "
+        "through sanitize_error_message, and the line is written to the "
+        "operator's stderr at startup, never into a reply to a caller."
+    ),
 }
 
 #: Per-module exemption rosters, keyed by POSIX path relative to the
@@ -71,8 +76,8 @@ _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
 }
 
 # Hand count (trellis-ai#748, shrunk by the MCP/CLI describe-dont-quote
-# follow-up sweep and its fix round): 1, in
-# _SanitizeUncaughtToolErrors.on_call_tool, in server.py.
+# follow-up sweep and its fix round): 2, in server.py:
+# _SanitizeUncaughtToolErrors.on_call_tool and main's startup error line.
 # save_experience, record_observation and execute_mutation each used to
 # carry one more (a raw pydantic ValidationError interpolated into the
 # caller-facing message) -- the follow-up sweep switched all three to
@@ -95,7 +100,7 @@ _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
 # finds none. Every other module under src/trellis/mcp (__init__.py,
 # auth.py, knowledge_links.py, reconcile.py, supersession.py) hand-reads
 # clean at this count.
-_HAND_READ_SITE_COUNT = 1
+_HAND_READ_SITE_COUNT = 2
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
 _MCP_PACKAGE_DIR = _SERVER_PATH.parent

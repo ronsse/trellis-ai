@@ -107,7 +107,7 @@ if TYPE_CHECKING:
         HoldoutReport,
         HoldoutSecondaryInference,
     )
-    from trellis.ops.write_health import ToolWriteStats
+    from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
 logger = structlog.get_logger(__name__)
 
@@ -676,17 +676,15 @@ def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
     )
 
 
-def _print_tool_table(
-    by_tool: dict[str, ToolWriteStats], bypass_surfaces: frozenset[str]
-) -> None:
+def _print_tool_table(by_tool: dict[str, ToolWriteStats]) -> None:
     """Render the per-surface accept/reject table in ``analyze health``.
 
     Two notes ride under the table rather than in it, because neither fits
     a flat accept/boundary/executor column: a surface with more than one
     ``Operation`` folded into ``accepted`` gets its breakdown named, and a
-    surface in *bypass_surfaces* (writes never reach the executor) gets a
-    pointer to where its real count is reported instead, so ``accepted=0``
-    there is not misread as zero activity.
+    surface that answered some calls with success but wrote nothing (a
+    duplicate ``save_memory``) gets that count named, since those calls are
+    in its attempts but in none of the columns.
     """
     tool_table = Table(show_header=True, header_style="bold")
     tool_table.add_column("surface")
@@ -710,14 +708,11 @@ def _print_tool_table(
                 )
             )
             console.print(f"    {escape(surface)} by operation: {breakdown}")
-        if surface in bypass_surfaces:
-            # This surface's writes bypass MutationExecutor, so accepted=0
-            # above is structural, not a report of zero activity. Its real
-            # count is the Serve line's feedback events, not this table.
+        if stats.noop:
             console.print(
-                f"    [dim]{escape(surface)}: writes bypass the executor, "
-                "so accepted=0 here by construction — see feedback "
-                "events in the Serve line below[/dim]"
+                f"    [dim]{escape(surface)}: {stats.noop} call(s) answered "
+                "success without writing (duplicates), counted as attempts but "
+                "not as accepted[/dim]"
             )
 
 
@@ -761,6 +756,33 @@ def _print_serving_builds(builds: ServingBuildsReport) -> None:
             )
 
 
+def _print_recovery(console: Console, recovery: RecoveryReport) -> None:
+    """The recovered share and its caveat, or nothing when nothing was tracked.
+
+    Rejections still inside their window are named but not rated: they have
+    not had the chance to be retried, so counting them as unrecovered would
+    read as failure what is only recent. All numbers, so nothing here needs
+    escaping; the note is printed with ``markup=False``.
+    """
+    if recovery.tracked_rejections == 0:
+        return
+    waiting = recovery.pending_rejections
+    if recovery.recovered_share is None:
+        console.print(
+            f"    recovered: not measurable yet, {waiting} tracked boundary "
+            "rejection(s) still inside the window"
+        )
+    else:
+        settled = recovery.tracked_rejections - waiting
+        more = f", {waiting} more still inside the window" if waiting else ""
+        console.print(
+            f"    recovered: {recovery.recovered_rejections}/{settled} tracked "
+            f"boundary rejections followed by an accepted call "
+            f"({recovery.recovered_share:.0%}){more}"
+        )
+    console.print(f"      {recovery.note}", markup=False)
+
+
 @analyze_app.command("health")
 def health(
     days: int = typer.Option(7, help="Days of history to analyze"),
@@ -790,10 +812,7 @@ def health(
     Status is `warn` with named reasons when any deterministic threshold
     trips — the surface the grooming loop watches.
     """
-    from trellis.ops.write_health import (  # noqa: PLC0415
-        _EXECUTOR_BYPASS_SURFACES,
-        summarize_backend_health,
-    )
+    from trellis.ops.write_health import summarize_backend_health  # noqa: PLC0415
 
     event_log = get_event_log()
     with wrap_cli_meta_analysis(
@@ -824,20 +843,22 @@ def health(
         # computed over a shorter window than the header just claimed.
         console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     write = report.write
+    noop_clause = f", {write.noop} answered without writing" if write.noop else ""
     console.print(
         f"  Writes: {write.accepted} accepted, "
         f"{write.boundary_rejected} rejected at boundary, "
-        f"{write.executor_rejected} rejected in executor "
+        f"{write.executor_rejected} rejected in executor{noop_clause} "
         f"({write.rejection_rate:.0%} of {write.attempts} attempts)"
     )
     if write.by_tool:
-        _print_tool_table(write.by_tool, _EXECUTOR_BYPASS_SURFACES)
+        _print_tool_table(write.by_tool)
+    _print_recovery(console, write.recovery)
     if write.boundary_kinds:
-        console.print("  Boundary rejection taxonomy:")
+        console.print("  Boundary rejection taxonomy (error elements, not calls):")
         for label, count in sorted(
             write.boundary_kinds.items(), key=lambda item: -item[1]
         ):
-            console.print(f"    {count:>3}  {label}")
+            console.print(f"    {count:>3}  {escape(label)}")
     serve = report.serve
     console.print(
         f"  Serve: {serve.packs_with_injected_items}/{serve.packs} packs carry "

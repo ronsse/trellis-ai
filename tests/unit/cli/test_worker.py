@@ -1772,9 +1772,9 @@ class TestWorkerCurateLoop:
     ) -> None:
         """A config.yaml parse warning fires once per process, not per cycle.
 
-        A top-level ``stores:`` block is deprecated and makes
+        A plane block that is not a mapping (``knowledge: [graph]``) makes
         ``StoreRegistry.from_config_dir`` log
-        ``registry_config_flat_stores_removed`` once per call. Each curate
+        ``registry_config_plane_not_mapping`` once per call. Each curate
         cycle used to rebuild a *second* registry (via
         ``trellis_cli.config.get_data_dir``) to resolve its advisory store,
         re-parsing config.yaml and re-logging that warning every cycle. The
@@ -1782,7 +1782,7 @@ class TestWorkerCurateLoop:
         across ``max_cycles=3`` the warning fires exactly once — from
         whichever call first builds the registry, not once per cycle.
         """
-        _write_config(tmp_path / "config", "stores: {}\n")
+        _write_config(tmp_path / "config", "knowledge: [graph]\n")
         _seed_promote_signal(temp_stores)
 
         monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
@@ -1809,9 +1809,7 @@ class TestWorkerCurateLoop:
             clear_cached_logger_proxies()
 
         occurrences = [
-            e
-            for e in cap_logs
-            if e.get("event") == "registry_config_flat_stores_removed"
+            e for e in cap_logs if e.get("event") == "registry_config_plane_not_mapping"
         ]
         assert len(occurrences) == 1, occurrences
 
@@ -1915,7 +1913,8 @@ class TestWorkerEnrich:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         text = " ".join(text.split())
         assert "'uv pip install trellis-ai[llm-openai]'" in text
-        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+        assert "Run: pip install 'trellis-ai[llm-openai]'" in text
+        assert 'pip install -e ".[llm-openai]"' in text
 
     @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
     def test_the_no_client_hint_names_both_extras(
@@ -4351,7 +4350,15 @@ class TestARefusedNightlyWriteEscalates:
 
         report = self._rejections(temp_stores)
         assert report.repeated_collisions == [
-            {"kind": "config_unreadable", "loc": ADVISORY_FILENAME, "count": 3}
+            {
+                "kind": "config_unreadable",
+                "loc": ADVISORY_FILENAME,
+                "tool": "config:advisory_file",
+                "count": 3,
+                # A file condition has no accepted side to rate against.
+                "tool_attempts": None,
+                "rate": None,
+            }
         ]
         assert report.status == "warn"
         assert any("config_unreadable" in r for r in report.reasons)

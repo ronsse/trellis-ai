@@ -18,7 +18,7 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
 * :func:`enrich_cmd` (``trellis worker enrich``) — batch LLM enrichment of
   unenriched / low-confidence-tagged documents.
 * :func:`mine_precedents_cmd` (``trellis worker mine-precedents``) — wraps
-  :meth:`PrecedentMiner.generate_precedent_candidates`.
+  :meth:`PrecedentMiner.mine`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same
   :func:`~trellis_workers.session_capture.sweep.run_sweep` the
@@ -102,7 +102,7 @@ from trellis_cli.analyze import (
     _resolve_learning_output_dir,
 )
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -118,8 +118,8 @@ if TYPE_CHECKING:
     from trellis.ops import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
-    from trellis.stores.base.trace import TraceStore
     from trellis.stores.base.vector import VectorStore
+    from trellis_workers.learning.miner import MiningReport
 
 logger = structlog.get_logger(__name__)
 
@@ -1413,7 +1413,7 @@ def curate_cmd(
         "--reconcile-first",
         help=(
             "Backfill pack_feedback.jsonl into the EventLog before the cycle "
-            "(runs reconcile_feedback_log_to_event_log against the data dir). "
+            "(scans <stores_dir>/feedback and the data dir). "
             "Refused with --dry-run."
         ),
     ),
@@ -1453,8 +1453,7 @@ def curate_cmd(
     if dry_run and reconcile_first:
         msg = (
             "--reconcile-first writes events, so --dry-run refuses it; preview "
-            "the backfill with 'trellis admin reconcile-feedback --log-dir DIR "
-            "--dry-run'"
+            "the backfill with 'trellis admin reconcile-feedback --dry-run'"
         )
         raise typer.BadParameter(msg)
 
@@ -2138,7 +2137,7 @@ def _run_batch_enrichment(
 
 
 # ---------------------------------------------------------------------------
-# worker mine-precedents — wrap PrecedentMiner.generate_precedent_candidates
+# worker mine-precedents — wrap PrecedentMiner.mine
 # ---------------------------------------------------------------------------
 
 
@@ -2148,67 +2147,146 @@ def mine_precedents_cmd(
         None, "--domain", help="Restrict mining to this trace domain."
     ),
     min_traces: int = typer.Option(
-        3, "--min-traces", help="Minimum failure/partial traces required to mine."
+        3,
+        "--min-traces",
+        min=1,
+        help="Minimum failure/partial traces required to mine.",
     ),
-    limit: int = typer.Option(100, "--limit", help="Max traces to analyze."),
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        min=1,
+        help=(
+            "Max failure/partial traces to find, at least --min-traces. At "
+            "most 20 (the newest) are shown to the model per run; older ones "
+            "are not paged."
+        ),
+    ),
+    scan_cap: int | None = typer.Option(
+        None,
+        "--scan-cap",
+        min=1,
+        help=(
+            "Most traces to read, newest first, looking for failure/partial "
+            "ones; a scan stopped here says so. Defaults to the miner's own "
+            "cap, reported as scan_cap."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Report how many failure traces are in scope without calling the LLM.",
+        help=(
+            "Report how many failure traces are in scope, and whether a run "
+            "would skip them as already mined, without calling the LLM."
+        ),
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "Exit non-zero when the model call failed (outcome llm_error). "
+            "Off by default: a failed call is reported as status partial, "
+            "exits 0, and the next run asks again."
+        ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format."),
 ) -> None:
     """Mine precedent candidates from failure / partial traces.
 
-    Wraps :meth:`PrecedentMiner.generate_precedent_candidates`. Candidates
-    are surfaced (and persisted as ``PRECEDENT_CANDIDATE_MINED`` events,
-    one per candidate). They are **not** promoted: ``get_lessons`` and
-    ``GET /precedents`` do not serve them, and nothing routes them into the
-    Review queue yet.
+    Wraps :meth:`PrecedentMiner.mine`. Candidates are surfaced (and
+    persisted as ``PRECEDENT_CANDIDATE_MINED`` events, one per candidate).
+    They are **not** promoted: ``get_lessons`` and ``GET /precedents`` do not
+    serve them, and nothing routes them into the Review queue yet.
+
+    ``--limit`` counts failure/partial traces, and must be at least
+    ``--min-traces`` (exit 2 otherwise, in both formats). The store is read
+    newest first, in widening reads of at most ``--scan-cap`` traces, until it
+    holds enough to analyse (at most 20 are shown to the model), so a run of
+    recent successes does not hide older failures. A run that stopped at the
+    cap reports ``read_bound_hit``: that is not "no failures", it means older
+    traces were not read.
+
+    A run over the same failure traces as an earlier complete run mints
+    nothing and reports ``skipped_unchanged``. A new failure among the newest
+    analysed changes the input, so it mines again; a new success does not,
+    unless it pushes a failure out of the read window. A run that wrote only
+    some of its candidates is not complete, and the next run retries. It does
+    not judge whether two candidates mean the same thing.
+
+    A failed model call reports ``status: partial`` and ``outcome: llm_error``
+    and exits 0 unless ``--strict``. ``no_candidates`` and ``llm_error`` write
+    nothing, so a scheduled run asks the model again every time.
 
     Requires an LLM extra. Without a configured client this command exits
     loudly (the miner would otherwise return an empty list silently).
     """
+    if limit < min_traces:
+        # Nothing can be mined from fewer failures than the minimum, so this
+        # is refused before the stores open rather than run to a false report.
+        message = (
+            f"--limit ({limit}) is below --min-traces ({min_traces}); no run "
+            f"could mine. Raise --limit or lower --min-traces."
+        )
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(
+                f"[red]worker mine-precedents: {escape(message)}[/red]",
+                soft_wrap=True,
+            )
+        raise typer.Exit(code=EXIT_VALIDATION)
+
     trace_store = get_trace_store()
     event_log = get_event_log()
     llm = _require_llm_client_or_exit(
         LLMConsumer.PRECEDENT_MINING, command="worker mine-precedents"
     )
 
+    from trellis_workers.learning.miner import (  # noqa: PLC0415
+        DEFAULT_TRACE_SCAN_CAP,
+        PrecedentMiner,
+    )
+
+    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+    cap = DEFAULT_TRACE_SCAN_CAP if scan_cap is None else scan_cap
+
     if dry_run:
-        in_scope = _count_failure_traces(trace_store, domain=domain, limit=limit)
+        plan = miner.plan(
+            domain=domain, min_traces=min_traces, limit=limit, scan_cap=cap
+        )
         if output_format == "json":
             emit_json(
                 {
                     "status": "ok",
                     "dry_run": True,
                     "domain": domain,
-                    "failure_traces_in_scope": in_scope,
+                    "failure_traces_in_scope": plan.failures_in_scope,
                     "min_traces": min_traces,
-                    "would_mine": in_scope >= min_traces,
+                    "would_mine": plan.outcome == "would_mine",
+                    **_mining_scan_fields(plan),
                 }
             )
         else:
             console.print(
                 f"[bold]worker mine-precedents[/bold] DRY-RUN — "
-                f"{in_scope} failure/partial trace(s) in scope "
+                f"{plan.failures_in_scope} failure/partial trace(s) in scope "
                 f"(min_traces={min_traces})"
             )
+            _print_mining_outcome(plan, min_traces=min_traces)
         return
 
-    from trellis_workers.learning.miner import PrecedentMiner  # noqa: PLC0415
-
-    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
-    precedents = asyncio.run(
-        miner.generate_precedent_candidates(
-            domain=domain, min_traces=min_traces, limit=limit
-        )
+    report = asyncio.run(
+        miner.mine(domain=domain, min_traces=min_traces, limit=limit, scan_cap=cap)
     )
+    precedents = report.candidates
+    # Same flag for the payload's status and the exit below, so the two
+    # surfaces cannot disagree about whether the run failed.
+    failed = report.outcome == "llm_error"
 
     if output_format == "json":
         emit_json(
             {
-                "status": "ok",
+                "status": "partial" if failed else "ok",
                 "dry_run": False,
                 "domain": domain,
                 "candidate_count": len(precedents),
@@ -2220,38 +2298,98 @@ def mine_precedents_cmd(
                     }
                     for p in precedents
                 ],
+                "failure_traces_in_scope": report.failures_in_scope,
+                **_mining_scan_fields(report),
             }
         )
-        return
-    console.print(
-        f"[bold]worker mine-precedents[/bold] — "
-        f"{len(precedents)} candidate(s) generated"
-    )
-    for p in precedents:
-        console.print(f"  - [{p.confidence:.2f}] {p.title}")
-    if precedents:
+    else:
         console.print(
-            "[dim]Candidates are surfaced, not promoted. Review before "
-            "acting on them.[/dim]"
+            f"[bold]worker mine-precedents[/bold] — "
+            f"{len(precedents)} candidate(s) generated"
         )
+        for p in precedents:
+            console.print(f"  - [{p.confidence:.2f}] {escape(p.title)}")
+        _print_mining_outcome(report, min_traces=min_traces)
+        if precedents:
+            console.print(
+                "[dim]Candidates are surfaced, not promoted. Review before "
+                "acting on them.[/dim]"
+            )
+
+    # Opt-in, unlike capture-sessions: main exits 0 on an outage and a
+    # scheduled unit going red on one is the operator's call, not a default.
+    if failed and strict:
+        raise typer.Exit(code=EXIT_INTERNAL)
 
 
-def _count_failure_traces(
-    trace_store: TraceStore,
-    *,
-    domain: str | None,
-    limit: int,
-) -> int:
-    """Count failure/partial traces in scope — the miner's eligibility input."""
-    from trellis.schemas.enums import OutcomeStatus  # noqa: PLC0415
+def _mining_scan_fields(report: MiningReport) -> dict[str, Any]:
+    """The part of a mining payload that says what was read and why it stopped."""
+    return {
+        "outcome": report.outcome,
+        "traces_examined": report.traces_examined,
+        "scan_cap": report.scan_cap,
+        "read_bound_hit": report.read_bound_hit,
+        "skipped_unchanged": report.outcome == "skipped_unchanged",
+        "source_digest": report.source_digest,
+        "already_mined_candidate_ids": list(report.already_mined),
+    }
 
-    traces = trace_store.query(domain=domain, limit=limit)
-    return sum(
-        1
-        for t in traces
-        if t.outcome
-        and t.outcome.status in (OutcomeStatus.FAILURE, OutcomeStatus.PARTIAL)
-    )
+
+def _print_mining_outcome(report: MiningReport, *, min_traces: int) -> None:
+    """Say, for every outcome, why a mining run produced what it did."""
+    outcome = report.outcome
+    analysed = len(report.analyzed)
+    if outcome == "mined":
+        console.print(
+            f"[green]mined:[/green] {len(report.candidates)} candidate(s) from "
+            f"{analysed} failure/partial trace(s)."
+        )
+    elif outcome == "would_mine":
+        console.print(
+            f"[green]would mine:[/green] a real run would show the model "
+            f"{analysed} failure/partial trace(s)."
+        )
+    elif outcome == "skipped_unchanged":
+        console.print(
+            f"[yellow]skipped:[/yellow] these {analysed} "
+            f"failure/partial trace(s) were already mined into "
+            f"{len(report.already_mined)} candidate(s) "
+            f"({escape(', '.join(report.already_mined))}); nothing was minted. "
+            f"A new failure trace changes the input."
+        )
+    elif outcome == "no_failures":
+        console.print(
+            f"No failure/partial traces: read {report.traces_examined} trace(s) "
+            f"and the store holds no more."
+        )
+    elif outcome == "below_min_traces":
+        if report.read_to_end:
+            console.print(
+                f"Below --min-traces ({min_traces}): the store was read to its end."
+            )
+        else:
+            console.print(
+                f"Below --min-traces ({min_traces}): only "
+                f"{report.failures_in_scope} were kept, so nothing was mined."
+            )
+    elif outcome == "no_candidates":
+        console.print(
+            "[yellow]no candidates:[/yellow] the model answered but returned "
+            "none; nothing was written, so the next run asks again."
+        )
+    elif outcome == "llm_error":
+        console.print(
+            "[red]llm error:[/red] the model call failed; nothing was "
+            "written, so the next run asks again."
+        )
+    elif outcome == "no_llm":
+        console.print("No model is configured; nothing was read.")
+    if report.read_bound_hit:
+        console.print(
+            f"[yellow]read stopped at the {report.scan_cap}-trace cap with "
+            f"{report.failures_in_scope} failure/partial trace(s) found; older "
+            f"traces were not read (raise --scan-cap)[/yellow]"
+        )
 
 
 # ---------------------------------------------------------------------------

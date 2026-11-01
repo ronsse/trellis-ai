@@ -158,12 +158,6 @@ def _data_dir() -> Path:
     return Path(os.environ.get("TRELLIS_DATA_DIR", str(_config_dir() / "data")))
 
 
-#: Resolved once per process, at import time — same posture as
-#: ``trellis.core.write_provenance``'s stamp: environment-specific, but
-#: not something that needs re-reading mid-process.
-_FEEDBACK_LOG_DIR = str(_data_dir() / "stores" / "feedback")
-
-
 JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
     (
         # -- Host-only: need the docker socket, gh auth, or /mnt/data. --
@@ -294,8 +288,6 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
                 "trellis",
                 "admin",
                 "reconcile-feedback",
-                "--log-dir",
-                _FEEDBACK_LOG_DIR,
                 "--format",
                 "json",
             ),

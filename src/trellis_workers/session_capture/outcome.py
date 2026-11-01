@@ -12,6 +12,13 @@ the text of a qualifying result are read in memory, and only what they count
 survives the parse: the digest is F8-safe and the event it rides is stored
 where anyone with the event log can read it.
 
+* **Tool calls** are ``tool_use`` blocks that name a tool, every tool.
+  **Memory tool calls** are those whose tool is one of Trellis's own MCP
+  tools: matched on the server in the name (see :func:`trellis_tool_name`),
+  so a tool added later counts without a list to edit. A ``Bash`` call to
+  the ``trellis`` CLI is not one. A join written before this count existed
+  lacks the key, which is unknown and not zero; a rejoin of its transcript
+  fills it.
 * **Assistant turns** are API messages, one per ``message.id``. Claude Code
   writes one record per content block and repeats the message's ``usage`` on
   each, input and cache counts unchanged and output growing, so a message's
@@ -126,6 +133,10 @@ class SessionOutcome:
 
     #: ``tool_use`` blocks, every tool.
     tool_calls: int = 0
+    #: Of :attr:`tool_calls`, those to a Trellis MCP tool: the server in the
+    #: name holds ``trellis``. Not a ``Bash`` call to the ``trellis`` CLI. A
+    #: join written before this field lacks the key, which reads as unknown.
+    memory_tool_calls: int = 0
     #: ``tool_result`` blocks flagged ``is_error``.
     tool_errors: int = 0
     #: API messages the model wrote, one per ``message.id``.
@@ -179,6 +190,7 @@ class OutcomeTally:
 
     def __init__(self) -> None:
         self._tool_calls = 0
+        self._memory_tool_calls = 0
         self._tool_errors = 0
         self._user_turns = 0
         #: The ``uuid`` of every record folded; a record under one again is a copy.
@@ -251,6 +263,9 @@ class OutcomeTally:
             if isinstance(block.get("name"), str) and block["name"]
         ]
         self._tool_calls += len(named)
+        self._memory_tool_calls += sum(
+            1 for block in named if trellis_tool_name(block["name"]) is not None
+        )
         if record.get("isApiErrorMessage"):
             self._state = _API_ERROR
             return
@@ -351,6 +366,7 @@ class OutcomeTally:
         )
         return SessionOutcome(
             tool_calls=self._tool_calls,
+            memory_tool_calls=self._memory_tool_calls,
             tool_errors=self._tool_errors,
             assistant_turns=len(self._usage),
             assistant_turns_with_usage=sum(
@@ -369,6 +385,21 @@ class OutcomeTally:
             ended_on_error=self._state in _ENDED_ON_ERROR,
             ended_interrupted=self._state in _ENDED_INTERRUPTED,
         )
+
+
+def trellis_tool_name(name: str) -> str | None:
+    """The tool part of a Trellis MCP tool's name, else ``None``.
+
+    MCP tools are named ``mcp__<server>__<tool>``. The local stdio server is
+    ``trellis`` and a connector or plugin carries ``trellis`` inside a longer
+    server name, so the server is matched on containing it, not on a list of
+    tools. A same-named tool on any other server is not Trellis's, and a
+    tool that is not an MCP tool (``Bash``, ``Read``) never is.
+    """
+    if not name.startswith("mcp__"):
+        return None
+    server, _, tool = name.removeprefix("mcp__").rpartition("__")
+    return tool if tool and "trellis" in server.lower() else None
 
 
 def _steps(command: str) -> frozenset[str]:

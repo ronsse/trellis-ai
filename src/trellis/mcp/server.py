@@ -34,6 +34,7 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -138,6 +139,7 @@ from trellis.ops.memory_extraction_health import (
     STATE_UNAVAILABLE,
     emit_memory_extraction_state,
 )
+from trellis.ops.write_health import NoopReason, RejectionRecoveryTracker
 from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
@@ -304,6 +306,13 @@ def _result_message(result: CommandResult) -> str:
     return result.message
 
 
+#: Pairs a boundary rejection with the accepted call that follows it, per
+#: tool and in memory. See
+#: :class:`trellis.ops.write_health.RejectionRecoveryTracker` for what it
+#: keeps (a tool name, a count and a time) and why it cannot key by caller.
+_REJECTION_RECOVERY = RejectionRecoveryTracker()
+
+
 def _record_boundary_rejection(
     *,
     tool: str,
@@ -334,7 +343,54 @@ def _record_boundary_rejection(
         rejections=rejections,
         hints=hints,
         payload_chars=payload_chars,
+        recovery=_REJECTION_RECOVERY,
     )
+
+
+def _note_accepted_call(tool: str) -> None:
+    """Emit ``WRITE_RECOVERED`` when a call is accepted right after rejections.
+
+    Called with the name of a tool whose call just returned without raising.
+    A tool that recorded no rejection recently costs one dict lookup. Wrapped
+    whole, like the rest of the write-health telemetry: pairing is advisory,
+    and an escaped exception here would fail a write that already succeeded.
+    """
+    try:
+        from trellis.ops.write_health import (  # noqa: PLC0415
+            record_write_recovery,
+            surface_label,
+        )
+
+        rejected = _REJECTION_RECOVERY.claim_recovery(surface_label(tool))
+        if rejected:
+            record_write_recovery(
+                _get_registry().operational.event_log,
+                tool=tool,
+                rejected_attempts=rejected,
+                window_seconds=_REJECTION_RECOVERY.window_seconds,
+            )
+    except Exception:
+        logger.warning("write_recovery.pairing_failed", tool=tool, exc_info=True)
+
+
+def _note_noop_call(tool: str, reason: NoopReason) -> None:
+    """Record that ``tool`` answered success without writing anything.
+
+    A duplicate reply leaves no ``MUTATION_EXECUTED``, so without this row the
+    call is missing from the attempts a rejection rate is divided by (see
+    :func:`trellis.ops.write_health.record_write_noop`). Wrapped whole, like
+    :func:`_note_accepted_call`: the reply already exists and is not this
+    function's to change, so nothing here may raise, including a registry that
+    cannot be built.
+    """
+    try:
+        from trellis.ops.write_health import record_write_noop  # noqa: PLC0415
+
+        record_write_noop(
+            _get_registry().operational.event_log, tool=tool, reason=reason
+        )
+    except Exception:
+        logger.warning("write_noop.record_failed", tool=tool, exc_info=True)
 
 
 # The ``instructions`` string is returned in the MCP ``initialize`` response and
@@ -450,6 +506,100 @@ class _SanitizeUncaughtToolErrors(Middleware):
 
 
 mcp.add_middleware(_SanitizeUncaughtToolErrors())
+
+
+#: The tools whose argument rejections are recorded as ``WRITE_REJECTED``.
+#: Each already records its body-level rejections through
+#: ``_record_boundary_rejection``, so ``test_capture_surface_roster.py``
+#: already knows how its surface clears (a capture surface with an accept
+#: recipe, or ``NON_CAPTURE_SURFACES``). ``record_observation`` and
+#: ``execute_mutation`` are deliberately absent: neither records a boundary
+#: rejection today, and ``execute_mutation`` stamps accepted writes with the
+#: authenticated principal rather than ``mcp:execute_mutation``, so a banner
+#: raised under that label could not clear. A read tool gets the message and
+#: no event.
+_RECORDED_ARGUMENT_TOOLS = frozenset(
+    {"save_experience", "save_knowledge", "save_memory", "record_feedback"}
+)
+
+
+class _ExplainArgumentRejections(Middleware):
+    """Tell a caller what a tool accepts when its arguments are wrong.
+
+    FastMCP validates a call's arguments against the tool signature before
+    the tool body runs, so a misspelt or mistyped argument never reaches the
+    body's own handling. Left alone it comes back as pydantic's text, which
+    names no accepted parameter and quotes the value the caller sent; and
+    because the body never ran it left no ``WRITE_REJECTED`` event either.
+
+    This rewrites that one failure (a pydantic ``ValidationError`` titled
+    ``call[<tool>]``, found as the ``__cause__`` of the exception FastMCP
+    raises) from the tool's own JSON schema, through
+    :func:`trellis.ops.write_health.describe_argument_rejection`, and records
+    it for a tool in :data:`_RECORDED_ARGUMENT_TOOLS`. It never loosens
+    anything: the call is still rejected, with the same ``ToolError`` type,
+    and an unexpected shape passes through untouched.
+
+    The rewrite is fail-soft as a whole: guidance is advisory, so a failure
+    to build it re-raises the original error. It never renders the exception
+    itself (``test_exception_text_roster.py``): the message is built from the
+    error's structured ``errors()`` rows and the schema.
+    """
+
+    def __init__(self, server: FastMCP) -> None:
+        self._server = server
+
+    async def _explain(self, tool: str, cause: BaseException | None) -> str | None:
+        """The rewritten message, or ``None`` to leave the error as it is."""
+        if not isinstance(cause, ValidationError) or not cause.title.startswith(
+            "call["
+        ):
+            return None
+        try:
+            from trellis.ops.write_health import (  # noqa: PLC0415
+                describe_argument_rejection,
+            )
+
+            declared = await self._server.get_tool(tool)
+            if declared is None:
+                return None
+            guidance = describe_argument_rejection(tool, declared.parameters, cause)
+            if tool in _RECORDED_ARGUMENT_TOOLS:
+                _record_boundary_rejection(
+                    tool=tool,
+                    error=cause,
+                    rejections=guidance.rows,
+                    hints=guidance.hints,
+                )
+        except Exception:
+            logger.warning("argument_rejection.guidance_failed", tool=tool)
+            return None
+        return guidance.message
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            message = await self._explain(context.message.name, exc.__cause__)
+            if message is None:
+                raise
+            raise ToolError(message) from exc.__cause__
+        # "Accepted" here means the call returned without raising, which is
+        # looser than "wrote something": a duplicate reply that stored nothing
+        # and a feedback reply that says the event log was down both return.
+        # Only the tools in ``_RECORDED_ARGUMENT_TOOLS`` ever have a rejection
+        # to pair with, and their body-level rejections do raise;
+        # ``record_observation`` and ``execute_mutation`` return some errors as
+        # JSON, but neither records a boundary rejection, so none is tracked.
+        _note_accepted_call(context.message.name)
+        return result
+
+
+mcp.add_middleware(_ExplainArgumentRejections(mcp))
 
 
 _registry: StoreRegistry | None = None
@@ -1690,17 +1840,21 @@ def save_experience(trace_json: str) -> str:
             top-level keys are ``source``, ``intent``, and ``context``.
             ``source`` must be one of ``agent``, ``human``, ``workflow``, or
             ``system``. Put execution details such as ``agent_id``, ``domain``,
-            ``started_at``, and ``ended_at`` inside ``context``. Each entry in
-            ``steps`` requires ``step_type`` and ``name``; do not use
-            ``action``/``observation`` as field names. A step's ``result`` is
-            an object, never a bare string: write ``{"summary": "12 passed"}``,
-            not ``"12 passed"``. Validation is
+            ``started_at``, and ``ended_at`` inside ``context``. A step takes
+            ``step_type`` and ``name`` (both required) and, optionally,
+            ``args``, ``result``, ``error``, ``duration_ms``, and
+            ``started_at``; there is no ``action`` or ``observation`` field.
+            A step's ``args`` and ``result`` are objects, never a bare string:
+            write ``{"summary": "12 passed"}``, not ``"12 passed"``. Record a
+            step that failed in its ``error`` string. Put how the work ended
+            in top-level ``outcome``: ``status`` (``success``, ``failure``,
+            ``partial`` or ``unknown``) and ``summary``. Validation is
             all-or-nothing: an unknown top-level or context field rejects the
             **entire trace** and nothing is recorded — not just that field. So
             put additional data in top-level ``metadata`` (or outcome
             measurements in ``outcome.metrics``).
 
-            Example minimal valid trace:
+            Example valid trace:
             {
               "source": "agent",
               "intent": "Fix a failing test",
@@ -1710,10 +1864,31 @@ def save_experience(trace_json: str) -> str:
                 "started_at": "2026-08-27T00:00:00Z",
                 "ended_at": "2026-08-27T00:01:00Z"
               },
-              "metadata": {"repo": "my/repo"},
               "steps": [
-                {"step_type": "tool_call", "name": "search"}
-              ]
+                {
+                  "step_type": "tool_call",
+                  "name": "run_tests",
+                  "args": {"path": "tests/unit"},
+                  "result": {"summary": "1 failed, 11 passed"}
+                },
+                {
+                  "step_type": "tool_call",
+                  "name": "edit_file",
+                  "args": {"path": "src/parser.py"},
+                  "error": "patch did not apply: file changed on disk"
+                },
+                {
+                  "step_type": "tool_call",
+                  "name": "edit_file",
+                  "args": {"path": "src/parser.py"},
+                  "result": {"summary": "patched"}
+                }
+              ],
+              "outcome": {
+                "status": "success",
+                "summary": "Fixed the failing parser test"
+              },
+              "metadata": {"repo": "my/repo"}
             }
     """
     if not trace_json or not trace_json.strip():
@@ -2374,7 +2549,18 @@ def _memory_exists_response(
     a re-send finishes a stamp that failed after the memory was stored.
     """
     if supersedes is None:
+        _note_noop_call("save_memory", "exact_duplicate")
         return f"Memory already exists: {existing_id}"
+    # Read before the stamp, which is what tells the two outcomes apart: a
+    # stamp that runs emits its own ``MUTATION_EXECUTED``, and that is already
+    # this call's accepted count, so it must not also be counted as a no-op.
+    # Only a stamp that was already in place writes nothing.
+    already_stamped = _supersession.stamp_in_place(
+        registry,
+        doc_id=supersedes,
+        successor=existing_id,
+        clearance=current_clearance(),
+    )
     error = _supersession.supersede_document(
         registry,
         doc_id=supersedes,
@@ -2392,6 +2578,8 @@ def _memory_exists_response(
                 "existing": existing_id,
             },
         )
+    if already_stamped:
+        _note_noop_call("save_memory", "exact_duplicate")
     return f"Memory already exists (supersedes {supersedes}): {existing_id}"
 
 
@@ -2420,6 +2608,20 @@ def _refuse_near_duplicate_supersedes(
         message,
         data={"field": "content", "supersedes": supersedes, "duplicate_of": match_id},
     )
+
+
+def _fuzzy_duplicate_response(
+    supersedes: str | None, match_id: str, similarity: float
+) -> str:
+    """Reply to a near-duplicate hit, refusing it first when ``supersedes`` was set.
+
+    With no ``supersedes`` the match is the answer and nothing is stored, so
+    the call is recorded as a no-op (:func:`_note_noop_call`): no
+    ``MUTATION_EXECUTED`` will stand for it.
+    """
+    _refuse_near_duplicate_supersedes(supersedes, match_id, similarity)
+    _note_noop_call("save_memory", "fuzzy_duplicate")
+    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
 
 
 def _supersede_saved_memory(
@@ -2559,8 +2761,7 @@ def save_memory(
                         match_id=match_id,
                         similarity=round(similarity, 3),
                     )
-                    _refuse_near_duplicate_supersedes(supersedes, match_id, similarity)
-                    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
+                    return _fuzzy_duplicate_response(supersedes, match_id, similarity)
         except McpError:
             # _get_minhash_index already wrapped the cause structurally.
             raise
@@ -3015,6 +3216,7 @@ def _save_memory_reconciled(
             logger.debug(
                 "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
             )
+            _note_noop_call("save_memory", "exact_duplicate")
             return f"Memory already exists: {existing_id}"
 
         candidate = _gather_reconcile_candidate(registry, document_store, content)
@@ -3064,6 +3266,7 @@ def _save_memory_reconciled(
         if raced is not None:
             # A concurrent writer stored identical content while we judged —
             # the deterministic dedup wins; drop our now-duplicate write.
+            _note_noop_call("save_memory", "exact_duplicate")
             return f"Memory already exists: {raced['doc_id']}"
         outcome = _reverify_candidate(document_store, candidate, outcome)
         stored_id, stored_meta, outcome = _commit_reconcile_verdict(
@@ -3111,6 +3314,10 @@ def _save_memory_reconciled(
             registry, stored_id, content, stored_meta or metadata, chash
         )
 
+    if not outcome.fallback and outcome.decision == ReconcileDecision.NOOP:
+        # The judge found the content already covered and nothing was
+        # written, so no ``MUTATION_EXECUTED`` stands for this call.
+        _note_noop_call("save_memory", "judged_covered")
     message = _reconcile_result_message(outcome, candidate, stored_id)
     return f"{message}\n{enrich_note}" if enrich_note else message
 
@@ -4793,6 +5000,12 @@ def _close_registry() -> None:
         _registry = None
 
 
+#: ``trellis_cli.exit_codes.EXIT_STORE``, the code the CLI gives a typed
+#: configuration or store error. Written out because core does not import the
+#: CLI; ``tests/unit/mcp/test_main_boundary.py`` pins the two equal.
+_EXIT_TRELLIS_ERROR = 5
+
+
 def main() -> None:
     """Run the Trellis MCP server over the configured transport.
 
@@ -4820,8 +5033,8 @@ def main() -> None:
     # only live record; the durable record is the same stamp on every
     # event it writes.
     logger.info("mcp_write_provenance", **get_write_provenance())
-    transport = resolve_transport()
     try:
+        transport = resolve_transport()
         if transport == TRANSPORT_HTTP:
             settings = resolve_http_settings()
             _configure_http_auth(settings)
@@ -4853,5 +5066,15 @@ def main() -> None:
         else:
             _install_shutdown_signal_handlers()
             mcp.run()
+    except TrellisError as exc:
+        # A bad ``TRELLIS_MCP_TRANSPORT``, an unusable http setting or a
+        # store that will not open is an operator error whose message names
+        # its own fix; a traceback buries it. One stderr line (stdout is the
+        # stdio protocol's) and the code the CLI gives this class. An untyped
+        # exception keeps its traceback.
+        sys.stderr.write(
+            f"trellis-mcp: {exc.code} — {sanitize_error_message(exc.message)}\n"
+        )
+        raise SystemExit(_EXIT_TRELLIS_ERROR) from None
     finally:
         _close_registry()

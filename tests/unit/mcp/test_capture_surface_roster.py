@@ -267,7 +267,15 @@ def _scan_sites_blind_to_except_handlers(source: str) -> list[_Site]:
 
 SERVER_SOURCE = SERVER_SOURCE_PATH.read_text(encoding="utf-8")
 SITES = _scan_sites(SERVER_SOURCE)
-TOOLS = sorted({site.tool for site in SITES if site.tool is not None})
+#: The argument-rejection middleware records for a *computed* ``tool=`` (the
+#: tool the failed call named), so the literal scan cannot see its tools.
+#: They join the roster from the set that middleware gates on, which is what
+#: puts each one through the same classification and clears-by-execution
+#: checks as a literal site.
+TOOLS = sorted(
+    {site.tool for site in SITES if site.tool is not None}
+    | set(server_mod._RECORDED_ARGUMENT_TOOLS)
+)
 
 #: How to make a **successful** call to each capture surface, so the guard
 #: can prove the accept event exists by emitting it rather than by asserting
@@ -287,7 +295,7 @@ def _minimal_trace_json() -> str:
     """The minimal valid trace from ``save_experience``'s own docstring."""
     doc = inspect.getdoc(save_experience)
     assert doc is not None
-    marker = "Example minimal valid trace:\n"
+    marker = "Example valid trace:\n"
     assert marker in doc
     return doc.split(marker, maxsplit=1)[1]
 
@@ -295,11 +303,21 @@ def _minimal_trace_json() -> str:
 def _unclassified(source: str) -> set[str]:
     """Tools with a rejection site but no declared way to clear the banner."""
     tools = {site.tool for site in _scan_sites(source) if site.tool is not None}
+    tools |= set(server_mod._RECORDED_ARGUMENT_TOOLS)
     return {
         tool
         for tool in tools
         if is_capture_surface(f"mcp:{tool}") and tool not in SUCCESS_CALL
     }
+
+
+def _middleware_span(source: str) -> tuple[int, int]:
+    """Lines of the one class allowed to call the recorder with a computed tool."""
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == "_ExplainArgumentRejections":
+            return node.lineno, node.end_lineno or node.lineno
+    msg = "_ExplainArgumentRejections is not defined in server.py"
+    raise AssertionError(msg)
 
 
 def _modules_calling(name: str, root: Path) -> set[str]:
@@ -397,7 +415,12 @@ class TestTheScanIsNotVacuous:
         Failing loudly is the point: the alternative is a rejection site the
         roster silently does not cover.
         """
-        dynamic = [site.lineno for site in SITES if site.tool is None]
+        allowed = _middleware_span(SERVER_SOURCE)
+        dynamic = [
+            site.lineno
+            for site in SITES
+            if site.tool is None and not allowed[0] <= site.lineno <= allowed[1]
+        ]
         assert dynamic == [], (
             f"{RECORDER} called with a non-literal tool= at lines {dynamic}; "
             "the roster guard cannot classify it — pass a string literal"

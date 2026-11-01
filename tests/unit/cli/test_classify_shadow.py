@@ -136,7 +136,8 @@ class TestShadowCommand:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         text = " ".join(text.split())
         assert "'uv pip install trellis-ai[llm-openai]'" in text
-        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+        assert "Run: pip install 'trellis-ai[llm-openai]'" in text
+        assert 'pip install -e ".[llm-openai]"' in text
 
     def test_the_no_client_hint_names_the_config_in_use(
         self, config_yaml: Path, monkeypatch: pytest.MonkeyPatch

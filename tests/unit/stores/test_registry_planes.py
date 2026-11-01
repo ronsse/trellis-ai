@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
+from trellis.errors import ConfigError
 from trellis.stores.registry import (
     _PLANE_OF,
     StoreRegistry,
@@ -102,29 +103,48 @@ def test_extract_config_plane_split_shape() -> None:
     assert result["graph"] == {"backend": "sqlite"}
 
 
-def test_extract_config_rejects_store_in_wrong_plane() -> None:
-    """A ``trace`` key under ``knowledge:`` should be dropped (with warning)."""
+def test_extract_config_refuses_store_in_wrong_plane() -> None:
+    """A ``trace`` key under ``knowledge:`` would run on sqlite; refuse it."""
     data: dict[str, Any] = {
         "knowledge": {
             "graph": {"backend": "sqlite"},
-            "trace": {"backend": "sqlite"},  # wrong plane
+            "trace": {"backend": "postgres"},  # wrong plane
         }
     }
-    result = _extract_store_config(data, "<test>")
-    assert "graph" in result
-    assert "trace" not in result
+    with pytest.raises(ConfigError) as info:
+        _extract_store_config(data, "<test>")
+    assert (
+        "'trace' is a store of the operational plane, not the knowledge plane"
+        in str(info.value)
+    )
+    assert "'operational:'" in str(info.value)
+    assert info.value.setting == "knowledge.trace"
 
 
-def test_extract_config_ignores_unknown_store_type() -> None:
+def test_extract_config_refuses_unknown_store_type() -> None:
     data: dict[str, Any] = {
         "knowledge": {
             "graph": {"backend": "sqlite"},
             "nonsense": {"backend": "whatever"},
         }
     }
-    result = _extract_store_config(data, "<test>")
-    assert "graph" in result
-    assert "nonsense" not in result
+    with pytest.raises(ConfigError) as info:
+        _extract_store_config(data, "<test>")
+    message = str(info.value)
+    assert "'knowledge:' has no store named 'nonsense'" in message
+    assert "blob, document, graph, vector" in message
+    assert info.value.setting == "knowledge.nonsense"
+
+
+def test_extract_config_names_every_misplaced_store() -> None:
+    data: dict[str, Any] = {
+        "knowledge": {"documents": {"backend": "postgres"}},
+        "operational": {"traces": {"backend": "postgres"}},
+    }
+    with pytest.raises(ConfigError) as info:
+        _extract_store_config(data, "<test>")
+    assert "'documents'" in str(info.value)
+    assert "'traces'" in str(info.value)
 
 
 def test_extract_config_empty_returns_empty() -> None:
@@ -180,21 +200,17 @@ def test_constructor_empty_config_uses_defaults() -> None:
     assert backend == "sqlite"
 
 
-def test_constructor_drops_store_in_wrong_plane() -> None:
-    """Plane-split with a misplaced store should drop it (existing behaviour)."""
-    registry = StoreRegistry(
-        config={
-            "knowledge": {
-                "graph": {"backend": "postgres"},
-                "trace": {"backend": "postgres"},  # wrong plane
-            },
-        }
-    )
-    backend, _ = registry._resolve_backend("graph")
-    assert backend == "postgres"
-    # Misplaced trace was dropped; resolves to default SQLite.
-    backend, _ = registry._resolve_backend("trace")
-    assert backend == "sqlite"
+def test_constructor_refuses_store_in_wrong_plane() -> None:
+    """A plane-split config with a misplaced store is refused, as from a file."""
+    with pytest.raises(ConfigError, match="'trace' is a store of the operational"):
+        StoreRegistry(
+            config={
+                "knowledge": {
+                    "graph": {"backend": "postgres"},
+                    "trace": {"backend": "postgres"},  # wrong plane
+                },
+            }
+        )
 
 
 # -- DSN resolution ------------------------------------------------------
