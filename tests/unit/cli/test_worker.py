@@ -1913,7 +1913,8 @@ class TestWorkerEnrich:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         text = " ".join(text.split())
         assert "'uv pip install trellis-ai[llm-openai]'" in text
-        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+        assert "Run: pip install 'trellis-ai[llm-openai]'" in text
+        assert 'pip install -e ".[llm-openai]"' in text
 
     @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
     def test_the_no_client_hint_names_both_extras(
