@@ -56,6 +56,50 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **The repeated-rejection health signal is rated against each tool's attempts and
+  no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
+  reached three rejections, with no denominator, so a busy, healthy tool stayed at
+  `warn` for good; it counted error elements rather than calls (one bad trace with
+  many steps was many collisions); and its reason said the schema and its docs or
+  skill disagree. It now counts distinct rejected attempts and warns only when the
+  tool has at least 10 attempts in the window and the rejected share is above 5%
+  (named constants in `trellis.ops.write_health`, starting points rather than
+  tuned values). The floor can hide a low-volume total failure, which the docs now
+  say. The reason lists the schema, its docs, the rejection hint and caller
+  payloads as possibilities and says the cause is not established. Each
+  `repeated_collisions` row gains `tool`, `tool_attempts` and `rate`, and rows are
+  per tool; file conditions keep warning on recurrence alone. The default label is
+  "repeated rejection", not "schema collision".
+- **What counts as an attempt is stated per tool.** `save_experience` is rated on
+  `trace.ingest` accepts and `trace.ingest` executor rejections only, so a refused
+  extraction command is not a refused call. `mcp:record_feedback` has an accepted
+  call after all, the `FEEDBACK_RECORDED` event it emits with `source="mcp"`, so it
+  is rated against that and its rejections instead of being left unrated. A
+  `save_memory` call that answers a duplicate stored nothing and left no accepted
+  event, so a healthy tool read as mostly failing; it now emits a new `WRITE_NOOP`
+  event (`tool` and a closed `reason`, no content and no id) that the report counts
+  as an attempt, and `analyze health` prints that count. Replies, stores and return
+  values are unchanged, and a failed emit does not change the reply. Rows written
+  before the event existed are not there to count, so the `save_memory` rate
+  overstates until the window rolls past them.
+- **`trellis analyze health` reports how many rejected MCP writes were followed by
+  an accepted call.** New `WRITE_RECOVERED` event and `recovery` block
+  (`recovered_share`, `pending_rejections`, `by_tool`). It is an approximation that
+  can sit on either side of the truth, stated beside the number: a rejection is
+  paired with the next accepted call of the same tool within 120 seconds, held in
+  process memory only, and keying per tool is a choice (a stdio server serves one
+  process per client; an authenticated HTTP request carries a key id the pairing
+  does not use). "Accepted" means the call returned without raising. Rejections
+  still inside the window when the report is read are counted as pending and left
+  out of the share, and a rejection older than the window is not carried forward to
+  be claimed by a later accepted call. MCP boundary `WRITE_REJECTED` rows written by
+  this build carry `recovery_window_s`; older rows are left out of the denominator
+  and a window of only older rows reports `recovered_share: null`. What a capture
+  surface accepts is unchanged.
+- **`trellis analyze health` prints a bracketed rejection location as written.** A
+  taxonomy row such as `extra_forbidden@[red]steps[/red]` lost its text to Rich's
+  markup; the row is now escaped.
+
 - **BREAKING: `trellis admin health` exits 5 when a SQLite store file is damaged
   or cannot be opened.**
   A file that is present but is not a database (random bytes, a truncated or

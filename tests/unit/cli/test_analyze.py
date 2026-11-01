@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -15,6 +16,8 @@ from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.logging import configure_stderr_logging
+from trellis.ops import write_health
+from trellis.ops.write_health import RECOVERY_WINDOW_SECONDS
 from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
 from trellis.schemas.advisory import (
     Advisory,
@@ -2977,12 +2980,18 @@ class TestAnalyzeHealthWriteSurfaceTable:
             "entity.create": 2,
         }
 
-    def test_executor_bypass_surface_gets_a_pointer_note(
+    def test_record_feedback_shows_its_real_accepted_count(
         self, temp_stores: StoreRegistry
     ) -> None:
-        # record_feedback's writes never reach MutationExecutor, so a
-        # boundary rejection is what puts it in ``by_tool`` for this test.
-        temp_stores.operational.event_log.emit(
+        """The tool's accept is the ``FEEDBACK_RECORDED`` row it writes as ``mcp``."""
+        event_log = temp_stores.operational.event_log
+        for _ in range(2):
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="mcp",
+                payload={"pack_id": "pack-1", "rating": 0.5},
+            )
+        event_log.emit(
             EventType.WRITE_REJECTED,
             source="test",
             payload={"tool": "record_feedback", "rejections": []},
@@ -2992,9 +3001,27 @@ class TestAnalyzeHealthWriteSurfaceTable:
 
         assert result.exit_code == 0, result.output
         out = plain(result.stdout)
-        assert "mcp:record_feedback" in out
-        assert "bypass the executor" in out
-        assert "Serve line below" in out
+        (row,) = [line for line in out.splitlines() if "mcp:record_feedback" in line]
+        cells = [cell.strip() for cell in row.strip("│ ").split("│")]
+        assert cells[:3] == ["mcp:record_feedback", "2", "1"]
+        assert "bypass" not in out
+        assert "accepted=0" not in out
+
+    def test_feedback_from_another_source_is_not_this_surfaces_accept(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """The REST and CLI routes emit the same event type under other sources."""
+        temp_stores.operational.event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="feedback.record",
+            payload={"pack_id": "pack-1", "rating": 0.5},
+        )
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert "mcp:record_feedback" not in payload["write"]["by_tool"]
 
     def test_a_non_bypass_surface_gets_no_pointer_note(
         self, temp_stores: StoreRegistry
@@ -3006,8 +3033,196 @@ class TestAnalyzeHealthWriteSurfaceTable:
         result = runner.invoke(app, ["analyze", "health"])
 
         assert result.exit_code == 0, result.output
+        assert "bypass" not in plain(result.stdout)
+
+    def test_answers_without_writing_are_named_under_the_table(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        for _ in range(3):
+            temp_stores.operational.event_log.emit(
+                EventType.WRITE_NOOP,
+                source="mcp:save_memory",
+                payload={"tool": "save_memory", "reason": "exact_duplicate"},
+            )
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "3 answered without writing" in out
+        assert (
+            "mcp:save_memory: 3 call(s) answered success without writing "
+            "(duplicates), counted as attempts but not as accepted"
+        ) in out
+
+
+def _append_backdated(
+    registry: StoreRegistry,
+    event_type: EventType,
+    source: str,
+    payload: dict[str, object],
+    *,
+    age_s: float,
+) -> None:
+    registry.operational.event_log.append(
+        Event(
+            event_type=event_type,
+            source=source,
+            occurred_at=datetime.now(UTC) - timedelta(seconds=age_s),
+            payload=payload,
+        )
+    )
+
+
+class TestAnalyzeHealthRecoveryAndTaxonomyPrinting:
+    """The two sections an operator reads to tell a fixable payload from a dead one."""
+
+    #: Past the window a tracked rejection waits in, so none of them is pending.
+    _SETTLED = RECOVERY_WINDOW_SECONDS + 60
+
+    def _reject(
+        self,
+        registry: StoreRegistry,
+        *,
+        age_s: float,
+        loc: str = "item_ids",
+        tracked: bool = True,
+    ) -> None:
+        payload: dict[str, object] = {
+            "tool": "record_feedback",
+            "rejections": [{"kind": "extra_forbidden", "loc": loc}],
+        }
+        if tracked:
+            payload["recovery_window_s"] = RECOVERY_WINDOW_SECONDS
+        _append_backdated(
+            registry,
+            EventType.WRITE_REJECTED,
+            "mcp:record_feedback",
+            payload,
+            age_s=age_s,
+        )
+
+    def _recover(self, registry: StoreRegistry, *, age_s: float) -> None:
+        _append_backdated(
+            registry,
+            EventType.WRITE_RECOVERED,
+            "mcp:record_feedback",
+            {
+                "tool": "record_feedback",
+                "rejected_attempts": 1,
+                "window_s": RECOVERY_WINDOW_SECONDS,
+            },
+            age_s=age_s,
+        )
+
+    def test_a_settled_recovery_share_is_printed_with_its_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=self._SETTLED + 30)
+        self._reject(temp_stores, age_s=self._SETTLED + 20)
+        self._recover(temp_stores, age_s=self._SETTLED + 10)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert (
+            "recovered: 1/2 tracked boundary rejections followed by an "
+            "accepted call (50%)"
+        ) in out
+        assert "either side of the truth" in out
+        assert "more still inside the window" not in out
+
+    def test_a_rejection_still_inside_the_window_is_named_and_not_rated(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=self._SETTLED + 20)
+        self._recover(temp_stores, age_s=self._SETTLED + 10)
+        self._reject(temp_stores, age_s=5)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert (
+            "recovered: 1/1 tracked boundary rejections followed by an "
+            "accepted call (100%), 1 more still inside the window"
+        ) in out
+
+    def test_only_pending_rejections_are_not_yet_measurable(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=5)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert (
+            "recovered: not measurable yet, 1 tracked boundary rejection(s) "
+            "still inside the window"
+        ) in out
+        assert "followed by an accepted call" not in out
+
+    def test_no_tracked_rejection_prints_no_recovery_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=self._SETTLED, tracked=False)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "recovered:" not in plain(result.stdout)
+
+    def test_the_note_is_printed_as_text_and_not_as_markup(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whatever the note says, the printer must not read it as Rich markup."""
+        monkeypatch.setattr(
+            write_health,
+            "RECOVERY_APPROXIMATION_NOTE",
+            "see [bold]this[/bold] and [red]that[/red] :warning: {window}",
+        )
+        self._reject(temp_stores, age_s=self._SETTLED + 30)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "see [bold]this[/bold] and [red]that[/red] :warning:" in out
+
+    def test_the_taxonomy_header_says_it_counts_error_elements(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=self._SETTLED)
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
         out = plain(result.stdout)
-        assert "bypass the executor" not in out
+        assert "Boundary rejection taxonomy (error elements, not calls):" in out
+        assert "extra_forbidden@item_ids" in out
+
+    def test_a_taxonomy_row_prints_a_bracketed_location_literally(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """``[red]steps[/red]`` is a location, not a style; Rich would eat it."""
+        self._reject(temp_stores, age_s=self._SETTLED, loc="[red]steps[/red]")
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        assert "extra_forbidden@[red]steps[/red]" in plain(result.stdout)
+
+    def test_the_exit_code_does_not_depend_on_the_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._reject(temp_stores, age_s=self._SETTLED, loc="[red]steps[/red]")
+
+        text = runner.invoke(app, ["analyze", "health"])
+        as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code
 
 
 class TestGenerateAdvisoriesQueryFilter:

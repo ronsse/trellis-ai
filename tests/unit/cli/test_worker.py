@@ -4350,7 +4350,15 @@ class TestARefusedNightlyWriteEscalates:
 
         report = self._rejections(temp_stores)
         assert report.repeated_collisions == [
-            {"kind": "config_unreadable", "loc": ADVISORY_FILENAME, "count": 3}
+            {
+                "kind": "config_unreadable",
+                "loc": ADVISORY_FILENAME,
+                "tool": "config:advisory_file",
+                "count": 3,
+                # A file condition has no accepted side to rate against.
+                "tool_attempts": None,
+                "rate": None,
+            }
         ]
         assert report.status == "warn"
         assert any("config_unreadable" in r for r in report.reasons)
