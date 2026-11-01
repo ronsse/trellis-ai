@@ -487,7 +487,16 @@ All notable changes to Trellis will be documented in this file.
   and still answers 500. Not covered: a key above `public` still answers 500 for
   such a row, because the store cannot return it; a public row whose own text
   column is not UTF-8 still fails every external list, search and pack.
-
+- **A flaky test: a session-dedup test compared two pack id lists in order.**
+  `TestSessionDedup` in `tests/unit/mcp/test_external_key_events.py` asserted that two
+  ordinary-key packs for the same query held identical id lists. The documents that rank
+  below the public ones tie on every axis, and what orders them is each row's own clock
+  reading in `_apply_recency_decay`, so a stall between two rows reorders them (and can
+  change which of the tied bulk documents is served). Two CI runs failed this way, on
+  Python 3.11 and 3.12, with the same three documents in a different order. The tests now
+  compare which documents were served, and the test about what an external pack records
+  compares the public documents only. Test-only: no change under `src/`, and no pack
+  changes.
 - **A document row whose metadata cannot be read no longer fails every read by
   an `external` key on SQLite.** The label predicate the public path runs
   through `DocumentStore.list_documents` raised on a row whose `metadata_json`
