@@ -31,6 +31,7 @@ from trellis.retrieve.sensitivity import (
     conceal_withheld_ids,
     concealed_ids_metadata,
     partition_by_clearance,
+    public_withholding,
     readable_ids,
     reader_for,
     refuse_overwrite,
@@ -60,7 +61,7 @@ def label(level: str) -> dict[str, Any]:
     return {
         DATA_CLASSIFICATION_KEY: DataClassification(
             sensitivity=level,  # type: ignore[arg-type]
-            classified_by=["test"],
+            classified_by=["caller"],
         ).model_dump(mode="json")
     }
 
@@ -1254,7 +1255,7 @@ class TestConcealWithheldIds:
         assert shown_report == report
         assert shown_withholding == withholding
 
-    @pytest.mark.parametrize("clearance", ["public", "internal", "confidential"])
+    @pytest.mark.parametrize("clearance", ["internal", "confidential"])
     def test_a_lower_caller_loses_the_ids_but_keeps_every_count(
         self, clearance: Sensitivity
     ) -> None:
@@ -1272,6 +1273,32 @@ class TestConcealWithheldIds:
         assert shown_withholding["withheld_item_ids"] == ["big"]
         assert shown_withholding["total"] == 2
         assert shown_withholding["by_reason"] == withholding["by_reason"]
+
+    @pytest.mark.parametrize("clearance", ["public", "not-a-label"])
+    def test_a_public_only_caller_is_shown_no_count_at_all(
+        self, clearance: Sensitivity
+    ) -> None:
+        """Every key stays, every number that sees past the filter is zero."""
+        report = _report(("secret", "sensitivity"), ("big", "token_budget"))
+        withholding = {**_withholding("secret", "big"), "served_count": 3}
+        shown_report, shown_withholding = conceal_withheld_ids(
+            report,
+            withholding,
+            ["secret"],
+            clearance,  # type: ignore[arg-type]
+        )
+        assert shown_report is not None
+        assert shown_withholding is not None
+        assert shown_report["rejected_items"] == []
+        assert shown_report["other"] == "kept"
+        assert shown_withholding == {**public_withholding(3)}
+        assert shown_withholding["total"] == 0
+        assert shown_withholding["by_reason"] == {}
+        assert shown_withholding["withheld_item_ids"] == []
+        assert shown_withholding["served_count"] == 3
+
+    def test_a_public_only_caller_with_no_block_is_shown_none(self) -> None:
+        assert conceal_withheld_ids(None, None, [], "public") == (None, None)
 
     def test_a_hidden_id_is_dropped_under_whatever_reason_it_carries(self) -> None:
         """A sectioned report holds no sensitivity rows; the builder names the ids."""

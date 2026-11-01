@@ -212,6 +212,43 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
             conditions.append("doc_id NOT LIKE %s")
             params.append(chunk_id_like_pattern())
 
+        filter_conditions, filter_params = self._filter_conditions(filters)
+        conditions.extend(filter_conditions)
+        params.extend(filter_params)
+
+        where_clause = " AND ".join(conditions)
+        params.append(limit)
+
+        rank_query = _OR_TSQUERY
+        sql = f"""
+            SELECT doc_id, content, content_hash, metadata,
+                   created_at, updated_at,
+                   ts_rank(tsv, {rank_query}) AS rank
+            FROM documents
+            WHERE {where_clause}
+            ORDER BY rank DESC
+            LIMIT %s
+        """
+        # The first %s in the SELECT is the ranking query param
+        all_params: list[Any] = [query, *params]
+
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, all_params)
+            rows = cur.fetchall()
+
+        return [self._row_to_dict(row, include_rank=True) for row in rows]
+
+    @staticmethod
+    def _filter_conditions(
+        filters: dict[str, Any] | None,
+    ) -> tuple[list[str], list[Any]]:
+        """The ``WHERE`` predicates and parameters of a metadata filter.
+
+        :meth:`search` and :meth:`list_documents` both take their filters from
+        here, so a filter means the same thing in each.
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
         if filters:
             for key, value in filters.items():
                 if key == "content_tags" and isinstance(value, dict):
@@ -331,28 +368,7 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
                     # down"; it did not push them down, it dropped them.
                     conditions.append("metadata -> %s = %s::jsonb")
                     params.extend([key, encode_filter_value(key, value)])
-
-        where_clause = " AND ".join(conditions)
-        params.append(limit)
-
-        rank_query = _OR_TSQUERY
-        sql = f"""
-            SELECT doc_id, content, content_hash, metadata,
-                   created_at, updated_at,
-                   ts_rank(tsv, {rank_query}) AS rank
-            FROM documents
-            WHERE {where_clause}
-            ORDER BY rank DESC
-            LIMIT %s
-        """
-        # The first %s in the SELECT is the ranking query param
-        all_params: list[Any] = [query, *params]
-
-        with self._conn() as conn, conn.cursor() as cur:
-            cur.execute(sql, all_params)
-            rows = cur.fetchall()
-
-        return [self._row_to_dict(row, include_rank=True) for row in rows]
+        return conditions, params
 
     # ------------------------------------------------------------------
     # Listing / counting
@@ -364,8 +380,17 @@ class PostgresDocumentStore(PostgresStoreBase, DocumentStore):
         limit: int = 50,
         offset: int = 0,
         include_chunks: bool = True,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         where, params = chunk_exclusion_clause("%s", include_chunks=include_chunks)
+        if filters:
+            # The same predicates ``search`` builds, in the same grammar, so a
+            # filter is a ``WHERE`` term and never a pass over the page.
+            conditions, filter_params = self._filter_conditions(filters)
+            if conditions:
+                clause = " AND ".join(conditions)
+                where = f"{where} AND {clause}" if where else f" WHERE {clause}"
+                params = [*params, *filter_params]
         with self._conn() as conn, conn.cursor() as cur:
             # ``doc_id`` breaks a ``created_at`` tie, so an OFFSET-paged scan
             # neither repeats nor skips rows that share a timestamp.

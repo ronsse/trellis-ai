@@ -231,6 +231,12 @@ def set_document_sensitivity(
     its own reach. A chunk id (it reads its parent's label) and a value outside
     the vocabulary are refused. Re-applying the stored label is a no-op.
 
+    ``public`` writes the exact record an ``external`` key reads, so a record
+    that only reads ``public`` (a corpus file's bare frontmatter) is rewritten,
+    and a record that carries regulatory tags, a jurisdiction or other fields
+    the exact record would discard is refused (400, naming them) rather than
+    cleared. Only a stored record that already is the exact one is a no-op.
+
     ``requested_by`` is derived from the authenticated principal when one is
     present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
     the body's own claim rides along as ``metadata["requested_by_claim"]``.

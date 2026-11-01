@@ -339,6 +339,47 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         if not sanitized:
             return []
 
+        filter_conditions, filter_params = self._filter_conditions(
+            filters, "d.metadata_json"
+        )
+
+        where_parts = ["documents_fts MATCH ?"]
+        sql_params: list[Any] = [sanitized]
+
+        if not include_chunks:
+            where_parts.append("d.doc_id NOT LIKE ?")
+            sql_params.append(chunk_id_like_pattern())
+
+        if filter_conditions:
+            where_parts.extend(filter_conditions)
+            sql_params.extend(filter_params)
+
+        sql_params.append(limit)
+        where_clause = " AND ".join(where_parts)
+
+        sql = (
+            "SELECT d.*, bm25(documents_fts) as rank"
+            " FROM documents d"
+            " JOIN documents_fts fts ON d.doc_id = fts.doc_id"
+            f" WHERE {where_clause}"
+            " ORDER BY rank"
+            " LIMIT ?"
+        )
+        cursor = self._conn.execute(sql, sql_params)
+
+        return [self._row_to_dict(row, include_rank=True) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _filter_conditions(
+        filters: dict[str, Any] | None, column: str
+    ) -> tuple[list[str], list[Any]]:
+        """The ``WHERE`` predicates and bound parameters of a metadata filter.
+
+        ``column`` is the ``metadata_json`` column as the calling query spells it
+        (``d.metadata_json`` under a join, ``metadata_json`` on the bare table).
+        :meth:`search` and :meth:`list_documents` both take their filters from
+        here, so a filter means the same thing in each.
+        """
         # Every filter shape becomes a WHERE predicate. Nothing is applied
         # to the returned page — see :func:`_metadata_matches` (#409).
         filter_conditions: list[str] = []
@@ -378,8 +419,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     # ``NULL NOT IN (...)`` is NULL, so an absent key stays
                     # excluded exactly as the equality already left it.
                     filter_conditions.append(
-                        "(json_extract(d.metadata_json, ?) = ?"
-                        " AND json_type(d.metadata_json, ?)"
+                        f"(json_extract({column}, ?) = ?"
+                        f" AND json_type({column}, ?)"
                         " NOT IN ('object', 'array'))"
                     )
                     filter_params.extend([path, value, path])
@@ -394,36 +435,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     # than an approximation of it, and it takes the whole
                     # object (path ``'$'``), so no key needs escaping.
                     filter_conditions.append(
-                        f"{_METADATA_MATCH_FN}"
-                        "(json_extract(d.metadata_json, '$'), ?, ?)"
+                        f"{_METADATA_MATCH_FN}(json_extract({column}, '$'), ?, ?)"
                     )
                     filter_params.extend([key, encode_filter_value(key, value)])
-
-        where_parts = ["documents_fts MATCH ?"]
-        sql_params: list[Any] = [sanitized]
-
-        if not include_chunks:
-            where_parts.append("d.doc_id NOT LIKE ?")
-            sql_params.append(chunk_id_like_pattern())
-
-        if filter_conditions:
-            where_parts.extend(filter_conditions)
-            sql_params.extend(filter_params)
-
-        sql_params.append(limit)
-        where_clause = " AND ".join(where_parts)
-
-        sql = (
-            "SELECT d.*, bm25(documents_fts) as rank"
-            " FROM documents d"
-            " JOIN documents_fts fts ON d.doc_id = fts.doc_id"
-            f" WHERE {where_clause}"
-            " ORDER BY rank"
-            " LIMIT ?"
-        )
-        cursor = self._conn.execute(sql, sql_params)
-
-        return [self._row_to_dict(row, include_rank=True) for row in cursor.fetchall()]
+        return filter_conditions, filter_params
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -448,12 +463,27 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         limit: int = 50,
         offset: int = 0,
         include_chunks: bool = True,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         where, params = chunk_exclusion_clause("?", include_chunks=include_chunks)
+        table = "documents"
+        if filters:
+            # The same predicates ``search`` builds, in the same grammar, so a
+            # filter is a ``WHERE`` term and never a pass over the page. The
+            # table is aliased only here: ``filters=None`` runs the SQL it
+            # always has.
+            conditions, filter_params = self._filter_conditions(
+                filters, "d.metadata_json"
+            )
+            if conditions:
+                clause = " AND ".join(conditions)
+                where = f"{where} AND {clause}" if where else f" WHERE {clause}"
+                params = [*params, *filter_params]
+                table = "documents d"
         # ``doc_id`` breaks a ``created_at`` tie, so an OFFSET-paged scan neither
         # repeats nor skips rows that share a timestamp.
         cursor = self._conn.execute(
-            f"SELECT * FROM documents{where}"
+            f"SELECT * FROM {table}{where}"
             " ORDER BY created_at DESC, doc_id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         )

@@ -13,6 +13,11 @@ from :func:`generate_api_key` and is unrecoverable afterwards.
 Scopes are a small closed set (``read`` / ``ingest`` / ``mutate`` /
 ``admin``); ``admin`` implies every other scope. The REST layer maps
 each router to one required scope — see ``trellis_api.app``.
+
+Two clearance scopes (``confidential`` / ``restricted``) raise the sensitivity
+ceiling above ``internal``, and one (``external``) lowers it to ``public``: an
+``external`` key reads only documents someone labelled ``public``, and no
+surface that cannot carry a label (see :func:`clearance_of`).
 """
 
 from __future__ import annotations
@@ -51,6 +56,14 @@ SCOPE_ADMIN = "admin"
 SCOPE_CONFIDENTIAL = "confidential"
 SCOPE_RESTRICTED = "restricted"
 
+#: The one scope that lowers the ceiling rather than raising it: a key that
+#: carries it reads documents labelled ``public`` and nothing else. It narrows
+#: ``read``, so a key is minted ``read,external`` (:func:`external_scope_refusal`).
+#: It is deliberately *not* in :data:`ALL_SCOPES`: that set is what auth mode
+#: ``off``, the legacy shared secret and a no-credential ``optional`` request
+#: are granted, and a trusted-local caller must never read as ``external``.
+SCOPE_EXTERNAL = "external"
+
 ALL_SCOPES: frozenset[str] = frozenset(
     {
         SCOPE_READ,
@@ -62,6 +75,11 @@ ALL_SCOPES: frozenset[str] = frozenset(
     }
 )
 
+#: Every scope a stored key may carry: :data:`ALL_SCOPES` plus ``external``.
+#: What a mint validates against; :data:`ALL_SCOPES` stays the grant-everything
+#: set.
+KEY_SCOPES: frozenset[str] = ALL_SCOPES | {SCOPE_EXTERNAL}
+
 #: Leading marker on every Trellis API token. Lets log scrubbers and
 #: secret scanners recognise the credential shape.
 TOKEN_PREFIX = "trellis_ak_"  # noqa: S105 — public prefix, not a secret
@@ -70,16 +88,39 @@ _KEY_ID_HEX_CHARS = 12
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
+def holds_external(granted: Iterable[str]) -> bool:
+    """Whether ``granted`` carries ``external``, however it is spelled.
+
+    The one place the narrowing scope is recognised. It ignores case and
+    surrounding whitespace, so a stored scope ``External`` (a hand-edited record,
+    an import) is still read as ``external``: the lower clearance is the safe
+    failure for a scope that is merely mis-spelled. Only ``external`` is
+    normalised this way; every other scope is matched exactly, as before.
+    """
+    return any(
+        isinstance(scope, str) and scope.strip().lower() == SCOPE_EXTERNAL
+        for scope in granted
+    )
+
+
 def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
     """Return ``True`` when ``granted`` covers the ``required`` scope.
 
     ``admin`` implies every other scope. Raises :class:`ValueError`
     when ``required`` is not a known scope — a typo'd scope name at a
     call site must fail loudly, not silently deny (or allow) requests.
+
+    A credential that holds ``external`` satisfies ``read`` and nothing else,
+    whatever else it holds: ``external`` grants no write, and a stored key that
+    somehow carries it beside ``admin`` or ``ingest`` is still a read-only,
+    public-clearance key (:func:`external_scope_refusal` stops a mint, this
+    covers a record that is already stored).
     """
     if required not in ALL_SCOPES:
         msg = f"Unknown scope {required!r}; known scopes: {sorted(ALL_SCOPES)}"
         raise ValueError(msg)
+    if holds_external(granted):
+        return required == SCOPE_READ and SCOPE_READ in granted
     if required == SCOPE_CONFIDENTIAL and SCOPE_RESTRICTED in granted:
         return True
     return required in granted or SCOPE_ADMIN in granted
@@ -88,16 +129,49 @@ def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
 def clearance_of(scopes: Iterable[str]) -> Sensitivity:
     """The highest document sensitivity a credential's ``scopes`` may read.
 
+    ``external`` gives ``public``, and wins over every other scope the key
+    holds: the lower clearance applies, whatever the key also carries. Otherwise
     ``admin`` or ``restricted`` gives ``restricted``; ``confidential`` gives
-    ``confidential``; anything else gives ``internal``. There is no ``public``
-    tier, so a caller never sees less than unlabelled content.
+    ``confidential``; anything else gives ``internal``, so a caller without
+    ``external`` never sees less than unlabelled content (a document with no
+    label reads ``internal``). A ``public`` caller is not shown an unlabelled
+    document, and is shown nothing that cannot carry a label at all.
     """
     granted = frozenset(scopes)
+    if holds_external(granted):
+        return "public"
     if SCOPE_ADMIN in granted or SCOPE_RESTRICTED in granted:
         return "restricted"
     if SCOPE_CONFIDENTIAL in granted:
         return "confidential"
     return "internal"
+
+
+def external_scope_refusal(scopes: Iterable[str]) -> str | None:
+    """Why ``scopes`` may not be minted, when they carry ``external``; else ``None``.
+
+    ``external`` narrows ``read``: the one legal spelling is ``read,external``.
+    It cannot sit beside ``confidential`` / ``restricted`` / ``admin`` (a ceiling
+    that is both public and higher is not a ceiling) or ``ingest`` / ``mutate``
+    (``external`` grants no write), and without ``read`` the key could call
+    nothing. The reason is text Trellis wrote, safe to show.
+    """
+    granted = frozenset(scopes)
+    if SCOPE_EXTERNAL not in granted:
+        return None
+    extra = sorted(granted - {SCOPE_READ, SCOPE_EXTERNAL})
+    if extra:
+        return (
+            f"scope 'external' cannot be combined with {extra}: it caps the key at "
+            "documents labelled public and grants no write, so mint it as "
+            "'read,external' and nothing else"
+        )
+    if SCOPE_READ not in granted:
+        return (
+            "scope 'external' narrows 'read' and grants nothing by itself: "
+            "mint it as 'read,external'"
+        )
+    return None
 
 
 def hash_secret(secret: str) -> str:
@@ -111,7 +185,8 @@ def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecor
     Returns ``(token, record)``. The token is shown to the caller once
     and never persisted; the record carries only ``sha256(secret)``.
     Raises :class:`ValueError` on an empty name, empty scope set, or
-    any scope outside :data:`ALL_SCOPES` — loud on misuse, no silent
+    any scope outside :data:`KEY_SCOPES`, or ``external`` beside anything but
+    ``read`` (:func:`external_scope_refusal`) — loud on misuse, no silent
     scope-dropping.
     """
     clean_name = name.strip()
@@ -122,10 +197,13 @@ def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecor
     if not scope_tuple:
         msg = "API key must carry at least one scope"
         raise ValueError(msg)
-    unknown = [s for s in scope_tuple if s not in ALL_SCOPES]
+    unknown = [s for s in scope_tuple if s not in KEY_SCOPES]
     if unknown:
-        msg = f"Unknown scope(s) {unknown!r}; known scopes: {sorted(ALL_SCOPES)}"
+        msg = f"Unknown scope(s) {unknown!r}; known scopes: {sorted(KEY_SCOPES)}"
         raise ValueError(msg)
+    refusal = external_scope_refusal(scope_tuple)
+    if refusal is not None:
+        raise ValueError(refusal)
 
     key_id = secrets.token_hex(6)
     secret = secrets.token_urlsafe(32)

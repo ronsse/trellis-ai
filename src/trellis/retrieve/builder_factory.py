@@ -41,6 +41,7 @@ from trellis.retrieve.pack_builder import (
 )
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import (
+    GRAPH_STRATEGY_NAME,
     NamespaceSeedExtractor,
     build_strategies,
     resolve_graph_axis_state,
@@ -225,11 +226,12 @@ def build_pack_builder(
     # ``load_settings_values`` degrades to ``{}`` rather than raising, so
     # no caller here needs its own try/except around this read.
     settings = load_settings_values(registry.stores_dir)
+    excerpt_max_chars = _resolve_excerpt_max_chars(settings)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
         graph_seed_extractor=_build_seed_extractor(registry, settings=settings),
-        excerpt_max_chars=_resolve_excerpt_max_chars(settings),
+        excerpt_max_chars=excerpt_max_chars,
         graph_recency_fallback=_graph_recency_fallback_enabled(settings),
     )
     return PackBuilder(
@@ -276,6 +278,9 @@ def build_pack_builder(
         # chunks (trellis.retrieve.parent_verdicts). Every surface that
         # goes through this factory gets the lookup wired in.
         document_store=registry.knowledge.document_store,
+        # The same cut the keyword axis was built with, for the public-only
+        # path, which re-reads each item's text from the stored document.
+        excerpt_max_chars=excerpt_max_chars,
     )
 
 
@@ -369,6 +374,7 @@ def describe_axes(
     embedder_configured: bool,
     embedder_resolve_failure: EmbedderResolveFailure | None = None,
     graph_axis: str | None = None,
+    public_only: bool = False,
 ) -> AxisReport:
     """Say which axes this deployment has, which ran, and which did not.
 
@@ -426,11 +432,19 @@ def describe_axes(
             ``embedder_configured`` is accurate on its own.
         graph_axis: The pack's ``retrieval_report.graph_axis``. Every
             caller passes it; ``None`` means the axis was not withheld.
+        public_only: ``True`` for a public-only caller (an ``external`` key).
+            Its pack never runs the graph axis, and reporting that axis
+            (``unseeded_fallback_off`` says whether the intent named a seed
+            the graph holds) would describe the graph it may not read, so the
+            graph reads ``"absent"`` and is neither ``available`` nor
+            ``failed``. Every other caller's report is unchanged.
 
     Returns a mapping, not prose: the caller renders it (or serialises it
     verbatim into ``--format json``).
     """
     available = list(builder.strategy_names)
+    if public_only:
+        available = [name for name in available if name != GRAPH_STRATEGY_NAME]
     ran = list(strategies_used)
     failed = [name for name in available if name not in ran]
     embedder_error_type: str | None = None

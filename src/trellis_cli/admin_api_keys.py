@@ -15,7 +15,8 @@ roadmap item E.5 (issue #191):
 Exit codes follow :mod:`trellis_cli.exit_codes`:
 
 * :data:`EXIT_OK` (0) — success.
-* :data:`EXIT_VALIDATION` (2) — unknown scope on ``create``; unknown
+* :data:`EXIT_VALIDATION` (2) — unknown scope on ``create``, or ``external``
+  beside anything but ``read``; unknown
   or already-revoked key id on ``revoke``. Operator input problem.
 * :data:`EXIT_STORE` (5) — backend failure during read/write.
 """
@@ -30,7 +31,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.auth import ALL_SCOPES, generate_api_key
+from trellis.auth import KEY_SCOPES, SCOPE_EXTERNAL, generate_api_key
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
@@ -83,11 +84,11 @@ def _store_error(exc: Exception, output_format: str) -> typer.Exit:
 def _parse_scopes(scopes: str) -> list[str]:
     """Split + validate a comma-separated scope list; loud on unknowns."""
     parsed = [s.strip() for s in scopes.split(",") if s.strip()]
-    unknown = [s for s in parsed if s not in ALL_SCOPES]
+    unknown = [s for s in parsed if s not in KEY_SCOPES]
     if unknown or not parsed:
         msg = (
             f"Unknown or empty scope(s): {unknown or '(none given)'}; "
-            f"valid scopes: {sorted(ALL_SCOPES)}"
+            f"valid scopes: {sorted(KEY_SCOPES)}"
         )
         raise ValueError(msg)
     return parsed
@@ -146,6 +147,11 @@ def create_api_key_command(
             f"({escape(record.name)})"
         )
         console.print(f"  scopes: {', '.join(record.scopes)}")
+        if SCOPE_EXTERNAL in record.scopes:
+            console.print(
+                "  [dim]external: reads only documents someone labelled public; "
+                "it does not hide unlabelled content from other keys.[/dim]"
+            )
         console.print(f"  token:  [bold green]{token}[/bold green]")
         console.print(f"[yellow]{_SHOWN_ONCE_WARNING}[/yellow]")
     raise typer.Exit(code=EXIT_OK)
@@ -245,7 +251,10 @@ def create(  # pragma: no cover — Typer wrapper only
         "--scopes",
         help=(
             "Comma-separated scope list. Valid scopes: read, ingest, "
-            "mutate, admin (admin implies all others)."
+            "mutate, admin (admin implies all others), confidential, "
+            "restricted, and external. external is only valid as "
+            "'read,external': a read-only key that sees only documents "
+            "labelled public."
         ),
     ),
     output_format: str = typer.Option(

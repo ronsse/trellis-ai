@@ -28,10 +28,12 @@ import os
 from typing import TYPE_CHECKING
 
 import structlog
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 
 from trellis.errors import ConfigError
+from trellis.retrieve.sensitivity import is_public_only
 from trellis_api.auth import AuthContext, _raise_401, authenticate_optional
+from trellis_api.routes._principal import PUBLIC_CALLER_REFUSAL, request_clearance
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -45,7 +47,8 @@ DISABLE_ENV = "TRELLIS_DISABLE_OBSERVABILITY"
 
 #: ``true`` (default) — /metrics is open for credential-less scrape
 #: jobs (current behavior). ``false`` — /metrics requires a valid
-#: credential (any scope). Anything else refuses to start.
+#: credential above public-only clearance, so an ``external`` key is refused.
+#: Anything else refuses to start.
 METRICS_PUBLIC_ENV = "TRELLIS_METRICS_PUBLIC"
 
 
@@ -86,12 +89,17 @@ def _require_metrics_access(
     auth mode ``required`` with no credential presented, so in modes
     ``off`` / ``optional`` the endpoint stays reachable (matching the
     rest of the API's posture in those modes). A presented-but-invalid
-    credential 401s inside ``authenticate_optional`` itself.
+    credential 401s inside ``authenticate_optional`` itself. An ``external``
+    key is credentialed but is handed to an outside party, and the gate exists
+    to keep this traffic data from such a caller, so it gets the 403 every other
+    route gives it.
     """
     if resolve_metrics_public():
         return
     if ctx is None:
         _raise_401("metrics_requires_credential")
+    if is_public_only(request_clearance(ctx)):
+        raise HTTPException(status_code=403, detail=PUBLIC_CALLER_REFUSAL)
 
 
 def _install_otel() -> bool:

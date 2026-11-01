@@ -15,6 +15,7 @@ from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis_api.app import get_registry
 from trellis_api.auth import require_scope
+from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS
 
 router = APIRouter()
 
@@ -112,7 +113,7 @@ class CreatePolicyRequest(BaseModel):
     enforcement: Enforcement = Enforcement.WARN
 
 
-@router.get("/policies")
+@router.get("/policies", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_policies() -> dict[str, Any]:
     """List all governance policies.
 
@@ -135,7 +136,7 @@ def list_policies() -> dict[str, Any]:
     }
 
 
-@router.get("/policies/{policy_id}")
+@router.get("/policies/{policy_id}", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_policy(policy_id: str) -> dict[str, Any]:
     """Get a policy by ID."""
     store = _get_policy_store()

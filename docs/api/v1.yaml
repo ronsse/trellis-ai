@@ -4244,7 +4244,30 @@ paths:
 
         readable ones it holds, a count that depends on how many hidden matches
 
-        ranked ahead of them, with ``total_exact: false``.'
+        ranked ahead of them, with ``total_exact: false``.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        by one read of the public documents: the newest 2000 the label predicate
+
+        selects (``trellis.retrieve.public_rank``), never a scan of the store and
+
+        never the store''s ``search``. With ``q`` set, those rows are matched (any
+
+        query word, ASCII alphanumerics) and ordered by BM25 computed over them
+
+        here; with no ``q`` they are the page, newest first. ``total``, the order and
+
+        every page are functions of the public documents alone. At most the newest
+
+        2000 public documents are read, so past that ``total`` is clipped and
+
+        ``total_exact`` is ``false``, and an older public document is out of reach
+
+        of this route. A busy server refuses the read at once (429 with
+
+        ``Retry-After``) rather than queueing it.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -4311,6 +4334,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: List Documents
@@ -4458,6 +4490,17 @@ paths:
         its own reach. A chunk id (it reads its parent''s label) and a value outside
 
         the vocabulary are refused. Re-applying the stored label is a no-op.
+
+
+        ``public`` writes the exact record an ``external`` key reads, so a record
+
+        that only reads ``public`` (a corpus file''s bare frontmatter) is rewritten,
+
+        and a record that carries regulatory tags, a jurisdiction or other fields
+
+        the exact record would discard is refused (400, naming them) rather than
+
+        cleared. Only a stored record that already is the exact one is a no-op.
 
 
         ``requested_by`` is derived from the authenticated principal when one is
@@ -5811,6 +5854,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Pack
@@ -5851,6 +5903,15 @@ paths:
           description: '``req`` itself fails pydantic validation (DefaultValidationError -- ``detail`` is a list of field
             errors), or ``sections`` is empty or one entry fails ``SectionRequest`` validation (StringDetailError -- ``detail``
             is a plain string).'
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Sectioned Pack
@@ -6714,7 +6775,22 @@ paths:
 
         ``include_chunks=true`` for the unfiltered result set. The applied
 
-        setting is echoed back on the response.'
+        setting is echoed back on the response.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        a search that never ranks a hidden row: the store is asked for documents
+
+        labelled ``public`` alone and they are ordered by BM25 computed over those
+
+        rows, ties by ``doc_id``, so the order and ``limit`` membership are
+
+        functions of the public documents (at most 2000 matches are held). It is
+
+        never served a chunk (``include_chunks`` is ignored and echoed ``false``),
+
+        and its rows carry only the allowlisted metadata.'
       operationId: search_api_v1_search_get
       parameters:
       - description: Search query
@@ -6772,6 +6848,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Search
@@ -7405,6 +7490,11 @@ paths:
         this route was written for.  They appear when the API is served from
 
         an editable install whose working tree has moved on.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is not an
+
+        operator, so it is answered as an anonymous caller is.
 
 
         ``write_behaviour_settings`` is gated the same way, for the same

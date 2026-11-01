@@ -20,16 +20,23 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.retrieve.public_rank import PublicRead, public_keyword_rows
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_document_rows,
     conceal_document_successor,
     conceal_node_pointers,
+    is_public_only,
+    read_document_row,
 )
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
-from trellis_api.routes._principal import request_clearance
+from trellis_api.routes._principal import (
+    NOT_FOR_PUBLIC_CALLERS,
+    PUBLIC_READ_BUSY_RESPONSE,
+    request_clearance,
+)
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 router = APIRouter()
@@ -128,6 +135,7 @@ def _document_row(doc: dict[str, Any], *, with_rank: bool) -> dict[str, Any]:
 @router.get(
     "/documents",
     responses={
+        **PUBLIC_READ_BUSY_RESPONSE,
         400: {
             "description": (
                 "A key below `restricted` asked for an `offset` past the "
@@ -190,11 +198,35 @@ def list_documents(
     unavoidable: a capture still short of 2000 readable matches reports the
     readable ones it holds, a count that depends on how many hidden matches
     ranked ahead of them, with ``total_exact: false``.
+
+    A key that reads only ``public`` documents (an ``external`` key) is served
+    by one read of the public documents: the newest 2000 the label predicate
+    selects (``trellis.retrieve.public_rank``), never a scan of the store and
+    never the store's ``search``. With ``q`` set, those rows are matched (any
+    query word, ASCII alphanumerics) and ordered by BM25 computed over them
+    here; with no ``q`` they are the page, newest first. ``total``, the order and
+    every page are functions of the public documents alone. At most the newest
+    2000 public documents are read, so past that ``total`` is clipped and
+    ``total_exact`` is ``false``, and an older public document is out of reach
+    of this route. A busy server refuses the read at once (429 with
+    ``Retry-After``) rather than queueing it.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
     gate = DocumentClearance(store, request_clearance(ctx))
-    if q:
+    if is_public_only(gate.clearance):
+        # A chunk is never served to a key that reads only ``public``.
+        include_chunks = False
+    if q and is_public_only(gate.clearance):
+        # Public documents are read by predicate, matched and ranked locally,
+        # so the capture holds public rows only: no hidden match can sit in it,
+        # move a score or shorten a page. Exact unless the read hit its ceiling.
+        read = PublicRead(store)
+        matches = [row for row, _score in public_keyword_rows(store, q, read=read)]
+        total_exact = not read.truncated
+        total = len(matches)
+        docs = matches[offset : offset + limit]
+    elif q:
         matches, total_exact = _search_readable(store, gate, q, include_chunks)
         total = len(matches)
         docs = matches[offset : offset + limit]
@@ -208,9 +240,12 @@ def list_documents(
                     "restricted scope"
                 ),
             )
-        docs, total, total_exact = _list_readable(
-            store, gate, offset=offset, limit=limit, include_chunks=include_chunks
-        )
+        if is_public_only(gate.clearance):
+            docs, total, total_exact = _list_public(store, offset=offset, limit=limit)
+        else:
+            docs, total, total_exact = _list_readable(
+                store, gate, offset=offset, limit=limit, include_chunks=include_chunks
+            )
     else:
         docs = store.list_documents(
             limit=limit, offset=offset, include_chunks=include_chunks
@@ -229,6 +264,21 @@ def list_documents(
         "include_chunks": include_chunks,
         "documents": rows,
     }
+
+
+def _list_public(
+    store: Any, *, offset: int, limit: int
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """One page of the public documents: ``(page, total, exact)``.
+
+    The newest 2000 documents the label predicate selects, read once and cut
+    here, so no hidden row is scanned, counted or able to shorten the page.
+    ``total`` is the number of public documents read and is exact unless the
+    read reached its ceiling.
+    """
+    read = PublicRead(store)
+    rows = read.rows
+    return rows[offset : offset + limit], len(rows), not read.truncated
 
 
 def _list_readable(
@@ -321,7 +371,7 @@ def get_document(
     registry = get_registry()
     store = registry.knowledge.document_store
     clearance = request_clearance(ctx)
-    doc = store.get(doc_id)
+    doc = read_document_row(store, doc_id, clearance)
     if doc is not None and not DocumentClearance(store, clearance).permits(
         doc_id, doc.get("metadata")
     ):
@@ -576,7 +626,7 @@ def get_pack(pack_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/graph/history")
+@router.get("/graph/history", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_node_history(
     entity_id: str = Query(..., description="Node ID to fetch SCD-2 history for"),
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom

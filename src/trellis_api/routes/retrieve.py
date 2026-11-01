@@ -15,6 +15,7 @@ from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis.retrieve.public_pack import public_search_page
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
@@ -22,6 +23,7 @@ from trellis.retrieve.sensitivity import (
     conceal_graph_pointers,
     conceal_node_pointers,
     conceal_withheld_ids,
+    is_public_only,
 )
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -30,7 +32,11 @@ from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import request_clearance
+from trellis_api.routes._principal import (
+    NOT_FOR_PUBLIC_CALLERS,
+    PUBLIC_READ_BUSY_RESPONSE,
+    request_clearance,
+)
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
@@ -164,7 +170,7 @@ def _resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
 # budget prices and the chunk is the retrievable unit. See
 # :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule and
 # ``tests/unit/test_chunk_visibility_rule.py`` for its enforcement.
-@router.get("/search")
+@router.get("/search", responses=PUBLIC_READ_BUSY_RESPONSE)
 def search(
     q: str = Query(..., description="Search query"),
     domain: str | None = Query(None, description="Domain filter"),
@@ -188,20 +194,38 @@ def search(
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied
     setting is echoed back on the response.
+
+    A key that reads only ``public`` documents (an ``external`` key) is served
+    a search that never ranks a hidden row: the store is asked for documents
+    labelled ``public`` alone and they are ordered by BM25 computed over those
+    rows, ties by ``doc_id``, so the order and ``limit`` membership are
+    functions of the public documents (at most 2000 matches are held). It is
+    never served a chunk (``include_chunks`` is ignored and echoed ``false``),
+    and its rows carry only the allowlisted metadata.
     """
     registry = get_registry()
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.knowledge.document_store.search(
-        q, limit=limit, filters=filters, include_chunks=include_chunks
-    )
     readable = DocumentClearance(
         registry.knowledge.document_store, request_clearance(ctx)
     )
-    results = [
-        r for r in results if readable.permits(r.get("doc_id", ""), r.get("metadata"))
-    ]
+    if is_public_only(readable.clearance):
+        # Public documents only are read and ranked, so a hidden match cannot
+        # outrank them or shorten the page; a chunk is never served.
+        include_chunks = False
+        results = public_search_page(
+            registry.knowledge.document_store, q, limit=limit, filters=filters
+        )
+    else:
+        results = registry.knowledge.document_store.search(
+            q, limit=limit, filters=filters, include_chunks=include_chunks
+        )
+        results = [
+            r
+            for r in results
+            if readable.permits(r.get("doc_id", ""), r.get("metadata"))
+        ]
     results = conceal_document_rows(
         results, registry.knowledge.document_store, readable.clearance
     )
@@ -214,7 +238,7 @@ def search(
     }
 
 
-@router.post("/packs", response_model=PackResponse)
+@router.post("/packs", response_model=PackResponse, responses=PUBLIC_READ_BUSY_RESPONSE)
 def assemble_pack(
     req: PackRequest,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
@@ -251,6 +275,7 @@ def assemble_pack(
         budget=budget,
         filters=filters,
         tag_filters=req.tag_filters,
+        principal_id=ctx.key_id,
     )
 
     # The axis report `trellis retrieve pack --format json` prints, so a
@@ -264,6 +289,7 @@ def assemble_pack(
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
         graph_axis=pack.retrieval_report.graph_axis,
+        public_only=is_public_only(clearance),
     )
 
     # A caller below ``restricted`` is shown the withheld counts but not the ids
@@ -297,6 +323,7 @@ def assemble_pack(
     "/packs/sectioned",
     response_model=SectionedPackResponse,
     responses={
+        **PUBLIC_READ_BUSY_RESPONSE,
         422: {
             "description": (
                 "``req`` itself fails pydantic validation "
@@ -347,6 +374,7 @@ def assemble_sectioned_pack(
         run_id=req.run_id,
         intent_family=req.intent_family,
         filters=filters,
+        principal_id=ctx.key_id,
     )
 
     # Same axis report as POST /api/v1/packs (#775). build_sectioned()
@@ -364,6 +392,7 @@ def assemble_sectioned_pack(
             embedder_configured=builder.embedder_configured,
             embedder_resolve_failure=builder.embedder_resolve_failure,
             graph_axis=pack.sections[0].retrieval_report.graph_axis,
+            public_only=is_public_only(clearance),
         )
     )
 
@@ -395,7 +424,11 @@ def assemble_sectioned_pack(
     )
 
 
-@router.get("/graph/search", summary="Search graph entities")
+@router.get(
+    "/graph/search",
+    summary="Search graph entities",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def search_entities(
     q: str | None = Query(
         None,
@@ -451,7 +484,11 @@ def search_entities(
     }
 
 
-@router.get("/graph/search/facets", summary="Count graph search matches per node type")
+@router.get(
+    "/graph/search/facets",
+    summary="Count graph search matches per node type",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def search_entity_facets(
     q: str | None = Query(
         None,
@@ -477,7 +514,7 @@ def search_entity_facets(
     return {"status": "ok", "total": sum(counts.values()), "node_types": node_types}
 
 
-@router.get("/entities/{entity_id:path}")
+@router.get("/entities/{entity_id:path}", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_entity(
     entity_id: str,
     depth: int = Query(1, description="Subgraph traversal depth"),
@@ -515,7 +552,7 @@ def get_entity(
     }
 
 
-@router.get("/traces")
+@router.get("/traces", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_traces(
     domain: str | None = Query(None),
     agent: str | None = Query(None, alias="agent_id"),
@@ -543,7 +580,11 @@ def list_traces(
     return {"status": "ok", "total": total, "count": len(items), "traces": items}
 
 
-@router.get("/traces/domains", summary="Count traces per domain")
+@router.get(
+    "/traces/domains",
+    summary="Count traces per domain",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def list_trace_domains() -> dict[str, Any]:
     """Count all stored traces per ``domain``, for a domain filter's options.
 
@@ -559,7 +600,7 @@ def list_trace_domains() -> dict[str, Any]:
     return {"status": "ok", "total": sum(counts.values()), "domains": domains}
 
 
-@router.get("/traces/{trace_id}")
+@router.get("/traces/{trace_id}", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_trace(
     trace_id: str,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
@@ -624,7 +665,7 @@ def _evidence_links(
     return links
 
 
-@router.get("/precedents")
+@router.get("/precedents", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_precedents(
     domain: str | None = Query(None),
     limit: int = Query(20, ge=1, le=500, description="Max results"),
@@ -650,7 +691,11 @@ def list_precedents(
     return {"status": "ok", "count": len(items), "precedents": items}
 
 
-@router.get("/precedents/domains", summary="Count promoted precedents per domain")
+@router.get(
+    "/precedents/domains",
+    summary="Count promoted precedents per domain",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def list_precedent_domains() -> dict[str, Any]:
     """Count promoted precedents per ``domain``, for a domain filter's options.
 

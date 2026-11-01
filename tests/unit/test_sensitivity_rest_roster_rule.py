@@ -784,3 +784,277 @@ class TestTheRuleCatchesADefectiveSubject:
         assert "m:gone: rostered but no such route" in violations(
             {}, {"m:gone": FREE}, set()
         )
+
+
+# ---------------------------------------------------------------------------
+# What a ``public`` caller (an ``external`` key: scopes ``read,external``) meets
+# ---------------------------------------------------------------------------
+#
+# ``external`` satisfies ``read`` and nothing above it, so a route is reachable
+# by it exactly when its mount and its decorator ask for no scope above ``read``.
+# Every such route must be refused outright (``NOT_FOR_PUBLIC_CALLERS``), or be
+# listed below as one that answers, which the rule then requires to be ``gated``
+# above (the clearance gate is what narrows its answer to public documents). A
+# route cannot default open: a new read route that is neither fails. Routes
+# behind ingest, mutate or admin need nothing here, and a route on a mount with
+# no auth at all must be listed as open and say why.
+
+NOT_FOR_PUBLIC = "NOT_FOR_PUBLIC_CALLERS"
+
+#: Read-scoped routes that answer an external key, each gated by clearance.
+EXTERNAL_ANSWERS = frozenset(
+    {
+        "retrieve:search",  # GET /search
+        "retrieve:assemble_pack",  # POST /packs
+        "retrieve:assemble_sectioned_pack",  # POST /packs/sectioned
+        "explore:list_documents",  # GET /documents
+        "explore:get_document",  # GET /documents/{doc_id}
+    }
+)
+
+#: Routes on a mount with no auth dependency: the same for every caller.
+#: ``readyz`` narrows its own body for an external key (``test_health`` and
+#: ``test_external_key_routes`` pin that); the others carry no store content.
+EXTERNAL_OPEN = frozenset(
+    {
+        "version:api_version",  # GET /api/version
+        "health:healthz",  # GET /healthz
+        "health:readyz",  # GET /readyz
+    }
+)
+
+_SCOPE_BY_AUTH = {
+    "read_auth": "read",
+    "ingest_auth": "ingest",
+    "mutate_auth": "mutate",
+    "admin_auth": "admin",
+}
+
+_DECORATOR_SCOPES = (
+    ("SCOPE_ADMIN", "admin"),
+    ("_ADMIN_ONLY", "admin"),
+    ("SCOPE_MUTATE", "mutate"),
+    ("SCOPE_INGEST", "ingest"),
+)
+
+
+def _mounts(app_source: str) -> dict[str, str | None]:
+    """Module -> the name of the auth list its router is mounted with, if any."""
+    mounts: dict[str, str | None] = {}
+    for node in ast.walk(ast.parse(app_source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "include_router"
+            and node.args
+        ):
+            continue
+        target = node.args[0]
+        if not (
+            isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+        ):
+            continue
+        mounts[target.value.id] = next(
+            (
+                k.value.id
+                for k in node.keywords
+                if k.arg == "dependencies" and isinstance(k.value, ast.Name)
+            ),
+            None,
+        )
+    return mounts
+
+
+def _dependency_text(decorators: list[ast.Call]) -> str:
+    return " ".join(
+        ast.unparse(k.value)
+        for d in decorators
+        for k in d.keywords
+        if k.arg == "dependencies"
+    )
+
+
+def external_violations(  # noqa: PLR0912
+    sources: dict[str, str],
+    app_source: str,
+    roster: dict[str, str],
+    answers: frozenset[str],
+    open_routes: frozenset[str],
+) -> list[str]:
+    mounts = _mounts(app_source)
+    found: list[str] = []
+    seen: set[str] = set()
+    for module, source in sources.items():
+        for name, fn in _module_functions(source).items():
+            decorators = _route_decorators(fn)
+            if not decorators:
+                continue
+            key = f"{module}:{name}"
+            seen.add(key)
+            mount = mounts.get(module)
+            if mount is None:
+                if key not in open_routes:
+                    found.append(f"{key}: no auth mount, not listed as open")
+                continue
+            if mount not in _SCOPE_BY_AUTH:
+                found.append(
+                    f"{key}: mounted behind {mount!r}, which is not understood"
+                )
+                continue
+            text = _dependency_text(decorators)
+            required = {_SCOPE_BY_AUTH[mount]} | {
+                scope for token, scope in _DECORATOR_SCOPES if token in text
+            }
+            if required - {"read"}:
+                if key in answers or key in open_routes:
+                    found.append(
+                        f"{key}: listed for an external key but needs "
+                        f"{sorted(required)}"
+                    )
+                continue
+            if key in open_routes:
+                found.append(f"{key}: listed as open but is behind read auth")
+            refused = NOT_FOR_PUBLIC in text
+            if key in answers:
+                if refused:
+                    found.append(
+                        f"{key}: listed as answering but carries {NOT_FOR_PUBLIC}"
+                    )
+                if roster.get(key) != GATED:
+                    found.append(
+                        f"{key}: answers an external key but is not rostered gated"
+                    )
+            elif not refused:
+                found.append(
+                    f"{key}: reachable by an external key, neither refused "
+                    "nor listed as answering"
+                )
+    found.extend(
+        f"{key}: listed for an external key but no such route"
+        for key in sorted((answers | open_routes) - seen)
+    )
+    return found
+
+
+def test_no_route_defaults_open_to_an_external_key() -> None:
+    sources = _sources()
+    app_source = APP.read_text(encoding="utf-8")
+    # Hand read: read-scoped routes in the five read-mounted modules that are not
+    # behind a stronger decorator scope: 5 answering, 14 refused (retrieve 8,
+    # explore 1, observations 2, policies 2, classify_rules 1), plus 3 on
+    # unauthenticated mounts.
+    assert_hand_read_floor(
+        len(EXTERNAL_ANSWERS) + len(EXTERNAL_OPEN),
+        8,
+        subject="routes listed as answering or open to an external key",
+        hint="a route was dropped from the lists without a person re-reading them",
+    )
+    refused = sum(
+        1
+        for source in sources.values()
+        for fn in _module_functions(source).values()
+        if NOT_FOR_PUBLIC in _dependency_text(_route_decorators(fn))
+    )
+    assert_hand_read_floor(
+        refused,
+        14,
+        subject="routes refused to an external key",
+        hint="a refusal was removed from a route, or the dependency spelling changed",
+    )
+    found = external_violations(
+        sources, app_source, ROSTER, EXTERNAL_ANSWERS, EXTERNAL_OPEN
+    )
+    assert found == [], "\n".join(found)
+
+
+class TestTheExternalRuleCatchesADefectiveSubject:
+    APP = (
+        "app.include_router(m.router, dependencies=read_auth)\n"
+        "app.include_router(a.router, dependencies=admin_auth)\n"
+        "app.include_router(v.router)\n"
+    )
+    REFUSED = (
+        "@router.get('/x', dependencies=NOT_FOR_PUBLIC_CALLERS)\n"
+        "def refused():\n    return 1\n"
+    )
+    OPEN_ROUTE = "@router.get('/y')\ndef pinged():\n    return 1\n"
+
+    def _run(
+        self,
+        module_source: str,
+        *,
+        answers: frozenset[str] = frozenset(),
+        roster: dict[str, str] | None = None,
+        extra: dict[str, str] | None = None,
+        open_routes: frozenset[str] = frozenset({"v:pinged"}),
+    ) -> list[str]:
+        sources = {"m": module_source, "v": self.OPEN_ROUTE, **(extra or {})}
+        return external_violations(
+            sources, self.APP, roster or {}, answers, open_routes
+        )
+
+    def test_the_clean_subject_passes(self) -> None:
+        assert self._run(self.REFUSED) == []
+
+    def test_a_new_read_route_that_is_not_refused_fails(self) -> None:
+        source = self.REFUSED + "@router.get('/z')\ndef sneaky():\n    return 1\n"
+        expected = (
+            "m:sneaky: reachable by an external key, neither refused "
+            "nor listed as answering"
+        )
+        assert self._run(source) == [expected]
+
+    def test_a_refusal_removed_from_a_route_fails(self) -> None:
+        source = self.REFUSED.replace(", dependencies=NOT_FOR_PUBLIC_CALLERS", "")
+        assert any("neither refused" in v for v in self._run(source))
+
+    def test_an_answering_route_must_be_rostered_gated(self) -> None:
+        source = "@router.get('/z')\ndef answers():\n    return 1\n"
+        found = self._run(source, answers=frozenset({"m:answers"}), roster={})
+        assert found == ["m:answers: answers an external key but is not rostered gated"]
+        assert (
+            self._run(
+                source, answers=frozenset({"m:answers"}), roster={"m:answers": GATED}
+            )
+            == []
+        )
+
+    def test_a_route_cannot_both_answer_and_refuse(self) -> None:
+        found = self._run(
+            self.REFUSED, answers=frozenset({"m:refused"}), roster={"m:refused": GATED}
+        )
+        assert any("answering but carries" in v for v in found)
+
+    def test_an_admin_route_needs_no_listing(self) -> None:
+        assert (
+            self._run(
+                self.REFUSED,
+                extra={"a": "@router.get('/a')\ndef adm():\n    return 1\n"},
+            )
+            == []
+        )
+
+    def test_a_route_level_admin_dependency_on_a_read_mount_needs_no_listing(
+        self,
+    ) -> None:
+        source = self.REFUSED + (
+            "@router.get('/q', dependencies=[Depends(require_scope(SCOPE_ADMIN))])\n"
+            "def closed():\n    return 1\n"
+        )
+        assert self._run(source) == []
+
+    def test_an_unauthenticated_route_must_be_listed_as_open(self) -> None:
+        assert self._run(self.REFUSED, open_routes=frozenset()) == [
+            "v:pinged: no auth mount, not listed as open"
+        ]
+
+    def test_a_stale_listing_fails(self) -> None:
+        found = self._run(self.REFUSED, answers=frozenset({"m:gone"}))
+        assert found == ["m:gone: listed for an external key but no such route"]
+
+    def test_a_mount_behind_an_unknown_auth_list_fails(self) -> None:
+        app = "app.include_router(m.router, dependencies=custom_auth)\n"
+        found = external_violations(
+            {"m": self.REFUSED}, app, {}, frozenset(), frozenset()
+        )
+        assert any("not understood" in v for v in found)

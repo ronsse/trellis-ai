@@ -66,7 +66,7 @@ from trellis.core.write_config import (
     resolve_write_behaviour,
 )
 from trellis.core.write_provenance import get_write_provenance
-from trellis.errors import TrellisError
+from trellis.errors import PublicReadBusyError, TrellisError
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import (
@@ -173,6 +173,8 @@ from trellis.retrieve.sensitivity import (
     OverwriteRefusedError,
     SensitivityLabelError,
     conceal_node_pointers,
+    is_public_only,
+    read_document_row,
     readable_ids,
     refuse_overwrite,
     stamp_sensitivity,
@@ -208,6 +210,12 @@ POLICY_DENIED = -32002
 
 #: A governed mutation executed but came back non-success.
 MUTATION_FAILED = -32003
+
+#: A read for a key that reads only public documents was refused because the
+#: process is at its limit on concurrent public reads
+#: (:class:`~trellis.errors.PublicReadBusyError`). The error text
+#: carries ``retry_after_seconds=N`` (the wire has the text only); nothing ran.
+PUBLIC_READ_BUSY = -32004
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +297,26 @@ def _raise_policy_denied(
     :func:`_raise_mutation_failed`.
     """
     raise McpError(ErrorData(code=POLICY_DENIED, message=message, data=data))
+
+
+def _refuse_public_caller(tool: str) -> None:
+    """Refuse ``tool`` to a public-only caller (an ``external`` key), or return.
+
+    For a tool that reads something with no sensitivity label (the graph, a
+    trace, a precedent, an observation, file context). A ``public`` caller is
+    only ever shown a stored document someone labelled ``public``, so these are
+    refused with a stated reason rather than filtered to nothing silently. The
+    reason is the same on every refused tool and names no content.
+    """
+    if is_public_only(current_clearance()):
+        _raise_policy_denied(
+            f"{tool} is not available to an external key: it reads content that "
+            "cannot carry a public label. An external key can use get_context, "
+            "search, get_sectioned_context, get_objective_context, "
+            "get_task_context and get_items, and sees only documents labelled "
+            "public.",
+            data={"tool": tool, "reason": "external_key"},
+        )
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -501,6 +529,23 @@ class _SanitizeUncaughtToolErrors(Middleware):
             cause = exc.__cause__
             name = context.message.name
             prefix = f"Error calling tool {name!r}:"
+            if isinstance(cause, PublicReadBusyError):
+                raise McpError(
+                    ErrorData(
+                        code=PUBLIC_READ_BUSY,
+                        # The wire carries ``isError`` and this text only (the
+                        # SDK renders any handler exception as ``str(exc)``), so
+                        # the reason and the retry hint are in the text too.
+                        message=(
+                            f"public_read_busy: {cause.message} "
+                            f"(retry_after_seconds={cause.retry_after})"
+                        ),
+                        data={
+                            "reason": "public_read_busy",
+                            "retry_after_seconds": cause.retry_after,
+                        },
+                    )
+                ) from cause
             if (
                 cause is None
                 or isinstance(cause, McpError)
@@ -1398,6 +1443,18 @@ def _axis_note(axes: AxisReport) -> str:
     return "\n\n".join(note for note in notes if note)
 
 
+def _context_banner(registry: StoreRegistry) -> str:
+    """The capture-health banner for a pack reply; empty for a public-only caller.
+
+    The banner is operational health text about the store's capture surfaces,
+    not a document, so a public-only caller (an ``external`` key) is not shown
+    it. Every other caller gets :func:`_capture_warning_banner` unchanged.
+    """
+    if is_public_only(current_clearance()):
+        return ""
+    return _capture_warning_banner(registry)
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -1476,8 +1533,13 @@ def _flat_context(
             refresh=refresh,
             index_mode=index,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
     except McpError:
+        raise
+    except PublicReadBusyError:
+        # A refused public read is not an assembly failure: it travels as
+        # itself so ``_SanitizeUncaughtToolErrors`` can give it its own code.
         raise
     except Exception as exc:
         logger.exception("flat_context_failed", operation=operation)
@@ -1489,7 +1551,7 @@ def _flat_context(
             data={"tool": operation, "intent": intent},
         )
 
-    banner = _capture_warning_banner(registry)
+    banner = _context_banner(registry)
     # #404: read the summary the builder stamped, do not re-derive one.
     withholding = withholding_from_payload(pack.metadata.get("withholding"))
     # A missing axis is reported in the pack's axes block on the REST
@@ -1507,6 +1569,7 @@ def _flat_context(
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
         graph_axis=pack.retrieval_report.graph_axis,
+        public_only=is_public_only(current_clearance()),
     )
     axis_note = _axis_note(axes)
 
@@ -1628,6 +1691,7 @@ def _sectioned_context(
             run_id=run_id or None,
             refresh=refresh,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
         section_dicts = [
             {
@@ -1657,6 +1721,7 @@ def _sectioned_context(
                 embedder_configured=builder.embedder_configured,
                 embedder_resolve_failure=builder.embedder_resolve_failure,
                 graph_axis=sectioned_pack.sections[0].retrieval_report.graph_axis,
+                public_only=is_public_only(current_clearance()),
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(
@@ -1670,7 +1735,7 @@ def _sectioned_context(
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
         )
-        banner = _capture_warning_banner(registry)
+        banner = _context_banner(registry)
         if banner:
             result = f"{banner}\n\n{result}"
         _track_tokens(
@@ -1682,6 +1747,9 @@ def _sectioned_context(
         )
     except McpError:
         # Already structured by a deeper helper — let it propagate.
+        raise
+    except PublicReadBusyError:
+        # See the flat path: a refused public read keeps its own type.
         raise
     except Exception as exc:
         logger.exception("sectioned_context_failed", tool=tool)
@@ -3425,6 +3493,7 @@ def get_lessons(
     """
     from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
 
+    _refuse_public_caller("get_lessons")
     registry = _get_registry()
     lessons = _list_prec(
         registry.operational.event_log,
@@ -3468,6 +3537,7 @@ def get_graph(
         depth: How many relationship hops to traverse (default 1).
         max_tokens: Maximum response size in tokens (default 2000).
     """
+    _refuse_public_caller("get_graph")
     if not entity_id or not entity_id.strip():
         _raise_invalid_params(
             "entity_id must not be empty",
@@ -3532,7 +3602,9 @@ def _render_fetched_item(
     ``get_graph`` renders, so a fetched entity carries the ``document_ids``
     evidence pointers that make it a hop rather than a dead end.
     """
-    doc = registry.knowledge.document_store.get(item_id)
+    doc = read_document_row(
+        registry.knowledge.document_store, item_id, current_clearance()
+    )
     if doc is not None:
         # Above the caller's clearance answers exactly as not-found: no other
         # kind is tried, so the reply cannot say the document exists (#194).
@@ -3541,6 +3613,12 @@ def _render_fetched_item(
         ).permits(item_id, doc.get("metadata")):
             return None
         return "document", doc.get("content", "")
+
+    if is_public_only(current_clearance()):
+        # A graph node or a trace has no label to compare, so a public-only
+        # caller is never shown one, and the reply is the not-found a missing
+        # id gets: no other kind is tried, so it cannot say the id exists.
+        return None
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
@@ -3690,6 +3768,7 @@ def get_file_context(
             (excluded by default — extraction attests mention, not fact).
         max_tokens: Maximum response size in tokens (default 2000).
     """
+    _refuse_public_caller("get_file_context")
     cleaned = [p.strip() for p in paths if p and p.strip()] if paths else []
     if not cleaned:
         _raise_invalid_params(
@@ -4749,6 +4828,7 @@ def query_observations(
         property dicts. Each dict carries ``node_id`` plus the
         schema's payload fields.
     """
+    _refuse_public_caller("query_observations")
     from trellis.schemas.well_known import OBSERVATION  # noqa: PLC0415
 
     registry = _get_registry()

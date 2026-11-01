@@ -38,7 +38,7 @@ from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import MEASUREMENT, OBSERVATION
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
-from trellis_api.routes._principal import request_clearance
+from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS, request_clearance
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 logger = structlog.get_logger(__name__)
@@ -126,7 +126,7 @@ def record_observation(
     }
 
 
-@router.get("/observations")
+@router.get("/observations", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_observations(
     subject_entity_id: str | None = Query(None),
     observer_agent_id: str | None = Query(None),
@@ -198,7 +198,7 @@ def record_measurement(
     }
 
 
-@router.get("/measurements")
+@router.get("/measurements", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_measurements(
     subject_entity_id: str | None = Query(None),
     metric_name: str | None = Query(None),

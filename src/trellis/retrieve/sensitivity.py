@@ -9,11 +9,33 @@ caller's: ``clearance_of(scopes)`` on a credentialed surface, ``"restricted"``
 on a trusted-local one (stdio, auth off, the CLI).
 
 **Transparent by default.** A missing label reads ``internal`` and the lowest
-clearance is ``internal``, so a store with no labels serves every caller
-exactly what it served before this gate existed. Only a document someone
-labelled ``confidential`` or ``restricted`` is withheld, and only from a caller
-who lacks the scope. A *malformed* label reads ``restricted``
-(:func:`sensitivity_of`): unparseable is withheld, never served.
+clearance a key reaches without opting in is ``internal``, so a store with no
+labels serves every such caller exactly what it served before this gate
+existed. Only a document someone labelled ``confidential`` or ``restricted`` is
+withheld, and only from a caller who lacks the scope. A *malformed* label reads
+``restricted`` (:func:`sensitivity_of`): unparseable is withheld, never served.
+
+**The one opt-in is a ``public`` caller** (an ``external`` key,
+:func:`is_public_only`), and it inverts the default: an unlabelled document
+reads ``internal``, so it is withheld. It is also shown only what *can* carry a
+label. A graph item, trace, precedent or observation has none, and its metadata
+is free-form, so :func:`item_readable` serves a ``public`` caller only a pack
+item that is a stored whole document row carrying the exact public record
+(:func:`~trellis.schemas.classification.is_public_label`: whole-record
+equality, the record a person's labelling writes, never a test of the
+``sensitivity`` value alone). One predicate decides "public" on every surface,
+so a bare ``{"sensitivity": "public"}`` is withheld from a list, a by-id read,
+a search and a pack alike. An error while looking the row up withholds, and a
+clearance outside the vocabulary ranks as ``public``, not above it.
+
+**What a public caller receives is the stored row, and only a window onto it.**
+The governing rule is that nothing it is sent depends on anything it may not
+read. So a served item's text and metadata are re-read from the stored document
+row (:meth:`~trellis.retrieve.parent_verdicts.ParentVerdictCache.stored_row`),
+never taken from the strategy that found it (a vector row's text is an
+embed-time snapshot an overwrite does not touch), and the metadata is cut down
+to :data:`PUBLIC_METADATA_KEYS`. No count that looks past the filter reaches it
+either: :func:`conceal_withheld_ids` returns the empty report.
 
 **Enforced where PackBuilder collects, not per strategy**, for the reason in
 :mod:`trellis.retrieve.lifecycle`: the strategy set is open. It runs over the
@@ -32,7 +54,9 @@ the higher of the two, through the same
 :class:`~trellis.retrieve.parent_verdicts.ParentVerdictCache` the archived and
 noise gates share. A parent that is *missing* is no verdict (served); a parent
 whose fetch *raised* withholds its chunks, because an outage must not read as
-permission.
+permission. A ``public`` caller does not take part in that: it is never served a
+chunk at all (:func:`item_readable`, :meth:`DocumentClearance.permits`), and a
+chunk id answers as a missing id does.
 
 Non-pack read surfaces (``get_items``, ``get_file_context``) use
 :class:`DocumentClearance`, the same predicate over a stored document. A by-id
@@ -41,23 +65,29 @@ read of a withheld document answers exactly as not-found.
 Graph nodes, entities, precedents, advisories and observations carry no label
 in this slice; ``tests/unit/test_sensitivity_surface_rule.py`` rosters every MCP
 tool as gated or free of document content so a new one cannot slip in unread.
+A ``public`` caller is refused those surfaces outright instead.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
+from trellis.retrieve.withholding import summarize_withheld
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
     LIFECYCLE_KEY,
     SENSITIVITY_ORDER,
     DataClassification,
+    is_public_label,
     sensitivity_of,
     sensitivity_rank,
 )
+from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import PackItem
 
 if TYPE_CHECKING:
@@ -82,9 +112,127 @@ SENSITIVITY_REJECTION_REASON = "sensitivity"
 SENSITIVITY_WITHHELD_IDS_KEY = "sensitivity_withheld_ids"
 
 
+#: The clearances a caller holds without being public-only. Spelled out so that
+#: a value outside it (a typo, a future rung, ``None`` from a bug) lands on the
+#: narrow side of :func:`is_public_only` rather than the wide one.
+_NON_PUBLIC_CLEARANCES = frozenset({"internal", "confidential", "restricted"})
+
+
+def is_public_only(clearance: Sensitivity) -> bool:
+    """Whether ``clearance`` reads only stored documents labelled ``public``.
+
+    ``True`` for ``public`` and for anything that is not one of the three higher
+    rungs, so an unknown clearance fails closed.
+    """
+    return clearance not in _NON_PUBLIC_CLEARANCES
+
+
 def permits(clearance: Sensitivity, sensitivity: Sensitivity) -> bool:
-    """Whether a caller holding ``clearance`` may read ``sensitivity`` content."""
-    return sensitivity_rank(sensitivity) <= sensitivity_rank(clearance)
+    """Whether a caller holding ``clearance`` may read ``sensitivity`` content.
+
+    A ``clearance`` outside the vocabulary ranks as ``public``, the lowest, so an
+    unrecognised value never reads above it.
+    """
+    try:
+        ceiling = sensitivity_rank(clearance)
+    except ValueError:
+        ceiling = sensitivity_rank("public")
+    return sensitivity_rank(sensitivity) <= ceiling
+
+
+#: The ``PackItem.item_type`` values that can be a stored document row: the
+#: keyword axis emits ``document``, the semantic axis ``vector``. Anything else
+#: (``entity``, ``observation``, and a trace or precedent as the graph axis
+#: carries them) has no label to compare.
+_PUBLIC_ITEM_TYPES = frozenset({"document", "vector"})
+
+#: The metadata a ``public`` caller is shown for a document: a title to name it
+#: by and the document form, and nothing else. Everything else a store keeps on
+#: a row (the entity and trace ids a save stamps, the pointers between
+#: documents, tags, lifecycle, classification) is for a caller who may read the
+#: rest of the corpus. Each value must be a non-empty string.
+PUBLIC_METADATA_KEYS: tuple[str, ...] = ("title", "document_form")
+
+
+def public_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``metadata`` cut down to :data:`PUBLIC_METADATA_KEYS`, as a new dict.
+
+    A key that is absent, or whose value is not a non-empty string, is left out,
+    so the result never carries a shape a reader would have to guard against.
+    The form is read as :func:`~trellis.schemas.document_metadata.document_form_of`
+    reads it, so a document written before ``document_form`` existed still
+    shows one.
+    """
+    bag = metadata or {}
+    shown: dict[str, Any] = {}
+    title = bag.get("title")
+    if isinstance(title, str) and title.strip():
+        shown["title"] = title
+    form = document_form_of(bag)
+    if form is not None:
+        shown["document_form"] = form
+    return shown
+
+
+def public_withholding(served_count: int = 0) -> dict[str, Any]:
+    """The withholding block of a public-only pack: the empty shape, same keys.
+
+    Every count that would see past the filter is zero or empty, so the block
+    reads the same whatever the corpus holds. ``served_count`` is the one number
+    that stays, because it counts what the caller was sent.
+    """
+    return {**summarize_withheld([], []).as_telemetry(), "served_count": served_count}
+
+
+def _is_chunk_id(item_id: str) -> bool:
+    """Whether ``item_id`` has the shape of a chunk row's id.
+
+    Deferred for the reason ``ParentVerdictCache.resolve`` defers it:
+    ``trellis.ingest_corpus`` imports back into ``trellis.retrieve``.
+    """
+    from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+    return is_chunk_doc_id(item_id)
+
+
+def _public_document_readable(
+    item: PackItem, parent_verdict_cache: ParentVerdictCache | None
+) -> bool:
+    """Whether ``item`` is a stored whole document carrying the public label.
+
+    ``False`` when ``item`` is not something a ``public`` caller may be shown
+    at all: not a document or vector row, a chunk, no cache to look the row up
+    with, no stored row under its id, or a failed lookup. The label is read off
+    the stored row, never off ``item.metadata``, and judged by
+    :func:`~trellis.schemas.classification.is_public_label`, the same
+    predicate :class:`DocumentClearance` and the store filter use.
+    """
+    if item.item_type not in _PUBLIC_ITEM_TYPES or parent_verdict_cache is None:
+        return False
+    if _is_chunk_id(item.item_id):
+        return False
+    stored = parent_verdict_cache.stored_metadata(item.item_id)
+    return stored is not None and is_public_label(stored)
+
+
+def item_readable(
+    clearance: Sensitivity,
+    item: PackItem,
+    parent_verdict_cache: ParentVerdictCache | None,
+) -> bool:
+    """Whether a caller at ``clearance`` may be served ``item``.
+
+    The one predicate every pack gate asks. Above ``public`` it is exactly
+    ``permits(clearance, effective_sensitivity(item, cache))``. For a public-only
+    caller (:func:`is_public_only`) the item must also be a stored whole document
+    row (:func:`_public_document_readable`) carrying the exact public record: an
+    unlabelled document reads ``internal`` and is withheld, a bare
+    ``{"sensitivity": "public"}`` is withheld, a chunk is withheld whatever its
+    parent says, and an item that cannot carry a label is withheld.
+    """
+    if not is_public_only(clearance):
+        return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+    return _public_document_readable(item, parent_verdict_cache)
 
 
 def effective_sensitivity(
@@ -116,7 +264,7 @@ def partition_by_clearance(
     kept: list[PackItem] = []
     withheld: list[PackItem] = []
     for item in items:
-        if permits(clearance, effective_sensitivity(item, parent_verdict_cache)):
+        if item_readable(clearance, item, parent_verdict_cache):
             kept.append(item)
         else:
             withheld.append(item)
@@ -137,7 +285,7 @@ def reader_for(
         return None
 
     def _readable(item: PackItem) -> bool:
-        return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+        return item_readable(clearance, item, parent_verdict_cache)
 
     return _readable
 
@@ -146,7 +294,15 @@ class DocumentClearance:
     """:func:`partition_by_clearance`'s predicate over a stored document.
 
     For the read surfaces that fetch documents directly rather than through a
-    pack. One instance per request: it carries a per-request parent cache.
+    pack. One instance per request: it carries a per-request parent cache. For a
+    public-only clearance a document is permitted only when it carries the exact
+    public record (:func:`~trellis.schemas.classification.is_public_label`): an
+    unlabelled document reads ``internal`` and is not permitted, a bare
+    ``{"sensitivity": "public"}`` is not permitted, and neither is an id with no
+    stored row (``metadata`` is ``None``). A public-only clearance is also
+    refused every chunk id: only a whole document is ever served to it, so a
+    chunk answers as a missing id does. Every other clearance judges the
+    effective sensitivity value, as before.
     """
 
     def __init__(self, document_store: DocumentStore, clearance: Sensitivity) -> None:
@@ -165,7 +321,55 @@ class DocumentClearance:
     def permits(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
         if self.clearance == "restricted":
             return True
+        if is_public_only(self.clearance):
+            return not _is_chunk_id(doc_id) and is_public_label(metadata)
         return permits(self.clearance, self.sensitivity(doc_id, metadata))
+
+
+#: What CPython's ``sqlite3`` raises when a stored text column is not UTF-8.
+_SQLITE_UNDECODABLE = "Could not decode to UTF-8"
+
+
+def _row_cannot_be_parsed(exc: BaseException) -> bool:
+    """Whether ``exc`` is a stored row's own bytes failing to parse.
+
+    The shapes reproduced against a raw row, and nothing else: ``metadata_json``
+    that is not JSON (``json.JSONDecodeError``, which also covers empty text and a
+    control character in a string), JSON nested past the recursion limit
+    (``RecursionError``), and a SQLite text column that is not UTF-8 (a
+    ``sqlite3.OperationalError`` whose text names the decode; any other
+    ``OperationalError`` is a store fault and is not matched). All four depend on the
+    row, never on the store, so none of them is an outage.
+    """
+    if isinstance(exc, json.JSONDecodeError | RecursionError):
+        return True
+    return isinstance(exc, sqlite3.OperationalError) and str(exc).startswith(
+        _SQLITE_UNDECODABLE
+    )
+
+
+def read_document_row(
+    document_store: DocumentStore, doc_id: str, clearance: Sensitivity
+) -> dict[str, Any] | None:
+    """``document_store.get(doc_id)``, for a by-id read at ``clearance``.
+
+    A public-only caller must receive nothing that depends on a row it may not
+    read, and a hidden row whose stored metadata cannot be parsed would otherwise
+    answer a guessed id with a 500 where a missing id answers 404. So for that
+    clearance alone, a row that fails to parse (:func:`_row_cannot_be_parsed`)
+    reads as ``None``, exactly as an absent id does. Any other failure is a store
+    fault, does not depend on the id, and propagates; every other clearance
+    propagates the parse failure too, as it always did.
+    """
+    try:
+        return document_store.get(doc_id)
+    except (json.JSONDecodeError, RecursionError, sqlite3.OperationalError) as exc:
+        if not is_public_only(clearance) or not _row_cannot_be_parsed(exc):
+            raise
+        logger.warning(
+            "public_read_unparseable_row", doc_id=doc_id, error=type(exc).__name__
+        )
+        return None
 
 
 def readable_ids(
@@ -394,8 +598,21 @@ def conceal_document_rows(
     judgement per call, so a response passes all its rows in one call rather
     than one per row. A row that names nothing unreadable is returned as the
     same object, else as a copy.
+
+    A public-only caller's rows keep only the allowlisted metadata
+    (:func:`public_metadata`) and no ``rank``: a stored row's other keys name
+    entities, traces and documents it may not read, and the full-text rank is
+    computed from term statistics over every document, hidden ones included.
     """
     rows = list(docs)
+    if is_public_only(clearance):
+        return [
+            {
+                **{k: v for k, v in row.items() if k != "rank"},
+                "metadata": public_metadata(row.get("metadata")),
+            }
+            for row in rows
+        ]
     bags = _concealed_bags(
         [row.get("metadata") for row in rows], document_store, clearance
     )
@@ -674,11 +891,27 @@ def conceal_withheld_ids(
     ``withheld_item_ids``: a per-query ``(id, score)`` for a document it may not
     read is an oracle on that document's content. Every count survives
     (``by_reason``, ``total``), so the note can still say how many.
+
+    A public-only caller (:func:`is_public_only`) gets no count either. A count
+    of what a query matched and the filter removed is an oracle over the very
+    corpus the filter hides: an intent naming a word found only in a hidden
+    document moves it, and so does a hidden tag or an archived, noise or
+    superseded state. So ``rejected_items`` is emptied and ``withholding``
+    becomes the empty summary, the keys all still present (zeros and empty
+    lists), which renders no ``**Withheld:**`` line anywhere.
     """
     if clearance == "restricted":
         return (
             dict(report) if report is not None else None,
             dict(withholding) if withholding is not None else None,
+        )
+    if is_public_only(clearance):
+        served = withholding.get("served_count") if withholding is not None else 0
+        return (
+            {**report, "rejected_items": []} if report is not None else None,
+            public_withholding(served if isinstance(served, int) else 0)
+            if withholding is not None
+            else None,
         )
     hidden = set(hidden_ids)
     shown_report: dict[str, Any] | None = None
@@ -749,7 +982,7 @@ def unreadable_rejected_ids(
         if row.item_id in ids:
             continue
         if any(
-            not permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+            not item_readable(clearance, item, parent_verdict_cache)
             for item in candidates.get(row.item_id)
         ):
             ids.add(row.item_id)
@@ -852,6 +1085,7 @@ __all__ = [
     "CandidateIndex",
     "DocumentClearance",
     "OverwriteRefusedError",
+    "PUBLIC_METADATA_KEYS",
     "SOURCE_ITEM_POINTER_PATHS",
     "SUPERSESSION_POINTER_PATHS",
     "SensitivityLabelError",
@@ -864,8 +1098,12 @@ __all__ = [
     "conceal_unreadable_successors",
     "concealed_ids_metadata",
     "effective_sensitivity",
+    "is_public_only",
+    "item_readable",
     "partition_by_clearance",
     "permits",
+    "public_metadata",
+    "public_withholding",
     "readable_ids",
     "reader_for",
     "refuse_overwrite",
