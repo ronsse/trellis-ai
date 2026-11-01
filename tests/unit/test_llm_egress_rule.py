@@ -41,16 +41,19 @@ a labelled document, a route not declared local, a recording fake that must see
 nothing. An exempt function is one that needs a re-read when what it sends
 changes; the roster does not notice that it did.
 
-Known evasions, none of them caught, each pinned in
-``test_the_known_evasions_are_named_not_caught`` so this list stays true:
-``gen = client.generate`` and ``functools.partial`` hide the call; an
-attribute write such as ``gate.local = True`` opens a gate after construction;
-a sender or service passed in as an argument is built where this scan does not
-look; an entry that calls ``gate.permits(...)`` and ignores the result, or
-checks one path of several, still counts as passing. A call spelled
-``getattr(client, "gen" + "erate")`` is invisible too; what bounds it is that
-every provider client is built through ``StoreRegistry.build_llm_client``, which
-``test_llm_consumer_rule.py`` polices.
+Known evasions, none of them caught. Pinned in
+``test_the_known_evasions_are_named_not_caught``, so this part of the list stays
+true: ``gen = client.generate``, ``functools.partial(client.generate, ...)``,
+``partial(EgressGate, local=True)``, ``partial(judge_reconcile, a)`` and
+``map(judge_reconcile, a)`` hide a call; an attribute write such as
+``gate.local = True`` opens a gate after construction; a service passed in as an
+argument is built where this scan does not look; an entry that calls
+``gate.permits(...)`` and ignores the result still counts as passing. Named but
+not pinned: a computed ``getattr(client, "gen" + "erate")``; a sender function
+passed in as an argument (``send(messages=[d])``); an entry that checks one path
+of several. What bounds the computed ``getattr`` is that every provider client is
+built through ``StoreRegistry.build_llm_client``, which ``test_llm_consumer_rule.py``
+polices.
 """
 
 from __future__ import annotations
@@ -125,7 +128,9 @@ _EXEMPT: dict[tuple[str, str], str] = {
         "enrichment candidate, and nothing here follows that path"
     ),
     ("trellis_workers/learning/miner.py", "_ask_llm"): (
-        "sends traces, which carry no sensitivity label in this slice"
+        "sends stored trace summaries, which carry no sensitivity label of "
+        "their own, so the predicate has nothing to read there; the path is not "
+        "gated and the operations guide names it as not covered"
     ),
 }
 
@@ -587,6 +592,18 @@ def test_the_known_evasions_are_named_not_caught(tmp_path: Path) -> None:
     )
     root = _corpus(tmp_path, c=discarded)
     assert entry_violations(root, {Entry("c.py", "gated_entry")}) == []
+
+    wrapped = (
+        "def a(x):\n    return functools.partial(judge_reconcile, x)\n"
+        "def b(x):\n    return list(map(judge_reconcile, x))\n"
+    )
+    assert sink_caller_violations(_corpus(tmp_path, e=wrapped), set(), {}) == (0, [])
+
+    partial_gate = (
+        "def build(store):\n"
+        "    return functools.partial(EgressGate, local=True)(store)\n"
+    )
+    assert gate_opening_violations(_corpus(tmp_path, f=partial_gate)) == []
 
     passed_in = "def job(service, doc):\n    return service.enrich(doc)\n"
     assert sink_caller_violations(_corpus(tmp_path, d=passed_in), set(), {}) == (

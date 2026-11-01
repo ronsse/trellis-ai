@@ -37,6 +37,7 @@ from trellis.mcp.reconcile import (
     ReconcileDecision,
     ReconcileFallbackReason,
 )
+from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis_cli import worker
@@ -539,6 +540,46 @@ class TestOperationsGuideExample:
     def test_an_unrouted_consumer_keeps_the_parents_declaration(self) -> None:
         route = resolve_llm_route(self._example(), LLMConsumer.MEMORY_EXTRACTION)
         assert route.local is True
+
+    def test_every_consumer_builds_a_client_from_the_example(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A copied example must yield a client, not a silent ``None``.
+
+        The credential names come from the example itself, so an example that
+        names none leaves the variable unset and its consumers unbuilt.
+        """
+        example = self._example()
+        built: list[dict[str, Any]] = []
+
+        class _Fake:
+            def __init__(self, **kwargs: Any) -> None:
+                built.append(kwargs)
+
+        monkeypatch.setattr("trellis.llm.providers.openai.OpenAIClient", _Fake)
+        names = [example.get("api_key_env")] + [
+            tier.get("api_key_env") for tier in example["tiers"].values()
+        ]
+        for name in names:
+            if name:
+                monkeypatch.setenv(name, "placeholder")
+        config_dir = tmp_path / ".trellis"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"knowledge": {}, "llm": example})
+        )
+        registry = StoreRegistry.from_config_dir(
+            config_dir=config_dir, data_dir=tmp_path / "data"
+        )
+        for consumer in LLMConsumer:
+            before = len(built)
+            assert registry.build_llm_client(consumer=consumer) is not None, (
+                consumer.value
+            )
+            assert len(built) == before + 1
+            hosted = consumer is LLMConsumer.ENRICHMENT
+            expected = example["tiers"]["hosted"] if hosted else example
+            assert built[-1]["base_url"] == expected["base_url"], consumer.value
 
 
 class TestPerConsumerConfig:

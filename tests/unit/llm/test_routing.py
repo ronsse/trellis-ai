@@ -490,6 +490,11 @@ class TestLocalNeedsAnEndpoint:
         assert error.setting == "llm.local"
         assert "base_url" in error.message
 
+    @pytest.mark.parametrize("provider", ["OpenAI", "ANTHROPIC", " openai "])
+    def test_a_hosted_provider_is_matched_whatever_its_case_or_padding(self, provider):
+        error = _raises({"provider": provider, "model": "m", "local": True})
+        assert error.setting == "llm.local"
+
     @pytest.mark.parametrize("provider", ["openai", "anthropic"])
     def test_a_tier_that_resolves_to_no_endpoint_is_rejected(self, provider):
         config = {

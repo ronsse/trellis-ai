@@ -1750,8 +1750,8 @@ def _print_egress_withheld(count: int) -> None:
     if count:
         console.print(
             f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] {count} document(s) "
-            f"labelled above internal were not sent; the enrichment route is "
-            f"not declared local"
+            f"withheld (labelled above internal, label unreadable, or an orphan "
+            f"chunk) were not sent; the enrichment route is not declared local"
         )
 
 
@@ -2564,8 +2564,9 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
         console.print(
             f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
             f"{payload['candidates_skipped_egress_withheld']} candidate(s) not "
-            f"judged; their nearest stored capture is labelled above "
-            f"internal and the session_capture route is not declared local"
+            f"judged; their nearest stored capture was withheld (labelled above "
+            f"internal, label unreadable, or an orphan chunk) and the "
+            f"session_capture route is not declared local"
         )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the

@@ -4772,3 +4772,36 @@ class _LocalRouteRegistry:
         from trellis.llm.routing import resolve_llm_route
 
         return resolve_llm_route({"local": True}, consumer)
+
+
+class TestCaptureTextEgressLine:
+    """The egress line is not tied to the reconcile flag that raises its count."""
+
+    @staticmethod
+    def _text(*, reconcile_enabled: bool, withheld: int) -> str:
+        from trellis_workers.session_capture.models import CaptureReport
+
+        report = CaptureReport(
+            transcripts_root="transcripts",
+            dry_run=True,
+            reconcile_enabled=reconcile_enabled,
+        )
+        report.candidates_skipped_egress_withheld = withheld
+        with worker.console.capture() as captured:
+            worker._render_capture_text(report.to_payload())
+        return " ".join(plain(captured.get()).split())
+
+    @pytest.mark.parametrize("reconcile_enabled", [False, True])
+    def test_a_nonzero_count_is_printed(self, reconcile_enabled: bool) -> None:
+        text = self._text(reconcile_enabled=reconcile_enabled, withheld=2)
+        assert "egress_withheld: 2 candidate(s) not judged" in text
+        assert (
+            "withheld (labelled above internal, label unreadable, or an orphan chunk)"
+            in text
+        )
+
+    @pytest.mark.parametrize("reconcile_enabled", [False, True])
+    def test_a_zero_count_prints_nothing(self, reconcile_enabled: bool) -> None:
+        assert "egress_withheld" not in self._text(
+            reconcile_enabled=reconcile_enabled, withheld=0
+        )
