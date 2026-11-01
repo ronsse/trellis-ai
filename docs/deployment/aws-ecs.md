@@ -3,9 +3,10 @@
 First-client POC runbook for standing Trellis up on AWS. Target: a bastion-hosted
 REST API + UI in a VPN'd VPC, talking to RDS PostgreSQL (pgvector) and S3.
 
-Assumptions: network-layer auth (VPN + security groups) is sufficient; no app-layer
-auth, no rate limiting, no horizontal scaling. Single Fargate task is enough for POC
-scale.
+Assumptions: the VPN and security groups are the network boundary, and the API runs
+with `TRELLIS_AUTH_MODE=required` behind them (the image binds `0.0.0.0`, which the API
+refuses to do without it). No rate limiting, no horizontal scaling. Single Fargate task
+is enough for POC scale.
 
 ## Topology
 
@@ -122,6 +123,7 @@ The task definition sets `TRELLIS_CONFIG_DIR=/etc/trellis` (Dockerfile default).
     "portMappings": [{ "containerPort": 8420, "protocol": "tcp" }],
     "environment": [
       { "name": "TRELLIS_CONFIG_DIR", "value": "/etc/trellis" },
+      { "name": "TRELLIS_AUTH_MODE", "value": "required" },
       { "name": "TRELLIS_LOG_FORMAT", "value": "json" },
       { "name": "TRELLIS_S3_BUCKET",  "value": "my-trellis-blobs" },
       { "name": "AWS_REGION",         "value": "us-east-1" }
@@ -151,12 +153,20 @@ The task definition sets `TRELLIS_CONFIG_DIR=/etc/trellis` (Dockerfile default).
 
 If you front the task with an ALB, the target group should probe `/readyz` on port
 8420 (returns 503 during store init, 200 once the event log is reachable). If the
-bastion talks to the task directly, `/healthz` is enough.
+bastion talks to the task directly, `/healthz` is enough. Neither probe needs a
+credential.
+
+With `TRELLIS_AUTH_MODE=required`, every `/api/v1` call needs a key. Keys live in the
+operational Postgres, so mint them with `trellis admin api-keys create --name <n>
+--scopes <list>` against the same `config.yaml` and `TRELLIS_OPERATIONAL_PG_DSN` the
+task uses, and keep each token: it prints once. See
+[runbook.md → Authentication](runbook.md#authentication) for scopes and revocation.
 
 ## Step 7 — Bastion access + MCP note
 
 Agents running Claude Code / Cursor on dev laptops reach the REST API through the
-bastion. Configure the Trellis SDK with `base_url=https://<bastion-dns>:<port>`.
+bastion. Configure the Trellis SDK with `base_url=https://<bastion-dns>:<port>` and
+`api_key=<token>`.
 
 **MCP stays local.** `trellis-mcp` is stdio-only and runs as a subprocess on each
 agent's host, talking to the same remote REST API via the SDK under the hood. You
@@ -187,10 +197,13 @@ browser).
 
 ## What's out of scope for this runbook
 
-- App-layer authentication (VPN-only assumption)
 - Horizontal scaling / multiple Fargate tasks
 - Prometheus metrics / custom CloudWatch metrics
 - Postgres migration framework (tables autocreate; safe for greenfield)
+- Moving an existing SQLite store into RDS. `trellis admin migrate-graph` copies current
+  graph rows only, without closed SCD-2 versions or the original timestamps, and documents,
+  traces, the event log, vectors, blobs and feedback have no migration tool. See
+  [`migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
 - Multi-tenancy
 
 Each of those has a home in the next phase — see [TODO.md](../../TODO.md)

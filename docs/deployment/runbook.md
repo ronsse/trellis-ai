@@ -12,6 +12,22 @@ Pairs with the infrastructure-specific guides in this folder
 [neo4j-auradb.md](neo4j-auradb.md)) — those describe *where* Trellis
 runs; this one describes *how* to operate it once it's running.
 
+## Moving an existing SQLite deployment
+
+Changing a store's `backend` in `config.yaml` points Trellis at the new
+store; it does not copy what the old one held. The one migration tool is
+`trellis admin migrate-graph`, and it copies **current graph rows** only:
+closed SCD-2 versions are not copied (the run counts them), timestamps are
+not preserved (the destination sets them when it writes each row), and an
+edge or alias attached to an id with no current node is not copied (the run
+counts those edges; aliases have no count). A re-run adds missing rows and
+does not update or remove existing ones, and `--dry-run` still creates the
+destination database. Documents, traces, the event log, vectors, blobs and
+feedback are not moved by it and have no migration tool, so data already in
+them stays in the SQLite files or the local blob directory. Details, the
+JSON shape and the exit codes:
+[`trellis admin migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
+
 ## Environment variables
 
 `config.yaml` selects each store's backend (see
@@ -31,11 +47,12 @@ The minimum set to bring up the API against Postgres + Neo4j:
 
 | Variable                       | Required? | Purpose                                                                  |
 |--------------------------------|-----------|--------------------------------------------------------------------------|
-| `TRELLIS_API_KEY`              | **Yes** in prod | Shared secret for `X-API-Key` auth on `/api/v1`. Unset = open API.   |
+| `TRELLIS_AUTH_MODE`            | **Yes** in prod | Set `required`. `off` and `optional` serve a caller with no credential every scope. See [Authentication](#authentication). |
 | `TRELLIS_KNOWLEDGE_PG_DSN`     | Yes       | DSN for the knowledge plane (graph / vector / document).                 |
 | `TRELLIS_OPERATIONAL_PG_DSN`   | Yes       | DSN for the operational plane (trace / event_log).                       |
-| `TRELLIS_API_HOST`             | No        | Bind address. **Defaults to `127.0.0.1`** — set `0.0.0.0` for containers. |
-| `TRELLIS_API_PORT`             | No        | Default `8420`.                                                          |
+| `TRELLIS_API_HOST`             | No        | Bind address. **Defaults to `127.0.0.1`** — set `0.0.0.0` for containers, which the API then refuses to start on unless `TRELLIS_AUTH_MODE=required`. `trellis serve`, `trellis admin serve` and `trellis-api` all read it; the first two take `--host`, which beats it. |
+| `TRELLIS_API_PORT`             | No        | Default `8420`. Read by the same three entry points; `--port` beats it on the first two. |
+| `TRELLIS_API_KEY`              | No        | Legacy shared secret: a token equal to it gets every scope. Prefer scoped keys. |
 | `TRELLIS_CONFIG_DIR`           | No        | Path to `config.yaml`. Defaults to `~/.trellis`.                         |
 
 Backend-specific:
@@ -66,11 +83,68 @@ Pool sizing (covered in detail below):
 | `TRELLIS_PG_POOL_MIN_SIZE`     | 2       | Minimum live connections per Postgres store. |
 | `TRELLIS_PG_POOL_MAX_SIZE`     | 20      | Maximum live connections per Postgres store. |
 
-> **Auth note.** `TRELLIS_API_KEY` is opt-in by code default — if the env
-> var is unset, every `/api/v1` route accepts unauthenticated traffic and
-> startup logs `api_key_unset`. Always set it for production. The
-> `/healthz`, `/readyz`, and `/metrics` endpoints are deliberately
-> unauthenticated so orchestrator probes work without holding the secret.
+## Authentication
+
+`TRELLIS_AUTH_MODE` sets the posture for every `/api/v1` route:
+
+| Mode | A request with no credential | A credential that is present |
+|------|------------------------------|------------------------------|
+| `required` | 401 | checked, then limited to the key's scopes |
+| `optional` | served with every scope | invalid is 401, valid is limited to its scopes |
+| `off` | served with every scope | ignored, served with every scope |
+
+Unset, the mode is inferred: `required` when `TRELLIS_API_KEY` is set,
+otherwise `off`. An unrecognised value stops startup rather than picking a
+posture. The API refuses to bind a non-loopback address (`TRELLIS_API_HOST=0.0.0.0`,
+a container's default `--host`) unless the mode is `required`; the refusal is a
+`ConfigError` (exit 5) that names its two ways out, and
+`TRELLIS_API_ALLOW_INSECURE_BIND=1` is the second, for a listener that really is
+on a trusted interface. The full matrix and the router-to-scope map are in
+[operations.md](../agent-guide/operations.md#api-authentication).
+
+From a fresh install to an enforced API and a working key:
+
+```bash
+trellis admin init
+
+# One key per caller. The token prints once; only its SHA-256 is stored.
+# List every scope the caller needs: only `admin` implies the others.
+trellis admin api-keys create --name agent --scopes read,ingest,mutate --format json
+trellis admin api-keys create --name operator --scopes admin --format json
+
+TRELLIS_AUTH_MODE=required trellis admin serve
+
+# In another shell, with a token from above in $TRELLIS_ADMIN_KEY:
+curl -H "X-API-Key: $TRELLIS_ADMIN_KEY" http://127.0.0.1:8420/api/v1/advisories
+curl -H "Authorization: Bearer $TRELLIS_ADMIN_KEY" http://127.0.0.1:8420/api/v1/advisories
+```
+
+`X-API-Key` wins when both headers are sent. A wrong or missing credential is
+an undifferentiated 401; a valid key without the scope the route needs is a 403.
+Keys live in the operational store, so `api-keys` and the API must read the same
+`config.yaml`: the same `TRELLIS_CONFIG_DIR`, and on Postgres the same
+`TRELLIS_OPERATIONAL_PG_DSN`. List keys with `trellis admin api-keys list` and
+revoke one with `trellis admin api-keys revoke <key_id>`; a revoked key is
+refused by the running API on its next request, with no restart.
+
+The loops below call `/api/v1/advisories/generate` and
+`/api/v1/effectiveness/apply-noise-tags`, which need an `admin` key, as does
+the `/api/v1/advisories` check under [Validating a deployment](#validating-a-deployment).
+
+Two things to avoid:
+
+- **Do not put a scoped token in `TRELLIS_API_KEY`** where the API process can
+  read it. That variable is the legacy shared secret, and the API checks it
+  first: a token equal to it is granted every scope, so a `read` key exported
+  there acts as `admin`. The examples here call the client-side variable
+  `TRELLIS_ADMIN_KEY`.
+- **Do not rely on the probes for access control.** `/healthz`, `/readyz` and
+  `/api/version` answer without a credential so orchestrator probes work;
+  in `required` mode `/readyz` shows its per-backend breakdown only to a valid
+  credential unless `TRELLIS_OPS_DETAIL=public`. `/metrics` is open to a scraper by default, and
+  `TRELLIS_METRICS_PUBLIC=false` makes it require a credential. `TRELLIS_UI_ENABLED=false`
+  stops the API mounting `/ui`. See
+  [Production exposure](../agent-guide/operations.md#production-exposure).
 
 ## Probes
 
@@ -91,6 +165,11 @@ Returns 200 only when the StoreRegistry is initialized **and** every
 cloud backend probes cleanly. Wire to the orchestrator's readiness
 check so traffic doesn't get routed to a pod whose Postgres pool
 hasn't connected yet.
+
+The `backends` block below is shown to a caller holding a valid credential, and
+to everyone when auth is `off` or `TRELLIS_OPS_DETAIL=public`; an anonymous
+caller on a `required` deployment gets only the `status` line, with the same
+status code. An orchestrator probe needs no credential either way.
 
 Probes four backends — each runs the cheapest possible round-trip
 (`count()` for stores, `count_nodes()` for graph) — and reports
@@ -286,8 +365,8 @@ or `stood_down`).
 REST equivalent:
 
 ```bash
-curl -X POST -H "X-API-Key: $TRELLIS_API_KEY" \
-  "$TRELLIS_API_HOST:$TRELLIS_API_PORT/api/v1/advisories/generate?days=30"
+curl -X POST -H "X-API-Key: $TRELLIS_ADMIN_KEY" \
+  "http://localhost:8420/api/v1/advisories/generate?days=30"
 ```
 
 A run that generated and wrote nothing answers **409**, never 200, and
@@ -310,8 +389,8 @@ Tags low-value items with `signal_quality="noise"`, which causes
 enough feedback has accumulated that effectiveness analysis can rank items.
 
 ```bash
-curl -X POST -H "X-API-Key: $TRELLIS_API_KEY" \
-  "$TRELLIS_API_HOST:$TRELLIS_API_PORT/api/v1/effectiveness/apply-noise-tags?days=30&min_appearances=2"
+curl -X POST -H "X-API-Key: $TRELLIS_ADMIN_KEY" \
+  "http://localhost:8420/api/v1/effectiveness/apply-noise-tags?days=30&min_appearances=2"
 ```
 
 There is no CLI wrapper for this endpoint as of PR-8 — REST is the
@@ -346,19 +425,65 @@ and none failed, and `5` when a write did not land, in either format; the JSON
 `status` reads `ok`, `refused` or `failed` to match. See
 [`operations.md`](../agent-guide/operations.md#trellis-curate-promote-learning).
 
+## Upgrading
+
+This is for the default SQLite stores. `scripts/upgrade_check.sh` upgrades a store
+from the previous release to the build under test, then reads it back with the
+previous release, and `.github/workflows/upgrade-check.yml` runs it on release
+tags and nightly. Postgres, pgvector, Neo4j, ArcadeDB and S3 are **not** covered
+by it. There is no migration command. The registry does keep a schema
+fingerprint: `stores/_trellis_meta.json` records `<store>/<backend>/v<N>` per
+store, and when the API server starts it refuses a store whose recorded value
+differs from the build's (`SchemaFingerprintMismatch`;
+`TRELLIS_SKIP_FINGERPRINT_CHECK=1` bypasses it). Every store class has been at
+`v1` from v0.7.0 to now, so that check has never refused an upgrade, and the
+script does not test a release that bumps it. Apart from that fingerprint a build
+does not check that it can read a store, so the steps below are the compatibility
+signal.
+
+1. **Back up.** `trellis admin backup --output DIR` (see
+   [`operations.md`](../agent-guide/operations.md#trellis-admin-backup); do not
+   `cp` the `.db` files). Keep `config.yaml` beside it. The check does not test a
+   restore.
+2. **Install.** Stop `trellis admin serve` and any worker, then
+   `pip install --upgrade trellis-ai` (or pull the new image). The new build
+   opens the existing stores in place.
+3. **Run.** Start the server and workers as before.
+4. **Check.** `trellis admin health --format json` exits 0 with the store files
+   present, and `trellis admin stats --format json` reports at least the counts
+   you saw before. A pack serves different items under a different build by
+   design, so compare counts, not served items.
+5. **Roll back.** Reinstall the previous version against the same stores. What
+   the check proves: after the new build had written to a store, the previous
+   release read every row back, the new build's included (documents, traces,
+   entities, edges, pack and feedback events, and `admin health`). It does not
+   prove the previous release can *write* to an upgraded store, a rollback past
+   the immediately preceding release, or a store a worker has touched since the
+   upgrade. If a read fails, restore the backup from step 1.
+
+To run the check from a git checkout with its tags (`git fetch --tags`):
+`scripts/upgrade_check.sh` (an optional wheel or source tree as its argument,
+`UPGRADE_FROM=<tag>` to pick the release to start from). It covers one document,
+one trace, two entities and an edge, one pack and its feedback. Per-item pack
+feedback (the MCP `record_feedback` tool and `POST /packs/{id}/feedback`) is not
+in it.
+
 ## Recovery operations
 
 ### Feedback reconciliation
 
-Trellis writes feedback to two paths: a `pack_feedback.jsonl` file on
-disk (file-based capture) and the `FEEDBACK_RECORDED` event in the
-EventLog (governed mutation pipeline). On a healthy system both writes
-succeed and stay in lockstep. If the EventLog write fails (transient
-backend outage, process crash between writes), the JSONL has the row
-but the EventLog does not — analytics that read from the EventLog miss
-it.
+Feedback recorded through the MCP `record_feedback` tool or
+`POST /api/v1/packs/{pack_id}/feedback` is written to two paths: a
+`pack_feedback.jsonl` file on disk (file-based capture) and the
+`FEEDBACK_RECORDED` event in the EventLog (governed mutation pipeline). On a
+healthy system both writes succeed and stay in lockstep. If the EventLog write
+fails (transient backend outage, process crash between writes), the JSONL has
+the row but the EventLog does not — analytics that read from the EventLog miss
+it. Feedback recorded with `trellis curate feedback` or `POST /api/v1/feedback`
+goes straight to the EventLog and writes no JSONL row, so reconciliation has
+nothing to say about it.
 
-`reconcile_feedback_log_to_event_log` closes that gap. It is **not** a
+`trellis admin reconcile-feedback` closes that gap. It is **not** a
 scheduled loop — running it against a healthy system scans the JSONL
 and emits zero events because every entry is `already_present`. Run it
 **when monitoring shows drift**, not on a cron.
@@ -371,20 +496,20 @@ Signals that you need to run reconciliation:
 * Imported a JSONL feedback log from another instance and want to
   promote those rows into the governed pipeline
 
-Invocation is currently programmatic — no CLI / REST wrapper:
-
-```python
-from pathlib import Path
-from trellis.feedback.recording import reconcile_feedback_log_to_event_log
-from trellis.stores.registry import StoreRegistry
-
-registry = StoreRegistry.from_config_dir()
-result = reconcile_feedback_log_to_event_log(
-    log_dir=Path("/var/lib/trellis/feedback"),
-    event_log=registry.operational.event_log,
-)
-print(result)  # ReconcileResult(scanned=N, already_present=N, emitted=N, failed=N)
+```bash
+# Count what would be emitted, then do it. Safe to repeat: rows already in the
+# EventLog are left alone.
+trellis admin reconcile-feedback --dry-run --format json
+trellis admin reconcile-feedback --format json
 ```
+
+It reads `pack_feedback.jsonl` from the feedback directory under the configured
+stores directory, or from `--log-dir`. The report counts `scanned`,
+`already_present`, `emitted` and `failed`. A directory with no
+`pack_feedback.jsonl` is never reported as a clean pass: the report says
+`no_log` and names the file looked for, which exits `0` for the default
+directory (a fresh install has no log) and `2` for a `--log-dir` you named. A log
+that exists but cannot be read exits `5`.
 
 If you find yourself running this often, the right fix is to harden
 the underlying EventLog sink (retry policy, failover, monitoring) —
@@ -400,7 +525,7 @@ not to wrap reconciliation in a recurring schedule.
 5 *  * * * trellis  /usr/local/bin/trellis analyze generate-advisories --format json >> /var/log/trellis/advisory.log 2>&1
 
 # Noise demote, daily at 03:15
-15 3 * * * trellis  curl -fsS -X POST -H "X-API-Key: $TRELLIS_API_KEY" \
+15 3 * * * trellis  curl -fsS -X POST -H "X-API-Key: $TRELLIS_ADMIN_KEY" \
   "http://localhost:8420/api/v1/effectiveness/apply-noise-tags?days=30&min_appearances=2" \
   >> /var/log/trellis/noise.log 2>&1
 ```
@@ -449,12 +574,12 @@ spec:
               args:
                 - >-
                   curl -fsS -X POST
-                  -H "X-API-Key: $TRELLIS_API_KEY"
+                  -H "X-API-Key: $TRELLIS_ADMIN_KEY"
                   "http://trellis-api:8420/api/v1/effectiveness/apply-noise-tags?days=30&min_appearances=2"
               env:
-                - name: TRELLIS_API_KEY
+                - name: TRELLIS_ADMIN_KEY
                   valueFrom:
-                    secretKeyRef: { name: trellis-secrets, key: api_key }
+                    secretKeyRef: { name: trellis-secrets, key: admin_key }
 ```
 
 The learning-promote loop is intentionally not on this schedule — it
@@ -470,15 +595,16 @@ For any deployment (cloud included), the single-command path:
 
 ```bash
 trellis admin smoke-test --url http://localhost:8420 \
-  --api-key "$TRELLIS_API_KEY" --format json
+  --api-key "$TRELLIS_ADMIN_KEY" --format json
 ```
 
 `smoke-test` exits 0 only when every check passes; non-zero on any
 failure. Suitable for a k8s init-container hook or a deploy-pipeline
-gate. The `--url` and `--api-key` flags both fall back to env vars
-(`TRELLIS_API_HOST` / `TRELLIS_API_PORT` / `TRELLIS_API_KEY`), so a
-locally-deployed instance with the env loaded just needs `trellis
-admin smoke-test` with no arguments.
+gate. The `--url` flag falls back to `TRELLIS_API_HOST` and
+`TRELLIS_API_PORT`, and `--api-key` to `TRELLIS_API_KEY`. Pass a scoped
+key with `--api-key`, as above, rather than through `TRELLIS_API_KEY`, which
+is the legacy shared-secret variable (see [Authentication](#authentication)).
+The key needs the `admin` scope, since the auth check calls an admin route.
 
 The five checks it runs, equivalent to running these manually:
 
@@ -491,20 +617,20 @@ curl -fsS http://localhost:8420/healthz
 #    breakdown shows on an auth-required deployment; without a key
 #    (or with one readyz itself rejects) the breakdown is withheld and
 #    smoke-test notes it rather than reporting a bare pass/fail.
-curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/readyz | jq
+curl -fsS -H "X-API-Key: $TRELLIS_ADMIN_KEY" http://localhost:8420/readyz | jq
 
 # 3. Auth — should 401 without the key, 200 with it
 curl -fsS -o /dev/null -w "%{http_code}\n" \
   http://localhost:8420/api/v1/advisories
 curl -fsS -o /dev/null -w "%{http_code}\n" \
-  -H "X-API-Key: $TRELLIS_API_KEY" \
+  -H "X-API-Key: $TRELLIS_ADMIN_KEY" \
   http://localhost:8420/api/v1/advisories
 
 # 4. Metrics — should return Prometheus-format text (404 means the
 #    [observability] extra isn't installed; smoke-test reports this
 #    as INFO rather than FAIL). smoke-test sends the key here too, so
 #    a gated /metrics (TRELLIS_METRICS_PUBLIC=false) doesn't 401.
-curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/metrics | head
+curl -fsS -H "X-API-Key: $TRELLIS_ADMIN_KEY" http://localhost:8420/metrics | head
 ```
 
 If `/readyz` returns `degraded` with `event_log` or `document_store`
