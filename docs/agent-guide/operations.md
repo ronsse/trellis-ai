@@ -259,14 +259,14 @@ Each YAML file holds a single `graph:` block in the shape `recommended-config.ya
 
 Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy". A run that finishes with errors (`--continue-on-error`) carries `copy_scope` beside `status: "error"`.
 
-**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`). Text prints a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`; `--format json` prints one `{"status": "error", "message": "Migration aborted: ...", "hint": "..."}` object. Neither carries `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets `null` and must read `status` or the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` is refused before anything is written, with one line of text or one `{"status": "error", "message": ...}` object, and an exit code from the list below. The `--from-config` / `--to-config` refusals answer in the same two shapes.
+**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`). Text prints a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`; `--format json` prints one `{"status": "error", "message": "Migration aborted: ...", "hint": "..."}` object. Neither carries `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets `null` and must read `status` or the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` is refused before anything is written, with one line of text or one `{"status": "error", "message": ...}` object, and exit `2`. The `--from-config` / `--to-config` refusals answer in the same two shapes.
 
 **Exit codes** (the same under both formats, as observed through the installed `trellis` entry point):
 
 - `0`: a clean copy.
 - `5`: a step failed (`errors` is non-empty, or a store write aborted the run), or the config named a backend that does not exist, a key the backend does not accept, or a backend that is not installed (a `CONFIG_ERROR` or `BACKEND_NOT_INSTALLED` line, or a JSON error object under `--format json`).
-- `2`: a `--from-config` or `--to-config` file that is missing, unreadable, invalid YAML or lacking a `graph:` block with a `backend` key, and an unknown option (`--from` and `--to` are not options).
-- `1`: a source over `--max-nodes`, and two cases the command does not handle and that end in a Python traceback: a `db_path` under a regular file, and a SQLite source that is read-only.
+- `2`: a `--from-config` or `--to-config` file that is missing, unreadable, invalid YAML or lacking a `graph:` block with a `backend` key, a source over `--max-nodes` (re-run with a larger value; this exited `1` before), and an unknown option (`--from` and `--to` are not options).
+- `1`: two cases the command does not handle and that end in a Python traceback: a `db_path` under a regular file, and a SQLite source that is read-only.
 
 ### `trellis admin show-prompt`
 

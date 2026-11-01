@@ -26,7 +26,7 @@ from tests.cli_output import plain
 from trellis.stores.base.graph import GraphStore
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_STORE, EXIT_VALIDATION
 
 #: The timestamp columns each SQLite table holds, by the name this module gives
 #: the row (an edge row has no ``updated_at``).
@@ -702,7 +702,7 @@ class TestARunThatAbortsStatesNoLimits:
     ``--format json`` and carry no ``copy_scope``, so a caller reads ``status``
     (or the exit code) before ``.copy_scope``. The destination can hold a
     partial copy after a store error; a source over ``--max-nodes`` is refused
-    before anything is written.
+    (exit 2) before anything is written.
     """
 
     @staticmethod
@@ -749,7 +749,7 @@ class TestARunThatAbortsStatesNoLimits:
         assert _current_rows(versioned["dst_db"])[0] == 1
 
     @pytest.mark.parametrize("fmt", ["text", "json"])
-    def test_a_source_over_max_nodes_exits_1_before_writing_anything(
+    def test_a_source_over_max_nodes_exits_2_before_writing_anything(
         self, versioned: dict[str, Path], runner: CliRunner, fmt: str
     ) -> None:
         result = runner.invoke(
@@ -764,7 +764,7 @@ class TestARunThatAbortsStatesNoLimits:
             ),
         )
 
-        assert result.exit_code == EXIT_INTERNAL
+        assert result.exit_code == EXIT_VALIDATION
         assert "max_nodes=1" in plain(result.stdout)
         self._assert_the_answer_is_a_refusal_in(fmt, result.stdout)
         assert _current_rows(versioned["dst_db"]) == [0, 0, 0]

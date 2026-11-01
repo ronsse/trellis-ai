@@ -286,9 +286,9 @@ All notable changes to Trellis will be documented in this file.
   run also carries the next step under `hint`, where text prints it as a second
   line, and still carries no `copy_scope`. The proposal commands add
   `"error": "validation_error"` so their existing `error` key stays populated.
-  Exit codes are unchanged (`migrate-graph` config file `2`, step abort `5`,
-  source over `--max-nodes` `1`, the others `1`), and the human-format text is
-  byte-identical. One success path changes: `draft-promotion-adr --force` under
+  Exit codes are unchanged by this entry (`migrate-graph` config file `2`, step
+  abort `5`, the others `1`); a source over `--max-nodes` changes in the entry
+  under Changed. The human-format text is byte-identical. One success path changes: `draft-promotion-adr --force` under
   `--format json` no longer prints its "Overwriting existing file" line ahead of
   the JSON object, which made stdout unparseable at exit `0`; the warning is
   still logged and text still prints it.
@@ -607,6 +607,18 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
+  current nodes than `--max-nodes`.** Breaking for a script that branches on the
+  code. Old `1`, new `2` (`EXIT_VALIDATION`), in both formats. `1` is the
+  "unexpected error, file it with a traceback" code
+  (`docs/design/adr-cli-exit-codes.md`), and this is a deliberate refusal of the
+  arguments given: re-run with a larger `--max-nodes`, as for the command's other
+  input refusals, which already exit `2`. It is not `5`:
+  `MigrationCapacityExceededError` is a `RuntimeError`, not a `TrellisError`, and
+  no store or backend failed. Every other `migrate-graph` exit code is
+  unchanged (`0`, `2` for a config file, `5` for a step failure or a bad
+  backend); nothing was written before the refusal, as before.
 
 - **The repeated-rejection health signal is rated against each tool's attempts and
   no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`

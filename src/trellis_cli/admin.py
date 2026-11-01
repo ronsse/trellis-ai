@@ -2515,8 +2515,11 @@ def migrate_graph(
             try:
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
+                # A refusal of the arguments given, not a bug: re-run with a
+                # larger ``--max-nodes``. ``EXIT_INTERNAL`` reads "file this
+                # with a traceback" (``docs/design/adr-cli-exit-codes.md``).
                 _report_refusal(str(exc), output_format=output_format)
-                raise typer.Exit(code=EXIT_INTERNAL) from exc
+                raise typer.Exit(code=EXIT_VALIDATION) from exc
             except MigrationStepError as exc:
                 # str(exc) embeds the destination store's own error
                 # text, which can quote the row value that tripped it.

@@ -269,7 +269,7 @@ def _migrate_config_not_text(tmp_path, monkeypatch):
 def _migrate_over_max_nodes(tmp_path, monkeypatch):
     source = _graph_config(tmp_path, "src", nodes=2)
     args = _migrate(tmp_path, source, "--max-nodes", "1")
-    return args, "exceeding max_nodes=1", EXIT_INTERNAL
+    return args, "exceeding max_nodes=1", EXIT_VALIDATION
 
 
 def _migrate_aborted_by_a_store_error(tmp_path, monkeypatch):
