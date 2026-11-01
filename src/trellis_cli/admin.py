@@ -1306,7 +1306,12 @@ def _init_stores_if_needed(config_dir: Path, data_dir: Path) -> str:
     ``StoreRegistry.from_config_dir``, so project stores stay in the
     project even when a global ``TRELLIS_DATA_DIR`` is set.
     """
-    if (config_dir / "config.yaml").exists():
+    # ``path_is_present``, not ``.exists()``: a dangling link, a link loop or a
+    # config dir that is a file reads as absent to ``.exists()``, and the
+    # first-run branch below would write a config through the link or crash on
+    # the mkdir. Present-but-unreadable goes to ``from_config_dir``, which names
+    # the file it could not read as a ``ConfigError`` (``EXIT_STORE``).
+    if path_is_present(config_dir / "config.yaml"):
         from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
         StoreRegistry.from_config_dir(config_dir=config_dir)

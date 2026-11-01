@@ -419,6 +419,51 @@ class TestQuickstart:
         assert not (project_dir / ".gitignore").exists()
 
     @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "shape", ["dangling-symlink", "symlink-loop", "config-dir-is-a-file"]
+    )
+    def test_a_config_path_that_cannot_be_read_stops_quickstart(
+        self, monkeypatch, output_format, shape
+    ):
+        """A path that is there but unreadable is a config error, not "no config".
+
+        ``Path.exists()`` answers False for a dangling link, a link loop
+        (``ELOOP``) and a config dir that is a file (``ENOTDIR``), so quickstart
+        took the first-run branch and wrote a config through the link or
+        crashed on the mkdir. ``path_is_present`` counts all three as present,
+        and ``StoreRegistry.from_config_dir`` then names the file it could not
+        read, which exits ``EXIT_STORE`` in both formats.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        config_dir = project_dir / ".trellis"
+        target = project_dir / "elsewhere.yaml"
+        if shape == "dangling-symlink":
+            config_dir.mkdir()
+            (config_dir / "config.yaml").symlink_to(target)
+        elif shape == "symlink-loop":
+            config_dir.mkdir()
+            (config_dir / "config.yaml").symlink_to(config_dir / "config.yaml")
+        else:
+            config_dir.write_text("not a directory", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--scope", "project", "--format", output_format],
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+            assert payload["status"] == "error"
+            assert payload["error_type"] == "ConfigError"
+            assert "steps" not in payload
+        else:
+            assert "CONFIG_ERROR" in plain(result.stdout)
+        assert not target.exists()
+        assert not (project_dir / ".gitignore").exists()
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
     def test_unknown_scope_exits_before_writing(self, monkeypatch, output_format):
         """A ``--scope`` other than ``root`` or ``project`` writes nothing.
 
