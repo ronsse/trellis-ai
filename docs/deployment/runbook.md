@@ -12,6 +12,22 @@ Pairs with the infrastructure-specific guides in this folder
 [neo4j-auradb.md](neo4j-auradb.md)) — those describe *where* Trellis
 runs; this one describes *how* to operate it once it's running.
 
+## Moving an existing SQLite deployment
+
+Changing a store's `backend` in `config.yaml` points Trellis at the new
+store; it does not copy what the old one held. The one migration tool is
+`trellis admin migrate-graph`, and it copies **current graph rows** only:
+closed SCD-2 versions are not copied (the run counts them), timestamps are
+not preserved (the destination sets them when it writes each row), and an
+edge or alias attached to an id with no current node is not copied (the run
+counts those edges; aliases have no count). A re-run adds missing rows and
+does not update or remove existing ones, and `--dry-run` still creates the
+destination database. Documents, traces, the event log, vectors, blobs and
+feedback are not moved by it and have no migration tool, so data already in
+them stays in the SQLite files or the local blob directory. Details, the
+JSON shape and the exit codes:
+[`trellis admin migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
+
 ## Environment variables
 
 `config.yaml` selects each store's backend (see
