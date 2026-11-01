@@ -3985,8 +3985,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties:
-                  type: string
+                additionalProperties: true
                 title: Response Revoke Api Key Api V1 Api Keys  Key Id  Delete
                 type: object
           description: Successful Response
