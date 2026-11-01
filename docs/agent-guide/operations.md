@@ -253,8 +253,11 @@ trellis admin serve [--port PORT] [--host HOST]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port` | `8420` | Port to listen on |
-| `--host` | `127.0.0.1` | Host to bind to |
+| `--port` | `8420` | Port to listen on. Falls back to `TRELLIS_API_PORT` |
+| `--host` | `127.0.0.1` | Host to bind to. Falls back to `TRELLIS_API_HOST` |
+
+A flag beats its variable, and an empty variable counts as unset. A variable
+changes only the address: the bind check below runs on it like on a flag.
 
 Both `trellis admin serve` and `trellis serve` refuse to bind a
 non-loopback host (`0.0.0.0`, `::`, a LAN address, …) unless
