@@ -3888,6 +3888,64 @@ rate over every eligible task, cut-offs included. Output is counts and
 statistics only, never an id, intent or text. Exit `0` on any report, `2` on an
 invalid option or an unnamed choice between rates, in both formats.
 
+### `trellis analyze learning-candidates`
+
+Score the EventLog into learning candidates for human review and write two
+artifacts, `intent_learning_candidates.json` and
+`promotion_decisions.template.json`. Nothing is promoted here. It is not a pure
+read: besides the two files, each run records itself as a meta-Activity in the
+graph unless `--no-meta-trace` is passed.
+
+```bash
+trellis analyze learning-candidates [--output-dir PATH] [--days N] \
+  [--min-support N] [--format text|json] [--no-meta-trace]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-dir` | `TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Where the two artifacts are written; the directory the Review queue and `curate review-ready` read |
+| `--days` | `30` | Days of EventLog history to scan |
+| `--min-support` | `2` | Times an item must appear in graded packs, within one intent family, to be scored for that family |
+| `--no-meta-trace` | off | Do not record this run as a meta-Activity in the graph |
+
+`--format json` answers `status`, `observation_count`, `candidate_count`,
+`candidates_path`, `decisions_template_path` and `candidates`, plus two counts
+over that same `candidates` list:
+
+- `by_recommendation_type`: the number of candidates of each
+  `recommendation_type` (`promote_guidance`, `promote_precedent`,
+  `investigate_noise`), in name order. A type with no candidate is absent, so
+  read a missing key as `0`; an empty list gives `{}`. The values sum to
+  `candidate_count`.
+- `promotion_ready_count`: how many of them pass `is_promotion_ready`,
+  the one predicate the promotion-ready digest and `trellis curate
+  review-ready` select through (`promote_guidance`, at least one helpful
+  citation, no unhelpful one). It equals the artifact's `promotion_ready.count`.
+
+Text output prints the same two: a `By recommendation:` line (only when there
+is a candidate) and `N candidates promotion-ready`, with the `review with`
+pointer only when `N > 0`.
+
+`candidate_count` includes every `investigate_noise` row, so a large count says
+little about promotable knowledge. `promotion_ready_count` narrows it, but it is
+not a backlog either: a candidate stays counted after it is promoted, and one a
+review would refuse is still counted.
+
+**What `promotion_ready_count` is not.** It counts this run's list, so it moves
+with the flags that shape the list: `--min-support` and `--days` decide which
+items are candidates at all (a higher floor can only lower it). `--output-dir`
+does not change the count; it decides whether the file the review commands read
+by default is the one this run wrote. It is also not what `curate
+promote-learning` would act on: that plans a promotion for any approved candidate whose type is
+`promote_guidance` or `promote_precedent`, whatever its citations.
+`curate review-ready` selects the same candidates as `promotion_ready_count`
+(its `ready_count`, for the same file), but refuses to approve one whose
+precedent already exists or whose item is an `investigate_noise` candidate
+under another intent family (unless `--force-contradicted`), so what a reviewer
+can approve is at most this count. The auto-promote evaluation is a separate
+report with its own floors (by default 5 helpful citations and 3 distinct
+sessions).
+
 ### `trellis analyze domains`
 
 Read-only usage report for the primary retrieval slice, `domain`. Joins observed

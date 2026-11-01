@@ -389,6 +389,36 @@ def promotion_ready_sort_key(candidate: Mapping[str, Any]) -> tuple[int, float, 
     )
 
 
+def summarize_learning_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Break a candidate list down by type and count the promotion-ready ones.
+
+    ``candidate_count`` alone cannot say whether a long list is promotable
+    knowledge or ``investigate_noise`` rows. ``by_recommendation_type`` counts
+    the candidates of each ``recommendation_type`` present, in name order (a
+    type with no candidate is absent, not ``0``), and ``promotion_ready_count``
+    counts those :func:`is_promotion_ready` accepts, the same predicate the
+    digest and ``trellis curate review-ready`` select through.
+
+    Pass the list that is being reported. The counts describe exactly those
+    candidates: ``min_support`` and ``days`` have already shaped the list, and
+    this function applies no filter of its own. Surfacing only; nothing here
+    promotes or recommends anything.
+    """
+    by_type: dict[str, int] = {}
+    ready = 0
+    for candidate in candidates:
+        recommendation_type = str(candidate.get("recommendation_type", ""))
+        by_type[recommendation_type] = by_type.get(recommendation_type, 0) + 1
+        if is_promotion_ready(candidate):
+            ready += 1
+    return {
+        "by_recommendation_type": dict(sorted(by_type.items())),
+        "promotion_ready_count": ready,
+    }
+
+
 def _build_promotion_ready_digest(
     candidates: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -2430,6 +2460,7 @@ __all__ = [
     "settle_promotion",
     "strip_source_excerpt",
     "submit_learning_promotion",
+    "summarize_learning_candidates",
     "unnamed_approved_count",
     "write_learning_review_artifacts",
 ]

@@ -28,6 +28,7 @@ from trellis.learning.scoring import (
     normalize_intent_family,
     prepare_learning_promotions,
     promotion_ready_sort_key,
+    summarize_learning_candidates,
     write_learning_review_artifacts,
 )
 from trellis.ops import ParameterRegistry
@@ -1610,6 +1611,65 @@ class TestIsPromotionReady:
             "1",
             "0",
         ]
+
+
+class TestSummarizeLearningCandidates:
+    """The per-type counts and the ready count over a reported candidate list."""
+
+    def test_empty_list(self) -> None:
+        assert summarize_learning_candidates([]) == {
+            "by_recommendation_type": {},
+            "promotion_ready_count": 0,
+        }
+
+    def test_counts_each_type_present_and_only_those(self) -> None:
+        evidence = {"helpful_count": 2, "unhelpful_count": 0}
+        candidates = [
+            _make_promotable_candidate(
+                candidate_id="a", recommendation_type="promote_guidance"
+            ),
+            _make_promotable_candidate(
+                candidate_id="b", recommendation_type="promote_guidance"
+            ),
+            _make_promotable_candidate(
+                candidate_id="c",
+                recommendation_type="investigate_noise",
+                citation_evidence=evidence,
+            ),
+        ]
+        summary = summarize_learning_candidates(candidates)
+        assert summary["by_recommendation_type"] == {
+            "investigate_noise": 1,
+            "promote_guidance": 2,
+        }
+        assert "promote_precedent" not in summary["by_recommendation_type"]
+
+    def test_ready_count_applies_the_shared_predicate_to_each_candidate(self) -> None:
+        ready = {"helpful_count": 2, "unhelpful_count": 0}
+        candidates = [
+            _make_promotable_candidate(candidate_id="ready", citation_evidence=ready),
+            # Listed, promote_guidance, but contested by an unhelpful citation.
+            _make_promotable_candidate(
+                candidate_id="contested",
+                citation_evidence={"helpful_count": 2, "unhelpful_count": 1},
+            ),
+            # Listed, promote_guidance, but never cited helpful.
+            _make_promotable_candidate(
+                candidate_id="uncited",
+                citation_evidence={"helpful_count": 0, "unhelpful_count": 0},
+            ),
+            # Helpful and clean, but promote_precedent is not the narrow type.
+            _make_promotable_candidate(
+                candidate_id="precedent",
+                recommendation_type="promote_precedent",
+                citation_evidence=ready,
+            ),
+        ]
+        summary = summarize_learning_candidates(candidates)
+        assert summary["promotion_ready_count"] == 1
+        assert summary["promotion_ready_count"] == sum(
+            1 for c in candidates if is_promotion_ready(c)
+        )
 
 
 # ---------------------------------------------------------------------------

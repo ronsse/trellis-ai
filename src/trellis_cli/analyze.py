@@ -44,6 +44,7 @@ from trellis.learning import (
 from trellis.learning import (
     RECOMMENDED_SEED_VALUES as SCHEMA_EVOLUTION_SEED_DEFAULTS,
 )
+from trellis.learning.scoring import summarize_learning_candidates
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
 from trellis.ops.precedent_sync_health import PrecedentSyncReport
@@ -3968,7 +3969,8 @@ def learning_candidates(
         2,
         "--min-support",
         help=(
-            "Minimum times an item must appear in graded packs to score as a candidate"
+            "Minimum times an item must appear in graded packs, within one "
+            "intent family, to score as a candidate for that family"
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -3991,8 +3993,23 @@ def learning_candidates(
         want to promote, then pass it to ``trellis curate
         promote-learning``.
 
-    Read-only. Does not mutate the graph; the promote step does that
-    after a human review pass.
+    ``--format json`` adds ``by_recommendation_type`` (a count per
+    ``recommendation_type``; a type with no candidate is absent) and
+    ``promotion_ready_count``; the text form prints the same.
+    ``promotion_ready_count`` counts the candidates this run lists that
+    pass ``is_promotion_ready``, the one predicate ``trellis curate
+    review-ready`` selects through: ``promote_guidance`` with at least one
+    helpful citation and none unhelpful. It is a count of the list written by
+    *this* run, so ``--min-support`` and ``--days`` change it, and it
+    is not what ``promote-learning`` would act on. That command plans a
+    promotion for any ``promote_*`` candidate you approve,
+    ``promote_precedent`` included, while ``review-ready`` also refuses a
+    candidate already promoted or contradicted by a noise candidate under
+    another intent family.
+
+    Promotes nothing; the promote step does that after a human review pass.
+    Not a pure read: besides the two artifacts, a run records itself as a
+    meta-Activity in the graph unless ``--no-meta-trace`` is passed.
     """
     output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
@@ -4022,6 +4039,11 @@ def learning_candidates(
                 finding_type="LearningCandidatesReport",
             )
 
+    # Counted over the very list both surfaces print, after the artifact write
+    # (which only renames candidates), so the breakdown cannot describe a
+    # different set than the one listed.
+    breakdown = summarize_learning_candidates(report["candidates"])
+
     if output_format == "json":
         print(
             json.dumps(
@@ -4029,6 +4051,8 @@ def learning_candidates(
                     "status": "ok",
                     "observation_count": report["observation_count"],
                     "candidate_count": report["candidate_count"],
+                    "by_recommendation_type": breakdown["by_recommendation_type"],
+                    "promotion_ready_count": breakdown["promotion_ready_count"],
                     "candidates_path": paths["candidates_path"],
                     "decisions_template_path": paths["decisions_template_path"],
                     "candidates": report["candidates"],
@@ -4047,16 +4071,26 @@ def learning_candidates(
     console.print(
         f"  Decisions template: [cyan]{escape(paths['decisions_template_path'])}[/cyan]"
     )
-    promotion_ready_count = int(
-        (report.get("promotion_ready") or {}).get("count", 0) or 0
-    )
+    if breakdown["by_recommendation_type"]:
+        by_type = ", ".join(
+            f"{name} {count}"
+            for name, count in breakdown["by_recommendation_type"].items()
+        )
+        # ``soft_wrap`` so a long type list stays one copyable line instead of
+        # being broken at the console width.
+        console.print(
+            f"  By recommendation: {escape(by_type)}", soft_wrap=True, highlight=False
+        )
+    promotion_ready_count = breakdown["promotion_ready_count"]
+    noun = "candidate" if promotion_ready_count == 1 else "candidates"
     if promotion_ready_count:
         # Surfacing only (#845) — nothing here promotes anything.
-        noun = "candidate" if promotion_ready_count == 1 else "candidates"
         console.print(
             f"  {promotion_ready_count} {noun} promotion-ready — review with "
             "[bold]trellis curate promote-learning[/bold] or the Review tab"
         )
+    else:
+        console.print(f"  0 {noun} promotion-ready")
 
     if not report["candidates"]:
         console.print()
@@ -4089,8 +4123,8 @@ def learning_candidates(
         retry_rate = metrics["retry_rate"]
         table.add_row(
             escape(candidate["candidate_id"]),
-            f"[{rec_style}]{candidate['recommendation_type']}[/{rec_style}]",
-            candidate.get("item_type") or "-",
+            f"[{rec_style}]{escape(candidate['recommendation_type'])}[/{rec_style}]",
+            escape(str(candidate.get("item_type") or "-")),
             str(metrics["times_served"]),
             f"{metrics['success_rate']:.1%}",
             "n/a" if retry_rate is None else f"{retry_rate:.1%}",
