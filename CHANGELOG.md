@@ -172,6 +172,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`upsert_edges_bulk` on ArcadeDB keeps its returned ids when the post-commit
+  recount read fails (closes #1078).** The one read that finds triplets with
+  more than one current row ran outside the per-triplet handling, so a failure
+  there raised from a batch that had already committed: the caller lost every
+  id and no duplicate was repaired. It now follows the repair beside it: the
+  failure is logged as `edge_duplicate_current_recount_failed` (`path`, `edges`,
+  `error_type`), the batch returns the ids it committed, and a duplicate that
+  read would have found stays until the triplet is next written, when the
+  ordinary recount repairs it. `upsert_edge` still raises from its recount, as
+  its write has not returned.
+
 - **`trellis admin quickstart` no longer reports `ok` on a `config.yaml` the
   registry refuses, `trellis admin migrate-graph` no longer tracebacks on a
   graph store that will not open, and `trellis admin serve` reads
