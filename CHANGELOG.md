@@ -113,6 +113,31 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
+  deployment docs describe the scoped-key auth that is built.** The operator
+  runbook listed both as server settings, and `trellis serve` and `trellis-api` honour them,
+  but `admin serve` ignored both and bound `127.0.0.1:8420`.
+  It now takes them as the option defaults: a flag beats the variable, an empty variable is
+  the default, and a port that is not an integer is a usage error (exit 2) instead of being
+  ignored. **Behaviour change:** a deployment that sets either variable for another
+  process in the environment `admin serve` runs in used to get the loopback default and now
+  gets the address the variable names. The fail-closed bind check runs on that address
+  exactly as on a flag, so `TRELLIS_API_HOST=0.0.0.0` without `TRELLIS_AUTH_MODE=required`
+  (or `TRELLIS_API_ALLOW_INSECURE_BIND=1`) now refuses to start with `ConfigError`, exit 5,
+  where it used to start on loopback. With neither variable set nothing changes, and no
+  default, auth mode or check changed. The operator runbook's auth section now starts from
+  `TRELLIS_AUTH_MODE=required` and `trellis admin api-keys create` and says which scope the
+  scheduled loops need (`admin`); it also warns that a scoped token exported as
+  `TRELLIS_API_KEY` is read as the legacy shared secret and gets every scope. The runbook's
+  reconcile section names `trellis admin reconcile-feedback` where it said there was no CLI,
+  and its examples call the client-side variable `TRELLIS_ADMIN_KEY`. The setup-decisions
+  page marks the scoped-credential, UI, readiness/metrics, ArcadeDB-credential and
+  data-classification rows **Now**, as built, and no longer calls scopes inclusive (only
+  `admin` implies the others). The ECS runbook's task definition sets
+  `TRELLIS_AUTH_MODE=required`, which the image's `0.0.0.0` bind needs to start. The README
+  endpoint table lists `POST /api/v1/packs/{pack_id}/feedback`, the route that takes
+  per-item attribution, where it listed `/api/v1/feedback`, which needs a `target_id`.
+
 - **`trellis admin migrate-graph` now says what it copies and what it leaves behind.** The
   command reads current rows and writes them through the destination's `upsert_*` methods, so a
   node with three SCD-2 versions arrives with one, the destination sets each row's timestamps
