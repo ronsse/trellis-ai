@@ -217,6 +217,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Postgres event log reads a naive timestamp as UTC, whatever the
+  session's time zone.** `PostgresEventLog` bound a naive `datetime` as it
+  came, which psycopg sends as `timestamp` and the server reads in the
+  session's time zone. Under any session but UTC a naive `occurred_at` was
+  stored hours away from the instant its digits name, and a naive `since` or
+  `until` named another instant, so the same naive value meant different
+  things to SQLite, to the trace store and to this log. Against a scratch
+  Postgres 16 in `America/Los_Angeles`, a naive event stamped
+  `2026-03-04T05:06:07` was stored as 13:06:07 UTC, an `until` at 05:06:07Z
+  missed it, `count(since=...)` read one of two events, and two event log
+  contract cases failed (the naive `occurred_at` and the naive-and-aware
+  ordering ones); all 53 contract cases passed under `UTC`, and under
+  `America/Los_Angeles`, `Pacific/Kiritimati` and `Pacific/Pago_Pago` once the
+  binds below were in. `append` now binds a naive `occurred_at` and
+  `recorded_at` as UTC, `get_events` a naive `since` and `until`, and `count` a
+  naive `since`, on the trace store's rule (`as_utc`). An aware value reaches
+  the driver as the very object it was, so a deployment whose callers pass
+  aware datetimes sees no change; it is not passed through `as_utc`, which
+  clamps a stamp at the edge of `datetime`'s range where the server today
+  stores the instant it was given. Rows already stored under a non-UTC
+  session are not rewritten. `EventLog.get_events` now says both backends read
+  a naive bound or `occurred_at` as UTC; that replaces the last sentence of the
+  SQLite entry below, which called the Postgres case unchanged. Reads still
+  have no tie-break: `ORDER BY occurred_at` on Postgres orders events at one
+  instant as the plan happens to, where SQLite uses insertion order. That
+  stays out of this change on purpose, because the session dedup read keeps
+  the newest `limit` `PACK_ASSEMBLED` rows of a session by that order, so a
+  tie-break could change which tied rows survive the cut, which ids are
+  deduplicated out of the next pack, and so what a pack serves. The new
+  mocked-pool test (`tests/unit/stores/test_postgres_event_log_binding.py`)
+  runs wherever psycopg is installed; `live-infra` runs the contract suite
+  under the server's default session, which is UTC, so only the mocked test
+  and a local run in another zone cover the fix.
+
 - **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
   is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
   and a CI smoke test under `tests/unit/eval/` as living here; the harness moved
