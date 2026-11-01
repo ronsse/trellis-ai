@@ -172,6 +172,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **SQLite event log time bounds compare `occurred_at` by instant, not as
+  text.** `get_events(since=..., until=...)`, `count(since=...)` and the
+  `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`
+  text, so an event stamped `-11:00` that was newer than a `since` bound read
+  as older and was dropped, a `+14:00` event fell outside an `until`, and a
+  bound given in another zone, or a naive stamp, sat on the wrong side of the
+  instant it names. `EventLog.get_events` now documents inclusive by-instant
+  bounds with a naive value read as UTC, and `SQLiteEventLog` filters and orders
+  on a generated `occurred_at_utc` column with its own index, added to an
+  existing file on open without rewriting a stored row; the query plans keep
+  their index search. The migration is best effort, as the trace store's is: a
+  read-only file or one under another connection's write lock opens as before,
+  warns (`event_log_schema_migration_skipped`) and reads through the same
+  expression unindexed. The expression, the bound and the migration now live in
+  `trellis.stores.sqlite.instant`, which `SQLiteTraceStore` uses unchanged in
+  behaviour. `idx_events_occurred_at` stays, because an earlier build expects
+  it; `append` still writes the text it is given, so `get_event` returns the
+  `occurred_at` it was handed, naive or offset. Eight by-instant cases join the
+  event log contract suite, so Postgres runs them under `live-infra`. The
+  Postgres backend binds a naive datetime without normalising it, which
+  psycopg sends as `timestamp` and the server reads in the session's time zone,
+  so the naive case holds there under a UTC session only; it is not changed
+  here.
+
 - **`trellis admin quickstart` no longer reports `ok` on a `config.yaml` the
   registry refuses, `trellis admin migrate-graph` no longer tracebacks on a
   graph store that will not open, and `trellis admin serve` reads

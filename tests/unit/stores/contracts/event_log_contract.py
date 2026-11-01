@@ -30,7 +30,7 @@ Subclass shape::
 from __future__ import annotations
 
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -54,6 +54,14 @@ def _sleep_for_ordering() -> None:
     avoid relying on that. 5ms is plenty.
     """
     time.sleep(0.005)
+
+
+def _event_at(source: str, occurred_at: datetime) -> Event:
+    return Event(
+        event_type=EventType.TRACE_INGESTED,
+        source=source,
+        occurred_at=occurred_at,
+    )
 
 
 class EventLogContractTests:
@@ -364,6 +372,136 @@ class EventLogContractTests:
         store.emit(EventType.TRACE_INGESTED, "new")
         store.emit(EventType.TRACE_INGESTED, "newer")
         assert store.count(since=cutoff) == 2
+
+    # ------------------------------------------------------------------
+    # Time-range queries compare by instant, whatever offset was written
+    # ------------------------------------------------------------------
+
+    def test_since_finds_an_event_written_with_a_negative_offset(
+        self, store: EventLog
+    ) -> None:
+        # One hour ago, written as eleven hours behind UTC: the wall-clock
+        # digits read twelve hours ago, which a text comparison against a
+        # two-hours-ago bound would call too old.
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        behind = timezone(timedelta(hours=-11))
+        event = _event_at("behind", instant.astimezone(behind))
+        store.append(event)
+        bound = utc_now() - timedelta(hours=2)
+        assert [e.event_id for e in store.get_events(since=bound)] == [event.event_id]
+        assert store.count(since=bound) == 1
+
+    def test_until_finds_an_event_written_with_a_positive_offset(
+        self, store: EventLog
+    ) -> None:
+        # One hour ago, written as fourteen hours ahead of UTC: the digits
+        # read thirteen hours from now, which a text comparison against an
+        # ``until`` of now would call too new.
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        ahead = timezone(timedelta(hours=14))
+        event = _event_at("ahead", instant.astimezone(ahead))
+        store.append(event)
+        found = store.get_events(until=utc_now())
+        assert [e.event_id for e in found] == [event.event_id]
+
+    def test_a_bound_given_with_an_offset_means_its_instant(
+        self, store: EventLog
+    ) -> None:
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        store.append(_event_at("utc", instant))
+        ahead = timezone(timedelta(hours=14))
+        behind = timezone(timedelta(hours=-11))
+        # Both bounds name an instant 30 minutes either side of the event.
+        found = store.get_events(
+            since=(instant - timedelta(minutes=30)).astimezone(behind),
+            until=(instant + timedelta(minutes=30)).astimezone(ahead),
+        )
+        assert [e.source for e in found] == ["utc"]
+        # One 30 minutes past it, in the same dress, excludes it.
+        late = (instant + timedelta(minutes=30)).astimezone(behind)
+        assert store.get_events(since=late) == []
+        assert store.count(since=late) == 0
+        early = (instant - timedelta(minutes=30)).astimezone(ahead)
+        assert store.get_events(until=early) == []
+
+    def test_results_are_ordered_by_instant_across_offsets(
+        self, store: EventLog
+    ) -> None:
+        now = utc_now().replace(microsecond=0)
+        # ``earlier`` happened first but its digits are the larger: written
+        # fourteen hours ahead of UTC, they read twelve hours from now.
+        earlier = (now - timedelta(hours=2)).astimezone(timezone(timedelta(hours=14)))
+        later = now - timedelta(hours=1)
+        store.append(_event_at("later", later))
+        store.append(_event_at("earlier", earlier))
+        assert [e.source for e in store.get_events()] == ["earlier", "later"]
+        assert [e.source for e in store.get_events(order="desc")] == [
+            "later",
+            "earlier",
+        ]
+        # ``limit`` cuts the ordered list, not the digits.
+        assert [e.source for e in store.get_events(limit=1)] == ["earlier"]
+        assert [e.source for e in store.get_events(order="desc", limit=1)] == ["later"]
+
+    def test_bounds_are_inclusive_to_the_microsecond(self, store: EventLog) -> None:
+        instant = datetime(2026, 3, 4, 5, 6, 7, 123456, tzinfo=UTC)
+        written = instant.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        store.append(_event_at("tick", written))
+        tick = timedelta(microseconds=1)
+        assert len(store.get_events(since=instant, until=instant)) == 1
+        assert store.count(since=instant) == 1
+        assert store.get_events(since=instant + tick) == []
+        assert store.count(since=instant + tick) == 0
+        assert store.get_events(until=instant - tick) == []
+
+    def test_a_whole_second_event_sits_between_microsecond_bounds(
+        self, store: EventLog
+    ) -> None:
+        # ``isoformat`` drops a zero fraction, so this one is written without
+        # one; the bounds are written with six digits.
+        instant = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+        store.append(_event_at("whole", instant))
+        tick = timedelta(microseconds=1)
+        found = store.get_events(since=instant - tick, until=instant + tick)
+        assert [e.source for e in found] == ["whole"]
+        assert store.get_events(since=instant + tick) == []
+        assert store.get_events(until=instant - tick) == []
+
+    def test_a_naive_occurred_at_is_read_as_utc(self, store: EventLog) -> None:
+        # ``Event`` accepts a naive ``occurred_at`` and Postgres reads one as
+        # UTC in its default session, so the store does too: the event is
+        # found by the instant its digits name in UTC, naive bound or aware.
+        now = utc_now().replace(microsecond=0)
+        naive = (now - timedelta(hours=1)).replace(tzinfo=None)
+        store.append(_event_at("naive", naive))
+        around = {
+            "since": now - timedelta(hours=2),
+            "until": now - timedelta(minutes=30),
+        }
+        assert [e.source for e in store.get_events(**around)] == ["naive"]
+        naive_around = {k: v.replace(tzinfo=None) for k, v in around.items()}
+        assert [e.source for e in store.get_events(**naive_around)] == ["naive"]
+        assert store.get_events(since=now - timedelta(minutes=30)) == []
+        assert store.get_events(until=now - timedelta(hours=2)) == []
+        assert store.count(since=around["since"]) == 1
+        # Both bounds are inclusive at the very instant, which a text compare
+        # misses: "...T05:06:07" sorts before "...T05:06:07+00:00".
+        at = naive.replace(tzinfo=UTC)
+        assert [e.source for e in store.get_events(since=at, until=at)] == ["naive"]
+
+    def test_naive_and_aware_events_query_together_in_order(
+        self, store: EventLog
+    ) -> None:
+        now = utc_now().replace(microsecond=0)
+        store.append(_event_at("aware", now - timedelta(hours=2)))
+        store.append(
+            _event_at("old naive", (now - timedelta(hours=3)).replace(tzinfo=None))
+        )
+        store.append(
+            _event_at("new naive", (now - timedelta(hours=1)).replace(tzinfo=None))
+        )
+        found = store.get_events(since=now - timedelta(hours=4), until=now)
+        assert [e.source for e in found] == ["old naive", "aware", "new naive"]
 
     # ------------------------------------------------------------------
     # Ordering — ASC default + DESC + truncation semantics

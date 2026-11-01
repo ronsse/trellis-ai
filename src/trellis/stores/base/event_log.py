@@ -811,6 +811,15 @@ class EventLog(ABC):
     ) -> list[Event]:
         """Query events with filters.
 
+        ``since`` and ``until`` are inclusive and compare by instant: an event
+        stored with a ``-11:00`` or ``+14:00`` offset is found by the moment it
+        happened, not by the wall-clock digits it was written with, and results
+        are ordered by instant. A naive bound or a naive stored ``occurred_at``
+        is read as UTC. The returned event keeps the ``occurred_at`` it was
+        appended with, so a caller that compares or sorts them across events
+        must normalise (see ``_as_utc`` below) first. ``count(since=...)``
+        reads its bound the same way.
+
         ``order`` controls truncation semantics when ``limit`` is hit:
         ``"asc"`` (default) preserves chronological consumption for
         analytics aggregators; ``"desc"`` returns the most recent events
