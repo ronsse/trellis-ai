@@ -6,6 +6,20 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis classify label-candidates` points a person at documents they may
+  want to label.** A read-only scan counts matches of four plain patterns (an email
+  address, a US/Canada phone number with separators, a US SSN shape and a
+  Luhn-passing card number) and reports the document id, the rule and a count per
+  finding. It never prints the matched value, an excerpt or the text around it, in
+  JSON, text or logs, and it writes no label, tag, event or queue row; the label is
+  applied through `trellis curate classify-sensitivity`. Documents that already
+  carry a `data_classification` record are skipped and counted, chunk rows are not
+  read, and `--limit` (default 5000) bounds the scan, with `stopped_at_limit` and
+  `status: "partial"` saying so. A miss proves nothing and this is not a PII
+  guarantee: the rules over-report on shapes such as `icon@2x.png` and 13-digit
+  millisecond timestamps, and their precision on a real store is unmeasured.
+  `regulatory_tags` is not read or written. No dependency was added.
+
 - **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
   upgrading and rolling back a SQLite store.** The script installs the previous
   release (the newest release tag that is an ancestor of HEAD and not HEAD
