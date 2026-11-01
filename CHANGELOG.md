@@ -288,7 +288,8 @@ All notable changes to Trellis will be documented in this file.
   `"error": "validation_error"` so their existing `error` key stays populated.
   Exit codes are unchanged by this entry (`migrate-graph` config file `2`, step
   abort `5`, the others `1`); a source over `--max-nodes` changes in the entry
-  under Changed. The human-format text is byte-identical. One success path changes: `draft-promotion-adr --force` under
+  under Changed. The human-format text is byte-identical. One success path
+  changes: `draft-promotion-adr --force` under
   `--format json` no longer prints its "Overwriting existing file" line ahead of
   the JSON object, which made stdout unparseable at exit `0`; the warning is
   still logged and text still prints it.

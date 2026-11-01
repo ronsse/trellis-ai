@@ -2102,9 +2102,7 @@ def _print_check_plugins_report(report: Any) -> None:
     console.print(table)
 
 
-def _report_refusal(
-    message: str, *, output_format: str | None = None, style: str = "red"
-) -> None:
+def _report_refusal(message: str, *, output_format: str | None = None) -> None:
     """Report a refused command on the caller's ``--format``.
 
     ``--format json`` gets the ``{"status": "error", "message": ...}`` object
@@ -2117,7 +2115,7 @@ def _report_refusal(
     if (output_format or active_output_format()) == "json":
         emit_json({"status": "error", "message": message})
     else:
-        console.print(f"[{style}]{escape(message)}[/{style}]", soft_wrap=True)
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
 
 
 def _report_migration_abort(sanitized: str, *, output_format: str) -> None:
