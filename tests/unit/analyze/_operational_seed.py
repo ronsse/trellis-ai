@@ -9,11 +9,14 @@ holdout key at all), how many packs it drew, how long after its first pack its
 join was written, whether the join was written again (and whether the second
 join also changes the timing flags, covariates and first pack id the first
 join fixed), whether it ended interrupted, how many pack ids the capture could
-not parse, and which pack rows another surface wrote that no join names. Every
+not parse, how many of its retrievals errored, and which pack rows another
+surface wrote that no join names. Every
 arm, build, covariate and timing flag a first pack settles, which joins carry an
 outcome block at all, and when capture swept, are fixed by the task's index, so
 two stores that differ only in a :class:`PostTreatment` differ only in values a
-treatment could have moved.
+treatment could have moved. One task in four has an earlier join that names no
+pack (a sweep that landed before its first retrieval), in both arms, whatever
+the :class:`PostTreatment`.
 
 A join is written before the first sweep that could admit its task (at most 25
 minutes after the first pack, where the nightly tests settle for 30), because a
@@ -23,7 +26,7 @@ join written later would be missing from the night a sweep admitted it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from tests.unit.analyze._holdout_fixture import (
     MONDAY,
@@ -74,6 +77,8 @@ class PostTreatment:
     #: Write a later pack as a row from a build before the holdout (no key).
     later_pack_unkeyed: bool = False
     unparsed_pack_ids: int = 0
+    #: Retrievals the capture counted as errored, on every join that names a pack.
+    retrieval_errors: int = 0
     #: Minutes from a task's first pack to its join, for (served, withheld) tasks.
     join_lag_minutes: tuple[int, int] = (10, 10)
     #: Write the join again 30 hours on, for tasks of this arm: ``none``,
@@ -91,6 +96,25 @@ class PostTreatment:
     interrupted_in: str = "none"
     #: Packs drawn after the first, for (served, withheld) tasks, in their arm.
     extra_packs: tuple[int, int] = (0, 0)
+
+
+def _write_pack_free_join(
+    log: HoldoutLog, index: int, start: datetime, parent: str
+) -> None:
+    """For one task in four, a sweep landed before the first retrieval.
+
+    It wrote a join that names no pack; the join that names it follows, and
+    the task is read from that one.
+    """
+    if index % 4 != 1:
+        return
+    log.join(
+        f"task-{index:03d}",
+        at=start - timedelta(minutes=1),
+        pack_ids=[],
+        parent=parent,
+        outcome=outcome_payload(turns=1),
+    )
 
 
 def seed_store(
@@ -179,6 +203,7 @@ def seed_store(
                     else None
                 )
                 lag = timedelta(minutes=post.join_lag_minutes[int(withheld)])
+                _write_pack_free_join(log, index, start, parent)
                 log.join(
                     f"task-{index:03d}",
                     at=start + lag,
@@ -186,6 +211,7 @@ def seed_store(
                     parent=parent,
                     outcome=None if index == 11 else outcome,
                     pack_ids_unparsed=post.unparsed_pack_ids,
+                    retrieval_errors=post.retrieval_errors,
                     timing=timing,
                     covariates=covariates,
                 )
@@ -221,6 +247,7 @@ def seed_store(
                         parent=parent,
                         outcome=None if index == 11 else again,
                         pack_ids_unparsed=post.unparsed_pack_ids,
+                        retrieval_errors=post.retrieval_errors,
                         timing=second_timing,
                         covariates=second_covariates,
                     )

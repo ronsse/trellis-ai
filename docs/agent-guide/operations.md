@@ -3634,20 +3634,26 @@ one.
 sweeps and, for each join, the one pack row its first pack id names, fetched by
 id. It does not scan `PACK_ASSEMBLED`: later packs, the number of packs and the
 volume of pack rows never enter the computation, so there is nothing to filter
-out of the output. A test enforces this with an event log that raises on any
-read of the pack stream other than a join's first pack, by id. Joins and sweeps
-are paged to completion, so there is no scan cap and `--limit` with
-`--operational` is a usage error (exit 2 in both formats). A window in which
-more joins or sweeps share one timestamp than a page holds cannot be paged
-through, and is refused rather than read short.
+out of the output. A test enforces this with an event log that allows only the
+join and sweep events and a first pack by id, and raises on any other event type
+or attribute; the join and sweep payloads it hands back refuse every key the
+report does not read. Joins and sweeps are paged to completion, so there is no
+scan cap and `--limit` with `--operational` is a usage error (exit 2 in both
+formats). Joins stamped at one instant are ordered by event id, and
+`--by-commit` rows first seen together by build label.
 
 **The rule.** An operational figure depends only on values fixed when a task's
 first pack was assembled, and on capture sweep times, which no one task drives.
 The first pack's values are its time, its arm draw, its build stamp and rate,
-and, from the session's earliest join, the agent type, the brief and covariates
-and the two timing flags set before the first retrieval. The earliest join is
-the one read because a later join for the same session can change the flags,
-the covariates and the first pack id; a session with any join before the window
+and, from the session's anchor join, the agent type, the brief and covariates
+and the two timing flags set before the first retrieval. The anchor is the
+earliest join that names a pack, and the earliest of all only when none does:
+capture writes a join for any transcript with a turn or a tool call, so a sweep
+that lands before the first retrieval writes one that names no pack, and
+anchoring on it would lose the task. The anchor is the one read because a later
+join for the same session can change the flags, the covariates and the first
+pack id; a later join is looked at only while the anchor names no pack, and
+only for whether it does. A session with a pack-naming join before the window
 start is skipped, so a join written again inside the window cannot bring it in
 with other values. Everything after the first pack is post-treatment and is
 never read: later packs, the pack count, a session's length and every outcome
@@ -3665,18 +3671,31 @@ report, not the store: a reader of the events can still read them.
 
 **Stated limits.** These are not fixed here.
 
-- A join with no pack id, or whose first pack has no row, has no anchor and no
-  arm. It is windowed on its join time and counted pooled
-  (`funnel.first_pack_not_found` and the other pre-eligibility stages).
+- A session none of whose joins names a pack, or whose first pack has no row,
+  has no first pack to anchor on and no arm. It is windowed on its join time
+  and counted pooled (`funnel.first_pack_not_found` and the other
+  pre-eligibility stages). A join that names no pack is counted only once a
+  sweep ran `settle_hours` after it, as the full report admits a join, so a join
+  that names a pack and follows within that time replaces it first; one written
+  later leaves the session pooled as `no_retrieval` for the nights between.
 - A task whose first join is written later than the sweep that would admit it
   enters on the first night the join exists, not the night its first pack
   settled, so a night asked about again later can show a larger `eligible`.
-  Two causes are known: a per-session parse error that capture retries at a
-  later sweep, and a `--rejoin-since` backfill, which stamps the join when it
-  is written.
+  Three causes are known: a per-session parse error that capture retries at a
+  later sweep, a failed join write, and a `--rejoin-since` backfill, which
+  stamps the join when it is written.
 - A first pack at another rate is counted under `funnel.other_rate`, and a
   later pack at another rate is not read, so it cannot raise the "several
-  holdout rates" error that the full report raises.
+  holdout rates" error that the full report raises. The note for a rate that
+  no pack carries then says no first pack was written at it.
+- A page or more of joins (or of sweeps) stamped at one instant cannot be paged
+  through: this mode refuses (exit 2) where the full report, which reads a
+  capped scan, exits 0. The pile carries no arm, and only an imported or
+  crafted log reaches it.
+- One command line has one exit status across `--format`, not across modes.
+  `--limit N` exits 0 on the full report and 2 here, a later pack at another
+  rate exits 2 there and 0 here, and a page of joins tied at one timestamp
+  exits 0 there and 2 here.
 
 **First-pack admission.** A task is windowed on its first pack's time and
 admitted once a completed sweep ran `settle_hours` after that pack. The full
@@ -3714,7 +3733,7 @@ and every count that follows the first pack: analysed tasks, packs per task,
 tasks with several packs or both arms, the post-hoc share, and the cut-offs
 split by arm. `--outcome` and `--itt` are accepted and change nothing;
 `--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` are
-validated as for the full report and then unused, so one command line exits
+validated as for the full report and then unused, so an invalid one exits
 alike with and without `--operational`. With `--by-commit`, `by_commit` holds
 counts only: per build the eligible tasks that were `served` and `withheld`,
 each under its first pack's build. The text and JSON are an inspection aid, not

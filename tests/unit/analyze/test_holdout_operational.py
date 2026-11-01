@@ -15,17 +15,21 @@ between reports over several windows. Five guards, each of a different kind:
   which fields are post-treatment);
 * the outcome readers and the inference stages patched to raise, so the mode
   is shown not to compute an outcome value rather than to hide one;
-* an event log that raises on any read of a post-treatment key of a join, by
-  subscript, iteration or copy as much as by ``.get``;
-* an event log that raises when the mode reads the pack stream in any way but
-  one join's first pack by id, so a later pack, the number of packs and the
-  volume of pack rows cannot reach a figure;
+* an event log that raises on any read of a post-treatment key of a join or a
+  sweep, by subscript, iteration or copy as much as by ``.get``, and on any
+  attribute but ``get_events``;
+* an allowlisted event log: joins, sweeps and one first pack by id are the only
+  reads it answers, so a later pack, the number of packs, the volume of pack
+  rows, the feedback stream and a raw connection cannot reach a figure;
 * one store grown night by night, whose stored reports must equal a retro
   ``--until`` report and must not differ between stores that differ only in
   post-treatment values.
 
 The rule they pin: the mode reads the joins, the sweeps and each join's first
-pack, and nothing else from the pack stream. The one disclosed exception is
+pack, and nothing else from the pack stream. What no fixture can pin is a read
+that stays quiet on every store the suite builds, such as a threshold on a
+count (of re-emitted joins, say) that no fixture reaches: that is outside what a
+suite of this kind catches, and review has to. The one disclosed exception is
 whether a join carries an outcome block, which the fixtures do not move.
 
 Every id, commit and word the fixtures write is synthetic.
@@ -349,6 +353,7 @@ POST_TREATMENT: dict[str, PostTreatment] = {
     "served joins written again": PostTreatment(reemit_in="served"),
     "interrupted in the withheld arm": PostTreatment(interrupted_in="withheld"),
     "interrupted in the served arm": PostTreatment(interrupted_in="served"),
+    "errored retrievals on every task": PostTreatment(retrieval_errors=3),
     "all at once": PostTreatment(
         magnitude=2,
         cut_offs_in="served",
@@ -361,6 +366,7 @@ POST_TREATMENT: dict[str, PostTreatment] = {
         later_packs_everywhere=True,
         later_pack_rate=0.25,
         unparsed_pack_ids=1,
+        retrieval_errors=3,
         extra_packs=(2, 3),
         join_lag_minutes=(25, 12),
         reemit_in="all",
@@ -372,6 +378,7 @@ POST_TREATMENT: dict[str, PostTreatment] = {
 #: Knobs the full report cannot see at its default window: where a join is
 #: written, and whether it is written again, move only the join's own time.
 NO_FULL_SIGNAL = {
+    "errored retrievals on every task",
     "joins written later for the withheld arm",
     "joins written later for the served arm",
     "interrupted in the withheld arm",
@@ -669,8 +676,8 @@ class _JoinGate(dict[str, Any]):
             return _TimingGate(value)
         if key == "pack_ids" and isinstance(value, list):
             return _PackIds(value)
-        if key == "pack_ids_unparsed" and super().get("pack_ids"):
-            msg = "gated read: pack_ids_unparsed of a join that retrieved"
+        if key in ("pack_ids_unparsed", "retrieval_errors") and super().get("pack_ids"):
+            msg = f"gated read: {key} of a join that retrieved"
             raise AssertionError(msg)
         return value
 
@@ -682,22 +689,49 @@ class _JoinGate(dict[str, Any]):
     items = keys = values = __iter__ = copy = _refuse  # type: ignore[assignment]
 
 
+class _SweepGate(dict[str, Any]):
+    """A sweep payload, readable at the two keys the sweep reader uses."""
+
+    ALLOWED = frozenset({"dry_run", "source_system"})
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key not in self.ALLOWED:
+            msg = f"gated read: a sweep's {key!r}"
+            raise AssertionError(msg)
+        return super().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.get(key)
+
+    items = keys = values = __iter__ = __contains__ = copy = _refuse  # type: ignore[assignment]
+
+
 class _GatedLog:
-    """Hands the analysis every join with its post-treatment keys gated."""
+    """Hands the analysis every join and sweep with its payload gated.
+
+    Only ``get_events`` is offered; any other attribute raises, so a raw
+    connection or a count is not a way round the gates.
+    """
 
     def __init__(self, inner: SQLiteEventLog) -> None:
         self._inner = inner
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
+        msg = f"gated read: log attribute {name!r}"
+        raise AssertionError(msg)
 
     def get_events(self, *args: Any, **kwargs: Any) -> list[Event]:
-        events = self._inner.get_events(*args, **kwargs)
+        gates = {
+            EventType.CAPTURE_SESSION_PACKS: _JoinGate,
+            EventType.CAPTURE_SWEEP_COMPLETED: _SweepGate,
+        }
         return [
-            event.model_copy(update={"payload": _JoinGate(event.payload or {})})
-            if event.event_type == EventType.CAPTURE_SESSION_PACKS
+            event.model_copy(
+                update={"payload": gates[event.event_type](event.payload or {})}
+            )
+            if event.event_type in gates
             else event
-            for event in events
+            for event in self._inner.get_events(*args, **kwargs)
         ]
 
 
@@ -928,13 +962,16 @@ def test_main_transcripts_are_counted_on_their_own_first_pack(
 
 
 def _first_pack_ids(event_log: SQLiteEventLog) -> set[str]:
-    """The first pack id of each session's earliest join: the only packs to read."""
+    """The first pack id of each session's anchor join: the only packs to read.
+
+    The anchor is the earliest join that names a pack.
+    """
     earliest: dict[str, str] = {}
     for join in sorted(
         event_log.get_events(
             event_type=EventType.CAPTURE_SESSION_PACKS, order="asc", limit=100_000
         ),
-        key=lambda event: event.occurred_at,
+        key=lambda event: (event.occurred_at, event.event_id),
     ):
         ids = (join.payload or {}).get("pack_ids") or []
         if join.entity_id and ids:
@@ -943,13 +980,20 @@ def _first_pack_ids(event_log: SQLiteEventLog) -> set[str]:
 
 
 class _FirstPackOnlyLog:
-    """An event log that refuses any read of the pack stream but one first pack by id.
+    """An allowlisted event log: joins, sweeps and each session's first pack by id.
 
-    A query for pack rows by type, with no id or with one that no session's
-    earliest join names first, raises, as does a count or a read by event id,
-    so a later pack, the number of packs and the volume of pack rows cannot
-    reach a figure by any route the log offers.
+    ``get_events`` answers only for the join stream, the sweep stream and a
+    pack row fetched by an id some session's anchor join names first. Every
+    other read raises: another event type (the feedback stream among them), a
+    pack query with no id or another one, a count, a read by event id and any
+    attribute at all (a raw connection included). So a later pack, the number
+    of packs and the volume of pack rows cannot reach a figure by any route the
+    log offers. What a join or a sweep carries is gated by :class:`_GatedLog`.
     """
+
+    LISTED = frozenset(
+        {EventType.CAPTURE_SESSION_PACKS, EventType.CAPTURE_SWEEP_COMPLETED}
+    )
 
     def __init__(self, inner: SQLiteEventLog) -> None:
         self._inner = inner
@@ -957,25 +1001,21 @@ class _FirstPackOnlyLog:
         self.fetched: list[str] = []
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
+        msg = f"read outside the allowlist: log attribute {name!r}"
+        raise AssertionError(msg)
 
     def get_events(self, *args: Any, **kwargs: Any) -> list[Event]:
         event_type = kwargs.get("event_type")
-        if event_type is None or event_type == EventType.PACK_ASSEMBLED:
+        if event_type == EventType.PACK_ASSEMBLED:
             entity = kwargs.get("entity_id")
-            if event_type is None or entity not in self.allowed:
-                msg = f"pack stream read: {event_type} for entity {entity!r}"
+            if entity not in self.allowed:
+                msg = f"read outside the allowlist: {event_type} for entity {entity!r}"
                 raise AssertionError(msg)
             self.fetched.append(entity)
+        elif event_type not in self.LISTED:
+            msg = f"read outside the allowlist: {event_type}"
+            raise AssertionError(msg)
         return self._inner.get_events(*args, **kwargs)
-
-    def count(self, *args: Any, **kwargs: Any) -> int:
-        msg = "pack stream read: a count"
-        raise AssertionError(msg)
-
-    def get_event(self, *args: Any, **kwargs: Any) -> Event | None:
-        msg = "pack stream read: an event by id"
-        raise AssertionError(msg)
 
 
 #: A store with every kind of pack the mode must not see.
@@ -1001,7 +1041,7 @@ def test_operational_mode_reads_only_each_joins_first_pack_from_the_pack_stream(
             _operational(log, until=end, **NIGHT, **options)
         ), end
     # The guard bites: the full analysis scans the pack stream and trips it.
-    with pytest.raises(AssertionError, match="pack stream read"):
+    with pytest.raises(AssertionError, match="outside the allowlist"):
         holdout.analyze_holdout(guarded, **{**WINDOW, **FAST, **options})
 
 
@@ -1013,14 +1053,16 @@ def test_the_pack_stream_guard_catches_a_scan_and_a_later_pack_read(
     guarded = _FirstPackOnlyLog(log.event_log)
     real_read, real_fetch = holdout._read_window, holdout._first_pack_row
 
-    def scanning(event_log: Any, event_type: Any, since: Any, until: Any) -> Any:
+    def scanning(
+        event_log: Any, event_type: Any, since: Any, until: Any, **kwargs: Any
+    ) -> Any:
         event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, since=since, until=until, limit=10
         )
-        return real_read(event_log, event_type, since, until)
+        return real_read(event_log, event_type, since, until, **kwargs)
 
     monkeypatch.setattr(holdout, "_read_window", scanning)
-    with pytest.raises(AssertionError, match="pack stream read"):
+    with pytest.raises(AssertionError, match="outside the allowlist"):
         holdout.analyze_holdout_operational(guarded, **WINDOW)
     monkeypatch.setattr(holdout, "_read_window", real_read)
 
@@ -1037,8 +1079,51 @@ def test_the_pack_stream_guard_catches_a_scan_and_a_later_pack_read(
         return real_fetch(event_log, pack_id)
 
     monkeypatch.setattr(holdout, "_first_pack_row", reading_later)
-    with pytest.raises(AssertionError, match="pack stream read"):
+    with pytest.raises(AssertionError, match="outside the allowlist"):
         holdout.analyze_holdout_operational(guarded, **WINDOW)
+
+
+def test_the_guards_catch_a_feedback_read_a_raw_query_and_a_payload_read(
+    make_log: Callable[..., HoldoutLog], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutants: a feedback read, a raw connection, a sweep key, an error count."""
+    log = make_log(post=CROWDED)
+    guarded, gated = _FirstPackOnlyLog(log.event_log), _GatedLog(log.event_log)
+    real_read, real_excluded = holdout._read_window, holdout._pre_treatment_excluded
+
+    def feedback(event_log: Any, *args: Any, **kwargs: Any) -> Any:
+        event_log.get_events(event_type=EventType.FEEDBACK_RECORDED, limit=5)
+        return real_read(event_log, *args, **kwargs)
+
+    def raw_connection(event_log: Any, *args: Any, **kwargs: Any) -> Any:
+        event_log._conn.execute("select count(*) from events")
+        return real_read(event_log, *args, **kwargs)
+
+    for mutant in (feedback, raw_connection):
+        monkeypatch.setattr(holdout, "_read_window", mutant)
+        with pytest.raises(AssertionError, match="outside the allowlist"):
+            holdout.analyze_holdout_operational(guarded, **WINDOW)
+
+    def sweep_payload(
+        event_log: Any, event_type: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        events = real_read(event_log, event_type, *args, **kwargs)
+        if event_type == EventType.CAPTURE_SWEEP_COMPLETED and events:
+            (events[-1].payload or {}).get("pack_joins_recorded")
+        return events
+
+    monkeypatch.setattr(holdout, "_read_window", sweep_payload)
+    with pytest.raises(AssertionError, match="gated read: a sweep"):
+        holdout.analyze_holdout_operational(gated, **WINDOW)
+    monkeypatch.setattr(holdout, "_read_window", real_read)
+
+    def error_count(payload: Any, funnel: Any) -> Any:
+        payload.get("retrieval_errors")
+        return real_excluded(payload, funnel)
+
+    monkeypatch.setattr(holdout, "_pre_treatment_excluded", error_count)
+    with pytest.raises(AssertionError, match="gated read: retrieval_errors"):
+        holdout.analyze_holdout_operational(gated, **WINDOW)
 
 
 # ---------------------------------------------------------------------------
@@ -1291,3 +1376,190 @@ def test_a_timestamp_shared_by_more_events_than_a_page_is_refused(
         holdout.analyze_holdout_operational(
             log.event_log, days=3, until=MONDAY + timedelta(days=1)
         )
+
+
+def test_a_page_of_tied_events_is_refused_as_a_pile_is(
+    blank: Callable[[], HoldoutLog], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly a page of events at one instant cannot be passed either."""
+    log = blank()
+    for step in range(3):
+        log.join(
+            f"task-{step}",
+            at=MONDAY,
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=5),
+        )
+    monkeypatch.setattr(holdout, "_PAGE_SIZE", 3)
+    with pytest.raises(holdout.HoldoutAnalysisError, match="A page or more"):
+        holdout.analyze_holdout_operational(
+            log.event_log, days=3, until=MONDAY + timedelta(days=1)
+        )
+
+
+# ---------------------------------------------------------------------------
+# A task whose earliest join names no pack, and ties
+# ---------------------------------------------------------------------------
+
+
+def test_a_task_whose_earliest_join_names_no_pack_is_read_from_the_join_that_does(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """A sweep before the first retrieval writes a pack-free join; the task stays.
+
+    Ten sub-agent tasks and one main transcript each get a pack-free join a
+    minute before their first pack and the join that names it later. Read from
+    the first join alone they were ten ``no_retrieval`` tasks, no arm and no
+    rate; the full report, which reads the latest join, counts all ten.
+    """
+    log = blank()
+    for step in range(11):
+        at = MONDAY + timedelta(hours=step)
+        first = log.pack(
+            at=at, withheld=step % 2 == 1, items=3, metadata=provenance(COMMIT_A)
+        )
+        parent = "parent-a" if step < 10 else None
+        log.join(
+            f"task-{step}",
+            at=at - timedelta(minutes=1),
+            pack_ids=[],
+            parent=parent,
+            outcome=outcome_payload(turns=1),
+        )
+        log.join(
+            f"task-{step}",
+            at=at + timedelta(minutes=10),
+            pack_ids=[first],
+            parent=parent,
+            outcome=outcome_payload(turns=9),
+        )
+    log.sweep(at=MONDAY + timedelta(days=2))
+    window: dict[str, Any] = {"days": 30, "until": MONDAY + timedelta(days=3)}
+    operational = holdout.analyze_holdout_operational(log.event_log, **window)
+    full = holdout.analyze_holdout(log.event_log, **window, **FAST)
+    assert (
+        operational.funnel.no_retrieval,
+        operational.funnel.eligible,
+        operational.rate,
+    ) == (0, 10, 0.5)
+    assert (full.funnel.eligible, full.rate) == (10, 0.5)
+    arms = operational.descriptive.eligible_by_arm
+    assert (arms.served, arms.withheld) == (5, 5)
+    assert operational.descriptive.sessions.with_first_pack == 1
+    assert (
+        operational.descriptive.sessions.eligible == full.descriptive.sessions.eligible
+    )
+
+
+def test_a_pack_free_join_before_the_window_does_not_make_a_session_begin_before_it(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """Only a join that names a pack puts a session's first pack before the window."""
+    log = blank()
+    first = log.pack(
+        at=MONDAY + timedelta(days=3),
+        withheld=False,
+        items=3,
+        metadata=provenance(COMMIT_A),
+    )
+    log.join(
+        "task-0",
+        at=MONDAY,
+        pack_ids=[],
+        parent="parent-a",
+        outcome=outcome_payload(turns=1),
+    )
+    log.join(
+        "task-0",
+        at=MONDAY + timedelta(days=3, minutes=5),
+        pack_ids=[first],
+        parent="parent-a",
+        outcome=outcome_payload(turns=5),
+    )
+    log.sweep(at=MONDAY + timedelta(days=4))
+    window = {"days": 2, "until": MONDAY + timedelta(days=5)}
+    assert (
+        holdout.analyze_holdout_operational(log.event_log, **window).funnel.eligible
+        == 1
+    )
+
+
+def _event_join(
+    log: HoldoutLog, event_id: str, session: str, at: Any, pack_ids: list[str]
+) -> None:
+    """A join with a chosen event id, as an import or a clock tie would write one."""
+    log.event_log.append(
+        Event(
+            event_id=event_id,
+            event_type=EventType.CAPTURE_SESSION_PACKS,
+            source="worker:session-capture",
+            entity_id=session,
+            entity_type="capture_session",
+            occurred_at=at,
+            recorded_at=at,
+            payload={
+                "pack_ids": pack_ids,
+                "retrieval_results": len(pack_ids),
+                "retrieval_errors": 0,
+                "pack_ids_unparsed": 0,
+                "parent_session_id": "parent-a",
+                "source_system": "claude-code",
+                "outcome": outcome_payload(turns=5),
+            },
+        )
+    )
+
+
+def test_two_joins_of_a_session_at_one_instant_are_chosen_by_event_id(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """The order the log returns tied joins in is not the anchor's choice."""
+    reports = []
+    for order in ((0, 1), (1, 0)):
+        log = blank()
+        packs = [
+            log.pack(at=MONDAY, withheld=arm, items=3, metadata=provenance(COMMIT_A))
+            for arm in (False, True)
+        ]
+        at = MONDAY + timedelta(minutes=5)
+        for position in order:  # event ids 0 and 1, written in either order
+            _event_join(log, f"evt-{position}", "task-0", at, [packs[position]])
+        log.sweep(at=MONDAY + timedelta(days=1))
+        report = holdout.analyze_holdout_operational(
+            log.event_log, days=3, until=MONDAY + timedelta(days=2)
+        )
+        arms = report.descriptive.eligible_by_arm
+        assert (arms.served, arms.withheld) == (1, 0)  # evt-0's pack is served
+        reports.append(_bytes(report))
+    assert reports[0] == reports[1]
+
+
+def test_by_commit_rows_first_seen_together_are_ordered_by_build_label(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """Two builds' first packs at one instant: join order does not order the rows."""
+    reports = []
+    for order in ((COMMIT_A, COMMIT_B), (COMMIT_B, COMMIT_A)):
+        log = blank()
+        for step, commit in enumerate(order):
+            first = log.pack(
+                at=MONDAY, withheld=bool(step), items=3, metadata=provenance(commit)
+            )
+            log.join(
+                f"task-{commit}",
+                at=MONDAY + timedelta(minutes=5 + step),
+                pack_ids=[first],
+                parent="parent-a",
+                outcome=outcome_payload(turns=5),
+            )
+        log.sweep(at=MONDAY + timedelta(days=1))
+        report = holdout.analyze_holdout_operational(
+            log.event_log, days=3, until=MONDAY + timedelta(days=2), by_commit=True
+        )
+        assert report.by_commit is not None
+        labels = [row.build for row in report.by_commit.rows]
+        assert labels == sorted(labels)
+        assert len(labels) == 2
+        reports.append(labels)
+    assert reports[0] == reports[1]

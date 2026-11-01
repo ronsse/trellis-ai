@@ -122,8 +122,9 @@ design rule: a figure may depend only on values fixed when the task's first
 pack was assembled (that pack's time, arm draw, build stamp and rate, and the
 join's agent type, brief and the two timing flags set before the first
 retrieval) and on capture sweep timestamps, which belong to no task. Those
-join fields come from the session's earliest join, so a join written again
-later changes none of them. A task is admitted on its first pack (the latest
+join fields come from the session's anchor join, the earliest that names a
+pack (the earliest of all when none does), so a join written again later
+changes none of them. A task is admitted on its first pack (the latest
 sweep for its source system ran ``settle_hours`` after it) and windowed by it,
 where the full report admits on the latest join; the two ``eligible`` counts
 can differ on the same night. The rate, the unkeyed-row note, the task window
@@ -136,15 +137,21 @@ and there is no ``limit``.
 One exception is disclosed: a join's outcome block is tested for presence
 (``no_outcome``), never read, because a join without one is dropped before
 eligibility; capture writes the block on every join, so only a join written by
-an older build lacks it. Three limits are stated rather than fixed. A join
-with no pack, or whose first pack has no row, has no first pack to anchor on,
-so it is windowed on its join time and its arm is unknown, and the rows with no
-arm are pooled. A task whose first join is written after the sweep that would
-admit it enters from the night the join exists; the known causes are a
-session's parse error retried at a later sweep, and a ``--rejoin-since``
-backfill, whose join is stamped when it is written. And the report is only as
-sound as the first-pack row the join names. The full report reads every one of
-these values and carries no such guarantee.
+an older build lacks it. Four limits are stated rather than fixed. A
+session none of whose joins names a pack, or whose first pack has no row, has no
+first pack to anchor on, so it is windowed on its join time and its arm is
+unknown, and the rows with no arm are pooled. A join that names no pack waits
+for a sweep ``settle`` after it, and one that names a pack written later than
+that leaves the session pooled as ``no_retrieval`` for the nights between. A task
+whose anchor join is written after the sweep that would admit it enters from the
+night the join exists; the known causes are a session's parse error retried at
+a later sweep, a failed join write, and a ``--rejoin-since`` backfill, whose
+join is stamped when it is written. A page or more of joins (or of sweeps)
+stamped at one instant cannot be paged through, so this report refuses where
+the full report, which reads a capped scan, does not; the pile carries no arm,
+and only an imported or crafted log reaches it. And the report is only as sound as the
+first-pack row the join names. The full report reads every one of these values
+and carries no such guarantee.
 
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
@@ -1516,9 +1523,13 @@ def _find_pack(
 
 
 def _resolve_rate(
-    rows: _Rows, rate: float | None, *, counts: bool = True
+    rows: _Rows, rate: float | None, *, counts: bool = True, unit: str = "row"
 ) -> tuple[float | None, list[str]]:
-    """The rate to analyse, refusing to guess between several."""
+    """The rate to analyse, refusing to guess between several.
+
+    ``unit`` names what ``rows`` holds in the note for a rate no row was
+    written at.
+    """
     keyed = [e.payload or {} for e in rows.window if HOLDOUT_KEY in (e.payload or {})]
     present = Counter(
         value for value in (_rate_value(p) for p in keyed) if value is not None
@@ -1526,7 +1537,7 @@ def _resolve_rate(
     if rate is not None:
         if any(abs(value - rate) <= _RATE_TOLERANCE for value in present):
             return rate, []
-        return rate, [f"No row in the window was written at rate {rate:g}."]
+        return rate, [f"No {unit} in the window was written at rate {rate:g}."]
     if not present:
         return None, []
     if len(present) > 1:
@@ -1759,16 +1770,18 @@ _OPERATIONAL_NOTE = (
     "capture joins, the capture sweeps and, for each join, the one pack row it "
     "names first. It does not scan PACK_ASSEMBLED, so a later pack, the number "
     "of packs and the volume of pack rows are not read. Each task is read from "
-    "its session's earliest join (a later join can change the timing flags, "
-    "the covariates and the first pack id), admitted on its first pack once a "
-    "completed sweep ran settle_hours after it, and windowed by it, so "
+    "its session's earliest join that names a pack (a later join can change "
+    "the timing flags, the covariates and the first pack id), admitted on its "
+    "first pack once a completed sweep ran settle_hours after it, and "
+    "windowed by it, so "
     "eligible counts can differ from the full report's on the same night. One "
     "disclosed exception: whether a join carries an outcome block at all (a "
     "join without one is dropped before eligibility; its values are never "
     "read). A task whose first join is written after the sweep that would "
-    "admit it counts from the night the join exists. A join with no pack, or "
-    "whose first pack has no row, has no arm: it is windowed on its join time "
-    "and counted pooled. --outcome and --itt change nothing here."
+    "admit it counts from the night the join exists. A session with no "
+    "join that names a pack, or whose first pack has no row, has no arm: it "
+    "is windowed on its join time and counted pooled. --outcome and --itt "
+    "change nothing here."
 )
 _OPERATIONAL_BY_COMMIT_NOTE = (
     "Counts only. Each eligible task is counted once, under the build stamped "
@@ -1821,7 +1834,11 @@ def analyze_holdout_operational(
     ``outcome``, ``itt``, ``permutations``, ``bootstraps``, ``power_sims``,
     ``planned_mde``, ``planned_n`` and ``seed`` change no figure. They are
     validated as :func:`analyze_holdout` validates them, so one command line
-    has one exit status in both modes, and are otherwise ignored.
+    has one exit status in both formats, and are otherwise ignored. Across the
+    two modes the status can differ: ``--limit`` is a usage error here and
+    accepted there, a later pack at another rate raises ("several holdout
+    rates") in the full report only, and a page or more of joins stamped at one
+    instant raises here only.
 
     Args:
         event_log: Operational event log, as for :func:`analyze_holdout`.
@@ -1938,12 +1955,19 @@ def analyze_holdout_operational(
 def _operational_by_commit(
     arrivals: Sequence[_Arrival],
 ) -> HoldoutOperationalByCommit:
-    """The eligible tasks per build and arm, in the order builds were first seen."""
+    """The eligible tasks per build and arm, in the order builds were first seen.
+
+    Builds first seen at the same instant are ordered by label.
+    """
     by_build: dict[BuildKey, list[_Arrival]] = {}
     for unit in arrivals:
         by_build.setdefault(unit.build, []).append(unit)
     ordered = sorted(
-        by_build.items(), key=lambda item: min(u.first_pack_at for u in item[1])
+        by_build.items(),
+        key=lambda item: (
+            min(u.first_pack_at for u in item[1]),
+            build_label(*item[0]),
+        ),
     )
     return HoldoutOperationalByCommit(
         rows=[
@@ -1992,10 +2016,17 @@ def _gather_operational(
 ) -> _OperationalEvidence:
     """Read the joins, the sweeps and each join's first pack, and count the tasks.
 
-    Never queries ``PACK_ASSEMBLED`` by type: a pack row is fetched by id, and
-    only the first pack id of a session's earliest join is ever named. A
-    session with a join older than the window began before it, so its first
-    pack is outside the window whatever a later join says, and it is left out.
+    Reads ``PACK_ASSEMBLED`` only for first packs, each by id: the only id
+    ever named is the first pack id of a session's anchor join, the earliest
+    that names a pack (the earliest of all when none does). A session with a
+    pack-naming join older than the window began before it, so its first pack
+    is outside the window whatever a later join says, and it is left out.
+
+    An anchor that names no pack waits for a sweep ``settle`` after the join,
+    as the full report's admission does, so a join that names one and was
+    written within ``settle`` of it replaces it before anything is counted.
+    Counted at once, the pooled figures would move with how long that second
+    join took.
     """
     end = _as_utc(until) if until is not None else datetime.now(tz=UTC)
     since = end - timedelta(days=days)
@@ -2011,13 +2042,17 @@ def _gather_operational(
         if _began_before(event_log, session, since):
             continue
         first_id = _first_pack_id(join.payload or {})
+        if first_id is None and not _finished(join, sweeps, settle):
+            continue
         named.append((join, _first_pack_row(event_log, first_id) if first_id else None))
     first_packs = [
         first
         for _, first in named
         if first is not None and since <= _as_utc(first.occurred_at) < end
     ]
-    rate, notes = _resolve_rate(_Rows(window=first_packs), rate, counts=False)
+    rate, notes = _resolve_rate(
+        _Rows(window=first_packs), rate, counts=False, unit="first pack"
+    )
     arrivals: list[_Arrival] = []
     assigned: list[_Assignment] = []
     mains = _MainTranscripts()
@@ -2053,9 +2088,18 @@ def _gather_operational(
 
 
 def _read_window(
-    event_log: EventLog, event_type: EventType, since: datetime, until: datetime
+    event_log: EventLog,
+    event_type: EventType,
+    since: datetime | None,
+    until: datetime,
+    *,
+    entity_id: str | None = None,
 ) -> list[Event]:
     """Every ``event_type`` event from ``since`` to ``until``, oldest first.
+
+    Events at one instant are ordered by event id, so the order does not
+    depend on how the log returned them. ``entity_id`` narrows the read to one
+    entity, and ``since=None`` leaves the window open at the start.
 
     Read a page at a time, newest first, each page ending where the last one
     began; ``until`` is inclusive, so the boundary rows come twice and are
@@ -2069,6 +2113,7 @@ def _read_window(
     while True:
         page = event_log.get_events(
             event_type=event_type,
+            entity_id=entity_id,
             since=since,
             until=cursor,
             limit=_PAGE_SIZE,
@@ -2080,31 +2125,53 @@ def _read_window(
             break
         if not fresh:
             message = (
-                f"More than {_PAGE_SIZE} {event_type.value} events share one "
-                "timestamp, so the log cannot be read to completion."
+                f"A page or more ({_PAGE_SIZE}) of {event_type.value} events "
+                "share one timestamp, so the log cannot be read to completion."
             )
             raise HoldoutAnalysisError(message)
         cursor = min(_as_utc(event.occurred_at) for event in page)
-    return sorted(seen.values(), key=lambda event: _as_utc(event.occurred_at))
+    return sorted(
+        seen.values(), key=lambda event: (_as_utc(event.occurred_at), event.event_id)
+    )
 
 
 def _earliest_joins(events: Sequence[Event]) -> dict[str, Event]:
-    """Each session's earliest join, by entity id, from events oldest first."""
-    earliest: dict[str, Event] = {}
+    """Each session's anchor join, by entity id, from events oldest first.
+
+    The anchor is the earliest join that names a pack, else the session's
+    earliest. Capture writes a join for any transcript with a turn or a tool
+    call, so a sweep that lands before the first retrieval writes one that
+    names no pack, and the join that names it follows; anchoring on the first
+    would lose the task. A join is read past the anchor only while the anchor
+    names no pack, and only to ask whether it names one.
+    """
+    anchors: dict[str, Event] = {}
     for event in events:
-        if event.entity_id:
-            earliest.setdefault(event.entity_id, event)
-    return earliest
+        if not event.entity_id:
+            continue
+        held = anchors.get(event.entity_id)
+        if held is None or (
+            _first_pack_id(held.payload or {}) is None
+            and _first_pack_id(event.payload or {}) is not None
+        ):
+            anchors[event.entity_id] = event
+    return anchors
 
 
 def _began_before(event_log: EventLog, session: str, since: datetime) -> bool:
-    """Whether the session has a join written before the window opened."""
-    return bool(
-        event_log.get_events(
-            event_type=EventType.CAPTURE_SESSION_PACKS,
+    """Whether a join naming a pack was written before the window opened.
+
+    A join that names none does not count: it anchors nothing, and a session
+    whose only earlier join is one has its first pack inside the window.
+    """
+    return any(
+        _first_pack_id(join.payload or {}) is not None
+        for join in _read_window(
+            event_log,
+            EventType.CAPTURE_SESSION_PACKS,
+            None,
+            since - timedelta(microseconds=1),
             entity_id=session,
-            until=since - timedelta(microseconds=1),
-            limit=1,
         )
     )
 
@@ -2132,15 +2199,16 @@ def _operational_arrival(  # noqa: PLR0911 - one return per funnel stage
 ) -> _Arrival | None:
     """The join's eligible task, admitted and windowed on its first pack.
 
-    ``join`` is the session's earliest and ``first`` the row its first pack id
+    ``join`` is the session's anchor (the earliest that names a pack, the
+    earliest of all when none does) and ``first`` the row its first pack id
     names. The anchor is that pack alone: it is windowed by its time and
     admitted once a completed sweep ran ``settle`` after it, so nothing about
     the join (when it was written, whether it was written again) or any later
     pack moves the night a task counts, except that a join must exist to be
-    read. A join with no pack, or whose first pack has no row, has no such
-    anchor and is counted as the scan holds it, pooled. Past the anchor the one
-    post-treatment fact read is whether the join carries an outcome block;
-    its values never are.
+    read. A session with no join that names a pack, or whose first pack has
+    no row, has no such anchor and is counted as the scan holds it, pooled.
+    Past the anchor the one post-treatment fact read is whether the join
+    carries an outcome block; its values never are.
     """
     payload = join.payload or {}
     first_id = _first_pack_id(payload)
@@ -2389,7 +2457,7 @@ def _arrival(  # noqa: PLR0911 - one return per funnel stage
     the join itself (:func:`_finished`), and the join read is the latest one
     for the session. When a join was written, and whether it was written
     again, are values a session's length can move, so this anchor is not the
-    one the operational report uses (:func:`_first_pack_arrival`), and the
+    one the operational report uses (:func:`_operational_arrival`), and the
     two ``eligible`` counts can differ on the same night. A join without an
     outcome block is dropped here, as there.
     """

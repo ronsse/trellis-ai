@@ -16,24 +16,29 @@ All notable changes to Trellis will be documented in this file.
   reads the capture joins, the capture sweeps and, for each join, the one pack
   row its first pack id names, fetched by id, so later packs, the number of
   packs and the volume of pack rows never enter it. A test enforces that with
-  an event log that raises on any other read of the pack stream. Every figure
+  an event log that allows only the join and sweep events and a first pack by
+  id, and refuses every payload key the report does not read. Every figure
   depends only on values fixed when a task's first pack was assembled (that
-  pack's time, arm draw, build and rate, and, from the session's earliest join,
-  the agent type, brief and the two timing flags set before the first
-  retrieval) and on capture sweep times, so reports over several windows, or
+  pack's time, arm draw, build and rate, and, from the session's anchor join,
+  the earliest that names a pack, the agent type, brief and the two timing
+  flags set before the first retrieval) and on capture sweep times, so reports over several windows, or
   stored nightly, do not vary with later packs, re-emitted joins, session
   length or outcome values. Joins and sweeps are paged to completion,
   so `--limit` with `--operational` is a usage error (exit 2). One exception is
   disclosed: whether a join carries an outcome block (presence only; a join
-  without one is dropped before eligibility). Stated limits: a join with no
-  first-pack row is windowed on its join time and counted pooled, and a task
-  whose first join is written after its settling sweep (a retried parse error,
-  a `--rejoin-since` backfill) counts from the night the join exists. A task is
+  without one is dropped before eligibility). Stated limits: a session with no
+  join that names a pack, or no first-pack row, is windowed on its join time
+  and counted pooled; a task whose anchor join is written after its settling
+  sweep (a retried parse error, a failed join write, a `--rejoin-since`
+  backfill) counts from the night the join exists; and a page or more of joins
+  stamped at one instant exits 2 where the full report exits 0. A task is
   admitted and windowed on its first pack, so operational `eligible` can differ
   from the full report's on the same night.
   The arm-ratio check runs on `assigned`, the first pack of each admitted join
-  at the rate. The inference options are validated as for the full report, so a
-  command line exits alike with and without the flag. With `--by-commit` the
+  at the rate. The inference options are validated as for the full report, so an
+  invalid one exits alike with and without the flag; the exit status differs
+  across modes for `--limit`, a later pack at another rate and a page of tied
+  joins, and is the same across `--format`. With `--by-commit` the
   table is eligible-task counts per build and arm. Default output and exit codes
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
