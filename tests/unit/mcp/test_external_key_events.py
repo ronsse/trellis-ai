@@ -134,18 +134,27 @@ class TestSessionDedup:
             alone = _ids(get_context(QUERY))
             after = _ids(get_context(QUERY, session_id="shared"))
         assert alone
-        assert after == alone
+        assert set(after) == set(alone)
 
     def test_an_external_pack_leaves_no_record_for_a_session(self, world) -> None:
-        """A public pack in a session does not thin an ordinary caller's."""
+        """A public pack in a session does not thin an ordinary caller's.
+
+        Compared on the public documents. The unreadable ones tie on every
+        axis, and what ranks them is the age each row gets from its own clock
+        reading in ``_apply_recency_decay``, so two identical calls can order
+        them, and even pick among the bulk, differently.
+        """
+        public = set(PUBLIC_IDS)
         with as_http(ORDINARY):
-            fresh = _ids(get_context(QUERY, session_id="untouched"))
+            fresh = set(_ids(get_context(QUERY, session_id="untouched")))
         with as_http(EXTERNAL):
             assert _ids(get_context(QUERY, session_id="used"))
         with as_http(ORDINARY):
-            after = _ids(get_context(QUERY, session_id="used"))
-        assert fresh
-        assert after == fresh
+            after = set(_ids(get_context(QUERY, session_id="used")))
+        # The control pack carries every public document, so dropping any of
+        # them from the second one would show.
+        assert public <= fresh
+        assert public <= after
 
     def test_an_ordinary_session_does_dedup(self, world) -> None:
         """The control: the same two calls by an ordinary key do thin the second."""
@@ -159,4 +168,4 @@ class TestSessionDedup:
             again = _ids(get_context(QUERY, session_id="s"))
             refreshed = _ids(get_context(QUERY, session_id="s", refresh=True))
         assert first
-        assert again == refreshed == first
+        assert set(again) == set(refreshed) == set(first)
