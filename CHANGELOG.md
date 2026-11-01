@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze learning-candidates` says what its candidates are.** `--format json`
+  reported only `candidate_count`, which includes every `investigate_noise` row, so a long
+  list could not be told apart from a backlog of promotable knowledge. The JSON now also
+  carries `by_recommendation_type` (a count per `recommendation_type`; a type with no
+  candidate is absent) and `promotion_ready_count` (how many pass `is_promotion_ready`, the
+  predicate the digest and `curate review-ready` already use), both over the `candidates`
+  list the command prints. The text output prints the same, and now says `0 candidates
+  promotion-ready` where it used to print nothing. The count describes one run's list: a
+  different `--min-support` or `--days` changes it, `--output-dir` only chooses whether the
+  review commands read that run's file, and the count is narrower than what `curate
+  promote-learning` accepts, so the help text and the operations guide say so. No existing
+  key, candidate or promotion changes. The text table now escapes the recommendation and
+  item type it prints, so a type containing `[...]` is no longer deleted by Rich. That also
+  fixes an exit code: such a type could make the text output exit 1 where `--format json`
+  exited 0, and both now exit 0.
+
 - **`trellis analyze holdout --operational` reports the experiment's health
   without reading an outcome.** A pack holdout needs a check that it is running
   (arm counts and their ratio, the funnel, covariate coverage, per-build
