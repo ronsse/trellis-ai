@@ -6,6 +6,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Per-key access log: what did this key read, and when did it last run?** Off by
+  default; `TRELLIS_ACCESS_LOG=1` (settings key `access_log`; only `1`, `true`, `yes`, `on`
+  enable it) writes one `access.key_read` event per authenticated read by an API key, on REST
+  (every `GET /api/v1/...` plus `POST /packs` and `POST /packs/sectioned`, answered 200) and
+  on MCP (each tool registered at the `read` scope). A row holds the key id, the surface,
+  the route template or tool name, the count of items it could name and the first 25 ids,
+  with `item_ids_truncated` beside them: on REST the items in the answer's body, on MCP the
+  pack ids the answer printed (a formatter that runs out of token budget drops the rest, and
+  those are not counted). Ids come from an allowlist of item-serving REST
+  routes and from ids the MCP tools already hold, kept only if the answer prints them; any other route or tool records
+  `item_count: null`. It holds no document text, query or intent text, or secret. A call
+  with no key id (auth mode `off`, an anonymous call, the legacy shared secret, stdio)
+  records nothing. Rows are written after the response by one bounded background writer
+  (1024 entries, 16 MiB, drop-and-count when full), so a slow store delays rows and never
+  reads. `trellis admin access-log [--hours] [--key-id] [--format json]` and the admin-only
+  `GET /api/v1/access-log/keys` read it back as one row per key (an `external` key is
+  refused the route); unrecorded reads leave an `access.log_failed` event, shown as
+  `failure_signals`, `dropped_reads` and `failed_reads`. **Rows have no retention path**:
+  nothing deletes events, and a row is about 1.6 KB on SQLite, so 1,000 reads a day is about
+  590 MB a year. The new `access_log` field joins every event's `write_provenance.env_flags`,
+  so `env_flags_digest` changes once for every process after upgrade, whatever the flag's
+  value. Retrieval, `PACK_ASSEMBLED` and every pack are unchanged. See
+  `docs/agent-guide/operations.md`.
+
 - **The Memories tab shows a document's sensitivity label and relabels it.** The list has a
   Label column and the detail view a badge and a "Relabel as" control that calls the existing
   `POST /documents/{id}/sensitivity`, showing the server's refusal text (a key without the

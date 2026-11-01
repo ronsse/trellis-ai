@@ -3734,6 +3734,12 @@ from trellis_cli.admin_api_keys import (  # noqa: E402
 
 _register_api_keys(admin_app)
 
+from trellis_cli.admin_access_log import (  # noqa: E402
+    register as _register_access_log,
+)
+
+_register_access_log(admin_app)
+
 
 # ---------------------------------------------------------------------------
 # schedule set / run — CLI parity for PATCH/POST /admin/jobs

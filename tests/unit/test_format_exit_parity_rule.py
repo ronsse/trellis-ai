@@ -887,6 +887,11 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # Admitted deliberately: it exits on every path and defines no
         # ``return``.
         "admin": {"_refuse_option"},
+        # ``trellis admin access-log``: the command body renders, then raises
+        # ``typer.Exit`` as its last statement with the code derived above the
+        # format branch, and its Typer wrapper only delegates to it. Admitted
+        # deliberately, per this docstring.
+        "admin_access_log": {"access_log_command", "access_log"},
         "analyze": {"_exit_on_refused_advisory_write"},
         # ``trellis classify effective-rules``: every arm of its own
         # format branch raises ``typer.Exit`` and the function defines no

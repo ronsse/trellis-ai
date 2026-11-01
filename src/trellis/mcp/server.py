@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 from pydantic import ValidationError
 
 from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.core.access_log import note_printed_items, note_served_items
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     describe_validation_error,
@@ -86,6 +87,7 @@ from trellis.llm.egress import EgressGate, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp import supersession as _supersession
+from trellis.mcp.access_log import AccessLogMiddleware
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
     HttpSettings,
@@ -651,6 +653,8 @@ class _ExplainArgumentRejections(Middleware):
 
 
 mcp.add_middleware(_ExplainArgumentRejections(mcp))
+# The lambda is late binding: ``_get_registry`` is defined below this line.
+mcp.add_middleware(AccessLogMiddleware(lambda: _get_registry()))  # noqa: PLW0108
 
 
 _registry: StoreRegistry | None = None
@@ -1600,6 +1604,8 @@ def _flat_context(
         # One shape for all empty packs also keeps the look-alike rule
         # above true by construction: a withheld pack and a genuinely empty
         # one take this same path, so neither can differ by its header.
+        # Nothing is served here, so the count is a real zero.
+        note_served_items([])
         formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
         result = formatter(
             [],
@@ -1639,6 +1645,9 @@ def _flat_context(
         # footer stays the last thing read (see ``_advisories_block``).
         advisories=pack.advisories,
     )
+    # The pack's own ids, kept only if the formatter printed them: it stops
+    # listing items when the token budget runs out.
+    note_printed_items(result, (item.item_id for item in pack.items))
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
@@ -1734,6 +1743,14 @@ def _sectioned_context(
             ),
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
+        )
+        note_printed_items(
+            result,
+            (
+                item.item_id
+                for section in sectioned_pack.sections
+                for item in section.items
+            ),
         )
         banner = _context_banner(registry)
         if banner:
@@ -3706,6 +3723,8 @@ def get_items(
             max_tokens=max_tokens,
             pack_id=pack_id.strip() or None,
         )
+
+        note_served_items(served_ids)
 
         # The serve record is the point of the tool (#305): a fetch that
         # cannot be recorded is invisible to attribution, so this emit is

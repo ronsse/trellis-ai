@@ -26,7 +26,8 @@ surface (``get_context_max_tokens``, ``get_context_max_items``,
 (``rest_pack_max_items``, ``rest_pack_max_tokens``), and two shared by
 every surface that builds a pack (``disclosure_body_items``,
 ``excerpt_max_chars``) — pinned by :data:`_PACK_BUDGET_KNOB_NAMES`,
-bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd.
+bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd and
+``access_log`` the 44th.
 """
 
 from __future__ import annotations
@@ -130,8 +131,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortythree_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 43
+    def test_fortyfour_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 44
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
