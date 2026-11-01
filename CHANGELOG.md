@@ -172,6 +172,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `save_memory` refuses a `lifecycle` or `evidence_ref` in its `metadata`
+  argument** (`INVALID_PARAMS`, whatever the value, nothing written, `data.field`
+  names the key). The tool stored the caller's metadata as given, so a
+  `lifecycle` written at a graph node's id withheld that node, and an
+  `evidence_ref` made the memory the successor another item's `superseded_by`
+  resolves to. It is the rule `POST /documents` already holds (#1082), taken from
+  the same table. It judges only what the caller sent, so `supersedes=`, a
+  reconcile SUPERSEDE verdict and `save_knowledge` write as before. Rows already
+  stored are not re-judged. Still open under #1057: a graph node's
+  `evidence_ref` through `entity.update` and `observation.record`, identity keys
+  on `POST /vectors` rows at an id naming no document, the graph-node id
+  collision, and dedup-winner judging (a serving change).
+
 - **On Postgres, `upsert_nodes_bulk` no longer closes a newer node version with
   an earlier timestamp.** It read the clock before its transaction, so a
   concurrent `upsert_node` that committed in between left a current row the
