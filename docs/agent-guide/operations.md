@@ -4835,7 +4835,11 @@ serve, it still answers `200`, but with `status: "error"`, a `code`
 `learning_candidates_unreadable` or `stores_dir_unconfigured`) and a
 `hint` naming the path, so an unwritten artifact never reads as an empty
 queue. The promote endpoint answers `409` with `detail: {code, message,
-path}` for the same four conditions.
+path}` for the same four conditions. The static UI's Review tab reads the
+two "no writer has produced it yet" codes (`learning_artifacts_dir_missing`,
+`learning_candidates_missing`) as an empty state that shows the hint, and
+every other `status: "error"` answer, including a code it does not know, as
+an error; the response itself is unchanged.
 
 ### Improvement-metrics dashboard (admin scope)
 
