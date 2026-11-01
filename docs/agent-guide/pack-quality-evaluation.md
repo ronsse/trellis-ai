@@ -81,7 +81,7 @@ scenario = EvaluationScenario(
 
 The score is the mean across declared constraints of `(min_score + max_score) / 2`. `min_score` is `1.0` when the actual count meets `min_count`, else a linear ramp `actual / min_count`. `max_score` is `1.0` when `max_count` is `None` or `actual ≤ max_count`, else a linear excess penalty. Items whose `item_type` is not declared are ignored — `shape_composition` judges the declared shapes, not novelty.
 
-Today the strategy-stamped values are `"document"` (KeywordSearch), `"vector"` (SemanticSearch), and `"entity"` (GraphSearch). Built-in profiles do **not** weight `shape_composition`, so opting a scenario in changes the per-dimension report but not the profile-weighted aggregate. The dimension is scaffolding for the typed-shape vocabulary work tracked under *Item-type semantics + summary-generation path* in [TODO.md](../../TODO.md); the policy of which shapes a real production scenario should expect is deliberately deferred pending real-agent signal.
+Today the strategy-stamped values are `"document"` (KeywordSearch), `"vector"` (SemanticSearch), and `"entity"` (GraphSearch). Built-in profiles do **not** weight `shape_composition`, so opting a scenario in changes the per-dimension report but not the profile-weighted aggregate. The dimension is scaffolding for the typed-shape vocabulary work tracked under *Item-type semantics + summary-generation path* in [`docs/archive/TODO.md`](../archive/TODO.md); the policy of which shapes a real production scenario should expect is deliberately deferred pending real-agent signal.
 
 ## Built-in profiles
 
@@ -263,7 +263,7 @@ for dim in report.dimensions:
     print(dim.dimension, dim.correlation, dim.signal_classification)
 ```
 
-The report is **read-only** — it never mutates profiles, scorers, or classifier state. Auto-calibration of profile weights from these correlations (e.g., reducing weight on `noise`-classified dimensions) is deliberately a separate step tracked in [TODO.md](../../TODO.md) under *Pack Quality P3 — Feedback-driven dimension calibration*. The reason for the split: automatic weight tuning without operator review can drive the scorer into a local minimum that looks good by current outcomes but masks a regression. The separation lets you inspect the signal before acting on it.
+The report is **read-only** — it never mutates profiles, scorers, or classifier state. Auto-calibration of profile weights from these correlations (e.g., reducing weight on `noise`-classified dimensions) is deliberately a separate step tracked in [`docs/archive/TODO.md`](../archive/TODO.md) under *Pack Quality P3 — Feedback-driven dimension calibration*. The reason for the split: automatic weight tuning without operator review can drive the scorer into a local minimum that looks good by current outcomes but masks a regression. The separation lets you inspect the signal before acting on it.
 
 ### Relationship to the improvement-metrics dashboard
 
@@ -283,4 +283,4 @@ The admin UI's **Metrics** view (`/ui/` → **Metrics**, backed by `GET /api/v1/
 - **No sectioned-pack evaluation** — `evaluate_pack` scores a flat `Pack`. Scoring a `SectionedPack` per-section is a small extension but needs a scenario shape that declares per-section expectations.
 - **No per-scenario predictiveness breakdown** — correlations today aggregate across scenarios. A per-scenario view is a natural next step once scenario volume justifies it.
 
-These are deferred by design, not oversight. See [`TODO.md`](../../TODO.md) → *Pack Quality Evaluation Framework* for the full phase plan.
+These are deferred by design, not oversight. See [`TODO.md`](../archive/TODO.md) → *Pack Quality Evaluation Framework* for the full phase plan.

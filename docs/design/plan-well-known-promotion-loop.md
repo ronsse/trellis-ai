@@ -1,6 +1,6 @@
 # Plan: Well-known promotion loop
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05. Code: `src/trellis/learning/schema_evolution.py` and `EventType.WELL_KNOWN_CANDIDATE`. The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable
 **ADR:** [`adr-well-known-promotion-loop.md`](./adr-well-known-promotion-loop.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 5

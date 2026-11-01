@@ -13,7 +13,7 @@
 - [`../../src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py) — `LinkCreateHandler` already does FK validation; `EntityCreateHandler` defers to graph store role validation.
 - [`../../src/trellis/schemas/extraction.py`](../../src/trellis/schemas/extraction.py) — `EntityDraft`, `EdgeDraft`, `ExtractionResult.unparsed_residue`.
 - [`../../src/trellis/retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py) — Assembly-time `RejectedItem` shape and `_build_filters()`.
-- [`../../TODO.md`](../../TODO.md) — Logic Gap 1.3.
+- [`../../TODO.md`](../archive/TODO.md) — Logic Gap 1.3.
 
 ---
 

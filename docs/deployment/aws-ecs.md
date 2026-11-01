@@ -206,5 +206,5 @@ browser).
   [`migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph).
 - Multi-tenancy
 
-Each of those has a home in the next phase — see [TODO.md](../../TODO.md)
+Each of those has a home in the next phase — see [TODO.md](../archive/TODO.md)
 "cloud deployment" section.

@@ -1,6 +1,6 @@
 # Plan: Cleanup — silent-fallback hardening
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05-13 (phases 0-8: #115-#140). The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable (per-call-site decomposable)
 **ADR:** the POC directive in [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) §2 is the spec
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) cleanup track C2

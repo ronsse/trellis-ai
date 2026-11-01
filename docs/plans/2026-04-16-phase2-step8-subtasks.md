@@ -15,7 +15,7 @@ sub-tasks can be handed off in the right order (or in parallel when
 independent).
 
 **Status:** Steps 1–7 of Phase 2 are DONE and pushed. See
-[TODO.md — Tiered Extraction Pipeline — Phase 2 Plan](../../TODO.md#tiered-extraction-pipeline--phase-2-plan).
+[TODO.md — Tiered Extraction Pipeline — Phase 2 Plan](../archive/TODO.md#tiered-extraction-pipeline--phase-2-plan).
 
 **Dependencies between sub-tasks:**
 
@@ -235,7 +235,7 @@ non-critical warnings (flag unset but clients buildable), exit 1.
 **Context to read:**
 - [`docs/agent-guide/playbooks.md`](../agent-guide/playbooks.md) — existing structure; find a good insertion point
 - [`docs/design/adr-llm-client-abstraction.md`](../design/adr-llm-client-abstraction.md) — §5 Implementation Plan, Phase 4 section
-- [`TODO.md`](../../TODO.md) — Phase 2 plan section; Step 8 and Step 9 entries
+- [`TODO.md`](../archive/TODO.md) — Phase 2 plan section; Step 8 and Step 9 entries
 - `trellis admin init` command — find where the default `config.yaml` template lives
 
 **Deliverables.**

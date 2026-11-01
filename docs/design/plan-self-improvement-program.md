@@ -1,6 +1,8 @@
 # Plan: Self-improvement program
 
-**Status:** proposed 2026-05-11
+**Status:** Items 1-7 Cohort 1, C1 and C2 landed 2026-05 (CHANGELOG `[0.9.0]`); Item 7 Cohort 2 is gated by [`adr-coding-agent-loop-cohort2-amendment.md`](./adr-coding-agent-loop-cohort2-amendment.md) §2. The text below is the original plan, kept as design history.
+
+> Paths under `eval/scenarios/` named below moved to the `trellis-evals` repo on 2026-07-12.
 **Owner:** rotating (swarm-pickable per sub-plan)
 **Self-contained:** yes — but read [`implementation-roadmap.md`](./implementation-roadmap.md) first for the live state of the project.
 
