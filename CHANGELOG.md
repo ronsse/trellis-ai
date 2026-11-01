@@ -33,6 +33,20 @@ All notable changes to Trellis will be documented in this file.
   effect:** enrichment and shadow tags on a labelled document stop updating on a
   route that is not declared local; whatever tags it already carries keep being
   served unchanged, and nothing in `trellis.retrieve` changed.
+- **`trellis classify label-candidates` points a person at documents they may
+  want to label.** A read-only scan counts matches of four plain patterns (an email
+  address, a US/Canada phone number with separators, a US SSN shape and a
+  Luhn-passing card number) and reports the document id, the rule and a count per
+  finding. It never prints the matched value, an excerpt or the text around it, in
+  JSON, text or logs, and it writes no label, tag, event or queue row; the label is
+  applied through `trellis curate classify-sensitivity`. Documents that already
+  carry a `data_classification` record are skipped and counted, chunk rows are not
+  read, and `--limit` (default 5000) bounds the scan, with `stopped_at_limit` and
+  `status: "partial"` saying so. A miss proves nothing and this is not a PII
+  guarantee: the rules over-report on shapes such as `icon@2x.png` and 13-digit
+  millisecond timestamps, and their precision on a real store is unmeasured.
+  `regulatory_tags` is not read or written. No dependency was added.
+
 - **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
   upgrading and rolling back a SQLite store.** The script installs the previous
   release (the newest release tag that is an ancestor of HEAD and not HEAD
@@ -116,6 +130,44 @@ All notable changes to Trellis will be documented in this file.
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
 ### Fixed
+
+- **The Review tab reads a fresh deployment as an empty queue, and a real failure there shows
+  its reason.** `GET /learning/candidates` answers `status: "error"` when no writer has
+  produced the artifact yet (`learning_artifacts_dir_missing`, `learning_candidates_missing`),
+  and the UI drew that as a failure: a red `!` on the count badge and an error body. Those two
+  codes now render as an empty state that keeps the server's hint (the directory looked in and
+  how to fill it) with a count of 0. `learning_candidates_unreadable`, `stores_dir_unconfigured`
+  and any code the page does not know still render as errors, and the error body now carries the
+  hint: it read `Failed to load undefined: undefined` since `reviewError` took a label, because
+  one call site still passed it a string. The REST response is unchanged (same `status`, `code`
+  and `hint`, so the OpenAPI spec and the CLI are untouched); a client that needs "not written
+  yet" still reads `code`. The Precedents tab's one line about waiting candidates still reads
+  `status: "error"` as "could not be checked".
+
+- **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
+  deployment docs describe the scoped-key auth that is built.** The operator
+  runbook listed both as server settings, and `trellis serve` and `trellis-api` honour them,
+  but `admin serve` ignored both and bound `127.0.0.1:8420`.
+  It now takes them as the option defaults: a flag beats the variable, an empty variable is
+  the default, and a port that is not an integer is a usage error (exit 2) instead of being
+  ignored. **Behaviour change:** a deployment that sets either variable for another
+  process in the environment `admin serve` runs in used to get the loopback default and now
+  gets the address the variable names. The fail-closed bind check runs on that address
+  exactly as on a flag, so `TRELLIS_API_HOST=0.0.0.0` without `TRELLIS_AUTH_MODE=required`
+  (or `TRELLIS_API_ALLOW_INSECURE_BIND=1`) now refuses to start with `ConfigError`, exit 5,
+  where it used to start on loopback. With neither variable set nothing changes, and no
+  default, auth mode or check changed. The operator runbook's auth section now starts from
+  `TRELLIS_AUTH_MODE=required` and `trellis admin api-keys create` and says which scope the
+  scheduled loops need (`admin`); it also warns that a scoped token exported as
+  `TRELLIS_API_KEY` is read as the legacy shared secret and gets every scope. The runbook's
+  reconcile section names `trellis admin reconcile-feedback` where it said there was no CLI,
+  and its examples call the client-side variable `TRELLIS_ADMIN_KEY`. The setup-decisions
+  page marks the scoped-credential, UI, readiness/metrics, ArcadeDB-credential and
+  data-classification rows **Now**, as built, and no longer calls scopes inclusive (only
+  `admin` implies the others). The ECS runbook's task definition sets
+  `TRELLIS_AUTH_MODE=required`, which the image's `0.0.0.0` bind needs to start. The README
+  endpoint table lists `POST /api/v1/packs/{pack_id}/feedback`, the route that takes
+  per-item attribution, where it listed `/api/v1/feedback`, which needs a `target_id`.
 
 - **`trellis admin migrate-graph` now says what it copies and what it leaves behind.** The
   command reads current rows and writes them through the destination's `upsert_*` methods, so a

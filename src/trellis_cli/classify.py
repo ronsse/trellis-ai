@@ -1,6 +1,7 @@
 """``trellis classify`` — tag backfill, shadow-mode LLM tagging, and promotion.
 
-Four commands spanning the deterministic-to-LLM-and-back ladder:
+Four commands spanning the deterministic-to-LLM-and-back ladder (``label-candidates``,
+a read-only scan that proposes documents for a human to label, sits beside them):
 
 * ``backfill`` — re-run the deterministic pipeline over stored documents.
 * ``shadow`` — record what an LLM says about them, without serving it (#321
@@ -61,6 +62,11 @@ from trellis.classify.factory import (
     DOMAIN_ASPECTS_KEY,
     effective_classify_rule_rows,
 )
+from trellis.classify.label_proposer import (
+    DEFAULT_SCAN_LIMIT as DEFAULT_LABEL_SCAN_LIMIT,
+)
+from trellis.classify.label_proposer import NOTICE as LABEL_SCAN_NOTICE
+from trellis.classify.label_proposer import scan_for_label_candidates
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
@@ -105,6 +111,7 @@ from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
+    from trellis.classify.label_proposer import LabelScanReport
     from trellis.classify.protocol import Classifier
     from trellis.classify.refresh import BatchRefreshResult
     from trellis.classify.shadow import ShadowAgreementReport
@@ -1370,3 +1377,79 @@ def effective_rules(
             f"{escape(row['kind'])}: {escape(row['key'])} -> {escape(row['target'])}"
         )
     raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)
+
+
+@classify_app.command("label-candidates")
+def label_candidates(
+    limit: int = typer.Option(
+        DEFAULT_LABEL_SCAN_LIMIT,
+        "--limit",
+        min=1,
+        help=(
+            "Cap on documents read. The report says whether the scan stopped "
+            "here, and a stopped scan is not the whole store."
+        ),
+    ),
+    page_size: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--page-size",
+        min=1,
+        help="Documents fetched per store round-trip.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """List documents a human may want to label, and which rule fired.
+
+    A report-only scan. It writes nothing -- no label, no tag, no event -- and
+    a finding names a document id, a rule and a match count, never the value
+    it matched or any text around it. Apply a label yourself, with ``trellis
+    curate classify-sensitivity <doc_id> --sensitivity <level>``.
+
+    Four plain rules run: email address, phone number, US SSN shape, and a
+    card number that passes a Luhn check. Documents that already carry a label
+    are skipped and counted. A miss proves nothing, and this is not a PII
+    guarantee: the rules do not read medical content, and they over-report.
+    """
+    registry = _get_registry()
+    report = scan_for_label_candidates(
+        registry.knowledge.document_store, limit=limit, page_size=page_size
+    )
+
+    if output_format == "json":
+        emit_json(report.to_payload())
+    else:
+        _render_label_candidates(report)
+    raise typer.Exit(code=EXIT_OK)
+
+
+def _render_label_candidates(report: LabelScanReport) -> None:
+    """Human-readable rendering: one line per flagged document, rules and counts."""
+    by_document: dict[str, list[str]] = {}
+    for finding in report.findings:
+        by_document.setdefault(finding.doc_id, []).append(
+            f"{finding.rule} x{finding.matches}"
+        )
+
+    console.print(
+        f"[green]Label candidates:[/green] {len(report.findings)} findings in "
+        f"{report.documents_flagged} of {report.documents_scanned} documents scanned "
+        f"({report.documents_read} read, {report.skipped_labelled} already "
+        f"labelled, {report.skipped_unscannable} with no text to scan)"
+    )
+    for doc_id, rules in by_document.items():
+        console.print(f"  {escape(doc_id)}: {', '.join(rules)}", soft_wrap=True)
+
+    if report.stopped_at_limit:
+        console.print(
+            f"\n[yellow]Stopped at --limit {report.limit}: documents past it were "
+            "not read, so this is not the whole store. Raise --limit to read "
+            "more.[/yellow]"
+        )
+    if by_document:
+        console.print(
+            "\n[dim]Nothing was written. To label one, run: trellis curate "
+            "classify-sensitivity <doc_id> --sensitivity <level>[/dim]"
+        )
+    console.print(f"\n[dim]{LABEL_SCAN_NOTICE}[/dim]")

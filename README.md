@@ -337,7 +337,7 @@ trellis admin migrate-graph \
 | GET | `/api/v1/events` | Tail the audit event log |
 | GET | `/api/v1/packs` | Inspect assembled-pack telemetry |
 | GET | `/api/v1/graph/history` | SCD-2 version history for a node |
-| POST | `/api/v1/feedback` | Record pack outcome |
+| POST | `/api/v1/packs/{pack_id}/feedback` | Record a pack's outcome and which of its items helped |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
 **MCP server** — `trellis-mcp`. Local agents use the default stdio transport; remote clients use the opt-in HTTP transport (`TRELLIS_MCP_TRANSPORT=http`, bearer-token auth), documented in [adr-mcp-http-transport.md](docs/design/adr-mcp-http-transport.md). Sixteen macro tools. Thirteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
