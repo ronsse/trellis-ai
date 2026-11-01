@@ -20,8 +20,10 @@ Three pieces close that hole:
   tool. The event's ``source`` uses the same ``mcp:<tool>`` string the
   executor stores in ``requested_by``, so accept/reject join per tool.
 * :func:`summarize_backend_health` — the operator/grooming surface:
-  acceptance vs rejection rates per tool and stage, repeated schema
-  collisions, pack-attribution coverage, session-capture coverage
+  acceptance vs rejection rates per tool and stage, repeated rejections
+  rated against each tool's attempts, how many rejected writes were
+  followed by an accepted one, pack-attribution coverage, session-capture
+  coverage
   (:mod:`trellis.ops.capture_coverage`), and a deterministic
   ``ok | warn`` status with named reasons. ``trellis analyze health``
   is a thin shell over it.
@@ -36,6 +38,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -153,38 +157,87 @@ _DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 _MIN_ATTEMPTS_FOR_RATE = 5
 #: Warn when more than this fraction of attempts is rejected.
 _REJECTION_RATE_WARN = 0.10
-#: Warn when one (kind, loc) pair recurs this often — the signature of a
-#: standing conflict rather than a one-off.
+#: A ``(kind, loc)`` rejection is *repeated* only when it was hit by at least
+#: this many **distinct rejected attempts** (one ``WRITE_REJECTED`` event is
+#: one attempt, however many error elements it lists). Counting elements let
+#: one trace with many bad steps cross the line alone.
 _REPEAT_COLLISION_WARN = 3
+#: A repeated payload rejection also has to be a real share of its tool's
+#: attempts: ``count / (accepted + rejected)`` for that tool must exceed this.
+#: An absolute count has no denominator, so a busy healthy tool crosses it
+#: by volume alone and the signal sits at ``warn`` permanently.
+_COLLISION_RATE_WARN = 0.05
+#: Below this many attempts on the tool the collision is not rated at all:
+#: three rejections out of seven calls says nothing about the tool.
+_MIN_ATTEMPTS_FOR_COLLISION_RATE = 10
+#: These three numbers are starting points chosen by reading the code, not
+#: values fitted to a deployment's traffic. 5% sits under the overall
+#: ``_REJECTION_RATE_WARN`` because one ``(kind, loc)`` is a slice of all
+#: rejections; 10 attempts is twice ``_MIN_ATTEMPTS_FOR_RATE`` because a
+#: collision also needs ``_REPEAT_COLLISION_WARN`` rejections to exist. Tune
+#: them from the ``rate`` and ``tool_attempts`` every ``repeated_collisions``
+#: row now carries.
+
+#: A rejection is counted as *recovered* when a call to the same tool was
+#: accepted within this many seconds after it (see
+#: :class:`RejectionRecoveryTracker`). It is meant to span one retry: the
+#: caller reads the error, corrects the payload, and calls again. Longer
+#: windows let an unrelated caller's accepted call stand in for the retry.
+RECOVERY_WINDOW_SECONDS = 120
+
+#: Said beside the recovered share, because the number cannot be read
+#: without it. See :class:`RejectionRecoveryTracker` for why there is no
+#: per-caller pairing to offer instead.
+RECOVERY_APPROXIMATION_NOTE = (
+    "approximate: a rejection counts as recovered when any call to the same "
+    "tool was accepted within {window}s after it, by whichever caller (the "
+    "server is stateless over HTTP, so there is no per-caller token, and none "
+    "is stored). Concurrent callers make this an upper bound, and an accepted "
+    "call is not shown to carry the rejected content."
+)
+
+#: Operation whose accepted count is the number of accepted *calls*, for a
+#: tool whose one call fans out to several commands (see
+#: :class:`ToolWriteStats`). Rating a collision against every fanned-out
+#: command would divide by a number that grows with the payload and dilute
+#: the rate. A tool absent here is rated against its ``accepted`` total,
+#: which can only understate the rate.
+_CALL_LEVEL_OPERATION = {"mcp:save_experience": "trace.ingest"}
 
 #: What a recurrence *means*, per :data:`RejectionKind` — a ``(label,
 #: explanation)`` pair rendered as ``repeated {label}: … — {explanation}``.
 #:
 #: ``repeated_collisions`` is a **routing** signal: it tells an operator
 #: which kind of repair to reach for. One sentence for every kind sent
-#: them to the wrong one (#485). The default below is the payload-schema
-#: reading the counter was written for, and it is sound *there* — an agent
-#: that keeps sending a field the model forbids is evidence the hint or
-#: the skill is wrong rather than the schema (#472/#473).
+#: them to the wrong one (#485).
 #:
-#: It is simply false for the two file conditions, which implicate no
-#: schema, no doc and no agent. They get a sentence **each** rather than
-#: one shared "this is a file problem" line, because their repairs differ
-#: from each other: ``config_unreadable`` needs a human to look at a
-#: damaged file, ``stale_write`` needs two writers separated. Note
-#: ``stale_write`` is the case the counter reads *best* — a single stale
-#: refusal needs nobody at all, and recurrence is exactly the condition
-#: that makes it worth saying — so explaining it as a schema disagreement
-#: mislabelled the one row carrying real signal.
+#: The default below is for the payload kinds, and it states no cause. It
+#: used to say that a recurring mistake means the schema and its docs/skill
+#: disagree; nothing in a rejection row can establish that. The same count
+#: is produced by a schema narrower than its docs, docs that misdescribe the
+#: schema, a hint that does not say what to send, and a caller whose own
+#: template is wrong. The row says how often and where, and the explanation
+#: says that, so the operator looks before choosing a repair.
+#:
+#: The two file conditions implicate no schema, no doc and no agent, so each
+#: gets a sentence of its own: ``config_unreadable`` needs a human to look
+#: at a damaged file, ``stale_write`` needs two writers separated. They are
+#: also not rated: their recurrence is the whole signal (a single stale
+#: refusal needs nobody at all), and their surface has no accepted side to
+#: divide by.
 #:
 #: Kinds absent here take the default; that is the safe direction, since
 #: every kind but these two is a payload problem. The recovery advice the
 #: stores compute (#427, a ``shlex``-quoted ``mv``) rides the rejection
-#: ``msg`` and is dropped by ``collision_counts``, which keys on ``(kind,
-#: loc)`` alone — getting it to the boundaries is #459, not this.
+#: ``msg`` and is dropped when collisions are keyed by ``(tool, kind,
+#: loc)`` — getting it to the boundaries is #459, not this.
 _DEFAULT_COLLISION_REASON: tuple[str, str] = (
-    "schema collision",
-    "same mistake recurring means the schema and its docs/skill disagree",
+    "rejection",
+    (
+        "cause not established: the schema, its docs or skill, or the "
+        "rejection hint may be at fault, or callers may be sending a bad "
+        "payload; the row says how often and where, not which"
+    ),
 )
 _COLLISION_REASONS: dict[str, tuple[str, str]] = {
     "config_unreadable": (
@@ -815,6 +868,69 @@ def describe_argument_rejection(
     )
 
 
+def surface_label(tool: str) -> str:
+    """The ``mcp:<tool>`` label a rejection is counted under.
+
+    A bare tool name gets the ``mcp:`` prefix the executor's ``requested_by``
+    already carries; a colon-prefixed label (``config:policy_file``,
+    ``cli:…``) is already a surface and passes through. The one place both
+    the write side and the read side derive it, so they cannot drift.
+    """
+    return f"mcp:{tool}" if tool and ":" not in tool else tool
+
+
+class RejectionRecoveryTracker:
+    """Remember, per tool and in memory only, that a write was just rejected.
+
+    The pairing that says a rejected write was retried and accepted. It holds
+    a tool name, a count and a monotonic timestamp, and nothing else: no
+    payload, intent, session or caller identifier, and none of it is
+    persisted. Keying by tool is an **approximation**. The MCP server runs
+    stateless over HTTP, where every request is a fresh session, so no
+    per-connection token exists to pair a rejection with its own retry, and
+    a caller's identity is exactly what must not be stored. So any accepted
+    call to the same tool within ``window_seconds`` of the last rejection
+    counts, whoever made it. Under concurrent callers that overstates
+    recovery, which makes the reported share an upper bound.
+
+    Bounded by the tool labels the code itself passes in, not by caller
+    input. Thread-safe, since tool bodies may run on worker threads.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: int = RECOVERY_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.window_seconds = window_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        # label -> (rejections since the last claim, time of the latest one)
+        self._pending: dict[str, tuple[int, float]] = {}
+
+    def note_rejection(self, label: str) -> None:
+        """Record one rejected attempt on ``label``."""
+        with self._lock:
+            count, _ = self._pending.get(label, (0, 0.0))
+            self._pending[label] = (count + 1, self._clock())
+
+    def claim_recovery(self, label: str) -> int:
+        """Rejected attempts on ``label`` that this acceptance recovers.
+
+        Clears the entry either way: an acceptance consumes the rejections
+        it follows, and a stale entry is dropped rather than kept. Returns
+        ``0`` when nothing was pending or the latest rejection is older than
+        the window.
+        """
+        with self._lock:
+            entry = self._pending.pop(label, None)
+            if entry is None:
+                return 0
+            count, at = entry
+            return count if self._clock() - at <= self.window_seconds else 0
+
+
 def record_write_rejection(
     event_log: EventLog | None,
     *,
@@ -824,6 +940,7 @@ def record_write_rejection(
     hints: list[str] | None = None,
     payload_chars: int | None = None,
     source: str | None = None,
+    recovery: RejectionRecoveryTracker | None = None,
 ) -> dict[str, Any]:
     """Emit a ``WRITE_REJECTED`` event for a boundary rejection, fail-soft.
 
@@ -831,6 +948,12 @@ def record_write_rejection(
     the caller can fold the classification into the error it is about to
     raise. Telemetry failure downgrades to a warning log — a broken event
     log must never escalate a rejected write into a crashed tool.
+
+    ``recovery`` is the tracker a later accepted call is paired against. When
+    given, the event carries ``recovery_window_s`` (the window the pairing
+    uses) so a reader can tell a rejection that was *tracked* from one
+    written by a build that did not track, and the rejection is noted only
+    once its event is on the log, so recovered can never outnumber tracked.
     """
     rows = (
         rejections
@@ -848,6 +971,8 @@ def record_write_rejection(
         "rejections": rows,
         "hints": hints or [],
     }
+    if recovery is not None:
+        payload["recovery_window_s"] = recovery.window_seconds
     try:
         event_log.emit(
             EventType.WRITE_REJECTED,
@@ -856,7 +981,39 @@ def record_write_rejection(
         )
     except Exception:
         logger.warning("write_health.emit_failed", tool=tool, exc_info=True)
+        return details
+    if recovery is not None:
+        recovery.note_rejection(surface_label(tool))
     return details
+
+
+def record_write_recovery(
+    event_log: EventLog | None,
+    *,
+    tool: str,
+    rejected_attempts: int,
+    window_seconds: int,
+) -> None:
+    """Emit ``WRITE_RECOVERED``: a call to ``tool`` was accepted right after rejections.
+
+    ``rejected_attempts`` is how many tracked rejections this acceptance
+    follows. Carries the tool and two integers, nothing about the call.
+    Fail-soft for the same reason as :func:`record_write_rejection`.
+    """
+    if event_log is None:
+        return
+    try:
+        event_log.emit(
+            EventType.WRITE_RECOVERED,
+            f"mcp:{tool}",
+            payload={
+                "tool": tool,
+                "rejected_attempts": rejected_attempts,
+                "window_s": window_seconds,
+            },
+        )
+    except Exception:
+        logger.warning("write_health.recovery_emit_failed", tool=tool, exc_info=True)
 
 
 #: Write surfaces whose writes never reach ``MutationExecutor``, so
@@ -893,6 +1050,39 @@ class ToolWriteStats(TrellisModel):
         return self.accepted + self.boundary_rejected + self.executor_rejected
 
 
+class ToolRecovery(TrellisModel):
+    """Tracked boundary rejections for one surface and how many were recovered."""
+
+    tracked: int = 0
+    recovered: int = 0
+    #: ``recovered / tracked``; ``None`` when nothing was tracked.
+    share: float | None = None
+
+
+class RecoveryReport(TrellisModel):
+    """How many rejected writes were followed by an accepted one.
+
+    Counted over **tracked** rejections only: ``WRITE_REJECTED`` rows that
+    carry ``recovery_window_s``, written by a build that pairs rejections
+    with later acceptances. A row from an older build has no such field and
+    is left out of both sides, so ``recovered_share`` is ``None`` (not
+    measured) rather than ``0.0`` (measured, none recovered) for a window
+    holding only old rows. ``recovered`` is capped at ``tracked`` per tool,
+    so a rejection just outside the window cannot push a share past 100%.
+    The pairing is by tool within a short window, not by caller; read
+    :attr:`note` for what that does to the number.
+    """
+
+    tracked_rejections: int = 0
+    recovered_rejections: int = 0
+    recovered_share: float | None = None
+    window_seconds: int | None = None
+    by_tool: dict[str, ToolRecovery] = Field(default_factory=dict)
+    #: The approximation, stated beside the number it qualifies. Empty when
+    #: nothing was tracked, so a caveat does not print over no figure.
+    note: str = ""
+
+
 class WriteHealthReport(TrellisModel):
     """Aggregated write-path health over one time window."""
 
@@ -903,9 +1093,19 @@ class WriteHealthReport(TrellisModel):
     attempts: int
     rejection_rate: float
     by_tool: dict[str, ToolWriteStats] = Field(default_factory=dict)
+    #: Counts error **elements**, not attempts: one rejected call listing
+    #: eight bad steps adds eight to ``steps[].result``. Read
+    #: ``repeated_collisions[].count`` for attempts.
     boundary_kinds: dict[str, int] = Field(default_factory=dict)
     executor_reasons: dict[str, int] = Field(default_factory=dict)
+    #: Rejections that recur on one tool: ``{kind, loc, tool, count,
+    #: tool_attempts, rate}``. ``count`` is distinct rejected attempts, not
+    #: error elements; ``rate`` is ``count / tool_attempts``. A file-condition
+    #: kind carries ``None`` for the last two, since it is not rated.
     repeated_collisions: list[dict[str, Any]] = Field(default_factory=list)
+    #: See :class:`RecoveryReport`. Absent on a report serialised before it
+    #: existed, which reads as nothing tracked.
+    recovery: RecoveryReport = Field(default_factory=RecoveryReport)
     #: Whether the EventLog reads behind these counts hit their cap, and
     #: what that excluded. A capped write-health report is a report whose
     #: window is shorter than ``window_days`` claims (#374).
@@ -1113,6 +1313,170 @@ class BackendHealthReport(TrellisModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+@dataclass
+class _BoundaryTally:
+    """What one pass over ``WRITE_REJECTED`` events yields."""
+
+    #: Error **elements** per ``kind@loc`` label.
+    kinds: dict[str, int]
+    #: Distinct rejected *attempts* per (surface, kind, loc): an event lists
+    #: every error element, so a key is counted once per event however many
+    #: elements share it.
+    collision_attempts: dict[tuple[str, str, str], int]
+    #: Rejections per surface written by a build that tracks recovery.
+    tracked: dict[str, int]
+    tracked_windows: list[int]
+
+
+def _tally_boundary_rejections(
+    events: Iterable[Event], stats: Callable[[str], ToolWriteStats]
+) -> _BoundaryTally:
+    """Count each ``WRITE_REJECTED`` event once per tool and once per key."""
+    tally = _BoundaryTally(
+        kinds={}, collision_attempts={}, tracked={}, tracked_windows=[]
+    )
+    for event in events:
+        surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
+        stats(surface).boundary_rejected += 1
+        window = event.payload.get("recovery_window_s")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            tally.tracked[surface] = tally.tracked.get(surface, 0) + 1
+            tally.tracked_windows.append(window)
+        in_this_attempt: set[tuple[str, str]] = set()
+        for row in event.payload.get("rejections") or []:
+            kind = str(row.get("kind", "other"))
+            # List indices are collapsed (``steps.0.action`` and
+            # ``steps.1.action`` → ``steps[].action``) because they are the
+            # same schema disagreement. Un-normalized, one mistake made in
+            # eight steps of one payload presented as eight separate
+            # collisions, each undercounting it.
+            loc = normalize_loc(str(row.get("loc", "")))
+            label = f"{kind}@{loc}" if loc else kind
+            tally.kinds[label] = tally.kinds.get(label, 0) + 1
+            in_this_attempt.add((kind, loc))
+        for kind, loc in in_this_attempt:
+            key = (surface, kind, loc)
+            tally.collision_attempts[key] = tally.collision_attempts.get(key, 0) + 1
+    return tally
+
+
+def _tally_recoveries(events: Iterable[Event]) -> dict[str, int]:
+    """Rejected attempts recovered, per surface, from ``WRITE_RECOVERED``."""
+    recovered: dict[str, int] = {}
+    for event in events:
+        # One malformed event must not fail health: skip it.
+        n = event.payload.get("rejected_attempts")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            continue
+        surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
+        recovered[surface] = recovered.get(surface, 0) + n
+    return recovered
+
+
+def _rate_clause(item: Mapping[str, Any]) -> str:
+    """`` on <tool> (N% of M attempts)`` for a rated row; empty for a file kind."""
+    if item["rate"] is None:
+        return ""
+    return (
+        f" on {item['tool']} ({item['rate']:.0%} of {item['tool_attempts']} attempts)"
+    )
+
+
+def _call_attempts(surface: str, tool_stats: ToolWriteStats) -> int:
+    """Attempts on ``surface``: accepted calls plus rejected ones.
+
+    Accepted comes from :data:`_CALL_LEVEL_OPERATION` where the tool fans out,
+    else from the ``accepted`` total (see :class:`ToolWriteStats`).
+    """
+    operation = _CALL_LEVEL_OPERATION.get(surface)
+    accepted = (
+        tool_stats.accepted_by_operation.get(operation, 0)
+        if operation
+        else tool_stats.accepted
+    )
+    return accepted + tool_stats.boundary_rejected + tool_stats.executor_rejected
+
+
+def _repeated_collisions(
+    collision_attempts: Mapping[tuple[str, str, str], int],
+    by_tool: Mapping[str, ToolWriteStats],
+) -> list[dict[str, Any]]:
+    """The ``(surface, kind, loc)`` rejections that recur, rated where they can be.
+
+    A file condition (:data:`_COLLISION_REASONS`) is warned on distinct
+    attempts alone. Any other kind must also be a share of its tool's
+    attempts above :data:`_COLLISION_RATE_WARN`, with at least
+    :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE` attempts to rate. A surface
+    that never reaches the executor (:data:`_EXECUTOR_BYPASS_SURFACES`) has
+    no accepted count at all, so its rate would read 100% whatever it did;
+    it is not rated and not warned here, and stays in ``by_tool`` and
+    ``boundary_kinds``.
+    """
+    rows: list[dict[str, Any]] = []
+    for (surface, kind, loc), count in collision_attempts.items():
+        if count < _REPEAT_COLLISION_WARN:
+            continue
+        if kind in _COLLISION_REASONS:
+            rows.append(
+                {
+                    "kind": kind,
+                    "loc": loc,
+                    "tool": surface,
+                    "count": count,
+                    "tool_attempts": None,
+                    "rate": None,
+                }
+            )
+            continue
+        tool_stats = by_tool.get(surface)
+        if tool_stats is None or surface in _EXECUTOR_BYPASS_SURFACES:
+            continue
+        tool_attempts = _call_attempts(surface, tool_stats)
+        if tool_attempts < _MIN_ATTEMPTS_FOR_COLLISION_RATE:
+            continue
+        share = count / tool_attempts
+        if share > _COLLISION_RATE_WARN:
+            rows.append(
+                {
+                    "kind": kind,
+                    "loc": loc,
+                    "tool": surface,
+                    "count": count,
+                    "tool_attempts": tool_attempts,
+                    "rate": round(share, 4),
+                }
+            )
+    rows.sort(key=lambda r: (-r["count"], r["tool"], r["kind"], r["loc"]))
+    return rows
+
+
+def _recovery_report(
+    tracked: Mapping[str, int],
+    recovered: Mapping[str, int],
+    windows: list[int],
+) -> RecoveryReport:
+    """Pair tracked rejections with the recoveries emitted for the same tool."""
+    by_tool = {
+        surface: ToolRecovery(
+            tracked=count,
+            recovered=min(recovered.get(surface, 0), count),
+            share=round(min(recovered.get(surface, 0), count) / count, 4),
+        )
+        for surface, count in sorted(tracked.items())
+    }
+    total = sum(t.tracked for t in by_tool.values())
+    done = sum(t.recovered for t in by_tool.values())
+    window = max(windows) if windows else None
+    return RecoveryReport(
+        tracked_rejections=total,
+        recovered_rejections=done,
+        recovered_share=round(done / total, 4) if total else None,
+        window_seconds=window,
+        by_tool=by_tool,
+        note=RECOVERY_APPROXIMATION_NOTE.format(window=window) if total else "",
+    )
+
+
 def summarize_write_health(
     event_log: EventLog,
     *,
@@ -1162,27 +1526,14 @@ def summarize_write_health(
         reason = str(event.payload.get("reason") or "failed")
         executor_reasons[reason] = executor_reasons.get(reason, 0) + 1
 
-    boundary_kinds: dict[str, int] = {}
-    collision_counts: dict[tuple[str, str], int] = {}
     boundary_scan = scan_events(
         event_log, event_type=EventType.WRITE_REJECTED, since=since, limit=limit
     )
-    for event in boundary_scan.events:
-        tool = str(event.payload.get("tool") or "")
-        stats(
-            f"mcp:{tool}" if tool and ":" not in tool else tool
-        ).boundary_rejected += 1
-        for row in event.payload.get("rejections") or []:
-            kind = str(row.get("kind", "other"))
-            # List indices are collapsed (``steps.0.action`` and
-            # ``steps.1.action`` → ``steps[].action``) because they are the
-            # same schema disagreement. Un-normalized, one mistake made in
-            # eight steps of one payload presented as eight separate
-            # "repeated schema collision" reasons, each undercounting it.
-            loc = normalize_loc(str(row.get("loc", "")))
-            label = f"{kind}@{loc}" if loc else kind
-            boundary_kinds[label] = boundary_kinds.get(label, 0) + 1
-            collision_counts[(kind, loc)] = collision_counts.get((kind, loc), 0) + 1
+    boundary = _tally_boundary_rejections(boundary_scan.events, stats)
+    recovered_scan = scan_events(
+        event_log, event_type=EventType.WRITE_RECOVERED, since=since, limit=limit
+    )
+    recovered_by_surface = _tally_recoveries(recovered_scan.events)
 
     accepted = sum(s.accepted for s in by_tool.values())
     boundary_rejected = sum(s.boundary_rejected for s in by_tool.values())
@@ -1190,16 +1541,16 @@ def summarize_write_health(
     attempts = accepted + boundary_rejected + executor_rejected
     rate = (boundary_rejected + executor_rejected) / attempts if attempts else 0.0
 
-    repeated = [
-        {"kind": kind, "loc": loc, "count": count}
-        for (kind, loc), count in sorted(
-            collision_counts.items(), key=lambda item: -item[1]
-        )
-        if count >= _REPEAT_COLLISION_WARN
-    ]
+    repeated = _repeated_collisions(boundary.collision_attempts, by_tool)
+    recovery = _recovery_report(
+        boundary.tracked, recovered_by_surface, boundary.tracked_windows
+    )
 
     scan = merge_coverage(
-        accepted_scan.coverage, rejected_scan.coverage, boundary_scan.coverage
+        accepted_scan.coverage,
+        rejected_scan.coverage,
+        boundary_scan.coverage,
+        recovered_scan.coverage,
     )
 
     reasons: list[str] = []
@@ -1221,7 +1572,7 @@ def summarize_write_health(
         )
         reasons.append(
             f"repeated {label}: {item['kind']} at {loc} "
-            f"x{item['count']} — {explanation}"
+            f"x{item['count']}{_rate_clause(item)} — {explanation}"
         )
     if boundary_rejected > 0 and accepted == 0:
         reasons.append(
@@ -1237,9 +1588,10 @@ def summarize_write_health(
         attempts=attempts,
         rejection_rate=round(rate, 4),
         by_tool=by_tool,
-        boundary_kinds=boundary_kinds,
+        boundary_kinds=boundary.kinds,
         executor_reasons=executor_reasons,
         repeated_collisions=repeated,
+        recovery=recovery,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

@@ -6,6 +6,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **The repeated-rejection health signal is rated against each tool's attempts and
+  no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
+  reached three rejections, with no denominator, so a busy, healthy tool stayed at
+  `warn` for good; it counted error elements rather than calls (one bad trace with
+  many steps was many collisions); and its reason said the schema and its docs or
+  skill disagree. It now counts distinct rejected attempts and warns only when the
+  tool has at least 10 attempts in the window and the rejected share is above 5%
+  (named constants in `trellis.ops.write_health`, starting points rather than
+  tuned values). The reason lists the schema, its docs, the rejection hint and
+  caller payloads as possibilities and says the cause is not established. Each
+  `repeated_collisions` row gains `tool`, `tool_attempts` and `rate`, and rows are
+  per tool; file conditions keep warning on recurrence alone, and a surface with no
+  accepted side (`mcp:record_feedback`) is no longer rated. The default label is
+  "repeated rejection", not "schema collision".
+- **`trellis analyze health` reports how many rejected MCP writes were followed by
+  an accepted call.** New `WRITE_RECOVERED` event and `recovery` block
+  (`recovered_share`, `by_tool`). It is an approximation, stated beside the number:
+  the server is stateless, so there is no per-caller token, and a rejection is
+  paired with the next accepted call of the same tool within 120 seconds, held in
+  process memory only. MCP boundary `WRITE_REJECTED` rows written by this build carry
+  `recovery_window_s`; older rows are left out of the denominator and a window of
+  only older rows reports `recovered_share: null`. What a capture surface accepts
+  is unchanged.
+
 - **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
   A file that starts today can stop starting, including on a harmless stray key
   such as `version: 1`; rename it `x-version` to keep it. Loading

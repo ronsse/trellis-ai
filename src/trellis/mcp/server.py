@@ -138,6 +138,7 @@ from trellis.ops.memory_extraction_health import (
     STATE_UNAVAILABLE,
     emit_memory_extraction_state,
 )
+from trellis.ops.write_health import RejectionRecoveryTracker
 from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
@@ -304,6 +305,13 @@ def _result_message(result: CommandResult) -> str:
     return result.message
 
 
+#: Pairs a boundary rejection with the accepted call that follows it, per
+#: tool and in memory. See
+#: :class:`trellis.ops.write_health.RejectionRecoveryTracker` for what it
+#: keeps (a tool name, a count and a time) and why it cannot key by caller.
+_REJECTION_RECOVERY = RejectionRecoveryTracker()
+
+
 def _record_boundary_rejection(
     *,
     tool: str,
@@ -334,7 +342,34 @@ def _record_boundary_rejection(
         rejections=rejections,
         hints=hints,
         payload_chars=payload_chars,
+        recovery=_REJECTION_RECOVERY,
     )
+
+
+def _note_accepted_call(tool: str) -> None:
+    """Emit ``WRITE_RECOVERED`` when a call is accepted right after rejections.
+
+    Called with the name of a tool whose call just returned without raising.
+    A tool that recorded no rejection recently costs one dict lookup. Wrapped
+    whole, like the rest of the write-health telemetry: pairing is advisory,
+    and an escaped exception here would fail a write that already succeeded.
+    """
+    try:
+        from trellis.ops.write_health import (  # noqa: PLC0415
+            record_write_recovery,
+            surface_label,
+        )
+
+        rejected = _REJECTION_RECOVERY.claim_recovery(surface_label(tool))
+        if rejected:
+            record_write_recovery(
+                _get_registry().operational.event_log,
+                tool=tool,
+                rejected_attempts=rejected,
+                window_seconds=_REJECTION_RECOVERY.window_seconds,
+            )
+    except Exception:
+        logger.warning("write_recovery.pairing_failed", tool=tool, exc_info=True)
 
 
 # The ``instructions`` string is returned in the MCP ``initialize`` response and
@@ -526,12 +561,15 @@ class _ExplainArgumentRejections(Middleware):
         call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         try:
-            return await call_next(context)
+            result = await call_next(context)
         except Exception as exc:
             message = await self._explain(context.message.name, exc.__cause__)
             if message is None:
                 raise
             raise ToolError(message) from exc.__cause__
+        # Every rejection path raises, so a call that returned was accepted.
+        _note_accepted_call(context.message.name)
+        return result
 
 
 mcp.add_middleware(_ExplainArgumentRejections(mcp))

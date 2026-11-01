@@ -500,6 +500,16 @@ class EventType(StrEnum):
     #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
     WRITE_REJECTED = "write.rejected"
 
+    #: A call to a tool was accepted shortly after that tool's boundary
+    #: rejections, so those rejections count as recovered by the retry that
+    #: followed. Payload: ``tool``, ``rejected_attempts`` (how many tracked
+    #: rejections this acceptance follows) and ``window_s``. Carries nothing
+    #: about the call, the caller or the content. Paired by tool within a
+    #: window, not by caller (see
+    #: :class:`trellis.ops.write_health.RejectionRecoveryTracker`).
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_RECOVERED = "write.recovered"
+
     #: Emitted by the API Review-queue endpoints (WP10) whenever a human
     #: operator acts on a governance surface from the UI inbox — approving
     #: or rejecting a tuner proposal, promoting learning candidates, or

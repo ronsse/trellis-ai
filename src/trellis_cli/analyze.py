@@ -106,7 +106,7 @@ if TYPE_CHECKING:
         HoldoutReport,
         HoldoutSecondaryInference,
     )
-    from trellis.ops.write_health import ToolWriteStats
+    from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
 logger = structlog.get_logger(__name__)
 
@@ -760,6 +760,18 @@ def _print_serving_builds(builds: ServingBuildsReport) -> None:
             )
 
 
+def _print_recovery(console: Console, recovery: RecoveryReport) -> None:
+    """The recovered share and its caveat, or nothing when nothing was tracked."""
+    if recovery.recovered_share is None:
+        return
+    console.print(
+        f"    recovered: {recovery.recovered_rejections}/"
+        f"{recovery.tracked_rejections} tracked boundary rejections "
+        f"followed by an accepted call ({recovery.recovered_share:.0%})"
+    )
+    console.print(f"      {recovery.note}", markup=False)
+
+
 @analyze_app.command("health")
 def health(
     days: int = typer.Option(7, help="Days of history to analyze"),
@@ -831,8 +843,9 @@ def health(
     )
     if write.by_tool:
         _print_tool_table(write.by_tool, _EXECUTOR_BYPASS_SURFACES)
+    _print_recovery(console, write.recovery)
     if write.boundary_kinds:
-        console.print("  Boundary rejection taxonomy:")
+        console.print("  Boundary rejection taxonomy (error elements, not calls):")
         for label, count in sorted(
             write.boundary_kinds.items(), key=lambda item: -item[1]
         ):
