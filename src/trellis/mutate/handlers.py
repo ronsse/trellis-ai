@@ -61,6 +61,7 @@ from trellis.mutate.retention import (
     ARCHIVED_STATE,
     CURRENT_STATE,
     MAX_DOCUMENTS_SCANNED,
+    MAX_ENTITIES_SCANNED,
     ResolutionReport,
     RetentionCandidate,
     RetentionCriteria,
@@ -4136,9 +4137,24 @@ def _prune_message(
             "says nothing about the corpus"
         )
     if report.scan_truncated:
+        # The document plane stops at its cap and nothing else, so it can name
+        # one. The entity scan can also stop on the walk's read budget or on a
+        # store whose total contradicts its pages, so "capped" would be false
+        # for two of its three causes.
+        causes = {
+            "document": f"scan capped at {MAX_DOCUMENTS_SCANNED} documents",
+            "entity": (
+                f"entity scan stopped early (the {MAX_ENTITIES_SCANNED}-entity cap, "
+                "the read budget, or store totals that disagreed)"
+            ),
+        }
+        stopped = (
+            " and ".join(causes[plane] for plane in report.scan_truncated_planes)
+            or causes["document"]
+        )
         message += (
-            f"; WARNING scan capped at {MAX_DOCUMENTS_SCANNED} documents — "
-            "candidate set is a prefix, re-run to continue"
+            f"; WARNING {stopped} — candidate set is a prefix "
+            "of the real population, not the whole of it"
         )
     if skipped:
         message += f"; {skipped} skipped (vanished between resolve and write)"
@@ -4287,6 +4303,7 @@ class RetentionPruneHandler:
             "documents_scanned": report.documents_scanned,
             "entities_scanned": report.entities_scanned,
             "scan_truncated": report.scan_truncated,
+            "scan_truncated_planes": report.scan_truncated_planes,
             "skipped_already_archived": report.skipped_already_archived,
             "skipped_confirmed": report.skipped_confirmed,
             "skipped_restored": report.skipped_restored,
