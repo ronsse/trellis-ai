@@ -4982,7 +4982,7 @@ call is refused:
   earn no credit. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
   are not checked: the learning join never credits either.
 - A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
-  joins to no item. It is recorded as before, and the attribution refusals still fail open for it.
+  cannot be confirmed to join any item. It is recorded as before, and the attribution refusals still fail open for it.
   The id is read stripped of surrounding whitespace, as the learning join reads a recorded one.
 - A pack whose record holds no served ids (assembled empty, or recorded before served ids were
   written) gets no note, so a citation on it reads like any other reply.

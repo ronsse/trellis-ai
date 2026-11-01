@@ -3838,7 +3838,8 @@ def _require_pack_attribution(
 
 _UNKNOWN_PACK_NOTE = (
     "note: pack {pack_id} is unknown (no assembled pack with that id is visible "
-    "to this caller), so this feedback joins to no item and earns no credit"
+    "to this caller), so this feedback cannot be confirmed to join any item or "
+    "earn credit"
 )
 
 
