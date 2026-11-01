@@ -42,11 +42,13 @@ When `config.yaml` exists and `--force` is not given, `init` leaves the file alo
 
 ### `trellis admin health`
 
-Check health of Trellis stores. Read-only: it resolves each store's backend from `config.yaml` without opening the store, so it makes no connection and creates no file.
+Check health of Trellis stores. Read-only: it resolves each store's backend from `config.yaml` without building the store, so it makes no network connection and creates no file. A SQLite store file that exists is opened read-only (`immutable=1`: no lock, and no `-wal` or `-shm` file left beside it) and must read as a database.
 
 ```bash
-trellis admin health [--format text|json]
+trellis admin health [--require-stores] [--format text|json]
 ```
+
+**Exit codes.** `0` unless a store file is damaged, in which case `5` (`EXIT_STORE`) in both formats. A file that exists but is not a database (random bytes, a truncated or mangled file) is `DAMAGED` in text output and listed in a `damaged` object in JSON (`{"documents.db": "not a valid SQLite database"}`, absent when nothing is damaged); its `.db` key stays `true`, because the file is there. A missing store file exits `0`, because `admin init` creates none; pass `--require-stores` to exit `5` when any SQLite store file is missing, for a monitor that runs against a deployment already in use. A store on another backend has no `.db` key and is never a failure. An empty file is a valid empty database. Health reads a file's first page only: it finds a file that is not a database, not corruption deeper in one.
 
 **JSON output** (knowledge plane on Postgres, operational plane on SQLite):
 
@@ -3803,7 +3805,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
 | `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage that runs still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
-| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --log-dir DIR --dry-run`. |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --dry-run`. |
 | `--skip-noise-tags` | off | Skip stage 1. |
 | `--skip-advisories` | off | Skip stages 2 + 3. |
 | `--skip-learning` | off | Skip stage 4. |
@@ -4675,7 +4677,7 @@ These element-level signals land in the `FEEDBACK_RECORDED` event payload so the
 
 The cited ids are *not* written as `items_served` — they are what the agent referenced, not what the pack contained. The payload leaves `items_served` empty so the reference-rate metric keeps joining against the pack's own `PACK_ASSEMBLED` `injected_item_ids`; synthesizing it from the citations would report a 100% reference rate for every attributed pack.
 
-The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback --log-dir <stores_dir>/feedback` (or `worker curate --reconcile-first`, which scans that directory) replays it.
+The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback` (which reads `<stores_dir>/feedback` by default; or `worker curate --reconcile-first`, which scans that directory) replays it.
 
 ### Retrieval Budgets
 

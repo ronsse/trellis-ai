@@ -114,7 +114,7 @@ In `--dry-run`, advisories are skipped wholesale (`"skipped_stages": ["advisorie
  "skipped_stages": ["advisories"], "dry_run": true}
 ```
 
-Each stage that runs still records its meta-Activity, as every other meta-traced dry run does, but no finding, because the noise-tag and learning findings name writes (the tags, the review files) that a dry run does not make; add `--no-meta-trace` for a dry run that writes nothing. A degraded advisory file still emits its `write.rejected` health event and exits 5, since a dry run is the usual health probe. `--reconcile-first` exits 2 under `--dry-run`, because the backfill writes events; preview it with `trellis admin reconcile-feedback --log-dir DIR --dry-run`.
+Each stage that runs still records its meta-Activity, as every other meta-traced dry run does, but no finding, because the noise-tag and learning findings name writes (the tags, the review files) that a dry run does not make; add `--no-meta-trace` for a dry run that writes nothing. A degraded advisory file still emits its `write.rejected` health event and exits 5, since a dry run is the usual health probe. `--reconcile-first` exits 2 under `--dry-run`, because the backfill writes events; preview it with `trellis admin reconcile-feedback --dry-run`.
 
 In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts; SIGINT/SIGTERM drains the current cycle and exits cleanly (no half-written artifact).
 
@@ -257,8 +257,9 @@ trellis worker tune --dry-run --format json
 #   expect: {"enabled": false, ..., "auto_promoted": 0}
 
 # 4. Feedback reconciliation is wired
-trellis admin reconcile-feedback --log-dir /tmp/trellis-check/data --dry-run --format json
+trellis admin reconcile-feedback --dry-run --format json
 #   expect: {"status": "ok", "dry_run": true, "scanned": N, "would_emit": M}
+#   ("no_log" means no feedback has been recorded yet; it is not a pass)
 
 # 5. A real curate cycle writes the two human-review artifacts
 trellis worker curate --output-dir /tmp/trellis-check/review --format json

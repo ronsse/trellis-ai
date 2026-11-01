@@ -49,10 +49,19 @@ def test_policy_violation_is_mutation_error():
 def test_backend_not_installed_renders_extra_hint():
     err = BackendNotInstalledError(backend_name="arcadedb", extra="arcadedb")
     assert "arcadedb" in err.message
-    assert 'uv pip install -e ".[arcadedb]"' in err.message
+    assert 'pip install -e ".[arcadedb]"' in err.message
     assert err.code == "BACKEND_NOT_INSTALLED"
     assert isinstance(err, ConfigError)
     assert err.setting == "backend.arcadedb"
+
+
+def test_backend_not_installed_advice_works_without_a_checkout():
+    """The first advice is the published name: an editable install needs a tree."""
+    err = BackendNotInstalledError(backend_name="arcadedb", extra="arcadedb")
+    wheel_advice = err.message.split("source checkout")[0]
+    assert "pip install 'trellis-ai[arcadedb]'" in wheel_advice
+    assert " -e " not in wheel_advice
+    assert "uv " not in err.message
 
 
 def test_backend_not_installed_falls_back_to_package_name():

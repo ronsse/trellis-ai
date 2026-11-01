@@ -90,7 +90,7 @@ You can also confirm the binary and stores from a shell:
 
 ```bash
 trellis-mcp --help          # MCP server is on PATH
-trellis admin health        # checks config and store paths (connects to nothing)
+trellis admin health        # checks config and store paths (no network connection; reads each SQLite file read-only)
 ```
 
 ### Per-client setup notes

@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -306,18 +307,90 @@ _HEALTH_STORES = (
 )
 
 
+#: What ``admin health`` says about a SQLite file that is there but is not a
+#: database. Fixed text, never the driver's message.
+_DAMAGED_NOT_A_DATABASE = "not a valid SQLite database"
+_DAMAGED_UNREADABLE = "could not be opened read-only"
+
+
+def _probe_sqlite_file(path: Path) -> str | None:
+    """Why the file at ``path`` is not a readable SQLite database, else ``None``.
+
+    Opened ``immutable=1``: no lock and no ``-wal``/``-shm`` file (a plain
+    ``mode=ro`` open of a WAL database leaves both behind), and never created,
+    which a plain ``connect`` would do for an absent path. The one read is a
+    scan of ``sqlite_master``, which parses the header and the first page, so
+    random bytes, a truncated file and a mangled first page all fail while a
+    healthy store of any size answers at once. An empty file is a valid empty
+    database and passes: stores create their files on first use.
+    """
+    try:
+        conn = sqlite3.connect(path.absolute().as_uri() + "?immutable=1", uri=True)
+    except sqlite3.Error:
+        return _DAMAGED_UNREADABLE
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except sqlite3.OperationalError:
+        return _DAMAGED_UNREADABLE
+    except sqlite3.DatabaseError:
+        return _DAMAGED_NOT_A_DATABASE
+    finally:
+        conn.close()
+    return None
+
+
+def _check_store_files(
+    registry: Any,
+) -> tuple[dict[str, str | None], dict[str, bool], dict[str, str]]:
+    """Each store's backend, its SQLite file's presence, and which files are damaged.
+
+    Returns ``(backends, file_checks, damaged)``. ``file_checks`` has a key
+    only for a store on SQLite: ``false`` would read as missing for any
+    other backend, and a file left over from before a store moved off SQLite
+    would read as OK. ``damaged`` maps a present file's key to why it does
+    not read as a database.
+    """
+    backends: dict[str, str | None] = {}
+    file_checks: dict[str, bool] = {}
+    damaged: dict[str, str] = {}
+    for store_type, file_key in _HEALTH_STORES:
+        backends[store_type] = registry.configured_backend(store_type)
+        sqlite_file = registry.configured_sqlite_path(store_type)
+        if sqlite_file is None:
+            continue
+        file_checks[file_key] = path_is_present(sqlite_file)
+        if file_checks[file_key]:
+            reason = _probe_sqlite_file(sqlite_file)
+            if reason is not None:
+                damaged[file_key] = reason
+    return backends, file_checks, damaged
+
+
 @admin_app.command()
 def health(
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
+    require_stores: bool = typer.Option(
+        False,
+        "--require-stores",
+        help=(
+            "Exit 5 when a SQLite store file is missing. Off by default: "
+            "'admin init' creates no store file, so a missing one is normal "
+            "until the store is first used."
+        ),
+    ),
 ) -> None:
     """Check health of Trellis stores.
 
     Read-only: each store's backend is resolved from config without
-    building the store, so this opens no connection and creates no file.
-    A SQLite store is checked by whether its file exists. Any other
-    backend is reported by name as not checked — never as missing. A
+    building the store, so this opens no network connection and creates no
+    file. A SQLite store is checked by whether its file exists, and a file
+    that exists is opened read-only (no lock, no side file) and must read as
+    a database: a damaged one is reported ``DAMAGED`` (``damaged`` in JSON)
+    and exits 5 (``EXIT_STORE``) in both formats. A missing file exits 0
+    unless ``--require-stores`` is given, because ``init`` creates none. Any
+    other backend is reported by name as not checked — never as missing. A
     value that names no registered backend is reported as unknown, and
     is never printed: it can be a DSN written where a name belongs.
 
@@ -349,15 +422,9 @@ def health(
     }
     # ``None`` (JSON ``null``) for a value that names no registered backend:
     # the value is never shown, since it can be a DSN written as a name.
-    backends: dict[str, str | None] = {}
-    for store_type, file_key in _HEALTH_STORES:
-        backends[store_type] = registry.configured_backend(store_type)
-        sqlite_file = registry.configured_sqlite_path(store_type)
-        # No key for a store with no SQLite file: ``false`` would read as
-        # missing, and a file left over from before it moved off SQLite
-        # would read as OK.
-        if sqlite_file is not None:
-            checks[file_key] = sqlite_file.exists()
+    backends, file_checks, damaged = _check_store_files(registry)
+    checks.update(file_checks)
+    missing = [name for name, present in file_checks.items() if not present]
 
     if output_format == "json":
         # Plain ``print`` (not ``console.print``) so Rich's terminal-
@@ -365,6 +432,8 @@ def health(
         # consumers expect single-line JSON per the project rule in
         # CLAUDE.md (`parse JSON output, not human-readable text`).
         payload: dict[str, Any] = {**checks, "backends": backends}
+        if damaged:
+            payload["damaged"] = damaged
         if disagreement is not None:
             payload["data_dir_disagreement"] = disagreement
         print(json.dumps(payload))
@@ -373,7 +442,10 @@ def health(
         table.add_column("Component", style="cyan")
         table.add_column("Status")
         for name, ok in checks.items():
-            status = "[green]OK[/green]" if ok else "[red]MISSING[/red]"
+            if name in damaged:
+                status = f"[red]DAMAGED[/red] ({damaged[name]})"
+            else:
+                status = "[green]OK[/green]" if ok else "[red]MISSING[/red]"
             table.add_row(name, status)
         for store_type, file_key in _HEALTH_STORES:
             if file_key not in checks:
@@ -399,6 +471,11 @@ def health(
             console.print(
                 f"  ignored: {escape(disagreement['ignored'])}", soft_wrap=True
             )
+
+    # Below the format branch: a monitor reads this, and both formats must
+    # agree about whether the check failed (test_format_exit_parity_rule).
+    if damaged or (require_stores and missing):
+        raise typer.Exit(code=EXIT_STORE)
 
 
 @admin_app.command()
@@ -644,10 +721,14 @@ def stats(
 
 @admin_app.command("reconcile-feedback")
 def reconcile_feedback(
-    log_dir: Path = typer.Option(  # noqa: B008 - typer option default
-        ...,
+    log_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
         "--log-dir",
-        help="Directory containing pack_feedback.jsonl to reconcile.",
+        help=(
+            "Directory containing pack_feedback.jsonl to reconcile. Default: "
+            "the feedback directory under the stores directory, where the MCP "
+            "tool and the REST route write it."
+        ),
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -663,22 +744,62 @@ def reconcile_feedback(
 ) -> None:
     """Backfill file-only feedback rows into the EventLog.
 
-    Replays ``pack_feedback.jsonl`` rows from ``--log-dir`` that are
+    Replays ``pack_feedback.jsonl`` rows from the log directory that are
     missing a matching ``FEEDBACK_RECORDED`` event, closing the divergence
     where the JSONL audit log was written but the governed event was not
     (sink unavailable, crash between writes, file-only capture). Safe to
     run repeatedly — already-present rows are left alone.
 
+    The directory defaults to ``<stores_dir>/feedback``, the one place the
+    log is written. A directory with no ``pack_feedback.jsonl`` is never a
+    clean pass: the report says ``no_log`` and names the file looked for. With
+    the default directory that is exit 0 (nothing has been recorded yet); with
+    ``--log-dir`` it is exit 2, since a directory named on purpose that lacks
+    the file is usually the wrong one.
+
     ``--dry-run`` scans the log and reports how many rows *would* be
     emitted without touching the EventLog.
     """
     from trellis.feedback.recording import (  # noqa: PLC0415
+        feedback_log_dir,
         load_feedback_log,
         reconcile_feedback_log_to_event_log,
     )
+    from trellis.ops.backup import FEEDBACK_LOG_NAME  # noqa: PLC0415
+
+    explicit_dir = log_dir is not None
+    if log_dir is None:
+        stores_dir = _get_registry().stores_dir
+        assert stores_dir is not None  # from_config_dir always sets it
+        log_dir = feedback_log_dir(stores_dir)
+    log_path = log_dir / FEEDBACK_LOG_NAME
 
     payload: dict[str, Any]
-    if dry_run:
+    exit_code = EXIT_OK
+    if not path_is_present(log_path):
+        # The file is absent, so no row was scanned: say that, not "ok".
+        exit_code = EXIT_VALIDATION if explicit_dir else EXIT_OK
+        payload = {
+            "status": "no_log",
+            "dry_run": dry_run,
+            "log_path": str(log_path),
+            "scanned": 0,
+            "already_present": 0,
+            "emitted": 0,
+            "would_emit": 0,
+            "failed": 0,
+            "missing_feedback_ids": [],
+            "message": (
+                f"No {FEEDBACK_LOG_NAME} at {log_path}, so nothing was scanned."
+                + (
+                    " The log is written under <stores_dir>/feedback; omit"
+                    " --log-dir to use it."
+                    if explicit_dir
+                    else " Nothing has been recorded yet."
+                )
+            ),
+        }
+    elif dry_run:
         signals = load_feedback_log(log_dir)
         event_log = get_event_log()
         from trellis.feedback.recording import (  # noqa: PLC0415
@@ -692,6 +813,7 @@ def reconcile_feedback(
         payload = {
             "status": "ok",
             "dry_run": True,
+            "log_path": str(log_path),
             "scanned": scanned,
             "already_present": already_present,
             "would_emit": scanned - already_present,
@@ -702,6 +824,7 @@ def reconcile_feedback(
         payload = {
             "status": "ok",
             "dry_run": False,
+            "log_path": str(log_path),
             "scanned": result.scanned,
             "already_present": result.already_present,
             "emitted": result.emitted,
@@ -711,19 +834,26 @@ def reconcile_feedback(
 
     if output_format == "json":
         print(json.dumps(payload))
-        return
-
-    console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
-    console.print(f"  Scanned: {payload['scanned']}")
-    console.print(f"  Already present: {payload['already_present']}")
-    if dry_run:
-        console.print(f"  Would emit: {payload['would_emit']}")
+    elif payload["status"] == "no_log":
+        console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
+        # Unwrapped: a path folded across lines is not one a reader can copy.
+        console.print(f"  No log: {escape(payload['message'])}", soft_wrap=True)
     else:
-        console.print(f"  [green]Emitted: {payload['emitted']}[/green]")
-        if payload["failed"]:
-            console.print(f"  [red]Failed: {payload['failed']}[/red]")
-            for fid in payload["missing_feedback_ids"]:
-                console.print(f"    - {fid}")
+        console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
+        console.print(f"  Scanned: {payload['scanned']}")
+        console.print(f"  Already present: {payload['already_present']}")
+        if dry_run:
+            console.print(f"  Would emit: {payload['would_emit']}")
+        else:
+            console.print(f"  [green]Emitted: {payload['emitted']}[/green]")
+            if payload["failed"]:
+                console.print(f"  [red]Failed: {payload['failed']}[/red]")
+                for fid in payload["missing_feedback_ids"]:
+                    console.print(f"    - {fid}")
+
+    # Below the format branch: both formats must agree about the exit.
+    if exit_code != EXIT_OK:
+        raise typer.Exit(code=exit_code)
 
 
 @admin_app.command("graph-health")

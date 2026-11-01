@@ -12,7 +12,7 @@ For *what* each command does, its autonomy tier, and where the human-in-the-loop
 
 | Command | Cadence | Why | LLM? | Autonomy |
 |---|---|---|---|---|
-| `trellis admin reconcile-feedback --log-dir DIR` | Before every curate run (or use `worker curate --reconcile-first`) | Backfills file-only `pack_feedback.jsonl` rows into the EventLog so the curate cycle sees every signal. | no | — |
+| `trellis admin reconcile-feedback [--log-dir DIR]` | Before every curate run (or use `worker curate --reconcile-first`) | Backfills file-only `pack_feedback.jsonl` rows into the EventLog so the curate cycle sees every signal. | no | — |
 | `trellis worker curate` | Daily | Demote (noise-tag) + advisory upkeep run unattended; learning candidates are written for human review, to the directory the API's Review queue reads (see below). | no | Tier 0 + Tier 2 |
 | `trellis worker tune` | Daily, **only where `auto_promote.enabled`** | Re-monitors recent auto-promotions and rolls back any that degraded; promotes newly-qualifying proposals. With auto-promote off it promotes nothing and only queues `pending` proposals for manual review, as `trellis metrics tune` does — schedule it only once you've opted a scope in. | no | Tier 1 |
 | `trellis worker enrich` | Daily, off-peak | LLM tagging of under-tagged documents — costs money/time, so run when the warehouse and API are quiet. | **yes** | — |
@@ -158,7 +158,7 @@ spec:
                 - sh
                 - -c
                 - >
-                  trellis admin reconcile-feedback --log-dir /data --format json &&
+                  trellis admin reconcile-feedback --format json &&
                   trellis worker curate --days 30 --format json
               env:
                 - name: TRELLIS_CONFIG_DIR
@@ -201,8 +201,9 @@ export TRELLIS_CONFIG_DIR=/tmp/trellis-check/config
 export TRELLIS_DATA_DIR=/tmp/trellis-check/data
 trellis admin init && trellis demo load
 
-trellis admin reconcile-feedback --log-dir "$TRELLIS_DATA_DIR" --dry-run --format json
-#   -> {"status": "ok", "dry_run": true, "scanned": 0, "already_present": 0, "would_emit": 0, "failed": 0}
+trellis admin reconcile-feedback --dry-run --format json
+#   -> {"status": "no_log", "dry_run": true, "log_path": ".../stores/feedback/pack_feedback.jsonl", "scanned": 0, ...}
+#      (a fresh install has recorded no feedback; "no_log" is not "ok"; after feedback exists it reads "ok" with a scanned count)
 
 trellis worker curate --output-dir /tmp/trellis-check/review --dry-run --format json
 #   -> {"status": "ok", ..., "candidates_path": null, "decisions_path": null, "dry_run": true}

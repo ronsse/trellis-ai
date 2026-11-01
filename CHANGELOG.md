@@ -6,6 +6,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: `trellis admin health` exits 5 when a SQLite store file is damaged.**
+  A file that is present but is not a database (random bytes, a truncated or
+  mangled file) used to read `true` and exit 0, so a monitor on the exit code
+  never fired; the commands that open it printed a Python traceback. Each store
+  file that exists is now opened read-only and immutable (no lock, no `-wal` or
+  `-shm` file, never created) and read once. A damaged one is `DAMAGED` in text
+  output, listed in a new `damaged` object in `--format json`, and exits 5
+  (`EXIT_STORE`) in both formats. A missing store file still exits 0, because
+  `trellis admin init` creates no store file and every store is created on first
+  use. New `--require-stores` exits 5 on a missing SQLite store file for a monitor
+  that runs against a deployment already in use. A store on another backend is
+  never a failure. An empty file is a valid empty database and passes.
+- **`trellis admin reconcile-feedback` finds the log without `--log-dir`, and no
+  longer reports a clean pass for a log it did not find.** `--log-dir` is now
+  optional and defaults to `<stores_dir>/feedback`, the directory the MCP tool and
+  the REST route write `pack_feedback.jsonl` to. Before, it was required, and the
+  data directory the docs named held no log, so the command scanned zero rows and
+  printed `"status": "ok"`. A directory with no `pack_feedback.jsonl` now reports
+  `"status": "no_log"` with `log_path` and a message in both formats, and every
+  report carries `log_path`. **BREAKING:** `--log-dir` pointing at a directory
+  without the file exits 2 instead of 0 (the default directory with no log still
+  exits 0), so a scheduled job that passed the data directory now fails until it
+  drops the flag. The docs' CronJob and checklists drop the flag.
+- **`trellis-mcp` with an invalid `TRELLIS_MCP_TRANSPORT`, and `trellis serve` or
+  `trellis admin serve` over an unparseable `config.yaml`, print one line and exit
+  5 instead of a Python traceback** (exits 1 and 3 before). `trellis-mcp` prints
+  the error to stderr. The REST server now parses `config.yaml` before handing
+  control to uvicorn, so the typed error reaches the CLI boundary (and
+  `trellis-api`'s wrapper) rather than failing inside uvicorn's startup.
+- **A missing optional backend's install advice works without a source
+  checkout.** `BackendNotInstalledError` told a wheel install to run
+  `uv pip install -e ".[extra]"`, which fails outside a checkout. It now says
+  `pip install 'trellis-ai[extra]'` and, for a checkout, `pip install -e ".[extra]"`.
+
 - **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
   A file that starts today can stop starting, including on a harmless stray key
   such as `version: 1`; rename it `x-version` to keep it. Loading
