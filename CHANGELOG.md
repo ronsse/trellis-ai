@@ -88,7 +88,7 @@ All notable changes to Trellis will be documented in this file.
   table is eligible-task counts per build and arm. Default output and exit codes
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
-- **MCP `record_feedback` says when a cited id joined to nothing.** The reply keeps its first
+- **MCP `record_feedback` says when a cited id's credit cannot be confirmed.** The reply keeps its first
   line and gains a further `note:` line when the call names a pack and cites an id in
   `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve (the first ten, the rest
   counted), or names a pack with no assembled-pack record. `ignored_item_ids` are not checked,
@@ -114,8 +114,8 @@ All notable changes to Trellis will be documented in this file.
   bodied gate), capped at 20 with the count of the rest stated. They are the ids the caller may
   read, so a pack's items above its clearance are neither listed nor counted. Each id is
   clipped to 100 characters, and a non-printable character or backtick in one becomes `?`,
-  so a stored id can neither lengthen the text nor write a line of its own. `data` and its
-  60-id cap are unchanged, and no refusal is added or removed.
+  so a stored item id can neither lengthen the text nor write a line of its own; the pack id
+  the refusal names is echoed as given. `data` and its 60-id cap are unchanged, and no refusal is added or removed.
 
 - **The Review tab reads a fresh deployment as an empty queue, and a real failure there shows
   its reason.** `GET /learning/candidates` answers `status: "error"` when no writer has

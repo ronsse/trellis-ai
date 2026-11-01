@@ -3850,7 +3850,7 @@ def _unserved_citation_note(
 
     Advisory only: it is read after the feedback is written and changes
     neither the event, the JSONL row nor whether the call is refused. ``cited``
-    is what the learning join reads
+    is the two lists the learning join credits
     (:func:`~trellis.feedback.attribution.cited_item_ids`), tested for
     membership as :func:`~trellis.feedback.attribution.stray_citations` tests
     it, at the moment the caller can still fix the id.
@@ -3895,10 +3895,11 @@ def _unserved_citation_note(
         rest = len(strays) - len(shown)
         more = f" (and {rest} more)" if rest else ""
         noun = "id was" if len(strays) == 1 else "ids were"
-        verb = "earns" if len(strays) == 1 else "earn"
+        possessive = "its" if len(strays) == 1 else "their"
         return (
             f"note: {len(strays)} cited {noun} not among the items this pack "
-            f"served and {verb} no credit: {listed}{more}"
+            f"served that this caller can see, so {possessive} credit cannot be "
+            f"confirmed: {listed}{more}"
         )
     except Exception:
         # GRACEFUL-DEGRADATION: wrapped whole, not by exception type. The

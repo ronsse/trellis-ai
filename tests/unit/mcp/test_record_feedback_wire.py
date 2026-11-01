@@ -331,8 +331,8 @@ class TestUnservedCitationNote:
         assert not result.is_error
         assert first == _first("pack_a")
         assert note == (
-            "note: 1 cited id was not among the items this pack served and earns "
-            "no credit: `zzz`"
+            "note: 1 cited id was not among the items this pack served that this "
+            "caller can see, so its credit cannot be confirmed: `zzz`"
         )
         (event,) = _feedback_events(temp_registry)
         assert event.payload["helpful_item_ids"] == ["doc-a", "zzz"]
@@ -375,7 +375,7 @@ class TestUnservedCitationNote:
 
         note = text.split("\n")[1]
         assert note.startswith("note: 2 cited ids were not among the items")
-        assert note.endswith("earn no credit: `bad-2`, `bad-1`")
+        assert note.endswith("their credit cannot be confirmed: `bad-2`, `bad-1`")
         assert "skip-1" not in text
         assert "adv-1" not in text
 
@@ -544,7 +544,7 @@ class TestUnservedCitationNote:
         )
 
         assert "is unknown" not in text
-        assert text.split("\n")[1].endswith("earns no credit: `zzz`")
+        assert text.split("\n")[1].endswith("its credit cannot be confirmed: `zzz`")
         assert padded_unknown.split("\n")[1].startswith("note: pack pack_x is unknown")
 
     async def test_a_blank_pack_id_is_a_trace_call_with_no_note(
@@ -615,8 +615,8 @@ class TestTheNoteNeverConfirmsAnUnreadableId:
         )
 
         assert with_secret.split("\n")[1] == (
-            "note: 1 cited id was not among the items this pack served and "
-            "earns no credit: `doc-secret`"
+            "note: 1 cited id was not among the items this pack served that this "
+            "caller can see, so its credit cannot be confirmed: `doc-secret`"
         )
         assert with_secret.replace("doc-secret", "doc-random") == with_random
 
@@ -791,6 +791,31 @@ class TestAnOutageIsNotAnAnswer:
 
         assert text == _first("p_real")
 
+    async def test_a_failed_parent_read_gives_no_note(
+        self, seeded: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = seeded.knowledge.document_store
+        chunk = chunk_doc_id("doc-open", 0)
+        store.put(chunk, "chunk", {})
+        _serve(seeded, "p_real", [chunk])
+        real_get = store.get
+
+        def flaky(doc_id: str) -> Any:
+            if doc_id == "doc-open":
+                raise RuntimeError(_DOWN)
+            return real_get(doc_id)
+
+        monkeypatch.setattr(store, "get", flaky)
+
+        text = _text(
+            await _call(
+                {"pack_id": "p_real", "rating": 0.9, "helpful_item_ids": ["zzz"]},
+                scopes=MUTATE_READ,
+            )
+        )
+
+        assert text == _first("p_real")
+
     async def test_a_trusted_caller_does_not_read_the_store_so_it_still_hears(
         self, seeded: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -803,7 +828,7 @@ class TestAnOutageIsNotAnAnswer:
             )
         )
 
-        assert text.split("\n")[1].endswith("earns no credit: `zzz`")
+        assert text.split("\n")[1].endswith("its credit cannot be confirmed: `zzz`")
 
     async def test_the_refusal_still_fails_closed_on_the_ids_it_lists(
         self, seeded: StoreRegistry, monkeypatch: pytest.MonkeyPatch

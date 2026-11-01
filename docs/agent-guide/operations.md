@@ -4406,8 +4406,9 @@ recorded. A trusted-local caller sees every id. The ids a refusal names are in
 its message text, capped at 20 with the count of the rest stated, because
 the error's `data` does not reach an MCP client; the same list is what the
 clearance rule above applies to. Each id is clipped to 100 characters and shown
-with any non-printable character or backtick replaced by `?`, so a stored id
-cannot lengthen the text or write a line of its own.
+with any non-printable character or backtick replaced by `?`, so a stored item
+id cannot lengthen the text or write a line of its own. The pack id the refusal
+names is echoed as given.
 
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
@@ -4978,8 +4979,9 @@ recorded and changing neither the event, the `pack_feedback.jsonl` row, the exit
 call is refused:
 
 - Ids in `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve are listed (the
-  first ten, with the count of the rest, each clipped and made safe as in a refusal) and stated to
-  earn no credit. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
+  first ten, with the count of the rest, each clipped and made safe as in a refusal), and their
+  credit is stated as not confirmed: the learning join still credits a served id the caller may not
+  read, and strips a padded one. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
   are not checked: the learning join never credits either.
 - A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
   cannot be confirmed to join any item. It is recorded as before, and the attribution refusals still fail open for it.
