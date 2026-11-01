@@ -12,6 +12,12 @@ import structlog
 from trellis.schemas.outcome import ComponentOutcome, OutcomeEvent
 from trellis.stores.base.outcome import OutcomeStore
 from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.instant import (
+    MigrationEvents,
+    instant_key,
+    instant_key_sql,
+    migrate_instant_column,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -60,6 +66,35 @@ _CREATE_INDEXES = [
     ),
 ]
 
+#: ``occurred_at`` is TEXT in whatever offset (or none) the writer's ``datetime``
+#: carried, so the queries compare and order :data:`_OCCURRED_AT_UTC_SQL`, its
+#: instant as fixed-width UTC (see :mod:`trellis.stores.sqlite.instant`), not
+#: the text. ``idx_outcomes_occurred`` stays: an earlier build expects it.
+_OCCURRED_AT_UTC_SQL = instant_key_sql("occurred_at")
+
+_OCCURRED_AT_UTC_INDEX = "idx_outcomes_occurred_at_utc"
+
+#: Led by the column a read names before it compares or orders the instant (the
+#: rollback check reads one ``params_version``, the metrics command one
+#: ``component_id``), so such a read is a range scan, not an evaluation of the
+#: expression per matching row.
+_LED_OCCURRED_AT_UTC_INDEXES = (
+    (
+        "idx_outcomes_params_occurred_at_utc",
+        "params_version, occurred_at_utc",
+    ),
+    (
+        "idx_outcomes_component_occurred_at_utc",
+        "component_id, occurred_at_utc",
+    ),
+)
+
+_MIGRATION_EVENTS = MigrationEvents(
+    migrating="migrating_outcome_schema_add_occurred_at_utc",
+    skipped="outcome_schema_migration_skipped",
+    index_skipped="outcome_index_creation_skipped",
+)
+
 
 class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
     """SQLite-backed :class:`OutcomeEvent` store.
@@ -75,6 +110,39 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
         for idx_sql in _CREATE_INDEXES:
             cur.execute(idx_sql)
         self._conn.commit()
+        self._has_occurred_at_utc = self._migrate_add_occurred_at_utc()
+
+    def _outcome_columns(self) -> set[str]:
+        return {
+            row["name"] for row in self._conn.execute("PRAGMA table_xinfo(outcomes)")
+        }
+
+    def _migrate_add_occurred_at_utc(self) -> bool:
+        """Additive migration: index ``occurred_at`` by instant, not by text.
+
+        See :func:`~trellis.stores.sqlite.instant.migrate_instant_column`; no
+        stored row is rewritten. Returns whether the column exists afterwards;
+        when it does not, :meth:`_instant` evaluates the same expression inline,
+        which returns the same rows, in the same order, and is merely unindexed.
+        """
+        return migrate_instant_column(
+            self._conn,
+            db_path=self._db_path,
+            table="outcomes",
+            source_column="occurred_at",
+            instant_column="occurred_at_utc",
+            index=_OCCURRED_AT_UTC_INDEX,
+            columns=self._outcome_columns,
+            events=_MIGRATION_EVENTS,
+            also_indexes=_LED_OCCURRED_AT_UTC_INDEXES,
+        )
+
+    def _instant(self) -> str:
+        """The SQL the time bounds and ``ORDER BY`` read: the indexed column
+        when the migration ran, else the expression it holds."""
+        if self._has_occurred_at_utc:
+            return "occurred_at_utc"
+        return f"({_OCCURRED_AT_UTC_SQL})"
 
     # -- mutations -----------------------------------------------------------
 
@@ -169,7 +237,15 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
             until=until,
         )
         where = " AND ".join(clauses) if clauses else "1=1"
-        sql = f"SELECT * FROM outcomes WHERE {where} ORDER BY occurred_at ASC LIMIT ?"
+        # ``rowid`` breaks ties among outcomes at one instant, so ``limit`` cuts
+        # the same rows whichever plan runs (the indexes, or the inline
+        # expression on a file that could not migrate). Every index on the
+        # instant carries ``rowid`` last, so it adds no sort.
+        instant = self._instant()
+        sql = (
+            f"SELECT * FROM outcomes WHERE {where} "
+            f"ORDER BY {instant} ASC, rowid ASC LIMIT ?"
+        )
         params.append(limit)
 
         cur = self._conn.cursor()
@@ -206,8 +282,8 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
-    @staticmethod
     def _build_filters(
+        self,
         *,
         component_id: str | None = None,
         domain: str | None = None,
@@ -246,12 +322,13 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
         if run_id is not None:
             clauses.append("run_id = ?")
             params.append(run_id)
+        instant = self._instant()
         if since is not None:
-            clauses.append("occurred_at >= ?")
-            params.append(since.isoformat())
+            clauses.append(f"{instant} >= ?")
+            params.append(instant_key(since))
         if until is not None:
-            clauses.append("occurred_at <= ?")
-            params.append(until.isoformat())
+            clauses.append(f"{instant} <= ?")
+            params.append(instant_key(until))
         return clauses, params
 
     # -- helpers -------------------------------------------------------------
