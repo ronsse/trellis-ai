@@ -460,7 +460,12 @@ _REPORTS: dict[str, _ReportEntry] = {
             "fit marked not measurable was refused rather than run (too few "
             "tasks carry the covariates, too few residual degrees of freedom "
             "remain, no stratum holds both arms, or the covariates nearly "
-            "determine the arm), and its reason and task counts say which."
+            "determine the arm), and its reason and task counts say which. "
+            "A read given until whose capture sweeps have not settled past "
+            "the window end, or whose event scan was truncated, returns a "
+            "refusal instead of a report: it names what is missing and "
+            "carries no figure, and its note points to the operational "
+            "report for whether the experiment is running."
         ),
         params_model=HoldoutParams,
         run=_run_holdout,
