@@ -19,12 +19,19 @@ from pydantic import BaseModel, ValidationError
 
 from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.ops.write_health import (
+    _COLLISION_RATE_WARN,
+    _MIN_ATTEMPTS_FOR_COLLISION_RATE,
     _REPEAT_COLLISION_WARN,
+    RECOVERY_WINDOW_SECONDS,
+    NoopReason,
     RejectionKind,
+    RejectionRecoveryTracker,
     ToolWriteStats,
     classify_rejection,
     hints_for_trace_rejections,
     normalize_loc,
+    record_write_noop,
+    record_write_recovery,
     record_write_rejection,
     resolve_trace_loc,
     summarize_backend_health,
@@ -435,9 +442,11 @@ class TestSummarizeWriteHealth:
         assert report.by_tool["mcp:save_experience"].boundary_rejected == 3
         assert report.boundary_kinds == {"extra_forbidden@outcome.artifacts": 3}
         assert report.executor_reasons == {"policy_violation": 1}
-        assert report.repeated_collisions[0]["count"] == 3
+        # Three identical rejections, but on nine attempts: under the floor
+        # a collision is not rated, so only the overall rate warns.
+        assert report.repeated_collisions == []
         assert report.status == "warn"
-        assert any("collision" in reason for reason in report.reasons)
+        assert not any(reason.startswith("repeated") for reason in report.reasons)
         assert any("rejection rate" in reason for reason in report.reasons)
 
     def test_accepted_by_operation_breaks_down_the_fan_out(
@@ -504,32 +513,53 @@ class TestSummarizeWriteHealth:
         restored = ToolWriteStats.model_validate(dumped)
         assert restored == stats
 
-    def test_one_mistake_across_steps_is_one_collision(self, tmp_path: Path) -> None:
-        """Indices are collapsed, so the operator sees the true count.
+    def test_one_mistake_across_steps_is_one_attempt(self, tmp_path: Path) -> None:
+        """Indices are collapsed, and one rejected call is one attempt.
 
-        Un-normalized, one payload that used ``action`` in four steps
-        reported four ``steps.N.action`` collisions of one each — each
-        below the repeat threshold, so it warned about nothing at all.
+        ``boundary_kinds`` still counts error elements (a reader can see how
+        many steps were wrong). The collision count does not: one trace that
+        used ``action`` in four steps is one rejected attempt, below the
+        repeat threshold however many steps it got wrong.
         """
         event_log = SQLiteEventLog(tmp_path / "events.db")
-        event_log.emit(
-            EventType.WRITE_REJECTED,
-            "mcp:save_experience",
-            payload={
-                "tool": "save_experience",
-                "stage": "boundary",
-                "rejections": [
-                    {"kind": "extra_forbidden", "loc": f"steps.{i}.action", "msg": ""}
-                    for i in range(4)
-                ],
-                "hints": [],
-            },
+        _seed_accepted_traces(event_log, 30)
+        _seed_step_rejections(event_log, attempts=1, elements=4)
+        report = summarize_write_health(event_log, days=1)
+        assert report.boundary_kinds == {"extra_forbidden@steps[].result": 4}
+        assert report.boundary_rejected == 1
+        assert report.repeated_collisions == []
+        assert report.status == "ok"
+
+    def test_collision_count_is_attempts_not_error_elements(
+        self, tmp_path: Path
+    ) -> None:
+        """Three rejected calls of eight bad steps each is 3, not 24."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 30)
+        _seed_step_rejections(event_log, attempts=_REPEAT_COLLISION_WARN, elements=8)
+        report = summarize_write_health(event_log, days=1)
+        assert report.boundary_kinds == {
+            "extra_forbidden@steps[].result": 8 * _REPEAT_COLLISION_WARN
+        }
+        (row,) = report.repeated_collisions
+        assert row["count"] == _REPEAT_COLLISION_WARN
+        assert row["tool"] == "mcp:save_experience"
+        assert row["tool_attempts"] == 30 + _REPEAT_COLLISION_WARN
+        assert row["rate"] == round(
+            _REPEAT_COLLISION_WARN / (30 + _REPEAT_COLLISION_WARN), 4
+        )
+
+    def test_two_elements_at_one_loc_in_one_call_are_one_attempt_even_at_scale(
+        self, tmp_path: Path
+    ) -> None:
+        """Two bad-step calls of 30 elements each must not reach the threshold."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 30)
+        _seed_step_rejections(
+            event_log, attempts=_REPEAT_COLLISION_WARN - 1, elements=30
         )
         report = summarize_write_health(event_log, days=1)
-        assert report.boundary_kinds == {"extra_forbidden@steps[].action": 4}
-        assert report.repeated_collisions == [
-            {"kind": "extra_forbidden", "loc": "steps[].action", "count": 4}
-        ]
+        assert report.repeated_collisions == []
 
     def test_empty_window_is_ok(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -620,8 +650,88 @@ _LOC_FOR_KIND = {
 }
 
 
-def _seed_collision(event_log: EventLog, kind: str, loc: str, *, count: int) -> None:
-    """``count`` boundary rejections of one ``(kind, loc)`` pair."""
+def _append(
+    event_log: EventLog,
+    event_type: EventType,
+    source: str,
+    payload: dict[str, object],
+    *,
+    age_s: float = 0.0,
+) -> None:
+    """Append one row stamped ``age_s`` seconds ago, which ``emit`` cannot do."""
+    event_log.append(
+        Event(
+            event_type=event_type,
+            source=source,
+            occurred_at=datetime.now(UTC) - timedelta(seconds=age_s),
+            payload=payload,
+        )
+    )
+
+
+def _seed_accepted_traces(
+    event_log: EventLog, calls: int, *, fan_out: int = 0, tool: str = "save_experience"
+) -> None:
+    """``calls`` accepted trace ingests, each with ``fan_out`` extracted commands."""
+    for _ in range(calls):
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={"requested_by": f"mcp:{tool}", "operation": "trace.ingest"},
+        )
+        for _ in range(fan_out):
+            event_log.emit(
+                EventType.MUTATION_EXECUTED,
+                "mutation_executor",
+                payload={"requested_by": f"mcp:{tool}", "operation": "entity.create"},
+            )
+
+
+def _seed_step_rejections(
+    event_log: EventLog,
+    *,
+    attempts: int,
+    elements: int,
+    tool: str = "save_experience",
+    recovery_window_s: int | None = None,
+    age_s: float = 0.0,
+) -> None:
+    """``attempts`` rejected calls, each listing ``elements`` bad steps.
+
+    ``age_s`` stamps the rows that many seconds in the past, so a test can say
+    whether a tracked rejection is still inside its recovery window.
+    """
+    for _ in range(attempts):
+        payload: dict[str, object] = {
+            "tool": tool,
+            "stage": "boundary",
+            "rejections": [
+                {"kind": "extra_forbidden", "loc": f"steps.{i}.result", "msg": ""}
+                for i in range(elements)
+            ],
+            "hints": [],
+        }
+        if recovery_window_s is not None:
+            payload["recovery_window_s"] = recovery_window_s
+        _append(
+            event_log, EventType.WRITE_REJECTED, f"mcp:{tool}", payload, age_s=age_s
+        )
+
+
+def _seed_collision(
+    event_log: EventLog, kind: str, loc: str, *, count: int, accepted: int = 0
+) -> None:
+    """``count`` boundary rejections of one ``(kind, loc)`` pair.
+
+    ``accepted`` seeds that many accepted writes on the same surface, which a
+    payload kind needs to be rated at all.
+    """
+    for _ in range(accepted):
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={"requested_by": "cli:curate-advisories"},
+        )
     for _ in range(count):
         event_log.emit(
             EventType.WRITE_REJECTED,
@@ -667,6 +777,7 @@ class TestRecurrenceExplanationRoutesByKind:
             kind,
             _LOC_FOR_KIND.get(kind, f"payload.{kind}"),
             count=_REPEAT_COLLISION_WARN,
+            accepted=20,
         )
         reasons = _recurrence_reasons(event_log)
         assert len(reasons) == 1, reasons
@@ -708,6 +819,7 @@ class TestRecurrenceExplanationRoutesByKind:
             "extra_forbidden",
             "outcome.artifacts",
             count=_REPEAT_COLLISION_WARN + 1,
+            accepted=20,
         )
         (reason,) = _recurrence_reasons(event_log)
         assert "extra_forbidden" in reason
@@ -719,14 +831,30 @@ class TestRecurrenceExplanationRoutesByKind:
         reason = self._reason_for(tmp_path, "json_invalid")
         assert "at (payload)" in reason
 
-    def test_payload_kinds_keep_the_schema_sentence(self, tmp_path: Path) -> None:
-        """The original wording, on the kinds it was written for."""
+    def test_payload_kinds_name_possible_causes_and_assert_none(
+        self, tmp_path: Path
+    ) -> None:
+        """A rejection row cannot say the schema and its docs disagree.
+
+        The same count comes from a schema narrower than its docs, docs that
+        misdescribe it, an unhelpful hint and a caller's own bad template.
+        The reason names those and says it cannot tell which.
+        """
         for kind in sorted(_PAYLOAD_KINDS):
             reason = self._reason_for(tmp_path, kind)
-            assert reason.startswith("repeated schema collision:"), reason
-            assert _explanation(reason) == (
-                "same mistake recurring means the schema and its docs/skill disagree"
-            ), reason
+            assert reason.startswith("repeated rejection:"), reason
+            explanation = _explanation(reason)
+            assert "cause not established" in explanation, reason
+            for possibility in ("schema", "docs or skill", "hint", "callers"):
+                assert possibility in explanation, (possibility, reason)
+            for assertion in ("disagree", "means", "because"):
+                assert assertion not in reason, (assertion, reason)
+
+    def test_a_payload_reason_carries_the_tool_and_its_rate(
+        self, tmp_path: Path
+    ) -> None:
+        reason = self._reason_for(tmp_path, "extra_forbidden")
+        assert " on cli:curate-advisories (13% of 23 attempts) — " in reason, reason
 
     def test_file_conditions_never_blame_a_schema_doc_or_skill(
         self, tmp_path: Path
@@ -786,6 +914,951 @@ class TestRecurrenceExplanationRoutesByKind:
         assert len(reasons) == 2
         assert all("advisories.json" in r for r in reasons)
         assert len({_explanation(r) for r in reasons}) == 2
+
+
+class TestCollisionIsRatedAgainstItsTool:
+    """The threshold has a denominator, and a floor below which it is silent.
+
+    An absolute count of three crosses on volume alone: a busy, healthy tool
+    sits at ``warn`` for good. These pin the rating, the floor, the strict
+    inequality at the threshold, per-tool separation and the fan-out
+    denominator, each against a seed that a count-only rule would fail.
+    """
+
+    def _repeated(self, event_log: EventLog) -> list[dict[str, object]]:
+        return summarize_write_health(event_log, days=1).repeated_collisions
+
+    def test_a_busy_healthy_tool_does_not_warn_on_volume(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 400)
+        _seed_step_rejections(event_log, attempts=_REPEAT_COLLISION_WARN, elements=1)
+        report = summarize_write_health(event_log, days=1)
+        assert report.repeated_collisions == []
+        assert report.status == "ok"
+
+    def test_below_the_attempt_floor_it_does_not_warn(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        accepted = _MIN_ATTEMPTS_FOR_COLLISION_RATE - _REPEAT_COLLISION_WARN - 1
+        _seed_accepted_traces(event_log, accepted)
+        _seed_step_rejections(event_log, attempts=_REPEAT_COLLISION_WARN, elements=1)
+        # One attempt short of the floor, at a rate far above the threshold.
+        assert not self._repeated(event_log)
+
+    def test_at_the_floor_a_high_rate_warns(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        accepted = _MIN_ATTEMPTS_FOR_COLLISION_RATE - _REPEAT_COLLISION_WARN
+        _seed_accepted_traces(event_log, accepted)
+        _seed_step_rejections(event_log, attempts=_REPEAT_COLLISION_WARN, elements=1)
+        (row,) = self._repeated(event_log)
+        assert row["tool_attempts"] == _MIN_ATTEMPTS_FOR_COLLISION_RATE
+
+    def test_the_rate_threshold_is_strict(self, tmp_path: Path) -> None:
+        """Exactly at the threshold is quiet; one attempt fewer is not."""
+        at_threshold = round(_REPEAT_COLLISION_WARN / _COLLISION_RATE_WARN)
+        for attempts, warns in ((at_threshold, False), (at_threshold - 1, True)):
+            event_log = SQLiteEventLog(tmp_path / f"events-{attempts}.db")
+            _seed_accepted_traces(event_log, attempts - _REPEAT_COLLISION_WARN)
+            _seed_step_rejections(
+                event_log, attempts=_REPEAT_COLLISION_WARN, elements=1
+            )
+            assert bool(self._repeated(event_log)) is warns, attempts
+
+    def test_fewer_than_the_repeat_count_never_warns_at_any_rate(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 20)
+        _seed_step_rejections(
+            event_log, attempts=_REPEAT_COLLISION_WARN - 1, elements=1
+        )
+        assert not self._repeated(event_log)
+
+    def test_a_fan_out_does_not_dilute_the_denominator(self, tmp_path: Path) -> None:
+        """One accepted trace is one attempt, however many commands it spawned.
+
+        Dividing by every executed command would read 3 of 115 here and
+        stay silent; the call-level count is 3 of 15.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 12, fan_out=8)
+        _seed_step_rejections(event_log, attempts=_REPEAT_COLLISION_WARN, elements=1)
+        (row,) = self._repeated(event_log)
+        assert row["tool_attempts"] == 12 + _REPEAT_COLLISION_WARN
+
+    def test_each_tool_is_rated_on_its_own_attempts(self, tmp_path: Path) -> None:
+        """The same ``(kind, loc)`` on a busy tool does not hide a quiet one."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 400)
+        _seed_step_rejections(event_log, attempts=3, elements=1)
+        _seed_accepted_traces(event_log, 12, tool="save_knowledge")
+        for _ in range(3):
+            event_log.emit(
+                EventType.WRITE_REJECTED,
+                "mcp:save_knowledge",
+                payload={
+                    "tool": "save_knowledge",
+                    "stage": "boundary",
+                    "rejections": [
+                        {"kind": "extra_forbidden", "loc": "steps.0.result", "msg": ""}
+                    ],
+                },
+            )
+        (row,) = self._repeated(event_log)
+        assert row["tool"] == "mcp:save_knowledge"
+
+    def test_a_file_condition_is_warned_on_attempts_alone(self, tmp_path: Path) -> None:
+        """Recurrence is its whole signal: a refused file is not a share of calls."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_collision(
+            event_log, "stale_write", "policies.json", count=_REPEAT_COLLISION_WARN
+        )
+        (row,) = self._repeated(event_log)
+        assert (row["count"], row["rate"], row["tool_attempts"]) == (
+            _REPEAT_COLLISION_WARN,
+            None,
+            None,
+        )
+
+
+def _seed_noops(
+    event_log: EventLog,
+    calls: int,
+    *,
+    tool: str = "save_memory",
+    reason: NoopReason = "exact_duplicate",
+) -> None:
+    for _ in range(calls):
+        record_write_noop(event_log, tool=tool, reason=reason)
+
+
+class TestADuplicateReplyIsAnAttempt:
+    """A call that answered success without writing is a call.
+
+    ``save_memory`` answers a duplicate without executing a command, so no
+    ``MUTATION_EXECUTED`` row exists for it. Left out of the denominator, a
+    healthy tool that mostly answers duplicates rates as mostly failing.
+    """
+
+    def _seed_mostly_duplicates(self, event_log: EventLog, *, noops: int) -> None:
+        _seed_step_rejections(event_log, attempts=3, elements=1, tool="save_memory")
+        _seed_accepted_traces(event_log, 8, tool="save_memory")
+        _seed_noops(event_log, noops)
+
+    def test_duplicate_replies_keep_a_healthy_tool_from_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """3 rejections, 8 saves and 61 duplicate replies are 72 calls: 4.2%."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        self._seed_mostly_duplicates(event_log, noops=61)
+        report = summarize_write_health(event_log, days=1)
+        assert report.repeated_collisions == []
+        assert report.status == "ok"
+        assert report.reasons == []
+        assert report.attempts == 72
+        assert report.by_tool["mcp:save_memory"].attempts == 72
+
+    def test_without_the_rows_the_same_tool_warns_which_is_the_old_window(
+        self, tmp_path: Path
+    ) -> None:
+        """Rows from before the event are not there to add, and the rate overstates.
+
+        The same traffic read over a window that holds no ``WRITE_NOOP`` rows
+        counts 11 attempts, not 72. This is the documented cost of adding the
+        event, and it ends when the window rolls past the old rows.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        self._seed_mostly_duplicates(event_log, noops=0)
+        (row,) = summarize_write_health(event_log, days=1).repeated_collisions
+        assert row["tool_attempts"] == 11
+        assert row["rate"] == round(3 / 11, 4)
+
+    def test_a_noop_is_counted_apart_from_an_accepted_write(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        self._seed_mostly_duplicates(event_log, noops=5)
+        report = summarize_write_health(event_log, days=1)
+        assert report.noop == 5
+        assert report.accepted == 8
+        tool_stats = report.by_tool["mcp:save_memory"]
+        assert (tool_stats.noop, tool_stats.accepted) == (5, 8)
+        assert report.rejection_rate == round(3 / 16, 4)
+
+    def test_every_reason_counts_the_same(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        for reason in get_args(NoopReason):
+            _seed_noops(event_log, 2, reason=reason)
+        assert summarize_write_health(event_log, days=1).noop == 2 * len(
+            get_args(NoopReason)
+        )
+
+    def test_a_tool_that_only_answers_duplicates_is_not_all_failing(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(event_log, attempts=1, elements=1, tool="save_memory")
+        _seed_noops(event_log, 20)
+        report = summarize_write_health(event_log, days=1)
+        assert not any("every write attempt is failing" in r for r in report.reasons)
+
+    def test_a_row_with_no_tool_is_counted_not_fatal(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(EventType.WRITE_NOOP, "x", payload={})
+        assert summarize_write_health(event_log, days=1).by_tool["(unknown)"].noop == 1
+
+
+class TestRecordWriteNoop:
+    def test_the_event_carries_a_tool_and_a_closed_reason_and_nothing_else(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        record_write_noop(event_log, tool="save_memory", reason="fuzzy_duplicate")
+        (event,) = event_log.get_events(event_type=EventType.WRITE_NOOP, limit=5)
+        assert event.source == "mcp:save_memory"
+        assert event.payload == {"tool": "save_memory", "reason": "fuzzy_duplicate"}
+        assert event.entity_id is None
+
+    def test_the_reasons_are_a_closed_set(self) -> None:
+        assert set(get_args(NoopReason)) == {
+            "exact_duplicate",
+            "fuzzy_duplicate",
+            "judged_covered",
+        }
+
+    def test_a_failing_log_does_not_raise_out_of_a_noop(self) -> None:
+        event_log = MagicMock(spec=EventLog)
+        event_log.emit.side_effect = RuntimeError("event store down")
+        record_write_noop(event_log, tool="save_memory", reason="exact_duplicate")
+        record_write_noop(None, tool="save_memory", reason="exact_duplicate")
+        event_log.emit.assert_called_once()
+
+
+def _seed_feedback_rejections(
+    event_log: EventLog, count: int, *, loc: str = "item_ids"
+) -> None:
+    for _ in range(count):
+        event_log.emit(
+            EventType.WRITE_REJECTED,
+            "mcp:record_feedback",
+            payload={
+                "tool": "record_feedback",
+                "stage": "boundary",
+                "rejections": [{"kind": "extra_forbidden", "loc": loc, "msg": ""}],
+            },
+        )
+
+
+def _seed_feedback_recorded(
+    event_log: EventLog, count: int, *, source: str = "mcp"
+) -> None:
+    for _ in range(count):
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source,
+            payload={"pack_id": "p", "rating": 0.5},
+        )
+
+
+class TestRecordFeedbackIsRatedAgainstItsEvent:
+    """``record_feedback`` never reaches the executor, but it has an accept.
+
+    Its accepted call is a ``FEEDBACK_RECORDED`` event with ``source="mcp"``.
+    Treating the surface as having nothing to divide by silenced the
+    repeated-rejection check on one of the three loop tools.
+    """
+
+    def test_forty_rejections_beside_other_accepted_traffic_warn(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 800, tool="save_memory")
+        _seed_feedback_rejections(event_log, 40)
+        _seed_feedback_recorded(event_log, 10)
+        report = summarize_write_health(event_log, days=1)
+        (row,) = report.repeated_collisions
+        assert row["tool"] == "mcp:record_feedback"
+        assert (row["kind"], row["loc"], row["count"]) == (
+            "extra_forbidden",
+            "item_ids",
+            40,
+        )
+        assert row["tool_attempts"] == 50
+        assert row["rate"] == 0.8
+        assert report.status == "warn"
+        assert any("mcp:record_feedback" in r for r in report.reasons)
+
+    def test_every_call_rejected_still_warns(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 800, tool="save_memory")
+        _seed_feedback_rejections(event_log, 40)
+        report = summarize_write_health(event_log, days=1)
+        (row,) = report.repeated_collisions
+        assert (row["tool_attempts"], row["rate"]) == (40, 1.0)
+        assert report.status == "warn"
+
+    def test_a_healthy_feedback_tool_does_not_warn(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_feedback_rejections(event_log, 3)
+        _seed_feedback_recorded(event_log, 200)
+        report = summarize_write_health(event_log, days=1)
+        assert report.repeated_collisions == []
+        assert report.status == "ok"
+        tool_stats = report.by_tool["mcp:record_feedback"]
+        assert (tool_stats.accepted, tool_stats.attempts) == (200, 203)
+
+    def test_feedback_from_another_surface_is_not_this_tools_accept(
+        self, tmp_path: Path
+    ) -> None:
+        """REST and reconcile stamp a different source, so they cannot dilute it."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_feedback_rejections(event_log, 40)
+        _seed_feedback_recorded(event_log, 300, source="feedback.record")
+        _seed_feedback_recorded(event_log, 300, source="feedback.reconcile")
+        report = summarize_write_health(event_log, days=1)
+        assert report.by_tool["mcp:record_feedback"].accepted == 0
+        (row,) = report.repeated_collisions
+        assert row["tool_attempts"] == 40
+
+    def test_it_is_no_longer_a_special_case_in_the_totals(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_feedback_rejections(event_log, 2)
+        _seed_feedback_recorded(event_log, 6)
+        report = summarize_write_health(event_log, days=1)
+        assert (report.accepted, report.boundary_rejected, report.attempts) == (6, 2, 8)
+
+
+class TestExecutorFanOutDoesNotDiluteTheRejectionSide:
+    """A fan-out tool is rated on its call-level operation, accepts and rejects.
+
+    ``save_experience`` is one call but many commands. Counting every
+    rejected command beside the call-level accept count lets a burst of
+    rejected extraction commands hide a real boundary problem.
+    """
+
+    @staticmethod
+    def _seed_executor_rejections(
+        event_log: EventLog, count: int, *, operation: str, tool: str
+    ) -> None:
+        for _ in range(count):
+            event_log.emit(
+                EventType.MUTATION_REJECTED,
+                "mutation_executor",
+                payload={
+                    "requested_by": f"mcp:{tool}",
+                    "operation": operation,
+                    "reason": "validation failed",
+                },
+            )
+
+    def test_rejected_extraction_commands_do_not_hide_a_boundary_problem(
+        self, tmp_path: Path
+    ) -> None:
+        """15 ingests and 3 boundary rejections are 16.7%, not 3 of 78."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 15)
+        _seed_step_rejections(event_log, attempts=3, elements=1)
+        self._seed_executor_rejections(
+            event_log, 60, operation="entity.create", tool="save_experience"
+        )
+        (row,) = summarize_write_health(event_log, days=1).repeated_collisions
+        assert row["tool_attempts"] == 18
+        assert row["rate"] == round(3 / 18, 4)
+
+    def test_a_rejected_trace_ingest_is_a_rejected_call(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 12)
+        _seed_step_rejections(event_log, attempts=3, elements=1)
+        self._seed_executor_rejections(
+            event_log, 2, operation="trace.ingest", tool="save_experience"
+        )
+        (row,) = summarize_write_health(event_log, days=1).repeated_collisions
+        assert row["tool_attempts"] == 12 + 3 + 2
+
+    def test_a_tool_rated_on_its_totals_keeps_every_rejected_command(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a tool in ``_CALL_LEVEL_OPERATION`` is narrowed to one operation."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 12, tool="save_knowledge")
+        for _ in range(3):
+            event_log.emit(
+                EventType.WRITE_REJECTED,
+                "mcp:save_knowledge",
+                payload={
+                    "tool": "save_knowledge",
+                    "stage": "boundary",
+                    "rejections": [
+                        {"kind": "extra_forbidden", "loc": "links.0.x", "msg": ""}
+                    ],
+                },
+            )
+        self._seed_executor_rejections(
+            event_log, 2, operation="entity.create", tool="save_knowledge"
+        )
+        (row,) = summarize_write_health(event_log, days=1).repeated_collisions
+        assert row["tool_attempts"] == 12 + 3 + 2
+
+
+class TestTheFloorHasABlindSpot:
+    """The attempt floor trades a false alarm for a documented blind spot.
+
+    These pin what the documentation says, so changing the floor is a
+    decision and not an accident. ``by_tool`` and ``boundary_kinds`` still
+    carry the counts that ``status`` does not act on.
+    """
+
+    def test_nine_of_nine_calls_rejected_on_a_quiet_tool_reads_ok(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 400)
+        _seed_step_rejections(
+            event_log,
+            attempts=_MIN_ATTEMPTS_FOR_COLLISION_RATE - 1,
+            elements=1,
+            tool="save_knowledge",
+        )
+        report = summarize_write_health(event_log, days=1)
+        assert report.status == "ok"
+        assert report.by_tool["mcp:save_knowledge"].boundary_rejected == 9
+
+    def test_one_mistake_spread_over_many_locs_reads_ok(self, tmp_path: Path) -> None:
+        """Each ``loc`` is under 5% of the attempts, though 60 calls failed."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 800)
+        for loc_id in range(20):
+            for _ in range(_REPEAT_COLLISION_WARN):
+                event_log.emit(
+                    EventType.WRITE_REJECTED,
+                    "mcp:save_experience",
+                    payload={
+                        "tool": "save_experience",
+                        "stage": "boundary",
+                        "rejections": [
+                            {
+                                "kind": "extra_forbidden",
+                                "loc": f"field{loc_id}",
+                                "msg": "",
+                            }
+                        ],
+                    },
+                )
+        report = summarize_write_health(event_log, days=1)
+        assert report.status == "ok"
+        assert report.by_tool["mcp:save_experience"].boundary_rejected == 60
+
+
+def _seed_recovery(
+    event_log: EventLog,
+    *,
+    tool: str = "save_experience",
+    attempts: int,
+    age_s: float = 0.0,
+) -> None:
+    _append(
+        event_log,
+        EventType.WRITE_RECOVERED,
+        f"mcp:{tool}",
+        {
+            "tool": tool,
+            "rejected_attempts": attempts,
+            "window_s": RECOVERY_WINDOW_SECONDS,
+        },
+        age_s=age_s,
+    )
+
+
+#: Old enough that every tracked rejection seeded with it has left its window.
+_SETTLED = RECOVERY_WINDOW_SECONDS + 60
+
+
+class TestRejectionRecoveryTracker:
+    """In-memory pairing of a rejection with the acceptance that follows."""
+
+    @staticmethod
+    def _tracker() -> tuple[RejectionRecoveryTracker, list[float]]:
+        now = [1000.0]
+        return RejectionRecoveryTracker(clock=lambda: now[0]), now
+
+    def test_an_acceptance_inside_the_window_recovers_the_rejection(self) -> None:
+        tracker, now = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        now[0] += RECOVERY_WINDOW_SECONDS
+        assert tracker.claim_recovery("mcp:save_experience") == 1
+
+    def test_one_second_past_the_window_recovers_nothing(self) -> None:
+        tracker, now = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        now[0] += RECOVERY_WINDOW_SECONDS + 1
+        assert tracker.claim_recovery("mcp:save_experience") == 0
+
+    def test_the_window_runs_from_the_latest_rejection(self) -> None:
+        """A caller that keeps failing is still inside one retry loop."""
+        tracker, now = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        now[0] += RECOVERY_WINDOW_SECONDS - 1
+        tracker.note_rejection("mcp:save_experience")
+        now[0] += RECOVERY_WINDOW_SECONDS - 1
+        assert tracker.claim_recovery("mcp:save_experience") == 2
+
+    def test_an_acceptance_consumes_what_it_recovers(self) -> None:
+        tracker, _ = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        assert tracker.claim_recovery("mcp:save_experience") == 1
+        assert tracker.claim_recovery("mcp:save_experience") == 0
+
+    def test_another_tools_acceptance_recovers_nothing(self) -> None:
+        tracker, _ = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        assert tracker.claim_recovery("mcp:save_memory") == 0
+        assert tracker.claim_recovery("mcp:save_experience") == 1
+
+    def test_an_acceptance_with_no_rejection_recovers_nothing(self) -> None:
+        tracker, _ = self._tracker()
+        assert tracker.claim_recovery("mcp:save_experience") == 0
+
+    def test_a_stale_count_does_not_carry_into_a_new_rejection(self) -> None:
+        """A day-old rejection is not recovered by tonight's accepted call."""
+        tracker, now = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        now[0] += 24 * 3600
+        tracker.note_rejection("mcp:save_experience")
+        assert tracker.claim_recovery("mcp:save_experience") == 1
+
+    def test_the_count_is_kept_up_to_the_window_and_dropped_past_it(self) -> None:
+        for gap, expected in (
+            (RECOVERY_WINDOW_SECONDS, 2),
+            (RECOVERY_WINDOW_SECONDS + 1, 1),
+        ):
+            tracker, now = self._tracker()
+            tracker.note_rejection("mcp:save_experience")
+            now[0] += gap
+            tracker.note_rejection("mcp:save_experience")
+            assert tracker.claim_recovery("mcp:save_experience") == expected, gap
+
+    def test_expiry_is_per_tool(self) -> None:
+        tracker, now = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        tracker.note_rejection("mcp:save_memory")
+        now[0] += RECOVERY_WINDOW_SECONDS - 1
+        tracker.note_rejection("mcp:save_memory")
+        now[0] += 2
+        # save_experience's own window has closed; save_memory's has not.
+        assert tracker.claim_recovery("mcp:save_experience") == 0
+        assert tracker.claim_recovery("mcp:save_memory") == 2
+
+    def test_it_holds_a_tool_a_count_and_a_time_and_nothing_else(self) -> None:
+        tracker, _ = self._tracker()
+        tracker.note_rejection("mcp:save_experience")
+        ((label, (count, at)),) = tracker._pending.items()
+        assert (label, count, at) == ("mcp:save_experience", 1, 1000.0)
+
+
+class TestRecoveryEvents:
+    def test_a_tracked_rejection_says_so_and_is_noted(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        tracker = RejectionRecoveryTracker()
+        record_write_rejection(
+            event_log,
+            tool="save_experience",
+            rejections=[{"kind": "missing", "loc": "intent", "msg": ""}],
+            recovery=tracker,
+        )
+        (event,) = event_log.get_events(event_type=EventType.WRITE_REJECTED, limit=5)
+        assert event.payload["recovery_window_s"] == RECOVERY_WINDOW_SECONDS
+        assert tracker.claim_recovery("mcp:save_experience") == 1
+
+    def test_without_a_tracker_the_event_keeps_its_old_shape(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        record_write_rejection(event_log, tool="save_experience", error=ValueError("x"))
+        (event,) = event_log.get_events(event_type=EventType.WRITE_REJECTED, limit=5)
+        assert "recovery_window_s" not in event.payload
+
+    def test_a_rejection_that_never_reached_the_log_is_not_noted(self) -> None:
+        """Recovered must not outnumber tracked."""
+        event_log = MagicMock(spec=EventLog)
+        event_log.emit.side_effect = RuntimeError("event store down")
+        tracker = RejectionRecoveryTracker()
+        record_write_rejection(
+            event_log, tool="save_experience", error=ValueError("x"), recovery=tracker
+        )
+        assert tracker.claim_recovery("mcp:save_experience") == 0
+
+    def test_a_recovery_event_carries_a_tool_and_two_integers(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        record_write_recovery(
+            event_log, tool="save_experience", rejected_attempts=2, window_seconds=120
+        )
+        (event,) = event_log.get_events(event_type=EventType.WRITE_RECOVERED, limit=5)
+        assert event.source == "mcp:save_experience"
+        assert event.payload == {
+            "tool": "save_experience",
+            "rejected_attempts": 2,
+            "window_s": 120,
+        }
+
+    def test_a_failing_log_does_not_raise_out_of_a_recovery(self) -> None:
+        event_log = MagicMock(spec=EventLog)
+        event_log.emit.side_effect = RuntimeError("event store down")
+        record_write_recovery(
+            event_log, tool="save_experience", rejected_attempts=1, window_seconds=120
+        )
+        record_write_recovery(
+            None, tool="save_experience", rejected_attempts=1, window_seconds=120
+        )
+
+
+class TestRecoveryReport:
+    def _summarize(self, event_log: EventLog):
+        return summarize_write_health(event_log, days=1).recovery
+
+    def test_a_window_of_old_rows_is_not_measured_rather_than_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """Rows written before tracking lack ``recovery_window_s``."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(event_log, attempts=4, elements=1)
+        recovery = self._summarize(event_log)
+        assert recovery.recovered_share is None
+        assert recovery.tracked_rejections == 0
+        assert recovery.note == ""
+
+    def test_the_share_is_recovered_over_tracked(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=4, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        _seed_recovery(event_log, attempts=3)
+        recovery = self._summarize(event_log)
+        assert (recovery.tracked_rejections, recovery.recovered_rejections) == (4, 3)
+        assert recovery.recovered_share == 0.75
+        assert recovery.window_seconds == RECOVERY_WINDOW_SECONDS
+        assert recovery.by_tool["mcp:save_experience"].share == 0.75
+
+    def test_tracking_with_nothing_recovered_reads_zero_not_none(
+        self, tmp_path: Path
+    ) -> None:
+        """Rejections whose window closed with no retry are a measured zero."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=2,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=_SETTLED,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.recovered_share == 0.0
+        assert recovery.pending_rejections == 0
+
+    def test_old_rows_stay_out_of_the_denominator(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(event_log, attempts=6, elements=1)
+        _seed_step_rejections(
+            event_log, attempts=2, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        _seed_recovery(event_log, attempts=1)
+        recovery = self._summarize(event_log)
+        assert recovery.tracked_rejections == 2
+        assert recovery.recovered_share == 0.5
+
+    def test_the_share_never_passes_one(self, tmp_path: Path) -> None:
+        """A rejection just before the window still has its recovery inside it."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        _seed_recovery(event_log, attempts=5)
+        assert self._summarize(event_log).recovered_share == 1.0
+
+    def test_recovered_and_pending_never_add_past_what_was_tracked(
+        self, tmp_path: Path
+    ) -> None:
+        """A recovery for rejections from before the window opened is capped first.
+
+        Two tracked rejections, both newer than a recovery that claims three:
+        the recovery takes the two there are, and nothing is left to be pending.
+        Left uncapped the report would show two recovered and two pending of two
+        tracked.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_recovery(event_log, attempts=3, age_s=30.0)
+        _seed_step_rejections(
+            event_log,
+            attempts=2,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=10.0,
+        )
+
+        recovery = self._summarize(event_log)
+
+        assert recovery.tracked_rejections == 2
+        assert recovery.recovered_rejections == 2
+        assert recovery.pending_rejections == 0
+        assert recovery.recovered_share == 1.0
+        stats = recovery.by_tool["mcp:save_experience"]
+        assert (stats.tracked, stats.recovered, stats.pending) == (2, 2, 0)
+
+    def test_recoveries_with_nothing_tracked_report_no_share(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_recovery(event_log, attempts=2)
+        assert self._summarize(event_log).recovered_share is None
+
+    def test_the_approximation_is_stated_beside_the_number(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        note = self._summarize(event_log).note
+        assert note.startswith("approximate")
+        assert f"{RECOVERY_WINDOW_SECONDS}s" in note
+
+    def test_the_note_names_both_directions_of_error_and_what_accepted_means(
+        self, tmp_path: Path
+    ) -> None:
+        """It is not an upper bound, and the note must not say it is.
+
+        A restart, a retry after the window or a retry through another tool
+        all read as no recovery, so the share can sit below the truth as well
+        as above it. "Accepted" is also looser than it sounds: a call that
+        returned without raising, including one that wrote nothing.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        note = self._summarize(event_log).note
+        assert "either side of the truth" in note
+        assert "overstates" in note
+        assert "understates" in note
+        assert "restart" in note
+        assert "returned without raising" in note
+        assert "pending" in note
+        assert "upper bound" not in note.lower()
+        assert "no per-caller token" not in note
+
+    def test_a_malformed_recovery_event_is_skipped_not_fatal(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=_SETTLED,
+        )
+        for bad in ("two", True, -1, None):
+            event_log.emit(
+                EventType.WRITE_RECOVERED,
+                "mcp:save_experience",
+                payload={"tool": "save_experience", "rejected_attempts": bad},
+            )
+        assert self._summarize(event_log).recovered_share == 0.0
+
+    def test_a_rejection_still_inside_its_window_is_pending_not_unrecovered(
+        self, tmp_path: Path
+    ) -> None:
+        """Read a minute after the rejection, the retry may simply not have come yet."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=2,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=RECOVERY_WINDOW_SECONDS / 2,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.tracked_rejections == 2
+        assert recovery.pending_rejections == 2
+        assert recovery.recovered_share is None
+        assert recovery.by_tool["mcp:save_experience"].pending == 2
+        assert recovery.by_tool["mcp:save_experience"].share is None
+
+    def test_a_rejection_past_its_window_is_no_longer_pending(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=2,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=RECOVERY_WINDOW_SECONDS + 5,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.pending_rejections == 0
+        assert recovery.recovered_share == 0.0
+
+    def test_pending_rows_leave_the_denominator_and_the_rest_keep_their_share(
+        self, tmp_path: Path
+    ) -> None:
+        """Three settled (one recovered) and one pending: 1 of 3, not 1 of 4."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=3,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=_SETTLED + 20,
+        )
+        _seed_recovery(event_log, attempts=1, age_s=_SETTLED + 10)
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=5,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.tracked_rejections == 4
+        assert recovery.recovered_rejections == 1
+        assert recovery.pending_rejections == 1
+        assert recovery.recovered_share == round(1 / 3, 4)
+        # Nothing is counted twice: the three never add past what was tracked.
+        assert (
+            recovery.recovered_rejections + recovery.pending_rejections
+            <= recovery.tracked_rejections
+        )
+
+    def test_a_rejection_that_a_later_recovery_claimed_is_not_pending(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=20,
+        )
+        _seed_recovery(event_log, attempts=1, age_s=10)
+        recovery = self._summarize(event_log)
+        assert recovery.pending_rejections == 0
+        assert recovery.recovered_share == 1.0
+
+    def test_a_recovery_before_a_rejection_does_not_claim_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A recovery consumes what was pending when it ran, not what came after."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=60,
+        )
+        _seed_recovery(event_log, attempts=1, age_s=30)
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=10,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.tracked_rejections == 2
+        assert recovery.recovered_rejections == 1
+        assert recovery.pending_rejections == 1
+
+    def test_pending_follows_each_rows_own_window(self, tmp_path: Path) -> None:
+        """A row written with a 30 s window is settled at 60 s."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=30, age_s=60
+        )
+        assert self._summarize(event_log).pending_rejections == 0
+
+    def test_pending_is_per_tool(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log,
+            attempts=1,
+            elements=1,
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=5,
+        )
+        _seed_step_rejections(
+            event_log,
+            attempts=2,
+            elements=1,
+            tool="save_memory",
+            recovery_window_s=RECOVERY_WINDOW_SECONDS,
+            age_s=_SETTLED,
+        )
+        recovery = self._summarize(event_log)
+        assert recovery.by_tool["mcp:save_experience"].pending == 1
+        assert recovery.by_tool["mcp:save_memory"].pending == 0
+        assert recovery.by_tool["mcp:save_memory"].share == 0.0
+        assert recovery.recovered_share == 0.0
+
+    def test_the_report_keeps_its_existing_keys(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        dumped = self._summarize(event_log).model_dump()
+        assert {
+            "tracked_rejections",
+            "recovered_rejections",
+            "recovered_share",
+            "window_seconds",
+            "by_tool",
+            "note",
+        } <= set(dumped)
+        assert {"tracked", "recovered", "share"} <= set(
+            dumped["by_tool"]["mcp:save_experience"]
+        )
+
+    def test_a_stale_rejection_does_not_read_as_recovered_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        """Reject, reject a day later, accept: one of two recovered, not two of two.
+
+        The tracker credits only the second rejection, and the report keeps
+        ``recovered`` under ``tracked`` without needing its cap to do it.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        clock = [1000.0]
+        tracker = RejectionRecoveryTracker(clock=lambda: clock[0])
+        for _ in range(2):
+            record_write_rejection(
+                event_log,
+                tool="save_experience",
+                rejections=[{"kind": "missing", "loc": "intent", "msg": ""}],
+                recovery=tracker,
+            )
+            clock[0] += 24 * 3600
+        clock[0] -= 24 * 3600
+        credited = tracker.claim_recovery("mcp:save_experience")
+        assert credited == 1
+        record_write_recovery(
+            event_log,
+            tool="save_experience",
+            rejected_attempts=credited,
+            window_seconds=RECOVERY_WINDOW_SECONDS,
+        )
+        recovery = self._summarize(event_log)
+        assert (recovery.tracked_rejections, recovery.recovered_rejections) == (2, 1)
+        assert recovery.recovered_share == 0.5
+
+    def test_recovery_never_changes_the_status(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _seed_accepted_traces(event_log, 50)
+        _seed_step_rejections(
+            event_log, attempts=1, elements=1, recovery_window_s=RECOVERY_WINDOW_SECONDS
+        )
+        assert summarize_write_health(event_log, days=1).status == "ok"
 
 
 class TestServeAttribution:

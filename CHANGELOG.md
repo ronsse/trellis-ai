@@ -22,7 +22,104 @@ All notable changes to Trellis will be documented in this file.
   fixes an exit code: such a type could make the text output exit 1 where `--format json`
   exited 0, and both now exit 0.
 
+- **`trellis analyze holdout --operational` reports the experiment's health
+  without reading an outcome.** A pack holdout needs a check that it is running
+  (arm counts and their ratio, the funnel, covariate coverage, per-build
+  counts) that does not expose the results it is meant to leave blind. The flag
+  emits a separate report model with no outcome-mean, estimate, interval,
+  p-value, power, MDE, guardrail or covariate-fit field, no cut-off, analysed or
+  post-hoc count, and no pack row count. It does not scan `PACK_ASSEMBLED`: it
+  reads the capture joins, the capture sweeps and, for each join, the one pack
+  row its first pack id names, fetched by id, so later packs, the number of
+  packs and the volume of pack rows never enter it. A test enforces that with
+  an event log that allows only the join and sweep events and a first pack by
+  id, and hands the report join and sweep payloads that serve only the keys
+  the report reads (`retrieval_results`, `retrieval_errors` and
+  `pack_ids_unparsed` only from a join that names no pack) and refuse the rest,
+  `len`, `repr` and `==` included. That bounds the fixtures' reads, not the
+  store: a reader of the events can still read them. Every figure depends only
+  on values fixed when a task's first pack was assembled (that pack's time, arm
+  draw, build and rate, and, from the session's anchor join, the earliest that
+  names a pack, the agent type, brief and the two timing flags set before the
+  first retrieval) and on capture sweep times. Nothing read is a later pack,
+  the pack count, a re-emitted join's contents, a session's length or an
+  outcome value, so reports over several windows, or stored nightly, do not
+  vary with them; they do vary with when a join was written, below. Joins and
+  sweeps are paged to completion,
+  so `--limit` with `--operational` is a usage error (exit 2). One exception is
+  disclosed: whether a join carries an outcome block (presence only; a join
+  without one is dropped before eligibility). Stated limits: a session with no
+  join that names a pack, or no first-pack row, is windowed on its join time
+  and counted pooled; a join that names no pack and is too close to a window's
+  end to have settled is missing from that night's report and skipped in the
+  next (the session has a join before its start), so a stored nightly series
+  undercounts it, by join time and not by any treatment value; a task whose
+  anchor join is written after its settling sweep (a retried parse error, a
+  failed join write, a `--rejoin-since` backfill) counts from the night the
+  join exists, and a night asked about again shows a larger `eligible` only if
+  a sweep ran between the first pack's settling time and the join's write; and
+  a page or more of joins stamped at one instant exits 2 where the full report
+  exits 0. A task is
+  admitted and windowed on its first pack, so operational `eligible` can differ
+  from the full report's on the same night.
+  The arm-ratio check runs on `assigned`, the first pack of each admitted join
+  at the rate. The inference options are validated as for the full report, so an
+  invalid one exits alike with and without the flag; the exit status differs
+  across modes for `--limit`, a later pack at another rate and a page of tied
+  joins, and is the same across `--format`. With `--by-commit` the
+  table is eligible-task counts per build and arm. Default output and exit codes
+  are unchanged, and there is no REST or OpenAPI surface for the flag yet.
+
 ### Fixed
+
+- **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
+  say the table has "no estimate".** It prints each arm's outcome mean per
+  build; what it omits is an interval and a p-value. `analyze value`'s help no
+  longer says the system has no withhold arm and points to `analyze holdout`.
+
+
+- **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
+  on a rerun.** The miner read the newest `--limit` traces and only then kept the
+  failure/partial ones, so a run of recent successes hid every older failure and the command
+  reported nothing found (`--dry-run` shared the shape). `--limit` now counts failure/partial
+  traces: the store is read newest first in widening reads (the first at least 100 wide, then
+  doubling) until it holds enough to analyse (`max(min(--limit, 20), --min-traces)`, since at
+  most 20 are shown to the model), the store ends, or the new `--scan-cap` (default 5,000
+  traces) is reached. The read has no cursor because `until` is inclusive and traces can share a
+  `created_at`; a scan that reaches the cap reads up to three times `--scan-cap` rows in all.
+  Both formats carry an `outcome` that says why a run produced nothing: `no_failures` (the
+  store was read to its end), `read_bound_hit` (the cap stopped the read short of what it
+  wanted, so older traces were not read; not the same as none), `below_min_traces`,
+  `skipped_unchanged`, `no_candidates` (the model returned none) and `llm_error`, with
+  `traces_examined`, `scan_cap` and `read_bound_hit`; text output names every outcome,
+  including those two. `failure_traces_in_scope` is the failures found (at most `--limit`),
+  and the read stops once it has enough to analyse, so it is not a count of the store's
+  failures. A malformed model reply still raises.
+  `--limit` below `--min-traces` is refused (exit `2`, both formats) and so is `--min-traces 0`;
+  zero failures found is `no_failures` whatever the minimum is. A failed model call reports
+  `status: "partial"` beside `outcome: "llm_error"` in JSON; the exit is `0` for every outcome
+  in both formats unless `--strict` is given, which exits `1` on `llm_error` in both. The
+  default exit is unchanged from before, a choice that can be revisited.
+  Each mined candidate event now records `source_digest`, a digest of the (at most 20) newest
+  failure traces the model was shown and the `--domain` scope, plus `mining_run_id` and
+  `run_candidate_count`. A run's events are written only after every item in the reply has
+  validated, and a later run skips only when some one run has all its declared events among
+  the newest 200 for that digest, so a run cut off by a failed write is retried and a run of
+  more than 200 candidates mines again each time. A skip asks no model, writes nothing and
+  reports `skipped_unchanged` with `already_mined_candidate_ids`, in text and JSON;
+  `--dry-run` reports it as `would_mine: false`. A new failure among the newest 20 changes the
+  digest, so the next run mines again. A new success does not, unless it pushes a failure out of
+  the read window; the shrunken set is a different input and mines again. Failures beyond the
+  newest 20 are not paged. The key is the input, not the output: two candidates with different
+  wording are never judged to mean the same thing; `no_candidates` and `llm_error` write nothing,
+  so they leave nothing to skip against and every scheduled run pays for the call again; and
+  candidates minted before this change carry no digest, so the first rerun over the same
+  failures mints once more.
+  `PrecedentMiner.mine` and `.plan` return the report the command prints.
+  `generate_precedent_candidates` still returns a list of candidates, but `limit` changed
+  meaning (it counts failures, not traces read, and at most 20 are analysed), it raises
+  `ValueError` for a `limit` or `scan_cap` below 1, and it returns `[]` on a skip, the same
+  `[]` as a run that found nothing.
 
 - **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
   (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
@@ -73,6 +170,50 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **The repeated-rejection health signal is rated against each tool's attempts and
+  no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
+  reached three rejections, with no denominator, so a busy, healthy tool stayed at
+  `warn` for good; it counted error elements rather than calls (one bad trace with
+  many steps was many collisions); and its reason said the schema and its docs or
+  skill disagree. It now counts distinct rejected attempts and warns only when the
+  tool has at least 10 attempts in the window and the rejected share is above 5%
+  (named constants in `trellis.ops.write_health`, starting points rather than
+  tuned values). The floor can hide a low-volume total failure, which the docs now
+  say. The reason lists the schema, its docs, the rejection hint and caller
+  payloads as possibilities and says the cause is not established. Each
+  `repeated_collisions` row gains `tool`, `tool_attempts` and `rate`, and rows are
+  per tool; file conditions keep warning on recurrence alone. The default label is
+  "repeated rejection", not "schema collision".
+- **What counts as an attempt is stated per tool.** `save_experience` is rated on
+  `trace.ingest` accepts and `trace.ingest` executor rejections only, so a refused
+  extraction command is not a refused call. `mcp:record_feedback` has an accepted
+  call after all, the `FEEDBACK_RECORDED` event it emits with `source="mcp"`, so it
+  is rated against that and its rejections instead of being left unrated. A
+  `save_memory` call that answers a duplicate stored nothing and left no accepted
+  event, so a healthy tool read as mostly failing; it now emits a new `WRITE_NOOP`
+  event (`tool` and a closed `reason`, no content and no id) that the report counts
+  as an attempt, and `analyze health` prints that count. Replies, stores and return
+  values are unchanged, and a failed emit does not change the reply. Rows written
+  before the event existed are not there to count, so the `save_memory` rate
+  overstates until the window rolls past them.
+- **`trellis analyze health` reports how many rejected MCP writes were followed by
+  an accepted call.** New `WRITE_RECOVERED` event and `recovery` block
+  (`recovered_share`, `pending_rejections`, `by_tool`). It is an approximation that
+  can sit on either side of the truth, stated beside the number: a rejection is
+  paired with the next accepted call of the same tool within 120 seconds, held in
+  process memory only, and keying per tool is a choice (a stdio server serves one
+  process per client; an authenticated HTTP request carries a key id the pairing
+  does not use). "Accepted" means the call returned without raising. Rejections
+  still inside the window when the report is read are counted as pending and left
+  out of the share, and a rejection older than the window is not carried forward to
+  be claimed by a later accepted call. MCP boundary `WRITE_REJECTED` rows written by
+  this build carry `recovery_window_s`; older rows are left out of the denominator
+  and a window of only older rows reports `recovered_share: null`. What a capture
+  surface accepts is unchanged.
+- **`trellis analyze health` prints a bracketed rejection location as written.** A
+  taxonomy row such as `extra_forbidden@[red]steps[/red]` lost its text to Rich's
+  markup; the row is now escaped.
 
 - **BREAKING: `trellis admin health` exits 5 when a SQLite store file is damaged
   or cannot be opened.**

@@ -139,6 +139,7 @@ from trellis.ops.memory_extraction_health import (
     STATE_UNAVAILABLE,
     emit_memory_extraction_state,
 )
+from trellis.ops.write_health import NoopReason, RejectionRecoveryTracker
 from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
@@ -305,6 +306,13 @@ def _result_message(result: CommandResult) -> str:
     return result.message
 
 
+#: Pairs a boundary rejection with the accepted call that follows it, per
+#: tool and in memory. See
+#: :class:`trellis.ops.write_health.RejectionRecoveryTracker` for what it
+#: keeps (a tool name, a count and a time) and why it cannot key by caller.
+_REJECTION_RECOVERY = RejectionRecoveryTracker()
+
+
 def _record_boundary_rejection(
     *,
     tool: str,
@@ -335,7 +343,54 @@ def _record_boundary_rejection(
         rejections=rejections,
         hints=hints,
         payload_chars=payload_chars,
+        recovery=_REJECTION_RECOVERY,
     )
+
+
+def _note_accepted_call(tool: str) -> None:
+    """Emit ``WRITE_RECOVERED`` when a call is accepted right after rejections.
+
+    Called with the name of a tool whose call just returned without raising.
+    A tool that recorded no rejection recently costs one dict lookup. Wrapped
+    whole, like the rest of the write-health telemetry: pairing is advisory,
+    and an escaped exception here would fail a write that already succeeded.
+    """
+    try:
+        from trellis.ops.write_health import (  # noqa: PLC0415
+            record_write_recovery,
+            surface_label,
+        )
+
+        rejected = _REJECTION_RECOVERY.claim_recovery(surface_label(tool))
+        if rejected:
+            record_write_recovery(
+                _get_registry().operational.event_log,
+                tool=tool,
+                rejected_attempts=rejected,
+                window_seconds=_REJECTION_RECOVERY.window_seconds,
+            )
+    except Exception:
+        logger.warning("write_recovery.pairing_failed", tool=tool, exc_info=True)
+
+
+def _note_noop_call(tool: str, reason: NoopReason) -> None:
+    """Record that ``tool`` answered success without writing anything.
+
+    A duplicate reply leaves no ``MUTATION_EXECUTED``, so without this row the
+    call is missing from the attempts a rejection rate is divided by (see
+    :func:`trellis.ops.write_health.record_write_noop`). Wrapped whole, like
+    :func:`_note_accepted_call`: the reply already exists and is not this
+    function's to change, so nothing here may raise, including a registry that
+    cannot be built.
+    """
+    try:
+        from trellis.ops.write_health import record_write_noop  # noqa: PLC0415
+
+        record_write_noop(
+            _get_registry().operational.event_log, tool=tool, reason=reason
+        )
+    except Exception:
+        logger.warning("write_noop.record_failed", tool=tool, exc_info=True)
 
 
 # The ``instructions`` string is returned in the MCP ``initialize`` response and
@@ -527,12 +582,21 @@ class _ExplainArgumentRejections(Middleware):
         call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         try:
-            return await call_next(context)
+            result = await call_next(context)
         except Exception as exc:
             message = await self._explain(context.message.name, exc.__cause__)
             if message is None:
                 raise
             raise ToolError(message) from exc.__cause__
+        # "Accepted" here means the call returned without raising, which is
+        # looser than "wrote something": a duplicate reply that stored nothing
+        # and a feedback reply that says the event log was down both return.
+        # Only the tools in ``_RECORDED_ARGUMENT_TOOLS`` ever have a rejection
+        # to pair with, and their body-level rejections do raise;
+        # ``record_observation`` and ``execute_mutation`` return some errors as
+        # JSON, but neither records a boundary rejection, so none is tracked.
+        _note_accepted_call(context.message.name)
+        return result
 
 
 mcp.add_middleware(_ExplainArgumentRejections(mcp))
@@ -2485,7 +2549,18 @@ def _memory_exists_response(
     a re-send finishes a stamp that failed after the memory was stored.
     """
     if supersedes is None:
+        _note_noop_call("save_memory", "exact_duplicate")
         return f"Memory already exists: {existing_id}"
+    # Read before the stamp, which is what tells the two outcomes apart: a
+    # stamp that runs emits its own ``MUTATION_EXECUTED``, and that is already
+    # this call's accepted count, so it must not also be counted as a no-op.
+    # Only a stamp that was already in place writes nothing.
+    already_stamped = _supersession.stamp_in_place(
+        registry,
+        doc_id=supersedes,
+        successor=existing_id,
+        clearance=current_clearance(),
+    )
     error = _supersession.supersede_document(
         registry,
         doc_id=supersedes,
@@ -2503,6 +2578,8 @@ def _memory_exists_response(
                 "existing": existing_id,
             },
         )
+    if already_stamped:
+        _note_noop_call("save_memory", "exact_duplicate")
     return f"Memory already exists (supersedes {supersedes}): {existing_id}"
 
 
@@ -2531,6 +2608,20 @@ def _refuse_near_duplicate_supersedes(
         message,
         data={"field": "content", "supersedes": supersedes, "duplicate_of": match_id},
     )
+
+
+def _fuzzy_duplicate_response(
+    supersedes: str | None, match_id: str, similarity: float
+) -> str:
+    """Reply to a near-duplicate hit, refusing it first when ``supersedes`` was set.
+
+    With no ``supersedes`` the match is the answer and nothing is stored, so
+    the call is recorded as a no-op (:func:`_note_noop_call`): no
+    ``MUTATION_EXECUTED`` will stand for it.
+    """
+    _refuse_near_duplicate_supersedes(supersedes, match_id, similarity)
+    _note_noop_call("save_memory", "fuzzy_duplicate")
+    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
 
 
 def _supersede_saved_memory(
@@ -2670,8 +2761,7 @@ def save_memory(
                         match_id=match_id,
                         similarity=round(similarity, 3),
                     )
-                    _refuse_near_duplicate_supersedes(supersedes, match_id, similarity)
-                    return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
+                    return _fuzzy_duplicate_response(supersedes, match_id, similarity)
         except McpError:
             # _get_minhash_index already wrapped the cause structurally.
             raise
@@ -3126,6 +3216,7 @@ def _save_memory_reconciled(
             logger.debug(
                 "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
             )
+            _note_noop_call("save_memory", "exact_duplicate")
             return f"Memory already exists: {existing_id}"
 
         candidate = _gather_reconcile_candidate(registry, document_store, content)
@@ -3175,6 +3266,7 @@ def _save_memory_reconciled(
         if raced is not None:
             # A concurrent writer stored identical content while we judged —
             # the deterministic dedup wins; drop our now-duplicate write.
+            _note_noop_call("save_memory", "exact_duplicate")
             return f"Memory already exists: {raced['doc_id']}"
         outcome = _reverify_candidate(document_store, candidate, outcome)
         stored_id, stored_meta, outcome = _commit_reconcile_verdict(
@@ -3222,6 +3314,10 @@ def _save_memory_reconciled(
             registry, stored_id, content, stored_meta or metadata, chash
         )
 
+    if not outcome.fallback and outcome.decision == ReconcileDecision.NOOP:
+        # The judge found the content already covered and nothing was
+        # written, so no ``MUTATION_EXECUTED`` stands for this call.
+        _note_noop_call("save_memory", "judged_covered")
     message = _reconcile_result_message(outcome, candidate, stored_id)
     return f"{message}\n{enrich_note}" if enrich_note else message
 

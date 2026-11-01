@@ -1185,6 +1185,69 @@ class TestDeterministicTierUnderFlag:
 
 
 # ---------------------------------------------------------------------------
+# A call that answered without writing is still a call
+# ---------------------------------------------------------------------------
+
+
+def _noop_reasons(registry: StoreRegistry) -> list[str]:
+    return [
+        e.payload["reason"]
+        for e in registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_NOOP, limit=100
+        )
+    ]
+
+
+class TestReconcileAnswersWithoutWritingAreCounted:
+    """No ``MUTATION_EXECUTED`` stands for these, so a ``WRITE_NOOP`` row does."""
+
+    def test_a_noop_verdict_leaves_one_row(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("noop")))
+
+        save_memory(_NEAR)
+
+        assert _noop_reasons(temp_registry) == ["judged_covered"]
+
+    def test_an_exact_resave_leaves_one_row(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("noop")))
+
+        save_memory(_BASE)
+
+        assert _noop_reasons(temp_registry) == ["exact_duplicate"]
+
+    @pytest.mark.parametrize("decision", ["add", "update", "supersede"])
+    def test_a_verdict_that_writes_leaves_none(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        decision: str,
+    ) -> None:
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json(decision)))
+
+        save_memory(_NEAR)
+
+        assert _noop_reasons(temp_registry) == []
+
+    def test_a_judge_that_fails_falls_back_to_a_write_and_leaves_none(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_memory(_BASE)
+        _enable(monkeypatch, FakeLLMClient(raises=RuntimeError("model down")))
+
+        result = save_memory(_NEAR)
+
+        assert result.startswith("Memory saved")
+        assert _noop_reasons(temp_registry) == []
+
+
+# ---------------------------------------------------------------------------
 # Supersession must not reset the recency clock (#397)
 # ---------------------------------------------------------------------------
 

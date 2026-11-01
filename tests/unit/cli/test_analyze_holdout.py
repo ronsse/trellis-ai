@@ -261,9 +261,13 @@ def test_every_cli_default_is_the_library_default() -> None:
     command = {
         name: parameter.default.default
         for name, parameter in inspect.signature(holdout).parameters.items()
-        if name != "output_format"
+        if name not in {"output_format", "operational"}
     }
 
+    # ``--limit`` defaults to None so ``--operational`` can tell it was given; the
+    # command hands the full report the library default.
+    assert command.pop("limit") is None
+    assert library.pop("limit") == holdout_analysis.DEFAULT_SCAN_LIMIT
     assert command == library
 
 
