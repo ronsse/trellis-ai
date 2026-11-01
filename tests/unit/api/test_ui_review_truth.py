@@ -799,3 +799,176 @@ def test_the_not_written_codes_are_exactly_the_two_nothing_written_answers() -> 
     listed = _between(_page(), "const LEARNING_NOT_WRITTEN_CODES = [", "];")
 
     assert tuple(re.findall(r"'([a-z_]+)'", listed)) == NOT_WRITTEN_CODES
+
+
+# ---------------------------------------------------------------------------
+# 9. The Precedents empty state: the same two answers, the same reading
+# ---------------------------------------------------------------------------
+
+
+def _page_fn(page: str, start: str) -> str:
+    return start + _between(page, start, "\n        }\n") + "\n        }\n"
+
+
+def _page_region(page: str, start: str, end: str) -> str:
+    return start + _between(page, start, end)
+
+
+def render_precedents_empty_state(
+    candidates: dict[str, object] | str, tmp_path: Path
+) -> str:
+    """Run the page's own ``renderPrecedentsEmptyState`` against stub routes.
+
+    ``candidates`` is the body ``/learning/candidates`` answers, or a string
+    for a request that fails with that message. The two other routes the
+    state reads answer empty, so only the candidate line varies. Returns the
+    markup of the empty state.
+    """
+    page = _page()
+    source = "\n".join(
+        [
+            _page_fn(page, "function escHtml(s) {"),
+            _page_region(page, "const EMPTY_STATE_ICON =", "</svg>';") + "</svg>';",
+            _page_fn(page, "function emptyStateHtml("),
+            _page_region(page, "const LEARNING_NOT_WRITTEN_CODES = [", "];") + "];",
+            _page_region(
+                page,
+                "async function renderPrecedentsEmptyState() {",
+                "\n        async function loadPrecedents() {",
+            ),
+        ]
+    )
+    harness = f"""
+const document = {{
+    createElement: () => {{
+        let text = '';
+        return {{
+            set textContent(v) {{ text = v; }},
+            get innerHTML() {{
+                return text
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }},
+        }};
+    }},
+}};
+const candidates = {json.dumps(candidates)};
+const fetchJSON = async (path) => {{
+    if (path === '/learning/candidates') {{
+        if (typeof candidates === 'string') throw new Error(candidates);
+        return candidates;
+    }}
+    return path === '/loops' ? {{ loops: [] }} : {{ jobs: [] }};
+}};
+{source}
+renderPrecedentsEmptyState().then((html) => console.log(JSON.stringify(html)));
+"""
+    script = tmp_path / "precedents_empty_state_harness.js"
+    script.write_text(harness, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603
+        [NODE, str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
+        timeout=30,
+    )
+    return json.loads(done.stdout)
+
+
+_NOT_YET = "No learning candidates are currently awaiting a decision."
+_UNCHECKED = "could not be checked"
+
+
+def _line(shown: str) -> str:
+    """The candidate sentence alone, so the two loop sentences cannot match.
+
+    It sits between the fixed introduction and the sentence about the check
+    that estimates what would qualify (the stub loops route reports none).
+    """
+    return shown.split("its commit mode. ")[1].split(
+        " The automatic check", maxsplit=1
+    )[0]
+
+
+@needs_node
+@pytest.mark.parametrize("code", NOT_WRITTEN_CODES)
+def test_precedents_reads_nothing_written_as_an_empty_queue_with_the_hint(
+    code: str, tmp_path: Path
+) -> None:
+    hint = "No learning candidates have been written for review: /data/learning."
+    shown = render_precedents_empty_state(_unavailable(code, hint), tmp_path)
+
+    assert _NOT_YET in shown
+    assert hint in shown
+    assert _UNCHECKED not in _line(shown)
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [
+        (
+            "learning_candidates_unreadable",
+            "Could not read learning candidates from /data/learning/x.json: bad.",
+        ),
+        (
+            "stores_dir_unconfigured",
+            "No learning-candidate directory: set TRELLIS_LEARNING_ARTIFACTS_DIR.",
+        ),
+        ("some_future_reason", "A reason this page has never heard of."),
+        (None, "An error answer that carries no code."),
+    ],
+    ids=["unreadable", "unconfigured", "unknown-code", "no-code"],
+)
+def test_precedents_shows_the_servers_reason_for_a_real_failure(
+    code: str | None, hint: str, tmp_path: Path
+) -> None:
+    sentence = _line(render_precedents_empty_state(_unavailable(code, hint), tmp_path))
+
+    assert _UNCHECKED in sentence
+    assert hint in sentence
+    assert (f"({code})" in sentence) is (code is not None)
+    assert _NOT_YET not in sentence
+
+
+@needs_node
+def test_precedents_shows_why_a_failed_request_could_not_be_checked(
+    tmp_path: Path,
+) -> None:
+    sentence = _line(render_precedents_empty_state("HTTP 503 <down>", tmp_path))
+
+    assert _UNCHECKED in sentence
+    assert "HTTP 503 &lt;down&gt;" in sentence
+    assert _NOT_YET not in sentence
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("candidates", "expected"),
+    [
+        ([], _NOT_YET),
+        ([{"candidate_id": "a"}, {"candidate_id": "b"}], "2 learning candidate(s)"),
+    ],
+    ids=["none", "two"],
+)
+def test_precedents_reads_an_artifact_that_was_read_as_before(
+    candidates: list[dict[str, str]], expected: str, tmp_path: Path
+) -> None:
+    answer = {
+        "status": "ok",
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+    sentence = _line(render_precedents_empty_state(answer, tmp_path))
+
+    assert expected in sentence
+    assert _UNCHECKED not in sentence
+
+
+def test_precedents_uses_the_same_nothing_written_list_review_does() -> None:
+    """Source pin: one list of codes, so the two tabs cannot disagree."""
+    body = _render_precedents_empty_state_body(_page())
+
+    assert "LEARNING_NOT_WRITTEN_CODES.includes(" in body
+    assert "learning_artifacts_dir_missing" not in body

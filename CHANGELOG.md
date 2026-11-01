@@ -172,6 +172,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A `TRELLIS_API_PORT` that is not a port number is a one-line configuration error
+  from `trellis serve` and `trellis-api`, and no longer takes down every `trellis`
+  command.** `trellis_api.app` ran `int()` on the variable at import, and
+  `trellis_cli.main` imports it for every command, so a value like `abc` ended
+  `trellis serve`, `trellis admin stats --format json` and the rest in a `ValueError`
+  traceback with exit `1`. The port is now resolved when a server starts
+  (`resolve_api_port`): an empty variable is the default `8420`, a flag beats it, and
+  anything that is not an integer from 0 to 65535 raises `ConfigError`, which
+  `trellis serve` prints and exits `5` on, as it does for any configuration error, and
+  `trellis-api` prints to stderr and exits `5` on. `trellis serve` has no `--format`
+  option, so its exit does not vary by format. `trellis admin serve` is unchanged: it
+  still reads the variable through its option and rejects a bad value as a usage error,
+  exit `2`, where before it never got that far. On `trellis serve`, a bad value beside
+  `--port` is ignored, as a flag beats the variable.
+
+- **The Precedents tab reads the learning-candidates route's `status: "error"` as the
+  Review tab does, and a failure shows its reason.** The empty state's line about
+  waiting candidates said "could not be checked just now" for every error answer and
+  for a failed request alike. The two "nothing written yet" codes
+  (`learning_artifacts_dir_missing`, `learning_candidates_missing`) now read as no
+  candidates awaiting a decision and keep the server's hint; any other code, or a
+  request that failed, reads "could not be checked" followed by the hint and code, or
+  the request's message. The two tabs share one list of codes. The REST response is
+  unchanged.
+
+- **`SchemaFingerprintMismatch` no longer tells an operator to "Run migrations".** No
+  such command exists (`docs/deployment/runbook.md`, "Upgrading", says so). The message
+  now says the store was last written under a different backend or schema version, and
+  names what can be done: set the store's `backend` back to the recorded one, run the
+  build that wrote the store, or restore a backup taken before the change. It adds that
+  `TRELLIS_SKIP_FINGERPRINT_CHECK=1` starts without the check and does not convert the
+  store, where it used to call that a way to "bypass during a migration window". The
+  check itself is unchanged.
+
 - **An attribution refusal now puts the ids it promises in the text the client receives.**
   With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on, MCP
   `record_feedback` refused an uncited call and said the served ids were available, but they
@@ -194,7 +228,7 @@ All notable changes to Trellis will be documented in this file.
   one call site still passed it a string. The REST response is unchanged (same `status`, `code`
   and `hint`, so the OpenAPI spec and the CLI are untouched); a client that needs "not written
   yet" still reads `code`. The Precedents tab's one line about waiting candidates still reads
-  `status: "error"` as "could not be checked".
+  `status: "error"` as "could not be checked" (fixed in the entry above).
 
 - **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
   deployment docs describe the scoped-key auth that is built.** The operator
