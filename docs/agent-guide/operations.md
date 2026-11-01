@@ -1028,6 +1028,82 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
 ```
 
+### `trellis classify label-candidates`
+
+Point a person at documents they may want to label. A read-only scan counts how
+often four plain patterns match in each document's text and reports **which
+document, which rule, how many times**. Nothing in the store sets a sensitivity
+label for you, and in a large store nobody finds every sensitive document by
+reading; this narrows the search.
+
+```bash
+trellis classify label-candidates [--limit <n>] [--page-size <n>] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit` | `5000` | Cap on documents read. The report says whether the scan stopped at it. |
+| `--page-size` | `100` | Documents fetched per page. |
+
+| Rule | Fires on |
+|------|----------|
+| `email_address` | an email-address shape (`local@domain.tld`) |
+| `phone_number` | a US/Canada phone number with separators, such as `(212) 555-0123` |
+| `us_ssn_shape` | a US SSN or ITIN shape (3-2-4 digits); shape only, not a validity check |
+| `card_number_luhn` | a 13-19 digit run, optionally split by spaces or hyphens, that passes the Luhn check |
+
+The rules live in `LABEL_RULES` in `trellis/classify/label_proposer.py`, the one
+place to read or change them. Each has a match test and a near-miss test.
+
+**It never prints the value it matched.** A finding is a document id, a rule
+name and a count. There is no excerpt, no text around the match and no matched
+string, in JSON, in text or in logs (the scan logs counts only). A report that
+quoted the value would be a copy of what the label protects, with no label on
+it.
+
+**It writes nothing.** No label, no tag, no event, no queue row. Applying a
+label is the owner's decision, made through the existing route:
+
+```bash
+trellis curate classify-sensitivity <doc_id> --sensitivity <level>
+```
+
+This is a `classify` command, beside the other propose-for-a-human commands
+(`tag-candidates`, `domain-candidates`), rather than a `curate` command, because
+`curate` is where governed writes happen and this one makes none. The group's
+other commands tag *content*; the label this command points at is the access
+label (`DataClassification`), a different schema, so a finding is a prompt to run
+`classify-sensitivity`, not a content tag. The command does not touch
+`regulatory_tags` and implies no floor for any finding.
+
+**A miss proves nothing, and this is not a PII guarantee.** The rules are four
+fixed shapes. They do not read medical, financial or other content that has no
+fixed shape, and they do not read names. They also over-report: an asset named
+`icon@2x.png` reads as an email address, and a 13-digit millisecond timestamp
+passes a Luhn check about one time in ten. A card number followed by a space and
+a three-digit code can be missed, and an address with a non-ASCII local part is
+not matched. Precision on a real store has not been
+measured. Both the text and the JSON output carry this notice.
+
+**What it reads and skips.** Chunk rows are not read: a chunk takes its parent's
+label and the parent holds the same text. A document that already carries a
+`data_classification` record, of any value and including a malformed one, is
+skipped and counted in `skipped_labelled`, since a person has decided about it. A
+document with no text is counted in `skipped_unscannable`. `documents_read`
+counts every row fetched, which is what `--limit` caps.
+
+**A scan that stopped at `--limit`** reports `stopped_at_limit: true` and
+`status: "partial"` and still exits `0`, as `classify backfill` does; the text
+output says the result is not the whole store. `stopped_at_limit` is `false`
+only when nothing followed the last document read. The exit code is the same for
+`--format text` and `--format json`.
+
+**JSON output:**
+
+```json
+{"status": "ok", "limit": 5000, "stopped_at_limit": false, "documents_read": 3, "documents_scanned": 2, "skipped_labelled": 1, "skipped_unscannable": 0, "documents_flagged": 1, "rules": ["email_address", "phone_number", "us_ssn_shape", "card_number_luhn"], "findings": [{"doc_id": "doc-1", "rule": "email_address", "matches": 2}], "notice": "A miss proves nothing: ..."}
+```
+
 ### Classify rule review — Apply / Revoke 
 
 `tag-candidates` / `domain-candidates` (above) only *propose*: their text
