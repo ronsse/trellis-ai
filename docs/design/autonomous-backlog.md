@@ -108,7 +108,7 @@ Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-hando
 > [#448](https://github.com/ronsse/trellis-ai/issues/448),
 > [#459](https://github.com/ronsse/trellis-ai/issues/459)) and most Lane G review-gate
 > items landed before the 2026-09-04 corpus — verify issue state on GitHub before acting.
-> For current work, use [Current queue — 2026-09-04](#current-queue--2026-09-04) above.
+> For current work, use [Current queue](#current-queue) above.
 >
 > ⚠️ **The lane letters below are a different namespace from the `A1`–`F3` item codes in
 > Waves 1–5, and they collide.** "Lane A" is the file-store guard family (#448, #459,

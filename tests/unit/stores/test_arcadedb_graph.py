@@ -495,6 +495,84 @@ def test_upsert_edges_bulk_collapses_a_row_a_racing_writer_committed_unseen(
     assert rows_of_untouched == 1
 
 
+def test_a_failed_bulk_recount_read_returns_the_committed_ids(graph_store, monkeypatch):
+    """A committed batch whose recount read raises still returns its ids.
+
+    The batch's write lands, a racing writer's row appears beside it, and the
+    one read that looks for such rows then fails. The call must not raise
+    (the batch has committed, so raising would lose the ids), and the
+    duplicate it could not see stays until the triplet is next written, when
+    the ordinary recount repairs it.
+    """
+    import neo4j
+    from structlog.testing import capture_logs
+
+    for node_id in ("rf-src", "rf-tgt"):
+        graph_store.upsert_node(node_id, "rf-node", {})
+    real_execute_write = neo4j.Session.execute_write
+    raced: list[bool] = []
+
+    def write_then_lose_the_race(self, tx_function, *args, **kwargs):
+        result = real_execute_write(self, tx_function, *args, **kwargs)
+        if not raced:
+            raced.append(True)
+            now = datetime.now(UTC).isoformat()
+            with graph_store._driver.session(database=graph_store._database) as session:
+                session.run(
+                    "MATCH (s:Node {node_id: 'rf-src'}) WHERE s.valid_to IS NULL "
+                    "MATCH (t:Node {node_id: 'rf-tgt'}) WHERE t.valid_to IS NULL "
+                    "CREATE (s)-[e:EDGE]->(t) SET e = $props",
+                    props={
+                        "version_id": "rf-racer-version",
+                        "source_id": "rf-src",
+                        "target_id": "rf-tgt",
+                        "edge_type": "rf-rel",
+                        "properties_json": '{"writer": "racer"}',
+                        "edge_id": "rf-racer-edge",
+                        "valid_from": now,
+                        "created_at": now,
+                    },
+                )
+        return result
+
+    real_read = graph_store._run_read_list
+
+    def failing_recount(cypher, **params):
+        if cypher.startswith("UNWIND $triplets"):
+            msg = "recount read refused"
+            raise ConnectionError(msg)
+        return real_read(cypher, **params)
+
+    spec = {
+        "source_id": "rf-src",
+        "target_id": "rf-tgt",
+        "edge_type": "rf-rel",
+        "properties": {"writer": "bulk"},
+    }
+    monkeypatch.setattr(neo4j.Session, "execute_write", write_then_lose_the_race)
+    monkeypatch.setattr(graph_store, "_run_read_list", failing_recount)
+
+    with capture_logs() as logs:
+        returned = graph_store.upsert_edges_bulk([spec])
+
+    monkeypatch.undo()
+    assert raced == [True]
+    (failure,) = (
+        e for e in logs if e["event"] == "edge_duplicate_current_recount_failed"
+    )
+    assert (failure["path"], failure["error_type"]) == ("bulk", "ConnectionError")
+    current = graph_store.get_edges("rf-src", direction="outgoing", edge_type="rf-rel")
+    by_id = {row["edge_id"]: row for row in current}
+    assert len(current) == 2, list(by_id)
+    # The id the call returned names the batch's own committed row.
+    assert by_id[returned[0]]["properties"] == {"writer": "bulk"}
+
+    # The next write of the triplet runs the recount and collapses it.
+    healed = graph_store.upsert_edges_bulk([spec])
+    current = graph_store.get_edges("rf-src", direction="outgoing", edge_type="rf-rel")
+    assert [row["edge_id"] for row in current] == healed
+
+
 def test_bulk_recount_ignores_closed_versions_and_other_edge_types(graph_store):
     """The recount flags a triplet only for a second *current* row of its type.
 

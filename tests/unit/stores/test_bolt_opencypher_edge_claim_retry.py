@@ -1242,3 +1242,29 @@ class TestBulkDuplicateCurrentRows:
         assert (failure["source_id"], failure["target_id"]) == ("a", "b")
         assert failure["edge_type"] == "links_to"
         assert failure["error_type"] == "RuntimeError"
+
+    def test_a_recount_read_that_raises_keeps_every_committed_id(self) -> None:
+        store = _make_arcadedb_store()
+        session = self._session(
+            store,
+            reads=[self.ENDPOINTS, RuntimeError("driver went away")],
+            writes=[list(self.COMMITTED)],
+        )
+        store._count_current_edge_rows = MagicMock()  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            result = store.upsert_edges_bulk(list(self.EDGES))
+
+        # The batch committed: the caller keeps its ids, and the read that
+        # failed is the only thing the call reports, as a warning.
+        assert result == ["e0", "e1"]
+        assert session.execute_read.call_count == 2
+        assert session.execute_write.call_count == 1
+        store._count_current_edge_rows.assert_not_called()
+        (failure,) = (
+            e for e in logs if e["event"] == "edge_duplicate_current_recount_failed"
+        )
+        assert failure["path"] == "bulk"
+        assert failure["edges"] == len(self.EDGES)
+        assert failure["error_type"] == "RuntimeError"
+        assert failure["log_level"] == "warning"

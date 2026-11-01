@@ -45,9 +45,9 @@ Each item below is **independently decidable and independently shippable**. A sw
 
 **Status:** Premise is wrong as of 2026-05-15. Discovered by C1 swarm Unit A when it refused to delete the enum.
 
-**Why this entry is stale:** `TraceIngestHandler` was wired into the governed pipeline by `swarm/d1-trace-ingest-decision` (commit `ec478c1`) and trace ingestion was routed through `MutationExecutor` by `swarm2/b-7-trace-bypass-sites` (commit `b143e84`). The handler at [`src/trellis/mutate/handlers.py:26`](../../src/trellis/mutate/handlers.py:26) implements the full validate → idempotency → store → emit `TRACE_INGESTED` pipeline, and three production surfaces submit `Operation.TRACE_INGEST` Commands today: [`src/trellis_cli/ingest.py:67`](../../src/trellis_cli/ingest.py:67), [`src/trellis_api/routes/ingest.py:47`](../../src/trellis_api/routes/ingest.py:47), [`src/trellis/mcp/server.py:641`](../../src/trellis/mcp/server.py:641).
+**Why this entry is stale:** `TraceIngestHandler` was wired into the governed pipeline by `swarm/d1-trace-ingest-decision` (commit `ec478c1`) and trace ingestion was routed through `MutationExecutor` by `swarm2/b-7-trace-bypass-sites` (commit `b143e84`). The handler at [`src/trellis/mutate/handlers.py:26`](../../src/trellis/mutate/handlers.py#L26) implements the full validate → idempotency → store → emit `TRACE_INGESTED` pipeline, and three production surfaces submit `Operation.TRACE_INGEST` Commands today: [`src/trellis_cli/ingest.py:67`](../../src/trellis_cli/ingest.py#L67), [`src/trellis_api/routes/ingest.py:47`](../../src/trellis_api/routes/ingest.py#L47), [`src/trellis/mcp/server.py:641`](../../src/trellis/mcp/server.py#L641).
 
-The plan also pointed at the wrong file path: the `Operation` enum lives at [`src/trellis/mutate/commands.py:19`](../../src/trellis/mutate/commands.py:19), not `mutate/operations.py` (which does not exist). Recorded here so the next sweep doesn't waste a grep cycle.
+The plan also pointed at the wrong file path: the `Operation` enum lives at [`src/trellis/mutate/commands.py:19`](../../src/trellis/mutate/commands.py#L19), not `mutate/operations.py` (which does not exist). Recorded here so the next sweep doesn't waste a grep cycle.
 
 **Action: NONE. Do not delete the enum.** Deletion would break all three production surfaces and contradict the Hard Rule that all mutations flow through `MutationExecutor`.
 
@@ -89,7 +89,7 @@ The plan also pointed at the wrong file path: the `Operation` enum lives at [`sr
 
 ### C1.5 — Audit and remove duplicated `_parse_candidates` patterns
 
-**Status:** Closed 2026-05-15 by C1 swarm Unit C. Remediation was already complete on `origin/main` at base SHA `2ca9584` (PR #110 plus the C2 sweep PRs #115-#140). The C1 rollup PR adds the audit trail at [`audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md`](../../audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md): 13 in-scope sites — 4 emit-then-raise, 8 `# GRACEFUL-DEGRADATION:` annotated, 1 loud env-var parser. Two M-severity follow-ups in `EnrichmentService` ([`src/trellis_workers/enrichment/service.py:169,228,233`](../../src/trellis_workers/enrichment/service.py:169)) recorded in TODO.md under "Follow-ups surfaced by C1 swarm 2026-05-15".
+**Status:** Closed 2026-05-15 by C1 swarm Unit C. Remediation was already complete on `origin/main` at base SHA `2ca9584` (PR #110 plus the C2 sweep PRs #115-#140). The C1 rollup PR adds the audit trail at [`audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md`](../../audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md): 13 in-scope sites — 4 emit-then-raise, 8 `# GRACEFUL-DEGRADATION:` annotated, 1 loud env-var parser. Two M-severity follow-ups in `EnrichmentService` ([`src/trellis_workers/enrichment/service.py:169,228,233`](../../src/trellis_workers/enrichment/service.py#L169)) recorded in TODO.md under "Follow-ups surfaced by C1 swarm 2026-05-15".
 
 **Dependency:** Item 4 ([`plan-extraction-failure-analyzer.md`](./plan-extraction-failure-analyzer.md)) Phase 1 must land first.
 
