@@ -525,7 +525,7 @@ class CaptureReport:
     #: ``sessions_judge_unavailable`` does not move.
     sessions_skipped_egress_withheld: int = 0
     #: Sessions kept off the route because a store could not answer: the event
-    #: log, a pack payload with no readable item record, or a served document's
+    #: log or a served document's
     #: row. A fault and not a label, so it warns, fails a strict run like
     #: ``sessions_errored`` and is kept apart from the count above. Also left
     #: un-watermarked.

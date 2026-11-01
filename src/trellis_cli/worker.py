@@ -2285,10 +2285,12 @@ def mine_precedents_cmd(
         False,
         "--strict",
         help=(
-            "Exit non-zero when the model call failed (outcome llm_error) or a "
-            "store could not be asked whether a trace may leave the host "
-            "(egress_unreadable). Off by default: either is reported as "
-            "status partial, exits 0, and the next run asks again."
+            "On a live run, exit non-zero when the model call failed (outcome "
+            "llm_error) or a store could not be asked whether a trace may leave "
+            "the host (egress_unreadable). Off by default: either is reported "
+            "as status partial, exits 0, and the next run asks again. A "
+            "--dry-run never calls the model and exits 0 whether or not "
+            "--strict is given."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format."),

@@ -447,3 +447,46 @@ def test_the_gate_and_the_client_are_built_from_the_same_route(
     local_for["local"] = True
     runner.invoke(app, ["worker", "mine-precedents", "--format", "json"])
     assert "alpha intent" in llm.prompts[0]
+
+
+def _dry_run_json(*flags: str) -> tuple[dict[str, Any], int]:
+    result = runner.invoke(
+        app, ["worker", "mine-precedents", "--dry-run", "--format", "json", *flags]
+    )
+    return json.loads(result.output), result.exit_code
+
+
+def test_a_dry_run_with_an_unreadable_store_is_partial_and_exits_zero_even_strict(
+    cli_stores: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = get_document_store()
+    _seed_cli({w: ["ev-x"] for w in ("alpha", "bravo", "charlie")})
+    _stub_llm(monkeypatch, _CountingLLM(_MOCK_JSON))
+
+    def down(_doc_id: str) -> Any:
+        msg = "store down"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(docs, "get", down)
+
+    data, exit_code = _dry_run_json("--strict")
+
+    assert data["dry_run"] is True
+    assert data["status"] == "partial"
+    assert data["skipped_egress_unreadable"] == 3
+    assert exit_code == 0
+
+
+def test_a_dry_run_that_asked_every_question_is_ok(
+    cli_stores: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_cli({w: ["ev-x"] for w in ("alpha", "bravo", "charlie")})
+    _stub_llm(monkeypatch, _CountingLLM(_MOCK_JSON))
+
+    data, exit_code = _dry_run_json()
+
+    assert data["status"] == "ok"
+    assert data["skipped_egress_unreadable"] == 0
+    assert exit_code == 0

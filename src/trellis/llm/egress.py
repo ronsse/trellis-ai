@@ -81,11 +81,14 @@ class EgressVerdict(StrEnum):
     """What :meth:`EgressGate.stored_verdict` answers for one stored document.
 
     ``WITHHELD`` and ``UNREADABLE`` both keep the content off the route, and
-    they are not the same fact. ``WITHHELD`` is a property of the stored row (a
-    label above ``internal``, a label that is malformed, or a chunk id whose
-    parent row is gone) and holds until someone edits the row, so a job
-    counting it must not read as a fault. ``UNREADABLE`` is a store that could
-    not answer, which an operator must see and which may pass on a retry.
+    they are not the same fact. ``WITHHELD`` is a permanent fact about what is
+    stored: a label above ``internal``, a label that is malformed, a chunk id
+    whose parent row is gone, or (for a served pack, judged by the capture
+    sweep) an immutable event that records no readable item list. It holds
+    until someone edits the row, so a job counting it must not read as a
+    fault. ``UNREADABLE`` is a failure to read that a later run can clear: a
+    store that could not answer, or a gate that was given no document store to
+    ask. An operator must see it, and a retry may pass.
     """
 
     PERMITTED = "permitted"
@@ -209,20 +212,23 @@ class EgressGate:
         counts as ``WITHHELD``, because that does not pass on a retry.
 
         A store that cannot answer, for the row or for a chunk's parent, is
-        ``UNREADABLE``. So is an exception nobody anticipated: a defect should
-        be loud, not filed under a label. A row whose own bytes cannot be parsed
-        is ``WITHHELD``: it will not parse on a retry either. A local gate
-        answers before it reads anything.
+        ``UNREADABLE``, and so is a non-local gate that holds no store at all. So is
+        an exception nobody anticipated: a defect should be loud, not filed under
+        a label. A row whose own bytes cannot be parsed is ``WITHHELD``: it will
+        not parse on a retry either. A local gate answers before it reads anything.
         """
         if self.local:
             return EgressVerdict.PERMITTED
+        if self._documents is None:
+            # A gate with no store to ask cannot say a stored row is unlabelled,
+            # and "no row" must not read as "no label". Not ``WITHHELD``: the
+            # row was never consulted, and a gate built with a store can answer.
+            return EgressVerdict.UNREADABLE
         try:
-            row = self._documents.get(doc_id) if self._documents is not None else None
+            row = self._documents.get(doc_id)
             metadata = row.get("metadata") if row else None
             if metadata is not None and not isinstance(metadata, Mapping):
                 return EgressVerdict.WITHHELD
-            if self._clearance is None:
-                return _verdict(self.permits_metadata(metadata))
             chunk = self._chunk_verdict(doc_id, metadata)
             if chunk is not EgressVerdict.PERMITTED:
                 return chunk

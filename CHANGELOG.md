@@ -215,11 +215,16 @@ All notable changes to Trellis will be documented in this file.
   `sessions_skipped_egress_withheld`, an `egress_withheld:` line, the session left
   un-watermarked so a sweep over a local route distils it, and not counted as a judge outage.
   **A store that could not answer is not a label.** A document row, a chunk's parent, or a
-  pack event that raised, or a pack event holding no readable item record, is counted apart as
+  pack event that a store raised on, or a gate handed no document store, is counted apart as
   `sessions_skipped_egress_unreadable` / `skipped_egress_unreadable`, logs a warning, makes the
   run `partial`, and fails a strict run (the capture sweep's `TRELLIS_CAPTURE_STRICT`,
   `mine-precedents --strict`); a mine run where every trace was unreadable is `all_withheld`.
-  A pack that truly served nothing (`injected_item_ids: []`) is not an outage. `CaptureFunnel`
+  A pack event is read from `injected_item_ids`, `injected_items[]` and `sections[].item_ids`
+  together (a sectioned pack written before `injected_items[]` existed carries only the
+  section ids); an event that records none of them, or whose lists are malformed, is a
+  permanent fact of an immutable event, so the session is withheld (counted as withheld, never
+  failing a strict run) and not reported as an outage. A pack that truly served nothing
+  (`injected_item_ids: []`) is permitted. `CaptureFunnel`
   gains the two counts, so `analyze health` reports sessions kept off the route instead of
   calling them sampled out (two zero-valued keys appear in the funnel payload even when
   nothing is withheld; no existing value or text changes). A trace or transcript carries no
@@ -228,10 +233,12 @@ All notable changes to Trellis will be documented in this file.
   reads a document's row by id and answers `permitted`, `withheld` or `unreadable`.
   **Unchanged when nothing is labelled, or the route is declared local:** the prompts sent, the
   digest, the candidates and the mined events are byte-identical (tests compare both against
-  an ungated run), and a local gate reads nothing. One exception on a route that is not
-  local: a chunk-shaped id whose parent row is gone stays withheld (as since #1129, where
-  retrieval would judge it by the chunk's own label), counted as withheld, not unreadable,
-  because it does not pass on a retry; so a session that was served such a chunk is withheld
+  an ungated run), and a local gate reads nothing. Three cases keep content off a route that
+  is not local with nothing labelled: a chunk-shaped id whose parent row is gone (as since
+  #1129, where retrieval would judge it by the chunk's own label) and a pack event with no
+  readable item list, both counted as withheld because neither passes on a retry, and a store
+  that could not answer, or a gate handed no document store, counted as unreadable; so a
+  session that was served such a chunk is withheld
   on every sweep, and one withheld session is re-read and re-counted by each sweep with no age
   bound. `PrecedentMiner` now requires its `egress=` gate, and the rule test rosters
   `PrecedentMiner(` and the `_ask_llm` sender (its exempt roster is empty). **Not covered:** a

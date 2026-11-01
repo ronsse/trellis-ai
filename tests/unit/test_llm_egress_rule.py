@@ -273,6 +273,27 @@ def _chain_violations(
     return []
 
 
+def _is_route_gate(node: ast.expr) -> bool:
+    """``EgressGate.for_route_lazy(...)``, or ``for_route`` handed a real store.
+
+    ``for_route(registry, consumer, None)`` is a gate with no store, which
+    answers ``UNREADABLE`` for everything on a non-local route: it is not a
+    gate built to read labels.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    name = name_of(node.func)
+    if name == "for_route_lazy":
+        return True
+    if name != "for_route":
+        return False
+    keyed = [k.value for k in node.keywords if k.arg == "document_store"]
+    store = node.args[2] if len(node.args) >= 3 else (keyed[0] if keyed else None)
+    return store is not None and not (
+        isinstance(store, ast.Constant) and store.value is None
+    )
+
+
 def miner_construction_violations(root: Path) -> tuple[int, list[str]]:
     """``(PrecedentMiner calls seen, calls whose ``egress`` is not a route gate)``.
 
@@ -291,11 +312,7 @@ def miner_construction_violations(root: Path) -> tuple[int, list[str]]:
                 continue
             seen += 1
             egress = [k.value for k in call.keywords if k.arg == "egress"]
-            routed = (
-                len(egress) == 1
-                and isinstance(egress[0], ast.Call)
-                and name_of(egress[0].func) in {"for_route", "for_route_lazy"}
-            )
+            routed = len(egress) == 1 and _is_route_gate(egress[0])
             if not routed:
                 problems.append(
                     f"{module}:{call.lineno}: PrecedentMiner built without "
@@ -705,14 +722,16 @@ def test_a_miner_built_without_a_route_gate_is_reported(tmp_path: Path) -> None:
     source = (
         "def bare(t):\n    return PrecedentMiner(t)\n"
         "def borrowed(t, g):\n    return PrecedentMiner(t, egress=g)\n"
-        "def routed(t, r):\n"
+        "def storeless(t, r):\n"
         "    return PrecedentMiner(t, egress=EgressGate.for_route(r, X, None))\n"
         "def lazy(t, r):\n"
         "    return PrecedentMiner(t, egress=EgressGate.for_route_lazy(r, X, f))\n"
+        "def routed(t, r, d):\n"
+        "    return PrecedentMiner(t, egress=EgressGate.for_route(r, X, d))\n"
     )
     seen, problems = miner_construction_violations(_corpus(tmp_path, job=source))
-    assert seen == 4
-    assert [problem.split(":")[1] for problem in problems] == ["2", "4"]
+    assert seen == 5
+    assert [problem.split(":")[1] for problem in problems] == ["2", "4", "6"]
 
 
 _CHAIN = """

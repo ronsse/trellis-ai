@@ -725,3 +725,35 @@ class TestStoredVerdict:
         assert opened == []
         assert EgressGate.for_route_lazy(cloud, consumer, open_store).local is False
         assert opened == ["opened"]
+
+
+class _CloudRegistry:
+    """A registry whose every route is not declared local."""
+
+    @staticmethod
+    def llm_route(_consumer: object) -> object:
+        return type("Route", (), {"local": False})()
+
+
+def test_a_cloud_gate_with_no_store_cannot_answer_for_a_stored_row() -> None:
+    gate = EgressGate(None, local=False)
+
+    assert gate.stored_verdict("doc") is EgressVerdict.UNREADABLE
+
+
+def test_a_local_gate_with_no_store_still_permits_everything() -> None:
+    gate = EgressGate(None, local=True)
+
+    assert gate.stored_verdict("doc") is EgressVerdict.PERMITTED
+
+
+def test_a_lazy_gate_whose_store_opens_as_none_never_permits() -> None:
+    from trellis.llm.routing import LLMConsumer
+
+    gate = EgressGate.for_route_lazy(
+        _CloudRegistry(),  # type: ignore[arg-type]
+        LLMConsumer.PRECEDENT_MINING,
+        lambda: None,
+    )
+
+    assert gate.stored_verdict("doc") is EgressVerdict.UNREADABLE

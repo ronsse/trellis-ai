@@ -690,30 +690,40 @@ def _readable_served_ids(payload: Mapping[str, Any]) -> set[str] | None:
     """The item ids a ``PACK_ASSEMBLED`` payload records, or ``None`` if it has none.
 
     ``served_item_ids`` answers an empty set both for "served nothing" and for
-    "no record of what it served". Here the two must differ: a payload with no
-    item record at all, or one whose ``injected_item_ids`` / ``injected_items``
-    is not a well-formed list, cannot show the session was not served a
-    labelled document, so it is ``None``. A well-formed empty list is a pack
-    that served nothing. Both keys are read and united: a sectioned pack
-    carries its served items in ``injected_items`` alone.
+    "no record of what it served". Here the two must differ: a payload that
+    carries none of the three item records, or one whose record is not a
+    well-formed list, cannot show the session was not served a labelled
+    document, so it is ``None``. A well-formed empty list is a pack that served
+    nothing. The three are read and united: ``injected_item_ids`` (flat packs),
+    ``injected_items`` (flat, and sectioned packs since they began to emit it)
+    and ``sections[].item_ids`` (every sectioned pack ever written, and the
+    only record in those written before ``injected_items`` existed).
     """
     ids = payload.get("injected_item_ids")
     rows = payload.get("injected_items")
-    if ids is None and rows is None:
+    sections = payload.get("sections")
+    if ids is None and rows is None and sections is None:
         return None
-    served: set[str] = set()
+    lists: list[Any] = []
     if ids is not None:
-        if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids):
-            return None
-        served.update(ids)
+        lists.append(ids)
     if rows is not None:
         if not isinstance(rows, list):
             return None
-        for row in rows:
-            item_id = row.get("item_id") if isinstance(row, Mapping) else None
-            if not isinstance(item_id, str) or not item_id:
-                return None
-            served.add(item_id)
+        lists.extend(
+            [r.get("item_id") if isinstance(r, Mapping) else None] for r in rows
+        )
+    if sections is not None:
+        if not isinstance(sections, list):
+            return None
+        lists.extend(
+            s.get("item_ids") if isinstance(s, Mapping) else None for s in sections
+        )
+    served: set[str] = set()
+    for one in lists:
+        if not isinstance(one, list) or not all(isinstance(i, str) and i for i in one):
+            return None
+        served.update(one)
     return served
 
 
@@ -725,11 +735,13 @@ def _session_egress_verdict(
     A transcript carries no label, but the packs its session was served name
     documents that do, and the memory distilled from it is written unlabelled.
     Any served document labelled above ``internal`` (:mod:`trellis.llm.egress`)
-    makes the verdict ``WITHHELD``, whatever else failed to read. Otherwise a
-    store that could not answer (the event log, a pack payload with no readable
-    item record, a served document's row) makes it ``UNREADABLE``: kept off the
-    route, but reported as a fault, not as a label. A pack whose event the log
-    no longer holds names nothing to read and is skipped.
+    makes the verdict ``WITHHELD``, whatever else failed to read. So does a
+    pack event that records no readable item list: events are immutable, so
+    that is a permanent fact no retry can clear, and the session stays off the
+    route without failing a strict run. Otherwise a store that could not answer
+    (the event log, a served document's row) makes it ``UNREADABLE``: kept off
+    the route, reported as a fault a later sweep may clear. A pack whose event
+    the log no longer holds names nothing to read and is skipped.
     """
     if egress.local or not digest.pack_ids:
         return EgressVerdict.PERMITTED
@@ -741,8 +753,7 @@ def _session_egress_verdict(
             ):
                 served = _readable_served_ids(event.payload)
                 if served is None:
-                    unreadable = True
-                    continue
+                    return EgressVerdict.WITHHELD
                 for item_id in sorted(served):
                     verdict = egress.stored_verdict(item_id)
                     if verdict is EgressVerdict.WITHHELD:

@@ -250,8 +250,9 @@ class PrecedentMiner:
         self._llm = llm
         # Required, with no default: a miner built without a gate would send
         # every trace to a route not declared local. ``worker mine-precedents``
-        # passes ``EgressGate.for_route``; a caller that really sends nowhere
-        # off the host passes ``EgressGate(None, local=True)``.
+        # passes ``EgressGate.for_route_lazy``. Tests that send nowhere off the
+        # host pass ``EgressGate(None, local=True)``; the rule test refuses that
+        # anywhere in ``src/``.
         self._egress = egress
 
     # ------------------------------------------------------------------

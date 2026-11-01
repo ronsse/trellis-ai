@@ -220,11 +220,18 @@ def test_a_sectioned_pack_is_judged_by_its_item_rows(tmp_path: Path) -> None:
         pytest.param({"injected_item_ids": [None]}, id="id-not-a-string"),
         pytest.param({"injected_items": [{"rank": 1}]}, id="row-without-an-id"),
         pytest.param({"injected_items": "doc-secret"}, id="rows-not-a-list"),
+        pytest.param({"sections": "background"}, id="sections-not-a-list"),
+        pytest.param({"sections": [{"name": "a"}]}, id="section-without-ids"),
+        pytest.param(
+            {"sections": [{"item_ids": [None]}]}, id="section-id-not-a-string"
+        ),
+        pytest.param({"sections": ["a"]}, id="section-not-a-mapping"),
     ],
 )
-def test_a_pack_with_no_readable_item_record_is_unreadable(
+def test_a_pack_with_no_readable_item_record_is_withheld_and_never_sent(
     tmp_path: Path, payload: dict[str, Any]
 ) -> None:
+    """Events are immutable, so this is a permanent fact: withheld, not a fault."""
     registry = _registry(tmp_path)
     _emit_pack(registry, A, payload)
     root, judge = tmp_path / "projects", _Recorder()
@@ -233,7 +240,108 @@ def test_a_pack_with_no_readable_item_record_is_unreadable(
     report = _sweep(registry, root, tmp_path / "wm.json", judge)
 
     assert judge.prompts == []
-    assert report.sessions_skipped_egress_unreadable == 1
+    assert report.sessions_skipped_egress_withheld == 1
+    assert report.sessions_skipped_egress_unreadable == 0
+    assert report.warnings == []
+
+
+# The shape every sectioned pack carried from the first release until
+# ``injected_items[]`` was added to it (git history: ``_section_rows``): no
+# ``injected_item_ids``, no ``injected_items``, one ``item_ids`` list a section.
+def _legacy_sectioned(*item_ids: str) -> dict[str, Any]:
+    return {
+        "section_count": 1,
+        "total_items": len(item_ids),
+        "sections": [
+            {
+                "name": "background",
+                "items_count": len(item_ids),
+                "item_ids": list(item_ids),
+                "injected_advisory_ids": [[] for _ in item_ids],
+            }
+        ],
+    }
+
+
+def test_a_legacy_sectioned_pack_is_judged_by_its_section_item_ids(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    registry.knowledge.document_store.put("doc-secret", "body", _SECRET)
+    _emit_pack(registry, A, _legacy_sectioned("doc-secret"))
+    root, judge = tmp_path / "projects", _Recorder()
+    _session(root, A)
+
+    report = _sweep(registry, root, tmp_path / "wm.json", judge)
+
+    assert judge.prompts == []
+    assert report.sessions_skipped_egress_withheld == 1
+    assert report.sessions_skipped_egress_unreadable == 0
+
+
+def test_a_legacy_sectioned_pack_of_unlabelled_documents_is_sent(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    registry.knowledge.document_store.put("doc-ok", "body", {})
+    _emit_pack(registry, A, _legacy_sectioned("doc-ok"))
+    root, judge = tmp_path / "projects", _Recorder()
+    _session(root, A)
+
+    report = _sweep(registry, root, tmp_path / "wm.json", judge)
+
+    assert len(judge.prompts) == 1
+    assert report.sessions_skipped_egress_withheld == 0
+    assert report.sessions_skipped_egress_unreadable == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {
+                "injected_item_ids": ["doc-ok"],
+                "injected_items": [{"item_id": "doc-secret"}],
+            },
+            id="ids-then-rows",
+        ),
+        pytest.param(
+            {
+                "injected_item_ids": ["doc-secret"],
+                "injected_items": [{"item_id": "doc-ok"}],
+            },
+            id="rows-then-ids",
+        ),
+        pytest.param(
+            {
+                "injected_item_ids": ["doc-ok"],
+                "sections": [{"item_ids": ["doc-secret"]}],
+            },
+            id="ids-then-sections",
+        ),
+        pytest.param(
+            {
+                "injected_items": [{"item_id": "doc-ok"}],
+                "sections": [{"item_ids": ["doc-secret"]}],
+            },
+            id="rows-then-sections",
+        ),
+    ],
+)
+def test_every_item_record_a_pack_carries_is_read_not_the_first_found(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    registry = _registry(tmp_path)
+    registry.knowledge.document_store.put("doc-ok", "body", {})
+    registry.knowledge.document_store.put("doc-secret", "body", _SECRET)
+    _emit_pack(registry, A, payload)
+    root, judge = tmp_path / "projects", _Recorder()
+    _session(root, A)
+
+    report = _sweep(registry, root, tmp_path / "wm.json", judge)
+
+    assert judge.prompts == []
+    assert report.sessions_skipped_egress_withheld == 1
 
 
 def test_a_pack_that_truly_served_nothing_is_permitted(tmp_path: Path) -> None:
