@@ -217,6 +217,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A refused command under `--format json` answers with one JSON object, not a
+  Rich line.** `trellis extract refresh` (all eight refusal branches),
+  `trellis classify shadow` and `trellis worker enrich` / `mine-precedents`
+  without a usable LLM client, `trellis worker tune` on a malformed
+  `learning.auto_promote` config, and `trellis analyze replay` on a
+  `--graph-selection` conflict or a rejected replay policy each printed prose and
+  exited non-zero, so a caller parsing stdout got a decode error instead of the
+  reason. They now emit `{"status": "error", "message": ...}`, the shape their
+  neighbours use. Exit codes are unchanged, and the human-format text is
+  byte-identical. The three LLM-client and config helpers keep their signatures:
+  they read the running command's `--format` through
+  `trellis_cli.output.active_output_format`, which answers `text` outside a
+  command. Still prose under `--format json`, left as is because tests pin it:
+  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+- **`trellis admin quickstart` stops on a config path it cannot read instead of
+  initializing over it.** `config.yaml` as a dangling or looping symlink read as
+  absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
+  first-run branch wrote a config through the link and reported success, and a
+  `config_dir` that is a file crashed on the mkdir with a traceback. The check is
+  now `path_is_present`, and the registry's own read raises the `ConfigError`
+  that names the file. **Exit code change, in those cases only:** `0` (link) or
+  `1` (file) becomes `5` (`EXIT_STORE`), in both formats.
+
+
 - **`upsert_edges_bulk` on ArcadeDB keeps its returned ids when the post-commit
   recount read fails (closes #1078).** The one read that finds triplets with
   more than one current row ran outside the per-triplet handling, so a failure

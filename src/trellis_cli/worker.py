@@ -104,7 +104,7 @@ from trellis_cli.analyze import (
 )
 from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
-from trellis_cli.output import build_console, emit_json
+from trellis_cli.output import active_output_format, build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -311,7 +311,10 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
     try:
         return _build_auto_promote_policy()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        if active_output_format() == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
@@ -319,11 +322,21 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
         # overrides rejects a non-finite env/stored value the same way —
         # both raise with the raw value embedded in str(exc), so the
         # message here names only the exception type, never the value.
-        console.print(
-            "[red]invalid learning.auto_promote config "
-            f"({escape(type(exc).__name__)})[/red]",
-            soft_wrap=True,
-        )
+        if active_output_format() == "json":
+            emit_json(
+                {
+                    "status": "error",
+                    "message": (
+                        f"invalid learning.auto_promote config ({type(exc).__name__})"
+                    ),
+                }
+            )
+        else:
+            console.print(
+                "[red]invalid learning.auto_promote config "
+                f"({escape(type(exc).__name__)})[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
@@ -1786,24 +1799,50 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
     try:
         llm = registry.build_llm_client(consumer=consumer)
     except BackendNotInstalledError as exc:
-        console.print(
-            f"[red]{command} requires an LLM SDK that is not installed: "
-            f"{escape(str(exc))}[/red]\n"
-            "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
-            "and configure an 'llm:' block in config.yaml.[/dim]",
-            soft_wrap=True,
-        )
+        if active_output_format() == "json":
+            emit_json(
+                {
+                    "status": "error",
+                    "message": (
+                        f"{command} requires an LLM SDK that is not installed: "
+                        f"{exc} Install it, e.g. 'uv pip install "
+                        "trellis-ai[llm-openai]', and configure an 'llm:' block "
+                        "in config.yaml."
+                    ),
+                }
+            )
+        else:
+            console.print(
+                f"[red]{command} requires an LLM SDK that is not installed: "
+                f"{escape(str(exc))}[/red]\n"
+                "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
+                "and configure an 'llm:' block in config.yaml.[/dim]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
         config_path = str(get_config_dir() / CONFIG_FILENAME)
-        console.print(
-            f"[red]{command} requires an LLM client but none is "
-            "configured.[/red]\n"
-            f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
-            "api_key_env, model) and install the matching extra "
-            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]",
-            soft_wrap=True,
-        )
+        if active_output_format() == "json":
+            emit_json(
+                {
+                    "status": "error",
+                    "message": (
+                        f"{command} requires an LLM client but none is "
+                        f"configured. Add an 'llm:' block to {config_path} "
+                        "(provider, api_key_env, model) and install the "
+                        "matching extra ([llm-openai] / [llm-anthropic])."
+                    ),
+                }
+            )
+        else:
+            console.print(
+                f"[red]{command} requires an LLM client but none is "
+                "configured.[/red]\n"
+                f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
+                "api_key_env, model) and install the matching extra "
+                "(\\[llm-openai] / \\[llm-anthropic]).[/dim]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
     return llm
 
