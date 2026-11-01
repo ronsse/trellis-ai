@@ -725,6 +725,28 @@ class TestStoredVerdict:
             ),
             pytest.param(RecursionError(), EgressVerdict.WITHHELD, id="recursion"),
             pytest.param(
+                sqlite3.OperationalError(
+                    "Could not decode to UTF-8 column 'metadata_json' with text 'x'"
+                ),
+                EgressVerdict.WITHHELD,
+                id="sqlite-undecodable",
+            ),
+            # Faults a public by-id read treats as the row's own. This verdict is
+            # not widened with it: it answered ``UNREADABLE`` for both, and still
+            # does.
+            pytest.param(
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+                EgressVerdict.UNREADABLE,
+                id="unicode-decode",
+            ),
+            pytest.param(
+                ValueError(
+                    "Exceeds the limit (4300 digits) for integer string conversion"
+                ),
+                EgressVerdict.UNREADABLE,
+                id="integer-digit-limit",
+            ),
+            pytest.param(
                 ValidationError.from_exception_data("Event", []),
                 EgressVerdict.WITHHELD,
                 id="validation-error",
@@ -741,6 +763,41 @@ class TestStoredVerdict:
         self, failure: Exception, expected: EgressVerdict
     ) -> None:
         assert failed_read_verdict(failure) is expected
+
+    @pytest.mark.parametrize("raw", ["5", "[1]", '"str"', "true"])
+    def test_a_chunk_of_a_parent_whose_metadata_is_not_an_object_is_withheld(
+        self, store: SQLiteDocumentStore, raw: str
+    ) -> None:
+        """The same verdict as before the direct reads learned to fail closed."""
+        store.put("par", "body", {})
+        chunk = chunk_doc_id("par", 0)
+        store.put(chunk, "fragment", {"parent_doc_id": "par"})
+        conn = store._get_conn()
+        conn.execute(
+            "UPDATE documents SET metadata_json = ? WHERE doc_id = 'par'", (raw,)
+        )
+        conn.commit()
+        gate = EgressGate(store, local=False)
+        assert gate.stored_verdict(chunk) is EgressVerdict.WITHHELD
+        assert gate.permits(chunk, {"parent_doc_id": "par"}) is False
+
+    def test_a_chunk_costs_the_parent_read_the_clearance_cache_makes_and_no_more(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        """The parent is read once, through the clearance's own cache."""
+        store.put("par", "body", {})
+        chunk = chunk_doc_id("par", 0)
+        store.put(chunk, "fragment", {"parent_doc_id": "par"})
+        spy = MagicMock(wraps=store)
+        gate = EgressGate(spy, local=False)
+        for _ in range(3):
+            assert gate.stored_verdict(chunk) is EgressVerdict.PERMITTED
+        assert [c.args[0] for c in spy.get.call_args_list] == [
+            chunk,
+            "par",
+            chunk,
+            chunk,
+        ]
 
     def test_a_store_that_cannot_answer_is_unreadable_not_withheld(self) -> None:
         broken = MagicMock()

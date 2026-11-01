@@ -9,7 +9,9 @@ public is unchanged.
 
 The shapes are the ones reproduced against a raw SQLite row (``metadata_json``
 that is not JSON, empty, a control character, nested past the recursion limit,
-and text that is not UTF-8 in ``metadata_json`` or ``content``). The Postgres
+text that is not UTF-8 in ``metadata_json`` or ``content``, ``metadata_json``
+held as bytes that are not UTF-8, and an integer of more digits than the parser
+accepts). The Postgres
 shape is a JSONB *string* that is not JSON, which the Postgres row mapper hands to
 ``json.loads``.
 """
@@ -46,6 +48,10 @@ RAW_SHAPES: dict[str, tuple[str, str]] = {
     "nested-too-deep": (f"'{'[' * 5000}{']' * 5000}'", "'hidden'"),
     "metadata-not-utf8": ("CAST(x'7b22ff7d' AS TEXT)", "'hidden'"),
     "content-not-utf8": ("'{}'", "CAST(x'ff' AS TEXT)"),
+    # A BLOB, so ``json.loads`` is handed bytes: a ``UnicodeDecodeError``.
+    "metadata-bytes-not-utf8": ("x'7b22ff7d'", "'hidden'"),
+    # Past the interpreter's default 4300-digit limit: a bare ``ValueError``.
+    "metadata-integer-past-the-digit-limit": (f"'{'1' * 5000}'", "'hidden'"),
 }
 
 
@@ -104,6 +110,43 @@ class TestAnUnparseableRowAnswersAsAMissingId:
         # The control: a readable public document is still served.
         served = world.client.get("/api/v1/documents/pub-1", headers=headers)
         assert served.status_code == 200
+
+    @pytest.mark.parametrize("shape", list(RAW_SHAPES))
+    def test_the_list_serves_the_public_row_and_not_this_one(
+        self, world: World, shape: str
+    ) -> None:
+        insert_raw(
+            world.registry.knowledge.document_store, CORRUPT_ID, *RAW_SHAPES[shape]
+        )
+        response = world.client.get(
+            "/api/v1/documents", headers=world.key(["read", "external"])
+        )
+        assert response.status_code == 200, response.text
+        assert [d["doc_id"] for d in response.json()["documents"]] == ["pub-1"]
+
+    def test_a_public_row_with_a_text_column_the_page_cannot_decode_is_not_covered(
+        self, world: World
+    ) -> None:
+        """Not covered: it is labelled public, so the page must decode it.
+
+        The label filter matches the row, the page cannot be built, and the list
+        and a search answer 500 for an external key while it exists. By id the
+        same store fault reads as the row's, and answers as a missing id.
+        """
+        public = json.dumps(label("public"))
+        insert_raw(
+            world.registry.knowledge.document_store,
+            CORRUPT_ID,
+            f"'{public}'",
+            "CAST(x'ff' AS TEXT)",
+        )
+        headers = world.key(["read", "external"])
+        assert world.client.get("/api/v1/documents", headers=headers).status_code == 500
+        assert (
+            world.client.get("/api/v1/search", params={"q": "visible"}, headers=headers)
+        ).status_code == 500
+        by_id = world.client.get(f"/api/v1/documents/{CORRUPT_ID}", headers=headers)
+        assert by_id.status_code == 404
 
     @pytest.mark.parametrize("shape", list(RAW_SHAPES))
     def test_a_key_above_public_still_gets_the_fault(
@@ -168,6 +211,15 @@ def _postgres_jsonb_string_fault() -> BaseException:
     pytest.fail("a JSONB string that is not JSON must reach json.loads")
 
 
+def _parser_fault(source: str | bytes) -> BaseException:
+    """What ``json.loads`` raises for ``source`` on the running interpreter."""
+    try:
+        json.loads(source)
+    except Exception as exc:
+        return exc
+    pytest.fail("the source must not parse")
+
+
 def _decode_error(text: str) -> BaseException:
     try:
         json.loads(text)
@@ -181,6 +233,8 @@ PARSE_FAULTS = {
     "jsonb-string-decoded": lambda: _decode_error("str"),
     "json-decode": lambda: json.JSONDecodeError("Expecting value", "", 0),
     "recursion": lambda: RecursionError("maximum recursion depth exceeded"),
+    "bytes-not-utf8": lambda: _parser_fault(b"\xff"),
+    "integer-past-the-digit-limit": lambda: _parser_fault("1" * 5000),
     "sqlite-not-utf8": lambda: sqlite3.OperationalError(
         "Could not decode to UTF-8 column 'metadata_json' with text '{\"�}'"
     ),

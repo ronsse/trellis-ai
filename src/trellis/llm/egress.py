@@ -158,7 +158,14 @@ class EgressGate:
                 DocumentClearance,
             )
 
-            self._clearance = DocumentClearance(document_store, _EGRESS_CEILING)
+            # The older judgement, on purpose: an egress verdict is pinned, and the
+            # direct reads' fail-closed one would add a read of every chunk's
+            # parent to the one this gate's chunk verdict makes through the cache.
+            self._clearance = DocumentClearance(
+                document_store,
+                _EGRESS_CEILING,
+                fail_closed_on_unreadable_label=False,
+            )
 
     @classmethod
     def for_route(

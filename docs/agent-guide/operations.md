@@ -4818,8 +4818,9 @@ is judged on the stored document row, never on the metadata a pack item carries.
 
 An existence probe by id stays closed: a document the key may not read, a chunk and
 an id that does not exist answer in the same words. So does a row whose stored
-metadata cannot be parsed (not JSON, empty, nested past the recursion limit, or on
-SQLite not valid UTF-8, and on Postgres a JSONB string that is not JSON): on REST
+metadata cannot be parsed (not JSON, empty, nested past the recursion limit, an integer
+past the parser's digit limit, or on SQLite not valid UTF-8, and on Postgres a JSONB string
+that is not JSON): on REST
 `GET /documents/{id}` and in `get_items` it answers as a missing id, and a mixed
 `get_items` call lists it among the not-found ids without failing the call. A store
 fault (an outage, a failed query) still answers 500, because it does not depend on
@@ -4904,9 +4905,20 @@ guard:
   judged by its label. Not covered: a row labelled public whose `doc_id`, `content`,
   `content_hash`, `created_at` or `updated_at` is not valid UTF-8 still makes every
   external read answer 500 while it exists, because the page cannot be built. No `put` writes any of these; they are store
-  faults. A key that reads more than `public` is unchanged: its unfiltered listing and
-  `search` still read valid non-object JSON, while a row of non-JSON text fails an
-  unfiltered listing and a `search` that matches it for every key, as before.
+  faults. A key that reads more than `public` reads JSON that is not an object
+  differently from before: `[1]`, `"str"`, `5` and `true` hold no label the gate can read,
+  so the row reads `restricted`. A `read` or `confidential` key is served every other row
+  and not this one (`GET /documents` and `GET /search` answer 200 without it, where they
+  answered 500; by id it is a 404), and a `restricted` or `admin` key is served it, as it is
+  every row. `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of pairs are judged
+  as they always were. A chunk of such a row reads `restricted` too, in a list with
+  `include_chunks=true`, in `search` and by id (by id it was served before). A pack is
+  unchanged: it judges the item's own metadata, and still serves such a row to a `read`
+  key. The one place a pack reaches this gate, a served item whose `supersedes_doc_id`,
+  `updates_doc_id`, `evidence_ref` or `source_item_id` names such a row, still raises at
+  `internal` and `confidential`, as it did, and keeps the pointer at `restricted`. A row of non-JSON text, or of a text
+  column the page cannot decode, still fails an unfiltered listing and a `search` that
+  matches it for every key above `public`, as before.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would

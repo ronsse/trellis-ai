@@ -484,9 +484,11 @@ class TestAHiddenRowWithAnIdThatIsNotUtf8:
 #: What a ``read`` key (clearance ``internal``) gets from the same calls over a
 #: store holding one corrupt row, as ``(status, body names the row)`` per call.
 #: Measured on the commit before the public filter learned to withhold an
-#: unreadable row, and written out so that this change moves none of it: four of
-#: the five shapes answer alike, and ``null`` (which the unfiltered listing
-#: tolerates) differs.
+#: unreadable row, and written out so that this change moves none of it: text
+#: that is not JSON (``not-json``) answers alike on every call, and ``null``
+#: (which the unfiltered listing tolerates) differs. JSON that is not an object
+#: (``list``, ``number``, ``string``) answered alike too until the read gate
+#: stopped raising on it; see ``_READ_KEY_ON_A_NON_OBJECT_ROW``.
 _READ_KEY_ON_A_BROKEN_ROW: dict[str, tuple[int, bool]] = {
     "documents": (500, False),
     "documents-q": (500, False),
@@ -525,11 +527,25 @@ _READ_KEY_ON_A_NULL_ROW: dict[str, tuple[int, bool]] = {
     "sectioned": (200, True),
 }
 
+#: JSON that is not an object holds no label the gate can read, so the row
+#: reads ``restricted`` and a ``read`` key is served every other row and not
+#: this one: the five direct reads that answered 500 answer 200 with the row
+#: withheld. The pack calls are the ones above, unchanged (a pack still names
+#: the row).
+_READ_KEY_ON_A_NON_OBJECT_ROW: dict[str, tuple[int, bool]] = {
+    **_READ_KEY_ON_A_BROKEN_ROW,
+    "documents": (200, False),
+    "documents-q": (200, False),
+    "documents-q-1": (200, False),
+    "documents-q-runbook": (200, False),
+    "search": (200, False),
+}
+
 READ_KEY_OUTCOMES: dict[str, dict[str, tuple[int, bool]]] = {
     "not-json": _READ_KEY_ON_A_BROKEN_ROW,
-    "list": _READ_KEY_ON_A_BROKEN_ROW,
-    "number": _READ_KEY_ON_A_BROKEN_ROW,
-    "string": _READ_KEY_ON_A_BROKEN_ROW,
+    "list": _READ_KEY_ON_A_NON_OBJECT_ROW,
+    "number": _READ_KEY_ON_A_NON_OBJECT_ROW,
+    "string": _READ_KEY_ON_A_NON_OBJECT_ROW,
     "null": _READ_KEY_ON_A_NULL_ROW,
 }
 

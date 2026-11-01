@@ -494,6 +494,50 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A stored row whose metadata is JSON but not an object no longer fails every
+  document read by a `read` or `confidential` key.** `metadata_json` of `[1]`,
+  `5`, `"str"` or `true` parses, so the store returns it, and
+  `DocumentClearance.sensitivity` raised on it (`dict(5)`): `GET /documents`
+  (with or without `q`), `GET /search` and `GET /documents/{id}` answered 500 for
+  those keys while one such row existed, whoever it belonged to. The row holds no
+  label the gate can read, so on a direct read it now reads `restricted`, the same
+  fail-closed reading a present-but-malformed label record gets. A `read` or
+  `confidential` key is served every other row and not this one (by id: 404, as a
+  missing id answers); a `restricted` or `admin` key is served it, as it is every
+  row; an `external` key never was. Only what `dict()` refuses reads this way:
+  `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of pairs are judged as
+  they always were, and the `label` of such a row is unchanged too. A chunk of such a
+  row reads `restricted` as its parent does: before, it was judged on its own label,
+  so a list with `include_chunks=true`, a search and a by-id read served it to a
+  `read` key while the parent was withheld. That tightens by-id as well (it answered
+  200 for such a chunk). The `label` that `GET /documents` and `GET /documents/{id}`
+  attach for a `restricted` or `admin` key reports such a row as `sensitivity:
+  restricted`, `corrupt: true` (it said `internal`, a clearance that cannot read it).
+  The same change stops the MCP `get_items` call and the overwrite refusal raising
+  on one such row (each now judges that id as `restricted`), and the graph and REST
+  pointer concealment (a node, a version list, an observation) now drops a pointer
+  that names one for a key below `restricted` instead of raising. A precedent
+  listing no longer blanks every row it judged in the same batch when one source
+  is such a row: only that source's precedent is withheld, where a readable one
+  beside it was withheld too.
+  A pack is unchanged, and so is the one place it reaches this gate: a served item
+  whose `supersedes_doc_id`, `updates_doc_id`, `evidence_ref` or `source_item_id`
+  names such a row still raises at `internal` and `confidential` and keeps the
+  pointer at `restricted`, as it did. That is deliberate, for the measurement
+  freeze, and it is the one failure kept; the pack path passes
+  `fail_closed_on_unreadable_label=False`. The egress gate passes it too, so its
+  verdicts do not move. Pinned by a test that builds packs through `builder_factory`
+  for an unscoped caller over each shape, with and without a pointer to it.
+- **A by-id read by an `external` key answers 404 for a row whose `metadata_json`
+  is bytes that are not UTF-8 or an integer past `json.loads`'s digit limit.**
+  `GET /documents/{id}` and `get_items` answered 500 for such a row where the list
+  already withheld it, so a key could tell a row from a missing id.
+  The by-id read now treats `UnicodeDecodeError` and a `ValueError` whose text is the
+  digit-limit message as the row's own; any other `ValueError` is still a store fault
+  and still answers 500. The egress verdict does not use this test, so it is unchanged.
+  Not covered: `get_file_context` raises `AttributeError` on a row whose metadata is
+  `5`, before and after this change. Also not covered: a key above `public` still answers 500 for such a row, because the store cannot return it; a public row whose own text
+  column is not UTF-8 still fails every external list, search and pack.
 - **A row whose event type this build does not know no longer fails every read
   that reaches it.** A newer build can append an `event_type` an older one lacks,
   and both event logs turned the stored string into `EventType(...)` strictly, so
@@ -519,8 +563,6 @@ All notable changes to Trellis will be documented in this file.
   Postgres statements are covered by a no-database test of what is sent and returned
   and by new cases in the live contract suite, which run against a real server only in
   the live-infra job.
-
-
 - **A flaky test: a session-dedup test compared two pack id lists in order.**
   `TestSessionDedup` in `tests/unit/mcp/test_external_key_events.py` asserted that two
   ordinary-key packs for the same query held identical id lists. The documents that rank
