@@ -959,6 +959,26 @@ class EventLogContractTests:
         # Fewer readable rows than ``limit``: all of them, no more.
         assert len(store.get_events(limit=50)) == 5
 
+    def test_a_page_read_again_keeps_the_callers_filters(self, store: EventLog) -> None:
+        """The second read asks for known types within the caller's filter."""
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        mine = [_event_at("mine", base + timedelta(seconds=i)) for i in range(3)]
+        other = _event_at("other", base + timedelta(seconds=10))
+        for event in (*mine, other):
+            store.append(event)
+        store.append(_future_event_at("mine", base + timedelta(seconds=20)))
+
+        page = store.get_events(source="mine", limit=2, order="desc")
+        assert [e.event_id for e in page] == [mine[2].event_id, mine[1].event_id]
+        page = store.get_events(
+            source="mine",
+            since=base + timedelta(seconds=1),
+            until=base + timedelta(seconds=30),
+            limit=1,
+            order="desc",
+        )
+        assert [e.event_id for e in page] == [mine[2].event_id]
+
     def test_unknown_event_type_rows_do_not_change_what_a_scan_counts(
         self, store: EventLog
     ) -> None:

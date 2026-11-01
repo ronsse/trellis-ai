@@ -475,7 +475,9 @@ All notable changes to Trellis will be documented in this file.
   did. **`count()` is unchanged and counts every stored row**, so an unfiltered
   `count()` (and `total` in `GET /api/v1/events`) can exceed the rows `get_events`
   returns, and `scan_events` with no `event_type` over-reports `matched` and `dropped`
-  by the skipped rows; every shipped caller names a type. This helps only builds that
+  by the skipped rows; every shipped caller names a type. The response says nothing
+  else about a skipped row, so the Events tab can show "2 of 3" with Older enabled, or
+  its empty message beside "0 of N" when every row is unknown. This helps only builds that
   carry it: an older build still raises on a type it does not know. The
   Postgres statements are covered by a no-database test of what is sent and returned
   and by new cases in the live contract suite, which run against a real server only in

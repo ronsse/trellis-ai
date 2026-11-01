@@ -331,10 +331,12 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             if limit > 0 and len(rows) >= limit:
                 # The page was full, so the skipped rows used up some of it and
                 # a caller reading ``len(events) >= limit`` as "there is more"
-                # would read it as the end. Ask for readable rows only.
+                # would read it as the end. Ask for readable rows only. The unary
+                # ``+`` keeps the planner off the type index, which matches nearly
+                # every row and would sort them all to return one page.
                 marks = ", ".join("?" * len(KNOWN_EVENT_TYPE_VALUES))
                 known = read(
-                    f"{where} AND event_type IN ({marks})",
+                    f"{where} AND +event_type IN ({marks})",
                     [*params, *KNOWN_EVENT_TYPE_VALUES],
                 )
         return [self._row_to_event(row) for row in known]

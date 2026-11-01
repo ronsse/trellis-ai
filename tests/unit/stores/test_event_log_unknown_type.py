@@ -219,3 +219,16 @@ class TestStatementsSent:
         assert "event_type IN" in seen[1]
         # Every type the build knows is bound; the unknown one never is.
         assert "future.kind" not in seen[1]
+
+    def test_the_second_read_walks_the_time_index_rather_than_sorting(
+        self, store: SQLiteEventLog
+    ) -> None:
+        store.append(_known(0))
+        store.append(_future("future.kind", 1))
+        seen = self._selects(store)
+        store.get_events(limit=1, order="desc")
+        _raw(store).set_trace_callback(None)
+        plan = _raw(store).execute(f"EXPLAIN QUERY PLAN {seen[1]}").fetchall()
+        details = " ".join(str(row[3]) for row in plan)
+        assert "idx_events_occurred_at_utc" in details
+        assert "TEMP B-TREE" not in details
