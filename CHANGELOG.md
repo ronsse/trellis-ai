@@ -251,6 +251,18 @@ All notable changes to Trellis will be documented in this file.
   under the server's default session, which is UTC, so only the mocked test
   and a local run in another zone cover the fix.
 
+- **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
+  is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
+  and a CI smoke test under `tests/unit/eval/` as living here; the harness moved
+  to the `trellis-evals` repo on 2026-07-12 and this repo keeps only
+  `eval/reports/`. The page now says so and marks each command as run from that
+  repo. `plan-evaluation-strategy.md` and `plan-real-corpus-eval.md` carry the
+  same path note the other stamped plans do, and
+  `docs/agent-guide/program-convergence-eval.md` and one path in
+  `operations.md` name the repo. ROADMAP gate N3 said #194 stays open; it closed
+  2026-10-29, and the gate now states its acceptance command and a dated run.
+  Docs only; no code, test or served pack changes.
+
 - **SQLite event log time bounds compare `occurred_at` by instant, not as
   text.** `get_events(since=..., until=...)`, `count(since=...)` and the
   `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`
