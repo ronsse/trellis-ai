@@ -6,6 +6,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`StoreRegistry.validate()` no longer builds a store whose URI its own pre-flight refused.**
+  A Postgres store configured with a `dsn` the check rejects (`postgres:///db`, `://host/db`)
+  was still constructed, so `validate()` waited out the connection pool's 30 s timeout and
+  added a second `PoolTimeout` entry for a store the `ConfigError` had already named. The
+  aggregate now names that store once, from the URI check, and returns without connecting.
+  The checks that precede the constructor still run for it (unknown backend, a missing driver
+  package, a config key the backend does not accept); a connection or schema error that only
+  the constructor raises is reported once the URI is fixed. The skip is keyed by store, so a
+  store carrying the same string under a backend that accepts it, and a store another
+  pre-flight check names, are built as before. The `RegistryValidationError` type, the
+  `(store_type, exception)` pairs and the `ConfigError` text are unchanged; its "for N
+  store(s)" count is of entries, so it is one lower for such a store.
 - **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
   on a rerun.** The miner read the newest `--limit` traces and only then kept the
   failure/partial ones, so a run of recent successes hid every older failure and the command
