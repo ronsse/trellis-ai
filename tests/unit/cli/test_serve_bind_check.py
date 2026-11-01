@@ -195,13 +195,36 @@ class TestAdminServeEnvironment:
         assert result.exit_code == 0, result.output
         assert self._bound(fake_uvicorn_run) == ("0.0.0.0", 18731)  # noqa: S104
 
-    def test_unparseable_env_port_is_a_usage_error_not_a_bind(
+    @pytest.mark.parametrize("value", ["not-a-port", "80.5", "70000", "-1"])
+    def test_a_bad_env_port_is_a_config_error_not_a_bind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_uvicorn_run: MagicMock,
+        value: str,
+    ) -> None:
+        """The same ``ConfigError`` and exit 5 as ``trellis serve``.
+
+        Typer's ``envvar=`` parsed the variable as an ``int`` and exited 2 with
+        a usage error, so the three server entry points disagreed about one
+        bad value. ``admin serve`` now reads it through ``resolve_api_port``.
+        """
+        monkeypatch.setenv("TRELLIS_API_PORT", value)
+        result = runner.invoke(app, ["admin", "serve"])
+        assert result.exit_code == EXIT_STORE, result.output
+        text = " ".join(plain(result.output).split())
+        assert "CONFIG_ERROR" in text
+        assert f"TRELLIS_API_PORT='{value}' is not a port number" in text
+        assert "Starting Trellis API server" not in text
+        assert "Traceback" not in result.output
+        fake_uvicorn_run.assert_not_called()
+
+    def test_flag_beats_a_bad_env_port(
         self, monkeypatch: pytest.MonkeyPatch, fake_uvicorn_run: MagicMock
     ) -> None:
         monkeypatch.setenv("TRELLIS_API_PORT", "not-a-port")
-        result = runner.invoke(app, ["admin", "serve"])
-        assert result.exit_code == 2, result.output
-        fake_uvicorn_run.assert_not_called()
+        result = runner.invoke(app, ["admin", "serve", "--port", "18732"])
+        assert result.exit_code == 0, result.output
+        assert self._bound(fake_uvicorn_run) == ("127.0.0.1", 18732)
 
 
 class TestServeEnvironment:

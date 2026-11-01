@@ -29,6 +29,7 @@ from trellis.schemas import well_known as wk
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.main import app
 from trellis_cli.stores import _get_registry
 
 #: What a real read-only SQLite file raises on a write.
@@ -656,3 +657,127 @@ class TestStoreFailureTextIsSanitized:
         clean = f"IntegrityError: {_READONLY_DB}"
         assert [e["message"] for e in payload["errors"]] == [clean] * 2
         assert [f["message"] for f in payload["step_failures"]] == [_READONLY_DB] * 2
+
+
+class TestAnUnopenableGraphStoreIsATypedFailure:
+    """A store that will not open exits 5 as a typed error, not a traceback.
+
+    The sqlite backend opens its file while the registry builds the store and
+    raises its own classes (``sqlite3.DatabaseError``, ``OSError``,
+    ``TypeError``), none of them a ``TrellisError``, so the CLI boundary let
+    each out as a traceback and exit 1. These run through the root ``app``
+    because the boundary lives there, not on ``admin_app``. The exit is the same in both
+    ``--format``s and the message carries no driver text for a backend whose
+    errors can quote a host or a row.
+    """
+
+    @staticmethod
+    def _config(tmp_path: Path, name: str, graph_lines: str) -> Path:
+        path = tmp_path / f"{name}.yaml"
+        path.write_text(f"graph:\n{graph_lines}", encoding="utf-8")
+        return path
+
+    def _bad_config(self, tmp_path: Path, kind: str) -> Path:
+        if kind == "not-a-database":
+            db = tmp_path / "junk.db"
+            db.write_text("this is text, not a SQLite file" * 8, encoding="utf-8")
+            return self._config(
+                tmp_path, "bad", f"  backend: sqlite\n  db_path: {db}\n"
+            )
+        if kind == "parent-is-a-file":
+            parent = tmp_path / "a-file"
+            parent.write_text("x", encoding="utf-8")
+            return self._config(
+                tmp_path, "bad", f"  backend: sqlite\n  db_path: {parent}/sub/g.db\n"
+            )
+        assert kind == "wrong-type"
+        return self._config(
+            tmp_path, "bad", "  backend: sqlite\n  db_path: {nested: value}\n"
+        )
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize("role", ["source", "destination"])
+    @pytest.mark.parametrize(
+        ("kind", "code"),
+        [
+            ("not-a-database", "STORE_ERROR"),
+            ("parent-is-a-file", "STORE_ERROR"),
+            ("wrong-type", "CONFIG_ERROR"),
+        ],
+    )
+    def test_exits_5_in_both_formats(
+        self,
+        tmp_path: Path,
+        runner: CliRunner,
+        kind: str,
+        code: str,
+        role: str,
+        output_format: str,
+    ) -> None:
+        good, _ = _write_sqlite_config(tmp_path, "good")
+        bad = self._bad_config(tmp_path, kind)
+        from_config, to_config = (bad, good) if role == "source" else (good, bad)
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "migrate-graph",
+                "-f",
+                str(from_config),
+                "-t",
+                str(to_config),
+                "--dry-run",
+                "--no-meta-trace",
+                "--format",
+                output_format,
+            ],
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+            assert payload["status"] == "error"
+            assert payload["error_code"] == code
+        else:
+            assert code in plain(result.stdout)
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_a_driver_error_is_named_by_class_never_by_text(
+        self,
+        tmp_path: Path,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        output_format: str,
+    ) -> None:
+        class DriverFailureError(RuntimeError):
+            pass
+
+        def refuse(self: object, *args: object, **kwargs: object) -> None:
+            raise DriverFailureError(_SYNTHETIC_SECRET)
+
+        monkeypatch.setattr(SQLiteGraphStore, "__init__", refuse)
+        good, _ = _write_sqlite_config(tmp_path, "good")
+        other, _ = _write_sqlite_config(tmp_path, "other")
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "migrate-graph",
+                "-f",
+                str(good),
+                "-t",
+                str(other),
+                "--dry-run",
+                "--no-meta-trace",
+                "--format",
+                output_format,
+            ],
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        assert "DriverFailureError" in plain(result.stdout)
+        assert _SYNTHETIC_SECRET not in result.output
