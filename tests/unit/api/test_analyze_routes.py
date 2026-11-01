@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -18,6 +19,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.unit.analyze._holdout_fixture import (
+    BEHAVIOUR_FLAT,
+    BEHAVIOUR_VARIANTS,
+    MONDAY,
+    REFUSAL_KEYS,
+    UNTIL,
+    HoldoutLog,
+    seed_arm_shift,
+)
 from trellis.analyze.domains import analyze_domains
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
@@ -372,3 +382,134 @@ def test_report_route_is_a_sync_handler():
     import inspect
 
     assert not inspect.iscoroutinefunction(analyze.get_analyze_report)
+
+
+# ---------------------------------------------------------------------------
+# An unsettled holdout read is a refusal the store cannot move.
+# ---------------------------------------------------------------------------
+
+_HOLDOUT_FAST = {
+    "days": 60,
+    "until": UNTIL.isoformat(),
+    "rate": 0.2,
+    "limit": 20_000,
+    "permutations": 299,
+    "bootstraps": 100,
+    "power_sims": 20,
+}
+_CLOCK_KEYS = ("generated_at", "as_of")
+
+
+def _without_clock(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_clock(v) for k, v in node.items() if k not in _CLOCK_KEYS}
+    if isinstance(node, list):
+        return [_without_clock(v) for v in node]
+    return node
+
+
+def _holdout_read(client, tmp_path, name, *, seed, settled, **params):
+    registry = StoreRegistry(stores_dir=tmp_path / name)
+    try:
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, **seed)
+        if settled:
+            log.sweep()
+        else:
+            log.sweep(at=UNTIL - timedelta(hours=1))
+        app_module._registry = registry
+        analyze._CACHE.clear()
+        resp = client.get("/api/v1/analyze/holdout", params={**_HOLDOUT_FAST, **params})
+        assert resp.status_code == 200
+        return _without_clock(resp.json()["data"])
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("variant", sorted(BEHAVIOUR_VARIANTS))
+@pytest.mark.parametrize(
+    ("outcome", "itt"), [("log1p_turns", False), ("commits", True)]
+)
+def test_an_unsettled_holdout_read_answers_the_same_whatever_the_store_holds(
+    client, tmp_path, variant, outcome, itt
+):
+    """Two stores that differ in what the sessions did answer the same, whole.
+
+    The pairs differ in the withheld arm's values, cut-offs and missing
+    outcomes, its pack calls and join times, the timing's tool-call and
+    hook-message counts, and an outcome block.
+    """
+    params = {"outcome": outcome, "itt": itt}
+    flat = _holdout_read(
+        client, tmp_path, "flat", seed=BEHAVIOUR_FLAT, settled=False, **params
+    )
+    changed = _holdout_read(
+        client,
+        tmp_path,
+        "changed",
+        seed=BEHAVIOUR_VARIANTS[variant],
+        settled=False,
+        **params,
+    )
+
+    assert set(flat) == REFUSAL_KEYS
+    assert flat["settled_window"]["settled"] is False
+    assert flat == changed
+
+
+@pytest.mark.parametrize("variant", sorted(set(BEHAVIOUR_VARIANTS) - {"join_time"}))
+def test_the_same_pairs_do_differ_when_the_holdout_window_is_settled(
+    client, tmp_path, variant
+):
+    """The comparison above is not vacuous: settled, the same stores differ."""
+    params = {"outcome": "commits"}
+    flat = _holdout_read(
+        client, tmp_path, "flat", seed=BEHAVIOUR_FLAT, settled=True, **params
+    )
+    changed = _holdout_read(
+        client,
+        tmp_path,
+        "changed",
+        seed=BEHAVIOUR_VARIANTS[variant],
+        settled=True,
+        **params,
+    )
+
+    assert flat["settled_window"]["settled"] is True
+    assert "funnel" in flat
+    assert flat != changed
+
+
+def _two_rate_read(client, tmp_path, name, *, calls):
+    registry = StoreRegistry(stores_dir=tmp_path / name)
+    try:
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, withheld_calls=calls)
+        log.task(start=MONDAY + timedelta(hours=300), arms=[False], rate=0.5)
+        log.sweep(at=UNTIL - timedelta(hours=1))
+        app_module._registry = registry
+        analyze._CACHE.clear()
+        params = {k: v for k, v in _HOLDOUT_FAST.items() if k != "rate"}
+        resp = client.get("/api/v1/analyze/holdout", params=params)
+        assert resp.status_code == 200
+        return _without_clock(resp.json()["data"])
+    finally:
+        registry.close()
+
+
+def test_the_rate_error_of_a_checked_read_is_the_same_whatever_the_pack_calls(
+    client, tmp_path
+):
+    one = _two_rate_read(client, tmp_path, "one", calls=1)
+    three = _two_rate_read(client, tmp_path, "three", calls=3)
+
+    assert one["status"] == "error"
+    assert "Several holdout rates" in one["message"]
+    assert "rows" not in one["message"]
+    assert one == three
+
+
+def test_the_holdout_description_mentions_the_refusal(client):
+    entry = analyze._REPORTS["holdout"]
+
+    assert "refusal" in entry.description
