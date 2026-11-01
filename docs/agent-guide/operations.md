@@ -305,8 +305,11 @@ trellis admin serve [--port PORT] [--host HOST]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port` | `8420` | Port to listen on |
-| `--host` | `127.0.0.1` | Host to bind to |
+| `--port` | `8420` | Port to listen on. Falls back to `TRELLIS_API_PORT` |
+| `--host` | `127.0.0.1` | Host to bind to. Falls back to `TRELLIS_API_HOST` |
+
+A flag beats its variable, and an empty variable counts as unset. A variable
+changes only the address: the bind check below runs on it like on a flag.
 
 Both `trellis admin serve` and `trellis serve` refuse to bind a
 non-loopback host (`0.0.0.0`, `::`, a LAN address, …) unless
@@ -4759,7 +4762,11 @@ serve, it still answers `200`, but with `status: "error"`, a `code`
 `learning_candidates_unreadable` or `stores_dir_unconfigured`) and a
 `hint` naming the path, so an unwritten artifact never reads as an empty
 queue. The promote endpoint answers `409` with `detail: {code, message,
-path}` for the same four conditions.
+path}` for the same four conditions. The static UI's Review tab reads the
+two "no writer has produced it yet" codes (`learning_artifacts_dir_missing`,
+`learning_candidates_missing`) as an empty state that shows the hint, and
+every other `status: "error"` answer, including a code it does not know, as
+an error; the response itself is unchanged.
 
 ### Improvement-metrics dashboard (admin scope)
 

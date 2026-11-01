@@ -21,7 +21,11 @@ Six defects, pinned one test group each:
    It now renders as an error with the server's ``hint``/``code``. The
    artifact's ``generated_at_utc`` is shown labelled UTC via a new
    ``fmtUtc()`` instead of silently relabelled to the browser's local zone
-   by ``fmtDate()``.
+   by ``fmtDate()``. Two of the route's four ``status: "error"`` answers
+   mean only that nothing has been written yet (a fresh deployment): those
+   render as an empty state, every other answer as an error, and the error
+   branch now shows the server's hint instead of ``Failed to load undefined:
+   undefined``.
 4. The precedents empty state said "Promote traces to create precedents",
    implying any trace promotion suffices. A precedent is ordinarily
    created when a learning candidate is approved on the Review tab —
@@ -616,3 +620,182 @@ def test_the_toast_reads_the_difference_the_cli_reads() -> None:
 
     assert "r.approved_count - r.named_count" in body
     assert "name no candidate_id and were skipped." in body
+
+
+# ---------------------------------------------------------------------------
+# 8. The Review learning section: nothing written yet is empty, not an error
+# ---------------------------------------------------------------------------
+
+#: The route's answers that mean "no writer has produced the artifact yet".
+NOT_WRITTEN_CODES = ("learning_artifacts_dir_missing", "learning_candidates_missing")
+
+
+def _review_learning_source(page: str) -> str:
+    """The page's own functions ``loadReviewLearning`` runs, in source order."""
+
+    def fn(start: str) -> str:
+        return start + _between(page, start, "\n        }\n") + "\n        }\n"
+
+    def region(start: str, end: str) -> str:
+        return start + _between(page, start, end)
+
+    return "\n".join(
+        [
+            fn("function fmtTime(iso, { empty = '' } = {}) {"),
+            fn("function escHtml(s) {"),
+            fn("function loadingHtml(msg) {"),
+            region("const EMPTY_STATE_ICON =", "</svg>';") + "</svg>';",
+            fn("function emptyStateHtml("),
+            fn("function isAdminScopeError(err) {"),
+            fn("function loadFailureText(err, label) {"),
+            fn("function loadFailureColor(err) {"),
+            # setCount, setCountError, reviewEmpty and reviewError.
+            region("function setCount(id, n) {", "async function loadReview() {"),
+            region("const LEARNING_NOT_WRITTEN_CODES = [", "];") + "];",
+            region(
+                "async function loadReviewLearning() {",
+                "async function submitLearningPromotions() {",
+            ),
+        ]
+    )
+
+
+def render_review_learning(response: dict[str, object], tmp_path: Path) -> dict:
+    """Run the page's own ``loadReviewLearning`` against a stub response.
+
+    Returns the count badge (``text``, ``title``, ``failed``) and the body
+    markup the section ends up with.
+    """
+    harness = f"""
+const els = {{}};
+const mk = (id) => els[id] || (els[id] = {{
+    innerHTML: '', textContent: '', title: '', failed: false,
+    classList: {{
+        add: (c) => {{ if (c === 'review-count-error') els[id].failed = true; }},
+        remove: (c) => {{ if (c === 'review-count-error') els[id].failed = false; }},
+    }},
+    removeAttribute: () => {{ els[id].title = ''; }},
+}});
+const escape = (t) => t
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const document = {{
+    getElementById: mk,
+    createElement: () => {{
+        let text = '';
+        return {{
+            set textContent(v) {{ text = v; }},
+            get innerHTML() {{ return escape(text); }},
+        }};
+    }},
+}};
+const fetchJSON = async () => ({json.dumps(response)});
+{_review_learning_source(_page())}
+loadReviewLearning().then(() => {{
+    const count = els['review-learning-count'];
+    console.log(JSON.stringify({{
+        count: {{
+            text: String(count.textContent), title: count.title, failed: count.failed,
+        }},
+        body: els['review-learning-body'].innerHTML,
+    }}));
+}});
+"""
+    script = tmp_path / "review_learning_harness.js"
+    script.write_text(harness, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603
+        [NODE, str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
+        timeout=30,
+    )
+    return json.loads(done.stdout)
+
+
+def _unavailable(code: str | None, hint: str) -> dict[str, object]:
+    return {
+        "status": "error",
+        "code": code,
+        "artifacts_dir": "/data/learning",
+        "hint": hint,
+        "candidate_count": 0,
+        "candidates": [],
+    }
+
+
+@needs_node
+@pytest.mark.parametrize("code", NOT_WRITTEN_CODES)
+def test_a_deployment_with_nothing_written_reads_as_an_empty_state(
+    code: str, tmp_path: Path
+) -> None:
+    hint = "No learning candidates have been written for review: /data/learning."
+    shown = render_review_learning(_unavailable(code, hint), tmp_path)
+
+    # An honest zero, not the "!" a failed load gets.
+    assert shown["count"] == {"text": "0", "title": "", "failed": False}
+    assert "No learning candidates yet" in shown["body"]
+    # The hint still names where the page looked and how to fill it.
+    assert hint in shown["body"]
+    assert "var(--danger)" not in shown["body"]
+    assert "Failed to load" not in shown["body"]
+
+
+@needs_node
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [
+        (
+            "learning_candidates_unreadable",
+            "Could not read learning candidates from /data/learning/x.json: bad.",
+        ),
+        (
+            "stores_dir_unconfigured",
+            "No learning-candidate directory: set TRELLIS_LEARNING_ARTIFACTS_DIR.",
+        ),
+        ("some_future_reason", "A reason this page has never heard of."),
+        (None, "An error answer that carries no code."),
+    ],
+    ids=["unreadable", "unconfigured", "unknown-code", "no-code"],
+)
+def test_a_real_failure_still_reads_as_an_error_with_the_servers_reason(
+    code: str | None, hint: str, tmp_path: Path
+) -> None:
+    shown = render_review_learning(_unavailable(code, hint), tmp_path)
+
+    assert shown["count"]["text"] == "!"
+    assert shown["count"]["failed"] is True
+    assert hint in shown["count"]["title"]
+    assert "var(--danger)" in shown["body"]
+    # The reason is in the body too, not only in the badge's tooltip, and the
+    # body is not the placeholder text a string passed as an Error produced.
+    assert hint in shown["body"]
+    assert "undefined" not in shown["body"]
+    assert "No learning candidates yet" not in shown["body"]
+
+
+@needs_node
+def test_an_artifact_that_was_read_renders_as_before(tmp_path: Path) -> None:
+    shown = render_review_learning(
+        {
+            "status": "ok",
+            "artifacts_dir": "/data/learning",
+            "generated_at_utc": "2026-01-02T03:04:05+00:00",
+            "candidate_count": 0,
+            "candidates": [],
+        },
+        tmp_path,
+    )
+
+    assert shown["count"]["text"] == "0"
+    assert shown["count"]["failed"] is False
+    assert "0 candidate(s)" in shown["body"]
+    assert "No learning candidates found." in shown["body"]
+
+
+def test_the_not_written_codes_are_exactly_the_two_nothing_written_answers() -> None:
+    """Source pin, so the behaviour tests above cannot skip away the rule."""
+    listed = _between(_page(), "const LEARNING_NOT_WRITTEN_CODES = [", "];")
+
+    assert tuple(re.findall(r"'([a-z_]+)'", listed)) == NOT_WRITTEN_CODES

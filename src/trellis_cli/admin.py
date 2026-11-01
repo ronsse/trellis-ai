@@ -685,14 +685,24 @@ def write_config(
 def serve(
     host: str = typer.Option(
         "127.0.0.1",
+        envvar="TRELLIS_API_HOST",
         help=(
             "Bind address. Loopback by default; set TRELLIS_API_HOST=0.0.0.0 "
             "or pass --host 0.0.0.0 for container deployments."
         ),
     ),
-    port: int = typer.Option(8420, help="Port to bind"),
+    port: int = typer.Option(
+        8420,
+        envvar="TRELLIS_API_PORT",
+        help="Port to bind",
+    ),
 ) -> None:
     """Start the Trellis REST API server.
+
+    ``--host`` and ``--port`` fall back to ``TRELLIS_API_HOST`` and
+    ``TRELLIS_API_PORT``, as ``trellis serve`` and ``trellis-api`` do; a flag
+    beats the variable, and an empty variable is the default. The variable
+    only picks the address: the bind check below runs on whatever it names.
 
     Delegates to :func:`trellis_api.app.main` — the same entrypoint
     ``trellis serve`` uses — so there is exactly one place that calls
