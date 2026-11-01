@@ -598,22 +598,14 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
         node_ids: list[str] = [spec.get("node_id") or generate_ulid() for spec in nodes]
 
-        # Pull existing current rows once. The pre-validator already did
-        # this for role-immutability, but it discards the result; one
-        # extra round trip against the indexed ``node_id`` is cheaper
-        # than threading the data through the base class's API.
-        existing = {row["node_id"]: row for row in self.get_nodes_bulk(node_ids)}
-        now = utc_now()
-
-        # Build INSERT rows — one tuple per node. ``created_at`` carries
-        # forward from any prior version, mirroring the single-row method.
-        insert_rows: list[tuple[Any, ...]] = []
+        # Serialise every row before the transaction opens, so a bad value
+        # raises while nothing is locked. ``created_at`` and the stamps need
+        # the clock and the locked rows, so they are added inside it.
+        row_prefixes: list[tuple[Any, ...]] = []
         for spec, nid in zip(nodes, node_ids, strict=True):
-            prior = existing.get(nid)
-            created_at = prior["created_at"] if prior else now
             generation_spec = spec.get("generation_spec")
             document_ids = spec.get("document_ids")
-            insert_rows.append(
+            row_prefixes.append(
                 (
                     generate_ulid(),
                     nid,
@@ -628,25 +620,39 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     if document_ids is not None
                     else None,
                     json.dumps(spec.get("properties") or {}, allow_nan=False),
-                    created_at,
-                    now,
-                    now,
                 )
             )
 
-        # No retry here, unlike ``upsert_node``: ``existing`` was read above,
-        # outside this transaction, so a retry would have to repeat that read
-        # and rebuild every row. A conflict on ``_NODE_CURRENT_INDEX`` rolls
-        # the whole batch back, and the caller can re-run it.
+        # No retry here, unlike ``upsert_node``. The ``FOR UPDATE`` below
+        # waits out a concurrent writer of a row and then finds it closed,
+        # without seeing the version that writer inserted, so that node is
+        # written as new and conflicts on ``_NODE_CURRENT_INDEX``. A conflict
+        # rolls the whole batch back, and the caller can re-run it.
         import psycopg.errors  # noqa: PLC0415
 
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                if existing:
+                # Lock the current rows first, in node_id order so two
+                # overlapping batches cannot deadlock, and read the clock
+                # after the lock is granted: a stamp taken before the
+                # transaction predates any version a concurrent writer
+                # committed meanwhile, and the ``UPDATE`` below would close
+                # that version with a ``valid_to`` earlier than its own
+                # ``valid_from``. ``created_at`` carries forward from the
+                # locked row, mirroring the single-row method.
+                cur.execute(
+                    "SELECT node_id, created_at FROM nodes"
+                    " WHERE node_id = ANY(%s) AND valid_to IS NULL"
+                    " ORDER BY node_id FOR UPDATE",
+                    (node_ids,),
+                )
+                prior_created_at = {row[0]: row[1] for row in cur.fetchall()}
+                now = utc_now()
+                if prior_created_at:
                     cur.execute(
                         "UPDATE nodes SET valid_to = %s "
                         "WHERE node_id = ANY(%s) AND valid_to IS NULL",
-                        (now, list(existing.keys())),
+                        (now, list(prior_created_at)),
                     )
                 cur.executemany(
                     """
@@ -656,7 +662,10 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                          created_at, updated_at, valid_from, valid_to)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
                     """,
-                    insert_rows,
+                    [
+                        (*prefix, prior_created_at.get(prefix[1], now), now, now)
+                        for prefix in row_prefixes
+                    ],
                 )
         except psycopg.errors.UniqueViolation as exc:
             if getattr(exc.diag, "constraint_name", None) != _NODE_CURRENT_INDEX:
@@ -862,16 +871,15 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 raise RuntimeError(msg)
             winner = str(winner_row[2])
             if winner != entity_id and stale_owner_name_key is not None:
-                cur.execute(
-                    """
-                    SELECT properties
-                    FROM nodes
-                    WHERE node_id = %s AND valid_to IS NULL
-                    FOR SHARE
-                    """,
-                    (winner,),
-                )
-                owner_row = cur.fetchone()
+                owner_row = self._share_lock_current_node_properties(cur, winner)
+                if owner_row is None:
+                    # Nothing read does not yet mean no owner. A concurrent
+                    # write that closed the owner's row and committed while
+                    # the read above waited leaves it closed on recheck, and
+                    # the version that write inserted is not visible to the
+                    # same statement. A new statement sees it. Only a second
+                    # empty read means the owner has no current row.
+                    owner_row = self._share_lock_current_node_properties(cur, winner)
                 owner_name = None
                 if owner_row is not None:
                     properties = owner_row[0]
@@ -930,6 +938,27 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 alias_id=str(winner_row[1]),
                 entity_id=winner,
             )
+
+    @staticmethod
+    def _share_lock_current_node_properties(
+        cur: psycopg.Cursor, node_id: str
+    ) -> tuple[Any, ...] | None:
+        """Read a node's current ``properties`` row on ``cur`` with
+        ``FOR SHARE``, so a concurrent writer of that row waits for this
+        transaction. One statement: a row closed while it waited reads as
+        ``None``.
+        """
+        cur.execute(
+            """
+            SELECT properties
+            FROM nodes
+            WHERE node_id = %s AND valid_to IS NULL
+            FOR SHARE
+            """,
+            (node_id,),
+        )
+        row: tuple[Any, ...] | None = cur.fetchone()
+        return row
 
     def _resolve_alias_for_update(
         self,
