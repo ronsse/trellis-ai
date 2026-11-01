@@ -259,7 +259,7 @@ Each YAML file holds a single `graph:` block in the shape `recommended-config.ya
 
 Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy". A run that finishes with errors (`--continue-on-error`) carries `copy_scope` beside `status: "error"`.
 
-**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`) after printing text, a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`, in **both** formats. There is no JSON and no `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets a parse failure and must read the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` exits `1` after one line of text in both formats, before anything is written.
+**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`). Text prints a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`; `--format json` prints one `{"status": "error", "message": "Migration aborted: ...", "hint": "..."}` object. Neither carries `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets `null` and must read `status` or the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` is refused before anything is written, with one line of text or one `{"status": "error", "message": ...}` object, and an exit code from the list below. The `--from-config` / `--to-config` refusals answer in the same two shapes.
 
 **Exit codes** (the same under both formats, as observed through the installed `trellis` entry point):
 

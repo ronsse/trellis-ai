@@ -46,7 +46,7 @@ from rich.markup import escape
 from trellis.core.error_sanitize import render_exception_detail
 from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
-from trellis_cli.output import build_console
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log
 
 if TYPE_CHECKING:
@@ -312,6 +312,20 @@ def _parse_since(since: str | None) -> datetime | None:
     return parsed
 
 
+def _refuse_invalid_argument(message: str, output_format: str) -> None:
+    """Report a refused argument on the caller's format.
+
+    ``--format json`` gets the ``{"error": <code>, "message": ...}`` object this
+    module's other failures emit, plus the ``"status": "error"`` every other
+    command's carries. The exit stays at the call site, below this branch, so
+    both formats reach it (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    if output_format == "json":
+        emit_json({"status": "error", "error": "validation_error", "message": message})
+    else:
+        console.print(f"[red]{escape(message)}[/red]")
+
+
 def list_proposals_command(
     *,
     limit: int,
@@ -323,7 +337,7 @@ def list_proposals_command(
         # Typer's min= validation handles this on the registered
         # wrapper, but the programmatic entry-point may also be
         # exercised in tests; be loud either way.
-        console.print("[red]--limit must be a positive integer[/red]")
+        _refuse_invalid_argument("--limit must be a positive integer", output_format)
         raise typer.Exit(code=EXIT_INTERNAL)
     capped_limit = min(limit, _LIST_LIMIT_CEILING)
 
@@ -386,7 +400,7 @@ def show_proposal_command(
 ) -> None:
     """CLI body for ``show-proposal``."""
     if not proposal_id:
-        console.print("[red]proposal_id is required[/red]")
+        _refuse_invalid_argument("proposal_id is required", output_format)
         raise typer.Exit(code=EXIT_INTERNAL)
 
     try:

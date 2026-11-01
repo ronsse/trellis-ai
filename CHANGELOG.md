@@ -272,8 +272,26 @@ All notable changes to Trellis will be documented in this file.
   byte-identical. The three LLM-client and config helpers keep their signatures:
   they read the running command's `--format` through
   `trellis_cli.output.active_output_format`, which answers `text` outside a
-  command. Still prose under `--format json`, left as is because tests pin it:
-  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+  command. `trellis admin migrate-graph`'s config-file, step and capacity
+  refusals were left as prose; the next entry covers them.
+- **The remaining refusals under `--format json` answer with one JSON object
+  too.** `trellis admin migrate-graph` (its five `--from-config` / `--to-config`
+  refusals, a source over `--max-nodes`, and a run a store error aborted),
+  `trellis admin show-proposal` and `trellis admin list-proposals` on a blank id
+  or a non-positive `--limit`, `trellis admin draft-promotion-adr` on an unknown
+  candidate or an existing output file without `--force`, and the learning
+  parameter file guard shared by `trellis analyze learning-candidates` and
+  `trellis worker curate` each printed prose on stdout and exited non-zero. They
+  now emit `{"status": "error", "message": ...}`. An aborted `migrate-graph`
+  run also carries the next step under `hint`, where text prints it as a second
+  line, and still carries no `copy_scope`. The proposal commands add
+  `"error": "validation_error"` so their existing `error` key stays populated.
+  Exit codes are unchanged (`migrate-graph` config file `2`, step abort `5`,
+  source over `--max-nodes` `1`, the others `1`), and the human-format text is
+  byte-identical. One success path changes: `draft-promotion-adr --force` under
+  `--format json` no longer prints its "Overwriting existing file" line ahead of
+  the JSON object, which made stdout unparseable at exit `0`; the warning is
+  still logged and text still prints it.
 - **`trellis admin quickstart` stops on a config path it cannot read instead of
   initializing over it.** `config.yaml` as a dangling or looping symlink read as
   absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
