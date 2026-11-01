@@ -87,9 +87,11 @@ class World:
         assert response.status_code == 200, (who, params, response.text)
         return {d["doc_id"] for d in response.json()["documents"]}
 
-    def searched(self, who: str) -> set[str]:
+    def searched(self, who: str, **params: Any) -> set[str]:
         response = self.client.get(
-            "/api/v1/search", params={"q": "alpha"}, headers=self.headers(who)
+            "/api/v1/search",
+            params={"q": "alpha", **params},
+            headers=self.headers(who),
         )
         assert response.status_code == 200, (who, response.text)
         return {r["doc_id"] for r in response.json()["results"]}
@@ -196,13 +198,107 @@ class TestARowWhoseMetadataIsNotAnObject:
         ).json()["documents"]
         assert {d["doc_id"]: d["label"] for d in listed}[doc_id] == shown
 
-    @pytest.mark.parametrize("doc_id", ["old-null", "old-empty-list", "old-zero"])
+    @pytest.mark.parametrize(
+        "doc_id",
+        [
+            "old-null",
+            "old-empty-list",
+            "old-empty-string",
+            "old-zero",
+            "old-false",
+            "old-pairs-public",
+            "old-pairs-restricted",
+        ],
+    )
     def test_the_label_of_a_row_dict_converts_is_unchanged(
         self, world: World, doc_id: str
     ) -> None:
+        """``dict()`` converts these, so the label reads no bag: ``internal``.
+
+        A list of pairs is among them. The gate judges it by its converted
+        content (``old-pairs-restricted`` is withheld from a ``read`` key), but
+        the label has only ever described a row whose metadata is an object, and
+        it still does.
+        """
         shown = world.by_id("restricted", doc_id).json()["document"]["label"]
         assert shown == {
             "sensitivity": "internal",
+            "stored": False,
+            "corrupt": False,
+            "external_readable": False,
+        }
+        listed = world.client.get(
+            "/api/v1/documents", params={"limit": 100}, headers=world.headers("admin")
+        ).json()["documents"]
+        assert {d["doc_id"]: d["label"] for d in listed}[doc_id] == shown
+
+
+class TestAChunkOfARowWhoseMetadataIsNotAnObject:
+    """A chunk reads as its parent does, and the parent reads ``restricted``."""
+
+    @staticmethod
+    def _seed(world: World, raw: str) -> None:
+        _insert_raw(world.registry, "par", raw)
+        _insert_raw(world.registry, "par#chunk-0", json.dumps({"parent_doc_id": "par"}))
+
+    @pytest.mark.parametrize("raw", sorted(["5", "[1]", '"str"', "true"]))
+    @pytest.mark.parametrize("who", ["internal", "confidential"])
+    def test_a_key_below_restricted_is_served_neither(
+        self, world: World, raw: str, who: str
+    ) -> None:
+        self._seed(world, raw)
+        listed = world.listed(who, include_chunks="true")
+        assert "plain" in listed
+        assert not {"par", "par#chunk-0"} & listed
+        assert not {"par", "par#chunk-0"} & world.listed(
+            who, include_chunks="true", q="alpha"
+        )
+        assert "plain" in world.searched(who, include_chunks="true")
+        assert not {"par", "par#chunk-0"} & world.searched(who, include_chunks="true")
+        for doc_id in ("par", "par#chunk-0"):
+            assert world.by_id(who, doc_id.replace("#", "%23")).status_code == 404
+
+    @pytest.mark.parametrize("raw", sorted(["5", "[1]", '"str"', "true"]))
+    @pytest.mark.parametrize("who", ["restricted", "admin"])
+    def test_a_restricted_key_is_served_both(
+        self, world: World, raw: str, who: str
+    ) -> None:
+        self._seed(world, raw)
+        assert {"par", "par#chunk-0"} <= world.listed(who, include_chunks="true")
+        assert {"par", "par#chunk-0"} <= world.searched(who, include_chunks="true")
+        for doc_id in ("par", "par#chunk-0"):
+            assert world.by_id(who, doc_id.replace("#", "%23")).status_code == 200
+
+    @pytest.mark.parametrize("raw", ["null", "[]", '""'])
+    def test_a_parent_dict_converts_leaves_its_chunk_as_it_was(
+        self, world: World, raw: str
+    ) -> None:
+        self._seed(world, raw)
+        assert {"par", "par#chunk-0"} <= world.listed("internal", include_chunks="true")
+        assert world.by_id("internal", "par%23chunk-0").status_code == 200
+
+    def test_the_label_of_such_a_chunk_is_restricted_and_not_corrupt(
+        self, world: World
+    ) -> None:
+        """The parent is the corrupt row; its chunk reads as a hidden parent's."""
+        self._seed(world, "5")
+        shown = world.by_id("restricted", "par%23chunk-0").json()["document"]["label"]
+        assert shown == {
+            "sensitivity": "restricted",
+            "stored": False,
+            "corrupt": False,
+            "external_readable": False,
+        }
+
+    def test_an_empty_list_on_a_chunk_under_a_restricted_parent_is_not_corrupt(
+        self, world: World
+    ) -> None:
+        """Its own value is not the fault, and it never reported one."""
+        _insert_raw(world.registry, "par", json.dumps(RESTRICTED_RECORD))
+        _insert_raw(world.registry, "par#chunk-0", "[]")
+        shown = world.by_id("restricted", "par%23chunk-0").json()["document"]["label"]
+        assert shown == {
+            "sensitivity": "restricted",
             "stored": False,
             "corrupt": False,
             "external_readable": False,

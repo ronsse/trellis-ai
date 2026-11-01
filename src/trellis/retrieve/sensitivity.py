@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.retrieve.concentration import resolve_parent_id
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.withholding import summarize_withheld
 from trellis.schemas.classification import (
@@ -290,6 +291,21 @@ def reader_for(
     return _readable
 
 
+def label_is_unreadable(metadata: Any) -> bool:
+    """Whether a stored ``metadata`` holds no label the direct-read gate can read.
+
+    ``dict()`` refuses it: JSON that is not an object and not a list of pairs (a
+    number, a string, ``true``, a list of scalars). Everything it converts,
+    ``None`` and every other empty value and a list of pairs, is judged as it
+    always was.
+    """
+    try:
+        dict(metadata or {})
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
 class DocumentClearance:
     """:func:`partition_by_clearance`'s predicate over a stored document.
 
@@ -303,11 +319,53 @@ class DocumentClearance:
     refused every chunk id: only a whole document is ever served to it, so a
     chunk answers as a missing id does. Every other clearance judges the
     effective sensitivity value, as before.
+
+    ``fail_closed_on_unreadable_label`` (the default) is for a direct read: a row
+    whose label cannot be read (:func:`label_is_unreadable`), and a chunk whose
+    parent row is such a row, read ``restricted``. A caller that must keep the
+    older judgement passes ``False``, which is :meth:`sensitivity` exactly as it
+    was before that existed, raising on such a row and judging a chunk on its own
+    label. A pack's pointer concealment passes it (a pack is under a measurement
+    freeze), and so does the egress gate (its verdicts are pinned).
     """
 
-    def __init__(self, document_store: DocumentStore, clearance: Sensitivity) -> None:
+    def __init__(
+        self,
+        document_store: DocumentStore,
+        clearance: Sensitivity,
+        *,
+        fail_closed_on_unreadable_label: bool = True,
+    ) -> None:
         self.clearance = clearance
+        self._document_store = document_store
+        self._fail_closed = fail_closed_on_unreadable_label
         self._cache = ParentVerdictCache(document_store)
+        self._refused_parents: dict[str, bool] = {}
+
+    def _parent_label_is_unreadable(self, item: PackItem) -> bool:
+        """Whether ``item`` is a chunk whose parent row holds no readable label.
+
+        :meth:`ParentVerdictCache.resolve` answers ``None`` for such a parent, the
+        same answer as for an absent one, so a chunk would be judged on its own
+        label and served to a caller its parent is withheld from. A store that
+        raises is left to the cache, which reads it as restricted.
+        """
+        if not _is_chunk_id(item.item_id):
+            return False
+        parent_id = resolve_parent_id(item)
+        if parent_id == item.item_id:
+            return False
+        if parent_id not in self._refused_parents:
+            try:
+                parent = self._document_store.get(parent_id)
+            except Exception:
+                # GRACEFUL-DEGRADATION: the parent cache fetches the same row
+                # and fails closed on an outage; this check adds nothing to it.
+                parent = None
+            self._refused_parents[parent_id] = parent is not None and (
+                label_is_unreadable(parent.get("metadata"))
+            )
+        return self._refused_parents[parent_id]
 
     def sensitivity(
         self, doc_id: str, metadata: Mapping[str, Any] | None
@@ -317,16 +375,20 @@ class DocumentClearance:
         A row whose stored ``metadata`` is JSON that is not an object (a number,
         a string, ``true``, a list that is not pairs) holds no label this gate
         can read, and reads ``restricted``: a caller below ``restricted`` is not
-        served it, and one at ``restricted`` is, as it is every row. It used to
-        raise, which failed the whole read it sat in. Only what ``dict()``
-        refuses reads this way: the shapes it converts (``None`` and every
-        other empty value, a list of pairs) are judged as they always were.
+        served it, and one at ``restricted`` is, as it is every row. So does a
+        chunk of such a row. It used to raise, which failed the whole read it sat
+        in, and a chunk was judged on its own label. Only what ``dict()``
+        refuses reads this way: the shapes it converts (``None`` and every other
+        empty value, a list of pairs) are judged as they always were. With
+        ``fail_closed_on_unreadable_label`` off, none of this applies.
         """
-        try:
-            bag = dict(metadata or {})
-        except (TypeError, ValueError):
+        if self._fail_closed and label_is_unreadable(metadata):
             return "restricted"
-        item = PackItem(item_id=doc_id, item_type="document", metadata=bag)
+        item = PackItem(
+            item_id=doc_id, item_type="document", metadata=dict(metadata or {})
+        )
+        if self._fail_closed and self._parent_label_is_unreadable(item):
+            return "restricted"
         return effective_sensitivity(item, self._cache)
 
     def permits(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
@@ -352,22 +414,35 @@ def _row_cannot_be_parsed(exc: BaseException) -> bool:
 
     The shapes reproduced against a raw row, and nothing else: ``metadata_json``
     that is not JSON (``json.JSONDecodeError``, which also covers empty text and a
-    control character in a string), one held as bytes that are not UTF-8
-    (``UnicodeDecodeError``), valid JSON the parser refuses (an integer of more
-    than 4300 digits raises a bare ``ValueError`` whose text names the limit), JSON
-    nested past the recursion limit (``RecursionError``), and a SQLite text column
-    that is not UTF-8 (a ``sqlite3.OperationalError`` whose text names the decode;
-    any other ``OperationalError`` is a store fault and is not matched). All of
-    them depend on the row, never on the store, so none is an outage. Any other
-    ``ValueError`` is not matched: nothing reproduced shows it is the row's.
+    control character in a string), JSON nested past the recursion limit
+    (``RecursionError``), and a SQLite text column that is not UTF-8 (a
+    ``sqlite3.OperationalError`` whose text names the decode; any other
+    ``OperationalError`` is a store fault and is not matched). All four depend on the
+    row, never on the store, so none of them is an outage.
+
+    The egress verdict reads this (``failed_read_verdict``), so it is deliberately
+    not widened; :func:`_by_id_fault_is_the_row` is the wider test a public by-id
+    read uses.
     """
-    if isinstance(exc, json.JSONDecodeError | UnicodeDecodeError | RecursionError):
+    if isinstance(exc, json.JSONDecodeError | RecursionError):
         return True
-    if isinstance(exc, ValueError):
-        return str(exc).startswith(_INT_DIGIT_LIMIT)
     return isinstance(exc, sqlite3.OperationalError) and str(exc).startswith(
         _SQLITE_UNDECODABLE
     )
+
+
+def _by_id_fault_is_the_row(exc: BaseException) -> bool:
+    """:func:`_row_cannot_be_parsed`, plus two more faults that are the row's own.
+
+    ``metadata_json`` held as bytes that are not UTF-8 (``UnicodeDecodeError``)
+    and valid JSON the parser refuses, an integer of more than 4300 digits, which
+    raises a bare ``ValueError`` whose text names the limit. Neither depends on
+    the store. Any other ``ValueError`` is not matched: nothing reproduced shows
+    it is the row's, and an existing test pins one propagating as a store fault.
+    """
+    if _row_cannot_be_parsed(exc) or isinstance(exc, UnicodeDecodeError):
+        return True
+    return isinstance(exc, ValueError) and str(exc).startswith(_INT_DIGIT_LIMIT)
 
 
 def read_document_row(
@@ -378,7 +453,7 @@ def read_document_row(
     A public-only caller must receive nothing that depends on a row it may not
     read, and a hidden row whose stored metadata cannot be parsed would otherwise
     answer a guessed id with a 500 where a missing id answers 404. So for that
-    clearance alone, a row that fails to parse (:func:`_row_cannot_be_parsed`)
+    clearance alone, a row that fails to parse (:func:`_by_id_fault_is_the_row`)
     reads as ``None``, exactly as an absent id does. Any other failure is a store
     fault, does not depend on the id, and propagates; every other clearance
     propagates the parse failure too, as it always did.
@@ -386,7 +461,7 @@ def read_document_row(
     try:
         return document_store.get(doc_id)
     except (ValueError, RecursionError, sqlite3.OperationalError) as exc:
-        if not is_public_only(clearance) or not _row_cannot_be_parsed(exc):
+        if not is_public_only(clearance) or not _by_id_fault_is_the_row(exc):
             raise
         logger.warning(
             "public_read_unparseable_row", doc_id=doc_id, error=type(exc).__name__
@@ -395,7 +470,11 @@ def read_document_row(
 
 
 def readable_ids(
-    document_store: DocumentStore, ids: Iterable[str], clearance: Sensitivity
+    document_store: DocumentStore,
+    ids: Iterable[str],
+    clearance: Sensitivity,
+    *,
+    fail_closed_on_unreadable_label: bool = True,
 ) -> list[str]:
     """The ``ids`` a caller at ``clearance`` may read, in order.
 
@@ -405,10 +484,18 @@ def readable_ids(
     no document row is no verdict (a graph node, a trace), as it is for
     ``get_items``. A store that raises is unreadable: an outage must not read
     as permission. ``restricted`` reads everything without touching the store.
+
+    ``fail_closed_on_unreadable_label`` is :class:`DocumentClearance`'s, passed
+    through: off, a row whose label cannot be read raises out of this call, as it
+    always did.
     """
     if clearance == "restricted":
         return list(ids)
-    gate = DocumentClearance(document_store, clearance)
+    gate = DocumentClearance(
+        document_store,
+        clearance,
+        fail_closed_on_unreadable_label=fail_closed_on_unreadable_label,
+    )
     readable: list[str] = []
     for item_id in ids:
         try:
@@ -527,7 +614,11 @@ def _without_pointers(
 
 
 def _unreadable_pointers(
-    document_store: DocumentStore, named: Collection[str], clearance: Sensitivity
+    document_store: DocumentStore,
+    named: Collection[str],
+    clearance: Sensitivity,
+    *,
+    fail_closed_on_unreadable_label: bool = True,
 ) -> set[str]:
     """The ids in ``named`` that a caller at ``clearance`` may not read.
 
@@ -536,13 +627,21 @@ def _unreadable_pointers(
     in a pack's candidate pool: a pool test would answer only for a document
     that matched the query, which is an oracle on what matched.
     """
-    return set(named) - set(readable_ids(document_store, sorted(named), clearance))
+    readable = readable_ids(
+        document_store,
+        sorted(named),
+        clearance,
+        fail_closed_on_unreadable_label=fail_closed_on_unreadable_label,
+    )
+    return set(named) - set(readable)
 
 
 def _concealed_bags(
     bags: Sequence[Mapping[str, Any] | None],
     document_store: DocumentStore | None,
     clearance: Sensitivity,
+    *,
+    fail_closed_on_unreadable_label: bool = True,
 ) -> list[Mapping[str, Any] | None]:
     """Each metadata bag, or a copy without the pointers the caller cannot read.
 
@@ -561,7 +660,12 @@ def _concealed_bags(
         named |= _stored_pointers(bag)
     if not named:
         return list(bags)
-    hidden = _unreadable_pointers(document_store, named, clearance)
+    hidden = _unreadable_pointers(
+        document_store,
+        named,
+        clearance,
+        fail_closed_on_unreadable_label=fail_closed_on_unreadable_label,
+    )
     if not hidden:
         return list(bags)
     return [_without_pointers(bag, hidden) if bag else bag for bag in bags]
@@ -600,7 +704,18 @@ def conceal_unreadable_successors(
     rather than copied.
     """
     pool = list(items)
-    bags = _concealed_bags([item.metadata for item in pool], document_store, clearance)
+    # DELIBERATE: a pack keeps raising on a pointer that names a row whose
+    # metadata is not an object (``label_is_unreadable``), at ``internal`` and
+    # ``confidential``, exactly as before the direct reads learned to fail closed.
+    # What a pack serves is under a measurement freeze, and dropping that pointer
+    # instead of raising would change it. Every other caller judges such a row
+    # ``restricted``. ``test_pack_unchanged_by_unreadable_metadata.py`` pins it.
+    bags = _concealed_bags(
+        [item.metadata for item in pool],
+        document_store,
+        clearance,
+        fail_closed_on_unreadable_label=False,
+    )
     return [
         item if bag is item.metadata else item.model_copy(update={"metadata": bag})
         for item, bag in zip(pool, bags, strict=True)

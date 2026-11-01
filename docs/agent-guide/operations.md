@@ -4911,8 +4911,12 @@ guard:
   and not this one (`GET /documents` and `GET /search` answer 200 without it, where they
   answered 500; by id it is a 404), and a `restricted` or `admin` key is served it, as it is
   every row. `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of pairs are judged
-  as they always were. A pack is unchanged: it judges the item's own metadata, not this
-  gate, and still serves such a row to a `read` key. A row of non-JSON text, or of a text
+  as they always were. A chunk of such a row reads `restricted` too, in a list with
+  `include_chunks=true`, in `search` and by id (by id it was served before). A pack is
+  unchanged: it judges the item's own metadata, and still serves such a row to a `read`
+  key. The one place a pack reaches this gate, a served item whose `supersedes_doc_id`,
+  `updates_doc_id`, `evidence_ref` or `source_item_id` names such a row, still raises at
+  `internal` and `confidential`, as it did, and keeps the pointer at `restricted`. A row of non-JSON text, or of a text
   column the page cannot decode, still fails an unfiltered listing and a `search` that
   matches it for every key above `public`, as before.
 
