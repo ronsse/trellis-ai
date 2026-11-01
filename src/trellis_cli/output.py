@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from typing import TYPE_CHECKING, Any
@@ -155,6 +156,36 @@ def emit_json(
     :func:`emit_machine_text` for what that path does to a payload.
     """
     emit_machine_text(json.dumps(payload, indent=indent, default=default))
+
+
+def active_output_format() -> str:
+    """Return the ``--format`` of the command now running, ``"text"`` outside one.
+
+    For the helpers a command calls to refuse an invocation
+    (``_require_llm_client_or_exit`` and its siblings). They exit on some paths,
+    so their signatures, and the stubs that replace them, cannot grow a format
+    parameter; the format comes from the running command instead. Commands name
+    the option ``output_format``. Called with no command running (a unit test,
+    a script) a helper gets ``"text"``, the Rich rendering it has always had.
+
+    The read is advisory and never raises: it runs on a failure path, where an
+    escaped exception would replace the refusal it was about to report.
+    """
+    try:
+        # typer >= 0.27 carries its own click, whose context stack is not the
+        # one ``click.get_current_context`` reads; older typer runs on click.
+        for module_name in ("typer._click.globals", "click"):
+            try:
+                getter = importlib.import_module(module_name).get_current_context
+            except (ImportError, AttributeError):
+                continue
+            ctx = getter(silent=True)
+            if ctx is not None:
+                value = ctx.params.get("output_format")
+                return value if isinstance(value, str) else "text"
+    except Exception:  # advisory read on a failure path
+        return "text"
+    return "text"
 
 
 def build_console(**overrides: Any) -> Console:

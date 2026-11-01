@@ -107,7 +107,7 @@ from trellis_cli.exit_codes import (
     EXIT_VALIDATION,
     refusal_exit_code,
 )
-from trellis_cli.output import build_console, emit_json
+from trellis_cli.output import active_output_format, build_console, emit_json
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
@@ -308,24 +308,51 @@ def _require_llm_facet_classifier() -> Classifier:
     try:
         llm = registry.build_llm_client(consumer=LLMConsumer.CLASSIFY_SHADOW)
     except BackendNotInstalledError as exc:
-        console.print(
-            f"[red]classify shadow requires an LLM SDK that is not installed: "
-            f"{escape(str(exc))}[/red]\n"
-            "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
-            "and configure an 'llm:' block in config.yaml.[/dim]",
-            soft_wrap=True,
-        )
+        if active_output_format() == "json":
+            emit_json(
+                {
+                    "status": "error",
+                    "message": (
+                        "classify shadow requires an LLM SDK that is not "
+                        f"installed: {exc} Install it, e.g. 'uv pip install "
+                        "trellis-ai[llm-openai]', and configure an 'llm:' block "
+                        "in config.yaml."
+                    ),
+                }
+            )
+        else:
+            console.print(
+                f"[red]classify shadow requires an LLM SDK that is not installed: "
+                f"{escape(str(exc))}[/red]\n"
+                "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
+                "and configure an 'llm:' block in config.yaml.[/dim]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
         config_path = str(get_config_dir() / "config.yaml")
-        console.print(
-            "[red]classify shadow requires an LLM client but none is "
-            "configured.[/red]\n"
-            f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
-            "api_key_env, model). A local model is the intended default here — "
-            "the pass is ~1.6s per document and runs over the whole corpus.[/dim]",
-            soft_wrap=True,
-        )
+        if active_output_format() == "json":
+            emit_json(
+                {
+                    "status": "error",
+                    "message": (
+                        "classify shadow requires an LLM client but none is "
+                        f"configured. Add an 'llm:' block to {config_path} "
+                        "(provider, api_key_env, model). A local model is the "
+                        "intended default here — the pass is ~1.6s per document "
+                        "and runs over the whole corpus."
+                    ),
+                }
+            )
+        else:
+            console.print(
+                "[red]classify shadow requires an LLM client but none is "
+                "configured.[/red]\n"
+                f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
+                "api_key_env, model). A local model is the intended default here — "
+                "the pass is ~1.6s per document and runs over the whole corpus.[/dim]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
     return build_llm_facet_classifier(
         registry,

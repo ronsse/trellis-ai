@@ -5256,7 +5256,7 @@ adapter).
 
 **Definitional parity.** Where a metric overlaps with the agent-loop
 convergence scenario, the formula matches that scenario's helpers in
-`eval/scenarios/_convergence_common.py` (`pack_success_rate` ↔
+`eval/scenarios/_convergence_common.py` in the `trellis-evals` repo (`pack_success_rate` ↔
 `round_success_rate`; `reference_rate` ↔ the useful-fraction in
 `_base_round_metrics` / `_convergence_stats`; `advisory_fitness`'s suppressed
 count ↔ `advisories_suppressed_total`). Each shared formula is cross-referenced

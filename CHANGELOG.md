@@ -343,6 +343,85 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
+  is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
+  and a CI smoke test under `tests/unit/eval/` as living here; the harness moved
+  to the `trellis-evals` repo on 2026-07-12 and this repo keeps only
+  `eval/reports/`. The page now says so and marks each command as run from that
+  repo. `plan-evaluation-strategy.md` and `plan-real-corpus-eval.md` carry the
+  same path note the other stamped plans do, and
+  `docs/agent-guide/program-convergence-eval.md` and one path in
+  `operations.md` name the repo. ROADMAP gate N3 said #194 stays open; it closed
+  2026-10-29, and the gate now states its acceptance command and a dated run.
+  Docs only; no code, test or served pack changes.
+
+- **SQLite event log time bounds compare `occurred_at` by instant, not as
+  text.** `get_events(since=..., until=...)`, `count(since=...)` and the
+  `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`
+  text, so an event stamped `-11:00` that was newer than a `since` bound read
+  as older and was dropped, a `+14:00` event fell outside an `until`, and a
+  bound given in another zone, or a naive stamp, sat on the wrong side of the
+  instant it names. `EventLog.get_events` now documents inclusive by-instant
+  bounds, and `SQLiteEventLog` filters and orders on a generated
+  `occurred_at_utc` column with two indexes, added to an existing file on open
+  without rewriting a stored row: one on the instant and one led by
+  `event_type` (Postgres already has the matching `(event_type, occurred_at)`
+  index). A read that names an event type, such as `count`, the session dedup
+  and the recency lookups, is a range scan on the second. A read that filters
+  on `source` and then compares or orders the instant has no index led by
+  `source`, so it evaluates the expression per matching row: 122 ms before and
+  598 ms after on a million-row log. Events at one instant now come back in
+  insertion order (newest first for `order="desc"`) on every plan; before, the
+  order among them depended on the plan, so a `desc` `limit` that cuts a tie
+  can return other rows of that tie than it did. The migration is best effort,
+  as the trace store's is: a read-only file or one under another connection's
+  write lock opens as before, warns (`event_log_schema_migration_skipped`) and
+  reads through the same expression unindexed. The expression, the bound and
+  the migration now live in `trellis.stores.sqlite.instant`, which
+  `SQLiteTraceStore` uses unchanged in behaviour. `idx_events_occurred_at`
+  stays, because an earlier build expects it; `append` still writes the text it
+  is given, so `get_event` returns the `occurred_at` it was handed, naive or
+  offset. Eight by-instant cases join the event log contract suite, so Postgres
+  runs them under `live-infra`. The Postgres backend binds a naive datetime
+  without normalising it, which psycopg sends as `timestamp` and the server
+  reads in the session's time zone, so the naive case holds there under a UTC
+  session only; it is not changed here.
+
+  **Upgrade note.** The first open of an existing SQLite event log builds both
+  indexes while holding the write lock, about 5 to 7 seconds per million rows
+  (5.2 s at one million, 15 s at three, 37 s at five with a cold cache).
+  Another process writing to the file waits for the build and, once one
+  build outlasts that writer's 10-second busy timeout, fails with
+  `database is locked`: no failure at three million rows (longest stall 7.7 s),
+  three at five million. Take the first open after upgrading a log of several
+  million rows with no writer running. `trellis analyze` and every other
+  read-only command do this migration too when the file allows it; under a held
+  lock they skip it and warn. Postgres is unaffected.
+
+- **A refused command under `--format json` answers with one JSON object, not a
+  Rich line.** `trellis extract refresh` (all eight refusal branches),
+  `trellis classify shadow` and `trellis worker enrich` / `mine-precedents`
+  without a usable LLM client, `trellis worker tune` on a malformed
+  `learning.auto_promote` config, and `trellis analyze replay` on a
+  `--graph-selection` conflict or a rejected replay policy each printed prose and
+  exited non-zero, so a caller parsing stdout got a decode error instead of the
+  reason. They now emit `{"status": "error", "message": ...}`, the shape their
+  neighbours use. Exit codes are unchanged, and the human-format text is
+  byte-identical. The three LLM-client and config helpers keep their signatures:
+  they read the running command's `--format` through
+  `trellis_cli.output.active_output_format`, which answers `text` outside a
+  command. Still prose under `--format json`, left as is because tests pin it:
+  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+- **`trellis admin quickstart` stops on a config path it cannot read instead of
+  initializing over it.** `config.yaml` as a dangling or looping symlink read as
+  absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
+  first-run branch wrote a config through the link and reported success, and a
+  `config_dir` that is a file crashed on the mkdir with a traceback. The check is
+  now `path_is_present`, and the registry's own read raises the `ConfigError`
+  that names the file. **Exit code change, in those cases only:** `0` (link) or
+  `1` (file) becomes `5` (`EXIT_STORE`), in both formats.
+
+
 - **`upsert_edges_bulk` on ArcadeDB keeps its returned ids when the post-commit
   recount read fails (closes #1078).** The one read that finds triplets with
   more than one current row ran outside the per-triplet handling, so a failure
