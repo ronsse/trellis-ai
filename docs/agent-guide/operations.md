@@ -3634,10 +3634,14 @@ one.
 sweeps and, for each join, the one pack row its first pack id names, fetched by
 id. It does not scan `PACK_ASSEMBLED`: later packs, the number of packs and the
 volume of pack rows never enter the computation, so there is nothing to filter
-out of the output. A test enforces this with an event log that allows only the
-join and sweep events and a first pack by id, and raises on any other event type
-or attribute; the join and sweep payloads it hands back refuse every key the
-report does not read. Joins and sweeps are paged to completion, so there is no
+out of the output. A test enforces this with an event log (`_FirstPackOnlyLog`) that
+allows only the join and sweep events and a first pack by id, and raises on any
+other event type or attribute. The payloads it hands back are a separate wrapper
+(`_GatedLog`) whose join and sweep payloads serve only the keys the report
+reads, and refuse the others, including `pop`, `setdefault`, `len`, `repr` and
+`==`; `retrieval_results`, `retrieval_errors` and `pack_ids_unparsed` are served
+only from a join that names no pack. That bounds what the fixtures read, not the
+store: a reader of the events can still read them. Joins and sweeps are paged to completion, so there is no
 scan cap and `--limit` with `--operational` is a usage error (exit 2 in both
 formats). Joins stamped at one instant are ordered by event id, and
 `--by-commit` rows first seen together by build label.
@@ -3655,13 +3659,16 @@ join for the same session can change the flags, the covariates and the first
 pack id; a later join is looked at only while the anchor names no pack, and
 only for whether it does. A session with a pack-naming join before the window
 start is skipped, so a join written again inside the window cannot bring it in
-with other values. Everything after the first pack is post-treatment and is
+with other values; so is one whose anchor names no pack when any join of the
+session precedes the window, so a pack-free join written again cannot count a
+session in a later window. Everything after the first pack is post-treatment and is
 never read: later packs, the pack count, a session's length and every outcome
 value. Pooling does not make a post-treatment figure safe, because a pooled
 count differenced against `eligible_by_arm` across windows recovers it by arm,
-so pooled counts of them are absent too. Neither one report nor the differences
-between reports over several windows (`--until`, `--days`, or stored nightly
-output) vary with those values.
+so pooled counts of them are absent too. Nothing read is one of those values, so neither one
+report nor the differences between reports over several windows (`--until`,
+`--days`, or stored nightly output) vary with them. They do vary with when a
+join or a sweep was written, as the limits below say.
 
 **One disclosed exception.** Whether a task's join carries an outcome block at
 all is read, as presence only: a join without one is dropped before eligibility
@@ -3677,10 +3684,20 @@ report, not the store: a reader of the events can still read them.
   pre-eligibility stages). A join that names no pack is counted only once a
   sweep ran `settle_hours` after it, as the full report admits a join, so a join
   that names a pack and follows within that time replaces it first; one written
-  later leaves the session pooled as `no_retrieval` for the nights between.
+  later leaves the session pooled as `no_retrieval` for the nights between
+  (`no_outcome` when that join carries no outcome block; a main session's join
+  is in no pooled stage).
+- A join that names no pack and is too close to a window's end to have settled
+  is missing from that night's report. The next window skips it, because the
+  session then has a join before its start, so a stored nightly series
+  undercounts it. The count is pooled and depends on join time, not on a
+  treatment value.
 - A task whose first join is written later than the sweep that would admit it
   enters on the first night the join exists, not the night its first pack
-  settled, so a night asked about again later can show a larger `eligible`.
+  settled. A night asked about again later shows a larger `eligible` only if a
+  sweep ran between the first pack's settling time and the join's write. Under
+  healthy capture the join is written at the first sweep after the first pack,
+  so only a parse or write failure makes it later.
   Three causes are known: a per-session parse error that capture retries at a
   later sweep, a failed join write, and a `--rejoin-since` backfill, which
   stamps the join when it is written.

@@ -15,9 +15,11 @@ between reports over several windows. Five guards, each of a different kind:
   which fields are post-treatment);
 * the outcome readers and the inference stages patched to raise, so the mode
   is shown not to compute an outcome value rather than to hide one;
-* an event log that raises on any read of a post-treatment key of a join or a
-  sweep, by subscript, iteration or copy as much as by ``.get``, and on any
-  attribute but ``get_events``;
+* an event log whose joins and sweeps are allowlists: any key the report does
+  not read, by ``.get``, subscript, iteration or copy, and any ``len``,
+  ``repr``, ``==``, ``pop`` or ``setdefault`` of a payload or a block in it,
+  raises, as does a retrieval counter of a join that named a pack. The log
+  offers no attribute but ``get_events``;
 * an allowlisted event log: joins, sweeps and one first pack by id are the only
   reads it answers, so a later pack, the number of packs, the volume of pack
   rows, the feedback stream and a raw connection cannot reach a figure;
@@ -30,7 +32,9 @@ pack, and nothing else from the pack stream. What no fixture can pin is a read
 that stays quiet on every store the suite builds, such as a threshold on a
 count (of re-emitted joins, say) that no fixture reaches: that is outside what a
 suite of this kind catches, and review has to. The one disclosed exception is
-whether a join carries an outcome block, which the fixtures do not move.
+whether a join carries an outcome block, which the fixtures do not move. A
+join's ``pack_ids`` has to stay a ``list`` subclass (the report tests for one),
+so its gate refuses the list's methods one by one rather than by listing keys.
 
 Every id, commit and word the fixtures write is synthetic.
 """
@@ -39,7 +43,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -614,46 +618,82 @@ def test_operational_mode_calls_no_outcome_reader_or_inference_stage(
         _full(log, **options)
 
 
-class _Sealed(dict[str, Any]):
-    """An outcome block that raises on any read of its contents."""
-
-    def _refuse(self, *_args: Any, **_kwargs: Any) -> Any:
-        msg = "gated read: the outcome block's contents"
-        raise AssertionError(msg)
-
-    __getitem__ = get = items = keys = values = __iter__ = __contains__ = _refuse
-    pop = setdefault = copy = _refuse
-
-
 def _refuse(self: Any, *_args: Any, **_kwargs: Any) -> Any:
     msg = f"gated read: {type(self).__name__} was read past what the first pack fixes"
     raise AssertionError(msg)
 
 
-class _TimingGate(dict[str, Any]):
+class _Gate(Mapping[str, Any]):
+    """A payload that answers the keys its class lists and refuses every other read.
+
+    A ``Mapping`` rather than a ``dict``: ``get``, ``in``, ``items`` and ``==``
+    are all built on ``__getitem__``, ``__iter__`` and ``__len__``, which the
+    gate refuses or filters, and ``pop``, ``setdefault`` and ``update`` are not
+    there to call (a name the class lacks raises as a read). The listed keys
+    are the only way in, so no read gets past the gate because nobody thought
+    to deny it. ``len``, ``repr``, ``==`` and truth refuse too, since each says
+    something about the contents.
+    """
+
+    #: Keys that read whatever the payload holds.
+    OPEN: frozenset[str] = frozenset()
+
+    def __init__(self, data: Mapping[str, Any]) -> None:
+        self._data = dict(data)
+
+    def _readable(self, key: str) -> bool:
+        return key in self.OPEN
+
+    def _refusal(self, key: str) -> str:
+        return f"gated read: {type(self).__name__}[{key!r}]"
+
+    def _wrap(self, key: str, value: Any) -> Any:
+        return value
+
+    def __getitem__(self, key: str) -> Any:
+        if not self._readable(key):
+            raise AssertionError(self._refusal(key))
+        return self._wrap(key, self._data[key])
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):  # protocol probes (copy, pickle) ask politely
+            raise AttributeError(name)
+        msg = f"gated read: {type(self).__name__}.{name}"
+        raise AssertionError(msg)
+
+    __iter__ = __len__ = __bool__ = __repr__ = __eq__ = _refuse  # type: ignore[assignment]
+
+
+class _Sealed(_Gate):
+    """An outcome block that raises on any read of its contents."""
+
+    def _refusal(self, key: str) -> str:
+        return "gated read: the outcome block's contents"
+
+
+class _TimingGate(_Gate):
     """``retrieval_timing``, readable only at the two flags set before the arm."""
 
-    ALLOWED = frozenset(
+    OPEN = frozenset(
         {"hook_feedback_before_first_retrieval", "commit_before_first_retrieval"}
     )
 
-    def get(self, key: str, default: Any = None) -> Any:
-        if key not in self.ALLOWED:
-            msg = f"gated read: retrieval_timing[{key!r}] follows the first retrieval"
-            raise AssertionError(msg)
-        return super().get(key, default)
+    def _refusal(self, key: str) -> str:
+        return f"gated read: retrieval_timing[{key!r}] follows the first retrieval"
 
-    def __getitem__(self, key: str) -> Any:
-        return self.get(key)
 
-    def __contains__(self, key: object) -> bool:
-        return self.get(str(key), None) is not None
+class _CovariatesGate(_Gate):
+    """``covariates``, readable only at the two keys the report uses."""
 
-    items = keys = values = __iter__ = copy = _refuse  # type: ignore[assignment]
+    OPEN = frozenset({"brief_chars", "agent_type_digest"})
 
 
 class _PackIds(list[Any]):
-    """A join's ``pack_ids``, readable at index 0 and nowhere else."""
+    """A join's ``pack_ids``, readable at index 0 and nowhere else.
+
+    It stays a ``list`` because the report tests for one, so the list's other
+    methods are refused one by one.
+    """
 
     def __getitem__(self, index: Any) -> Any:
         if isinstance(index, int) and index == 0:
@@ -661,49 +701,73 @@ class _PackIds(list[Any]):
         msg = "gated read: pack_ids past the first pack"
         raise AssertionError(msg)
 
-    __iter__ = __len__ = __reversed__ = __contains__ = _refuse  # type: ignore[assignment]
-    index = count = copy = _refuse  # type: ignore[assignment]
+    __iter__ = __len__ = __bool__ = __reversed__ = __contains__ = _refuse  # type: ignore[assignment]
+    index = count = copy = pop = remove = insert = append = extend = _refuse  # type: ignore[assignment]
+    sort = reverse = clear = __setitem__ = __delitem__ = _refuse  # type: ignore[assignment]
+    __add__ = __radd__ = __iadd__ = __mul__ = __rmul__ = __imul__ = _refuse  # type: ignore[assignment]
+    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = __repr__ = _refuse  # type: ignore[assignment]
 
 
-class _JoinGate(dict[str, Any]):
-    """A join whose post-treatment keys raise when read, however they are read."""
+class _JoinGate(_Gate):
+    """A join, readable at the keys fixed before the arm and nowhere else.
 
-    def get(self, key: str, default: Any = None) -> Any:
-        value = super().get(key, default)
-        if key == "outcome" and isinstance(value, dict):
-            return _Sealed(value)
-        if key == "retrieval_timing" and isinstance(value, dict):
-            return _TimingGate(value)
-        if key == "pack_ids" and isinstance(value, list):
-            return _PackIds(value)
-        if key in ("pack_ids_unparsed", "retrieval_errors") and super().get("pack_ids"):
-            msg = f"gated read: {key} of a join that retrieved"
-            raise AssertionError(msg)
+    The retrieval counters (``retrieval_results``, ``retrieval_errors``,
+    ``pack_ids_unparsed``) are readable only on a join that names no pack, where
+    nothing was retrieved to count; on one that retrieved they are the session's
+    whole run. ``outcome`` and the nested blocks come back gated. An empty join
+    is falsy as a ``dict`` is, because the report writes ``payload or {}``.
+    """
+
+    OPEN = frozenset(
+        {
+            "pack_ids",
+            "parent_session_id",
+            "source_system",
+            "outcome",
+            "retrieval_timing",
+            "covariates",
+        }
+    )
+    ONLY_WITHOUT_PACKS = frozenset(
+        {"retrieval_results", "retrieval_errors", "pack_ids_unparsed"}
+    )
+
+    def _readable(self, key: str) -> bool:
+        return key in self.OPEN or (
+            key in self.ONLY_WITHOUT_PACKS and not self._data.get("pack_ids")
+        )
+
+    def _refusal(self, key: str) -> str:
+        if key in self.ONLY_WITHOUT_PACKS:
+            return f"gated read: {key} of a join that retrieved"
+        return f"gated read: a join's {key!r}"
+
+    def _wrap(self, key: str, value: Any) -> Any:
+        wrappers: dict[str, Callable[[Any], Any]] = {
+            "outcome": _Sealed,
+            "retrieval_timing": _TimingGate,
+            "covariates": _CovariatesGate,
+            "pack_ids": _PackIds,
+        }
+        expected = list if key == "pack_ids" else dict
+        if key in wrappers and isinstance(value, expected):
+            return wrappers[key](value)
         return value
 
-    def __getitem__(self, key: str) -> Any:
-        if key not in self:
-            raise KeyError(key)
-        return self.get(key)
-
-    items = keys = values = __iter__ = copy = _refuse  # type: ignore[assignment]
+    def __bool__(self) -> bool:
+        return bool(self._data)
 
 
-class _SweepGate(dict[str, Any]):
+class _SweepGate(_Gate):
     """A sweep payload, readable at the two keys the sweep reader uses."""
 
-    ALLOWED = frozenset({"dry_run", "source_system"})
+    OPEN = frozenset({"dry_run", "source_system"})
 
-    def get(self, key: str, default: Any = None) -> Any:
-        if key not in self.ALLOWED:
-            msg = f"gated read: a sweep's {key!r}"
-            raise AssertionError(msg)
-        return super().get(key, default)
+    def _refusal(self, key: str) -> str:
+        return f"gated read: a sweep's {key!r}"
 
-    def __getitem__(self, key: str) -> Any:
-        return self.get(key)
-
-    items = keys = values = __iter__ = __contains__ = copy = _refuse  # type: ignore[assignment]
+    def __bool__(self) -> bool:
+        return bool(self._data)
 
 
 class _GatedLog:
@@ -742,10 +806,11 @@ def test_operational_mode_reads_no_post_treatment_key_of_a_join(
     """The report is the same when every post-treatment read of a join raises.
 
     That is the outcome block's contents (its presence is readable), every
-    ``retrieval_timing`` key but the two flags set before the arm, every pack
-    id after the first, and the unparsed-pack-id count of a join that
-    retrieved. Subscripts, iteration, ``dict()`` and ``len`` raise as ``.get``
-    does, so a read that skips ``.get`` is caught.
+    ``retrieval_timing`` key but the two flags set before the arm, every
+    ``covariates`` key but the two the report uses, every pack id after the
+    first, any other key of a join, and the retrieval counters of a join that
+    named a pack. The gates list what is readable, so a read that skips
+    ``.get``, or that no one thought to deny, is caught.
     """
     log = make_log()
     expected = _bytes(_operational(log, **options))
@@ -986,9 +1051,12 @@ class _FirstPackOnlyLog:
     pack row fetched by an id some session's anchor join names first. Every
     other read raises: another event type (the feedback stream among them), a
     pack query with no id or another one, a count, a read by event id and any
-    attribute at all (a raw connection included). So a later pack, the number
-    of packs and the volume of pack rows cannot reach a figure by any route the
-    log offers. What a join or a sweep carries is gated by :class:`_GatedLog`.
+    attribute the wrapper does not have (a raw connection included). Its own
+    attributes are reachable, ``_inner`` among them: a mutant that names the
+    wrapper's private handle gets the real log, and only review catches it.
+    So a later pack, the number of packs and the volume of pack rows cannot
+    reach a figure by any route the log offers to the report. What a join or a
+    sweep carries is gated by :class:`_GatedLog`.
     """
 
     LISTED = frozenset(
@@ -1124,6 +1192,173 @@ def test_the_guards_catch_a_feedback_read_a_raw_query_and_a_payload_read(
     monkeypatch.setattr(holdout, "_pre_treatment_excluded", error_count)
     with pytest.raises(AssertionError, match="gated read: retrieval_errors"):
         holdout.analyze_holdout_operational(gated, **WINDOW)
+
+
+def _inside(join: Any, key: str, read: Callable[[Any], Any]) -> Any:
+    """``read`` of a nested block, for the joins that carry one."""
+    block = join.get(key)
+    return None if block is None else read(block)
+
+
+#: Reads a mutant of the report might add, each with the refusal it must meet.
+#: The gates list what the report reads; none of these is on the list.
+JOIN_READS: dict[str, tuple[Callable[[Any], Any], str]] = {
+    "results of a join that named a pack": (
+        lambda join: join.get("retrieval_results"),
+        "gated read: retrieval_results of a join that retrieved",
+    ),
+    "errors of a join that named a pack": (
+        lambda join: join["retrieval_errors"],
+        "gated read: retrieval_errors of a join that retrieved",
+    ),
+    "unparsed ids of a join that named a pack": (
+        lambda join: join.get("pack_ids_unparsed"),
+        "gated read: pack_ids_unparsed of a join that retrieved",
+    ),
+    "a key nobody lists": (
+        lambda join: join.get("made_up_key"),
+        "gated read: a join's 'made_up_key'",
+    ),
+    "a key of the covariates nobody lists": (
+        lambda join: _inside(join, "covariates", lambda block: block.get("zzz")),
+        "gated read: _CovariatesGate['zzz']",
+    ),
+    "the size of the outcome block": (
+        lambda join: len(join.get("outcome")),
+        "gated read: _Sealed was read",
+    ),
+    "the outcome block compared": (
+        lambda join: join.get("outcome") == {},
+        "gated read: _Sealed was read",
+    ),
+    "the outcome block shown": (
+        lambda join: repr(join.get("outcome")),
+        "gated read: _Sealed was read",
+    ),
+    "a pop of the error count": (
+        lambda join: join.pop("retrieval_errors", 0),
+        "gated read: _JoinGate.pop",
+    ),
+    "a setdefault of the error count": (
+        lambda join: join.setdefault("retrieval_errors", 0),
+        "gated read: _JoinGate.setdefault",
+    ),
+    "the size of the join": (len, "gated read: _JoinGate was read"),
+    "the join compared": (
+        lambda join: join == {},
+        "gated read: _JoinGate was read",
+    ),
+    "the join shown": (repr, "gated read: _JoinGate was read"),
+    "the join copied": (dict, "gated read: _JoinGate was read"),
+    "the timing block's size": (
+        lambda join: _inside(join, "retrieval_timing", len),
+        "gated read: _TimingGate was read",
+    ),
+    "the pack ids compared": (
+        lambda join: join.get("pack_ids") == [],
+        "gated read: _PackIds was read",
+    ),
+    "the pack ids popped": (
+        lambda join: join.get("pack_ids").pop(),
+        "gated read: _PackIds was read",
+    ),
+}
+
+
+@pytest.mark.parametrize("read", JOIN_READS)
+def test_the_join_gates_refuse_every_read_the_report_does_not_make(
+    make_log: Callable[..., HoldoutLog], monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    """Mutants: each read in :data:`JOIN_READS`, added to the eligibility stage.
+
+    The gates are allowlists, so a read that nobody thought to deny is refused
+    as much as one that somebody did.
+    """
+    reader, refusal = JOIN_READS[read]
+    real = holdout._pre_treatment_excluded
+
+    def reading(payload: Any, funnel: Any) -> Any:
+        reader(payload)
+        return real(payload, funnel)
+
+    log = make_log(1)
+    assert holdout.analyze_holdout_operational(log.event_log, **WINDOW)
+    monkeypatch.setattr(holdout, "_pre_treatment_excluded", reading)
+    with pytest.raises(AssertionError, match="gated read") as caught:
+        holdout.analyze_holdout_operational(_GatedLog(log.event_log), **WINDOW)
+    assert refusal in str(caught.value)
+
+
+SWEEP_READS: dict[str, tuple[Callable[[Any], Any], str]] = {
+    "a pop of a sweep's counter": (
+        lambda sweep: sweep.pop("pack_joins_recorded", 0),
+        "gated read: _SweepGate.pop",
+    ),
+    "a setdefault on a sweep": (
+        lambda sweep: sweep.setdefault("pack_joins_recorded", 0),
+        "gated read: _SweepGate.setdefault",
+    ),
+    "a key of a sweep nobody lists": (
+        lambda sweep: sweep.get("pack_joins_recorded"),
+        "gated read: a sweep's 'pack_joins_recorded'",
+    ),
+    "the size of a sweep": (
+        len,
+        "gated read: _SweepGate was read",
+    ),
+}
+
+
+@pytest.mark.parametrize("read", SWEEP_READS)
+def test_the_sweep_gate_refuses_every_read_the_report_does_not_make(
+    make_log: Callable[..., HoldoutLog], monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    """Mutants: each read in :data:`SWEEP_READS`, added to the sweep reader."""
+    reader, refusal = SWEEP_READS[read]
+    real = holdout._latest_sweeps
+
+    def reading(events: Any) -> Any:
+        assert events
+        reader(events[-1].payload)
+        return real(events)
+
+    log = make_log(1)
+    monkeypatch.setattr(holdout, "_latest_sweeps", reading)
+    with pytest.raises(AssertionError, match="gated read") as caught:
+        holdout.analyze_holdout_operational(_GatedLog(log.event_log), **WINDOW)
+    assert refusal in str(caught.value)
+
+
+def test_a_join_gate_lets_the_listed_reads_through() -> None:
+    """The gate is no stricter than the report: what the report reads works."""
+    join = _JoinGate(
+        {
+            "pack_ids": ["pack-0001", "pack-0002"],
+            "parent_session_id": "parent-a",
+            "source_system": "claude-code",
+            "outcome": {"assistant_turns": 3},
+            "retrieval_timing": {"hook_feedback_before_first_retrieval": False},
+            "covariates": {"brief_chars": 9, "agent_type_digest": "a"},
+            "retrieval_results": 2,
+        }
+    )
+    assert join  # ``payload or {}`` is how the report tests for an empty payload
+    assert join.get("pack_ids")[0] == "pack-0001"
+    assert join.get("parent_session_id") == "parent-a"
+    assert isinstance(join.get("outcome"), Mapping)
+    assert (
+        join.get("retrieval_timing").get("hook_feedback_before_first_retrieval")
+        is False
+    )
+    assert "commit_before_first_retrieval" not in join.get("retrieval_timing")
+    assert join.get("covariates").get("brief_chars") == 9
+    with pytest.raises(
+        AssertionError, match="retrieval_results of a join that retrieved"
+    ):
+        join.get("retrieval_results")
+    without_packs = _JoinGate({"pack_ids": [], "retrieval_results": 0})
+    assert without_packs.get("retrieval_results") == 0
+    assert without_packs.get("pack_ids_unparsed") is None  # listed, not written
 
 
 # ---------------------------------------------------------------------------
@@ -1563,3 +1798,232 @@ def test_by_commit_rows_first_seen_together_are_ordered_by_build_label(
         assert len(labels) == 2
         reports.append(labels)
     assert reports[0] == reports[1]
+
+
+# ---------------------------------------------------------------------------
+# A session whose joins name no pack, and the sessions that began before the window
+# ---------------------------------------------------------------------------
+
+#: The two ways a join can name no pack: capture never saw a retrieval call, or
+#: it saw results it could not read.
+PACK_FREE_COUNTERS = [
+    pytest.param({"retrieval_results": 0}, "no_retrieval_never_called", id="never"),
+    pytest.param(
+        {"retrieval_results": 1, "pack_ids_unparsed": 1},
+        "no_retrieval_unparsed",
+        id="unparsed",
+    ),
+]
+
+
+def _pack_free_sessions(
+    blank: Callable[[], HoldoutLog], counters: dict[str, Any], *, again: bool
+) -> HoldoutLog:
+    """Ten sessions whose only join names no pack; ``again`` writes each anew later."""
+    log = blank()
+    for hours in (12, 40, 60):
+        log.sweep(at=MONDAY + timedelta(hours=hours))
+    for step in range(10):
+        log.join(
+            f"task-{step}",
+            at=MONDAY + timedelta(hours=step + 1),
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=1),
+            **counters,
+        )
+        if again:
+            log.join(
+                f"task-{step}",
+                at=MONDAY + timedelta(hours=30 + step),
+                pack_ids=[],
+                parent="parent-a",
+                outcome=outcome_payload(turns=9),
+                **counters,
+            )
+    return log
+
+
+@pytest.mark.parametrize(("counters", "bucket"), PACK_FREE_COUNTERS)
+def test_a_pack_free_join_written_again_cannot_count_a_session_in_a_later_window(
+    blank: Callable[[], HoldoutLog], counters: dict[str, Any], bucket: str
+) -> None:
+    """A session is counted in the window its first join falls in and in no other.
+
+    Each session's first join sits in the first day and is settled by the sweep
+    that ends it; a second join, written a day later with other values, would
+    be the earliest join the second night reads, and its sweep settles it.
+    Without a skip for a session with a join before the window, the pooled
+    ``no_retrieval`` count of the second night moves with that second write.
+    """
+    once = _pack_free_sessions(blank, counters, again=False)
+    twice = _pack_free_sessions(blank, counters, again=True)
+    nights = [MONDAY + timedelta(hours=hours) for hours in (24, 48, 72)]
+    options: dict[str, Any] = {"days": 1, "settle_hours": 0.5}
+    seen = []
+    for end in [*nights, MONDAY + timedelta(hours=44)]:
+        reports = [
+            holdout.analyze_holdout_operational(
+                log.event_log, until=end, **options, by_commit=True
+            )
+            for log in (once, twice)
+        ]
+        assert _bytes(reports[0]) == _bytes(reports[1]), end
+        seen.append(reports[1])
+    first, second, third, finding = seen
+    assert getattr(first.funnel, bucket) == first.funnel.no_retrieval == 10
+    assert second.funnel.no_retrieval == third.funnel.no_retrieval == 0
+    assert finding.funnel.no_retrieval == 0  # +44h: only the second writes are in it
+
+
+def test_a_pack_free_join_unsettled_at_the_window_end_is_missed_that_night_and_after(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """The cost of the skip, pinned: a nightly series undercounts a late pack-free join.
+
+    A join written less than the settle time before a window's end has no
+    sweep after it in that window, so that night's report leaves it out, and
+    the next night's report does not read it either: it is older than that
+    window, and the sessions with a join older than the window are the ones
+    left alone. One wide window reads it. The count depends on the time the
+    join was written, which no treatment moves, never on a value one could.
+    """
+    log = blank()
+    for step in range(4):
+        log.join(
+            f"task-{step}",
+            at=MONDAY + timedelta(hours=20 + step),
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=1),
+        )
+    log.sweep(at=MONDAY + timedelta(hours=23, minutes=12))
+    log.sweep(at=MONDAY + timedelta(hours=30))
+    options: dict[str, Any] = {"settle_hours": 0.5}
+
+    def counted(days: int, hours: int) -> int:
+        return holdout.analyze_holdout_operational(
+            log.event_log, days=days, until=MONDAY + timedelta(hours=hours), **options
+        ).funnel.no_retrieval
+
+    assert counted(days=1, hours=24) == 3  # the join at +23h has no sweep after it yet
+    assert counted(days=1, hours=48) == 0  # and it is older than the next window
+    assert counted(days=2, hours=48) == 4  # one wide window reads all four
+
+
+def test_a_settled_session_whose_joins_all_name_no_pack_counts_as_no_retrieval(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """The full report counts such a session, and so does the operational one."""
+    log = blank()
+    for step in range(4):
+        log.join(
+            f"task-{step}",
+            at=MONDAY + timedelta(hours=step),
+            pack_ids=[],
+            parent="parent-a",
+            outcome=outcome_payload(turns=1),
+        )
+    log.sweep(at=MONDAY + timedelta(days=1))
+    window: dict[str, Any] = {"days": 30, "until": MONDAY + timedelta(days=3)}
+    operational = holdout.analyze_holdout_operational(log.event_log, **window)
+    full = holdout.analyze_holdout(log.event_log, **window, **FAST)
+    assert operational.funnel.no_retrieval == full.funnel.no_retrieval == 4
+    assert operational.funnel.eligible == full.funnel.eligible == 0
+    unsettled = holdout.analyze_holdout_operational(
+        log.event_log, days=30, until=MONDAY + timedelta(hours=1)
+    )
+    assert unsettled.funnel.no_retrieval == 0  # no sweep has followed the joins yet
+
+
+#: What a session's joins before the window named, oldest first.
+BEGAN_BEFORE = {
+    "a pack, then none": ("named", "pack-free"),
+    "none, then a pack": ("pack-free", "named"),
+    "a pack alone": ("named",),
+}
+
+
+@pytest.mark.parametrize("before", BEGAN_BEFORE.values(), ids=BEGAN_BEFORE.keys())
+def test_a_session_with_any_pack_naming_join_before_the_window_is_not_counted(
+    blank: Callable[[], HoldoutLog], before: tuple[str, ...]
+) -> None:
+    """Whichever of its earlier joins names the pack, the session began before.
+
+    The window's own join names a new first pack. Reading only the earliest join
+    before the window, or only the latest, misses one of the orders.
+    """
+    log = blank()
+    since = MONDAY + timedelta(days=5)
+    window: dict[str, Any] = {"days": 5, "until": MONDAY + timedelta(days=10)}
+    older = log.pack(
+        at=since - timedelta(days=2),
+        withheld=False,
+        items=3,
+        metadata=provenance(COMMIT_A),
+    )
+    newer = log.pack(
+        at=since + timedelta(hours=1),
+        withheld=False,
+        items=3,
+        metadata=provenance(COMMIT_A),
+    )
+    for step, kind in enumerate(before):
+        log.join(
+            "task-0",
+            at=since - timedelta(days=2 - step),
+            pack_ids=[older] if kind == "named" else [],
+            parent="parent-a",
+            outcome=outcome_payload(turns=1),
+        )
+    log.join(
+        "task-0",
+        at=since + timedelta(hours=2),
+        pack_ids=[newer],
+        parent="parent-a",
+        outcome=outcome_payload(turns=5),
+    )
+    log.sweep(at=MONDAY + timedelta(days=9))
+    assert (
+        holdout.analyze_holdout_operational(log.event_log, **window).funnel.eligible
+        == 0
+    )
+
+
+def test_a_join_exactly_at_the_window_start_is_inside_the_window(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """The window is closed at its start: a join at ``since`` did not come before it."""
+    log = blank()
+    since = MONDAY + timedelta(days=5)
+    first = log.pack(at=since, withheld=False, items=3, metadata=provenance(COMMIT_A))
+    log.join(
+        "task-0",
+        at=since,
+        pack_ids=[first],
+        parent="parent-a",
+        outcome=outcome_payload(turns=5),
+    )
+    log.sweep(at=MONDAY + timedelta(days=9))
+    report = holdout.analyze_holdout_operational(
+        log.event_log, days=5, until=MONDAY + timedelta(days=10)
+    )
+    assert report.funnel.eligible == 1
+
+
+def test_a_rate_no_first_pack_was_written_at_is_named_by_first_pack_here_and_row_there(
+    blank: Callable[[], HoldoutLog],
+) -> None:
+    """The operational note names what it holds; the full report's is unchanged."""
+    log = blank()
+    _task(log, "task-0", MONDAY)
+    window: dict[str, Any] = {"days": 30, "until": MONDAY + timedelta(days=3)}
+    operational = holdout.analyze_holdout_operational(
+        log.event_log, rate=0.25, **window
+    )
+    full = holdout.analyze_holdout(log.event_log, rate=0.25, **window, **FAST)
+    assert "No first pack in the window was written at rate 0.25." in operational.notes
+    assert "No row in the window was written at rate 0.25." in full.notes
+    # The helper's own default is the full report's wording.
+    _, notes = holdout._resolve_rate(holdout._Rows(), 0.25)
+    assert notes == ["No row in the window was written at rate 0.25."]

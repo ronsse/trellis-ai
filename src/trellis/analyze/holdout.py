@@ -137,16 +137,24 @@ and there is no ``limit``.
 One exception is disclosed: a join's outcome block is tested for presence
 (``no_outcome``), never read, because a join without one is dropped before
 eligibility; capture writes the block on every join, so only a join written by
-an older build lacks it. Four limits are stated rather than fixed. A
+an older build lacks it. Five limits are stated rather than fixed. A
 session none of whose joins names a pack, or whose first pack has no row, has no
 first pack to anchor on, so it is windowed on its join time and its arm is
 unknown, and the rows with no arm are pooled. A join that names no pack waits
 for a sweep ``settle`` after it, and one that names a pack written later than
-that leaves the session pooled as ``no_retrieval`` for the nights between. A task
-whose anchor join is written after the sweep that would admit it enters from the
-night the join exists; the known causes are a session's parse error retried at
-a later sweep, a failed join write, and a ``--rejoin-since`` backfill, whose
-join is stamped when it is written. A page or more of joins (or of sweeps)
+that leaves the session pooled as ``no_retrieval`` for the nights between
+(``no_outcome`` when that join has no outcome block; a main session's join is in
+no pooled stage). A join that names no pack and is too close to a window's end
+to have settled is missing from that night's report and skipped in the next, the
+session then having a join before its start, so a stored nightly series
+undercounts it; it depends on join time, not on a treatment value. A task whose
+anchor join is written after the sweep that would admit it enters from the
+night the join exists, and a night asked about again shows a larger ``eligible``
+only if a sweep ran between its first pack's settling time and that write;
+under healthy capture the join is written at the first sweep after the first
+pack, so the known causes are a session's parse error retried at a later sweep,
+a failed join write, and a ``--rejoin-since`` backfill, whose join is stamped
+when it is written. A page or more of joins (or of sweeps)
 stamped at one instant cannot be paged through, so this report refuses where
 the full report, which reads a capped scan, does not; the pile carries no arm,
 and only an imported or crafted log reaches it. And the report is only as sound as the
@@ -2020,7 +2028,10 @@ def _gather_operational(
     ever named is the first pack id of a session's anchor join, the earliest
     that names a pack (the earliest of all when none does). A session with a
     pack-naming join older than the window began before it, so its first pack
-    is outside the window whatever a later join says, and it is left out.
+    is outside the window whatever a later join says, and it is left out. So is
+    a session whose anchor names no pack and which has any join older than the
+    window: that join was read, or will be, by the window it falls in, and a
+    join written again later must not make the session count in another.
 
     An anchor that names no pack waits for a sweep ``settle`` after the join,
     as the full report's admission does, so a join that names one and was
@@ -2039,9 +2050,13 @@ def _gather_operational(
     settle = timedelta(hours=settle_hours)
     named: list[tuple[Event, Event | None]] = []
     for session, join in joins.items():
-        if _began_before(event_log, session, since):
-            continue
+        before = _joins_before(event_log, session, since)
         first_id = _first_pack_id(join.payload or {})
+        # An anchor that names no pack is read only from a session none of whose
+        # joins precede the window: otherwise a join written again later would
+        # become the anchor of a later window and count the session a second time.
+        if _began_before(before) or (first_id is None and before):
+            continue
         if first_id is None and not _finished(join, sweeps, settle):
             continue
         named.append((join, _first_pack_row(event_log, first_id) if first_id else None))
@@ -2158,22 +2173,26 @@ def _earliest_joins(events: Sequence[Event]) -> dict[str, Event]:
     return anchors
 
 
-def _began_before(event_log: EventLog, session: str, since: datetime) -> bool:
-    """Whether a join naming a pack was written before the window opened.
-
-    A join that names none does not count: it anchors nothing, and a session
-    whose only earlier join is one has its first pack inside the window.
-    """
-    return any(
-        _first_pack_id(join.payload or {}) is not None
-        for join in _read_window(
-            event_log,
-            EventType.CAPTURE_SESSION_PACKS,
-            None,
-            since - timedelta(microseconds=1),
-            entity_id=session,
-        )
+def _joins_before(event_log: EventLog, session: str, since: datetime) -> list[Event]:
+    """The session's joins written before the window opened, oldest first."""
+    return _read_window(
+        event_log,
+        EventType.CAPTURE_SESSION_PACKS,
+        None,
+        since - timedelta(microseconds=1),
+        entity_id=session,
     )
+
+
+def _began_before(before: Sequence[Event]) -> bool:
+    """Whether any of a session's joins before the window names a pack.
+
+    One that does puts the session's first pack before the window, whatever a
+    later join says. A pack-free earlier join does not: it names no first pack,
+    and the caller handles it, because what it changes is which join anchors
+    the session, not when the session began.
+    """
+    return any(_first_pack_id(join.payload or {}) is not None for join in before)
 
 
 def _first_pack_row(event_log: EventLog, pack_id: str) -> Event | None:
@@ -2206,7 +2225,8 @@ def _operational_arrival(  # noqa: PLR0911 - one return per funnel stage
     the join (when it was written, whether it was written again) or any later
     pack moves the night a task counts, except that a join must exist to be
     read. A session with no join that names a pack, or whose first pack has
-    no row, has no such anchor and is counted as the scan holds it, pooled.
+    no row, has no such anchor: it is windowed on its join time and counted
+    pooled.
     Past the anchor the one post-treatment fact read is whether the join
     carries an outcome block; its values never are.
     """
