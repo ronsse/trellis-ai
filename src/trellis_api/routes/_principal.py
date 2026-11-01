@@ -143,6 +143,28 @@ def refuse_public_caller(
 #: ``tests/unit/test_sensitivity_rest_roster_rule.py`` finds it by this name.
 NOT_FOR_PUBLIC_CALLERS = [Depends(refuse_public_caller)]
 
+#: ``responses=`` entry for a route that reads documents for a public-only
+#: caller (an ``external`` key): the process admits only a few such reads at
+#: once and refuses the rest immediately (``trellis.retrieve.public_rank``).
+#: The refusal counts public reads alone, so it reveals nothing about hidden
+#: documents or other callers' traffic.
+PUBLIC_READ_BUSY_RESPONSE: dict[int | str, dict[str, Any]] = {
+    429: {
+        "description": (
+            "A key that reads only public documents (an `external` key) was "
+            "refused because the server is already running its limit of such "
+            "reads. Nothing ran; retry after `Retry-After` seconds. Never "
+            "returned to a key that reads above `public`."
+        ),
+        "headers": {
+            "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {"type": "integer"},
+            }
+        },
+    }
+}
+
 
 def refuse_document_overwrite(
     document_store: DocumentStore,

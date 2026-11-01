@@ -32,7 +32,11 @@ from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS, request_clearance
+from trellis_api.routes._principal import (
+    NOT_FOR_PUBLIC_CALLERS,
+    PUBLIC_READ_BUSY_RESPONSE,
+    request_clearance,
+)
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
@@ -166,7 +170,7 @@ def _resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
 # budget prices and the chunk is the retrievable unit. See
 # :data:`trellis.ingest_corpus.models.CHUNK_ID_SEPARATOR` for the rule and
 # ``tests/unit/test_chunk_visibility_rule.py`` for its enforcement.
-@router.get("/search")
+@router.get("/search", responses=PUBLIC_READ_BUSY_RESPONSE)
 def search(
     q: str = Query(..., description="Search query"),
     domain: str | None = Query(None, description="Domain filter"),
@@ -234,7 +238,7 @@ def search(
     }
 
 
-@router.post("/packs", response_model=PackResponse)
+@router.post("/packs", response_model=PackResponse, responses=PUBLIC_READ_BUSY_RESPONSE)
 def assemble_pack(
     req: PackRequest,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
@@ -319,6 +323,7 @@ def assemble_pack(
     "/packs/sectioned",
     response_model=SectionedPackResponse,
     responses={
+        **PUBLIC_READ_BUSY_RESPONSE,
         422: {
             "description": (
                 "``req`` itself fails pydantic validation "

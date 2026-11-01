@@ -93,8 +93,9 @@ def public_search_page(
 
     The one keyword read of the public path (see
     :func:`~trellis.retrieve.public_rank.public_keyword_rows`): the store is
-    asked for public documents alone, and the order is BM25 over those rows,
-    ties by ``doc_id``. A chunk is never a result. Each row's ``rank`` is the
+    asked to list public documents, never to search, and the match and the
+    order (BM25 over those rows, ties by ``doc_id``) are computed here. A chunk
+    is never a result. Each row's ``rank`` is the
     local score, which :func:`~trellis.retrieve.sensitivity.conceal_document_rows`
     drops before anything is served.
     """

@@ -26,9 +26,14 @@ All notable changes to Trellis will be documented in this file.
   score's statistics. `DocumentStore.list_documents` gains an optional `filters` keyword (the
   semantics `search` already had: equality on a top-level metadata key, in the query; `None`
   keeps every existing caller's SQL and result), on the SQLite and Postgres stores. The
-  keyword axis asks `DocumentStore.search` for public rows (at most 2000), discards the
-  store's own rank, and scores them with BM25 computed over those rows alone (ties by
-  `doc_id`); `GET /search`, `GET /documents?q=` and a pack all read through that one function.
+  keyword axis does not call the store's `search` (a full-text index covers every row, so a
+  query word would be looked up among rows the key may not read): it reads the newest 2000
+  public documents with `list_documents`, keeps a document that holds any query word (ASCII
+  whole words, case-insensitive, the first 20, which is how the stores' own full-text query
+  reads), and ranks them by BM25 computed over those rows alone (ties by `doc_id`). The
+  stores' tokenizer is not reproduced (no stemming, no unicode folding). `GET /search`,
+  `GET /documents?q=` and a pack all read through that one function, and a pack's two axes
+  share one read.
   The semantic axis never calls `VectorStore.query` (two backends filter after an
   over-fetch, so a hidden row still pushes a public one out): it reads the public document
   ids, fetches each stored vector with `VectorStore.get`, computes cosine locally, and skips
@@ -36,6 +41,34 @@ All notable changes to Trellis will be documented in this file.
   key, by allow-list: a graph or plugin strategy is not asked, so a strategy added later fails
   closed. One that did not run is listed in `axes.failed`, and `axes.graph` reads `"absent"`.
   The gates (archived, noise, supersession, class prior) still run over the public candidates.
+
+  **One predicate decides "public", on every surface.** A document is public to this key
+  when its stored label is exactly the record `classification.set` writes for `public`
+  (`public_label_record()`; no tags, no jurisdiction, classifier `caller`, version `1`).
+  The store filter and the per-row gate (`DocumentClearance.permits`, for a public-only
+  clearance) both call it, so `/search`, `GET /documents` with and without `q`, a lookup by
+  id and a pack fail closed the same way; every clearance above `public` keeps its result
+  unchanged. Relabelling a document `public` (`POST /documents/{id}/sensitivity`,
+  `trellis curate classify-sensitivity`) now writes that exact record, or refuses with
+  `classification_public_discards` and writes nothing when the earlier record holds
+  regulatory tags, a jurisdiction or other fields the record would discard; it never reports
+  success on a document that is still not served. A corpus file's `sensitivity: public`
+  frontmatter is stored bare and is not enough: it is served to no external key until a
+  person runs `trellis curate classify-sensitivity <doc_id> --sensitivity public`. A test
+  pins a record written out by hand against both the filter and the gate, so bumping
+  `classification_version` or adding a `DataClassification` field fails a test, with
+  instructions, instead of turning every stored row into an empty 200.
+
+  **Public reads are bounded.** A public read lists and tokenises up to 2000 whole documents
+  however narrow the question, so a process runs at most 2 at once
+  (`MAX_CONCURRENT_PUBLIC_READS`) and refuses the rest at once, never queued:
+  `PublicReadBusyError`, HTTP 429 with `Retry-After: 1` (in the OpenAPI spec), and on MCP an
+  error result reading `public_read_busy: ... (retry_after_seconds=1)`. Only public reads take
+  a slot, so a key above `public` is never counted and a refusal says nothing about hidden rows.
+  The limit caps the amplification, not the cost of one read: on a synthetic SQLite store of
+  2000 documents of about 20 KB, one external `/search` takes about 1.2 s and an internal
+  `GET /documents/{id}` that takes 3 ms idle completes about 4 to 5 a second, not 40, while four
+  external loops run, at a limit of 2 or of 1 alike (`operations.md` has the figures).
 
   An item's text and metadata are read from the stored document row, never from the vector
   row, and cut as a pack cuts them; an item with no stored row is withheld. Metadata is an
@@ -49,30 +82,35 @@ All notable changes to Trellis will be documented in this file.
   item ids, count, key id) instead of `PACK_ASSEMBLED`; the key cannot write a feedback row, so
   no reader waits for one.
 
-  Limits of the read, all in `operations.md`. The predicate is equality on the whole stored
-  label record, so a document labelled `public` whose record also carries regulatory tags, a
-  jurisdiction or another classifier than the labelling path writes is not served (it fails
-  closed). A caller's filters (`domain`, tag filters) are matched against a public document's
-  own stored `domain` and tags, which the response drops, so a filter can test those fields of
-  a document labelled `public`. A public document whose embedding is older than its text lets
-  the old words move its semantic rank. The 2000-row ceiling counts public rows only; above
-  it the semantic read keeps the newest rows and the keyword read keeps the ones the store
-  ranks first (that rank is computed over the whole index, so only a key that can read more
-  than 2000 matching documents can reach it). A row whose stored metadata the store cannot
-  parse fails every read that touches it with a 500, for every key, and a hidden one is never
-  served but is observable by that failure.
+  Limits of the read, all in `operations.md`. A document labelled `public` whose record
+  carries anything beyond the exact record is not served (it fails closed). A caller's filters
+  (`domain`, tag filters) are matched against a public document's own stored `domain` and tags,
+  which the response drops, so a filter can test those fields of a document labelled `public`.
+  A public document whose embedding is older than its text lets the old words move its semantic
+  rank. Documents the corpus ingest split into chunks have chunk vectors and no parent vector,
+  so the semantic axis cannot read them (`axes.semantic` reads `ran`); the keyword axis still
+  finds them. The ceiling is the newest 2000 public documents, a function of public rows alone;
+  above it older public documents are out of reach of both axes and `total_exact` is `false`.
+  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, makes the
+  SQLite store's filtered listing fail, so every public read answers 500 for every external key
+  whoever the row belongs to and whatever it holds (the same for every query word, a word nobody
+  holds included): a caller can tell such a row exists and nothing about it. One
+  `VectorStore.get` per public document on a networked backend is reasoned, not measured.
 
   A differential test builds stores that hold the same public documents, one also holding
   documents the key may not read, and asserts every REST and MCP surface the key can reach
   answers alike (the whole payload, apart from ids drawn per call and clocks). Its worlds
   include a hidden document holding a public word, 1, 5 and 40 hidden documents that match
-  nothing, hidden rows with a malformed `auto_importance`, 2500 hidden rows, and a hidden
-  document whose vector is the query's own, and the walk covers `POST` bodies for the pack and
-  sectioned routes. A `read` key is run through the worlds that must differ, so no pair
-  passes for free. A runtime walk of the real app's routes and the server's registered
-  tools, resources and prompts requires each to be rostered by its full module path and for
-  the number of routes it was read for, which the two source rules cannot do for a route
-  added with `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`.
+  nothing, hidden rows with a malformed `auto_importance`, a hidden document whose vector is
+  the query's own, 3000 hidden rows beside 2200 public ones (more than one read holds; three
+  worlds, none and one repeating each word), and a hidden row whose stored metadata is not
+  JSON, `[1]`, `null`, `"str"` or `5`, with and without the queried words in its text; the walk
+  covers `POST` bodies for the pack and sectioned routes. A `read` key is run through the worlds
+  that must differ, so no pair passes for free. A runtime walk of the real app's routes and the
+  server's registered tools, resources and prompts requires each to be rostered by its full
+  module path and for the number of routes it was read for, which the two source rules cannot
+  do for a route added with `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`. A test names
+  `record_feedback` and `save_knowledge` and checks `["read","external"]` is refused both.
 
   No other caller changes. The test in `test_public_clearance.py` that compares a non-public
   caller with and without the new branch is a weak check: it patches the dispatch predicate

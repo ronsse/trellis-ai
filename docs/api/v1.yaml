@@ -4249,17 +4249,25 @@ paths:
 
         A key that reads only ``public`` documents (an ``external`` key) is served
 
-        a search that never ranks a hidden row: the store is asked for documents
+        by one read of the public documents: the newest 2000 the label predicate
 
-        labelled ``public`` alone and they are ordered by BM25 computed over those
+        selects (``trellis.retrieve.public_rank``), never a scan of the store and
 
-        rows (``trellis.retrieve.public_rank``), so ``total``, the order and every
+        never the store''s ``search``. With ``q`` set, those rows are matched (any
 
-        page are functions of the public documents. At most 2000 public matches are
+        query word, ASCII alphanumerics) and ordered by BM25 computed over them
 
-        held; past that ``total`` is clipped and ``total_exact`` is ``false``, and
+        here; with no ``q`` they are the page, newest first. ``total``, the order and
 
-        which matches the 2000 are is chosen by the store''s own rank.'
+        every page are functions of the public documents alone. At most the newest
+
+        2000 public documents are read, so past that ``total`` is clipped and
+
+        ``total_exact`` is ``false``, and an older public document is out of reach
+
+        of this route. A busy server refuses the read at once (429 with
+
+        ``Retry-After``) rather than queueing it.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -4326,6 +4334,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: List Documents
@@ -4473,6 +4490,17 @@ paths:
         its own reach. A chunk id (it reads its parent''s label) and a value outside
 
         the vocabulary are refused. Re-applying the stored label is a no-op.
+
+
+        ``public`` writes the exact record an ``external`` key reads, so a record
+
+        that only reads ``public`` (a corpus file''s bare frontmatter) is rewritten,
+
+        and a record that carries regulatory tags, a jurisdiction or other fields
+
+        the exact record would discard is refused (400, naming them) rather than
+
+        cleared. Only a stored record that already is the exact one is a no-op.
 
 
         ``requested_by`` is derived from the authenticated principal when one is
@@ -5826,6 +5854,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Pack
@@ -5866,6 +5903,15 @@ paths:
           description: '``req`` itself fails pydantic validation (DefaultValidationError -- ``detail`` is a list of field
             errors), or ``sections`` is empty or one entry fails ``SectionRequest`` validation (StringDetailError -- ``detail``
             is a plain string).'
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Sectioned Pack
@@ -6802,6 +6848,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Search

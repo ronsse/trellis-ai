@@ -66,7 +66,7 @@ from trellis.core.write_config import (
     resolve_write_behaviour,
 )
 from trellis.core.write_provenance import get_write_provenance
-from trellis.errors import TrellisError
+from trellis.errors import PublicReadBusyError, TrellisError
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import (
@@ -209,6 +209,12 @@ POLICY_DENIED = -32002
 
 #: A governed mutation executed but came back non-success.
 MUTATION_FAILED = -32003
+
+#: A read for a key that reads only public documents was refused because the
+#: process is at its limit on concurrent public reads
+#: (:class:`~trellis.errors.PublicReadBusyError`). ``data.retry_after_seconds``
+#: says when to retry; nothing ran.
+PUBLIC_READ_BUSY = -32004
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +528,23 @@ class _SanitizeUncaughtToolErrors(Middleware):
             cause = exc.__cause__
             name = context.message.name
             prefix = f"Error calling tool {name!r}:"
+            if isinstance(cause, PublicReadBusyError):
+                raise McpError(
+                    ErrorData(
+                        code=PUBLIC_READ_BUSY,
+                        # The wire carries ``isError`` and this text only (the
+                        # SDK renders any handler exception as ``str(exc)``), so
+                        # the reason and the retry hint are in the text too.
+                        message=(
+                            f"public_read_busy: {cause.message} "
+                            f"(retry_after_seconds={cause.retry_after})"
+                        ),
+                        data={
+                            "reason": "public_read_busy",
+                            "retry_after_seconds": cause.retry_after,
+                        },
+                    )
+                ) from cause
             if (
                 cause is None
                 or isinstance(cause, McpError)
@@ -1513,6 +1536,10 @@ def _flat_context(
         )
     except McpError:
         raise
+    except PublicReadBusyError:
+        # A refused public read is not an assembly failure: it travels as
+        # itself so ``_SanitizeUncaughtToolErrors`` can give it its own code.
+        raise
     except Exception as exc:
         logger.exception("flat_context_failed", operation=operation)
         detail = _exception_detail(exc)
@@ -1719,6 +1746,9 @@ def _sectioned_context(
         )
     except McpError:
         # Already structured by a deeper helper — let it propagate.
+        raise
+    except PublicReadBusyError:
+        # See the flat path: a refused public read keeps its own type.
         raise
     except Exception as exc:
         logger.exception("sectioned_context_failed", tool=tool)

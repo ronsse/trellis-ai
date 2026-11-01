@@ -2702,6 +2702,71 @@ class TestCurateClassifySensitivity:
         assert codes[0] == codes[1] != 0
         assert self._label() == "internal"
 
+    @staticmethod
+    def _stored_record(doc_id: str = "doc-1") -> dict[str, object]:
+        from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+        from trellis_cli.stores import _get_registry
+
+        row = _get_registry().knowledge.document_store.get(doc_id)
+        assert row is not None
+        return row["metadata"][DATA_CLASSIFICATION_KEY]
+
+    @staticmethod
+    def _seed_record(record: dict[str, object], doc_id: str = "doc-1") -> None:
+        from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+        from trellis_cli.stores import _get_registry
+
+        _get_registry().knowledge.document_store.put(
+            doc_id, "deploy checklist", {DATA_CLASSIFICATION_KEY: record}
+        )
+
+    def test_public_rewrites_a_bare_record_to_the_exact_one(self) -> None:
+        """Corpus frontmatter stores a bare record; this is the repair."""
+        from trellis.schemas.classification import public_label_record
+
+        self._seed_record({"sensitivity": "public"})
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "classify-sensitivity",
+                "doc-1",
+                "--sensitivity",
+                "public",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._stored_record() == public_label_record()
+
+    def test_public_over_a_record_with_tags_is_refused_in_both_formats(self) -> None:
+        record = {
+            "sensitivity": "public",
+            "regulatory_tags": ["gdpr"],
+            "jurisdiction": [],
+            "classified_by": ["caller"],
+            "classification_version": "1",
+        }
+        self._seed_record(record)
+        codes = []
+        for fmt in ("json", "text"):
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "classify-sensitivity",
+                    "doc-1",
+                    "--sensitivity",
+                    "public",
+                    "--format",
+                    fmt,
+                ],
+            )
+            codes.append(result.exit_code)
+        assert codes[0] == codes[1] != 0
+        assert self._stored_record() == record
+
     def test_a_missing_document_is_refused(self) -> None:
         result = runner.invoke(
             app,

@@ -21,8 +21,8 @@ from tests.unit.mcp.conftest import mint, unwrap_tool
 from tests.unit.mcp.test_auth import EXPECTED_TOOL_SCOPES
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
 from tests.unit.retrieve.test_sensitivity import label
-from trellis.auth import SCOPE_READ, clearance_of
-from trellis.mcp.auth import TrellisApiKeyVerifier, set_auth_enforced
+from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ, clearance_of
+from trellis.mcp.auth import TrellisApiKeyVerifier, set_auth_enforced, trellis_scope
 from trellis.mcp.server import current_clearance, mcp
 
 if TYPE_CHECKING:
@@ -238,6 +238,43 @@ class TestRefusedTools:
         for name, needed in EXPECTED_TOOL_SCOPES.items():
             if needed != SCOPE_READ:
                 assert not tools[name].auth(ctx), name  # type: ignore[attr-defined]
+
+
+class TestTheTwoWritesAnExternalKeyMustNotReach:
+    """``record_feedback`` and ``save_knowledge`` are refused for read+external.
+
+    ``record_feedback`` names a pack's item ids and ``save_knowledge`` writes an
+    entity, so each would hand an external key a route that depends on or
+    changes more than it may read. They are guarded by the ``mutate`` and
+    ``ingest`` scopes, which a ``["read", "external"]`` key does not hold, and
+    the gate that enforces that is the real one with enforcement on. If either
+    tool were ever re-scoped to ``read`` this fails, and so does the guarantee.
+    """
+
+    def test_the_tools_are_guarded_by_mutate_and_ingest(self) -> None:
+        assert EXPECTED_TOOL_SCOPES["record_feedback"] == SCOPE_MUTATE
+        assert EXPECTED_TOOL_SCOPES["save_knowledge"] == SCOPE_INGEST
+
+    async def test_the_real_scope_checks_refuse_a_read_external_key(
+        self, seeded: StoreRegistry
+    ) -> None:
+        ctx = _auth_context(await _external_scopes(seeded))
+        assert set(ctx.token.scopes) == {"read", "external"}  # type: ignore[union-attr]
+        assert trellis_scope("mutate")(ctx) is False
+        assert trellis_scope("ingest")(ctx) is False
+        assert trellis_scope("read")(ctx) is True
+
+    async def test_neither_tool_is_listed_to_the_key(
+        self, seeded: StoreRegistry
+    ) -> None:
+        ctx = _auth_context(await _external_scopes(seeded))
+        set_auth_enforced(enforced=False)
+        try:
+            tools = {t.name: t for t in await mcp.list_tools()}
+        finally:
+            set_auth_enforced(enforced=True)
+        for name in ("record_feedback", "save_knowledge"):
+            assert not tools[name].auth(ctx), name  # type: ignore[attr-defined]
 
 
 class TestAnonymousIsUnchanged:

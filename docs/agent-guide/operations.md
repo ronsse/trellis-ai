@@ -1571,7 +1571,19 @@ trellis curate classify-sensitivity doc-1 --sensitivity restricted --format json
 Re-applying the stored label answers `Classification unchanged: ...` and writes
 nothing. A document that does not exist, a chunk id (a chunk reads its parent's
 label, so relabel the parent) and a value outside the vocabulary exit `2` with
-`"status": "rejected"`. The exit code is the same under `--format text` and
+`"status": "rejected"`.
+
+**`public` writes the exact record an `external` key reads.** A document whose
+record merely reads `public` (a corpus file's frontmatter is stored bare as
+`{"sensitivity": "public"}`, and another classifier may have written
+`classified_by: ["import"]`) is *rewritten*, never reported unchanged, because an
+`external` key does not read it until it is. A record that carries regulatory tags,
+a jurisdiction, another classification version or a field the schema does not know
+is refused (exit `2`, reason `classification_public_discards`, naming those
+fields, `Nothing was written.`) rather than cleared silently: take the tags off on
+purpose, or leave the document unserved. Only a stored record that already is the
+exact one answers `unchanged`. A target other than `public` keeps the prior fields,
+as it always did. The exit code is the same under `--format text` and
 `--format json`. The CLI is a trusted-local surface and holds `restricted`
 clearance; the REST route is the credentialed equivalent:
 
@@ -3346,7 +3358,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline. A caller-chosen `evidence.doc_id` may not start with `trace-summary:` (the trace embed worker's namespace: a row there makes the trace it names look already embedded, so its real summary is never written; code `reserved_trace_summary_id`), may not sit in the `precedent://learning/` namespace, and may not be a minted `<x>#chunk-<digits>` chunk id (both `reserved_document_id`). The prefix is exact and case-sensitive. `POST /api/v1/evidence`, `POST /api/v1/documents`, MCP `save_memory` and `trellis ingest evidence` refuse it the same way |
-| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
+| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op, except to `public`: that writes the exact record an `external` key reads, so a record that only reads `public` is rewritten, and one carrying regulatory tags, a jurisdiction, another version or an unknown field is refused (`classification_public_discards`, nothing written). Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations
@@ -4539,28 +4551,56 @@ hidden row: a pack, a search page and a document list are computed from the
 documents labelled `public` alone, so a document the key may not read is in no
 result set and in no score's statistics. Adding or removing such documents leaves
 every payload this key gets unchanged, apart from ids and clocks drawn per call.
-The residuals are listed under "does not guard" below (timing, a row the document
-store cannot parse, and which matches survive above the 2000-row ceiling). The
-points that follow are each a change for this key alone: every other key is served
-exactly what it was.
+The residuals are listed under "does not guard" below (timing, and a row the
+document store cannot parse). The points that follow are each a change for this key
+alone: every other key is served exactly what it was.
 
-- **The label is a query predicate, and only two axes run.** The document store is
-  asked for rows labelled `public` (`DocumentStore.search` and
-  `DocumentStore.list_documents` both take a `filters` argument, equality on a
-  top-level metadata key, evaluated in the query), so a hidden row is not read,
-  whatever its text holds. The label is the whole stored record that the labelling
-  paths write for `public` (`save_memory` / `save_knowledge` `sensitivity`, and
-  `curate classify-sensitivity`), and a store filter is equality on a key's whole
-  value, so a document labelled `public` whose record also carries regulatory tags, a
-  jurisdiction or another classifier is **not** served: the predicate fails closed.
-  The clearance check then judges every returned row a second time, so it can only
-  narrow. The keyword axis scores the returned rows with BM25 computed over those
-  rows alone (the store's own `rank` is discarded; ties break on `doc_id`). The
-  semantic axis never calls `VectorStore.query` (two backends filter after an
-  over-fetch, so a hidden row would still push a public one out): it lists the
-  public document ids, reads each stored vector with `VectorStore.get`, computes
-  cosine locally (ties on `doc_id`) and skips a row whose vector is missing,
-  unusable or the wrong width. Only those two axes run, by allow-list: a graph
+- **One predicate decides "public", on every surface.** A document is served to
+  this key only when its stored `data_classification` is exactly the record the
+  labelling paths write for `public` (`save_memory` / `save_knowledge`
+  `sensitivity`, and `curate classify-sensitivity`):
+  `{"sensitivity": "public", "regulatory_tags": [], "jurisdiction": [],
+  "classified_by": ["caller"], "classification_version": "1"}`. The store filter and
+  the per-row gate both take that record from one function
+  (`trellis.schemas.classification.is_public_label` and `public_label_record`), so
+  the list, `GET /documents/{id}`, `GET /search`, `GET /documents?q=`, a pack and
+  `get_items` cannot disagree. A document whose record merely *reads* `public`, a
+  bare `{"sensitivity": "public"}`, `classified_by: ["import"]`, regulatory tags or a
+  jurisdiction, is served by none of them: the predicate fails closed. A clearance
+  above `public` is unchanged (it reads the sensitivity value). **Frontmatter is
+  not enough.** `ingest-corpus` stores a file's `sensitivity` or
+  `data_classification` frontmatter as the bare record, so a corpus document is
+  served to no `external` key until a person relabels it:
+  `trellis curate classify-sensitivity <doc_id> --sensitivity public` (or
+  `POST /api/v1/documents/{doc_id}/sensitivity`). That command writes the exact
+  record, or refuses with the names of the tags it would discard. A test pins a
+  hand-written copy of the record against both the filter and the gate
+  (`tests/unit/retrieve/test_public_label_pin.py`), so a schema change that would
+  turn every stored `public` document into an empty answer fails on purpose.
+- **Only two axes run, and neither asks a store to search.** The document store is
+  asked for one thing: the documents labelled `public`
+  (`DocumentStore.list_documents(filters=...)`, equality on the label evaluated in
+  the query), newest first, at most 2000. The clearance check then judges every row
+  a second time, so it can only narrow. A pack reads them once for both axes. The
+  **keyword axis** matches and scores those rows itself and never calls
+  `DocumentStore.search`, because a full-text index covers every row and a word
+  looked up in it is looked up among hidden rows. A document matches when its text
+  holds **any** of the query's words, the reading both stores' full-text queries
+  give (SQLite `OR`-joins the first 20 `[A-Za-z0-9]+` words, Postgres uses an
+  any-term `tsquery`). The score is BM25 with the document count and document
+  frequency taken over the public rows read (ties break on `doc_id`). Matching is
+  whole-word, ASCII, case-insensitive: the stores' tokenisers (SQLite `unicode61`
+  folding of diacritics, stemming on Postgres, non-ASCII words) are **not**
+  reproduced, so a query that depends on them matches differently on this path.
+  The **semantic axis** never calls `VectorStore.query` (two backends filter after an
+  over-fetch, so a hidden row would still push a public one out): it reads each
+  public document's own stored vector with `VectorStore.get` (one `get` per public
+  document, so on a networked backend that is one round trip each, reasoned here and
+  not measured), computes cosine locally (ties on `doc_id`) and skips a row whose
+  vector is missing, unusable or the wrong width. A document the corpus ingest
+  split into chunks has chunk vectors and no parent vector, so the semantic axis
+  cannot read it: `axes.semantic` still reads `ran` and `axes.failed` is empty, and
+  the keyword axis still finds it. Only these two axes run, by allow-list: a graph
   strategy or a plugin strategy is not asked, so a strategy added later fails
   closed. One that did not run is listed in `axes.failed`. Ranking quality on this
   path differs from the internal path, by design.
@@ -4599,19 +4639,32 @@ exactly what it was.
   `"graph": "absent"` for this key, since a pack to it never runs a graph axis and
   a report of one would describe the graph. Over REST a document row carries no
   `rank` for this key, and `include_chunks` is echoed `false` whatever was asked.
-- **`GET /search`, `GET /documents?q=` and a pack share one keyword read.** The page
-  is the first `limit` of the public matches, in the order above; nothing is read
-  past the public rows, so a page is as long as it would be if the unreadable
-  documents did not exist.
-- **The ceiling counts public rows only.** One read holds at most 2000 documents
-  labelled `public` (`PUBLIC_ROW_CEILING`), so whether it bites is a function of what
-  the key may read and nothing it may not. A hidden row cannot reach it. Above it,
-  the semantic read keeps the newest 2000 public documents, and the keyword read
-  keeps the 2000 the document store ranks first (that rank sees the whole index, so
-  which public matches are kept above the ceiling is the one place the store's rank
-  still enters; it can only be reached by a key that may read more than 2000
-  documents matching the query). `GET /documents?q=` reports `total_exact: false` at
-  the ceiling; a pack and `/search` carry no field for it.
+- **`GET /search`, `GET /documents?q=`, a no-`q` `GET /documents` and a pack share
+  one read of the public rows.** The keyword page is the first `limit` of the public
+  matches, in the order above, and a no-`q` list is the newest public rows; nothing
+  is read past the public rows, so a page is as long as it would be if the
+  unreadable documents did not exist.
+- **The ceiling is "the newest 2000 public documents".** One read holds at most 2000
+  documents labelled `public` (`PUBLIC_ROW_CEILING`), newest first. The label is a
+  query predicate, so a hidden row cannot reach the ceiling or choose which public
+  rows are in it: it is a function of what the key may read and nothing it may not,
+  and no score's statistics include a hidden row, with no qualifier. Above 2000
+  public documents the older ones are out of reach of the keyword and semantic
+  reads, a count is a clip, and `GET /documents` reports `total_exact: false`; a pack
+  and `/search` carry no field for it.
+- **Public reads are bounded.** A public read lists and tokenises up to 2000 whole
+  documents however narrow the question, so at most `MAX_CONCURRENT_PUBLIC_READS`
+  (2, a constant in `trellis.retrieve.public_rank`) run at once in a process. A read
+  over the limit is refused at once, never queued: REST answers `429` with
+  `Retry-After: 1` (documented in the OpenAPI spec on `/search`, `/packs`,
+  `/packs/sectioned` and `/documents`, body code `public_read_busy`), and MCP answers
+  an error result whose text reads `public_read_busy: ... (retry_after_seconds=1)`
+  (the server raises code `-32004` with `data.retry_after_seconds`, but the MCP SDK
+  puts only the error flag and that text on the wire, so a client reads the text). Only
+  public reads take a slot, and the refusal depends on public traffic alone, so it
+  says nothing about hidden rows or about other keys' traffic. A key that reads
+  above `public` is never counted and never refused. The limit is per process: a
+  deployment of several workers holds that many reads per worker.
 - **`/api/version` answers as an anonymous probe does** (no provenance and no
   write-behaviour settings unless `TRELLIS_OPS_DETAIL` is `public`), as `/readyz`
   does.
@@ -4654,13 +4707,37 @@ What this does **not** guard: a `read` key, and every key that existed before,
 still reads everything unlabelled. Nothing labels a document `public`
 automatically; that is a human act (`save_memory`/`save_knowledge`
 `sensitivity`, or `curate classify-sensitivity`), and a document whose label is
-missing or malformed is never served to an `external` key. The key does not
+missing, malformed or not the exact public record is never served to an `external`
+key. In particular a corpus file's `sensitivity: public` frontmatter is not enough:
+it is stored bare and served to no `external` key until a person runs
+`trellis curate classify-sensitivity <doc_id> --sensitivity public`. The key does not
 bound what an operator labels `public`, does not limit domains, and the `/ui`
 page and other routes that need no credential are unchanged. It also does not
 guard:
 
-- **Timing.** A request that has to read more documents takes longer. Latency is
-  not equalised.
+- **Timing, and what a public read costs the process.** A request that has to read
+  more documents takes longer, and latency is not equalised. A public read lists and
+  tokenises up to 2000 whole documents however narrow the question, in pure Python
+  under the GIL, so the process-wide limit bounds how many run at once and not what
+  one costs. Measured on SQLite with 2000 public documents of about 20 KB, in one
+  process (synthetic, an in-process client; a networked store was not measured): one
+  `/search` alone takes about 1.2 s and a `read` key's pack about 0.12 s. An internal
+  `GET /documents/{id}` answers in about 3 ms when idle and about 40 a second
+  complete, and the same under four concurrent `read`-key pack loops (median 3.8 ms).
+  Under four external `/search` loops about 4 to 5 a second completed, with the limit
+  off, at 2 or at 1 when the loops honour `Retry-After`, and over those requests the
+  median was 211 ms at 1 and 249 ms at 2 (p90 348 and 362 ms; 8 ms with the limit off,
+  whose p90 was 599 ms because the slow requests are most of the window). A client that
+  ignores `Retry-After` and retries at once is held to the limit: across four loops it
+  drew about 120 refusals a second at 2 and about 210 at 1, and the slowest internal
+  request fell from 755 ms to 534 ms and 464 ms, at a median of 14 and 18 ms against
+  8 ms with the limit off, because the refusals themselves cost. Neither 2 nor 1 brings
+  internal latency near idle while external reads run (a read in flight plausibly holds
+  the GIL in long stretches; that is reasoned, not profiled), so the limit stays at 2:
+  it caps the amplification, not the baseline. An operator who serves a large
+  public corpus to many external keys should run them in a separate process. One
+  `VectorStore.get` per public document on a networked backend is reasoned, not
+  measured.
 - **Auth modes.** The tier exists only under `required`, as above; nothing in `off`,
   or in `optional` with the key omitted, is enforced.
 - **A scoped token set as `TRELLIS_API_KEY`.** The REST shared-secret check runs
@@ -4671,12 +4748,23 @@ guard:
 - **A stale embedding.** A public document whose embedding is older than its text is
   ranked on the semantic axis by the old words, and those words move its rank (the
   text served is always the stored text). Re-embed after an edit.
-- **A row the document store cannot parse.** A stored row whose `metadata_json` is
-  not JSON makes every read that touches it fail with a 500, for every key, because
-  the SQLite store cannot read it (a filtered query evaluates `json_extract` over
-  every row it visits, a listing parses every row it returns). The row is never
-  served, but a caller can tell that one exists. No `put` writes such a row; it is
-  a store fault. The failure is the whole request, not a failed axis.
+- **A row the document store cannot parse.** The keyword axis never asks a store to
+  search, so a query word is not looked up among rows the key may not read, and a
+  corrupt row cannot answer differently by whether it holds the word (measured: for
+  each corrupt shape below, every status and every body is the same with and without
+  the queried words in the row, and no body carries the row or its text).
+  What is left: the SQLite store's *filtered* listing, which is how the label
+  predicate reads public rows, fails on a row whose `metadata_json` is not JSON
+  (`json_extract` raises `malformed JSON`) and on a row that is valid JSON but not an
+  object (`[1]`, `null`, `"str"`, `5`; the store's own filter function raises). Every
+  public read then answers 500 for every external key, whoever the row belongs to and
+  whatever it holds: `GET /search`, `GET /documents` with and without `q`, a pack and a
+  sectioned pack, for a word nobody holds as for one the row holds. A caller can tell
+  that such a row exists, and nothing about it. No `put` writes one; it is a store
+  fault. The unfiltered listing and `search` still read valid non-object JSON, so a key
+  that reads more than `public` answers 200 over the same store, while a row of
+  non-JSON text fails an unfiltered listing and a `search` that matches it for every
+  key, as before. The failure is the whole request, not a failed axis.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would
@@ -5021,7 +5109,7 @@ intents, served item ids and titles, attribution.
 
 | Method | Endpoint | Scope | Params/Body | Description |
 |--------|----------|-------|-------------|-------------|
-| GET | `/documents` | `read` | `?q=...&limit=50&offset=0&include_chunks=false` | List or search documents, previews only. A search (`q` set) is paged the same way the unfiltered list is — `offset`/`limit` both apply to the matches, not just to the unfiltered case. Nothing in `DocumentStore` counts a query's total matches, so a search captures up to a bounded scan window once and pages that capture; `total_exact: false` on the response means the query matched at least that many documents, so `total` is a floor, not an exact count. |
+| GET | `/documents` | `read` | `?q=...&limit=50&offset=0&include_chunks=false` | List or search documents, previews only. A search (`q` set) is paged the same way the unfiltered list is — `offset`/`limit` both apply to the matches, not just to the unfiltered case. Nothing in `DocumentStore` counts a query's total matches, so a search captures up to a bounded scan window once and pages that capture; `total_exact: false` on the response means the query matched at least that many documents, so `total` is a floor, not an exact count. For an `external` key the scan window is the newest 2000 public documents and a read over the process's public-read limit answers `429` with `Retry-After`. |
 | GET | `/documents/{doc_id}` | `read` | — | Get one document by id. 404 when absent. |
 | GET | `/graph/history` | `read` | `?entity_id=...` | All versions of a graph node, newest first (SCD-2 audit trail). 404 when the entity has none. |
 | GET | `/events` | `admin` | `?event_type=...&entity_id=...&since=...&until=...&order=desc&limit=100&include_payload=false` | Tail or filter the event log, newest first by default. `GET /events` has no offset — page older history by passing the oldest `occurred_at` you have as `until`. |

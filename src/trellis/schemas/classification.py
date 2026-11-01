@@ -459,3 +459,35 @@ def sensitivity_of(bag: Mapping[str, Any] | None) -> Sensitivity:
         if isinstance(value, str) and value in SENSITIVITY_ORDER:
             return value  # type: ignore[return-value]
     return "restricted"
+
+
+def public_label_record() -> dict[str, Any]:
+    """The one stored record that means "public" to an ``external`` caller.
+
+    The record the labelling paths write for ``public`` (``stamp_sensitivity``
+    on the save surfaces, ``classification.set`` on a relabel), built from the
+    model so the writers and the reader cannot drift. It is whole-record
+    equality, not a test of the ``sensitivity`` value, because a public-only
+    caller is served only what a person labelled on purpose: a bare
+    ``{"sensitivity": "public"}`` (a corpus file's frontmatter), a record that
+    also names a jurisdiction or a regulatory tag, or one another classifier
+    wrote does not match, and fails closed. ``tests/unit/retrieve/
+    test_public_label_pin.py`` holds a hand-written copy of this record and
+    fails when the model moves.
+    """
+    record = DataClassification(sensitivity="public", classified_by=["caller"])
+    return record.model_dump(mode="json")
+
+
+def is_public_label(bag: Mapping[str, Any] | None) -> bool:
+    """Whether ``bag`` carries exactly :func:`public_label_record`.
+
+    The one predicate that decides "public" for a public-only caller, shared
+    by the store filter (:func:`trellis.retrieve.public_rank.public_label_filter`)
+    and by :class:`~trellis.retrieve.sensitivity.DocumentClearance`, so no
+    surface answers a document another surface refuses. Python equality, which
+    is also what every store's metadata filter computes on an object value.
+    """
+    if not isinstance(bag, Mapping):
+        return False
+    return bool(bag.get(DATA_CLASSIFICATION_KEY) == public_label_record())

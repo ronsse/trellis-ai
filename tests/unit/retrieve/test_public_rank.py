@@ -10,22 +10,28 @@ running over the public candidates.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
 
 from tests.unit.retrieve.test_sensitivity import label
+from trellis.errors import PublicReadBusyError
 from trellis.retrieve import public_rank
 from trellis.retrieve.builder_factory import describe_axes
 from trellis.retrieve.class_prior import ClassPriorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.public_rank import (
+    MAX_CONCURRENT_PUBLIC_READS,
+    PUBLIC_READ_RETRY_AFTER_SECONDS,
     PUBLIC_ROW_CEILING,
+    PublicRead,
     bm25_rank,
     cosine,
     public_keyword_rows,
     public_label_filter,
+    public_read_slot,
     read_public_documents,
 )
 from trellis.retrieve.sensitivity import stamp_sensitivity
@@ -122,6 +128,13 @@ class TestReadPublicDocuments:
     def test_the_ceiling_is_the_documented_one(self) -> None:
         assert PUBLIC_ROW_CEILING == 2000
 
+    def test_no_document_store_reads_no_row(self) -> None:
+        """A builder with no document store can label, read and rebuild nothing."""
+        read = PublicRead(None)
+        assert read.rows == []
+        assert read.truncated is False
+        assert public_keyword_rows(None, "alpha", read=read) == []  # type: ignore[arg-type]
+
 
 class TestBm25:
     ROWS: ClassVar[list[dict[str, Any]]] = [
@@ -203,28 +216,26 @@ class TestPublicKeywordRows:
             plain.close()
             mixed.close()
 
-    def test_the_stores_own_rank_is_discarded(self) -> None:
+    def test_the_stores_search_is_never_called(self) -> None:
+        """The keyword axis lists public rows and matches them itself."""
         store = MagicMock()
-        store.search.return_value = [
-            {"doc_id": "weak", "content": "alpha", "rank": -99.0, "metadata": {}},
+        store.search.side_effect = AssertionError("store search called")
+        store.list_documents.return_value = [
+            {"doc_id": "weak", "content": "alpha beta", "metadata": label("public")},
             {
                 "doc_id": "strong",
                 "content": "alpha alpha alpha",
-                "rank": -0.1,
-                "metadata": {},
+                "metadata": label("public"),
             },
         ]
-        gate_rows = store.search.return_value
-        for row in gate_rows:
-            row["metadata"] = label("public")
-        ranked = public_keyword_rows(store, "alpha")
-        assert _ids(ranked) == ["strong", "weak"]
+        assert _ids(public_keyword_rows(store, "alpha")) == ["strong", "weak"]
+        store.search.assert_not_called()
 
     def test_the_label_is_asked_of_the_store(self) -> None:
         store = MagicMock()
-        store.search.return_value = []
+        store.list_documents.return_value = []
         public_keyword_rows(store, "alpha", filters={"scope": "x"})
-        kwargs = store.search.call_args.kwargs
+        kwargs = store.list_documents.call_args.kwargs
         assert kwargs["filters"] == {"scope": "x", **public_label_filter()}
         assert kwargs["include_chunks"] is False
         assert kwargs["limit"] == PUBLIC_ROW_CEILING
@@ -233,10 +244,187 @@ class TestPublicKeywordRows:
         self,
     ) -> None:
         store = MagicMock()
-        store.search.return_value = [
+        store.list_documents.return_value = [
             {"doc_id": "x", "content": "alpha", "metadata": label("internal")},
         ]
         assert public_keyword_rows(store, "alpha") == []
+
+    def test_a_document_matches_when_it_holds_any_query_word(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        """What the stores' full-text query reads: any term, not all of them."""
+        store.put("both", "alpha beta", label("public"))
+        store.put("one", "beta only", label("public"))
+        store.put("none", "gamma", label("public"))
+        assert _ids(public_keyword_rows(store, "alpha beta")) == ["both", "one"]
+
+    def test_a_query_with_no_word_matches_nothing(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("p", "alpha", label("public"))
+        assert public_keyword_rows(store, "  ?! ") == []
+
+    def test_matching_is_case_insensitive_whole_words(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("p", "The Alpha rollout", label("public"))
+        store.put("sub", "alphabet soup", label("public"))
+        assert _ids(public_keyword_rows(store, "ALPHA")) == ["p"]
+
+    def test_statistics_are_over_the_public_rows_and_not_the_hidden_ones(
+        self, tmp_path: Path
+    ) -> None:
+        plain = SQLiteDocumentStore(tmp_path / "a.db")
+        mixed = SQLiteDocumentStore(tmp_path / "b.db")
+        try:
+            for s in (plain, mixed):
+                s.put("p1", "failover plan", label("public"))
+                s.put("p2", "unrelated words", label("public"))
+            for i in range(30):
+                mixed.put(f"h{i}", "failover failover failover", {})
+
+            def served(rows: list[tuple[dict[str, Any], float]]) -> list[Any]:
+                return [(row["doc_id"], score) for row, score in rows]
+
+            assert served(public_keyword_rows(plain, "failover")) == served(
+                public_keyword_rows(mixed, "failover")
+            )
+        finally:
+            plain.close()
+            mixed.close()
+
+    def test_past_the_ceiling_the_capture_is_the_newest_public_rows(
+        self, store: SQLiteDocumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A function of the public rows alone: hidden rows holding the word,
+        however many, do not choose which public rows are in reach."""
+        monkeypatch.setattr(public_rank, "PUBLIC_ROW_CEILING", 3)
+        for i in range(6):
+            store.put(f"pub-{i}", "failover plan", label("public"))
+        for i in range(40):
+            store.put(f"hidden-{i:02d}", "failover " * 20, {})
+        read = PublicRead(store)
+        ids = {
+            r["doc_id"] for r, _ in public_keyword_rows(store, "failover", read=read)
+        }
+        assert len(ids) == 3
+        assert all(i.startswith("pub-") for i in ids)
+        assert read.truncated is True
+
+    def test_below_the_ceiling_the_read_is_not_truncated(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("p", "alpha", label("public"))
+        read = PublicRead(store)
+        assert [r["doc_id"] for r in read.rows] == ["p"]
+        assert read.truncated is False
+
+    def test_two_axes_share_one_read(self) -> None:
+        store = MagicMock()
+        store.list_documents.return_value = [
+            {"doc_id": "p", "content": "alpha", "metadata": label("public")}
+        ]
+        read = PublicRead(store)
+        public_keyword_rows(store, "alpha", read=read)
+        public_keyword_rows(store, "beta", read=read)
+        assert store.list_documents.call_count == 1
+
+    def test_a_failed_read_is_not_remembered(self) -> None:
+        store = MagicMock()
+        store.list_documents.side_effect = [RuntimeError("down"), []]
+        read = PublicRead(store)
+        with pytest.raises(RuntimeError):
+            _ = read.rows
+        assert read.rows == []
+
+
+_BOOM = "boom"
+
+
+class TestPublicReadSlot:
+    """At most ``MAX_CONCURRENT_PUBLIC_READS`` public reads run at once."""
+
+    def test_the_limit_is_two(self) -> None:
+        assert MAX_CONCURRENT_PUBLIC_READS == 2
+
+    def test_a_read_over_the_limit_is_refused_at_once(self) -> None:
+        with public_read_slot():
+            started = threading.Event()
+            release = threading.Event()
+            outcome: list[BaseException | None] = []
+
+            def hold() -> None:
+                with public_read_slot():
+                    started.set()
+                    release.wait(5)
+
+            def try_a_third() -> None:
+                try:
+                    with public_read_slot():
+                        outcome.append(None)
+                except PublicReadBusyError as exc:
+                    outcome.append(exc)
+
+            holder = threading.Thread(target=hold)
+            holder.start()
+            assert started.wait(5)
+            third = threading.Thread(target=try_a_third)
+            third.start()
+            third.join(5)
+            release.set()
+            holder.join(5)
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], PublicReadBusyError)
+        assert outcome[0].retry_after == PUBLIC_READ_RETRY_AFTER_SECONDS
+        assert outcome[0].code == "PUBLIC_READ_BUSY"
+
+    def test_a_nested_read_on_the_same_thread_holds_one_slot(self) -> None:
+        with (
+            public_read_slot(),
+            public_read_slot(),
+            public_read_slot(),
+            public_read_slot(),
+        ):
+            pass
+
+    def test_a_slot_is_released_when_the_read_raises(self) -> None:
+        for _ in range(MAX_CONCURRENT_PUBLIC_READS * 3):
+            with pytest.raises(RuntimeError), public_read_slot():
+                raise RuntimeError(_BOOM)
+        with public_read_slot():
+            pass
+
+    def test_the_limit_comes_from_the_named_constant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(public_rank, "MAX_CONCURRENT_PUBLIC_READS", 1)
+        release = threading.Event()
+        started = threading.Event()
+
+        def hold() -> None:
+            with public_read_slot():
+                started.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert started.wait(5)
+            with pytest.raises(PublicReadBusyError), public_read_slot():
+                pass
+        finally:
+            release.set()
+            holder.join(5)
+
+    def test_a_read_of_the_public_rows_takes_a_slot(
+        self, store: SQLiteDocumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The read itself is guarded, so no surface can reach it unmetered."""
+        monkeypatch.setattr(public_rank, "MAX_CONCURRENT_PUBLIC_READS", 0)
+        with pytest.raises(PublicReadBusyError):
+            read_public_documents(store)
+        with pytest.raises(PublicReadBusyError):
+            public_keyword_rows(store, "alpha")
 
 
 class TestSemanticRead:

@@ -95,6 +95,7 @@ from trellis.retrieve.public_pack import (
     project_for_public,
     readable_stored_copy,
 )
+from trellis.retrieve.public_rank import PublicRead, public_read_slot
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
@@ -119,6 +120,7 @@ from trellis.retrieve.strategies import (
     KeywordSearch,
     SearchStrategy,
     SemanticSearch,
+    public_store_filters,
     resolve_graph_axis_state,
 )
 from trellis.retrieve.tier_mapping import TierMapper
@@ -2053,6 +2055,7 @@ class PackBuilder:
         clearance: Sensitivity,
         signal_quality_spec: dict[str, Any],
         parent_verdict_cache: ParentVerdictCache,
+        public_read: PublicRead,
     ) -> list[PackItem]:
         """One axis's items for a public-only caller: readable, refreshed, gated.
 
@@ -2065,10 +2068,16 @@ class PackBuilder:
         vector row cannot carry text or a stamp the document no longer holds.
         """
         if isinstance(strategy, KeywordSearch):
-            found = strategy.public_result(intent, limit=limit, filters=filters).items
+            found = strategy.public_result(
+                intent, limit=limit, filters=filters, read=public_read
+            ).items
         elif isinstance(strategy, SemanticSearch):
             found = strategy.public_result(
-                intent, self._document_store, limit=limit, filters=filters
+                intent,
+                self._document_store,
+                limit=limit,
+                filters=filters,
+                read=public_read,
             ).items
         else:  # pragma: no cover - _public_strategies never offers another
             msg = f"strategy {strategy.name!r} has no public-only read"
@@ -2094,6 +2103,7 @@ class PackBuilder:
         )
         return kept[:limit]
 
+    @public_read_slot()
     def _collect_public_pool(
         self,
         intent: str,
@@ -2115,6 +2125,11 @@ class PackBuilder:
         is all a public-only caller may be told about the search. Everything
         here, supersession included, sees only whole documents labelled
         ``public``, so the pool is a function of those documents alone.
+
+        Holds one public-read slot for the whole collection
+        (:func:`~trellis.retrieve.public_rank.public_read_slot`), so a process
+        runs at most a few of these at once; at the limit it raises
+        :class:`~trellis.errors.PublicReadBusyError` before reading anything.
         """
         scoped_filters, scoped_tag_filters = self._apply_domain_scope(
             domain, filters, tag_filters
@@ -2127,6 +2142,11 @@ class PackBuilder:
         class_prior_config = self._effective_class_prior_config()
         parent_verdict_cache = ParentVerdictCache(self._document_store)
         strategies = self._public_strategies()
+        # One read of the public documents, shared by the keyword and semantic
+        # axes: they ask for the same rows.
+        public_read = PublicRead(
+            self._document_store, filters=public_store_filters(merged_filters)
+        )
         pool: list[PackItem] = []
         strategies_used: list[str] = []
         strategy_failures: list[StrategyFailure] = []
@@ -2140,6 +2160,7 @@ class PackBuilder:
                     clearance=clearance,
                     signal_quality_spec=signal_quality_spec,
                     parent_verdict_cache=parent_verdict_cache,
+                    public_read=public_read,
                 )
                 items = self._stamp_collecting_strategy(
                     items, strategy.name, config=class_prior_config

@@ -24,9 +24,9 @@ from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
 from trellis.retrieve.lifecycle import is_archived, is_demoted
 from trellis.retrieve.public_rank import (
+    PublicRead,
     cosine,
     public_keyword_rows,
-    read_public_documents,
 )
 from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
@@ -1566,7 +1566,7 @@ def _public_items(
     )
 
 
-def _public_store_filters(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+def public_store_filters(filters: dict[str, Any] | None) -> dict[str, Any] | None:
     """``filters`` as a public-only read hands them to the document store.
 
     ``domain`` is a scoping hint already carried on the ``content_tags`` facet
@@ -1727,17 +1727,23 @@ class KeywordSearch(SearchStrategy):
         *,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
+        read: PublicRead | None = None,
     ) -> StrategyResult:
-        """The public-only keyword read: public documents, scored locally.
+        """The public-only keyword read: public documents, matched and scored here.
 
-        Reached only from the public-only path. The store is asked for
-        documents labelled ``public`` alone and its own rank is discarded; the
-        order is BM25 over those rows (:func:`~trellis.retrieve.public_rank.
-        public_keyword_rows`), so no hidden document can outrank, or move the
-        score of, a public one. :meth:`search_result` is unchanged.
+        Reached only from the public-only path. The public documents are read
+        by predicate (``read``, or the caller's own so the keyword and semantic
+        axes of one pack share a read) and matched and scored locally
+        (:func:`~trellis.retrieve.public_rank.public_keyword_rows`): the
+        store's ``search`` is not called, so no hidden document can outrank, or
+        move the score of, a public one, and a query word is never looked up
+        among hidden rows. :meth:`search_result` is unchanged.
         """
         scored = public_keyword_rows(
-            self._store, query, filters=_public_store_filters(filters)
+            self._store,
+            query,
+            filters=public_store_filters(filters),
+            read=read,
         )[:limit]
         return _public_items(
             strategy=self.name,
@@ -1932,6 +1938,7 @@ class SemanticSearch(SearchStrategy):
         *,
         limit: int = 20,
         filters: dict[str, Any] | None = None,
+        read: PublicRead | None = None,
     ) -> StrategyResult:
         """The public-only semantic read: public documents, cosine computed here.
 
@@ -1939,19 +1946,23 @@ class SemanticSearch(SearchStrategy):
         called: two backends filter after an approximate-neighbour over-fetch,
         so hidden rows would still push public ones out of it. The public
         documents are listed from ``document_store`` (the label is a query
-        predicate), each one's own vector is read with ``VectorStore.get``, and
+        predicate; ``read`` is the caller's own read, shared with the keyword
+        axis), each one's own vector is read with ``VectorStore.get``, and
         cosine against the query vector is computed over those and no others.
         A document with no vector, an unreadable one, or one of another width
-        is skipped. :meth:`search_result` is unchanged.
+        is skipped. A document that corpus ingest chunked has a vector per
+        chunk and none of its own, so this axis cannot read it (the keyword
+        axis can). :meth:`search_result` is unchanged.
         """
         if self._embedding_fn is None:
             logger.warning("semantic_search_no_embedding_fn")
             return StrategyResult(items=[], skipped=[])
         query_vector = self._embedding_fn(query)
         scored: list[tuple[dict[str, Any], float]] = []
-        for row in read_public_documents(
-            document_store, filters=_public_store_filters(filters)
-        ):
+        shared = read or PublicRead(
+            document_store, filters=public_store_filters(filters)
+        )
+        for row in shared.rows:
             try:
                 stored = self._store.get(row["doc_id"])
             except (ValueError, TypeError):

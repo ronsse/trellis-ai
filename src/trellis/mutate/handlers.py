@@ -80,7 +80,9 @@ from trellis.schemas.classification import (
     SENSITIVITY_ORDER,
     DataClassification,
     Lifecycle,
+    is_public_label,
     lifecycle_state_of,
+    public_label_record,
     sensitivity_of,
 )
 from trellis.schemas.measurement import Measurement
@@ -397,6 +399,34 @@ def _relabelled_record(prior: object, sensitivity: str) -> dict[str, Any]:
     return record.model_dump(mode="json")
 
 
+def _public_record_discards(prior: object) -> list[str]:
+    """What writing the exact public record would throw away from ``prior``.
+
+    The names of the substantive fields an exact public record
+    (:func:`~trellis.schemas.classification.public_label_record`) does not
+    carry: regulatory tags, a jurisdiction, a classification version other than
+    the current one, and any field the schema does not know. ``classified_by``
+    is not counted: it is who made the call, and a person making this one is
+    its new value. A prior that is not a record at all is replaced whole by
+    every relabel, so it discards nothing worth naming.
+    """
+    if not isinstance(prior, dict):
+        return []
+    defaults = DataClassification()
+    discarded = [
+        name
+        for name in ("regulatory_tags", "jurisdiction")
+        if prior.get(name) not in (None, getattr(defaults, name))
+    ]
+    version = prior.get("classification_version")
+    if version not in (None, defaults.classification_version):
+        discarded.append("classification_version")
+    discarded.extend(
+        sorted(str(k) for k in prior if k not in DataClassification.model_fields)
+    )
+    return discarded
+
+
 class ClassificationSetHandler:
     """Relabel one document's sensitivity, leaving its content untouched (#194).
 
@@ -415,6 +445,18 @@ class ClassificationSetHandler:
     (:func:`~trellis.mutate.sensitivity_floor.refuse_written_label`), so a caller
     cannot push a document out of its own reach. Re-applying the stored label is
     a no-op.
+
+    **``public`` is the exact record, and the handler says when it is not.** An
+    ``external`` key reads a document only when its stored record is exactly
+    :func:`~trellis.schemas.classification.public_label_record`, so a relabel
+    to ``public`` writes that record. A document whose record merely reads
+    ``public`` (a corpus file's bare frontmatter, a record another classifier
+    wrote) is *rewritten*, never reported as unchanged: it is unserved until it
+    is, and a success that changes nothing would leave it so. A record that
+    carries tags or other fields the exact record would discard is refused
+    (``classification_public_discards``) with the names of those fields rather
+    than cleared silently. Only the stored record being the exact one is a
+    no-op.
     """
 
     def __init__(
@@ -463,11 +505,28 @@ class ClassificationSetHandler:
 
         metadata: dict[str, Any] = dict(existing.get("metadata") or {})
         previous = sensitivity_of(metadata)
-        if DATA_CLASSIFICATION_KEY in metadata and previous == sensitivity:
-            return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
-        metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
-            metadata.get(DATA_CLASSIFICATION_KEY), sensitivity
-        )
+        prior_record = metadata.get(DATA_CLASSIFICATION_KEY)
+        if sensitivity == "public":
+            if is_public_label(metadata):
+                return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
+            discarded = _public_record_discards(prior_record)
+            if discarded:
+                msg = (
+                    f"document {doc_id!r} carries {', '.join(discarded)} in its "
+                    "classification record, which the exact public record an "
+                    "external key reads does not hold; writing it would discard "
+                    "them. Nothing was written."
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="classification_public_discards"
+                )
+            metadata[DATA_CLASSIFICATION_KEY] = public_label_record()
+        else:
+            if DATA_CLASSIFICATION_KEY in metadata and previous == sensitivity:
+                return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
+            metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
+                prior_record, sensitivity
+            )
         put_document(
             document_store,
             resolve_vector_store(self._registry),
@@ -476,7 +535,15 @@ class ClassificationSetHandler:
             metadata,
             preserve_updated_at=True,
         )
-        return doc_id, f"Classification set: {doc_id} {previous} -> {sensitivity}"
+        rewritten = (
+            " (record rewritten to the exact public record)"
+            if (previous == sensitivity)
+            else ""
+        )
+        return (
+            doc_id,
+            f"Classification set: {doc_id} {previous} -> {sensitivity}{rewritten}",
+        )
 
 
 def _bind_entity_name_alias(

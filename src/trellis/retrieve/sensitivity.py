@@ -20,9 +20,13 @@ withheld, and only from a caller who lacks the scope. A *malformed* label reads
 reads ``internal``, so it is withheld. It is also shown only what *can* carry a
 label. A graph item, trace, precedent or observation has none, and its metadata
 is free-form, so :func:`item_readable` serves a ``public`` caller only a pack
-item that is a stored whole document row labelled ``public``. An error while
-looking the row up withholds, and a clearance outside the vocabulary ranks as
-``public``, not above it.
+item that is a stored whole document row carrying the exact public record
+(:func:`~trellis.schemas.classification.is_public_label`: whole-record
+equality, the record a person's labelling writes, never a test of the
+``sensitivity`` value alone). One predicate decides "public" on every surface,
+so a bare ``{"sensitivity": "public"}`` is withheld from a list, a by-id read,
+a search and a pack alike. An error while looking the row up withholds, and a
+clearance outside the vocabulary ranks as ``public``, not above it.
 
 **What a public caller receives is the stored row, and only a window onto it.**
 The governing rule is that nothing it is sent depends on anything it may not
@@ -77,6 +81,7 @@ from trellis.schemas.classification import (
     LIFECYCLE_KEY,
     SENSITIVITY_ORDER,
     DataClassification,
+    is_public_label,
     sensitivity_of,
     sensitivity_rank,
 )
@@ -188,22 +193,24 @@ def _is_chunk_id(item_id: str) -> bool:
     return is_chunk_doc_id(item_id)
 
 
-def _public_document_label(
+def _public_document_readable(
     item: PackItem, parent_verdict_cache: ParentVerdictCache | None
-) -> Sensitivity | None:
-    """The label of the stored whole document ``item`` stands for, or ``None``.
+) -> bool:
+    """Whether ``item`` is a stored whole document carrying the public label.
 
-    ``None`` when ``item`` is not something a ``public`` caller may be shown at
-    all: not a document or vector row, a chunk, no cache to look the row up
+    ``False`` when ``item`` is not something a ``public`` caller may be shown
+    at all: not a document or vector row, a chunk, no cache to look the row up
     with, no stored row under its id, or a failed lookup. The label is read off
-    the stored row, never off ``item.metadata``.
+    the stored row, never off ``item.metadata``, and judged by
+    :func:`~trellis.schemas.classification.is_public_label`, the same
+    predicate :class:`DocumentClearance` and the store filter use.
     """
     if item.item_type not in _PUBLIC_ITEM_TYPES or parent_verdict_cache is None:
-        return None
+        return False
     if _is_chunk_id(item.item_id):
-        return None
+        return False
     stored = parent_verdict_cache.stored_metadata(item.item_id)
-    return None if stored is None else sensitivity_of(stored)
+    return stored is not None and is_public_label(stored)
 
 
 def item_readable(
@@ -216,15 +223,14 @@ def item_readable(
     The one predicate every pack gate asks. Above ``public`` it is exactly
     ``permits(clearance, effective_sensitivity(item, cache))``. For a public-only
     caller (:func:`is_public_only`) the item must also be a stored whole document
-    row (:func:`_public_document_label`) whose own label is ``public``: an
-    unlabelled document reads ``internal`` and is withheld, a chunk is withheld
-    whatever its parent says, and an item that cannot carry a label is
-    withheld.
+    row (:func:`_public_document_readable`) carrying the exact public record: an
+    unlabelled document reads ``internal`` and is withheld, a bare
+    ``{"sensitivity": "public"}`` is withheld, a chunk is withheld whatever its
+    parent says, and an item that cannot carry a label is withheld.
     """
     if not is_public_only(clearance):
         return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
-    label = _public_document_label(item, parent_verdict_cache)
-    return label is not None and permits("public", label)
+    return _public_document_readable(item, parent_verdict_cache)
 
 
 def effective_sensitivity(
@@ -287,10 +293,14 @@ class DocumentClearance:
 
     For the read surfaces that fetch documents directly rather than through a
     pack. One instance per request: it carries a per-request parent cache. For a
-    public-only clearance an unlabelled document reads ``internal`` and so is not
-    permitted, and so is an id with no stored row (``metadata`` is ``None``). A
-    public-only clearance is also refused every chunk id: only a whole document
-    is ever served to it, so a chunk answers as a missing id does.
+    public-only clearance a document is permitted only when it carries the exact
+    public record (:func:`~trellis.schemas.classification.is_public_label`): an
+    unlabelled document reads ``internal`` and is not permitted, a bare
+    ``{"sensitivity": "public"}`` is not permitted, and neither is an id with no
+    stored row (``metadata`` is ``None``). A public-only clearance is also
+    refused every chunk id: only a whole document is ever served to it, so a
+    chunk answers as a missing id does. Every other clearance judges the
+    effective sensitivity value, as before.
     """
 
     def __init__(self, document_store: DocumentStore, clearance: Sensitivity) -> None:
@@ -310,9 +320,7 @@ class DocumentClearance:
         if self.clearance == "restricted":
             return True
         if is_public_only(self.clearance):
-            return not _is_chunk_id(doc_id) and permits(
-                "public", sensitivity_of(metadata)
-            )
+            return not _is_chunk_id(doc_id) and is_public_label(metadata)
         return permits(self.clearance, self.sensitivity(doc_id, metadata))
 
 
