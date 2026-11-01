@@ -1127,9 +1127,11 @@ class TestDegradedEmission:
     def test_judge_failure_reasons_is_derived_not_hand_listed(self) -> None:
         """Exactly two reasons are excluded, and the set is computed.
 
-        Both excluded reasons are a usable verdict that was not applied: a
+        Two excluded reasons are a usable verdict that was not applied: a
         lock race, and a SUPERSEDE refused because its target is a promoted
-        precedent's row (#994). Counting the second as a broken judge would
+        precedent's row (#994); the third is a policy, a pair the route may
+        not carry, where the judge was never asked. Counting the second as a
+        broken judge would
         put a correctly refused verdict in the number that answers *how often
         does the judge fail*.
 
@@ -1142,6 +1144,7 @@ class TestDegradedEmission:
         not_failures = {
             ReconcileFallbackReason.STALE_RECHECK,
             ReconcileFallbackReason.TARGET_PROTECTED,
+            ReconcileFallbackReason.EGRESS_WITHHELD,
         }
         assert not not_failures & JUDGE_FAILURE_REASONS
         assert set(ReconcileFallbackReason) - not_failures == JUDGE_FAILURE_REASONS

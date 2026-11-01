@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import structlog
 from fastmcp import FastMCP
@@ -74,12 +74,15 @@ from trellis.extract.trace_ingest_hook import (
     trace_already_ingested,
 )
 from trellis.feedback.attribution import (
+    cited_item_ids,
     lookup_pack_bodied_item_ids,
     lookup_pack_item_ids,
+    lookup_pack_membership,
 )
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
+from trellis.llm.egress import EgressGate, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp import supersession as _supersession
@@ -875,9 +878,10 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
     source yields a client.
 
     The env-var fallback is skipped when ``llm.routes`` pins ``consumer`` to
-    a tier, and when ``llm.tiers`` / ``llm.routes`` is malformed: in both
-    cases the operator chose a model for this consumer, and
-    ``OPENAI_API_KEY`` would silently run it on a different one.
+    a tier, when the route is declared ``local`` and when ``llm.tiers`` /
+    ``llm.routes`` is malformed: in each case the operator chose a model for
+    this consumer, and ``OPENAI_API_KEY`` would silently run it on a
+    different one, a hosted one for content cleared to go only to a local one.
     """
     try:
         route = registry.llm_route(consumer)
@@ -903,7 +907,7 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
             "llm_client_from_registry", consumer=consumer.value, tier=route.tier
         )
         return client
-    if route.routed:
+    if route.routed or route.local:
         logger.warning(
             "llm_client_routed_tier_unbuildable",
             consumer=consumer.value,
@@ -2521,7 +2525,9 @@ def _emit_memory_stored_and_enrich(
     # reach callers without the clearance as derived text (#194).
     label = sensitivity_of(metadata)
     note: str | None = None
-    labelled = sensitivity_rank(label) > sensitivity_rank("internal")
+    # ``local=False`` on purpose: the reason is the unlabelled graph, not the
+    # route, so a route declared local does not lift this skip.
+    labelled = not may_reach_route(label, local=False)
     memory_extractor = None if labelled else _get_memory_extractor(registry)
     if labelled:
         note = (
@@ -2991,15 +2997,57 @@ def _gather_reconcile_candidate(
     )
 
 
+def _reconcile_egress_permits(
+    registry: StoreRegistry, metadata: dict[str, Any], candidate: ReconcileCandidate
+) -> bool:
+    """Whether the incoming memory and the stored candidate may both be sent.
+
+    The judge is shown both texts, so both labels count: the incoming
+    memory's own, and the candidate's effective one (a chunk takes its
+    parent's). A candidate that cannot be read back is unreadable, so it is
+    withheld rather than sent.
+    """
+    document_store = registry.knowledge.document_store
+    gate = EgressGate.for_route(registry, LLMConsumer.RECONCILE, document_store)
+    if gate.local:
+        return True
+    if not gate.permits_metadata(metadata):
+        return False
+    try:
+        stored = document_store.get(candidate.doc_id)
+    except Exception:
+        # GRACEFUL-DEGRADATION: fail closed. A candidate whose label cannot
+        # be read is not sent; the memory is stored as a plain ADD.
+        return False
+    if stored is None:
+        return False
+    return gate.permits(candidate.doc_id, stored.get("metadata"))
+
+
 def _compute_reconcile_outcome(
-    registry: StoreRegistry, content: str, candidate: ReconcileCandidate
+    registry: StoreRegistry,
+    content: str,
+    candidate: ReconcileCandidate,
+    *,
+    metadata: dict[str, Any],
 ) -> ReconcileOutcome:
     """Build the client and compute the verdict — **outside** the lock.
 
     The model is never a hard dependency: an unbuildable / unavailable client
-    yields a fallback ADD outcome rather than raising.
+    yields a fallback ADD outcome rather than raising. So does a pair the
+    reconcile route may not carry (:func:`_reconcile_egress_permits`), before
+    any client is built.
     """
     model_id = configured_model_id(registry)
+    if not _reconcile_egress_permits(registry, metadata, candidate):
+        logger.info("reconcile_egress_withheld", candidate_id=candidate.doc_id)
+        return ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=0.0,
+            model_id=model_id,
+            fallback=True,
+            fallback_reason=ReconcileFallbackReason.EGRESS_WITHHELD,
+        )
     try:
         client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
@@ -3286,7 +3334,9 @@ def _save_memory_reconciled(
     # near-total — a belt-and-suspenders guard turns any escape into the same
     # offline fallback. Fail-soft, never silent: the traceback goes to stderr.
     try:
-        outcome = _compute_reconcile_outcome(registry, content, candidate)
+        outcome = _compute_reconcile_outcome(
+            registry, content, candidate, metadata=metadata
+        )
     except Exception:
         logger.exception("reconcile_phase_b_failed", candidate_id=candidate.doc_id)
         outcome = ReconcileOutcome(
@@ -3696,6 +3746,48 @@ def get_file_context(
 #: against a pathological pack, it is not a normal truncation point.
 _MAX_CITABLE_IDS_IN_ERROR = 60
 
+#: Most ids written into the *text* of an attribution refusal. ``McpError.data``
+#: (which carries up to :data:`_MAX_CITABLE_IDS_IN_ERROR`) is dropped by FastMCP
+#: before a client sees the result, so the message is the only place a caller
+#: can read them. Twenty is enough to choose among and keeps the text near a
+#: couple of hundred tokens; the count of the rest is stated beside the list.
+_MAX_CITABLE_IDS_IN_MESSAGE = 20
+
+#: Most ids named in the note on a feedback reply, and the longest one echoed.
+#: Ids reach the reply and the refusal text from the caller or from a stored
+#: pack, so :func:`_echo_id` bounds each one; the caps say nothing about the pack.
+_MAX_UNSERVED_IDS_IN_NOTE = 10
+_MAX_ECHOED_ID_CHARS = 100
+
+
+def _echo_id(item_id: str) -> str:
+    """An id for a line of text: clipped, and safe to put between backticks.
+
+    An id is an arbitrary string, and FastMCP logs a refusal's message through
+    Rich, so an unbounded one can cost minutes. It is clipped first, so the
+    cost is the clip's, then each character that is not printable (a newline,
+    ESC, a line separator, a bidi mark) or is a backtick becomes ``?``: an id
+    cannot close its own span, start a second line or move the cursor.
+    """
+    clipped = item_id[:_MAX_ECHOED_ID_CHARS]
+    safe = "".join(c if c.isprintable() and c != "`" else "?" for c in clipped)
+    return safe + "…" if len(item_id) > _MAX_ECHOED_ID_CHARS else safe
+
+
+def _id_list_clause(label: str, item_ids: list[str]) -> str:
+    """`` <label>: `a`, `b`, ...`` for a refusal's text, capped, rest counted.
+
+    ``item_ids`` must already be the ones this caller may read
+    (:func:`_readable_served_ids`); nothing here re-checks clearance. Each id
+    goes through :func:`_echo_id`, so a stored id cannot bloat or forge the text.
+    """
+    shown = item_ids[:_MAX_CITABLE_IDS_IN_MESSAGE]
+    listed = ", ".join(f"`{_echo_id(item_id)}`" for item_id in shown)
+    clause = f" {label}: {listed}"
+    if len(item_ids) > len(shown):
+        clause += f" (and {len(item_ids) - len(shown)} more not listed)"
+    return f"{clause}."
+
 
 def _readable_served_ids(registry: StoreRegistry, item_ids: list[str]) -> list[str]:
     """The ids of a named pack's items that the caller may read (#1029).
@@ -3713,6 +3805,39 @@ def _readable_served_ids(registry: StoreRegistry, item_ids: list[str]) -> list[s
     return readable_ids(
         registry.knowledge.document_store, item_ids, current_clearance()
     )
+
+
+class _FailureNotingStore:
+    """A document-store view that remembers whether any read raised.
+
+    ``readable_ids`` fails closed on a store error, so an outage reads the same
+    as "nothing the caller may read". The note has to tell the two apart, so it
+    hands ``readable_ids`` this view: every read still raises into it as before.
+    """
+
+    def __init__(self, store: DocumentStore) -> None:
+        self._store = store
+        self.failed = False
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        try:
+            return self._store.get(doc_id)
+        except Exception:
+            self.failed = True
+            raise
+
+
+def _readable_ids_if_checked(
+    registry: StoreRegistry, item_ids: list[str]
+) -> list[str] | None:
+    """:func:`_readable_served_ids`, or ``None`` when a read of it failed.
+
+    ``[]`` means the store answered and the caller may read none of them;
+    ``None`` means it could not be established, which is no answer at all.
+    """
+    view = _FailureNotingStore(registry.knowledge.document_store)
+    readable = readable_ids(cast("DocumentStore", view), item_ids, current_clearance())
+    return None if view.failed else readable
 
 
 def _require_pack_attribution(
@@ -3733,10 +3858,11 @@ def _require_pack_attribution(
     rating into a lost one and teach the agent that the tool is
     unreliable — the opposite of the intent.
 
-    Nothing here writes attribution. The served ids ride the error so the
-    caller can *choose* among them; which of them helped is a judgement
-    only the caller holds, and synthesising it would manufacture exactly
-    the signal this whole change exists to measure honestly.
+    Nothing here writes attribution. The served ids ride the error's message
+    (its ``data`` does not reach a client) so the caller can *choose* among
+    them; which of them helped is a judgement only the caller holds, and
+    synthesising it would manufacture exactly the signal this whole change
+    exists to measure honestly.
 
     ``ignored_count`` is not a citation and does not satisfy this gate —
     it only changes what the refusal *says*. The trigger deliberately
@@ -3790,7 +3916,8 @@ def _require_pack_attribution(
     )
     _raise_invalid_params(
         f"feedback on pack {pack_id} must cite at least one item — it served "
-        f"{len(item_ids)} and {detail}. {remedy}.",
+        f"{len(item_ids)} and {detail}. {remedy}."
+        + _id_list_clause("Served ids", item_ids),
         data={
             "pack_id": pack_id,
             "item_ids": item_ids[:_MAX_CITABLE_IDS_IN_ERROR],
@@ -3801,6 +3928,80 @@ def _require_pack_attribution(
             ],
         },
     )
+
+
+_UNKNOWN_PACK_NOTE = (
+    "note: pack {pack_id} is unknown (no assembled pack with that id is visible "
+    "to this caller), so this feedback cannot be confirmed to join any item or "
+    "earn credit"
+)
+
+
+def _unserved_citation_note(
+    registry: StoreRegistry, pack_id: str, cited: list[str]
+) -> str | None:
+    """A line for the reply saying which cited ids the pack did not serve.
+
+    Advisory only: it is read after the feedback is written and changes
+    neither the event, the JSONL row nor whether the call is refused. ``cited``
+    is the two lists the learning join credits
+    (:func:`~trellis.feedback.attribution.cited_item_ids`), tested for
+    membership as :func:`~trellis.feedback.attribution.stray_citations` tests
+    it, at the moment the caller can still fix the id.
+
+    The note is optional, so a sentence the code cannot establish is left out:
+    a failed event-log read or a failed readability check gives no note, since
+    neither says whether the pack exists or what it served.
+
+    * An **unknown pack** (no assembled-pack record) says so; the call was
+      recorded as it always was.
+    * A pack with **no recorded membership** (assembled empty, withheld, older
+      than the payload key) says nothing. A withheld pack must not read any
+      differently from one assembled empty, so nothing here reads its
+      would-be items, and an empty membership is never subtracted from.
+    * Clearance: an id the pack served that this caller may not read counts as
+      unserved, the way :func:`_readable_served_ids` leaves it out of a
+      refusal, and a pack whose served ids are all unreadable reads as unknown,
+      whether or not the call cites anything, so two calls cannot tell
+      "above my clearance" from "no such pack". The note never confirms that
+      an id the caller cannot read is in the pack.
+
+    Wrapped whole. It runs on the write path and an escaped exception would
+    fail a call whose feedback is already recorded.
+    """
+    try:
+        unknown = _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id.strip()))
+        served = lookup_pack_membership(registry.operational.event_log, pack_id)
+        if served is None:
+            return unknown
+        if not served:
+            return None
+        readable = _readable_ids_if_checked(registry, sorted(served))
+        if readable is None:
+            return None
+        if not readable:
+            return unknown
+        strays = [item_id for item_id in cited if item_id not in set(readable)]
+        if not strays:
+            return None
+        shown = strays[:_MAX_UNSERVED_IDS_IN_NOTE]
+        listed = ", ".join(f"`{_echo_id(item_id)}`" for item_id in shown)
+        rest = len(strays) - len(shown)
+        more = f" (and {rest} more)" if rest else ""
+        noun = "id was" if len(strays) == 1 else "ids were"
+        possessive = "its" if len(strays) == 1 else "their"
+        return (
+            f"note: {len(strays)} cited {noun} not among the items this pack "
+            f"served that this caller can see, so {possessive} credit cannot be "
+            f"confirmed: {listed}{more}"
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: wrapped whole, not by exception type. The
+        # note is advice on a reply whose feedback is already recorded, and
+        # one escaped exception here would turn a recorded call into a
+        # failed one.
+        logger.exception("unserved_citation_note_failed", pack_id=pack_id)
+        return None
 
 
 def _require_bodied_attribution(
@@ -3869,7 +4070,8 @@ def _require_bodied_attribution(
         f"excerpt — {len(unjudged)} of {len(bodied)} carry no verdict. Put each "
         "remaining id in helpful_item_ids, unhelpful_item_ids, or "
         "ignored_item_ids; 'ignored' is the honest answer for one you did not "
-        "use. Items served as one-line pointers are not being asked about.",
+        "use. Items served as one-line pointers are not being asked about."
+        + _id_list_clause("Ids still owed a verdict", unjudged),
         data={
             "pack_id": pack_id,
             "item_ids": unjudged[:_MAX_CITABLE_IDS_IN_ERROR],
@@ -4076,6 +4278,22 @@ def record_feedback(
             " — event log unavailable, audit row kept;"
             " run `trellis admin reconcile-feedback` to replay it"
         )
+    if has_pack:
+        # A further line, never an edit to the first: the feedback above is
+        # already recorded, and the note only tells the caller which of its
+        # ids joined to nothing.
+        note = _unserved_citation_note(
+            registry,
+            pack_id,
+            cited_item_ids(
+                {
+                    "helpful_item_ids": list(helpful_item_ids or ()),
+                    "unhelpful_item_ids": list(unhelpful_item_ids or ()),
+                }
+            ),
+        )
+        if note is not None:
+            message += f"\n{note}"
     return message
 
 

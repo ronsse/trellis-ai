@@ -314,10 +314,11 @@ class EventType(StrEnum):
     #: :class:`~trellis.mcp.reconcile.ReconcileFallbackReason` value —
     #: a closed vocabulary, so a group-by over it is exhaustive.
     #: ``judge_failure`` is the boolean an operator actually wants:
-    #: ``reason in JUDGE_FAILURE_REASONS``, i.e. false for the two
-    #: reasons that are a usable verdict that was not applied rather
-    #: than a degradation: ``stale_recheck``, a *correctly handled*
-    #: race, and ``target_protected``, a SUPERSEDE verdict refused
+    #: ``reason in JUDGE_FAILURE_REASONS``, i.e. false for the three
+    #: reasons that are not a degraded judge: ``stale_recheck``, a *correctly
+    #: handled* race, ``egress_withheld``, a pair the reconcile route may not
+    #: carry so no verdict was asked for, and ``target_protected``, a
+    #: SUPERSEDE verdict refused
     #: because its target is a promoted precedent's row (#994) — the
     #: same split ``sessions_skipped_empty`` / ``sessions_sampled_out``
     #: draws for capture (#332). ``decision`` is the fallback verdict

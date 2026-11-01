@@ -568,3 +568,87 @@ class TestDomainCandidatesCommand:
         _reset_registry()
 
         assert _run_json("domain-candidates", "--no-emit")["candidates"] == []
+
+
+class TestShadowEgressReport:
+    """The skip count reaches the operator, and the two formats agree."""
+
+    def test_the_withheld_count_is_in_both_reports(self, cli_env, monkeypatch) -> None:
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis_cli import classify as classify_cli
+
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        results = iter(
+            [
+                BatchShadowResult(scanned=4, written=2, skipped_egress_withheld=2),
+                BatchShadowResult(scanned=4, written=2, skipped_egress_withheld=2),
+                BatchShadowResult(scanned=2, written=2),
+                BatchShadowResult(scanned=2, written=2),
+            ]
+        )
+        monkeypatch.setattr(
+            classify_cli, "shadow_classify_stale", lambda **_kwargs: next(results)
+        )
+
+        payload = _run_json("shadow")
+        assert payload["skipped_egress_withheld"] == 2
+        assert payload["errors"] == 0
+        assert payload["status"] == "ok"
+
+        text = runner.invoke(classify_app, ["shadow"])
+        assert text.exit_code == 0, text.output
+        assert "egress_withheld: 2 document(s)" in plain(text.output)
+
+        # Paired: the key is always present, the line only when non-zero.
+        assert _run_json("shadow")["skipped_egress_withheld"] == 0
+        clean = runner.invoke(classify_app, ["shadow"])
+        assert clean.exit_code == 0, clean.output
+        assert "egress_withheld" not in plain(clean.output)
+
+    def test_the_pass_is_given_the_gate_for_the_classify_shadow_route(
+        self, cli_env, monkeypatch
+    ) -> None:
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis.llm.egress import EgressGate
+        from trellis_cli import classify as classify_cli
+
+        seen: dict[str, Any] = {}
+
+        def _capture(**kwargs: Any) -> BatchShadowResult:
+            seen.update(kwargs)
+            return BatchShadowResult()
+
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        monkeypatch.setattr(classify_cli, "shadow_classify_stale", _capture)
+
+        _run_json("shadow")
+
+        assert isinstance(seen["egress"], EgressGate)
+        assert seen["egress"].local is False  # no declaration: treated as cloud
+
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_classify_shadow_route_not_another_consumers(
+        self, cli_env, monkeypatch, local
+    ) -> None:
+        from tests.llm_routes import TierRoutedRegistry, per_consumer_config
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis.llm.routing import LLMConsumer
+        from trellis_cli import classify as classify_cli
+
+        seen: dict[str, Any] = {}
+
+        def _capture(**kwargs: Any) -> BatchShadowResult:
+            seen.update(kwargs)
+            return BatchShadowResult()
+
+        inner = classify_cli._get_registry()
+        config = per_consumer_config(LLMConsumer.CLASSIFY_SHADOW, local=local)
+        monkeypatch.setattr(
+            classify_cli, "_get_registry", lambda: TierRoutedRegistry(inner, config)
+        )
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        monkeypatch.setattr(classify_cli, "shadow_classify_stale", _capture)
+
+        _run_json("shadow")
+
+        assert seen["egress"].local is local

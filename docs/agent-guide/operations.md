@@ -943,6 +943,8 @@ trellis classify shadow [--limit <n>] [--max-age-days <n>] [--page-size <n>] [--
 
 Requires an `llm:` block in `config.yaml`; without one the command exits `1` naming what is missing rather than silently shadowing nothing. A **local** model is the intended configuration — the pass is ~1.6 s per document against a whole corpus, which is free and private on-host and expensive anywhere else.
 
+**Labelled documents are not sent to a route that is not declared local.** A document labelled above `internal` (`confidential` or `restricted`), or whose label cannot be read, is skipped and counted: `skipped_egress_withheld` in the JSON report, and an `egress_withheld:` line in the text report when the count is non-zero. It is never an error and does not change the exit code. Declare the `classify_shadow` route local with `local: true` in the `llm:` block (or its tier) to classify them. Unlike `worker enrich`, shadow counts a withheld document as scanned. See [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
+
 **Why a separate key.** Verdicts are written to `metadata.content_tags_shadow`, never to `content_tags`. Two things follow, and both are the point:
 
 - **Retrieval does not move.** No pack ranking changes while the corpus accrues, so this is safe to run against a production store. The guarantee is enforced in two independent places: tag filters address the JSON path `$.content_tags.<facet>`, so a sibling top-level key is structurally unaddressable; and `trellis.retrieve.servable.strip_non_servable` runs where `PackBuilder` collects every strategy's results, so it covers strategies added later and out of tree, not just the built-ins. Note the scope of that claim — shadow tags never reach a *pack*; they are not confidential. `GET /api/v1/documents` returns them to a read-scoped caller, correctly, since that is the same access path as the content they describe.
@@ -1026,6 +1028,82 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 
 ```json
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
+```
+
+### `trellis classify label-candidates`
+
+Point a person at documents they may want to label. A read-only scan counts how
+often four plain patterns match in each document's text and reports **which
+document, which rule, how many times**. Nothing in the store sets a sensitivity
+label for you, and in a large store nobody finds every sensitive document by
+reading; this narrows the search.
+
+```bash
+trellis classify label-candidates [--limit <n>] [--page-size <n>] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit` | `5000` | Cap on documents read. The report says whether the scan stopped at it. |
+| `--page-size` | `100` | Documents fetched per page. |
+
+| Rule | Fires on |
+|------|----------|
+| `email_address` | an email-address shape (`local@domain.tld`) |
+| `phone_number` | a US/Canada phone number with separators, such as `(212) 555-0123` |
+| `us_ssn_shape` | a US SSN or ITIN shape (3-2-4 digits); shape only, not a validity check |
+| `card_number_luhn` | a 13-19 digit run, optionally split by spaces or hyphens, that passes the Luhn check |
+
+The rules live in `LABEL_RULES` in `trellis/classify/label_proposer.py`, the one
+place to read or change them. Each has a match test and a near-miss test.
+
+**It never prints the value it matched.** A finding is a document id, a rule
+name and a count. There is no excerpt, no text around the match and no matched
+string, in JSON, in text or in logs (the scan logs counts only). A report that
+quoted the value would be a copy of what the label protects, with no label on
+it.
+
+**It writes nothing.** No label, no tag, no event, no queue row. Applying a
+label is the owner's decision, made through the existing route:
+
+```bash
+trellis curate classify-sensitivity <doc_id> --sensitivity <level>
+```
+
+This is a `classify` command, beside the other propose-for-a-human commands
+(`tag-candidates`, `domain-candidates`), rather than a `curate` command, because
+`curate` is where governed writes happen and this one makes none. The group's
+other commands tag *content*; the label this command points at is the access
+label (`DataClassification`), a different schema, so a finding is a prompt to run
+`classify-sensitivity`, not a content tag. The command does not touch
+`regulatory_tags` and implies no floor for any finding.
+
+**A miss proves nothing, and this is not a PII guarantee.** The rules are four
+fixed shapes. They do not read medical, financial or other content that has no
+fixed shape, and they do not read names. They also over-report: an asset named
+`icon@2x.png` reads as an email address, and a 13-digit millisecond timestamp
+passes a Luhn check about one time in ten. A card number followed by a space and
+a three-digit code can be missed, and an address with a non-ASCII local part is
+not matched. Precision on a real store has not been
+measured. Both the text and the JSON output carry this notice.
+
+**What it reads and skips.** Chunk rows are not read: a chunk takes its parent's
+label and the parent holds the same text. A document that already carries a
+`data_classification` record, of any value and including a malformed one, is
+skipped and counted in `skipped_labelled`, since a person has decided about it. A
+document with no text is counted in `skipped_unscannable`. `documents_read`
+counts every row fetched, which is what `--limit` caps.
+
+**A scan that stopped at `--limit`** reports `stopped_at_limit: true` and
+`status: "partial"` and still exits `0`, as `classify backfill` does; the text
+output says the result is not the whole store. `stopped_at_limit` is `false`
+only when nothing followed the last document read. The exit code is the same for
+`--format text` and `--format json`.
+
+**JSON output:**
+
+```json
+{"status": "ok", "limit": 5000, "stopped_at_limit": false, "documents_read": 3, "documents_scanned": 2, "skipped_labelled": 1, "skipped_unscannable": 0, "documents_flagged": 1, "rules": ["email_address", "phone_number", "us_ssn_shape", "card_number_luhn"], "findings": [{"doc_id": "doc-1", "rule": "email_address", "matches": 2}], "notice": "A miss proves nothing: ..."}
 ```
 
 ### Classify rule review — Apply / Revoke 
@@ -4095,6 +4173,8 @@ trellis worker enrich [--concurrency N] [--limit N] \
 
 **Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
 
+**Labelled documents are not sent.** A document labelled above `internal`, or whose label cannot be read, is not a candidate while the `enrichment` route is not declared local. It takes no seat under `--limit`, and it is counted as `skipped_egress_withheld` in the JSON report (dry run and live run) with a matching `egress_withheld:` line in the text report. Its enrichment tags stop updating; the tags it already has keep being served as they are. Unlabelled and `internal` documents are enriched exactly as before. See [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
+
 ### `trellis worker mine-precedents`
 
 Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.mine`; `generate_precedent_candidates` is the same run returning only the candidates).
@@ -4519,7 +4599,13 @@ in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
-recorded. A trusted-local caller sees every id.
+recorded. A trusted-local caller sees every id. The ids a refusal names are in
+its message text, capped at 20 with the count of the rest stated, because
+the error's `data` does not reach an MCP client; the same list is what the
+clearance rule above applies to. Each id is clipped to 100 characters and shown
+with any non-printable character or backtick replaced by `?`, so a stored item
+id cannot lengthen the text or write a line of its own. The pack id the refusal
+names is echoed as given.
 
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
@@ -4876,7 +4962,11 @@ serve, it still answers `200`, but with `status: "error"`, a `code`
 `learning_candidates_unreadable` or `stores_dir_unconfigured`) and a
 `hint` naming the path, so an unwritten artifact never reads as an empty
 queue. The promote endpoint answers `409` with `detail: {code, message,
-path}` for the same four conditions.
+path}` for the same four conditions. The static UI's Review tab reads the
+two "no writer has produced it yet" codes (`learning_artifacts_dir_missing`,
+`learning_candidates_missing`) as an empty state that shows the hint, and
+every other `status: "error"` answer, including a code it does not know, as
+an error; the response itself is unchanged.
 
 ### Improvement-metrics dashboard (admin scope)
 
@@ -5080,6 +5170,31 @@ These element-level signals land in the `FEEDBACK_RECORDED` event payload so the
 
 The cited ids are *not* written as `items_served` — they are what the agent referenced, not what the pack contained. The payload leaves `items_served` empty so the reference-rate metric keeps joining against the pack's own `PACK_ASSEMBLED` `injected_item_ids`; synthesizing it from the citations would report a 100% reference rate for every attributed pack.
 
+**What the MCP reply says about the ids you cited.** The reply's first line is unchanged. When the
+call names a `pack_id`, a further line starting `note:` can follow it, written after the feedback is
+recorded and changing neither the event, the `pack_feedback.jsonl` row, the exit nor whether the
+call is refused:
+
+- Ids in `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve are listed (the
+  first ten, with the count of the rest, each clipped and made safe as in a refusal), and their
+  credit is stated as not confirmed: the learning join still credits a served id the caller may not
+  read, and strips a padded one. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
+  are not checked: the learning join never credits either.
+- A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
+  cannot be confirmed to join any item. It is recorded as before, and the attribution refusals still fail open for it.
+  The id is read stripped of surrounding whitespace, as the learning join reads a recorded one.
+- A pack whose record holds no served ids (assembled empty, or recorded before served ids were
+  written) gets no note, so a citation on it reads like any other reply.
+- An id the pack served but the caller may not read is treated as unserved, and a pack whose served
+  ids are all unreadable reads as unknown whether or not the call cites anything, so two calls
+  cannot tell "above my clearance" from "no such pack". A trusted-local caller is not restricted.
+- A read that failed says nothing about the pack, so there is no note when the event log cannot be
+  read or when the readability check of a served id fails; the reply is then the first line alone,
+  or the first line and the audit-row notice.
+
+The note reads only a pack's served ids, never anything held back from it, so it is the same on any
+pack that serves nothing.
+
 The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback` (which reads `<stores_dir>/feedback` by default; or `worker curate --reconcile-first`, which scans that directory) replays it.
 
 ### Retrieval Budgets
@@ -5243,3 +5358,55 @@ Because the SDK is HTTP-only, the hooks require a running `trellis-api`
 server. For tests and examples without a network listener, construct the
 hooks against the in-process client from `trellis.testing.in_memory_client`.
 A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.
+
+## Keeping labelled content off a hosted model
+
+On the paths listed below, content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach a chat or generate LLM route unless the route is declared local, provided the stored row still carries the label. The paths that are not listed, and a label that has been lost, are named under "What this does not cover" below. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
+
+```yaml
+llm:
+  provider: openai
+  base_url: http://localhost:11434/v1
+  model: local-model
+  api_key_env: LOCAL_LLM_KEY   # a client needs a credential to build; any non-empty value will do if the server ignores it
+  local: true          # this endpoint keeps content on the host
+  tiers:
+    hosted:
+      base_url: https://api.example.com/v1
+      api_key_env: HOSTED_API_KEY   # its own credential: a tier that moves base_url must name one
+      model: hosted-model    # moves base_url, so it does not inherit local: true
+  routes:
+    enrichment: hosted
+```
+
+`local` must be a boolean (a malformed value is an `llm.local` routing error, `EXIT_STORE`). A tier that keeps the parent's `provider` and `base_url` inherits the parent's declaration; a tier that moves either inherits nothing and can set its own `local`. `trellis admin llm-routes --format json` reports the resolved value per consumer.
+
+`local: true` is your statement about where the endpoint sends content, and Trellis cannot check it. A local router or proxy that forwards to a hosted model is not local. What is checked is that a URL is present, not what it says: `local: true` on a route that names `provider: openai` or `anthropic` with no `base_url` is rejected as an `llm.local` routing error, because that route is the vendor's cloud. A vendor URL written out (`base_url: https://api.openai.com/v1`) passes, and so does any provider name other than those two, with or without a URL.
+
+A route builds a client only if its credential resolves, so a local endpoint that needs no key still needs `api_key_env` naming a variable set to a non-empty value, as the example does. A route declared local never falls back to `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`: without a resolvable credential its consumer gets no client.
+
+These paths ask the same predicate, `trellis.llm.egress`, and report what they skipped under the reason `egress_withheld`. They are the only ones that do; the paths that send content to a chat or generate route without asking it are named under "What this does not cover" below:
+
+| Path | Where the skip is counted |
+|---|---|
+| `trellis worker enrich` | `skipped_egress_withheld` (JSON) / `egress_withheld:` line (text) |
+| `trellis classify shadow` | `skipped_egress_withheld` / `egress_withheld:` line |
+| MCP reconcile-on-write | `fallback_reason: egress_withheld` on the reconcile outcome; the memory is stored as a plain ADD and the reason is not a judge failure |
+| Session-capture reconcile pass | `candidates_skipped_egress_withheld` in the capture report and text line |
+| Memory extraction (`save_memory`, `ingest-corpus`, `ingest-conversations`) | skipped whatever the route, because the entity names it mints land in an unlabelled graph: the `save_memory` note, and `extraction_skipped_labelled` in the sync reports |
+
+A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents are sent as before, prompt included, with two exceptions: a chunk-shaped id with no parent row is withheld whatever its own label, and a reconcile pair is judged only if both sides may be sent, so an unlabelled memory whose nearest stored row is labelled is not judged.
+
+### What changes for a labelled document
+
+- **Corpus sync.** For a document whose metadata carries a label above `internal` (supplied by the handler in this run, or stored on the row and kept by an update), `ingest-corpus` no longer sends the text to the extractor, whatever the route is declared (the entities land in the graph, which carries no label), so such a document mints no graph entities. It used to send it. A moved or renamed file is the exception, see below.
+- **Orphan chunks.** A chunk-shaped id whose parent row is absent is withheld, where retrieval judges it by its own label.
+
+### What this does not cover
+
+- **Embedding.** Stored content, labelled content included, still goes to the configured embedder, and an operator with a hosted embedder must treat that as egress. The gate covers chat and generate routes only; gating the embedder would change which vectors exist, and so what a pack can serve.
+- **A labelled document that reaches a transcript.** A labelled document served to a session can appear in that session's transcript. The session-capture pass distills the transcript (`distill_session`), the memories it captures carry no label, and they can later become enrichment candidates. The predicate is not asked on that path.
+- **A relabel between scan and send.** `worker enrich` and `classify shadow` read the label when they scan for candidates. A document relabelled after the scan is not re-read before the send, and a chunk's parent label cached in that run stays permitted for the rest of it.
+- **Reconcile-on-write, flag on.** With `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes. With it on and a route not declared local, a pair with a labelled side is not judged: the new memory is stored as a plain ADD and both rows stay current, so a pack can serve the old fact. Nothing re-judges a withheld pair later.
+- **A moved or renamed corpus file loses a label set on the stored row.** `ingest-corpus` merges the stored metadata only when it updates a document; a move writes this run's metadata alone. A label set with `trellis curate classify-sensitivity` is therefore gone after a move, the document is treated as unlabelled by every gate, including the one that withholds labelled documents from retrieval, and its text can reach the extractor and a route that is not declared local. Apply the label again after a move. A handler that supplies the label on every run keeps it.
+- **Precedent mining.** `trellis_workers.learning.miner` sends stored trace summaries to a chat or generate route (`_ask_llm`) and does not ask the predicate. Traces carry no sensitivity label of their own.
