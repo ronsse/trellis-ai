@@ -260,6 +260,78 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `save_memory` refuses a `lifecycle` or `evidence_ref` in its `metadata`
+  argument** (`INVALID_PARAMS`, whatever the value, nothing written, `data.field`
+  names the key). The tool stored the caller's metadata as given, so a
+  `lifecycle` written at a graph node's id withheld that node, and an
+  `evidence_ref` made the memory the successor another item's `superseded_by`
+  resolves to. It is the rule `POST /documents` already holds (#1082), taken from
+  the same table. It judges only what the caller sent, so `supersedes=`, a
+  reconcile SUPERSEDE verdict and `save_knowledge` write as before. Rows already
+  stored are not re-judged. Still open under #1057: a graph node's
+  `evidence_ref` through `entity.update` and `observation.record`, identity keys
+  on `POST /vectors` rows at an id naming no document, the graph-node id
+  collision, and dedup-winner judging (a serving change).
+
+- **On Postgres, `upsert_nodes_bulk` no longer closes a newer node version with
+  an earlier timestamp.** It read the clock before its transaction, so a
+  concurrent `upsert_node` that committed in between left a current row the
+  bulk `UPDATE` then closed with a `valid_to` earlier than that row's own
+  `valid_from` ([#1106](https://github.com/ronsse/trellis-ai/issues/1106)). No
+  `as_of` query could see the closed row, and the bulk version's `valid_from`
+  sat before the version it replaced. The write now locks the current rows
+  (`FOR UPDATE`, in `node_id` order) and reads the clock after the lock, as
+  `upsert_node` does, and takes `created_at` from the locked rows. A bulk write
+  that loses a race to a concurrent create or update still raises `StoreError`
+  and rolls back. `upsert_edges_bulk` was checked for the same defect and does
+  not have it: it already reads the clock after its edge locks, and a test now
+  pins that.
+
+- **On Postgres, `bind_alias_if_absent` no longer takes an alias from an owner
+  that a concurrent write has just re-versioned.** On the conflict path it read
+  the owner's current node row with `FOR SHARE`. If another transaction had
+  closed that row and committed while the read waited, the read returned
+  nothing, because the new version is not visible to the same statement, and an
+  empty read was taken as "the owner is gone": the alias was rebound to the
+  claimant and the call returned `REBOUND`
+  ([#1107](https://github.com/ronsse/trellis-ai/issues/1107)). An empty read is
+  now repeated in a new statement before the owner is treated as gone. An owner
+  with no current row at all is still replaced.
+
+- **A `TRELLIS_API_PORT` that is not a port number is a one-line configuration error
+  from `trellis serve` and `trellis-api`, and no longer takes down every `trellis`
+  command.** `trellis_api.app` ran `int()` on the variable at import, and
+  `trellis_cli.main` imports it for every command, so a value like `abc` ended
+  `trellis serve`, `trellis admin stats --format json` and the rest in a `ValueError`
+  traceback with exit `1`. The port is now resolved when a server starts
+  (`resolve_api_port`): an empty variable is the default `8420`, a flag beats it, and
+  anything that is not an integer from 0 to 65535 raises `ConfigError`, which
+  `trellis serve` prints and exits `5` on, as it does for any configuration error, and
+  `trellis-api` prints to stderr and exits `5` on. `trellis serve` has no `--format`
+  option, so its exit does not vary by format. `trellis admin serve` is unchanged: it
+  still reads the variable through its option and rejects a bad value as a usage error,
+  exit `2`, where before it never got that far. On `trellis serve`, a bad value beside
+  `--port` is ignored, as a flag beats the variable.
+
+- **The Precedents tab reads the learning-candidates route's `status: "error"` as the
+  Review tab does, and a failure shows its reason.** The empty state's line about
+  waiting candidates said "could not be checked just now" for every error answer and
+  for a failed request alike. The two "nothing written yet" codes
+  (`learning_artifacts_dir_missing`, `learning_candidates_missing`) now read as no
+  candidates awaiting a decision and keep the server's hint; any other code, or a
+  request that failed, reads "could not be checked" followed by the hint and code, or
+  the request's message. The two tabs share one list of codes. The REST response is
+  unchanged.
+
+- **`SchemaFingerprintMismatch` no longer tells an operator to "Run migrations".** No
+  such command exists (`docs/deployment/runbook.md`, "Upgrading", says so). The message
+  now says the store was last written under a different backend or schema version, and
+  names what can be done: set the store's `backend` back to the recorded one, run the
+  build that wrote the store, or restore a backup taken before the change. It adds that
+  `TRELLIS_SKIP_FINGERPRINT_CHECK=1` starts without the check and does not convert the
+  store, where it used to call that a way to "bypass during a migration window". The
+  check itself is unchanged.
+
 - **An attribution refusal now puts the ids it promises in the text the client receives.**
   With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on, MCP
   `record_feedback` refused an uncited call and said the served ids were available, but they
@@ -282,7 +354,7 @@ All notable changes to Trellis will be documented in this file.
   one call site still passed it a string. The REST response is unchanged (same `status`, `code`
   and `hint`, so the OpenAPI spec and the CLI are untouched); a client that needs "not written
   yet" still reads `code`. The Precedents tab's one line about waiting candidates still reads
-  `status: "error"` as "could not be checked".
+  `status: "error"` as "could not be checked" (fixed in the entry above).
 
 - **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
   deployment docs describe the scoped-key auth that is built.** The operator

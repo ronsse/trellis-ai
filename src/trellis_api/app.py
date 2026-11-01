@@ -38,7 +38,46 @@ logger = structlog.get_logger(__name__)
 #: function's default parameter value — a default is evaluated once at
 #: function-definition time, so the name must already exist.
 DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
+
+API_PORT_ENV = "TRELLIS_API_PORT"
+_FALLBACK_PORT = 8420
+
+
+def resolve_api_port(port: int | None = None) -> int:
+    """The port to bind: *port* if given, else ``TRELLIS_API_PORT``, else 8420.
+
+    An empty variable counts as unset. A value that is not a port number
+    raises :class:`~trellis.errors.ConfigError`, which the CLI boundary
+    renders and exits ``EXIT_STORE`` on and :func:`console_main` does the
+    same for. It was an ``int()`` at import, so one bad value took every
+    ``trellis`` command down with a traceback, not only the ones that bind.
+    """
+    if port is not None:
+        return port
+    raw = os.environ.get(API_PORT_ENV, "").strip()
+    if not raw:
+        return _FALLBACK_PORT
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:  # noqa: PLR2004 -- the TCP port range
+        msg = (
+            f"{API_PORT_ENV}={raw!r} is not a port number (an integer from 0 to "
+            f"65535). Set it to one, unset it for the default {_FALLBACK_PORT}, "
+            "or pass --port."
+        )
+        raise ConfigError(msg, setting=API_PORT_ENV)
+    return value
+
+
+try:
+    DEFAULT_PORT = resolve_api_port()
+except ConfigError:
+    # Importing this module must not fail on a bad value: ``DEFAULT_PORT`` is
+    # only the default for ``create_app`` and the bind-info fallback. The
+    # entry points that bind call ``resolve_api_port`` again and raise there.
+    DEFAULT_PORT = _FALLBACK_PORT
 
 _registry: StoreRegistry | None = None
 
@@ -347,14 +386,16 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
 
 def main(
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: int | None = None,
     *,
     on_bind_ok: Callable[[], None] | None = None,
 ) -> None:
     """Run the API server.
 
-    Host/port default to a container-friendly bind. The ``trellis serve``
-    CLI subcommand is the preferred entrypoint — it exposes
+    Host/port default to a container-friendly bind; a ``port`` of ``None``
+    reads ``TRELLIS_API_PORT`` when called, so a bad value is a
+    :class:`~trellis.errors.ConfigError` here and not an import failure.
+    The ``trellis serve`` CLI subcommand is the preferred entrypoint — it exposes
     ``--host``/``--port``/``--config-dir`` flags and configures structured
     logging before the server starts. ``trellis admin serve`` delegates
     here too, so this is the sole place that calls ``uvicorn.run`` for
@@ -368,6 +409,8 @@ def main(
     message here instead of printing it before calling this function, so
     a refused bind stays silent instead of being announced first.
     """
+    port = resolve_api_port(port)
+
     import uvicorn  # noqa: PLC0415
 
     from trellis_api.logging import configure_logging  # noqa: PLC0415

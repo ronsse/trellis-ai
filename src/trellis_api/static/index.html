@@ -5539,15 +5539,31 @@
                 fetchJSON('/admin/jobs'),
             ]);
 
+            // The same reading the Review tab gives the same route: of its
+            // status="error" answers, the "nothing written yet" codes are an
+            // empty queue (keeping the server's hint), and any other, or a
+            // request that failed outright, is "could not be checked" with
+            // the reason it carries.
             let reviewLine;
-            if (candidatesRes.status === 'fulfilled' && candidatesRes.value.status !== 'error') {
+            if (candidatesRes.status === 'rejected') {
+                reviewLine = 'Whether any learning candidates are awaiting review could not be ' +
+                    `checked just now: ${escHtml((candidatesRes.reason && candidatesRes.reason.message) || candidatesRes.reason)}.`;
+            } else if (candidatesRes.value.status === 'error') {
+                const answer = candidatesRes.value;
+                if (LEARNING_NOT_WRITTEN_CODES.includes(answer.code)) {
+                    reviewLine = 'No learning candidates are currently awaiting a decision.' +
+                        (answer.hint ? ` ${escHtml(answer.hint)}` : '');
+                } else {
+                    reviewLine = 'Whether any learning candidates are awaiting review could not be ' +
+                        `checked: ${escHtml(answer.hint || 'Could not read learning candidates.')}` +
+                        (answer.code ? ` (${escHtml(answer.code)})` : '');
+                }
+            } else {
                 const n = candidatesRes.value.candidates.length;
                 reviewLine = n === 0
                     ? 'No learning candidates are currently awaiting a decision.'
                     : `${escHtml(n)} learning candidate(s) are awaiting a human decision on the ` +
                       `<a href="#" onclick="switchView('review'); return false;">Review</a> tab.`;
-            } else {
-                reviewLine = 'Whether any learning candidates are awaiting review could not be checked just now.';
             }
 
             let qualifyLine;

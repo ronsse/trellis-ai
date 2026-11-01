@@ -13,7 +13,7 @@ from pathlib import Path
 
 import typer
 
-from trellis_api.app import DEFAULT_HOST, DEFAULT_PORT
+from trellis_api.app import DEFAULT_HOST
 
 serve_app = typer.Typer(
     help="Run the Trellis REST API and UI.",
@@ -34,10 +34,13 @@ def serve(
             "container deployments that need to listen on the pod IP."
         ),
     ),
-    port: int = typer.Option(
-        DEFAULT_PORT,
+    port: int | None = typer.Option(
+        None,
         "--port",
-        help=f"TCP port to listen on (default {DEFAULT_PORT}).",
+        help=(
+            "TCP port to listen on. Defaults to TRELLIS_API_PORT, else 8420; "
+            "a TRELLIS_API_PORT that is not a port number exits 5."
+        ),
     ),
     config_dir: str = typer.Option(
         "",

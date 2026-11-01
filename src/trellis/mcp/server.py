@@ -129,7 +129,10 @@ from trellis.mutate import (
     redirect_unreachable_settings_update,
     requires_admin_scope,
 )
-from trellis.mutate.evidence_pointer_keys import evidence_ingest_pointer_refusal
+from trellis.mutate.evidence_pointer_keys import (
+    evidence_ingest_pointer_refusal,
+    pointer_key_refusal,
+)
 from trellis.ops import (
     check_capture_health,
     format_capture_warning,
@@ -2432,6 +2435,28 @@ def _stamp_sensitivity(
         _raise_invalid_params(exc.message, data={**exc.data, "tool": tool})
 
 
+def _refuse_memory_pointer_keys(metadata: dict[str, Any] | None) -> None:
+    """Refuse ``save_memory`` metadata that would withhold or redirect another item.
+
+    The pack builder withholds items by id, so a caller's ``lifecycle`` or
+    ``evidence_ref`` reaches an item other than the document being saved
+    (:mod:`trellis.mutate.evidence_pointer_keys`). The strict form, as on
+    ``POST /documents``: either key is refused whatever its value. It judges
+    only the metadata the caller sent, so the stamps ``supersedes=`` and the
+    reconcile verdicts write through their own commands are untouched.
+    Refused before anything is read or written, with the tool's ordinary
+    pre-flight ``INVALID_PARAMS``.
+    """
+    if not metadata:
+        return
+    refusal = pointer_key_refusal(metadata, strict=True)
+    if refusal is not None:
+        _raise_invalid_params(
+            refusal.message,
+            data={"field": f"metadata.{refusal.key}", "tool": "save_memory"},
+        )
+
+
 def _match_readable(registry: StoreRegistry, doc_id: str) -> bool:
     """Whether the caller may read document ``doc_id`` (a missing one is fine)."""
     store = registry.knowledge.document_store
@@ -2712,7 +2737,10 @@ def save_memory(
 
     Args:
         content: Document content to store.
-        metadata: Optional metadata (tags, source, domain, etc.).
+        metadata: Optional metadata (tags, source, domain, etc.). May not
+            carry ``lifecycle`` or ``evidence_ref``, which act on other items
+            by id (refused, nothing written); use ``supersedes`` to replace a
+            document.
         doc_id: Optional document ID. Auto-generated if not provided. May not
             start with ``trace-summary:``, which belongs to the trace embed
             worker (refused, nothing written).
@@ -2738,6 +2766,8 @@ def save_memory(
             "content must not be empty",
             data={"field": "content"},
         )
+
+    _refuse_memory_pointer_keys(metadata)
 
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 

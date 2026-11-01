@@ -10,12 +10,18 @@ everywhere so no test actually binds a socket.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
+from tests.integration._live_server import repo_src_pythonpath
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 
@@ -117,10 +123,9 @@ class TestAdminServeEnvironment:
 
     Its own ``--host`` help and the running-Trellis guide both say the
     variables apply, and ``trellis serve`` / ``trellis-api`` already honour
-    them. Only ``admin serve`` is covered here: ``trellis serve`` resolves
-    its defaults when the module is imported, so a variable set inside a
-    test never reaches it. Every case runs ``uvicorn.run`` as a mock, so
-    nothing binds, and the bind check still has to run on the env value.
+    them. ``TestServeEnvironment`` below covers the port for ``trellis
+    serve``. Every case runs ``uvicorn.run`` as a mock, so nothing binds,
+    and the bind check still has to run on the env value.
     """
 
     @pytest.fixture(autouse=True)
@@ -149,7 +154,7 @@ class TestAdminServeEnvironment:
         result = runner.invoke(app, ["admin", "serve"])
         assert result.exit_code == 0, result.output
         assert self._bound(fake_uvicorn_run) == ("127.0.0.2", 18731)
-        assert "127.0.0.2:18731" in result.output
+        assert "127.0.0.2:18731" in plain(result.output)
 
     def test_flag_beats_env(
         self, monkeypatch: pytest.MonkeyPatch, fake_uvicorn_run: MagicMock
@@ -197,3 +202,129 @@ class TestAdminServeEnvironment:
         result = runner.invoke(app, ["admin", "serve"])
         assert result.exit_code == 2, result.output
         fake_uvicorn_run.assert_not_called()
+
+
+class TestServeEnvironment:
+    """``trellis serve`` and ``trellis-api`` read ``TRELLIS_API_PORT`` when run.
+
+    The variable used to be an ``int()`` at import of ``trellis_api.app``,
+    which ``trellis_cli.main`` imports for every command, so a value that was
+    not a number crashed the whole CLI with a traceback and exit ``1``. Now it
+    is resolved when a server starts, and a bad value is a ``ConfigError``:
+    ``EXIT_STORE`` and one legible line. ``serve`` has no ``--format``, so
+    the formats are covered on a command that does, below.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_port_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TRELLIS_API_PORT", raising=False)
+
+    def test_env_port_reaches_uvicorn(
+        self, monkeypatch: pytest.MonkeyPatch, fake_uvicorn_run: MagicMock
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_API_PORT", "18731")
+        result = runner.invoke(app, ["serve"])
+        assert result.exit_code == 0, result.output
+        assert fake_uvicorn_run.call_args.kwargs["port"] == 18731
+
+    def test_flag_beats_env_even_when_the_env_is_bad(
+        self, monkeypatch: pytest.MonkeyPatch, fake_uvicorn_run: MagicMock
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_API_PORT", "not-a-port")
+        result = runner.invoke(app, ["serve", "--port", "18732"])
+        assert result.exit_code == 0, result.output
+        assert fake_uvicorn_run.call_args.kwargs["port"] == 18732
+
+    def test_empty_env_is_the_default(
+        self, monkeypatch: pytest.MonkeyPatch, fake_uvicorn_run: MagicMock
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_API_PORT", "")
+        result = runner.invoke(app, ["serve"])
+        assert result.exit_code == 0, result.output
+        assert fake_uvicorn_run.call_args.kwargs["port"] == 8420
+
+    @pytest.mark.parametrize("value", ["not-a-port", "80.5", "70000", "-1"])
+    def test_a_bad_env_port_is_a_config_error_not_a_bind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_uvicorn_run: MagicMock,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_API_PORT", value)
+        result = runner.invoke(app, ["serve"])
+        assert result.exit_code == EXIT_STORE, result.output
+        text = " ".join(plain(result.output).split())
+        assert "CONFIG_ERROR" in text
+        assert f"TRELLIS_API_PORT='{value}' is not a port number" in text
+        assert "Traceback" not in result.output
+        fake_uvicorn_run.assert_not_called()
+
+    def test_the_standalone_server_exits_the_same_way(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_uvicorn_run: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from trellis_api.app import console_main
+
+        monkeypatch.setenv("TRELLIS_API_PORT", "not-a-port")
+        with pytest.raises(SystemExit) as exited:
+            console_main()
+        assert exited.value.code == EXIT_STORE
+        assert "is not a port number" in capsys.readouterr().err
+        fake_uvicorn_run.assert_not_called()
+
+
+class _Ran(NamedTuple):
+    """What a ``trellis`` child process did, without the process object."""
+
+    code: int
+    out: str
+    err: str
+
+
+def _cli(tmp_path: Path, *args: str) -> _Ran:
+    """Run ``trellis`` in a fresh interpreter with a bad ``TRELLIS_API_PORT``.
+
+    A subprocess, because the defect was at import: an in-process run has
+    long since imported the module with a good value. The result is a plain
+    record, not the ``CompletedProcess``, so this helper is not mistaken for
+    a builder of pinned environments by ``test_subprocess_pythonpath_rule``.
+    """
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", "from trellis_cli.main import app; app()", *args],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        env={
+            **os.environ,
+            "PYTHONPATH": repo_src_pythonpath(),
+            "TRELLIS_API_PORT": "not-a-port",
+            "TRELLIS_CONFIG_DIR": str(tmp_path / "config"),
+            "TRELLIS_DATA_DIR": str(tmp_path / "data"),
+        },
+        check=False,
+    )
+    return _Ran(done.returncode, done.stdout, done.stderr)
+
+
+def test_a_bad_env_port_ends_trellis_serve_at_exit_five(tmp_path: Path) -> None:
+    done = _cli(tmp_path, "serve")
+
+    assert done.code == EXIT_STORE, done.out + done.err
+    assert "TRELLIS_API_PORT='not-a-port' is not a port number" in " ".join(
+        plain(done.out).split()
+    )
+    assert "Traceback" not in done.out + done.err
+
+
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_a_bad_env_port_no_longer_breaks_commands_that_do_not_bind(
+    tmp_path: Path, output_format: str
+) -> None:
+    """Both formats, one exit: the command does not read the port at all."""
+    done = _cli(tmp_path, "admin", "write-config", "--format", output_format)
+
+    assert done.code == 0, done.out + done.err
+    assert "Traceback" not in done.err

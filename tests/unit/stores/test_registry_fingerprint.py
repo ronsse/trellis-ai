@@ -22,6 +22,8 @@ from trellis.stores.registry import (
     StoreRegistry,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def _read_meta(stores_dir: Path) -> dict[str, str]:
     meta_path = stores_dir / _FINGERPRINT_META_FILENAME
@@ -100,6 +102,39 @@ class TestMismatchedFingerprints:
         assert "document/sqlite/v1" in rendered  # configured (sqlite default)
         assert "document/postgres/v1" in rendered  # stored (planted)
         assert "TRELLIS_SKIP_FINGERPRINT_CHECK" in rendered
+
+    def test_the_message_names_what_an_operator_can_do(self, tmp_path: Path) -> None:
+        """No command migrates a store, so the message must not name one.
+
+        It used to say "Run migrations". What an operator can do is what the
+        runbook's Upgrading section describes: point the backend back, run
+        the build that wrote the store, or restore a backup.
+        """
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / _FINGERPRINT_META_FILENAME).write_text(
+            json.dumps({"document": "document/postgres/v1"})
+        )
+        reg = StoreRegistry(stores_dir=stores_dir)
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["document"])
+        ((_, exc),) = [
+            pair for pair in excinfo.value.errors if isinstance(pair[1], ConfigError)
+        ]
+        text = " ".join(str(exc).split())
+
+        assert "Run migrations" not in text
+        assert "there is no migration command" in text
+        assert "set stores.document.backend back to the recorded one" in text
+        assert "restore a backup" in text
+        assert "does not convert or repair the store" in text
+        # The section it points at exists and says the same thing.
+        assert "docs/deployment/runbook.md, 'Upgrading'" in text
+        runbook = (_REPO_ROOT / "docs" / "deployment" / "runbook.md").read_text(
+            encoding="utf-8"
+        )
+        assert "\n## Upgrading\n" in runbook
+        assert "There is no migration command." in runbook
 
     def test_schema_version_bump_raises_config_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
