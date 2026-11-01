@@ -317,6 +317,8 @@ EXPECTED_TOOL_SCOPES = {
     "record_observation": SCOPE_MUTATE,
     "record_feedback": SCOPE_MUTATE,
     "execute_mutation": SCOPE_MUTATE,
+    "list_api_keys": SCOPE_ADMIN,
+    "revoke_api_key": SCOPE_ADMIN,
 }
 
 

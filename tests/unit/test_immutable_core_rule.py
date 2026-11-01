@@ -521,6 +521,14 @@ _DYNAMIC_PREFIX_REASON = (
     "though the scan cannot resolve the value it interpolates at runtime"
 )
 
+_PRINCIPAL_REASON = (
+    "the audit identity from resolve_requested_by(ctx, <fixed default>, "
+    "claim_was_set=False): api:<key id or name> for an authenticated "
+    "principal, otherwise the route's fixed api:api-keys default -- no "
+    "request-body value reaches it, and this scan cannot resolve the call "
+    "without becoming interprocedural"
+)
+
 _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
     ("src/trellis/extract/commands.py", "_apply_confidence_gate", "requested_by"): (
         1,
@@ -589,6 +597,18 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
+    ("src/trellis/mutate/api_key_commands.py", "build_mint_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    (
+        "src/trellis/mutate/api_key_commands.py",
+        "build_revoke_command",
+        "requested_by",
+    ): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
     (
         "src/trellis/mutate/evidence_ingest.py",
         "build_evidence_ingest_command",
@@ -602,6 +622,14 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
     ("src/trellis/mutate/name_aliases.py", "_command", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis_api/routes/api_keys.py", "mint_api_key", "_actor(ctx)"): (
+        1,
+        _PRINCIPAL_REASON,
+    ),
+    ("src/trellis_api/routes/api_keys.py", "revoke_api_key", "_actor(ctx)"): (
+        1,
+        _PRINCIPAL_REASON,
     ),
     ("src/trellis_api/routes/curate.py", "demote", "requested_by"): (
         1,

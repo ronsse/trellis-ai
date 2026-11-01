@@ -52,7 +52,13 @@ if TYPE_CHECKING:
     from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
 
-from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.auth import (
+    SCOPE_ADMIN,
+    SCOPE_INGEST,
+    SCOPE_MUTATE,
+    SCOPE_READ,
+    public_listing_row,
+)
 from trellis.core.access_log import note_printed_items, note_served_items
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
@@ -124,6 +130,7 @@ from trellis.mutate import (
     CommandStatus,
     MutationExecutor,
     Operation,
+    build_api_keys_executor,
     build_curate_executor,
     build_evidence_ingest_command,
     build_evidence_ingest_command_from_args,
@@ -131,6 +138,7 @@ from trellis.mutate import (
     redirect_unreachable_settings_update,
     requires_admin_scope,
 )
+from trellis.mutate.api_key_commands import build_revoke_command
 from trellis.mutate.evidence_pointer_keys import (
     evidence_ingest_pointer_refusal,
     pointer_key_refusal,
@@ -569,8 +577,9 @@ mcp.add_middleware(_SanitizeUncaughtToolErrors())
 #: ``execute_mutation`` are deliberately absent: neither records a boundary
 #: rejection today, and ``execute_mutation`` stamps accepted writes with the
 #: authenticated principal rather than ``mcp:execute_mutation``, so a banner
-#: raised under that label could not clear. A read tool gets the message and
-#: no event.
+#: raised under that label could not clear. ``list_api_keys`` and
+#: ``revoke_api_key`` are absent for the same reason: admin-scoped, no
+#: boundary rejection recorded. A read tool gets the message and no event.
 _RECORDED_ARGUMENT_TOOLS = frozenset(
     {"save_experience", "save_knowledge", "save_memory", "record_feedback"}
 )
@@ -5345,6 +5354,100 @@ def _close_registry() -> None:
         logger.exception("mcp_server_registry_close_failed")
     finally:
         _registry = None
+
+
+# ---------------------------------------------------------------------------
+# API-key administration. Admin scope only, so an ``external`` key (which
+# satisfies ``read`` and nothing else) is refused by the scope check. There is
+# deliberately NO mint tool: a token is a credential, and minting one over a
+# channel an agent drives would hand the agent a way to widen its own access.
+# Minting stays on ``trellis admin api-keys create`` and the admin REST route.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
+def list_api_keys() -> str:
+    """List every API key, live and revoked. Never returns a secret or its hash.
+
+    Returns:
+        A JSON object with ``status``, ``keys`` (each ``key_id``, ``name``,
+        ``scopes``, ``created_at``, ``revoked``, ``revoked_at``) and ``count``,
+        or ``message`` on failure. This tool never raises to MCP.
+    """
+    try:
+        rows = [
+            public_listing_row(r)
+            for r in _get_registry().operational.api_key_store.list()
+        ]
+    # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
+    except Exception as exc:
+        logger.exception("list_api_keys_failed")
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Listing failed: {detail}"})
+    return json.dumps({"status": "ok", "keys": rows, "count": len(rows)})
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
+def revoke_api_key(key_id: str) -> str:
+    """Revoke a live API key, through the governed mutation pipeline.
+
+    An unknown or already-revoked key id is refused, and so is revoking the
+    key this session is authenticated with. A caller the server cannot
+    identify (a stdio session, or HTTP with enforcement off) is refused too,
+    and pointed at ``trellis admin api-keys revoke``: revoking a credential
+    needs a named actor on the audit event.
+
+    Args:
+        key_id: The 12-hex-char key id (see ``list_api_keys``).
+
+    Returns:
+        A JSON object with ``status`` (``ok`` on success), ``key_id``, and
+        ``message`` plus ``reason`` when refused, and ``warnings`` when the
+        revoke took effect but its audit event was not recorded. This tool
+        never raises to MCP.
+    """
+    principal = current_principal_id()
+    if principal is None:
+        logger.warning("api_key_write_refused_unidentified", action="revoke")
+        return json.dumps(
+            {
+                "status": "rejected",
+                "reason": "unidentified_caller",
+                "message": (
+                    "Revoking an API key needs an identified admin credential, "
+                    "and this session has none. Use "
+                    "'trellis admin api-keys revoke <key_id>' on the server host."
+                ),
+            }
+        )
+    try:
+        command = build_revoke_command(
+            key_id,
+            requested_by="mcp:revoke_api_key",
+            actor_key_id=principal,
+        )
+        result = build_api_keys_executor(_get_registry()).execute(command)
+    # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
+    except Exception as exc:
+        logger.exception("revoke_api_key_failed")
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Revoke failed: {detail}"})
+
+    if result.status != CommandStatus.SUCCESS:
+        return json.dumps(
+            {
+                "status": result.status.value,
+                "message": _result_message(result),
+                "reason": result.metadata.get("rejection_reason"),
+            }
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "key_id": key_id,
+            **({"warnings": list(result.warnings)} if result.warnings else {}),
+        }
+    )
 
 
 #: ``trellis_cli.exit_codes.EXIT_STORE``, the code the CLI gives a typed

@@ -1601,6 +1601,12 @@
            table cell without either truncating or forcing sideways
            scroll at phone width. Stacks to one column below 560px. */
         .settings { display: grid; }
+        /* Keys: the one-time token is shown in a block the reader can
+           select whole; it wraps instead of scrolling so none is cut off. */
+        .key-token { display: block; padding: 0.6rem 0.8rem; margin: 0.5rem 0; word-break: break-all; user-select: all; font-family: ui-monospace, monospace; border: 1px solid var(--text-dim); border-radius: var(--r-2); }
+        #keys-mint-panel h3 { margin: 0 0 0.5rem; }
+        #keys-mint-error { color: var(--danger); }
+        .key-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
         .setting {
             display: grid;
             grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
@@ -2032,6 +2038,7 @@
             <a href="#" data-view="schedules" data-label="Schedules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="8.5"/><path d="M12 7.5v5l3.5 2"/><path d="M8.5 2.5h7"/></svg><span class="nav-label">Schedules</span></a>
             <a href="#" data-view="tagrules" data-label="Tag rules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 3.5h5.8a1.7 1.7 0 0 1 1.7 1.7v5.8L9.7 21.3a1.7 1.7 0 0 1-2.4 0l-5-5a1.7 1.7 0 0 1 0-2.4z"/><circle cx="15.3" cy="8.7" r="1.4"/></svg><span class="nav-label">Tag rules</span></a>
             <a href="#" data-view="settings" data-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.7 7.7 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9c.5.4 1.1.75 1.7 1l.3 2.5h4l.3-2.5c.6-.25 1.2-.6 1.7-1l2.3.9 2-3.4z"/></svg><span class="nav-label">Settings</span></a>
+            <a href="#" data-view="keys" data-label="Keys"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M17 6l3 3M14 9l2 2"/></svg><span class="nav-label">Keys</span></a>
         </nav>
 
         <div class="sidebar-foot" id="sidebar-foot" title="API build">&mdash;</div>
@@ -2707,6 +2714,56 @@
             </div>
             <p class="field-hint" id="settings-total"></p>
         </div>
+
+        <div id="view-keys" class="hide">
+            <p class="field-hint">
+                API keys decide what a caller may read and change. A key&rsquo;s token is
+                shown <strong>once</strong>, when it is minted; only a hash is stored, so a
+                lost token cannot be recovered &mdash; revoke the key and mint another.
+                <code>read,external</code> is a read-only key that sees only documents
+                labelled public. You cannot revoke the key this page is using; do that from
+                another key or the CLI.
+            </p>
+            <p class="field-hint" id="keys-identity-note" hidden>
+                No API key is stored in this browser. Minting and revoking need an
+                identified admin key, so both are refused from this page without one.
+                Save one above if the server enforces authentication; when its auth
+                mode is off a stored key is ignored and no key helps. To bootstrap the
+                first key or remove the last admin, use
+                <code>trellis admin api-keys</code> on the server host.
+            </p>
+            <div id="keys-token-panel"></div>
+            <p class="field-hint" id="keys-notice" role="status"></p>
+            <div class="status-section" id="keys-mint-panel">
+                <h3>Mint a key</h3>
+                <div class="key-form">
+                    <input type="text" id="keys-name" placeholder="Name, e.g. ci-reader" aria-label="Key name" maxlength="120">
+                    <select id="keys-preset" aria-label="Scope preset" onchange="applyKeyPreset()"></select>
+                    <input type="text" id="keys-scopes" placeholder="read" aria-label="Scopes, comma-separated" value="read">
+                    <button class="btn" id="keys-mint-btn" onclick="mintApiKey()">Mint key</button>
+                </div>
+                <p class="field-hint" id="keys-mint-error"></p>
+            </div>
+            <div class="search-bar">
+                <button class="btn" onclick="loadKeys()">Refresh</button>
+            </div>
+            <div class="status-section table-wrap p-0">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">Key id</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Scopes</th>
+                            <th scope="col">Created</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="keys-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="keys-total"></p>
+        </div>
     </div>
     </div>
     </div>
@@ -2820,11 +2877,20 @@
             if (res.status === 403) {
                 let detail = '';
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
-                // require_scope() is the only source of a 403 here, and it
-                // only ever fires when the key lacks admin scope (admin
-                // satisfies every other scope check) -- so this is proof,
-                // not a guess, and is the one place that can catch a 403
-                // from a tab the nav badges don't cover yet.
+                // Two things answer 403. require_scope() fires only when the
+                // key lacks admin scope (admin satisfies every other scope
+                // check), so it is proof the stored key is under-scoped, and
+                // this is the one place that catches a 403 from a tab the nav
+                // badges don't cover yet. The API-key routes' identity rule
+                // (_require_identified_admin) is the second: it refuses an
+                // anonymous caller and says nothing about a stored key's
+                // scope, so it marks itself with X-Trellis-Refusal and must
+                // neither badge the tabs nor raise the banner.
+                if (res.headers.get('X-Trellis-Refusal') === 'identified-admin-required') {
+                    const refusal = new Error('403 Forbidden (' + (detail || 'identity required') + ')');
+                    refusal.identityRefusal = detail || 'An identified admin API key is required.';
+                    throw refusal;
+                }
                 markKeyNonAdmin();
                 showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
                               + '. Other tabs may still work with this key — see the sidebar for which '
@@ -3122,6 +3188,7 @@
             schedules: ['the-schedules-tab', 'Schedules'],
             tagrules: ['classify-rule-review--apply--revoke', 'Tag rules'],
             settings: ['settings-store', 'Settings'],
+            keys: ['api-key-management', 'Keys'],
         };
 
         function installHelpLinks() {
@@ -3183,6 +3250,7 @@
             confirmApplyTagCandidate, applyTagCandidate,
             confirmDismissTagCandidate, dismissTagCandidate,
             confirmRevokeTagRule,
+            confirmRevokeApiKey,
             beginSaveSetting, beginResetSetting, confirmSaveSetting, confirmResetSetting,
             cancelSettingWrite,
         };
@@ -3288,13 +3356,13 @@
         let currentView = 'dashboard';
 
         // Tabs backed by admin-scoped routes (see app.py's router->scope
-        // map: admin.py, settings.py, analyze.py, and the pack-telemetry
+        // map: admin.py, settings.py, api_keys.py, analyze.py, and the pack-telemetry
         // routes in explore.py). A key without admin scope 403s on
         // every one of these; rather than let each tab discover that on its
         // own click, the first 403 any fetch sees (throwIfAuthRefused)
         // flips keyIsNonAdmin and this badges them instead of staying quiet
         // until the click happens.
-        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings', 'events', 'packs', 'reports', 'schedules'];
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'effectiveness', 'loops', 'advisories', 'settings', 'keys', 'events', 'packs', 'reports', 'schedules'];
         let keyIsNonAdmin = false;
 
         function applyScopeBadges() {
@@ -3368,6 +3436,7 @@
                 if (name === 'schedules') loadSchedules();
                 if (name === 'tagrules') loadTagRules();
                 if (name === 'settings') { loadRuntime(); loadSettings(); }
+                if (name === 'keys') loadKeys();
             }
             // Unlike the one-time loads gated by viewLoaded above, the nav
             // badge is refreshed every time Review opens, not just the
@@ -8589,6 +8658,171 @@
                 const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
                 if (degradation) renderDegradedBanner('tagrules-candidates-banner', degradation);
             }
+        }
+
+        // === Keys ===
+        // Driven by GET/POST/DELETE /api/v1/api-keys (admin scope). Every
+        // value from the server goes through escHtml; a key id reaches a
+        // handler through data-id, never through inline JavaScript. The
+        // minted token is held in `mintedToken` only until the panel is
+        // dismissed, and is never written into an attribute.
+        let keysCache = {};
+        let mintedToken = null;
+
+        function applyKeyPreset() {
+            const sel = document.getElementById('keys-preset');
+            if (sel.value) document.getElementById('keys-scopes').value = sel.value;
+        }
+
+        function populateKeyPresets(presets) {
+            const sel = document.getElementById('keys-preset');
+            sel.innerHTML = '<option value="">Custom scopes</option>' + presets.map(p =>
+                `<option value="${escHtml(p.scopes.join(','))}">${escHtml(p.label)} (${escHtml(p.scopes.join(','))})</option>`
+            ).join('');
+        }
+
+        async function loadKeys() {
+            const tbody = document.getElementById('keys-body');
+            const totalEl = document.getElementById('keys-total');
+            const mintPanel = document.getElementById('keys-mint-panel');
+            tbody.innerHTML = `<tr><td colspan="6">${loadingHtml('Loading keys...')}</td></tr>`;
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/api-keys');
+                mintPanel.style.display = '';
+                document.getElementById('keys-identity-note').hidden = !!getApiKey();
+                populateKeyPresets(data.presets || []);
+                const rows = data.keys || [];
+                keysCache = {};
+                rows.forEach(k => { keysCache[k.key_id] = k; });
+                if (rows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6">${emptyStateHtml({
+                        title: 'No API keys',
+                        body: 'Mint one above, or from the CLI.',
+                    })}</td></tr>`;
+                } else {
+                    tbody.innerHTML = rows.map(renderKeyRow).join('');
+                }
+                const live = rows.filter(k => !k.revoked).length;
+                totalEl.textContent = `${live} live, ${rows.length - live} revoked`;
+            } catch (err) {
+                // A read key is routine here: a 403 dims to a note rather
+                // than reading red, and the mint form is hidden with it.
+                if (isAdminScopeError(err)) mintPanel.style.display = 'none';
+                const cls = isAdminScopeError(err) ? 'text-dim' : 'text-danger';
+                tbody.innerHTML = `<tr><td colspan="6" class="${cls}">${escHtml(loadFailureText(err, 'API keys'))}</td></tr>`;
+            }
+        }
+
+        function renderKeyRow(k) {
+            const scopes = (k.scopes || []).map(sc => `<span class="badge badge-accent">${escHtml(sc)}</span>`).join(' ');
+            const status = k.revoked
+                ? `<span class="badge badge-danger">revoked</span>`
+                : '<span class="badge badge-ok">live</span>';
+            const action = k.revoked
+                ? '<span class="text-dim">&mdash;</span>'
+                : `<button class="btn btn-sm btn-danger" data-action="confirmRevokeApiKey" data-id="${escHtml(k.key_id)}">Revoke</button>`;
+            return `<tr>` +
+                `<td><code>${escHtml(k.key_id)}</code></td>` +
+                `<td>${escHtml(k.name)}</td>` +
+                `<td>${scopes}</td>` +
+                `<td>${escHtml(k.created_at)}</td>` +
+                `<td>${status}</td>` +
+                `<td id="key-actions-${escHtml(k.key_id)}">${action}</td>` +
+                `</tr>`;
+        }
+
+        function setKeysNotice(text) {
+            document.getElementById('keys-notice').textContent = text || '';
+        }
+
+        // A refusal for want of an admin key is explained, not shown bare; any
+        // other failure is shown as the server worded it.
+        function keyWriteFailureText(err, verb) {
+            if (err.identityRefusal) return `${verb} refused: ${err.identityRefusal}`;
+            if (isAdminScopeError(err)) {
+                return `${verb} refused: the stored key does not have admin scope.`;
+            }
+            return `${verb} failed: ${err.message}`;
+        }
+
+        async function mintApiKey() {
+            const nameEl = document.getElementById('keys-name');
+            const scopesEl = document.getElementById('keys-scopes');
+            const errEl = document.getElementById('keys-mint-error');
+            const btn = document.getElementById('keys-mint-btn');
+            errEl.textContent = '';
+            setKeysNotice('');
+            const name = nameEl.value.trim();
+            const scopes = scopesEl.value.trim();
+            if (!name) { errEl.textContent = 'Give the key a name.'; return; }
+            btn.disabled = true;
+            try {
+                const out = await classifyRuleWriteJSON('POST', '/api-keys', { name, scopes });
+                mintedToken = out.token;
+                document.getElementById('keys-token-panel').innerHTML =
+                    `<div class="degraded-banner banner-warn"><div class="degraded-body">` +
+                    `<span class="degraded-title">Key ${escHtml(out.key_id)} (${escHtml(out.name)}) minted. ` +
+                    `You will not see this token again &mdash; copy it now.</span>` +
+                    `<code class="key-token" id="keys-token-value">${escHtml(out.token)}</code>` +
+                    ((out.warnings || []).length ? `<span class="degraded-detail">Warning: ${escHtml(out.warnings.join(' '))}</span>` : '') +
+                    `<div class="degraded-actions">` +
+                    `<button class="btn btn-sm" onclick="copyMintedKey()">Copy token</button> ` +
+                    `<button class="btn btn-sm btn-ghost" onclick="dismissMintedKey()">I have stored it</button>` +
+                    `</div></div></div>`;
+                nameEl.value = '';
+                await loadKeys();
+            } catch (err) {
+                // The outcome of a failed mint can be unknown (a server fault),
+                // so re-list: the page must not show a row the server disagrees with.
+                errEl.textContent = keyWriteFailureText(err, 'Mint');
+                await loadKeys();
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function copyMintedKey() {
+            if (mintedToken && navigator.clipboard) navigator.clipboard.writeText(mintedToken);
+        }
+
+        function dismissMintedKey() {
+            mintedToken = null;
+            document.getElementById('keys-token-panel').innerHTML = '';
+        }
+
+        function confirmRevokeApiKey(id) {
+            const k = keysCache[id];
+            if (!k) return;
+            openConfirmDialog({
+                title: 'Revoke this API key?',
+                body: `Key ${k.key_id} (${k.name}), scopes ${(k.scopes || []).join(',')}.`,
+                consequences: [
+                    'Every caller using this key is refused from the next request.',
+                    'A revoked key cannot be restored; mint a new one instead.',
+                ],
+                confirmWord: 'revoke',
+                confirmLabel: 'Revoke key',
+                onConfirm: () => revokeApiKey(id),
+            });
+        }
+
+        async function revokeApiKey(id) {
+            const cell = document.getElementById('key-actions-' + id);
+            if (cell) cell.innerHTML = loadingHtml('Revoking...');
+            setKeysNotice('');
+            let notice = '';
+            try {
+                const out = await classifyRuleWriteJSON('DELETE', `/api-keys/${encodeURIComponent(id)}`);
+                if ((out.warnings || []).length) notice = `Key ${id} revoked. Warning: ${out.warnings.join(' ')}`;
+            } catch (err) {
+                notice = keyWriteFailureText(err, 'Revoke');
+            }
+            // Re-list on success and on failure alike: a failed revoke may or may
+            // not have taken effect, and the row must say which. The Revoke
+            // button on a still-live row is the retry.
+            await loadKeys();
+            setKeysNotice(notice);
         }
 
         // === Runtime panel ===

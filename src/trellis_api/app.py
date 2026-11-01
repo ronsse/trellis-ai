@@ -230,6 +230,7 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
         access_log,
         admin,
         analyze,
+        api_keys,
         classify_rules,
         curate,
         explore,
@@ -321,6 +322,7 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     #                                   (route-level deps in
     #                                   routes/policies.py)
     #   settings                     -> admin (both GET and PUT/POST)
+    #   api_keys                     -> admin (list, mint, revoke)
     #   access-log                   -> admin
     #   classify_rules               -> read on GET /classify/rules, plus
     #                                   admin on the candidate list and
@@ -339,6 +341,9 @@ def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
     )
     app.include_router(
         settings.router, prefix="/api/v1", tags=["settings"], dependencies=admin_auth
+    )
+    app.include_router(
+        api_keys.router, prefix="/api/v1", tags=["api-keys"], dependencies=admin_auth
     )
     app.include_router(
         access_log.router,
