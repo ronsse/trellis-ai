@@ -407,6 +407,52 @@ class TestSyncRecordsWiring:
         assert report.counts()["ingested"] == 1
         assert report.counts()["entities_extracted"] == 1
 
+    def test_a_labelled_record_is_not_extracted_and_is_counted(self, registry):
+        """Entities minted from a labelled document land in an unlabelled graph."""
+        from trellis.ingest_corpus.models import SyncRecord
+        from trellis.ingest_corpus.sync import sync_records
+
+        calls: list[str] = []
+
+        class _Recording(_FakeExtractor):
+            async def extract(self, raw, *, source_hint, context):
+                calls.append(raw["text"])
+                return await super().extract(
+                    raw, source_hint=source_hint, context=context
+                )
+
+        extractor = _Recording(
+            _result_with([EntityDraft(entity_type="person", name="Theo")])
+        )
+        records = [
+            SyncRecord(
+                doc_id="corpus:test:1",
+                source_key="open.md",
+                content="My son Theo is 4.",
+            ),
+            SyncRecord(
+                doc_id="corpus:test:2",
+                source_key="held.md",
+                content="Another note about Theo.",
+                handler_metadata={"data_classification": {"sensitivity": "restricted"}},
+            ),
+        ]
+        report = sync_records(
+            registry,
+            records,
+            source_system="test",
+            id_prefix="corpus:test:",
+            root_label="test",
+            requested_by="test",
+            extractor=extractor,
+        )
+
+        counts = report.counts()
+        assert counts["ingested"] == 2
+        assert counts["extraction_skipped_labelled"] == 1
+        assert counts["entities_extracted"] == 1
+        assert calls == ["My son Theo is 4."]
+
     def test_no_extractor_means_zero(self, registry):
         from trellis.ingest_corpus.models import SyncRecord
         from trellis.ingest_corpus.sync import sync_records

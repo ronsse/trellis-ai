@@ -82,6 +82,7 @@ from trellis.feedback.attribution import (
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
+from trellis.llm.egress import EgressGate, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp import supersession as _supersession
@@ -856,9 +857,10 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
     source yields a client.
 
     The env-var fallback is skipped when ``llm.routes`` pins ``consumer`` to
-    a tier, and when ``llm.tiers`` / ``llm.routes`` is malformed: in both
-    cases the operator chose a model for this consumer, and
-    ``OPENAI_API_KEY`` would silently run it on a different one.
+    a tier, when the route is declared ``local`` and when ``llm.tiers`` /
+    ``llm.routes`` is malformed: in each case the operator chose a model for
+    this consumer, and ``OPENAI_API_KEY`` would silently run it on a
+    different one, a hosted one for content cleared to go only to a local one.
     """
     try:
         route = registry.llm_route(consumer)
@@ -884,7 +886,7 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
             "llm_client_from_registry", consumer=consumer.value, tier=route.tier
         )
         return client
-    if route.routed:
+    if route.routed or route.local:
         logger.warning(
             "llm_client_routed_tier_unbuildable",
             consumer=consumer.value,
@@ -2486,7 +2488,9 @@ def _emit_memory_stored_and_enrich(
     # reach callers without the clearance as derived text (#194).
     label = sensitivity_of(metadata)
     note: str | None = None
-    labelled = sensitivity_rank(label) > sensitivity_rank("internal")
+    # ``local=False`` on purpose: the reason is the unlabelled graph, not the
+    # route, so a route declared local does not lift this skip.
+    labelled = not may_reach_route(label, local=False)
     memory_extractor = None if labelled else _get_memory_extractor(registry)
     if labelled:
         note = (
@@ -2956,15 +2960,57 @@ def _gather_reconcile_candidate(
     )
 
 
+def _reconcile_egress_permits(
+    registry: StoreRegistry, metadata: dict[str, Any], candidate: ReconcileCandidate
+) -> bool:
+    """Whether the incoming memory and the stored candidate may both be sent.
+
+    The judge is shown both texts, so both labels count: the incoming
+    memory's own, and the candidate's effective one (a chunk takes its
+    parent's). A candidate that cannot be read back is unreadable, so it is
+    withheld rather than sent.
+    """
+    document_store = registry.knowledge.document_store
+    gate = EgressGate.for_route(registry, LLMConsumer.RECONCILE, document_store)
+    if gate.local:
+        return True
+    if not gate.permits_metadata(metadata):
+        return False
+    try:
+        stored = document_store.get(candidate.doc_id)
+    except Exception:
+        # GRACEFUL-DEGRADATION: fail closed. A candidate whose label cannot
+        # be read is not sent; the memory is stored as a plain ADD.
+        return False
+    if stored is None:
+        return False
+    return gate.permits(candidate.doc_id, stored.get("metadata"))
+
+
 def _compute_reconcile_outcome(
-    registry: StoreRegistry, content: str, candidate: ReconcileCandidate
+    registry: StoreRegistry,
+    content: str,
+    candidate: ReconcileCandidate,
+    *,
+    metadata: dict[str, Any],
 ) -> ReconcileOutcome:
     """Build the client and compute the verdict — **outside** the lock.
 
     The model is never a hard dependency: an unbuildable / unavailable client
-    yields a fallback ADD outcome rather than raising.
+    yields a fallback ADD outcome rather than raising. So does a pair the
+    reconcile route may not carry (:func:`_reconcile_egress_permits`), before
+    any client is built.
     """
     model_id = configured_model_id(registry)
+    if not _reconcile_egress_permits(registry, metadata, candidate):
+        logger.info("reconcile_egress_withheld", candidate_id=candidate.doc_id)
+        return ReconcileOutcome(
+            decision=ReconcileDecision.ADD,
+            confidence=0.0,
+            model_id=model_id,
+            fallback=True,
+            fallback_reason=ReconcileFallbackReason.EGRESS_WITHHELD,
+        )
     try:
         client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
@@ -3251,7 +3297,9 @@ def _save_memory_reconciled(
     # near-total — a belt-and-suspenders guard turns any escape into the same
     # offline fallback. Fail-soft, never silent: the traceback goes to stderr.
     try:
-        outcome = _compute_reconcile_outcome(registry, content, candidate)
+        outcome = _compute_reconcile_outcome(
+            registry, content, candidate, metadata=metadata
+        )
     except Exception:
         logger.exception("reconcile_phase_b_failed", candidate_id=candidate.doc_id)
         outcome = ReconcileOutcome(

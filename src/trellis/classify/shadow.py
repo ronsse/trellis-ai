@@ -73,6 +73,7 @@ from trellis.classify.refresh import (
 from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
+from trellis.llm.egress import EgressGate
 from trellis.schemas.classification import (
     CONTENT_TYPE_VALUES,
     LIST_FACETS,
@@ -135,6 +136,9 @@ REASON_NO_SIGNAL = "classifier produced no tags"
 REASON_REDACTED = "document redacted while being judged"
 REASON_DRY_RUN = "shadow record would be written (dry-run)"
 REASON_WRITTEN = "shadow record written"
+#: The document is labelled above ``internal`` and the classifier's route is not
+#: declared local (:mod:`trellis.llm.egress`), so it was not sent to the model.
+REASON_EGRESS_WITHHELD = "egress withheld: labelled above internal, route not local"
 
 
 @dataclass
@@ -173,6 +177,9 @@ class BatchShadowResult:
     skipped_fresh: int = 0
     skipped_no_signal: int = 0
     skipped_redacted: int = 0
+    #: Documents labelled above ``internal`` that were not sent to a classifier
+    #: whose route is not declared local (:mod:`trellis.llm.egress`).
+    skipped_egress_withheld: int = 0
     errors: int = 0
     #: Documents whose content changed while the model was judging them
     #: (#421). A subset of ``written`` — the record landed on the current
@@ -182,7 +189,7 @@ class BatchShadowResult:
     item_ids_written: list[str] = field(default_factory=list)
 
 
-def shadow_classify_item(
+def shadow_classify_item(  # noqa: PLR0911 - one outcome per skip reason
     item_id: str,
     *,
     classifier: Classifier,
@@ -192,6 +199,7 @@ def shadow_classify_item(
     context_builder: Callable[[dict[str, Any]], ClassificationContext] | None = None,
     model_id: str = "",
     dry_run: bool = False,
+    egress: EgressGate | None = None,
 ) -> ShadowOutcome:
     """Classify one stored document and persist the verdict as a shadow record.
 
@@ -224,6 +232,11 @@ def shadow_classify_item(
         model_id: Label recorded on the shadow record and the event (e.g.
             ``"hermes3:8b"``). Defaults to the classifier's ``name``.
         dry_run: Compute and return the record without persisting or emitting.
+        egress: Decides whether this document may be sent to the classifier
+            (:mod:`trellis.llm.egress`). Omitted, it is the gate for a route
+            that is not declared local, so a caller that forgets fails closed.
+            A refusal returns ``REASON_EGRESS_WITHHELD`` before the classifier
+            is called.
 
     Returns:
         :class:`ShadowOutcome`.
@@ -232,6 +245,12 @@ def shadow_classify_item(
     if doc is None:
         logger.debug("shadow_classify_item_not_found", item_id=item_id)
         return ShadowOutcome(item_id=item_id, written=False, reason=REASON_NOT_FOUND)
+
+    gate = egress if egress is not None else EgressGate(document_store, local=False)
+    if not gate.permits(item_id, doc.get("metadata")):
+        return ShadowOutcome(
+            item_id=item_id, written=False, reason=REASON_EGRESS_WITHHELD
+        )
 
     content = doc.get("content", "")
     metadata: dict[str, Any] = dict(doc.get("metadata") or {})
@@ -358,6 +377,7 @@ def shadow_classify_stale(
     context_builder: Callable[[dict[str, Any]], ClassificationContext] | None = None,
     model_id: str = "",
     dry_run: bool = False,
+    egress: EgressGate | None = None,
 ) -> BatchShadowResult:
     """Shadow-classify every document that lacks a fresh shadow record.
 
@@ -379,9 +399,12 @@ def shadow_classify_stale(
         model_id: See :func:`shadow_classify_item`.
         dry_run: Nothing persisted, nothing emitted; counts report what a live
             run would have done.
+        egress: See :func:`shadow_classify_item`. One gate serves the whole
+            pass, so a chunk's parent is fetched once.
 
     Returns:
-        :class:`BatchShadowResult`. A failure on one document is counted in
+        :class:`BatchShadowResult`. A document the gate withholds is counted in
+        ``skipped_egress_withheld``. A failure on one document is counted in
         ``errors`` and skipped — a whole-store pass must not abort halfway and
         leave the operator with committed writes and no counts.
     """
@@ -391,6 +414,7 @@ def shadow_classify_stale(
         else datetime.now(UTC) - timedelta(days=max_age_days)
     )
     result = BatchShadowResult()
+    gate = egress if egress is not None else EgressGate(document_store, local=False)
     offset = 0
 
     while True:
@@ -426,6 +450,7 @@ def shadow_classify_stale(
                     context_builder=context_builder,
                     model_id=model_id,
                     dry_run=dry_run,
+                    egress=gate,
                 )
             # GRACEFUL-DEGRADATION: one unreachable model call or one
             # malformed row must not abort a whole-store pass. Counted in
@@ -445,6 +470,7 @@ def shadow_classify_stale(
         skipped_fresh=result.skipped_fresh,
         skipped_no_signal=result.skipped_no_signal,
         skipped_redacted=result.skipped_redacted,
+        skipped_egress_withheld=result.skipped_egress_withheld,
         errors=result.errors,
         stale_snapshot=result.stale_snapshot,
         dry_run=dry_run,
@@ -802,6 +828,8 @@ def _tally(result: BatchShadowResult, item_id: str, outcome: ShadowOutcome) -> N
         result.skipped_no_signal += 1
     elif outcome.reason == REASON_REDACTED:
         result.skipped_redacted += 1
+    elif outcome.reason == REASON_EGRESS_WITHHELD:
+        result.skipped_egress_withheld += 1
     else:
         # REASON_NOT_FOUND: the store listed the row then could not read it
         # back (a concurrent delete). A document we were asked to judge and

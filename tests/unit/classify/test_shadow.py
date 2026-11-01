@@ -1484,3 +1484,84 @@ class TestShadowWriteMirrorsThroughTheSeam:
 
         assert outcome.written is True
         assert SHADOW_TAGS_KEY in document_store.get("d1")["metadata"]
+
+
+class TestShadowEgress:
+    """Content labelled above ``internal`` is not sent to a route that is not local.
+
+    The classifier here is the model: ``FakeClassifier.calls`` is what reached it.
+    """
+
+    @staticmethod
+    def _label(sensitivity: str) -> dict[str, Any]:
+        return {"data_classification": {"sensitivity": sensitivity}}
+
+    def _seed_mixed(self, store: SQLiteDocumentStore) -> None:
+        _seed(store, "plain", "plain body", metadata={})
+        _seed(store, "secret", "secret body", metadata=self._label("confidential"))
+        _seed(store, "garbled", "garbled body", metadata={"data_classification": "x"})
+
+    def test_labelled_and_unreadable_documents_are_counted_not_classified(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        self._seed_mixed(document_store)
+        classifier = FakeClassifier({"domain": ["x"], "content_type": ["notes"]})
+
+        result = shadow_classify_stale(
+            classifier=classifier, document_store=document_store, vector_store=None
+        )
+
+        assert result.skipped_egress_withheld == 2
+        assert result.written == 1
+        assert classifier.calls == ["plain body"]
+        assert SHADOW_TAGS_KEY in document_store.get("plain")["metadata"]
+        for doc_id in ("secret", "garbled"):
+            assert SHADOW_TAGS_KEY not in document_store.get(doc_id)["metadata"]
+
+    def test_a_withheld_document_is_not_an_error(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        self._seed_mixed(document_store)
+        result = shadow_classify_stale(
+            classifier=FakeClassifier({"domain": ["x"]}),
+            document_store=document_store,
+            vector_store=None,
+        )
+        assert result.errors == 0
+
+    def test_a_route_declared_local_classifies_every_document(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        from trellis.llm.egress import EgressGate
+
+        self._seed_mixed(document_store)
+        classifier = FakeClassifier({"domain": ["x"], "content_type": ["notes"]})
+
+        result = shadow_classify_stale(
+            classifier=classifier,
+            document_store=document_store,
+            vector_store=None,
+            egress=EgressGate(document_store, local=True),
+        )
+
+        assert result.skipped_egress_withheld == 0
+        assert sorted(classifier.calls) == ["garbled body", "plain body", "secret body"]
+
+    def test_the_single_item_path_names_the_reason(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        from trellis.classify.shadow import REASON_EGRESS_WITHHELD, shadow_classify_item
+
+        self._seed_mixed(document_store)
+        classifier = FakeClassifier({"domain": ["x"]})
+
+        outcome = shadow_classify_item(
+            "secret",
+            classifier=classifier,
+            document_store=document_store,
+            vector_store=None,
+        )
+
+        assert outcome.written is False
+        assert outcome.reason == REASON_EGRESS_WITHHELD
+        assert classifier.calls == []

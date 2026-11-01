@@ -4621,3 +4621,187 @@ class TestWorkerCurateRetiresQueryRows:
         assert after is not None
         assert after.status == AdvisoryStatus.SUPPRESSED
         assert after.retired_by is not None
+
+
+class TestWorkerEnrichEgress:
+    """Labelled documents are not sent to a route that is not declared local."""
+
+    ENRICHMENT = json.dumps(
+        {
+            "tags": ["alpha"],
+            "class": "reference",
+            "summary": "Summary.",
+            "importance": 0.6,
+            "class_confidence": 0.9,
+        }
+    )
+
+    def _seed(self, doc_store: Any) -> None:
+        doc_store.put("doc-plain", "plain body", {"title": "Plain"})
+        doc_store.put(
+            "doc-secret",
+            "secret body",
+            {"data_classification": {"sensitivity": "confidential"}},
+        )
+        doc_store.put(
+            "doc-locked",
+            "locked body",
+            {"data_classification": {"sensitivity": "restricted"}},
+        )
+
+    def _stub(self, monkeypatch: pytest.MonkeyPatch) -> _CountingLLM:
+        llm = _CountingLLM(self.ENRICHMENT)
+        monkeypatch.setattr(
+            worker, "_require_llm_client_or_exit", lambda _consumer, *, command: llm
+        )
+        return llm
+
+    def test_dry_run_reports_the_skip_in_both_formats(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(temp_stores.knowledge.document_store)
+        self._stub(monkeypatch)
+
+        as_json = runner.invoke(
+            app, ["worker", "enrich", "--dry-run", "--format", "json"]
+        )
+        assert as_json.exit_code == 0, as_json.output
+        payload = json.loads(as_json.stdout.strip())
+        assert payload["skipped_egress_withheld"] == 2
+
+        as_text = runner.invoke(app, ["worker", "enrich", "--dry-run"])
+        assert as_text.exit_code == 0, as_text.output
+        assert f"egress_withheld: {payload['skipped_egress_withheld']} document(s)" in (
+            plain(as_text.output)
+        )
+
+    def test_a_live_run_sends_only_unlabelled_text_and_reports_the_skip(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        doc_store = temp_stores.knowledge.document_store
+        self._seed(doc_store)
+        llm = self._stub(monkeypatch)
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["enriched"] == 1
+        assert payload["skipped_egress_withheld"] == 2
+        assert len(llm.prompts) == 1
+        assert "plain body" in llm.prompts[0]
+        assert "secret" not in llm.prompts[0]
+        assert "locked" not in llm.prompts[0]
+        for doc_id in ("doc-secret", "doc-locked"):
+            assert "content_tags" not in doc_store.get(doc_id)["metadata"]
+        # No document text, title or id leaks into the report beyond what it printed.
+        assert "doc-secret" not in result.stdout
+        assert "secret body" not in result.stdout
+
+        text = runner.invoke(app, ["worker", "enrich", "--reenrich"])
+        assert text.exit_code == 0, text.output
+        assert "egress_withheld: 2 document(s)" in plain(text.output)
+
+    def test_a_route_declared_local_sends_them_and_reports_zero(
+        self,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._seed(temp_stores.knowledge.document_store)
+        llm = self._stub(monkeypatch)
+        # A route declared local is the operator's, in the llm: block.
+        monkeypatch.setattr(
+            worker,
+            "_get_registry",
+            lambda: _LocalRouteRegistry(temp_stores),
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["skipped_egress_withheld"] == 0
+        assert payload["enriched"] == 3
+        assert len(llm.prompts) == 3
+
+    def test_the_exit_code_does_not_depend_on_the_format(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(temp_stores.knowledge.document_store)
+        self._stub(monkeypatch)
+        as_json = runner.invoke(
+            app, ["worker", "enrich", "--dry-run", "--format", "json"]
+        )
+        as_text = runner.invoke(app, ["worker", "enrich", "--dry-run"])
+        assert as_json.exit_code == as_text.exit_code == 0
+
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_enrichment_route_not_another_consumers(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch, local: bool
+    ) -> None:
+        from tests.llm_routes import TierRoutedRegistry, per_consumer_config
+        from trellis.llm.routing import LLMConsumer
+
+        self._seed(temp_stores.knowledge.document_store)
+        llm = self._stub(monkeypatch)
+        config = per_consumer_config(LLMConsumer.ENRICHMENT, local=local)
+        monkeypatch.setattr(
+            worker, "_get_registry", lambda: TierRoutedRegistry(temp_stores, config)
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["skipped_egress_withheld"] == (0 if local else 2)
+        assert payload["enriched"] == (3 if local else 1)
+        assert len(llm.prompts) == payload["enriched"]
+
+
+class _LocalRouteRegistry:
+    """The real registry, with the ``llm:`` route declared local."""
+
+    def __init__(self, inner: StoreRegistry) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def llm_route(self, consumer: Any = None) -> Any:
+        from trellis.llm.routing import resolve_llm_route
+
+        return resolve_llm_route({"local": True}, consumer)
+
+
+class TestCaptureTextEgressLine:
+    """The egress line is not tied to the reconcile flag that raises its count."""
+
+    @staticmethod
+    def _text(*, reconcile_enabled: bool, withheld: int) -> str:
+        from trellis_workers.session_capture.models import CaptureReport
+
+        report = CaptureReport(
+            transcripts_root="transcripts",
+            dry_run=True,
+            reconcile_enabled=reconcile_enabled,
+        )
+        report.candidates_skipped_egress_withheld = withheld
+        with worker.console.capture() as captured:
+            worker._render_capture_text(report.to_payload())
+        return " ".join(plain(captured.get()).split())
+
+    @pytest.mark.parametrize("reconcile_enabled", [False, True])
+    def test_a_nonzero_count_is_printed(self, reconcile_enabled: bool) -> None:
+        text = self._text(reconcile_enabled=reconcile_enabled, withheld=2)
+        assert "egress_withheld: 2 candidate(s) not judged" in text
+        assert (
+            "withheld (labelled above internal, label unreadable, or an orphan chunk)"
+            in text
+        )
+
+    @pytest.mark.parametrize("reconcile_enabled", [False, True])
+    def test_a_zero_count_prints_nothing(self, reconcile_enabled: bool) -> None:
+        assert "egress_withheld" not in self._text(
+            reconcile_enabled=reconcile_enabled, withheld=0
+        )

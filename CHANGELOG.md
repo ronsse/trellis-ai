@@ -6,6 +6,58 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Content labelled above `internal` no longer reaches a chat or generate LLM
+  route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
+  label, `EgressGate` for a stored document, a chunk judged by its parent's
+  label as retrieval judges it, and a chunk whose parent row is absent
+  withheld), answers "may this content reach this route?"
+  and only these paths ask it: `trellis worker
+  enrich`, `trellis classify shadow` (`shadow_classify_stale`), the MCP
+  reconcile-on-write judge, the session-capture reconcile pass, and memory
+  extraction in `save_memory`, `trellis ingest-corpus` and
+  `trellis ingest-conversations`. **Embedding is not gated:** stored content,
+  labelled content included, still goes to the configured embedder, and an
+  operator with a hosted embedder must treat that as egress. A route is cloud unless it says otherwise:
+  set `local: true` in the `llm:` block, or in a tier under `llm.tiers`
+  (a tier that keeps the parent's endpoint inherits the parent's declaration; a
+  tier that moves `provider` or `base_url` does not). `local` is on the route,
+  not a write-behaviour knob, and `trellis admin llm-routes --format json`
+  reports it. `local: true` is the operator's statement about where the
+  endpoint sends content, and only the presence of a URL is checked: it is rejected
+  (`llm.local`, `EXIT_STORE`) on a route that names `openai` or `anthropic` with no
+  `base_url`; a vendor URL written out, or any other provider name, passes, and a
+  local router that forwards to a hosted model is not local.
+  A document whose label cannot be read is skipped, not sent.
+  Skips are counted under the named reason `egress_withheld`, never only
+  logged: `skipped_egress_withheld` in the JSON report of `worker enrich` and
+  `classify shadow`, `candidates_skipped_egress_withheld` in the session-capture
+  report, `egress_withheld` as a reconcile fallback reason (not a judge
+  failure), and `extraction_skipped_labelled` in the corpus and conversation
+  sync reports; each text report prints a matching line when the count is
+  non-zero. Unlabelled and `internal` documents are sent as before, prompt included,
+  with two exceptions: a chunk-shaped id with no parent row is withheld whatever
+  its own label, and an unlabelled memory whose nearest stored row is labelled
+  is not judged by reconcile. `tests/unit/test_llm_egress_rule.py` is a tripwire for the
+  common shapes of a new sender (it derives `.generate(...)` sites off `src/` and
+  requires each to be rostered behind the predicate or exempt with a reason);
+  the behaviour tests beside each sender are the guard, and the test's docstring
+  names the evasions it does not catch. **Effects on what is served, by path.**
+  Enrichment and shadow tags on a labelled document stop updating on a route that
+  is not declared local; whatever tags it already carries keep being served
+  unchanged. `ingest-corpus` sent the text of a labelled document (its label from the handler, or stored on the row and kept by an update) to the extractor
+  before and no longer does, whatever the route is declared (the entities land in
+  the graph, which carries no label), so such a document stops minting graph
+  entities, which feeds the graph axis. With
+  `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes; with it on and a route
+  not declared local, a pair with a labelled side is not judged, the new memory
+  is stored as a plain ADD and both rows stay current, so a pack can serve the
+  old fact (a pair the judge would have called NOOP stores a second row too).
+  Nothing re-judges a withheld pair later. The label is read when a job scans, so
+  a relabel between scan and send is not re-read. A labelled document served to a
+  session can reach a transcript, be captured unlabelled and become an
+  enrichment candidate; that path is not gated. Precedent mining (`_ask_llm` in the learning miner) also sends stored trace summaries to a chat or generate route without asking the predicate. A moved or renamed corpus file loses a label set on the stored row (an update merges stored metadata, a move does not), so every gate, the read gate included, treats it as unlabelled until it is labelled again; a handler that supplies the label on every run keeps it. `trellis admin check-extractors`
+  no longer reports an env-key fallback for a route declared local. No file
+  under `trellis.retrieve` changed.
 - **`trellis classify label-candidates` points a person at documents they may
   want to label.** A read-only scan counts matches of four plain patterns (an email
   address, a US/Canada phone number with separators, a US SSN shape and a

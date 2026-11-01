@@ -510,6 +510,12 @@ class CaptureReport:
     #: count only — the gate never surfaces matched content anywhere.
     candidates_blocked_scan: int = 0
     candidates_reconciled_noop: int = 0
+    #: Candidates not judged because their nearest stored capture is labelled
+    #: above ``internal`` and the ``session_capture`` route is not declared
+    #: local (:mod:`trellis.llm.egress`); each is a plain ADD. Named apart from
+    #: ``candidates_reconciled_noop`` and the judge-failure counts: no model
+    #: was asked, and nothing failed.
+    candidates_skipped_egress_withheld: int = 0
     #: SUPERSEDE *verdicts* — what the judge decided, counted whether or not
     #: the sweep went on to apply them (a ``--dry-run`` reports these and
     #: applies none). Paired with ``supersessions_failed`` deliberately: a
@@ -566,6 +572,9 @@ class CaptureReport:
             "candidates_rejected_injection": self.candidates_rejected_injection,
             "candidates_blocked_scan": self.candidates_blocked_scan,
             "candidates_reconciled_noop": self.candidates_reconciled_noop,
+            "candidates_skipped_egress_withheld": (
+                self.candidates_skipped_egress_withheld
+            ),
             "candidates_reconciled_supersede": self.candidates_reconciled_supersede,
             "supersessions_failed": self.supersessions_failed,
             "memories_written": self.memories_written,
