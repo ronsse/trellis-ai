@@ -67,6 +67,7 @@ from trellis.retrieve.disclosure import (
 from trellis.retrieve.evaluate import QualityReport
 from trellis.retrieve.excerpts import (
     DEFAULT_CONTENT_FLOOR,
+    EXCERPT_MAX_CHARS,
     ContentFloorConfig,
     apply_content_floor,
 )
@@ -90,6 +91,12 @@ from trellis.retrieve.parent_verdicts import (
     partition_by_parent_archived,
     partition_by_parent_signal_quality,
 )
+from trellis.retrieve.public_pack import (
+    PUBLIC_WINDOW_CEILING,
+    PUBLIC_WINDOW_FACTOR,
+    project_for_public,
+    readable_stored_copy,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
@@ -98,6 +105,7 @@ from trellis.retrieve.sensitivity import (
     concealed_ids_metadata,
     is_public_only,
     partition_by_clearance,
+    public_withholding,
     reader_for,
 )
 from trellis.retrieve.servable import strip_non_servable
@@ -822,6 +830,7 @@ class PackBuilder:
         filter_legacy_advisories: bool | None = None,
         class_prior_config: ClassPriorConfig | None = None,
         document_store: DocumentStore | None = None,
+        excerpt_max_chars: int = EXCERPT_MAX_CHARS,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -914,6 +923,12 @@ class PackBuilder:
         #: same "no verdict, serve the chunk" outcome a store that simply
         #: lacks the row produces.
         self._document_store = document_store
+        #: The cut :func:`~trellis.retrieve.excerpts.truncate_excerpt` makes
+        #: of a stored document's text, the same one the keyword axis was
+        #: built with (:func:`build_strategies` ``excerpt_max_chars``). Only
+        #: the public-only path reads it: it re-reads each item's text from
+        #: the stored row and must cut it the way the pack does.
+        self._excerpt_max_chars = excerpt_max_chars
 
     def _effective_class_prior_config(self) -> ClassPriorConfig:
         """``self._class_prior_config``, or a fresh env-only resolve.
@@ -1013,6 +1028,7 @@ class PackBuilder:
         refresh: bool = False,
         index_mode: bool = False,
         retrieval_phase: str | None = None,
+        principal_id: str | None = None,
     ) -> Pack:
         """Assemble a pack by running all strategies and applying budget.
 
@@ -1121,8 +1137,31 @@ class PackBuilder:
         ``PACK_ASSEMBLED`` payload so grading can tell a pre-work pack from
         a hindsight relevance check. ``None`` means the caller did not say.
         A stated-but-unrecognised value raises :class:`ValueError`.
+
+        ``principal_id`` (default ``None``) is the API key id the caller
+        authenticated as. Only the public-only path (``clearance`` of
+        ``public``, an ``external`` key) reads it; see
+        :meth:`_build_public`.
         """
         _validate_retrieval_phase(retrieval_phase)
+        if is_public_only(clearance):
+            return self._build_public(
+                intent,
+                clearance=clearance,
+                domain=domain,
+                agent_id=agent_id,
+                session_id=session_id,
+                run_id=run_id,
+                intent_family=intent_family,
+                budget=budget,
+                filters=filters,
+                tag_filters=tag_filters,
+                limit_per_strategy=limit_per_strategy,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                index_mode=index_mode,
+                principal_id=principal_id,
+            )
         start_time = time.perf_counter()
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -1529,6 +1568,7 @@ class PackBuilder:
         session_dedup_window_minutes: int = DEFAULT_SESSION_DEDUP_WINDOW_MINUTES,
         refresh: bool = False,
         retrieval_phase: str | None = None,
+        principal_id: str | None = None,
     ) -> SectionedPack:
         """Assemble a sectioned pack with independently budgeted sections.
 
@@ -1553,6 +1593,24 @@ class PackBuilder:
             6. Emit telemetry and return SectionedPack.
         """
         _validate_retrieval_phase(retrieval_phase)
+        if is_public_only(clearance):
+            return self._build_public_sectioned(
+                intent,
+                clearance=clearance,
+                sections=sections,
+                domain=domain,
+                agent_id=agent_id,
+                session_id=session_id,
+                run_id=run_id,
+                intent_family=intent_family,
+                filters=filters,
+                tag_filters=tag_filters,
+                limit_per_strategy=limit_per_strategy,
+                tier_mapper=tier_mapper,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                principal_id=principal_id,
+            )
         start_time = time.perf_counter()
         mapper = tier_mapper or TierMapper()
 
@@ -1967,6 +2025,446 @@ class PackBuilder:
                 **telemetry,
             )
 
+        return sectioned_pack
+
+    def _public_strategies(self) -> list[SearchStrategy]:
+        """The axes a public-only caller runs: every one but the graph axis.
+
+        The graph axis serves entities, which carry no document label and are
+        never served to a public-only caller, so it contributes no item. It
+        would still report on the graph (seeded or not, how many nodes
+        matched), which is a function of what the caller may not read.
+        """
+        return [s for s in self._strategies if s.name != GRAPH_STRATEGY_NAME]
+
+    def _search_public(
+        self,
+        strategy: SearchStrategy,
+        intent: str,
+        *,
+        limit: int,
+        filters: dict[str, Any] | None,
+        clearance: Sensitivity,
+        signal_quality_spec: dict[str, Any],
+        parent_verdict_cache: ParentVerdictCache,
+    ) -> list[PackItem]:
+        """One axis's items for a public-only caller: readable, refreshed, gated.
+
+        The page is filled from public documents only. A strategy ranks the
+        whole corpus, so a page of ``limit`` can hold fewer public rows than
+        exist because unreadable ones outrank them; filtering afterwards would
+        make how many a caller receives depend on what it may not read. So the
+        window is widened until ``limit`` rows survive, the strategy has
+        nothing further, or :data:`PUBLIC_WINDOW_CEILING` is reached. Each row
+        is rebuilt from its stored document (:func:`readable_stored_copy`)
+        before the archived and noise gates judge it, so a stale vector row
+        cannot carry text or a stamp the document no longer holds.
+        """
+        post_filtered = bool(
+            filters and ("domain" in filters or "content_tags" in filters)
+        )
+        window = limit
+        previous_raw = -1
+        while True:
+            found, _axis_state, _skipped = _search_strategy(
+                strategy,
+                intent,
+                limit=window,
+                filters=(dict(filters) if filters else None),
+            )
+            readable = [
+                copy
+                for item in strip_non_servable(found)
+                if (
+                    copy := readable_stored_copy(
+                        clearance,
+                        item,
+                        parent_verdict_cache,
+                        excerpt_max_chars=self._excerpt_max_chars,
+                    )
+                )
+                is not None
+            ]
+            kept, _gate_rejected = self._apply_collect_gates(
+                readable,
+                signal_quality_spec=signal_quality_spec,
+                strategy_name=strategy.name,
+                parent_verdict_cache=parent_verdict_cache,
+            )
+            raw = len(found)
+            # A strategy that returned fewer rows than it was asked for has
+            # nothing further, unless it post-filters (the semantic axis
+            # over-fetches then slices), where only "no growth" says so.
+            exhausted = raw <= previous_raw or (raw < window and not post_filtered)
+            if len(kept) >= limit or exhausted or window >= PUBLIC_WINDOW_CEILING:
+                return kept[:limit]
+            previous_raw = raw
+            window = min(window * PUBLIC_WINDOW_FACTOR, PUBLIC_WINDOW_CEILING)
+
+    def _collect_public_pool(
+        self,
+        intent: str,
+        *,
+        clearance: Sensitivity,
+        filters: dict[str, Any] | None,
+        tag_filters: dict[str, Any] | None,
+        domain: str | None,
+        limit_per_strategy: int,
+        include_structural: bool,
+        include_meta: bool,
+        pack_kind: str,
+    ) -> tuple[list[PackItem], int, list[str], list[StrategyFailure]]:
+        """The public-only candidate pool, down to dedup and structural filters.
+
+        Returns ``(pool, candidates_found, strategies_used, strategy_failures)``.
+        ``candidates_found`` counts the rows that were readable and passed every
+        gate that can withhold one (collect, supersession, class prior), which
+        is all a public-only caller may be told about the search. Everything
+        here, supersession included, sees only whole documents labelled
+        ``public``, so the pool is a function of those documents alone.
+        """
+        scoped_filters, scoped_tag_filters = self._apply_domain_scope(
+            domain, filters, tag_filters
+        )
+        merged_filters = self._build_filters(scoped_filters, scoped_tag_filters)
+        signal_quality_spec = resolve_signal_quality_spec(scoped_tag_filters)
+        if include_structural:
+            merged_filters = dict(merged_filters) if merged_filters else {}
+            merged_filters["include_structural"] = True
+        class_prior_config = self._effective_class_prior_config()
+        parent_verdict_cache = ParentVerdictCache(self._document_store)
+        strategies = self._public_strategies()
+        pool: list[PackItem] = []
+        strategies_used: list[str] = []
+        strategy_failures: list[StrategyFailure] = []
+        for strategy in strategies:
+            try:
+                items = self._search_public(
+                    strategy,
+                    intent,
+                    limit=limit_per_strategy,
+                    filters=merged_filters,
+                    clearance=clearance,
+                    signal_quality_spec=signal_quality_spec,
+                    parent_verdict_cache=parent_verdict_cache,
+                )
+                items = self._stamp_collecting_strategy(
+                    items, strategy.name, config=class_prior_config
+                )
+                pool.extend(items)
+                strategies_used.append(strategy.name)
+            # AGGREGATE: re-raised by _raise_if_blocking_strategy_failures,
+            # exactly as on the ordinary path.
+            except Exception as exc:
+                logger.exception("strategy_failed", strategy=strategy.name)
+                strategy_failures.append(
+                    StrategyFailure(
+                        strategy=strategy.name,
+                        error_class=type(exc).__name__,
+                        message=str(exc),
+                        audit_message=_audit_message(exc),
+                    )
+                )
+        _raise_if_blocking_strategy_failures(
+            strategy_failures, len(strategies), pack_kind=pack_kind
+        )
+        pool = self._promote_strategy_source(pool)
+        # Supersession among documents the caller may read: a successor it
+        # cannot read is no successor, and a hidden document is not a
+        # candidate at all by now.
+        pool, _superseded = partition_superseded(
+            pool, successor_visible=reader_for(clearance, parent_verdict_cache)
+        )
+        pool, _class_prior_rejected, _forms = self._apply_class_prior_pool(
+            pool,
+            config=class_prior_config,
+            parent_verdict_cache=parent_verdict_cache,
+        )
+        # Counted once every gate that can withhold a row has run, so a
+        # document that was found and then withheld is not in it.
+        candidates_found = len(pool)
+        pool, _dedup_rejected = self._deduplicate_tracked(pool)
+        if self._semantic_dedup is not None:
+            pool, _semantic_rejected = self._semantic_dedup_tracked(
+                pool, self._semantic_dedup
+            )
+        if not include_structural:
+            pool, _structural = self._partition(pool, self._is_structural)
+        if not include_meta:
+            pool, _meta = self._partition(pool, self._is_meta_activity)
+        return pool, candidates_found, strategies_used, strategy_failures
+
+    def _rerank_and_project_public(
+        self,
+        intent: str,
+        pool: list[PackItem],
+        strategy_failures: list[StrategyFailure],
+    ) -> list[PackItem]:
+        """Rerank, apply the content floor, and cut each item to what is served.
+
+        Projection comes last so the allowlist is applied to the item the
+        reranker returned (it adds ``original_score`` to the breakdown), and
+        before anything that renders the item (the disclosure pointer label
+        reads the metadata, which by then is the allowlisted set).
+        """
+        if self._reranker is not None:
+            try:
+                pool = self._reranker.rerank(intent, pool)
+            except Exception as exc:
+                logger.exception("reranker_failed", reranker=self._reranker.name)
+                msg = (
+                    f"Reranker {self._reranker.name!r} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise PackAssemblyError(msg, strategy_failures) from exc
+        pool = apply_content_floor(pool, self._content_floor).items
+        return [project_for_public(item) for item in pool]
+
+    def _emit_public_served(
+        self,
+        pack_id: str,
+        *,
+        entity_type: str,
+        items: Iterable[PackItem],
+        principal_id: str | None,
+    ) -> None:
+        """Record what a public-only pack served, in its own event type.
+
+        Not ``PACK_ASSEMBLED``: that event drives the holdout, session dedup,
+        attribution and promotion, and an ``external`` key is outside all of
+        them. This one answers only "what did that key read": the pack id,
+        the item ids served, their count, and the key's id.
+        """
+        if self._event_log is None:
+            return
+        served = [item.item_id for item in items]
+        self._event_log.emit(
+            EventType.PUBLIC_PACK_SERVED,
+            source="pack_builder",
+            entity_id=pack_id,
+            entity_type=entity_type,
+            payload={
+                "pack_id": pack_id,
+                "served_item_ids": served,
+                "count": len(served),
+                "key_id": principal_id,
+            },
+        )
+
+    def _build_public(
+        self,
+        intent: str,
+        *,
+        clearance: Sensitivity,
+        domain: str | None,
+        agent_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+        intent_family: str | None,
+        budget: PackBudget | None,
+        filters: dict[str, Any] | None,
+        tag_filters: dict[str, Any] | None,
+        limit_per_strategy: int,
+        include_structural: bool,
+        include_meta: bool,
+        index_mode: bool,
+        principal_id: str | None,
+    ) -> Pack:
+        """The flat pack for a public-only caller (an ``external`` API key).
+
+        What this caller receives must not depend on anything it may not read,
+        so this is a separate pipeline rather than a filter on
+        :meth:`build`'s. It differs from the ordinary path in that:
+
+        * the candidate pool holds public whole documents only, re-read from
+          their stored rows (:meth:`_search_public`); the graph axis does not
+          run;
+        * nothing counts what was filtered: ``candidates_found`` counts only
+          what passed, ``rejected_items`` and the withholding block are empty
+          (same keys), and no concealed-id list is attached;
+        * item metadata is cut to the allowlist and no raw strategy score is
+          served;
+        * the pack is not drawn into the holdout, does not read or write
+          session dedup, runs no quality evaluator, and emits
+          ``PUBLIC_PACK_SERVED`` instead of ``PACK_ASSEMBLED``.
+        """
+        start_time = time.perf_counter()
+        budget = budget or PackBudget()
+        pool, candidates_found, strategies_used, strategy_failures = (
+            self._collect_public_pool(
+                intent,
+                clearance=clearance,
+                filters=filters,
+                tag_filters=tag_filters,
+                domain=domain,
+                limit_per_strategy=limit_per_strategy,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                pack_kind="pack",
+            )
+        )
+        self._record_embedder_resolve_failure(strategy_failures)
+        pool = self._rerank_and_project_public(intent, pool, strategy_failures)
+        pool.sort(key=lambda x: x.relevance_score, reverse=True)
+        selected = pool[: budget.max_items]
+        selected, _token_rejected, budget_trace = self._apply_token_budget_tracked(
+            selected, budget.max_tokens, index_mode=index_mode
+        )
+        disclosure_result = apply_disclosure(
+            selected, DISCLOSURE_OFF if index_mode else self._disclosure
+        )
+        selected = disclosure_result.items
+        budget_trace = self._recharge_budget_trace(
+            budget_trace,
+            selected,
+            index_mode=index_mode,
+            demoted=frozenset(disclosure_result.pointer_item_ids),
+        )
+        selected = self._annotate_selected_items(selected)
+        pack = Pack(
+            intent=intent,
+            items=selected,
+            retrieval_report=RetrievalReport(
+                queries_run=len(strategies_used),
+                candidates_found=candidates_found,
+                items_selected=len(selected),
+                duration_ms=round((time.perf_counter() - start_time) * 1000),
+                strategies_used=strategies_used,
+                rejected_items=[],
+                budget_trace=budget_trace,
+            ),
+            budget=budget,
+            domain=domain,
+            agent_id=agent_id,
+            session_id=session_id,
+            run_id=run_id,
+            intent_family=intent_family or normalize_intent_family(intent=intent),
+            advisories=[],
+            assembled_at=utc_now(),
+            metadata={"withholding": public_withholding(len(selected))},
+        )
+        self._emit_public_served(
+            pack.pack_id,
+            entity_type="pack",
+            items=pack.items,
+            principal_id=principal_id,
+        )
+        return pack
+
+    def _build_public_sectioned(
+        self,
+        intent: str,
+        *,
+        clearance: Sensitivity,
+        sections: list[SectionRequest],
+        domain: str | None,
+        agent_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+        intent_family: str | None,
+        filters: dict[str, Any] | None,
+        tag_filters: dict[str, Any] | None,
+        limit_per_strategy: int,
+        tier_mapper: TierMapper | None,
+        include_structural: bool,
+        include_meta: bool,
+        principal_id: str | None,
+    ) -> SectionedPack:
+        """The sectioned pack for a public-only caller; see :meth:`_build_public`.
+
+        Sections are routed on the allowlisted metadata only: a section that
+        filters on a tag or affinity the allowlist drops matches nothing, so
+        routing cannot be used to read a stored field the pack would not
+        serve. A section with no filter takes every candidate.
+        """
+        start_time = time.perf_counter()
+        mapper = tier_mapper or TierMapper()
+        pool, _candidates_found, strategies_used, strategy_failures = (
+            self._collect_public_pool(
+                intent,
+                clearance=clearance,
+                filters=filters,
+                tag_filters=tag_filters,
+                domain=domain,
+                limit_per_strategy=limit_per_strategy,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                pack_kind="sectioned pack",
+            )
+        )
+        self._record_embedder_resolve_failure(strategy_failures)
+        pool = self._rerank_and_project_public(intent, pool, strategy_failures)
+        item_best_section: dict[str, tuple[int, float]] = {}
+        raw_sections: dict[int, list[PackItem]] = {}
+        for section_idx, section_req in enumerate(sections):
+            matched = [
+                item for item in pool if mapper.matches_section(item, section_req)
+            ]
+            matched.sort(key=lambda x: x.relevance_score, reverse=True)
+            within_items = matched[: section_req.max_items]
+            selected = self._apply_token_budget(within_items, section_req.max_tokens)
+            raw_sections[section_idx] = selected
+            for item in selected:
+                prev = item_best_section.get(item.item_id)
+                if prev is None or item.relevance_score > prev[1]:
+                    item_best_section[item.item_id] = (
+                        section_idx,
+                        item.relevance_score,
+                    )
+        section_duration_ms = round((time.perf_counter() - start_time) * 1000)
+        pack_sections: list[PackSection] = []
+        for section_idx, section_req in enumerate(sections):
+            kept = [
+                item
+                for item in raw_sections.get(section_idx, [])
+                if item_best_section.get(item.item_id, (None,))[0] == section_idx
+            ]
+            annotated = [
+                item.model_copy(
+                    update={"selection_reason": f"section:{section_req.name}"}
+                )
+                for item in self._annotate_selected_items(kept)
+            ]
+            pack_sections.append(
+                PackSection(
+                    name=section_req.name,
+                    items=annotated,
+                    retrieval_report=RetrievalReport(
+                        queries_run=len(strategies_used),
+                        candidates_found=len(raw_sections.get(section_idx, [])),
+                        items_selected=len(annotated),
+                        duration_ms=section_duration_ms,
+                        strategies_used=strategies_used,
+                        rejected_items=[],
+                    ),
+                    budget=PackBudget(
+                        max_items=section_req.max_items,
+                        max_tokens=section_req.max_tokens,
+                    ),
+                )
+            )
+        sectioned_pack = SectionedPack(
+            intent=intent,
+            sections=pack_sections,
+            domain=domain,
+            agent_id=agent_id,
+            session_id=session_id,
+            run_id=run_id,
+            intent_family=intent_family or normalize_intent_family(intent=intent),
+            advisories=[],
+            assembled_at=utc_now(),
+            metadata={
+                "withholding": public_withholding(
+                    sum(len(sec.items) for sec in pack_sections)
+                )
+            },
+        )
+        self._emit_public_served(
+            sectioned_pack.pack_id,
+            entity_type="sectioned_pack",
+            items=[item for section in pack_sections for item in section.items],
+            principal_id=principal_id,
+        )
         return sectioned_pack
 
     @staticmethod

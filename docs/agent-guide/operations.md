@@ -4331,21 +4331,86 @@ Graph nodes and entities carry no label.
 **An `external` key** (`trellis admin api-keys create --name <n> --scopes read,external`)
 is the one key that inverts that default. It reads at `public`, so a pack, a
 search, `GET /documents` and `get_items` serve it only a stored document someone
-labelled `public`: an unlabelled document reads `internal` and is withheld, and a
-chunk is served only when its own row and its parent are both labelled `public`.
+labelled `public`: an unlabelled document reads `internal` and is withheld.
+
+**The tier is enforced only under auth mode `required`.** With `TRELLIS_AUTH_MODE`
+`off`, or `optional` and the key omitted from the request, no key is presented
+and nothing here applies: the caller reads as trusted. Trusted-local callers and
+MCP over stdio read at `restricted`. Deploy the keys behind `required`.
+
+The rule the tier is built on is that **what an `external` key receives does not
+depend on anything it may not read**. A pack, a search page and a document list
+answer the same whether or not the store also holds documents above `public`,
+apart from ids and clocks drawn per call. This holds as follows, and each point is
+a change for this key alone: every other key is served exactly what it was.
+
+- **A chunk is never served to it.** A chunk is a slice of a document
+  (`<parent>#chunk-N`). A pack, `GET /search`, `GET /documents`, MCP `search` and
+  `get_items` serve it none, and a chunk id answers exactly as a missing id
+  (`GET /documents/{id}` is a 404, `get_items` lists it as not found). The label
+  of the whole document is what the key may read; a chunk is not a whole document.
+- **Text and metadata come from the stored document row, never from the vector
+  row.** The vector row is an embed-time snapshot: its text and metadata can lag a
+  later edit or relabel, and a stale copy is not something the key may read. The
+  excerpt is cut as a pack cuts it (`truncate_excerpt`, the configured excerpt
+  limit). An item that has no stored row is withheld.
+- **Metadata is an allowlist: `title` and `document_form`, and nothing else.**
+  `title` is kept when it is a non-empty string. A legacy `content_type` outside
+  the facet vocabulary is shown as `document_form`. Every other key is dropped:
+  entity and trace ids, supersession and reconcile pointers, source paths, tags,
+  scoring and gating keys, lifecycle state, labels, shadow tags and anything a
+  writer adds later. A key a new writer adds is therefore not served until someone
+  adds it to `PUBLIC_METADATA_KEYS` (`trellis.retrieve.sensitivity`), and the strategy
+  that found an item still reads as `strategy_source`. A sectioned pack routes an
+  item to a section from the allowlisted metadata only, so a section's affinity,
+  content-type or scope filter cannot be used to read a stored field the pack would
+  not serve.
+- **No count sees past the filter.** `withholding` keeps its keys and reads zero
+  or empty in every one of them, apart from `served_count`, which is what the
+  caller was sent; `rejected_items` is empty; `candidates_found` counts only the
+  items that passed the readable, archived, noise, supersession and class-prior
+  gates. No MCP surface prints a `**Withheld:**` line. The `axes` block reports no
+  graph axis, since a pack to this key never runs one and its report would
+  describe the graph. Over REST a document row carries no `rank` for this key (see
+  below), and `include_chunks` is echoed `false` whatever was asked.
+- **`GET /search` fills its page from public documents.** The store's ranked list
+  is read in widening windows until `limit` public rows survive, the store has
+  nothing further, or the window reaches 2000 rows, so a page is as long as it
+  would be if the unreadable documents did not exist.
+- **`/api/version` answers as an anonymous probe does** (no provenance and no
+  write-behaviour settings unless `TRELLIS_OPS_DETAIL` is `public`), as `/readyz`
+  does.
+
+A pack to an `external` key carries no advisory and no capture-health banner. It
+is not drawn into the holdout, and it neither reads nor writes session dedup, so a
+`session_id` neither thins its pack nor records one for another caller to be thinned
+by. It emits no `PACK_ASSEMBLED`, so it is outside holdout, attribution, promotion
+and every other reader of that event. It emits `PUBLIC_PACK_SERVED`
+(`pack.public_served`) instead, with exactly `pack_id`, `served_item_ids`, `count` and
+`key_id`, so what the key read is still audited. The key cannot write a feedback
+row for its pack (its scope satisfies `read` and nothing else, so `POST
+/packs/{pack_id}/feedback` and MCP `record_feedback` refuse it), which is why no
+reader waits for one. `get_items` still emits `pack.items_fetched`, as it does for
+every caller: it names the ids the caller itself asked for and the ones it was
+served, and nothing in `src/` reads that event.
+
 Anything that cannot carry a label is refused to it. Over REST these answer
 403 with the reason: `/graph/search`, `/graph/search/facets`, `/entities/{id}`,
 `/traces`, `/traces/domains`, `/traces/{id}`, `/precedents`, `/precedents/domains`,
 `/graph/history`, `/observations`, `/measurements`, `/policies`, `/policies/{id}`
 and `/classify/rules`. Over MCP `get_graph`, `get_lessons`, `get_file_context` and
 `query_observations` raise a policy-denied error with the same reason, and
-`get_items` answers a graph or trace id exactly as it answers a missing one. A
-pack to an `external` key carries no advisory and no capture-health banner, and
+`get_items` answers a graph or trace id exactly as it answers a missing one.
 `/readyz` returns the status line an anonymous probe gets. It can write nothing:
 the scope satisfies `read` and no other scope, and minting it beside `ingest`,
 `mutate`, `admin`, `confidential` or `restricted` is refused. If a stored key
-somehow holds both, the lower clearance wins and the key stays read-only. A label
+somehow holds both, the lower clearance wins and the key stays read-only. A stored
+scope string is matched without regard to case or surrounding space (`read,External`
+holds `external`), so a hand-edited key row cannot fall back to `internal`. A label
 is judged on the stored document row, never on the metadata a pack item carries.
+
+An existence probe by id stays closed: a document the key may not read, a chunk and
+an id that does not exist answer in the same words.
 
 What this does **not** guard: a `read` key, and every key that existed before,
 still reads everything unlabelled. Nothing labels a document `public`
@@ -4353,7 +4418,28 @@ automatically; that is a human act (`save_memory`/`save_knowledge`
 `sensitivity`, or `curate classify-sensitivity`), and a document whose label is
 missing or malformed is never served to an `external` key. The key does not
 bound what an operator labels `public`, does not limit domains, and the `/ui`
-page and other routes that need no credential are unchanged.
+page and other routes that need no credential are unchanged. It also does not
+guard:
+
+- **Timing.** A request that has to scan past more unreadable documents takes
+  longer, and the response time says so. Latency is not equalised.
+- **Auth modes.** The tier exists only under `required`, as above; nothing in `off`,
+  or in `optional` with the key omitted, is enforced.
+- **Score and order from a corpus statistic.** The keyword axis ranks by FTS5
+  `bm25`, whose inverse document frequency is computed over every document in the
+  index, hidden ones included. Which public documents a keyword-only pack keeps,
+  and the order of a `GET /search` page, can therefore move when documents the key
+  may not read are added. Measured, not hypothetical: with forty hidden documents
+  sharing a term, three public documents changed order on `/search` and a keyword
+  pack swapped one of its two items. The semantic axis scores by cosine, which does
+  not depend on the corpus. The raw strategy score (`score_breakdown.original_score`) and the
+  full-text `rank` are removed from what this key sees, and the fused
+  `relevance_score` is rank-based, but the order itself is not made
+  corpus-independent. Fixing it would need a per-key index.
+- **A window ceiling.** The widening read stops at 2000 rows, so a corpus whose top
+  2000 matches are all unreadable returns an empty page.
+- **A strategy that fails on an unreadable row.** If a strategy raises because of
+  a malformed document the key may not read, the axis is reported as failed.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would
@@ -4361,7 +4447,8 @@ be if the successor did not exist (the successor is judged the way the pack's
 own gate judges it: by its own label, and a chunk by its parent's too). The
 served items are the same with and without that successor among the candidates;
 the pack's counters (`candidates_found`, `total`, `by_reason.sensitivity`) still
-count it as a sensitivity withholding, as for any hidden candidate. A served
+count it as a sensitivity withholding, as for any hidden candidate, for every caller
+but an `external` key, whose pack carries no counter that sees past its filter. A served
 document's own reconcile pointers are dropped from the served copy when they
 name a document the caller cannot read: `lifecycle.superseded_by` (on a loser,
 naming its successor), `supersedes_doc_id` (on a successor, naming its loser)

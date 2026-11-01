@@ -6714,7 +6714,18 @@ paths:
 
         ``include_chunks=true`` for the unfiltered result set. The applied
 
-        setting is echoed back on the response.'
+        setting is echoed back on the response.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        a page filled from public documents alone, so ``limit`` is met whenever
+
+        that many exist however many hidden matches outrank them; it is never
+
+        served a chunk (``include_chunks`` is ignored and echoed ``false``), and
+
+        its rows carry only the allowlisted metadata.'
       operationId: search_api_v1_search_get
       parameters:
       - description: Search query
@@ -7405,6 +7416,11 @@ paths:
         this route was written for.  They appear when the API is served from
 
         an editable install whose working tree has moved on.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is not an
+
+        operator, so it is answered as an anonymous caller is.
 
 
         ``write_behaviour_settings`` is gated the same way, for the same

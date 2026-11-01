@@ -92,6 +92,14 @@ class EventType(StrEnum):
     #: to ``PACK_ASSEMBLED`` / ``FEEDBACK_RECORDED`` the same way
     #: ``PACK_QUALITY_SCORED`` does.
     PACK_ITEMS_FETCHED = "pack.items_fetched"
+    #: A pack served to a public-only caller (an ``external`` API key). It is
+    #: deliberately not ``PACK_ASSEMBLED``: that event feeds the pack-effect
+    #: holdout, session dedup, attribution and promotion, and a caller that
+    #: reads only ``public`` documents (and is refused feedback) must move
+    #: none of them. The payload is ``{pack_id, served_item_ids, count,
+    #: key_id}`` -- what the key read, answerable after the fact -- and
+    #: ``entity_id`` carries the pack_id.
+    PUBLIC_PACK_SERVED = "pack.public_served"
 
     # Graph
     LINK_CREATED = "link.created"

@@ -15,6 +15,7 @@ from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
 from trellis.retrieve.precedents import list_precedents as _list_precedents
+from trellis.retrieve.public_pack import public_search_page
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_WITHHELD_IDS_KEY,
     DocumentClearance,
@@ -22,6 +23,7 @@ from trellis.retrieve.sensitivity import (
     conceal_graph_pointers,
     conceal_node_pointers,
     conceal_withheld_ids,
+    is_public_only,
 )
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
@@ -188,20 +190,36 @@ def search(
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered result set. The applied
     setting is echoed back on the response.
+
+    A key that reads only ``public`` documents (an ``external`` key) is served
+    a page filled from public documents alone, so ``limit`` is met whenever
+    that many exist however many hidden matches outrank them; it is never
+    served a chunk (``include_chunks`` is ignored and echoed ``false``), and
+    its rows carry only the allowlisted metadata.
     """
     registry = get_registry()
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
-    results = registry.knowledge.document_store.search(
-        q, limit=limit, filters=filters, include_chunks=include_chunks
-    )
     readable = DocumentClearance(
         registry.knowledge.document_store, request_clearance(ctx)
     )
-    results = [
-        r for r in results if readable.permits(r.get("doc_id", ""), r.get("metadata"))
-    ]
+    if is_public_only(readable.clearance):
+        # The page is filled from public documents only, so a hidden match
+        # that outranks them cannot shorten it; a chunk is never served.
+        include_chunks = False
+        results = public_search_page(
+            registry.knowledge.document_store, q, limit=limit, filters=filters
+        )
+    else:
+        results = registry.knowledge.document_store.search(
+            q, limit=limit, filters=filters, include_chunks=include_chunks
+        )
+        results = [
+            r
+            for r in results
+            if readable.permits(r.get("doc_id", ""), r.get("metadata"))
+        ]
     results = conceal_document_rows(
         results, registry.knowledge.document_store, readable.clearance
     )
@@ -251,6 +269,7 @@ def assemble_pack(
         budget=budget,
         filters=filters,
         tag_filters=req.tag_filters,
+        principal_id=ctx.key_id,
     )
 
     # The axis report `trellis retrieve pack --format json` prints, so a
@@ -264,6 +283,7 @@ def assemble_pack(
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
         graph_axis=pack.retrieval_report.graph_axis,
+        public_only=is_public_only(clearance),
     )
 
     # A caller below ``restricted`` is shown the withheld counts but not the ids
@@ -347,6 +367,7 @@ def assemble_sectioned_pack(
         run_id=req.run_id,
         intent_family=req.intent_family,
         filters=filters,
+        principal_id=ctx.key_id,
     )
 
     # Same axis report as POST /api/v1/packs (#775). build_sectioned()
@@ -364,6 +385,7 @@ def assemble_sectioned_pack(
             embedder_configured=builder.embedder_configured,
             embedder_resolve_failure=builder.embedder_resolve_failure,
             graph_axis=pack.sections[0].retrieval_report.graph_axis,
+            public_only=is_public_only(clearance),
         )
     )
 

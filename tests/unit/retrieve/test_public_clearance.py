@@ -1,12 +1,14 @@
 """A ``public`` caller (an ``external`` key) is served only documents labelled so.
 
 It inverts the transparent default on purpose: an unlabelled document reads
-``internal``, and a pack item that cannot carry a label (a graph node, trace,
-precedent, observation) is never shown. Every item kind the pack can hold has a
+``internal``, a pack item that cannot carry a label (a graph node, trace,
+precedent, observation) is never shown, and neither is a chunk, whatever its
+own row or its parent's row says. Every item kind the pack can hold has a
 sentinel here, because the gate must not default open for the kind nobody listed.
 
-The freeze class at the end is the other half of the contract: a caller that is
-*not* public-only is served exactly what it was before the branch existed.
+The freeze class at the end is a weak check of the other half of the contract (a
+caller that is *not* public-only takes no public branch); its docstring says what
+it does and does not show.
 """
 
 from __future__ import annotations
@@ -41,8 +43,9 @@ PUB_CHUNK = chunk_doc_id("pub-parent", 1)
 UNLABELLED_PUB_CHUNK = chunk_doc_id("pub-parent", 0)
 PUB_CHUNK_OF_INTERNAL = chunk_doc_id("int-parent", 0)
 
-#: Item ids a ``public`` caller may be served, and nothing else.
-SERVED = {"pub-doc", "pub-vec", PUB_CHUNK}
+#: Item ids a ``public`` caller may be served, and nothing else. No chunk is on
+#: it: only a whole stored document labelled ``public`` is ever served.
+SERVED = {"pub-doc", "pub-vec"}
 
 
 def _typed(
@@ -160,7 +163,7 @@ class TestEveryItemKind:
         )
         assert set(shape(builder, unknown)) <= SERVED
 
-    def test_a_chunk_is_served_only_when_its_own_row_and_its_parent_are_public(
+    def test_a_chunk_is_never_served_whatever_its_row_or_its_parent_says(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
         cache = ParentVerdictCache(doc_store)
@@ -169,23 +172,38 @@ class TestEveryItemKind:
             for cid in (PUB_CHUNK, UNLABELLED_PUB_CHUNK, PUB_CHUNK_OF_INTERNAL)
         }
         assert verdicts == {
-            PUB_CHUNK: True,
+            PUB_CHUNK: False,
             UNLABELLED_PUB_CHUNK: False,
             PUB_CHUNK_OF_INTERNAL: False,
         }
 
-    def test_the_withheld_count_is_stated_and_no_id_rides_the_counts(
+    def test_an_orphan_chunk_is_not_served(
+        self, doc_store: SQLiteDocumentStore
+    ) -> None:
+        """A public chunk whose parent row is gone is the case a parent-label
+        rule would have widened: with no parent there is nothing to inherit."""
+        orphan = chunk_doc_id("deleted-parent", 0)
+        doc_store.put(orphan, "chunk", label("public"))
+        assert not item_readable(
+            "public", _typed(orphan, "document"), ParentVerdictCache(doc_store)
+        )
+
+    def test_no_count_that_sees_past_the_filter_is_reported(
         self, doc_store: SQLiteDocumentStore
     ) -> None:
         builder = PackBuilder(
             strategies=[_strategy("keyword", _pool())], document_store=doc_store
         )
         pack = builder.build("intent", clearance="public")
-        assert pack.metadata["withholding"]["by_reason"]["sensitivity"] == (
-            len(_pool()) - len(SERVED)
-        )
-        counts = json.dumps(pack.metadata["withholding"]["by_reason"])
-        assert not re.search(r"node-1|trace-1|plain-doc|conf-doc", counts)
+        withholding = pack.metadata["withholding"]
+        assert withholding["total"] == 0
+        assert withholding["by_reason"] == {}
+        assert withholding["withheld_item_ids"] == []
+        assert withholding["served_count"] == len(SERVED)
+        assert pack.retrieval_report.rejected_items == []
+        assert pack.retrieval_report.candidates_found == len(SERVED)
+        dumped = json.dumps(pack.model_dump(mode="json"))
+        assert not re.search(r"node-1|trace-1|plain-doc|conf-doc|ghost-doc", dumped)
 
     def test_partition_withholds_what_item_readable_refuses(
         self, doc_store: SQLiteDocumentStore
@@ -323,19 +341,24 @@ def _capture(
 
 
 class TestServingFreeze:
-    """A non-public caller is served what it was before the branch existed.
+    """A non-public caller never takes the public branch.
 
-    The baseline is the same builder with the public branch patched out
-    (``is_public_only`` always False), which is what the code did before it
-    existed. Compared as JSON: the flat pack, the sectioned pack and every
-    ``PACK_ASSEMBLED`` payload, on the served arm (``holdout_rate=0``) and the
-    held-out arm (``holdout_rate=1``). Masked: ids drawn per build and clocks
-    or durations (see ``_MASKED``), and nothing else.
+    This is a weak check and is named as one. The baseline patches
+    ``is_public_only`` to always return False, and for these callers it already
+    returns False, so both arms run the same code: the test shows the dispatch
+    predicate is false for ``internal``, ``confidential`` and ``restricted``, and
+    that two runs of one build agree once ids and clocks are masked. It does not
+    compare the code against the code before the branch existed, so a change
+    made inside the non-public path would pass it. That comparison needs the old
+    build beside the new one (the flat pack, the sectioned pack and every
+    ``PACK_ASSEMBLED`` payload, on the served and the held-out arm) and is made
+    against a base checkout, outside this suite. Masked: ids drawn per build and
+    clocks or durations (see ``_MASKED``), and nothing else.
     """
 
     @pytest.mark.parametrize("holdout", [0.0, 1.0])
     @pytest.mark.parametrize("clearance", ["internal", "confidential", "restricted"])
-    def test_a_non_public_caller_is_byte_identical_to_the_branch_absent(
+    def test_a_non_public_caller_runs_the_same_code_with_and_without_the_branch(
         self,
         tmp_path: Path,
         doc_store: SQLiteDocumentStore,

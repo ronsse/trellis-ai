@@ -109,21 +109,23 @@ class ParentVerdictCache:
         #: an absence, which the sensitivity gate must tell apart: it fails
         #: closed on an unreadable parent and open on a missing one.
         self.failed_parent_ids: set[str] = set()
-        #: Memo for :meth:`stored_metadata`, kept apart from ``_cache`` because
+        #: Memo for :meth:`stored_row`, kept apart from ``_cache`` because
         #: that one is keyed by *parent* id and answers a different question.
-        self._rows: dict[str, dict[str, Any] | None] = {}
+        self._rows: dict[str, tuple[str, dict[str, Any]] | None] = {}
 
-    def stored_metadata(self, item_id: str) -> dict[str, Any] | None:
-        """The metadata of the document row stored under ``item_id``, or ``None``.
+    def stored_row(self, item_id: str) -> tuple[str, dict[str, Any]] | None:
+        """The ``(content, metadata)`` of the stored row under ``item_id``, or ``None``.
 
-        For the one gate that must not trust the metadata an item carries: a
-        public-clearance read (:func:`trellis.retrieve.sensitivity.item_readable`)
-        judges the stored document, because a graph item's metadata is its
-        node's free-form properties and a vector row's is an embed-time
-        snapshot. ``None`` covers a missing row, a non-dict ``metadata``, no
-        document store at all and a store error alike (the last logged once and
-        marking :attr:`degraded`); the caller treats every one as "not a
-        document it may serve".
+        For the gate that must not trust what an item carries: a public-clearance
+        read (:func:`trellis.retrieve.sensitivity.item_readable`) judges, and a
+        public-only pack serves, the *stored* document, because a graph item's
+        metadata is its node's free-form properties and a vector row's text and
+        metadata are an embed-time snapshot that an overwrite does not touch.
+        ``None`` covers a missing row, a non-dict ``metadata``, no document store
+        at all and a store error alike (the last logged once and marking
+        :attr:`degraded`); the caller treats every one as "not a document it may
+        serve". A row whose ``content`` is not a string reads as empty text. One
+        :meth:`~trellis.stores.base.document.DocumentStore.get` per id.
         """
         if self._document_store is None:
             return None
@@ -132,16 +134,28 @@ class ParentVerdictCache:
         try:
             doc = self._document_store.get(item_id)
         except Exception:
-            # GRACEFUL-DEGRADATION: fail closed. The only caller withholds on
+            # GRACEFUL-DEGRADATION: fail closed. The only callers withhold on
             # None, so an outage here serves nothing rather than everything.
             logger.warning("stored_metadata_fetch_failed", item_id=item_id)
             self.degraded = True
             self._rows[item_id] = None
             return None
         metadata = doc.get("metadata") if doc else None
-        resolved = metadata if isinstance(metadata, dict) else None
+        resolved: tuple[str, dict[str, Any]] | None = None
+        if doc and isinstance(metadata, dict):
+            content = doc.get("content")
+            resolved = (content if isinstance(content, str) else "", metadata)
         self._rows[item_id] = resolved
         return resolved
+
+    def stored_metadata(self, item_id: str) -> dict[str, Any] | None:
+        """The metadata of the document row stored under ``item_id``, or ``None``.
+
+        The label half of :meth:`stored_row`, with the same fail-closed reading
+        of a missing row, a malformed ``metadata`` and a store error.
+        """
+        row = self.stored_row(item_id)
+        return row[1] if row is not None else None
 
     def resolve(self, item: PackItem) -> dict[str, Any] | None:
         """The parent document's metadata for ``item``, or ``None``.

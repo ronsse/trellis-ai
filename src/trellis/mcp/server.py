@@ -1502,6 +1502,7 @@ def _flat_context(
             refresh=refresh,
             index_mode=index,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
     except McpError:
         raise
@@ -1533,6 +1534,7 @@ def _flat_context(
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
         graph_axis=pack.retrieval_report.graph_axis,
+        public_only=is_public_only(current_clearance()),
     )
     axis_note = _axis_note(axes)
 
@@ -1654,6 +1656,7 @@ def _sectioned_context(
             run_id=run_id or None,
             refresh=refresh,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
         section_dicts = [
             {
@@ -1683,6 +1686,7 @@ def _sectioned_context(
                 embedder_configured=builder.embedder_configured,
                 embedder_resolve_failure=builder.embedder_resolve_failure,
                 graph_axis=sectioned_pack.sections[0].retrieval_report.graph_axis,
+                public_only=is_public_only(current_clearance()),
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(

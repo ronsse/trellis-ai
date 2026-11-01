@@ -182,3 +182,43 @@ class TestReadyz:
         assert set(client.get("/readyz", headers=external).json()) == set(anonymous)
         assert "backends" not in client.get("/readyz", headers=external).json()
         assert "backends" in client.get("/readyz", headers=reader).json()
+
+
+class TestVersion:
+    """``/api/version`` shows build and write-behaviour detail to an operator only."""
+
+    def test_an_external_key_gets_the_anonymous_answer(
+        self, client, external, reader, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_OPS_DETAIL", raising=False)
+        anonymous = client.get("/api/version").json()
+        as_external = client.get("/api/version", headers=external).json()
+        as_reader = client.get("/api/version", headers=reader).json()
+        assert anonymous["write_provenance"] is None
+        assert as_external == anonymous
+        # The control: a key that is not public-only does get the detail.
+        assert as_reader["write_provenance"] is not None
+
+
+class TestAxes:
+    """An ``external`` key's pack has no graph axis, and its report says so."""
+
+    BODIES = (
+        ("/api/v1/packs", {"intent": "failover runbook"}),
+        (
+            "/api/v1/packs/sectioned",
+            {"intent": "failover runbook", "sections": [{"name": "All"}]},
+        ),
+    )
+
+    @pytest.mark.parametrize(("url", "body"), BODIES)
+    def test_the_graph_axis_reads_absent_not_failed(
+        self, client, external, reader, url, body
+    ) -> None:
+        axes = client.post(url, json=body, headers=external).json()["axes"]
+        assert axes["graph"] == "absent"
+        assert "graph" not in axes["available"]
+        assert "graph" not in axes["failed"]
+        # The control: the same call by a key that may read the graph lists it.
+        control = client.post(url, json=body, headers=reader).json()["axes"]
+        assert "graph" in control["available"]

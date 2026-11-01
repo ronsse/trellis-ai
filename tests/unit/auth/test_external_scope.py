@@ -79,6 +79,32 @@ def test_a_read_key_still_satisfies_read_and_admin_still_everything() -> None:
     assert scopes_satisfy({SCOPE_ADMIN}, SCOPE_MUTATE)
 
 
+@pytest.mark.parametrize("spelling", ["External", "EXTERNAL", " external", "external "])
+def test_a_stored_external_scope_fails_closed_whatever_its_case(spelling: str) -> None:
+    """A hand-edited or imported record reading ``read,External`` is still the
+    narrow key: a mis-cased narrowing scope must not read as a plain read key."""
+    granted = frozenset({SCOPE_READ, spelling})
+    assert clearance_of(granted) == "public"
+    assert is_public_only(clearance_of(granted))
+    assert scopes_satisfy(granted, SCOPE_READ)
+    for needed in (SCOPE_INGEST, SCOPE_MUTATE, SCOPE_ADMIN):
+        assert not scopes_satisfy(granted, needed)
+
+
+def test_a_stored_mis_cased_external_beside_admin_is_still_read_only() -> None:
+    granted = frozenset({SCOPE_READ, "External", SCOPE_ADMIN})
+    assert clearance_of(granted) == "public"
+    assert not scopes_satisfy(granted, SCOPE_ADMIN)
+    assert not scopes_satisfy(granted, SCOPE_MUTATE)
+
+
+def test_other_scopes_are_still_matched_exactly() -> None:
+    """Only ``external`` is normalised: ``Admin`` is not ``admin``."""
+    assert clearance_of({"Admin"}) == "internal"
+    assert clearance_of({SCOPE_READ, "Restricted"}) == "internal"
+    assert not scopes_satisfy(frozenset({"Admin"}), SCOPE_MUTATE)
+
+
 def test_the_only_legal_spelling_is_read_and_external() -> None:
     assert external_scope_refusal({SCOPE_READ, SCOPE_EXTERNAL}) is None
     assert external_scope_refusal({SCOPE_READ}) is None

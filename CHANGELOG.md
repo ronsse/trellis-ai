@@ -13,17 +13,51 @@ All notable changes to Trellis will be documented in this file.
   for this one key. A graph node, trace, precedent, observation, advisory or capture banner
   cannot carry a label and is never shown to it: those REST routes answer 403 with the
   reason, the matching MCP tools raise a policy-denied error saying the same, and `get_items`
-  answers a graph or trace id as it answers a missing one. The label is judged on the stored
-  document row, not on the metadata a pack item carries. `external` grants no write, is only
+  answers a graph or trace id as it answers a missing one. `external` grants no write, is only
   valid as `read,external` (the CLI refuses it beside any other scope and stores nothing),
-  and a stored key that holds it beside a higher clearance reads at `public`. No other
-  caller changes: a fixture test compares the flat pack, the sectioned pack and the
-  `PACK_ASSEMBLED` payload, served and held-out, against the code without the new branch.
-  It does not protect anything an existing key reads, nothing labels a document `public`
-  for you, and a `public` label is still a human decision. `tests/unit/test_sensitivity_rest_roster_rule.py`
-  and `tests/unit/test_sensitivity_surface_rule.py` now fail a new read route or tool that
-  is neither refused nor listed as answering to this key. The ADR sentence saying there is
-  no `public` clearance tier is corrected.
+  and a stored key that holds it beside a higher clearance reads at `public`. A stored scope
+  string is matched without regard to case, so `read,External` is the same key.
+
+  What the key receives does not depend on anything it may not read, and every rule below
+  applies to this key alone. An item's text and metadata are read from the stored document
+  row, never from the vector row, and cut as a pack cuts them; an item with no stored row is
+  withheld. Metadata is an allowlist, `title` and `document_form`, so a key a writer adds
+  later is not served until someone lists it. A chunk is never served (a pack, `/search`,
+  `GET /documents`, `get_items`), and a chunk id answers as a missing id. No count sees past
+  the filter: `withholding` keeps its keys and reads zero, `rejected_items` is empty,
+  `candidates_found` counts only what passed, no MCP surface prints a `**Withheld:**` line,
+  and the graph axis is not reported. `GET /search` fills its page from public documents
+  (reading the store's ranked list in widening windows, to a ceiling of 2000 rows), and a
+  document row carries no `rank`. `/api/version` gives the key the anonymous answer. Its pack
+  draws no holdout, reads and writes no session dedup, and emits `pack.public_served` (pack
+  id, served item ids, count, key id) instead of `PACK_ASSEMBLED`; the key cannot write a
+  feedback row, so no reader waits for one.
+
+  A differential test builds stores that hold the same public documents, one also holding
+  documents the key may not read (and, in a third, public documents that a lifecycle gate
+  withholds, and in a fourth a graph node the intent names), and asserts every REST and MCP
+  surface the key can reach answers alike apart from ids and clocks. It fails if a count is added back or the text is taken from the vector
+  row. A runtime walk of the real app's routes and the server's registered tools requires
+  each to be rostered, which the two source rules cannot do for a route added with
+  `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`.
+
+  No other caller changes. The test in `test_public_clearance.py` that compares a non-public
+  caller with and without the new branch is a weak check: it patches the dispatch predicate
+  to the value it already has for those callers, so it shows that those callers take no public
+  branch and that a build agrees with itself, and it would not notice a change made inside the
+  non-public path. The comparison that would is a base-versus-head run of the packs and
+  `PACK_ASSEMBLED` payloads, made outside the suite.
+
+  It does not protect anything an existing key reads, nothing labels a document `public` for
+  you, and a `public` label is still a human decision. It is enforced only under auth mode
+  `required`; with auth `off`, or `optional` and no key sent, nothing is enforced, and
+  trusted-local and stdio MCP callers read at `restricted`. It does not equalise timing. Its
+  keyword order and the membership of a keyword-only pack can still move with documents the
+  key may not read, because the full-text score is computed over the whole index; the
+  semantic score is not. `operations.md` lists these. `tests/unit/test_sensitivity_rest_roster_rule.py`
+  and `tests/unit/test_sensitivity_surface_rule.py` fail a new read route or tool that is
+  neither refused nor listed as answering to this key. The ADR sentence saying there is no
+  `public` clearance tier is corrected.
 
 - **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
   upgrading and rolling back a SQLite store.** The script installs the previous

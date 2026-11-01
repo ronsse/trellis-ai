@@ -25,6 +25,7 @@ from trellis.retrieve.sensitivity import (
     conceal_document_rows,
     conceal_document_successor,
     conceal_node_pointers,
+    is_public_only,
 )
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
@@ -194,6 +195,9 @@ def list_documents(
     registry = get_registry()
     store = registry.knowledge.document_store
     gate = DocumentClearance(store, request_clearance(ctx))
+    if is_public_only(gate.clearance):
+        # A chunk is never served to a key that reads only ``public``.
+        include_chunks = False
     if q:
         matches, total_exact = _search_readable(store, gate, q, include_chunks)
         total = len(matches)

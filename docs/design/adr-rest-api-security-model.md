@@ -266,6 +266,13 @@ to protect data that has no label. The posture that replaces it:
   `public`, so it is served only a stored document someone labelled `public`,
   and nothing that cannot carry a label (see the operations guide's
   [Sensitivity clearance](../agent-guide/operations.md#sensitivity-clearance)).
+  Because a count of what a filter removed is an oracle over what it hides, that
+  key runs a separate pipeline in which nothing it receives depends on a
+  document it may not read: no chunk, text and metadata only from the stored row
+  (an allowlist of `title` and `document_form`), no count that sees past the
+  filter, and `pack.public_served` in place of `PACK_ASSEMBLED`. The tier holds
+  only under auth mode `required`, and it does not equalise timing or the
+  full-text score, which the operations guide lists.
 - **Clearance comes from existing key scopes.** `confidential` and `restricted`
   are two new scopes (`restricted` implies `confidential`; `admin` implies both),
   and `trellis.auth.clearance_of(scopes)` maps a scope set to its ceiling. No

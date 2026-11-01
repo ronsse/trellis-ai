@@ -88,6 +88,21 @@ _KEY_ID_HEX_CHARS = 12
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
+def holds_external(granted: Iterable[str]) -> bool:
+    """Whether ``granted`` carries ``external``, however it is spelled.
+
+    The one place the narrowing scope is recognised. It ignores case and
+    surrounding whitespace, so a stored scope ``External`` (a hand-edited record,
+    an import) is still read as ``external``: the lower clearance is the safe
+    failure for a scope that is merely mis-spelled. Only ``external`` is
+    normalised this way; every other scope is matched exactly, as before.
+    """
+    return any(
+        isinstance(scope, str) and scope.strip().lower() == SCOPE_EXTERNAL
+        for scope in granted
+    )
+
+
 def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
     """Return ``True`` when ``granted`` covers the ``required`` scope.
 
@@ -104,7 +119,7 @@ def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
     if required not in ALL_SCOPES:
         msg = f"Unknown scope {required!r}; known scopes: {sorted(ALL_SCOPES)}"
         raise ValueError(msg)
-    if SCOPE_EXTERNAL in granted:
+    if holds_external(granted):
         return required == SCOPE_READ and SCOPE_READ in granted
     if required == SCOPE_CONFIDENTIAL and SCOPE_RESTRICTED in granted:
         return True
@@ -123,7 +138,7 @@ def clearance_of(scopes: Iterable[str]) -> Sensitivity:
     document, and is shown nothing that cannot carry a label at all.
     """
     granted = frozenset(scopes)
-    if SCOPE_EXTERNAL in granted:
+    if holds_external(granted):
         return "public"
     if SCOPE_ADMIN in granted or SCOPE_RESTRICTED in granted:
         return "restricted"
