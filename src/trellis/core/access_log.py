@@ -13,8 +13,9 @@ what a response carried, it does not shape one.
 * **What a row holds.** The key id, the surface (``rest`` / ``mcp``), the route
   or tool, the item count (:func:`build_payload` says how each surface counts)
   and the first :data:`MAX_LOGGED_ITEM_IDS` item ids with ``item_ids_truncated``
-  beside them. No document text, no query or intent text, no secret. A route or tool that does not name its items
-  records ``item_count: null`` and no ids, never a guess.
+  beside them. No document text, no query or intent text, no secret. A route or
+  tool that does not name its items records ``item_count: null`` and no ids,
+  never a guess.
 * **Who is logged.** A call with a key id. The legacy shared secret, auth mode
   ``off`` and an anonymous call carry no key id and record nothing.
 * **Off the request path.** The transport hands one entry to
@@ -24,9 +25,9 @@ what a response carried, it does not shape one.
   happen on that thread, never on the event loop and never on anyio's worker
   pool. The one exception is :func:`note_printed_items`, a substring search of
   a pack tool's answer on the tool's own worker thread. The queue holds at most
-  :data:`MAX_QUEUE_ENTRIES` entries and :data:`MAX_QUEUE_BYTES` of held response bodies (16 MiB). The store is safe
-  for a writer thread: SQLite opens one connection per thread and Postgres
-  draws from its pool.
+  :data:`MAX_QUEUE_ENTRIES` entries and :data:`MAX_QUEUE_BYTES` of held response
+  bodies (16 MiB). The store is safe for a writer thread: SQLite opens one
+  connection per thread and Postgres draws from its pool.
 * **Advisory, wrapped whole.** Every step catches every exception, as
   :func:`trellis.core.version.resolve_stamp_staleness` does, because one
   escaped exception would fail a read that had already succeeded. A read that
