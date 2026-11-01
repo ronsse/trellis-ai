@@ -13,7 +13,7 @@
 - [`../../src/trellis/retrieve/strategies.py`](../../src/trellis/retrieve/strategies.py) — `_apply_importance()` and `_apply_recency_decay()` (half-life 30d, floor 0.3)
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `ContentTags.classified_at` already exists (Gap 1.1)
 - [`../../src/trellis_workers/enrichment/service.py`](../../src/trellis_workers/enrichment/service.py) — `EnrichmentService` writes `auto_importance` into doc metadata
-- [`../../TODO.md`](../../TODO.md) — Logic Gap 3.5
+- [`../../TODO.md`](../archive/TODO.md) — Logic Gap 3.5
 
 ---
 

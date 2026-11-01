@@ -334,9 +334,9 @@ exists. Ask `gh issue list --state open`; it is authoritative and costs one call
 ### What is open
 
 As of 2026-10-29 every issue named by the tables that stood here (first batches, owner
-prerequisites, persistent blockers) was closed, except
-[#194](https://github.com/ronsse/trellis-ai/issues/194) (classification enforcement),
-which is in progress. The open set is
+prerequisites, persistent blockers) was closed, including
+[#194](https://github.com/ronsse/trellis-ai/issues/194) (classification enforcement), whose
+follow-ups are tracked in [#1029](https://github.com/ronsse/trellis-ai/issues/1029). The open set is
 `gh issue list --state open`, and what an issue may be dispatched under is on the issue:
 its labels and its latest owner comment. This file keeps no list, because each list it kept
 went stale.

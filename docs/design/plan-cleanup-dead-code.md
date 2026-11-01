@@ -30,7 +30,7 @@ Each item below is **independently decidable and independently shippable**. A sw
 
 **Status:** Closed 2026-05-15 (C1 swarm Unit A, rollup PR).
 
-**Current state:** [`TODO.md`](../../TODO.md) line ~70 documents this: the "file-only" path is **structurally underspecified** because `PackFeedback` JSONL lacks per-item shape that `analyze_learning_observations` needs. Today the JSONL is demote-only de facto; CLAUDE.md still describes a "dual-loop" promote path that nobody runs.
+**Current state:** [`TODO.md`](../archive/TODO.md) line ~70 documents this: the "file-only" path is **structurally underspecified** because `PackFeedback` JSONL lacks per-item shape that `analyze_learning_observations` needs. Today the JSONL is demote-only de facto; CLAUDE.md still describes a "dual-loop" promote path that nobody runs.
 
 **Action:**
 - Update CLAUDE.md to remove the "JSONL feedback path drives promotion" framing.
@@ -111,7 +111,7 @@ The plan also pointed at the wrong file path: the `Operation` enum lives at [`sr
 > F0 Wave 1). The validate-before-deleting posture below is retained as written
 > for the historical record.
 
-**Current state:** [`TODO.md`](../../TODO.md) "Workflow engine / tier-based escalation" — fully designed, unit-tested, **zero production callers**.
+**Current state:** [`TODO.md`](../archive/TODO.md) "Workflow engine / tier-based escalation" — fully designed, unit-tested, **zero production callers**.
 
 **Action:** **Validate before deleting.** This plan does **not** delete. The TODO entry says "leave as-is until real workload signal tells us between (a) wire it up, (b) collapse, (c) delete." This cleanup plan **upholds that decision**. Cleanup-track items that lack signal are not in scope for C1.
 

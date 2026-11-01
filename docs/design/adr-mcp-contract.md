@@ -200,4 +200,4 @@ and enforces a per-tool scope map.
   MCP tool definitions (11 tools as of `MCP_TOOLS_VERSION=1`).
 - [docs/design/adr-plugin-contract.md](adr-plugin-contract.md) —
   runtime extension contract (Step 5).
-- [TODO.md — Client Boundary Phase 1, Step 6](../../TODO.md).
+- [TODO.md — Client Boundary Phase 1, Step 6](../archive/TODO.md).

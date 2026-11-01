@@ -197,7 +197,7 @@ contracts are the ABI.  Revisit only if:
 * Plugin CI fails to catch contract drift in practice (no evidence
   of this yet).
 
-See [TODO.md — Phase 1, Step 5](../../TODO.md) for the deferred-ABI
+See [TODO.md — Phase 1, Step 5](../archive/TODO.md) for the deferred-ABI
 decision.
 
 ### Contract test suites — the runtime spec

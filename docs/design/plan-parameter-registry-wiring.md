@@ -1,6 +1,6 @@
 # Plan: Parameter-registry wiring for learning thresholds
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05 (#109). Code: `src/trellis/learning/scoring.py` requires a `ParameterRegistry`; the hard-coded thresholds are gone. The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable (smallest unit in the program)
 **ADR:** none — sub-ADR scale; wakes existing dead code per [`adr-dual-loop-evolution.md`](./adr-dual-loop-evolution.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 3

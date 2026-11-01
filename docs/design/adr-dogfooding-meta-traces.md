@@ -22,7 +22,7 @@ The cost of that asymmetry:
 - **No convergence evidence.** Scenario 5.4 ([`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) §5.5) is "the chart you show people" — the system improving over time. Without meta-traces, there's no graph-shaped record of *what* the system did to itself across rounds; it's all log-shaped.
 - **No first user.** A self-improving system that doesn't use itself is suspicious.
 
-Scenario 5.4 is unwritten (per [`TODO.md`](../../TODO.md) "scenario 5.4 — agent loop convergence"). One of the missing pieces is the meta-trace abstraction itself. Build it now; Scenario 5.4 lands cleanly on top.
+Scenario 5.4 is unwritten (per [`TODO.md`](../archive/TODO.md) "scenario 5.4 — agent loop convergence"). One of the missing pieces is the meta-trace abstraction itself. Build it now; Scenario 5.4 lands cleanly on top.
 
 ## 2. Decision
 
@@ -148,7 +148,7 @@ The synthetic `Agent` nodes (`trellis_meta_analyzer`, `trellis_meta_tuner`, etc.
 
 - Does not change the operational EventLog at all (read-only consumer).
 - Does not introduce a new substrate or store.
-- Does not introduce auto-curation of the meta-trace graph (the graph compaction Phase that `compact_versions()` enables is the right cleanup path — call it on a schedule per [`TODO.md`](../../TODO.md) "Graph version compaction automation").
+- Does not introduce auto-curation of the meta-trace graph (the graph compaction Phase that `compact_versions()` enables is the right cleanup path — call it on a schedule per [`TODO.md`](../archive/TODO.md) "Graph version compaction automation").
 
 ### 5.3 What this costs
 
