@@ -346,6 +346,49 @@ and none failed, and `5` when a write did not land, in either format; the JSON
 `status` reads `ok`, `refused` or `failed` to match. See
 [`operations.md`](../agent-guide/operations.md#trellis-curate-promote-learning).
 
+## Upgrading
+
+This is for the default SQLite stores. `scripts/upgrade_check.sh` upgrades a store
+from the previous release to the build under test, then reads it back with the
+previous release, and `.github/workflows/upgrade-check.yml` runs it on release
+tags and nightly. Postgres, pgvector, Neo4j, ArcadeDB and S3 are **not** covered
+by it. There is no migration command. The registry does keep a schema
+fingerprint: `stores/_trellis_meta.json` records `<store>/<backend>/v<N>` per
+store, and when the API server starts it refuses a store whose recorded value
+differs from the build's (`SchemaFingerprintMismatch`;
+`TRELLIS_SKIP_FINGERPRINT_CHECK=1` bypasses it). Every store class has been at
+`v1` from v0.7.0 to now, so that check has never refused an upgrade, and the
+script does not test a release that bumps it. Apart from that fingerprint a build
+does not check that it can read a store, so the steps below are the compatibility
+signal.
+
+1. **Back up.** `trellis admin backup --output DIR` (see
+   [`operations.md`](../agent-guide/operations.md#trellis-admin-backup); do not
+   `cp` the `.db` files). Keep `config.yaml` beside it. The check does not test a
+   restore.
+2. **Install.** Stop `trellis admin serve` and any worker, then
+   `pip install --upgrade trellis-ai` (or pull the new image). The new build
+   opens the existing stores in place.
+3. **Run.** Start the server and workers as before.
+4. **Check.** `trellis admin health --format json` exits 0 with the store files
+   present, and `trellis admin stats --format json` reports at least the counts
+   you saw before. A pack serves different items under a different build by
+   design, so compare counts, not served items.
+5. **Roll back.** Reinstall the previous version against the same stores. What
+   the check proves: after the new build had written to a store, the previous
+   release read every row back, the new build's included (documents, traces,
+   entities, edges, pack and feedback events, and `admin health`). It does not
+   prove the previous release can *write* to an upgraded store, a rollback past
+   the immediately preceding release, or a store a worker has touched since the
+   upgrade. If a read fails, restore the backup from step 1.
+
+To run the check from a git checkout with its tags (`git fetch --tags`):
+`scripts/upgrade_check.sh` (an optional wheel or source tree as its argument,
+`UPGRADE_FROM=<tag>` to pick the release to start from). It covers one document,
+one trace, two entities and an edge, one pack and its feedback. Per-item pack
+feedback (the MCP `record_feedback` tool and `POST /packs/{id}/feedback`) is not
+in it.
+
 ## Recovery operations
 
 ### Feedback reconciliation

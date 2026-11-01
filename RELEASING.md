@@ -28,6 +28,17 @@ make verify-wheel   # builds + lists what's in dist/*.whl and dist/*.tar.gz
 make publish-check  # twine check on the artifacts
 ```
 
+Then check that the last release's data still reads under this build:
+
+```bash
+git fetch --tags
+scripts/upgrade_check.sh
+```
+
+It upgrades a scratch SQLite store from the previous tag to this checkout and back;
+see [Upgrading](docs/deployment/runbook.md#upgrading) for what a pass does and does
+not prove.
+
 Eyeball `make verify-wheel` output. Confirm:
 - `src/trellis*` packages are present.
 - No stray `examples/`, `docs/`, `tests/` under the wheel (those go in the sdist only).
@@ -54,6 +65,7 @@ The tag triggers `.github/workflows/publish.yml`. Watch it on the Actions tab.
 
 - The `test` job runs lint + mypy + pytest on Python 3.11/3.12/3.13.
 - The `publish` job builds, runs `twine check`, and uploads via OIDC trusted publishing — no API token needed.
+- `.github/workflows/upgrade-check.yml` starts on the same tag push. It does not gate `publish`: a red run there does not stop the upload, so read it before approving the `pypi` environment.
 - If the `pypi` environment requires an approval, click **Approve and deploy**.
 
 ### 5. Post-release

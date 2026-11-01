@@ -1,0 +1,49 @@
+name: Upgrade check
+
+# Upgrades one SQLite store from the previous release to this build and back, with
+# records written and read through the CLI and REST API. cold-install.yml proves a
+# wheel works from nothing; nothing else exercises old data against new code. The
+# checks live in scripts/upgrade_check.sh so they run locally too.
+#
+# Deliberately no pull_request trigger: the job installs two builds and takes
+# minutes, so it runs on release tags, nightly and on demand only.
+#
+# On a v* tag push this runs beside publish.yml and neither waits for the other:
+# there is no `needs` between workflows, so a red run here does not stop the publish
+# job. Read it as a signal on the tag, not a gate.
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    # 03:17 UTC, clear of the Monday 06:00 CodeQL scan and the morning dependabot runs.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the previous release is read from tags, and hatch-vcs derives the version from them
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install build
+      - run: python -m build --wheel
+      - name: Upgrade the previous release's store to this wheel, and back
+        env:
+          PYTHON: python
+        run: |
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "expected exactly one wheel in dist/, found: ${wheels[*]}" >&2
+            exit 1
+          fi
+          bash scripts/upgrade_check.sh "${wheels[0]}"
