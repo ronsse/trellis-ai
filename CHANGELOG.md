@@ -99,6 +99,112 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **The repeated-rejection health signal is rated against each tool's attempts and
+  no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
+  reached three rejections, with no denominator, so a busy, healthy tool stayed at
+  `warn` for good; it counted error elements rather than calls (one bad trace with
+  many steps was many collisions); and its reason said the schema and its docs or
+  skill disagree. It now counts distinct rejected attempts and warns only when the
+  tool has at least 10 attempts in the window and the rejected share is above 5%
+  (named constants in `trellis.ops.write_health`, starting points rather than
+  tuned values). The floor can hide a low-volume total failure, which the docs now
+  say. The reason lists the schema, its docs, the rejection hint and caller
+  payloads as possibilities and says the cause is not established. Each
+  `repeated_collisions` row gains `tool`, `tool_attempts` and `rate`, and rows are
+  per tool; file conditions keep warning on recurrence alone. The default label is
+  "repeated rejection", not "schema collision".
+- **What counts as an attempt is stated per tool.** `save_experience` is rated on
+  `trace.ingest` accepts and `trace.ingest` executor rejections only, so a refused
+  extraction command is not a refused call. `mcp:record_feedback` has an accepted
+  call after all, the `FEEDBACK_RECORDED` event it emits with `source="mcp"`, so it
+  is rated against that and its rejections instead of being left unrated. A
+  `save_memory` call that answers a duplicate stored nothing and left no accepted
+  event, so a healthy tool read as mostly failing; it now emits a new `WRITE_NOOP`
+  event (`tool` and a closed `reason`, no content and no id) that the report counts
+  as an attempt, and `analyze health` prints that count. Replies, stores and return
+  values are unchanged, and a failed emit does not change the reply. Rows written
+  before the event existed are not there to count, so the `save_memory` rate
+  overstates until the window rolls past them.
+- **`trellis analyze health` reports how many rejected MCP writes were followed by
+  an accepted call.** New `WRITE_RECOVERED` event and `recovery` block
+  (`recovered_share`, `pending_rejections`, `by_tool`). It is an approximation that
+  can sit on either side of the truth, stated beside the number: a rejection is
+  paired with the next accepted call of the same tool within 120 seconds, held in
+  process memory only, and keying per tool is a choice (a stdio server serves one
+  process per client; an authenticated HTTP request carries a key id the pairing
+  does not use). "Accepted" means the call returned without raising. Rejections
+  still inside the window when the report is read are counted as pending and left
+  out of the share, and a rejection older than the window is not carried forward to
+  be claimed by a later accepted call. MCP boundary `WRITE_REJECTED` rows written by
+  this build carry `recovery_window_s`; older rows are left out of the denominator
+  and a window of only older rows reports `recovered_share: null`. What a capture
+  surface accepts is unchanged.
+- **`trellis analyze health` prints a bracketed rejection location as written.** A
+  taxonomy row such as `extra_forbidden@[red]steps[/red]` lost its text to Rich's
+  markup; the row is now escaped.
+
+- **BREAKING: `trellis admin health` exits 5 when a SQLite store file is damaged
+  or cannot be opened.**
+  A file that is present but is not a database (random bytes, a truncated or
+  mangled file) used to read `true` and exit 0, so a monitor on the exit code
+  never fired; the commands that open it printed a Python traceback. Each store
+  file that exists is now opened read-only and immutable (`mode=ro&immutable=1`:
+  no lock, no `-wal` or `-shm` file, never created, including the target of a
+  dangling symlink) and read once. A damaged one is `DAMAGED` in text output,
+  listed in a new `damaged` object in `--format json`, and exits 5 (`EXIT_STORE`)
+  in both formats. A path that is there but cannot be opened read-only (a file
+  this user may not read, a directory, a symlink loop, a symlink to a missing
+  file) reports `could not be opened read-only` and exits 5 too, so a monitor
+  that runs as a different user from the store's owner gets 5. A missing store
+  file still exits 0, because `trellis admin init` creates no store file and every
+  store is created on first use. New `--require-stores` exits 5 on a missing
+  SQLite store file for a monitor that runs against a deployment already in use.
+  A store on another backend is never a failure. An empty file is a valid empty
+  database and passes. The probe reads each file's first page: a file truncated
+  by less than a page, a good first page with the rest zeroed, and a good main
+  file beside a garbage `-wal` read healthy. It holds no lock, so a read beside a
+  writer's checkpoint or `VACUUM` can fail on a healthy file; a failed read is
+  retried up to 3 times, 0.1 s apart, and a file is reported damaged only if all
+  fail. That lowers the rate and does not remove it, and a repeat run settles it.
+  In one bounded stress against a synthetic WAL file (one writer at a time, about
+  15 s per run: automatic checkpoint, truncating checkpoint, schema churn, three
+  runs of `VACUUM`), about 661,000 probes saw 309 failed reads on healthy files,
+  and one probe, under the `VACUUM` writer, still reported damage.
+- **`trellis admin reconcile-feedback` finds the log without `--log-dir`, and no
+  longer reports a clean pass for a log it did not find or could not read.**
+  `--log-dir` is now optional and defaults to `<stores_dir>/feedback`, the
+  directory the MCP tool and the REST route write `pack_feedback.jsonl` to.
+  Before, it was required, and the data directory the docs named held no log, so
+  the command scanned zero rows and printed `"status": "ok"`. A directory with no
+  `pack_feedback.jsonl` now reports `"status": "no_log"` with `log_path` and a
+  message in both formats, and every report carries `log_path`. When a
+  `pack_feedback.jsonl` exists in the data directory instead, the default's message
+  names it and says `--log-dir <data_dir>` reads it; the default still reads only
+  `<stores_dir>/feedback`. **BREAKING:** `--log-dir` pointing at a directory
+  without the file exits 2 instead of 0 (the default directory with no log still
+  exits 0), so a scheduled job that passed the data directory now fails until it
+  drops the flag. The docs' CronJob and checklists, the GitHub Actions example
+  (`examples/integrations/github-actions/curation.yml`) and the built-in
+  `reconcile-feedback` scheduled job no longer pass `--log-dir`. **BREAKING:** a log
+  that is there but cannot be read (a dangling symlink or a symlink loop, a
+  directory, a file this user cannot open) now reports `"status": "unreadable"`
+  with `log_path` and exits 5 in both formats; it used to read `ok` with zero rows
+  (dangling symlink, loop) or print a traceback and exit 1 (directory, no
+  permission).
+- **`trellis-mcp` with an invalid `TRELLIS_MCP_TRANSPORT`, and `trellis serve` or
+  `trellis admin serve` over an unparseable `config.yaml`, exit 5 with the error
+  instead of a Python traceback** (exits 1 and 3 before). `trellis serve` and
+  `trellis admin serve` print one line on stdout. `trellis-mcp` writes two lines
+  to stderr: its start-up log line, then the error. `trellis-api` writes its
+  start-up log lines (three JSON lines in a bare install) and then the error. The
+  REST server now parses `config.yaml` before handing control to uvicorn, so the
+  typed error reaches the CLI boundary (and `trellis-api`'s wrapper) rather than
+  failing inside uvicorn's startup.
+- **A missing optional backend's install advice works without a source
+  checkout.** `BackendNotInstalledError` told a wheel install to run
+  `uv pip install -e ".[extra]"`, which fails outside a checkout. It now says
+  `pip install 'trellis-ai[extra]'` and, for a checkout, `pip install -e ".[extra]"`.
+
 - **BREAKING: a misspelled `config.yaml` is refused instead of running on SQLite.**
   A file that starts today can stop starting, including on a harmless stray key
   such as `version: 1`; rename it `x-version` to keep it. Loading

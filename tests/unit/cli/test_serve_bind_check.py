@@ -10,6 +10,7 @@ everywhere so no test actually binds a socket.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,13 @@ from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``main`` parses config.yaml before ``uvicorn.run``; never the developer's."""
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +48,24 @@ def fake_uvicorn_run(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 @pytest.mark.parametrize("command", [["serve"], ["admin", "serve"]])
 class TestServeBindCheck:
+    def test_unparseable_config_is_a_config_error_not_a_traceback(
+        self,
+        tmp_path: Path,
+        fake_uvicorn_run: MagicMock,
+        command: list[str],
+    ) -> None:
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("stores: [unclosed\n  bad: : :\n")
+
+        result = runner.invoke(app, [*command, "--port", "18999"])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert "CONFIG_ERROR" in result.output
+        assert "Could not parse Trellis config" in " ".join(result.output.split())
+        assert "Traceback" not in result.output
+        fake_uvicorn_run.assert_not_called()
+
     def test_non_loopback_with_auth_off_refuses_without_starting(
         self, fake_uvicorn_run: MagicMock, command: list[str]
     ) -> None:

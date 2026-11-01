@@ -116,7 +116,7 @@ def test_error_message_includes_install_hint_with_extra() -> None:
     err = BackendNotInstalledError(backend_name="arcadedb", extra="arcadedb")
     msg = str(err)
     assert "arcadedb" in msg
-    assert 'uv pip install -e ".[arcadedb]"' in msg
+    assert 'pip install -e ".[arcadedb]"' in msg
     assert err.backend_name == "arcadedb"
     assert err.extra == "arcadedb"
     assert err.code == "BACKEND_NOT_INSTALLED"

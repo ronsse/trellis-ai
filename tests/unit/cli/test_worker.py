@@ -1913,7 +1913,8 @@ class TestWorkerEnrich:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         text = " ".join(text.split())
         assert "'uv pip install trellis-ai[llm-openai]'" in text
-        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+        assert "Run: pip install 'trellis-ai[llm-openai]'" in text
+        assert 'pip install -e ".[llm-openai]"' in text
 
     @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
     def test_the_no_client_hint_names_both_extras(
@@ -4349,7 +4350,15 @@ class TestARefusedNightlyWriteEscalates:
 
         report = self._rejections(temp_stores)
         assert report.repeated_collisions == [
-            {"kind": "config_unreadable", "loc": ADVISORY_FILENAME, "count": 3}
+            {
+                "kind": "config_unreadable",
+                "loc": ADVISORY_FILENAME,
+                "tool": "config:advisory_file",
+                "count": 3,
+                # A file condition has no accepted side to rate against.
+                "tool_attempts": None,
+                "rate": None,
+            }
         ]
         assert report.status == "warn"
         assert any("config_unreadable" in r for r in report.reasons)
