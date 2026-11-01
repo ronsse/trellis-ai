@@ -13,12 +13,13 @@ agent or connector holds) should not be able to read back wholesale.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from trellis.auth import SCOPE_ADMIN
+from trellis.auth import SCOPE_ADMIN, SCOPE_EXTERNAL, clearance_of
 from trellis.feedback.attribution import is_sectioned_payload
 from trellis.retrieve.public_rank import PublicRead, public_keyword_rows
 from trellis.retrieve.sensitivity import (
@@ -29,6 +30,7 @@ from trellis.retrieve.sensitivity import (
     is_public_only,
     read_document_row,
 )
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, sensitivity_of
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
@@ -38,6 +40,9 @@ from trellis_api.routes._principal import (
     request_clearance,
 )
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
+
+if TYPE_CHECKING:
+    from trellis.stores.base.document import DocumentStore
 
 router = APIRouter()
 
@@ -85,6 +90,60 @@ _SEARCH_GROWTH_CAP = 32
 #: grows with the offset; a ``restricted`` or admin key is served by the store
 #: directly and has no such ceiling.
 _MAX_FILTERED_OFFSET = 10_000
+
+
+def _external_gate(store: DocumentStore) -> DocumentClearance:
+    """The read gate an ``external`` key is held to, for ``label.external_readable``.
+
+    Its clearance is what the server assigns the ``external`` scope
+    (``clearance_of``), not a value written here, so the flag asks the gate's own
+    test and cannot drift from what such a key is served. It is only ever asked
+    a yes/no question about a row the caller already passed the read gate for.
+    """
+    return DocumentClearance(store, clearance_of({SCOPE_EXTERNAL}))
+
+
+def _document_label(
+    gate: DocumentClearance, external: DocumentClearance, doc: dict[str, Any]
+) -> dict[str, Any]:
+    """How a stored document is labelled, read off the row before it is concealed.
+
+    A public-only caller's metadata is cut down to a title and a form
+    (``public_metadata``), so the page could not tell a document an ``external``
+    key reads from one nobody labelled. ``sensitivity`` is the effective label
+    (``DocumentClearance.sensitivity``: an unlabelled row reads ``internal``, a
+    chunk reads its parent's), ``stored`` whether a label is on the row at all,
+    and ``corrupt`` whether the row's own record cannot be parsed, so it reads
+    as ``restricted`` without anyone having chosen that. ``external_readable``
+    is the answer of the public-only gate itself (``external.permits``), so it
+    cannot disagree with what an ``external`` key is served: a bare public
+    record, one with extra fields and every chunk id are all ``False``. Only
+    rows the caller already passed the read gate for come here, so each answer
+    is about a document the caller may read.
+
+    A row whose ``metadata`` is not an object is judged as ``sensitivity_of``
+    judges it (no label, so ``internal``): ``DocumentClearance.sensitivity``
+    would raise on it, and a label must never fail a route that answered
+    before it existed.
+    """
+    metadata = doc.get("metadata")
+    bag = metadata if isinstance(metadata, Mapping) else None
+    doc_id = str(doc.get("doc_id"))
+    stored = bag is not None and DATA_CLASSIFICATION_KEY in bag
+    record = bag[DATA_CLASSIFICATION_KEY] if bag is not None and stored else None
+    corrupt = (
+        stored
+        and sensitivity_of(bag) == "restricted"
+        and not (
+            isinstance(record, Mapping) and record.get("sensitivity") == "restricted"
+        )
+    )
+    return {
+        "sensitivity": gate.sensitivity(doc_id, bag),
+        "stored": stored,
+        "corrupt": corrupt,
+        "external_readable": external.permits(doc_id, bag),
+    }
 
 
 def _document_row(doc: dict[str, Any], *, with_rank: bool) -> dict[str, Any]:
@@ -181,6 +240,11 @@ def list_documents(
     ``updates_doc_id`` names a document the key may not read is served without
     that id.
 
+    Each row carries ``label`` (``sensitivity``, ``stored``, ``corrupt``,
+    ``external_readable``), computed from the stored row before a public-only
+    caller's metadata is cut down, so the label is shown whoever asks and is
+    only ever about a row the caller may read.
+
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
     counted under the same filter as the rows, and the applied setting is
@@ -253,8 +317,13 @@ def list_documents(
         total = store.count(include_chunks=include_chunks)
         total_exact = True
     with_rank = gate.clearance == "restricted"
+    external = _external_gate(store)
+    labels = [_document_label(gate, external, d) for d in docs]
     docs = conceal_document_rows(docs, store, gate.clearance)
-    rows = [_document_row(d, with_rank=with_rank) for d in docs]
+    rows = [
+        {**_document_row(d, with_rank=with_rank), "label": label}
+        for d, label in zip(docs, labels, strict=True)
+    ]
     return {
         "status": "ok",
         "total": total,
@@ -364,9 +433,11 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does. A document whose ``lifecycle.superseded_by``,
-    ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
-    not read is served without that id.
+    as a missing one does. ``document.label`` says how the row is labelled
+    (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``), for a public-only
+    caller too, whose ``metadata`` carries no label. A document whose
+    ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
+    names a document the caller may not read is served without that id.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
@@ -378,9 +449,15 @@ def get_document(
         doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+    label = _document_label(
+        DocumentClearance(store, clearance), _external_gate(store), doc
+    )
     return {
         "status": "ok",
-        "document": conceal_document_successor(doc, store, clearance),
+        "document": {
+            **conceal_document_successor(doc, store, clearance),
+            "label": label,
+        },
     }
 
 
