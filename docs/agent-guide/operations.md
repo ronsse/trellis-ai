@@ -216,6 +216,58 @@ flagged `stale` when that age exceeds 36h regardless of its own
 `last_status`, `null` rendered as "Not measured", and a fetch failure
 rendered as a visible error rather than a silent empty list.
 
+### `trellis admin migrate-graph`
+
+Copy the **current** graph rows (nodes, edges, aliases) from one graph store to another.
+
+```bash
+trellis admin migrate-graph --from-config FROM.yaml --to-config TO.yaml \
+  [--dry-run] [--max-nodes N] [--continue-on-error] [--format text|json] [--no-meta-trace]
+```
+
+Each YAML file holds a single `graph:` block in the shape `recommended-config.yaml` uses. A destination row that already exists is skipped. A re-run therefore adds the rows the destination lacks and nothing else: it does not update a row that changed on the source and does not remove one deleted there, and when nothing is missing it exits `0` with `current_rows_copied` all `0` while the destination keeps its old values. Use a re-run to finish an interrupted copy, not to catch up a destination while the source keeps taking writes.
+
+**What it does not copy.** A clean run is a copy of some current graph rows, not of the store:
+
+- **Closed history is not copied.** Only current rows (`valid_to IS NULL`) are read. A node with three versions arrives with one, so `as_of` reads and `get_node_history` on the destination start at the copy. The run counts the closed rows it left behind (nodes, edges and aliases) with `compact_versions(dry_run=True)` on the source, which deletes nothing. If the source store cannot report that count, `source_version_rows_counted` is `false` and the count is `null`: it is never printed as `0`.
+- **Timestamps are not preserved.** `upsert_node`, `upsert_edge` and `upsert_alias` take no clock, so the destination sets each row's timestamps (for example `created_at` and `valid_from`) when it writes the row. Edge and alias ids are new; node ids are kept.
+- **Edges and aliases are read through the current nodes.** An edge whose source id, or an alias whose owner id, has no current node is never read, so a run can finish with `status: ok`, `errors: []` and fewer current rows on the destination than the source holds. The stores accept such rows; this page does not say which write paths produce them. The run counts the edges it did not reach (`current_edges_not_reached`: the source's current edge count less the edges the run read, `null` when the source cannot report it). Aliases have no count. An edge whose source is a current node is copied even when its target is not one.
+- **Only the graph moves.** Documents, traces, the event log, vectors, blobs and feedback are not moved by this command, and none of them has a migration tool, nor does the policy file (`policies.json`). `trellis admin backup` copies SQLite stores, the policy file and the feedback log to a directory; it does not load them into another backend. `trellis admin reconcile-feedback` replays `pack_feedback.jsonl` rows the configured event log lacks; it writes events and does not move the feedback store. To keep a SQLite store's history intact, leave it on SQLite.
+
+**Source and destination.** The migration writes no rows to the source. Opening a SQLite source still runs its schema setup and sets the journal mode, so a read-only snapshot cannot be the source (the run exits `1` with a traceback). `--dry-run` writes no rows to the destination but does create its database file and schema.
+
+**What a run states.** A run that finishes, in either `--format`, states these limits beside its counts, whether or not anything was lost. `--format json` adds one key, `copy_scope`, and keeps every existing key; `status` is `ok` on a clean copy:
+
+```json
+{
+  "status": "ok",
+  "nodes_read": 4, "nodes_written": 4,
+  "copy_scope": {
+    "copies": "current graph rows only (nodes, edges, aliases)",
+    "current_rows_copied": {"nodes": 4, "edges": 3, "aliases": 2},
+    "source_version_rows_counted": true,
+    "source_version_rows_not_copied": {"nodes": 3, "edges": 2, "aliases": 1},
+    "current_edges_not_reached_counted": true,
+    "current_edges_not_reached": 0,
+    "unreached_note": "edges and aliases are read through the current nodes, so an edge whose source id, or an alias whose owner id, has no current node is not copied; the edges are counted, the aliases are not",
+    "timestamps_preserved": false,
+    "timestamps_note": "the destination sets each row's timestamps (for example created_at and valid_from) when it writes the row, and edge and alias ids are new; the source's values are not carried over",
+    "not_moved": ["documents", "traces", "event_log", "vectors", "blobs", "feedback"]
+  }
+}
+```
+
+Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy". A run that finishes with errors (`--continue-on-error`) carries `copy_scope` beside `status: "error"`.
+
+**A run that aborts states nothing.** Without `--continue-on-error`, a store error ends the run (exit `5`) after printing text, a `Migration aborted: ...` line and a hint to re-run with `--continue-on-error`, in **both** formats. There is no JSON and no `copy_scope`, so a caller that pipes `--format json` into `jq .copy_scope` gets a parse failure and must read the exit code first. The destination may hold a partial copy. A source with more current nodes than `--max-nodes` exits `1` after one line of text in both formats, before anything is written.
+
+**Exit codes** (the same under both formats, as observed through the installed `trellis` entry point):
+
+- `0`: a clean copy.
+- `5`: a step failed (`errors` is non-empty, or a store write aborted the run), or the config named a backend that does not exist, a key the backend does not accept, or a backend that is not installed (a `CONFIG_ERROR` or `BACKEND_NOT_INSTALLED` line, or a JSON error object under `--format json`).
+- `2`: a `--from-config` or `--to-config` file that is missing, unreadable, invalid YAML or lacking a `graph:` block with a `backend` key, and an unknown option (`--from` and `--to` are not options).
+- `1`: a source over `--max-nodes`, and two cases the command does not handle and that end in a Python traceback: a `db_path` under a regular file, and a SQLite source that is read-only.
+
 ### `trellis admin show-prompt`
 
 Print the retrieve, record, grade loop as text for a consumer that reads no skill: a model called with an API key, a framework's system message, or a dispatched subagent.
@@ -3835,6 +3887,64 @@ parsed a second pack id) over the primary's analysed tasks, and the cut-off
 rate over every eligible task, cut-offs included. Output is counts and
 statistics only, never an id, intent or text. Exit `0` on any report, `2` on an
 invalid option or an unnamed choice between rates, in both formats.
+
+### `trellis analyze learning-candidates`
+
+Score the EventLog into learning candidates for human review and write two
+artifacts, `intent_learning_candidates.json` and
+`promotion_decisions.template.json`. Nothing is promoted here. It is not a pure
+read: besides the two files, each run records itself as a meta-Activity in the
+graph unless `--no-meta-trace` is passed.
+
+```bash
+trellis analyze learning-candidates [--output-dir PATH] [--days N] \
+  [--min-support N] [--format text|json] [--no-meta-trace]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--output-dir` | `TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Where the two artifacts are written; the directory the Review queue and `curate review-ready` read |
+| `--days` | `30` | Days of EventLog history to scan |
+| `--min-support` | `2` | Times an item must appear in graded packs, within one intent family, to be scored for that family |
+| `--no-meta-trace` | off | Do not record this run as a meta-Activity in the graph |
+
+`--format json` answers `status`, `observation_count`, `candidate_count`,
+`candidates_path`, `decisions_template_path` and `candidates`, plus two counts
+over that same `candidates` list:
+
+- `by_recommendation_type`: the number of candidates of each
+  `recommendation_type` (`promote_guidance`, `promote_precedent`,
+  `investigate_noise`), in name order. A type with no candidate is absent, so
+  read a missing key as `0`; an empty list gives `{}`. The values sum to
+  `candidate_count`.
+- `promotion_ready_count`: how many of them pass `is_promotion_ready`,
+  the one predicate the promotion-ready digest and `trellis curate
+  review-ready` select through (`promote_guidance`, at least one helpful
+  citation, no unhelpful one). It equals the artifact's `promotion_ready.count`.
+
+Text output prints the same two: a `By recommendation:` line (only when there
+is a candidate) and `N candidates promotion-ready`, with the `review with`
+pointer only when `N > 0`.
+
+`candidate_count` includes every `investigate_noise` row, so a large count says
+little about promotable knowledge. `promotion_ready_count` narrows it, but it is
+not a backlog either: a candidate stays counted after it is promoted, and one a
+review would refuse is still counted.
+
+**What `promotion_ready_count` is not.** It counts this run's list, so it moves
+with the flags that shape the list: `--min-support` and `--days` decide which
+items are candidates at all (a higher floor can only lower it). `--output-dir`
+does not change the count; it decides whether the file the review commands read
+by default is the one this run wrote. It is also not what `curate
+promote-learning` would act on: that plans a promotion for any approved candidate whose type is
+`promote_guidance` or `promote_precedent`, whatever its citations.
+`curate review-ready` selects the same candidates as `promotion_ready_count`
+(its `ready_count`, for the same file), but refuses to approve one whose
+precedent already exists or whose item is an `investigate_noise` candidate
+under another intent family (unless `--force-contradicted`), so what a reviewer
+can approve is at most this count. The auto-promote evaluation is a separate
+report with its own floors (by default 5 helpful citations and 3 distinct
+sessions).
 
 ### `trellis analyze domains`
 
