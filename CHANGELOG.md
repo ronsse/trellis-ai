@@ -217,6 +217,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin draft-promotion-adr` no longer reads a broken `--output` as
+  free.** The overwrite check used `Path.exists()`, which answers absent for a
+  symlink loop, a dangling link and a path under a regular file, so the command
+  went on to write and died with a Python traceback in both formats. A path with
+  anything at it is now present: without `--force` the run is refused ("Refusing
+  to overwrite existing ADR", exit 1, as for a regular file). That now includes a
+  dangling link, which used to be written through when its target directory
+  existed and to crash when it did not. With `--force`, a write that
+  fails answers `Could not write the ADR at <path>: <reason>` (text), or
+  `{"status": "error", "message": ...}` under `--format json`, and exits 2
+  (`EXIT_VALIDATION`); both formats exit alike. A forced write through a dangling
+  link whose target directory exists still creates the target.
+
 - **The Postgres event log reads a naive timestamp as UTC, whatever the
   session's time zone.** `PostgresEventLog` bound a naive `datetime` as it
   came, which psycopg sends as `timestamp` and the server reads in the
@@ -654,6 +667,16 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers
+  as an error.** The generator has no dry-run mode, so the flag was refused with
+  a yellow warning and exit 0, which a caller that asked for a preview read as
+  success. It now exits 2 (`EXIT_VALIDATION`; was 0) without running the
+  generator, prints the same sentence as a plain error line in text, and under
+  `--format json` prints one `{"status": "error", "error": "validation_error",
+  "message": ...}` object (was a prose line on stdout, so the stream did not
+  parse). The `--dry-run` help says so. A script that passed the flag and
+  treated exit 0 as success must drop it.
 
 - **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
   current nodes than `--max-nodes`.** Breaking for a script that branches on the
