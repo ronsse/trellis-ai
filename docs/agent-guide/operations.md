@@ -136,9 +136,11 @@ no secret.
   built on them) names its answer's ids after formatting and keeps only those the answer prints
   as `` `id` ``, because a formatter stops listing items when its token budget runs out and
   an id the reader never received is not logged. This looks known ids up in the answer;
-  it does not read ids from it. Known bound: an item whose body quotes another pack item's id in
-  backticks makes that id count as printed even if its own entry was cut, so `item_count` can
-  over-count by those ids and never records an id outside the pack. `get_items` names the ids
+  it does not read ids from it. Known bound: the whole answer is searched, so a pack item's id
+  quoted in backticks anywhere in it counts as printed even if that item's own entry was cut.
+  An item's body can do this, and so can the caller's own `intent` or a section name, with no
+  document involved. `item_count` and `item_ids` can therefore name ids the answer never
+  listed; they never name an id outside the pack. `get_items` names the ids
   its formatter reports it served (`note_served_items`). `get_file_context`,
   `get_lessons`, `get_graph` and `query_observations` do not name ids and record `item_count: null`.
 
@@ -164,10 +166,12 @@ key that made it.
 
 **How rows are written.** A read never waits for its row. After the response has been sent
 (REST) or the tool has returned (MCP), one entry is put on a bounded in-process queue that a
-single daemon thread drains; the thread does the parsing and the store write. The one store
-call on the request path is the knob itself: `access_log_enabled` reads `settings.json` once
-per keyed read (about 50 microseconds, on the event loop for REST and on the tool's thread for
-MCP); nothing else touches a store before the answer is sent. The queue holds
+single daemon thread drains; the thread does the parsing of REST bodies and the store write.
+A pack tool's id search runs on the tool's own worker thread (about 1 ms for 50 ids in a 64 KB
+answer). The one store call on the request path is the knob itself: `access_log_enabled` reads
+`settings.json` once per keyed read, on the event loop on both surfaces (about 50 microseconds
+with no settings file; a populated one was not measured); nothing else touches a store before
+the answer is sent. The queue holds
 at most 1024 entries and 16 MiB (an entry is charged its answer size plus 512 bytes, the
 cost of its row), and a full queue drops the read and counts it. Shutdown drains for at most 2
 seconds and never holds up exit. A slow or hung store therefore delays rows, not reads.

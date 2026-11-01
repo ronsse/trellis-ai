@@ -12,7 +12,8 @@ writer thread as the tool returns. The tool's answer is passed through
 untouched; known ids are looked up in it, and no id is read out of it.
 
 * **Off is a pass-through.** The knob is read before the holder is opened; off
-  opens nothing and the tool's ``note_served_items`` call finds no holder.
+  opens nothing and the tool's ``note_printed_items`` or ``note_served_items``
+  call finds no holder.
 * **A tool that does not fill the holder** (``get_file_context``, ``get_lessons``,
   ``get_graph``, ``query_observations``) records ``item_count: null`` and no ids.
 * **A tool that raises** records nothing.
@@ -60,8 +61,9 @@ READ_TOOLS = frozenset(
         "search",
     }
 )
-#: Tools that name the items they served (``note_served_items`` in
-#: ``server.py``); the rest record ``item_count: null``. Pinned by a test.
+#: Tools that name the items they served (``note_printed_items`` or
+#: ``note_served_items`` in ``server.py``); the rest record ``item_count: null``.
+#: Pinned by a test.
 NAMING_TOOLS = frozenset(
     {
         "get_context",

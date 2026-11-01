@@ -11,8 +11,8 @@ what a response carried, it does not shape one.
   has no prune or delete, so every row stays until the database is dealt with
   by hand (about 1.6 KB a row on SQLite).
 * **What a row holds.** The key id, the surface (``rest`` / ``mcp``), the route
-  or tool, the count of items returned and the first :data:`MAX_LOGGED_ITEM_IDS`
-  item ids with ``item_ids_truncated`` beside them. No document text, no query
+  or tool, the item count (:func:`build_payload` says how each surface counts)
+  and the first :data:`MAX_LOGGED_ITEM_IDS` item ids with ``item_ids_truncated`` beside them. No document text, no query
   or intent text, no secret. A route or tool that does not name its items
   records ``item_count: null`` and no ids, never a guess.
 * **Who is logged.** A call with a key id. The legacy shared secret, auth mode
@@ -20,9 +20,10 @@ what a response carried, it does not shape one.
 * **Off the request path.** The transport hands one entry to
   :class:`AccessLogWriter`: a bounded in-process queue drained by one dedicated
   daemon thread. Submitting never blocks and never raises; a full queue drops
-  the entry and counts it. The emit, and any parsing of a response body, happen
-  on that thread, never on the event loop and never on anyio's worker pool.
-  The queue holds at most :data:`MAX_QUEUE_ENTRIES` entries and
+  the entry and counts it. The emit, and any parsing of a REST response body,
+  happen on that thread, never on the event loop and never on anyio's worker
+  pool. The one exception is :func:`note_printed_items`, a substring search of
+  a pack tool's answer on the tool's own worker thread. The queue holds at most :data:`MAX_QUEUE_ENTRIES` entries and
   :data:`MAX_QUEUE_BYTES` of held response bodies (16 MiB). The store is safe
   for a writer thread: SQLite opens one connection per thread and Postgres
   draws from its pool.
@@ -141,8 +142,9 @@ def served_ids_in(text: str, item_ids: Iterable[str]) -> list[str]:
     for them, never read for ids. A formatter stops listing items when its token
     budget runs out, so this is the set the reader actually received.
 
-    Known bound: an item's body that quotes another item's id in backticks makes
-    that id count as printed even if its own entry was cut.
+    Known bound: ``text`` is the whole answer, so an id quoted in backticks by an
+    item's body, the caller's intent or a section name counts as printed even if
+    its own entry was cut.
     """
     return [i for i in dict.fromkeys(item_ids) if i and f"`{i}`" in text]
 

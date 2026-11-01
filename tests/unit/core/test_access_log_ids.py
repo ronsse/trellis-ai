@@ -13,6 +13,7 @@ from trellis.core.access_log import (
     note_printed_items,
     served_ids_in,
 )
+from trellis.retrieve.formatters import format_pack_as_markdown
 
 LONG = "x" * 300
 
@@ -34,6 +35,24 @@ class TestServedIdsIn:
         text = "## [doc] `a`\nsee also `b` and `not-in-the-pack`"
         assert served_ids_in(text, ["a", "b"]) == ["a", "b"]
         assert "not-in-the-pack" not in served_ids_in(text, ["a", "b"])
+
+    def test_known_bound_the_caller_s_intent_counts_too(self) -> None:
+        # No document is needed: the formatter prints the intent above the items.
+        items = [
+            {"item_id": "a", "item_type": "document", "excerpt": "body " * 50},
+            {"item_id": "b", "item_type": "document", "excerpt": "body " * 50},
+        ]
+        text = format_pack_as_markdown(items, "compare `b` with this", max_tokens=100)
+        assert "## [document] `b`" not in text
+        assert served_ids_in(text, ["a", "b"]) == ["a", "b"]
+
+    def test_the_over_budget_fallback_still_prints_the_first_id(self) -> None:
+        # The fallback prints its own header. Without the backticks a served
+        # item would log as a silent zero.
+        items = [{"item_id": "a", "item_type": "document", "excerpt": "body " * 500}]
+        text = format_pack_as_markdown(items, "an intent", max_tokens=100)
+        assert "more items omitted" in text
+        assert served_ids_in(text, ["a"]) == ["a"]
 
 
 class TestNotePrintedItems:
