@@ -260,6 +260,28 @@ All notable changes to Trellis will be documented in this file.
   read-only command do this migration too when the file allows it; under a held
   lock they skip it and warn. Postgres is unaffected.
 
+- **`upsert_edges_bulk` on ArcadeDB keeps its returned ids when the post-commit
+  recount read fails (closes #1078).** The one read that finds triplets with
+  more than one current row ran outside the per-triplet handling, so a failure
+  there raised from a batch that had already committed: the caller lost every
+  id and no duplicate was repaired. It now follows the repair beside it: the
+  failure is logged as `edge_duplicate_current_recount_failed` (`path`, `edges`,
+  `error_type`), the batch returns the ids it committed, and a duplicate that
+  read would have found stays until the triplet is next written, when the
+  ordinary recount repairs it. `upsert_edge` still raises from its recount, as
+  its write has not returned.
+
+
+- **Broken relative links in `docs/` are repaired, and a test keeps them
+  repaired.** Twenty-five links outside `docs/archive/` pointed at a path or
+  heading that no longer exists (eval-harness files that left the repository,
+  a deleted worker module, a renamed heading, a `../` count one short, and
+  `path.py:12` line suffixes that GitHub reads as part of the filename). Each
+  is fixed, or unlinked where its target was removed on purpose.
+  `tests/unit/test_docs_links_rule.py` fails on a relative link or in-page
+  anchor that does not resolve in `docs/` (outside `docs/archive/`), `README*`
+  or `CLAUDE.md`. Archived documents are history and keep their links as
+  written; `docs/archive/README.md` says so.
 - **`trellis admin quickstart` no longer reports `ok` on a `config.yaml` the
   registry refuses, `trellis admin migrate-graph` no longer tracebacks on a
   graph store that will not open, and `trellis admin serve` reads

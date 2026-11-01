@@ -125,8 +125,8 @@ with more than one current row through the same
 from that row's own properties and provenance. The ``edge_id`` it returns
 for that row is the surviving row's, and the ``edge_duplicate_current_rerun``
 warning carries ``path="bulk"``. A batch with no duplicate costs that one
-read; a duplicate that outlasts the bound, or a repair that errors, is
-logged, not raised.
+read; a duplicate that outlasts the bound, a repair that errors, or a
+recount read that errors, is logged, not raised.
 
 ArcadeDB 26.10.1 ships the upstream page-slot fix (ArcadeDB PR #9270)
 and closes the underlying race on its own, measured 0 of 40 calls
@@ -2251,9 +2251,25 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         The batch has committed, so a repair that raises is logged
         (``edge_duplicate_current_repair_failed``, with the error type), that
         triplet keeps the id the batch returned, and the next flagged triplet
-        is repaired. ``upsert_edge`` still raises: its write has not returned.
+        is repaired. The recount read is handled the same way: if it raises,
+        the batch keeps every id it returned, the failure is logged
+        (``edge_duplicate_current_recount_failed``) and no triplet is
+        repaired on this call; a duplicate it would have found stays until
+        the next write of that triplet, which closes every current row.
+        ``upsert_edge`` still raises: its write has not returned.
         """
-        duplicated = self._rows_with_duplicate_current_edges(edges)
+        try:
+            duplicated = self._rows_with_duplicate_current_edges(edges)
+        except Exception as exc:
+            # Same reasoning as the repair below: the batch has committed, so
+            # raising would lose every id it returned.
+            logger.warning(
+                "edge_duplicate_current_recount_failed",
+                path="bulk",
+                edges=len(edges),
+                error_type=type(exc).__name__,
+            )
+            return
         for i in sorted(duplicated):
             spec = edges[i]
             try:
