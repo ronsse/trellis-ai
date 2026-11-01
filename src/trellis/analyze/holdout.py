@@ -107,10 +107,10 @@ keeps them. Any other guardrail whose field no task in an arm carries is
 the build that wrote the pack that sets the task's arm (``pack_ids[0]``), the
 commit of its ``write_provenance``. A build with no commit is keyed by its
 version, and a commit seen under several versions is one row that names each
-(``analyze health`` and ``--operational`` still key on the
-``(version, commit)`` pair). It is descriptive: a serving change that lands
-mid-window mixes builds inside each arm, and the table shows how, so a reader
-can judge whether a deploy confounds the comparison. It adds each arm's
+(``analyze health`` keys on the ``(version, commit)`` pair; ``--operational``
+keys on the commit, as this table does). It is descriptive: a serving change
+that lands mid-window mixes builds inside each arm, and the table shows how, so
+a reader can judge whether a deploy confounds the comparison. It adds each arm's
 outcome mean and the served-minus-withheld difference per build, with no
 interval and no p-value, labelled descriptive and non-decisive; it changes no
 other figure. A build serving fewer than five withheld analysed tasks is
@@ -131,9 +131,16 @@ and both adjustments read :data:`WINDOW_NOT_SETTLED`, and no value computed
 from an outcome is reported: the arm means, the outcome SDs and MDEs, the
 power figures and the guardrail values are ``None`` (their keys stay), so a
 read taken early cannot be mistaken for the readout or leak the arms'
-difference. The counts a window and a rate fix, and what ``--operational``
-publishes, stay. Without ``until`` the check does not run and nothing is
-withheld. ``settle_hours=0`` settles on one sweep. An early check of whether
+difference. So is every count of who is analysed, since who is analysed is
+fixed by an outcome (whether the session ended on a usage limit, whether a
+value exists): the funnel's cut-offs excluded, outcome missing and analysed,
+the exclusion's cut-off count, the analysed tasks and parents (in total and
+per arm), the analysed main sessions, the strata counts, the adjustments'
+counts, the realised N and each guardrail's n are ``None``, and no
+covariate fit runs. The by-build table then lists the eligible tasks with
+every n ``None``. The counts a window and a rate fix (the eligible tasks and
+the rest of the funnel) stay. Without ``until`` the check does not run and
+nothing is withheld. ``settle_hours=0`` settles on one sweep. An early check of whether
 the experiment is running is ``--operational``.
 
 **Operational mode.** :func:`analyze_holdout_operational` answers "is the
@@ -196,7 +203,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from statistics import NormalDist
@@ -304,6 +311,15 @@ _BY_COMMIT_NOTE = (
     "a build with no commit keeps its version as the key, and a pack with no "
     f"usable stamp reads {NO_PROVENANCE_LABEL!r}."
 )
+_BY_COMMIT_UNSETTLED_NOTE = (
+    "Descriptive and non-decisive. This read's window is not settled, so no "
+    "count or mean of the analysed tasks is reported: who is analysed is "
+    "fixed by an outcome. Each row names a build that served an eligible "
+    "task, in first-seen order, and a build serving fewer than "
+    f"{BY_COMMIT_POOL_THRESHOLD} withheld eligible tasks is pooled into the "
+    f"row named {OTHER_BUILD!r}. --operational counts the eligible tasks per "
+    "build and arm."
+)
 _NO_ELIGIBLE = "no eligible task"
 
 _PRE_TREATMENT_NOT_APPLIED = (
@@ -378,7 +394,10 @@ class HoldoutFunnel(TrellisModel):
     counts from ``main_sessions`` to ``pre_treatment_excluded`` plus
     ``eligible`` sum to ``sessions`` (the ``no_retrieval_*`` fields split
     ``no_retrieval`` and are not stages), and ``eligible`` minus
-    ``cut_offs_excluded`` and ``outcome_missing`` is ``analysed``.
+    ``cut_offs_excluded`` and ``outcome_missing`` is ``analysed``. Those three
+    count by an outcome (who was cut off, who has a value), so on a read whose
+    settled window was checked and is not settled each is ``None``, as
+    :class:`HoldoutOperationalFunnel` publishes none of them.
     ``pre_treatment_excluded`` is the last stage before ``eligible``: tasks
     whose first retrieval followed a stop hook's feedback or the session's
     first commit. ``pre_treatment_excluded_after_commit`` is the part of them
@@ -428,9 +447,9 @@ class HoldoutFunnel(TrellisModel):
     pre_treatment_hook_feedback_seen: int = 0
     post_hoc_measured: int = 0
     post_hoc_after_work: int = 0
-    cut_offs_excluded: int = 0
-    outcome_missing: int = 0
-    analysed: int = 0
+    cut_offs_excluded: int | None = 0
+    outcome_missing: int | None = 0
+    analysed: int | None = 0
     eligible_with_unparsed_pack_ids: int = 0
 
 
@@ -438,7 +457,8 @@ class HoldoutExclusion(TrellisModel):
     """One pre-registered population rule or exclusion, and what it removed.
 
     ``excluded`` is ``None`` when this analysis cannot count what the rule
-    removed: it was not applied, or it was applied before the rows it reads.
+    removed: it was not applied, it was applied before the rows it reads, or
+    it counts by an outcome and the read's settled window is not settled.
     ``unknown`` is how many units the rule could not decide and so kept, for
     a rule that reads a field some joins lack: ``applied`` with a non-zero
     ``unknown`` is "partially applied". ``None`` for a rule that has no
@@ -476,7 +496,9 @@ class ArmRatioCheck(TrellisModel):
 class HoldoutHorizon(TrellisModel):
     """The analytic MDE after ``days`` of evidence at the measured rate.
 
-    ``n`` is the measured count per 30 days scaled to ``days``. ``ratio`` is
+    ``n`` is the measured count per 30 days scaled to ``days``, and ``None``
+    on a read whose settled window is not settled (it counts analysed tasks).
+    ``ratio`` is
     ``exp(mde)``, the multiplicative change a log1p outcome's MDE stands
     for; ``share_of_mean`` is ``mde`` over the mean it is compared with, for
     an outcome on its own scale. ``not_measurable`` says why ``mde`` is
@@ -518,7 +540,7 @@ class HoldoutSessions(TrellisModel):
     reaching_retrieval_per_30d: float | None
     eligible: int
     eligible_per_30d: float | None
-    analysed: int
+    analysed: int | None
     analysed_per_30d: float | None
     outcome_sd: float | None
     mde_by_horizon: list[HoldoutHorizon]
@@ -538,7 +560,10 @@ class HoldoutDescriptive(TrellisModel):
     was checked and is not settled, every figure computed from an outcome is
     ``None`` (the SDs, ``between_parent_share``, ``n_for_10pct_effect``, the
     PR and cut-off rates, each ``mde_by_horizon`` figure and
-    ``cut_offs_by_arm``) and ``not_measurable`` says so. ``top_parent_share`` is the
+    ``cut_offs_by_arm``) and so is every count of the analysed set, which
+    the outcome fixes (``analysed_tasks``, ``analysed_per_30d``,
+    ``analysed_by_arm``, ``parents`` and each horizon's ``n``);
+    ``not_measurable`` says so. ``top_parent_share`` is the
     largest parent session's share of eligible tasks, both arms and
     cut-offs included. The figures per 30 days divide by the task window
     (``HoldoutReport.task_window_days``). ``mde_by_horizon`` uses the
@@ -550,12 +575,12 @@ class HoldoutDescriptive(TrellisModel):
 
     eligible_tasks: int
     eligible_per_30d: float | None
-    analysed_tasks: int
+    analysed_tasks: int | None
     analysed_per_30d: float | None
     outcome_sd_within_parent: float | None
     outcome_sd_total: float | None
     between_parent_share: float | None
-    parents: int
+    parents: int | None
     packs_per_task: float | None
     tasks_with_several_packs: int
     post_hoc_share: float | None
@@ -566,7 +591,7 @@ class HoldoutDescriptive(TrellisModel):
     prs_created_mean: float | None
     eligible_by_arm: ArmCounts
     cut_offs_by_arm: ArmCounts | None
-    analysed_by_arm: ArmCounts
+    analysed_by_arm: ArmCounts | None
     tasks_with_both_arms: int
     arm_ratio: list[ArmRatioCheck]
     top_parent_share: float | None
@@ -610,7 +635,11 @@ class HoldoutSettledWindow(TrellisModel):
 
 
 class HoldoutInference(TrellisModel):
-    """The primary analysis, or the reason it cannot run."""
+    """The primary analysis, or the reason it cannot run.
+
+    The four strata counts tally the analysed tasks, so they are ``None`` on
+    a read whose settled window is not settled.
+    """
 
     status: str
     verdict: str
@@ -623,10 +652,10 @@ class HoldoutInference(TrellisModel):
     alpha: float
     permutations: int
     bootstraps: int
-    strata: int
-    strata_both_arms: int
-    strata_one_arm: int
-    tasks_in_one_arm_strata: int
+    strata: int | None
+    strata_both_arms: int | None
+    strata_one_arm: int | None
+    tasks_in_one_arm_strata: int | None
     #: The share of the estimator's total weight (``n1*n0/n`` summed over the
     #: strata) held by the heaviest stratum: a weight share, not a task share.
     #: ``None`` whenever the primary does not run.
@@ -656,8 +685,8 @@ class HoldoutSecondaryInference(TrellisModel):
     p_value: float | None
     permutations: int
     bootstraps: int
-    strata: int
-    strata_both_arms: int
+    strata: int | None
+    strata_both_arms: int | None
 
 
 class HoldoutAdjustment(TrellisModel):
@@ -676,14 +705,18 @@ class HoldoutAdjustment(TrellisModel):
     the gap to the primary also includes the subset.
     ``arm_balance_r2`` is the share of the arm's within-stratum variance the
     covariates explain; above 0.9 the adjustment is ``not_measurable``.
+
+    On a read whose settled window is not settled no fit runs: ``status`` is
+    :data:`WINDOW_NOT_SETTLED` and every count and figure is ``None``, since
+    ``n_used + n_missing_covariate`` is the analysed count.
     """
 
     name: str
     preregistered: bool
     status: str
     reason: str | None
-    n_used: int
-    n_missing_covariate: int
+    n_used: int | None
+    n_missing_covariate: int | None
     agent_type_levels: int | None
     df_residual: int | None
     arm_balance_r2: float | None
@@ -704,7 +737,7 @@ class HoldoutPower(TrellisModel):
 
     On a read whose settled window was checked and is not settled, ``status``
     is :data:`WINDOW_NOT_SETTLED` and the three figures a realised SD would
-    give are ``None``; ``realised_n`` is the analysed count.
+    give are ``None``, as is ``realised_n``, the analysed count.
     """
 
     status: str
@@ -712,7 +745,7 @@ class HoldoutPower(TrellisModel):
     planned_n: int
     target_power: float
     withheld_share: float
-    realised_n: int
+    realised_n: int | None
     realised_sd: float | None
     power_at_planned_mde: float | None
     mde_at_target_power: float | None
@@ -726,12 +759,14 @@ class HoldoutGuardrailArm(TrellisModel):
     ``missing`` counts the arm's tasks in the guardrail's task set that
     lack its field, never for the cut-off rate, which reads a task without
     the field as not cut off; ``not_measurable`` says why ``value`` is
-    ``None``.
+    ``None``. A guardrail that reads an outcome has no ``n`` or ``missing`` on
+    a read whose settled window is not settled, since they count the tasks
+    that carry the field.
     """
 
-    n: int
+    n: int | None
     value: float | None
-    missing: int
+    missing: int | None
     not_measurable: str | None
 
 
@@ -760,9 +795,12 @@ class HoldoutGuardrails(TrellisModel):
 
 
 class HoldoutBuildArm(TrellisModel):
-    """One arm's analysed tasks under one build; a mean of nothing is ``None``."""
+    """One arm's analysed tasks under one build; a mean of nothing is ``None``.
 
-    n: int
+    ``n`` is ``None`` on a read whose settled window is not settled.
+    """
+
+    n: int | None
     outcome_mean: float | None
 
 
@@ -770,7 +808,9 @@ class HoldoutBuildRow(TrellisModel):
     """The analysed tasks attributed to one build, split by arm.
 
     ``first_seen`` and ``last_seen`` are the earliest and latest first-pack
-    times of the tasks counted under the build, as ISO-8601 UTC strings.
+    times of the tasks counted under the build, as ISO-8601 UTC strings. On a
+    read whose settled window is not settled the rows tabulate the eligible
+    tasks, which no outcome moves, with every count and mean ``None``.
     """
 
     build: str
@@ -794,10 +834,12 @@ class HoldoutByCommit(TrellisModel):
     arm), and again in ``units_spanning_builds``. ``build`` is the
     ``(version, commit)`` label ``analyze health`` gives the same stamp, or
     ``v1, v2 @ commit`` when one commit was served under several versions.
+    ``units_spanning_builds`` counts analysed tasks, so it is ``None`` on a
+    read whose settled window is not settled.
     """
 
     rows: list[HoldoutBuildRow]
-    units_spanning_builds: int
+    units_spanning_builds: int | None
     note: str
     verdict: str = BY_COMMIT_VERDICT
     pool_threshold: int = BY_COMMIT_POOL_THRESHOLD
@@ -896,7 +938,11 @@ class HoldoutCovariateCoverage(TrellisModel):
 
 
 class HoldoutBuildCountRow(TrellisModel):
-    """The eligible tasks attributed to one build, split by arm, as counts."""
+    """The eligible tasks attributed to one commit, split by arm, as counts.
+
+    ``build`` is named as the outcome read's row is: the commit, with every
+    version stamped under it.
+    """
 
     build: str
     first_seen: str
@@ -2036,9 +2082,10 @@ _OPERATIONAL_NOTE = (
 )
 _OPERATIONAL_BY_COMMIT_NOTE = (
     "Counts only. Each eligible task is counted once, under the build stamped "
-    "on the first pack of its join (the pack that sets its arm). A build is "
-    "the stamped (version, commit) pair, named as analyze health names a "
-    f"serving build; a pack with no usable stamp reads {NO_PROVENANCE_LABEL!r}."
+    "on the first pack of its join (the pack that sets its arm). A row is a "
+    "commit, as in the outcome read: one commit stamped under several versions "
+    "is one row, named with each version, and a stamp with no commit keeps its "
+    f"version as its row. A pack with no usable stamp reads {NO_PROVENANCE_LABEL!r}."
 )
 _OPERATIONAL_SESSIONS_NOTE = (
     "Main transcripts are counted on their own first pack, from every build "
@@ -2206,30 +2253,32 @@ def analyze_holdout_operational(
 def _operational_by_commit(
     arrivals: Sequence[_Arrival],
 ) -> HoldoutOperationalByCommit:
-    """The eligible tasks per build and arm, in the order builds were first seen.
+    """The eligible tasks per commit and arm, in the order commits were first seen.
 
-    Builds first seen at the same instant are ordered by label.
+    Keyed and labelled as the outcome read keys and labels its table
+    (:func:`_build_group`, :func:`_group_label`), so the two agree on what a
+    row is. Rows first seen at the same instant are ordered by label.
     """
     by_build: dict[BuildKey, list[_Arrival]] = {}
     for unit in arrivals:
-        by_build.setdefault(unit.build, []).append(unit)
+        by_build.setdefault(_build_group(unit.build), []).append(unit)
+    named = [
+        (_group_label(u.build for u in members), members)
+        for members in by_build.values()
+    ]
     ordered = sorted(
-        by_build.items(),
-        key=lambda item: (
-            min(u.first_pack_at for u in item[1]),
-            build_label(*item[0]),
-        ),
+        named, key=lambda item: (min(u.first_pack_at for u in item[1]), item[0])
     )
     return HoldoutOperationalByCommit(
         rows=[
             HoldoutBuildCountRow(
-                build=build_label(*build),
+                build=label,
                 first_seen=min(u.first_pack_at for u in members).isoformat(),
                 last_seen=max(u.first_pack_at for u in members).isoformat(),
                 served=sum(not u.withheld for u in members),
                 withheld=sum(u.withheld for u in members),
             )
-            for build, members in ordered
+            for label, members in ordered
         ],
         note=_OPERATIONAL_BY_COMMIT_NOTE,
     )
@@ -3293,8 +3342,8 @@ def _build_row(
         else served.outcome_mean - withheld.outcome_mean
     )
     if hide_outcomes:
-        served = HoldoutBuildArm(n=served.n, outcome_mean=None)
-        withheld = HoldoutBuildArm(n=withheld.n, outcome_mean=None)
+        served = HoldoutBuildArm(n=None, outcome_mean=None)
+        withheld = HoldoutBuildArm(n=None, outcome_mean=None)
         difference = None
     return HoldoutBuildRow(
         build=build,
@@ -3317,9 +3366,9 @@ def _build_group(build: BuildKey) -> BuildKey:
     return (None, commit) if commit is not None else (version, None)
 
 
-def _group_label(members: Sequence[tuple[_Unit, float]]) -> str:
+def _group_label(stamps: Iterable[BuildKey]) -> str:
     """A row's name: the commit, with every version stamped under it."""
-    builds = {unit.build for unit, _ in members}
+    builds = set(stamps)
     commit = next(iter(builds))[1]
     versions = sorted({version for version, _ in builds}, key=lambda v: (v is None, v))
     if len(versions) == 1:
@@ -3328,23 +3377,24 @@ def _group_label(members: Sequence[tuple[_Unit, float]]) -> str:
 
 
 def _by_commit(
-    analysed: Sequence[_Unit],
+    tasks: Sequence[_Unit],
     y: npt.NDArray[np.float64],
     *,
     hide_outcomes: bool = False,
 ) -> HoldoutByCommit:
-    """The analysed tasks per build and arm, in the order builds were first seen.
+    """The tasks per build and arm, in the order builds were first seen.
 
-    ``y`` is the analysed tasks' outcome column, in the order of ``analysed``,
-    so each mean reads the column the primary estimate reads. A build is its
-    commit (:func:`_build_group`), so a row names every version stamped under
-    it. A build with fewer than :data:`BY_COMMIT_POOL_THRESHOLD` withheld tasks
-    joins one ``other`` row, last, whose figures are computed over the pooled tasks.
-    ``hide_outcomes`` keeps every count and drops every mean and difference,
-    for a read whose window is not settled.
+    ``tasks`` are the analysed tasks and ``y`` their outcome column, in the
+    same order, so each mean reads the column the primary estimate reads. A
+    build is its commit (:func:`_build_group`), so a row names every version
+    stamped under it. A build with fewer than :data:`BY_COMMIT_POOL_THRESHOLD`
+    withheld tasks joins one ``other`` row, last, whose figures are computed
+    over the pooled tasks. ``hide_outcomes`` is for a read whose window is not
+    settled: ``tasks`` are then the eligible ones, which no outcome moves, and
+    every count, mean and difference is ``None``.
     """
     by_build: dict[BuildKey, list[tuple[_Unit, float]]] = {}
-    for unit, value in zip(analysed, y.tolist(), strict=True):
+    for unit, value in zip(tasks, y.tolist(), strict=True):
         by_build.setdefault(_build_group(unit.build), []).append((unit, value))
     ordered = sorted(
         by_build.items(), key=lambda item: min(u.first_pack_at for u, _ in item[1])
@@ -3360,7 +3410,11 @@ def _by_commit(
         if sum(u.withheld for u, _ in members) < BY_COMMIT_POOL_THRESHOLD
     ]
     rows = [
-        _build_row(_group_label(members), members, hide_outcomes=hide_outcomes)
+        _build_row(
+            _group_label(u.build for u, _ in members),
+            members,
+            hide_outcomes=hide_outcomes,
+        )
         for _, members in standing
     ]
     if pooled:
@@ -3373,8 +3427,10 @@ def _by_commit(
         )
     return HoldoutByCommit(
         rows=rows,
-        units_spanning_builds=sum(unit.spans_builds for unit in analysed),
-        note=_BY_COMMIT_NOTE,
+        units_spanning_builds=(
+            None if hide_outcomes else sum(unit.spans_builds for unit in tasks)
+        ),
+        note=_BY_COMMIT_UNSETTLED_NOTE if hide_outcomes else _BY_COMMIT_NOTE,
         pool_threshold=BY_COMMIT_POOL_THRESHOLD,
         pooled_builds=len(pooled),
     )
@@ -3460,14 +3516,13 @@ _GUARDRAILS = (
 
 
 def _guardrail_arm(
-    spec: _Guardrail, pool: Sequence[_Unit], *, withheld: bool
+    spec: _Guardrail, pool: Sequence[_Unit], *, withheld: bool, task_set: str
 ) -> HoldoutGuardrailArm:
-    """``spec`` over the tasks of ``pool`` in one arm."""
+    """``spec`` over the tasks of ``pool`` in one arm; ``task_set`` names them."""
     arm = [unit for unit in pool if unit.withheld == withheld]
     values = [value for value in map(spec.read, arm) if value is not None]
     reason = None
     if not arm:
-        task_set = "eligible" if spec.eligible else "analysed"
         side = "withheld" if withheld else "served"
         reason = f"no {task_set} task in the {side} arm"
     elif not values:
@@ -3481,9 +3536,19 @@ def _guardrail_arm(
 
 
 def _guardrails(
-    units: Sequence[_Unit], analysed: Sequence[_Unit], outcome: str
+    units: Sequence[_Unit],
+    analysed: Sequence[_Unit],
+    outcome: str,
+    *,
+    unsettled: bool = False,
 ) -> HoldoutGuardrails:
-    """Each guardrail per arm over its task set (:class:`HoldoutGuardrails`)."""
+    """Each guardrail per arm over its task set (:class:`HoldoutGuardrails`).
+
+    The re-call rate reads packs, not an outcome, but it averages over the
+    analysed tasks, and who is analysed is fixed by an outcome. On a read whose
+    window is not settled it averages over every eligible task instead, so no
+    outcome moves it.
+    """
     withheld = sum(unit.withheld for unit in units)
     if not units:
         status = NO_TASKS
@@ -3505,16 +3570,21 @@ def _guardrails(
     for spec in _GUARDRAILS:
         if spec.name == outcome and spec.name in _UNLESS_PRIMARY:
             continue
-        pool = units if spec.eligible else analysed
+        over_eligible = spec.eligible or (unsettled and spec.reads == _PACK_IDS_READ)
+        pool = units if over_eligible else analysed
+        task_set = _ELIGIBLE_TASKS if over_eligible else _ANALYSED_TASKS
+        kind = "eligible" if over_eligible else "analysed"
         measures.append(
             HoldoutGuardrail(
                 name=spec.name,
                 label=spec.label,
                 reads=spec.reads,
-                task_set=_ELIGIBLE_TASKS if spec.eligible else _ANALYSED_TASKS,
-                served=_guardrail_arm(spec, pool, withheld=False),
+                task_set=task_set,
+                served=_guardrail_arm(spec, pool, withheld=False, task_set=kind),
                 withheld=(
-                    _guardrail_arm(spec, pool, withheld=True) if withheld else None
+                    _guardrail_arm(spec, pool, withheld=True, task_set=kind)
+                    if withheld
+                    else None
                 ),
             )
         )
@@ -3614,10 +3684,11 @@ def _ratio_check(
 
 
 def _withheld_horizons(horizons: Sequence[HoldoutHorizon]) -> list[HoldoutHorizon]:
-    """Each horizon with its outcome-derived figures withheld; ``n`` is a count."""
+    """Each horizon with its figures withheld, ``n`` (a count of the analysed) too."""
     return [
         horizon.model_copy(
             update={
+                "n": None,
                 "mde": None,
                 "ratio": None,
                 "share_of_mean": None,
@@ -3630,6 +3701,10 @@ def _withheld_horizons(horizons: Sequence[HoldoutHorizon]) -> list[HoldoutHorizo
 
 #: The descriptive figures computed from an outcome's value or an arm's cut-offs.
 _OUTCOME_FIGURES = (
+    "analysed_tasks",
+    "analysed_per_30d",
+    "analysed_by_arm",
+    "parents",
     "outcome_sd_within_parent",
     "outcome_sd_total",
     "between_parent_share",
@@ -3643,10 +3718,12 @@ _OUTCOME_FIGURES = (
 
 
 def _withhold_descriptive(descriptive: HoldoutDescriptive) -> HoldoutDescriptive:
-    """The descriptive block of an unsettled read, with no outcome-derived value.
+    """The descriptive block of an unsettled read, with nothing an outcome moves.
 
-    Every count stays, and every key stays with ``None`` in place of a value, so
-    no consumer loses a key.
+    A figure computed from an outcome is withheld, and so is every count of the
+    analysed set, which the outcome fixes: eligible minus analysed is how many
+    tasks were cut off or have no value. The counts of eligible tasks stay.
+    Every key stays with ``None`` in place of a value, so no consumer loses one.
     """
     sessions = descriptive.sessions
     reasons = {
@@ -3655,14 +3732,19 @@ def _withhold_descriptive(descriptive: HoldoutDescriptive) -> HoldoutDescriptive
         if name not in _OUTCOME_FIGURES
     }
     reasons.update(dict.fromkeys(_OUTCOME_FIGURES, _WITHHELD_UNSETTLED))
+    withheld_sessions = ("outcome_sd", "analysed_per_30d")
     session_reasons = {
         name: why
         for name, why in sessions.not_measurable.items()
-        if name != "outcome_sd"
+        if name not in withheld_sessions
     }
-    session_reasons["outcome_sd"] = _WITHHELD_UNSETTLED
+    session_reasons.update(dict.fromkeys(withheld_sessions, _WITHHELD_UNSETTLED))
     return descriptive.model_copy(
         update={
+            "analysed_tasks": None,
+            "analysed_per_30d": None,
+            "analysed_by_arm": None,
+            "parents": None,
             "outcome_sd_within_parent": None,
             "outcome_sd_total": None,
             "between_parent_share": None,
@@ -3675,6 +3757,8 @@ def _withhold_descriptive(descriptive: HoldoutDescriptive) -> HoldoutDescriptive
             "n_for_10pct_effect": None,
             "sessions": sessions.model_copy(
                 update={
+                    "analysed": None,
+                    "analysed_per_30d": None,
                     "outcome_sd": None,
                     "mde_by_horizon": _withheld_horizons(sessions.mde_by_horizon),
                     "not_measurable": session_reasons,
@@ -3686,16 +3770,24 @@ def _withhold_descriptive(descriptive: HoldoutDescriptive) -> HoldoutDescriptive
 
 
 def _withhold_guardrails(guardrails: HoldoutGuardrails) -> HoldoutGuardrails:
-    """The guardrails of an unsettled read: an outcome's arm means are withheld.
+    """The guardrails of an unsettled read: what an outcome moves is withheld.
 
-    The re-call rate reads the packs a join parsed, not an outcome, so it stays.
+    An arm's mean and the count of tasks behind it are both withheld, since the
+    count is of the analysed tasks that carry the field. The re-call rate reads
+    the packs a join parsed, not an outcome, and :func:`_guardrails` averaged it
+    over the eligible tasks, so it stays.
     """
 
     def withhold(arm: HoldoutGuardrailArm | None) -> HoldoutGuardrailArm | None:
         if arm is None:
             return None
         return arm.model_copy(
-            update={"value": None, "not_measurable": _WITHHELD_UNSETTLED}
+            update={
+                "n": None,
+                "value": None,
+                "missing": None,
+                "not_measurable": _WITHHELD_UNSETTLED,
+            }
         )
 
     measures = [
@@ -3711,24 +3803,24 @@ def _withhold_guardrails(guardrails: HoldoutGuardrails) -> HoldoutGuardrails:
     ]
     return guardrails.model_copy(
         update={
-            "note": f"{guardrails.note} Arm values read from an outcome are "
-            f"withheld: {WINDOW_NOT_SETTLED}.",
+            "note": f"{guardrails.note} Arm values and counts read from an "
+            f"outcome are withheld: {WINDOW_NOT_SETTLED}. The re-call rate "
+            "averages over every eligible task on this read, because who is "
+            "analysed is fixed by an outcome.",
             "measures": measures,
         }
     )
 
 
-def _withhold_power(
-    rate: float | None, y: npt.NDArray[np.float64], options: Mapping[str, Any]
-) -> HoldoutPower:
-    """The power block of an unsettled read: the plan and the count, no simulation."""
+def _withhold_power(rate: float | None, options: Mapping[str, Any]) -> HoldoutPower:
+    """The power block of an unsettled read: the plan only, no count, no simulation."""
     return HoldoutPower(
         status=WINDOW_NOT_SETTLED,
         planned_mde=options["planned_mde"],
         planned_n=options["planned_n"],
         target_power=TARGET_POWER,
         withheld_share=share_for_rate(rate),
-        realised_n=int(y.size),
+        realised_n=None,
         realised_sd=None,
         power_at_planned_mde=None,
         mde_at_target_power=None,
@@ -3787,11 +3879,13 @@ def _report(
         for s in np.random.SeedSequence(options["seed"]).spawn(11)
     ]
     inference = _inference(y, served, strata, rngs[0], rngs[1], options)
-    covariate_adjusted = _covariate_adjusted(
-        analysed, y, served, strata, rngs[3:], options
+    covariate_adjusted = (
+        _withheld_adjusted(options)
+        if unsettled
+        else _covariate_adjusted(analysed, y, served, strata, rngs[3:], options)
     )
     power = (
-        _withhold_power(rate, y, options)
+        _withhold_power(rate, options)
         if unsettled
         else _power(
             y,
@@ -3804,10 +3898,24 @@ def _report(
             options,
         )
     )
-    guardrails = _guardrails(units, analysed, options["outcome"])
+    guardrails = _guardrails(units, analysed, options["outcome"], unsettled=unsettled)
+    by_commit = None
+    if options["by_commit"]:
+        by_commit = (
+            _by_commit(units, np.zeros(len(units)), hide_outcomes=True)
+            if unsettled
+            else _by_commit(analysed, y)
+        )
     if unsettled:
         descriptive = _withhold_descriptive(descriptive)
         guardrails = _withhold_guardrails(guardrails)
+        funnel = funnel.model_copy(
+            update={
+                "cut_offs_excluded": None,
+                "outcome_missing": None,
+                "analysed": None,
+            }
+        )
     notes = notes + _notes(
         rows,
         funnel,
@@ -3841,11 +3949,7 @@ def _report(
         covariate_adjusted=covariate_adjusted,
         power=power,
         guardrails=guardrails,
-        by_commit=(
-            _by_commit(analysed, y, hide_outcomes=unsettled)
-            if options["by_commit"]
-            else None
-        ),
+        by_commit=by_commit,
         scan=scan,
         notes=notes,
     )
@@ -3866,7 +3970,12 @@ def _population_exclusions(funnel: _AnyFunnel) -> list[HoldoutExclusion]:
 
 
 def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
-    """The three pre-registered exclusions, in the order the report lists them."""
+    """The three pre-registered exclusions, in the order the report lists them.
+
+    The cut-off count is ``None`` once the funnel withholds it, and the note
+    then says why.
+    """
+    withheld = funnel.cut_offs_excluded is None
     return [
         *_population_exclusions(funnel),
         HoldoutExclusion(
@@ -3877,6 +3986,12 @@ def _exclusions(funnel: HoldoutFunnel, itt: bool) -> list[HoldoutExclusion]:
             note=(
                 "Usage-limit cut-offs, read as outcome.ended_on_error; "
                 + ("kept (ITT sensitivity analysis)." if itt else "excluded.")
+                + (
+                    f" The count is withheld: {WINDOW_NOT_SETTLED}, and who "
+                    "ended on a usage limit is an outcome."
+                    if withheld
+                    else ""
+                )
             ),
         ),
     ]
@@ -3964,6 +4079,7 @@ def _inference(
     bootstrap_rng: np.random.Generator,
     options: Mapping[str, Any],
 ) -> HoldoutInference:
+    unsettled: bool = options["window_unsettled"]
     both = one = in_one = 0
     if y.size:
         codes = _codes(strata)
@@ -3972,7 +4088,6 @@ def _inference(
         two_arm = (n1 > 0) & (n1 < n)
         both, one = int(two_arm.sum()), int((~two_arm).sum())
         in_one = int(n[~two_arm].sum())
-    unsettled: bool = options["window_unsettled"]
     status = "ok"
     if unsettled:
         status = WINDOW_NOT_SETTLED
@@ -4016,10 +4131,10 @@ def _inference(
         alpha=ALPHA,
         permutations=options["permutations"],
         bootstraps=options["bootstraps"],
-        strata=both + one,
-        strata_both_arms=both,
-        strata_one_arm=one,
-        tasks_in_one_arm_strata=in_one,
+        strata=None if unsettled else both + one,
+        strata_both_arms=None if unsettled else both,
+        strata_one_arm=None if unsettled else one,
+        tasks_in_one_arm_strata=None if unsettled else in_one,
         top_stratum_weight_share=top_weight_share,
     )
 
@@ -4255,6 +4370,61 @@ def _covariate_note(adjustments: Sequence[HoldoutAdjustment], analysed: int) -> 
         "carry its covariates, so its gap to the primary mixes the adjustment "
         "with the subset; unadjusted_same_subset is the primary's test on "
         "those same tasks. " + "; ".join(parts) + "."
+    )
+
+
+_COVARIATE_UNSETTLED_NOTE = (
+    "Covariate-adjusted permutation (secondary analysis, not decisive): "
+    f"withheld, {WINDOW_NOT_SETTLED}. No fit runs, and no count of the tasks "
+    "it would use is reported, because who is analysed is fixed by an outcome."
+)
+
+
+def _withheld_secondary(options: Mapping[str, Any]) -> HoldoutSecondaryInference:
+    """A secondary result of an unsettled read: its keys, no figure and no count."""
+    return HoldoutSecondaryInference(
+        status=WINDOW_NOT_SETTLED,
+        verdict=SECONDARY_VERDICT,
+        mean_served=None,
+        mean_withheld=None,
+        mean_residual_served=None,
+        mean_residual_withheld=None,
+        difference=None,
+        ci_low=None,
+        ci_high=None,
+        p_value=None,
+        permutations=options["permutations"],
+        bootstraps=options["bootstraps"],
+        strata=None,
+        strata_both_arms=None,
+    )
+
+
+def _withheld_adjusted(options: Mapping[str, Any]) -> HoldoutCovariateAdjusted:
+    """The adjustments of an unsettled read: no fit, every count and figure ``None``.
+
+    The fit would run on the analysed tasks and report how many it used and how
+    many lacked a covariate, which sum to the analysed count.
+    """
+    return HoldoutCovariateAdjusted(
+        status=WINDOW_NOT_SETTLED,
+        note=_COVARIATE_UNSETTLED_NOTE,
+        adjustments=[
+            HoldoutAdjustment(
+                name=name,
+                preregistered=preregistered,
+                status=WINDOW_NOT_SETTLED,
+                reason=_WITHHELD_UNSETTLED,
+                n_used=None,
+                n_missing_covariate=None,
+                agent_type_levels=None,
+                df_residual=None,
+                arm_balance_r2=None,
+                inference=_withheld_secondary(options),
+                unadjusted_same_subset=_withheld_secondary(options),
+            )
+            for name, preregistered, _ in _ADJUSTMENT_SPECS
+        ],
     )
 
 

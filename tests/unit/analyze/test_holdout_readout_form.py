@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 
 from tests.unit.analyze._holdout_fixture import (
+    ARM_VARIANTS,
+    CHANGED_TASKS,
     DAYS,
     MONDAY,
     UNTIL,
@@ -22,6 +24,7 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     provenance,
     seed_arm_shift,
+    seed_random_outcomes,
 )
 from trellis.analyze import holdout
 from trellis.analyze.holdout import (
@@ -400,7 +403,10 @@ def test_a_read_before_any_sweep_past_until_is_incomplete(log: HoldoutLog) -> No
     assert report.inference.mean_served is None
     assert report.by_commit is not None
     row = report.by_commit.rows[-1]
-    assert row.served.n + row.withheld.n == 4
+    # The table lists the eligible tasks, and states no n: a count of analysed
+    # tasks per arm is what an outcome fixes.
+    assert row.served.n is None
+    assert row.withheld.n is None
     assert row.difference is None
     assert row.served.outcome_mean is None
 
@@ -425,10 +431,14 @@ def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
         "brief_length",
         "brief_length_and_agent_type",
     ]
+    assert block.status == WINDOW_NOT_SETTLED
     for adjustment in block.adjustments:
-        # The fit ran, so the adjustment's own status is its fit's; the
-        # estimates it would report are what the unsettled window refuses.
-        assert adjustment.status == "ok"
+        # No fit runs: whether one is possible depends on which tasks are
+        # analysed, and that is what an unsettled window must not show. The
+        # counts a fit reports are withheld with the estimates.
+        assert adjustment.status == WINDOW_NOT_SETTLED
+        assert adjustment.n_used is None
+        assert adjustment.n_missing_covariate is None
         for result in (adjustment.inference, adjustment.unadjusted_same_subset):
             assert result is not None
             assert result.status == WINDOW_NOT_SETTLED
@@ -437,6 +447,8 @@ def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
             assert result.ci_low is None
             assert result.mean_served is None
             assert result.mean_residual_served is None
+            assert result.strata is None
+            assert result.strata_both_arms is None
 
     log.sweep(at=UNTIL + timedelta(hours=1))
     log.sweep(at=UNTIL + timedelta(hours=4))
@@ -842,8 +854,30 @@ def _without_clock(node: Any) -> Any:
     return node
 
 
-def _arm_shifted_read(log: HoldoutLog, *, shift: int, settled: bool, **kw: Any) -> Any:
-    seed_arm_shift(log, shift=shift)
+def _differing_paths(left: Any, right: Any, path: str = "") -> list[str]:
+    """Every path at which two dumped reports differ, so a failure names them."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        keys = sorted(set(left) | set(right))
+        return [
+            found
+            for key in keys
+            for found in _differing_paths(
+                left.get(key), right.get(key), f"{path}.{key}" if path else key
+            )
+        ]
+    if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
+        return [
+            found
+            for index, (a, b) in enumerate(zip(left, right, strict=True))
+            for found in _differing_paths(a, b, f"{path}[{index}]")
+        ]
+    return [] if left == right else [path]
+
+
+def _arm_shifted_read(
+    log: HoldoutLog, *, seed: dict[str, Any], settled: bool, **kw: Any
+) -> Any:
+    seed_arm_shift(log, **seed)
     if settled:
         log.sweep()
     else:
@@ -853,44 +887,135 @@ def _arm_shifted_read(log: HoldoutLog, *, shift: int, settled: bool, **kw: Any) 
     return _without_clock(report.model_dump(mode="json"))
 
 
-@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
+@pytest.mark.parametrize(
+    ("variant", "outcome", "itt"),
+    [
+        ("values", "log1p_turns", False),
+        ("values", "commits", False),
+        ("values", "prs_created", False),
+        ("cut_offs", "log1p_turns", False),
+        ("cut_offs", "commits", True),
+        ("missing", "log1p_turns", False),
+        ("missing", "prs_created", True),
+    ],
+)
 def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
-    tmp_path: Path, outcome: str
+    tmp_path: Path, variant: str, outcome: str, itt: bool
 ) -> None:
     """The rule: two stores that differ only in one arm's outcomes read the same.
 
     A list of withheld keys would only name the figures someone remembered;
     this compares the whole payload, so a figure added later is caught too.
+    The outcome is the value read, whether the session ended on a usage limit
+    (which decides who is analysed) or whether a value exists at all, so a
+    count of who was analysed carries the outcome as much as a mean does.
     """
     reads = []
-    for name, shift in (("flat", 0), ("shifted", 6)):
+    for name, seed in (("flat", {}), ("changed", ARM_VARIANTS[variant])):
         event_log = SQLiteEventLog(tmp_path / f"{name}.db")
         reads.append(
             _arm_shifted_read(
-                HoldoutLog(event_log), shift=shift, settled=False, outcome=outcome
+                HoldoutLog(event_log),
+                seed=seed,
+                settled=False,
+                outcome=outcome,
+                itt=itt,
             )
         )
         event_log.close()
 
-    assert reads[0] == reads[1]
+    moved = _differing_paths(reads[0], reads[1])
+    assert not moved, "an unsettled read moved at:\n" + "\n".join(moved)
 
 
-def test_the_shift_does_move_a_settled_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
+def test_the_difference_does_move_a_settled_read(tmp_path: Path, variant: str) -> None:
     """The differential above is not vacuous: settled, the same stores differ."""
     reads = []
-    for name, shift in (("flat", 0), ("shifted", 6)):
+    for name, seed in (("flat", {}), ("changed", ARM_VARIANTS[variant])):
         event_log = SQLiteEventLog(tmp_path / f"{name}.db")
-        reads.append(
-            _arm_shifted_read(HoldoutLog(event_log), shift=shift, settled=True)
-        )
+        reads.append(_arm_shifted_read(HoldoutLog(event_log), seed=seed, settled=True))
         event_log.close()
 
     assert reads[0] != reads[1]
-    assert reads[0]["inference"]["difference"] != reads[1]["inference"]["difference"]
-    assert (
-        reads[0]["guardrails"]["measures"][0]["withheld"]["value"]
-        != reads[1]["guardrails"]["measures"][0]["withheld"]["value"]
-    )
+    if variant == "values":
+        assert (
+            reads[0]["inference"]["difference"] != reads[1]["inference"]["difference"]
+        )
+        assert (
+            reads[0]["guardrails"]["measures"][0]["withheld"]["value"]
+            != reads[1]["guardrails"]["measures"][0]["withheld"]["value"]
+        )
+    if variant == "cut_offs":
+        assert reads[0]["funnel"]["cut_offs_excluded"] == 0
+        assert reads[1]["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
+    if variant == "missing":
+        assert reads[0]["funnel"]["outcome_missing"] == 0
+        assert reads[1]["funnel"]["outcome_missing"] == CHANGED_TASKS
+
+
+def _random_read(
+    tmp_path: Path, *, structure: int, outcomes: int, settled: bool, **kw: Any
+) -> Any:
+    event_log = SQLiteEventLog(tmp_path / f"{structure}-{outcomes}-{settled}.db")
+    log = HoldoutLog(event_log)
+    seed_random_outcomes(log, structure=structure, outcomes=outcomes)
+    if settled:
+        log.sweep()
+    else:
+        log.sweep(at=UNTIL - timedelta(hours=1))
+    report = _analyze(log, rate=0.3, **kw)
+    assert report.settled_window.settled is settled
+    event_log.close()
+    return _without_clock(report.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("structure", range(6))
+@pytest.mark.parametrize(
+    ("outcome", "itt"), [("log1p_turns", False), ("commits", True)]
+)
+def test_an_unsettled_read_ignores_outcomes_drawn_at_random(
+    tmp_path: Path, structure: int, outcome: str, itt: bool
+) -> None:
+    """Two stores with one layout and independently drawn outcomes read the same.
+
+    The pair of hand-built stores above names the outcomes it moves, and a
+    figure that none of them moves, such as the count of strata holding both
+    arms, passes unseen. Here cut-offs, missing values and counts fall in both
+    arms and on every parent, so a count that reads the analysed set differs
+    in some seed or none.
+    """
+    reads = [
+        _random_read(
+            tmp_path,
+            structure=structure,
+            outcomes=outcomes,
+            settled=False,
+            outcome=outcome,
+            itt=itt,
+        )
+        for outcomes in (101, 202)
+    ]
+    moved = _differing_paths(reads[0], reads[1])
+    assert not moved, "an unsettled read moved at:\n" + "\n".join(moved)
+
+
+@pytest.mark.parametrize("structure", range(6))
+def test_randomly_drawn_outcomes_do_move_a_settled_read(
+    tmp_path: Path, structure: int
+) -> None:
+    """The random differential is not vacuous: settled, the same pair differs."""
+    reads = [
+        _random_read(tmp_path, structure=structure, outcomes=outcomes, settled=True)
+        for outcomes in (101, 202)
+    ]
+    moved = set(_differing_paths(reads[0], reads[1]))
+    assert {
+        "funnel.analysed",
+        "funnel.cut_offs_excluded",
+        "descriptive.analysed_tasks",
+        "inference.difference",
+    } <= moved
 
 
 def test_an_unsettled_read_keeps_the_keys_and_nulls_the_figures(
@@ -914,8 +1039,17 @@ def test_an_unsettled_read_keeps_the_keys_and_nulls_the_figures(
     assert report.power.realised_sd is None
     assert report.power.power_at_planned_mde is None
     assert report.power.mde_at_target_power is None
-    # What --operational publishes stays: the counts a rate and a window fix.
-    assert d.eligible_by_arm.served + d.eligible_by_arm.withheld == 90
+    # The counts a rate and a window fix stay, and nothing an outcome fixes.
+    assert d.eligible_by_arm.served + d.eligible_by_arm.withheld == 93
+    assert d.analysed_tasks is None
+    assert d.analysed_by_arm is None
+    assert d.parents is None
+    assert report.funnel.analysed is None
+    assert report.funnel.cut_offs_excluded is None
+    assert report.funnel.outcome_missing is None
+    assert report.power.realised_n is None
+    assert report.inference.strata is None
+    assert report.inference.tasks_in_one_arm_strata is None
     recall = next(m for m in report.guardrails.measures if m.name == "recall_rate")
     assert recall.served.value is not None
     others = [m for m in report.guardrails.measures if m.name != "recall_rate"]

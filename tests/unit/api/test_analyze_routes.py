@@ -19,7 +19,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
-from tests.unit.analyze._holdout_fixture import UNTIL, HoldoutLog, seed_arm_shift
+from tests.unit.analyze._holdout_fixture import (
+    ARM_VARIANTS,
+    CHANGED_TASKS,
+    UNTIL,
+    HoldoutLog,
+    seed_arm_shift,
+)
 from trellis.analyze.domains import analyze_domains
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
@@ -400,31 +406,66 @@ def _without_clock(node: Any) -> Any:
     return node
 
 
-@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
-def test_an_unsettled_holdout_read_does_not_move_with_the_withheld_outcomes(
-    client, tmp_path, outcome
-):
-    """Two stores that differ only in one arm's outcomes answer the same."""
-    reads = []
-    opened = []
+def _holdout_read(client, tmp_path, name, *, seed, settled, **params):
+    registry = StoreRegistry(stores_dir=tmp_path / name)
     try:
-        for name, shift in (("flat", 0), ("shifted", 6)):
-            registry = StoreRegistry(stores_dir=tmp_path / name)
-            opened.append(registry)
-            log = HoldoutLog(registry.operational.event_log)
-            seed_arm_shift(log, shift=shift)
+        log = HoldoutLog(registry.operational.event_log)
+        seed_arm_shift(log, **seed)
+        if settled:
+            log.sweep()
+        else:
             log.sweep(at=UNTIL - timedelta(hours=1))
-            app_module._registry = registry
-            analyze._CACHE.clear()
-            resp = client.get(
-                "/api/v1/analyze/holdout",
-                params={**_HOLDOUT_FAST, "outcome": outcome},
-            )
-            assert resp.status_code == 200
-            reads.append(_without_clock(resp.json()["data"]))
+        app_module._registry = registry
+        analyze._CACHE.clear()
+        resp = client.get("/api/v1/analyze/holdout", params={**_HOLDOUT_FAST, **params})
+        assert resp.status_code == 200
+        return _without_clock(resp.json()["data"])
     finally:
-        for registry in opened:
-            registry.close()
+        registry.close()
 
-    assert reads[0]["settled_window"]["settled"] is False
-    assert reads[0] == reads[1]
+
+@pytest.mark.parametrize(
+    ("variant", "outcome", "itt"),
+    [
+        ("values", "log1p_turns", False),
+        ("values", "commits", False),
+        ("values", "prs_created", False),
+        ("cut_offs", "log1p_turns", False),
+        ("cut_offs", "commits", True),
+        ("missing", "log1p_turns", False),
+        ("missing", "prs_created", True),
+    ],
+)
+def test_an_unsettled_holdout_read_does_not_move_with_the_withheld_outcomes(
+    client, tmp_path, variant, outcome, itt
+):
+    """Two stores that differ only in one arm's outcomes answer the same.
+
+    The outcome is the value read, whether the session ended on a usage limit
+    and whether a value exists, so a count of who was analysed moves with it.
+    """
+    params = {"outcome": outcome, "itt": itt}
+    flat = _holdout_read(client, tmp_path, "flat", seed={}, settled=False, **params)
+    changed = _holdout_read(
+        client, tmp_path, "changed", seed=ARM_VARIANTS[variant], settled=False, **params
+    )
+
+    assert flat["settled_window"]["settled"] is False
+    assert flat == changed
+
+
+@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
+def test_the_difference_does_move_a_settled_holdout_read(client, tmp_path, variant):
+    """The comparison above is not vacuous: settled, the same stores differ."""
+    params = {"outcome": "commits"}
+    flat = _holdout_read(client, tmp_path, "flat", seed={}, settled=True, **params)
+    changed = _holdout_read(
+        client, tmp_path, "changed", seed=ARM_VARIANTS[variant], settled=True, **params
+    )
+
+    assert flat["settled_window"]["settled"] is True
+    assert flat != changed
+    if variant == "cut_offs":
+        assert changed["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
+    if variant == "missing":
+        assert changed["funnel"]["outcome_missing"] == CHANGED_TASKS

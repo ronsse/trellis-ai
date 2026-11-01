@@ -161,12 +161,25 @@ def test_a_build_name_is_never_read_as_console_markup(log: HoldoutLog) -> None:
     assert MARKUP_BUILD in _flat(text)
 
 
-def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike() -> None:
+def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike(
+    log: HoldoutLog,
+) -> None:
+    log.sweep()
+
     text, machine = _run("--by-commit")
 
     assert text.exit_code == machine.exit_code
     assert _payload(machine)["by_commit"]["rows"] == []
     assert "no analysed task" in _flat(text)
+
+
+def test_an_unsettled_empty_table_names_the_tasks_it_lists() -> None:
+    """With no sweep past the window end the table lists eligible tasks."""
+    text, machine = _run("--by-commit")
+
+    assert text.exit_code == machine.exit_code
+    assert _payload(machine)["by_commit"]["rows"] == []
+    assert "no eligible task" in _flat(text)
 
 
 def test_a_build_is_labelled_as_health_labels_it_and_one_commit_is_one_row(

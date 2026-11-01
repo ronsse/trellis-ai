@@ -37,6 +37,16 @@ WINDOW_START = UNTIL - timedelta(days=DAYS)
 KEYED_FROM = WINDOW_START + timedelta(days=20)
 
 
+#: The outcome fields a readout turns into a measured value.
+_MEASURED_FIELDS = (
+    "assistant_turns",
+    "prs_created",
+    "commits",
+    "input_tokens",
+    "output_tokens",
+)
+
+
 def outcome_payload(
     *,
     turns: int,
@@ -44,7 +54,7 @@ def outcome_payload(
     prs_created: int = 0,
     commits: int = 0,
     tokens: int | None = 10_000,
-    tool_errors: int = 0,
+    tool_errors: int | None = 0,
 ) -> dict[str, Any]:
     """A ``SessionOutcome.to_payload()`` dict, every field present."""
     return {
@@ -291,9 +301,10 @@ class HoldoutLog:
         prs_created: int = 0,
         commits: int = 0,
         tokens: int | None = 10_000,
-        tool_errors: int = 0,
+        tool_errors: int | None = 0,
         sectioned: bool = False,
         with_outcome: bool = True,
+        measures_missing: bool = False,
         timing: dict[str, Any] | None = None,
         covariates: dict[str, Any] | None = None,
         pack_metadata: Sequence[dict[str, Any] | None] | None = None,
@@ -303,7 +314,9 @@ class HoldoutLog:
         ``arms`` holds each call's ``withheld`` value in call order
         (``None`` for a row from a build before the holdout). The join is
         written an hour after the last pack. ``pack_metadata`` holds each
-        pack row's event metadata in the same order.
+        pack row's event metadata in the same order. ``measures_missing``
+        leaves every outcome count the readout reads as ``None``, so the task
+        has an outcome block and no measured value.
         """
         self._tasks += 1
         task_id = f"task-{self._tasks:04d}"
@@ -334,6 +347,8 @@ class HoldoutLog:
             if with_outcome
             else None
         )
+        if outcome is not None and measures_missing:
+            outcome.update(dict.fromkeys(_MEASURED_FIELDS))
         self.join(
             task_id,
             at=start + timedelta(minutes=len(arms), hours=1),
@@ -536,33 +551,143 @@ def seed_late_build(
     log.sweep()
 
 
-def seed_arm_shift(log: HoldoutLog, *, shift: int = 0, rate: float = 0.2) -> None:
-    """Ninety tasks over three parents and three builds; the withheld arm moved.
+#: How many tasks :func:`seed_arm_shift` changes: three in each of the first
+#: three parents, the fourth parent's only task and one of the fifth's two.
+CHANGED_TASKS = 11
+#: How a second store differs from the first, by the one thing it changes in
+#: the withheld arm: the outcome values, which tasks ended on a usage limit, or
+#: which tasks have no measured outcome. Keyword arguments of the seed.
+ARM_VARIANTS: dict[str, dict[str, Any]] = {
+    "values": {"shift": 6},
+    "cut_offs": {"cut_offs": True},
+    "missing": {"missing": True},
+}
+
+
+def seed_arm_shift(
+    log: HoldoutLog,
+    *,
+    shift: int = 0,
+    cut_offs: bool = False,
+    missing: bool = False,
+    rate: float = 0.2,
+) -> None:
+    """Ninety-three tasks over five parents and three builds; the withheld arm moved.
 
     Every figure is arithmetic on the task's index, so two calls differ in
-    nothing but ``shift``, which is added to each of the withheld arm's four
-    outcome counts (turns, PRs, commits, tool errors). The served arm, the
-    cut-off flags, the covariates, the builds and the timing are identical.
+    nothing but the arguments. ``shift`` is added to each of the withheld
+    arm's four outcome counts (turns, PRs, commits, tool errors). ``cut_offs``
+    ends, and ``missing`` leaves with no measured outcome, every second
+    withheld task, the only task of the fourth parent and the withheld task of
+    the fifth, whose other task is served: the fourth parent's stratum
+    disappears and the fifth's drops from two arms to one. Those tasks carry no
+    covariates, record no tool errors and made two calls in both stores, so
+    each count that reads the analysed set (the covariate coverage, the
+    re-call rate, a guardrail's missing count, the parents and strata it spans,
+    the main sessions) has something to differ on. The
+    served arm, the builds and the timing are identical across calls.
     """
     commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
     hour = 0
-    for parent_index, parent in enumerate(("parent-a", "parent-b", "parent-c")):
+
+    def one(parent: str, parent_index: int, k: int, *, changed: bool) -> None:
+        nonlocal hour
+        withheld = k % 5 == 0
+        move = shift if withheld else 0
+        build = commits[0] if k < 15 else commits[1 if k < 28 else 2]
+        log.task(
+            start=MONDAY + timedelta(hours=hour),
+            parent=parent,
+            arms=[withheld, withheld] if changed else [withheld],
+            turns=10 + (k * 7 + parent_index * 3) % 25 + move,
+            prs_created=(k + parent_index) % 2 + move,
+            commits=(k * 5 + parent_index) % 4 + move,
+            tool_errors=None if changed else (k * 3 + parent_index) % 3 + move,
+            ended_on_error=cut_offs and changed,
+            measures_missing=missing and changed,
+            rate=rate,
+            pack_metadata=[provenance(build)] * (2 if changed else 1),
+            covariates=None
+            if changed
+            else covariates_payload(
+                brief_chars=100 + (hour * 37) % 800, agent_type=f"kind-{k % 3}"
+            ),
+        )
+        hour += 1
+
+    parents = ("parent-a", "parent-b", "parent-c", "parent-d", "parent-e")
+    for parent_index, parent in enumerate(parents[:3]):
         for k in range(30):
-            withheld = k % 5 == 0
-            move = shift if withheld else 0
-            build = commits[0] if k < 15 else commits[1 if k < 28 else 2]
-            log.task(
-                start=MONDAY + timedelta(hours=hour),
-                parent=parent,
-                arms=[withheld],
-                turns=10 + (k * 7 + parent_index * 3) % 25 + move,
-                prs_created=(k + parent_index) % 2 + move,
-                commits=(k * 5 + parent_index) % 4 + move,
-                tool_errors=(k * 3 + parent_index) % 3 + move,
-                rate=rate,
-                pack_metadata=[provenance(build)],
-                covariates=covariates_payload(
-                    brief_chars=100 + (hour * 37) % 800, agent_type=f"kind-{k % 3}"
-                ),
-            )
-            hour += 1
+            one(parent, parent_index, k, changed=k % 5 == 0 and k % 2 == 0)
+    one(parents[3], 3, 0, changed=True)
+    one(parents[4], 4, 0, changed=True)
+    one(parents[4], 4, 1, changed=False)
+    for parent in parents:
+        log.join(
+            parent,
+            at=MONDAY + timedelta(hours=hour),
+            pack_ids=[],
+            parent=None,
+            outcome=outcome_payload(turns=5),
+        )
+        hour += 1
+
+
+def seed_random_outcomes(
+    log: HoldoutLog, *, structure: int, outcomes: int, rate: float = 0.3
+) -> None:
+    """Eighty tasks over seven parents; ``outcomes`` alone draws what a task did.
+
+    ``structure`` draws everything a window and a rate fix: the parent, the arm,
+    the number of packs, the build and whether a covariate was recorded, and the
+    main session of each parent. ``outcomes`` draws the figures: the counts, a
+    missing tool-error count, a usage-limit cut-off, a missing measured outcome
+    and the main sessions' own. Two calls with the same ``structure`` differ in
+    outcomes only, and the draws are independent, so cut-offs and missing values
+    land in both arms and on any stratum, which a hand-built pair cannot promise.
+    """
+    layout = random.Random(structure)  # noqa: S311 - test RNG, not crypto
+    results = random.Random(outcomes)  # noqa: S311 - test RNG, not crypto
+    commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
+    hour = 0
+    for _ in range(80):
+        parent = f"parent-{layout.randrange(7)}"
+        withheld = layout.random() < 0.3
+        packs = layout.choice((1, 1, 2))
+        build = layout.choice(commits)
+        covered = layout.random() < 0.8
+        brief = layout.randrange(100, 900)
+        kind = layout.randrange(3)
+        cut_off = results.random() < 0.25
+        gone = results.random() < 0.1
+        no_errors = results.random() < 0.1
+        log.task(
+            start=MONDAY + timedelta(hours=hour),
+            parent=parent,
+            arms=[withheld] * packs,
+            turns=results.randrange(5, 60),
+            prs_created=results.randrange(0, 3),
+            commits=results.randrange(0, 5),
+            tool_errors=None if no_errors else results.randrange(0, 6),
+            ended_on_error=cut_off,
+            measures_missing=gone,
+            rate=rate,
+            pack_metadata=[provenance(build)] * packs,
+            covariates=(
+                covariates_payload(brief_chars=brief, agent_type=f"kind-{kind}")
+                if covered
+                else None
+            ),
+        )
+        hour += 1
+    for index in range(7):
+        log.join(
+            f"parent-{index}",
+            at=MONDAY + timedelta(hours=hour),
+            pack_ids=[],
+            parent=None,
+            outcome=outcome_payload(
+                turns=results.randrange(3, 30), ended_on_error=results.random() < 0.3
+            ),
+        )
+        hour += 1

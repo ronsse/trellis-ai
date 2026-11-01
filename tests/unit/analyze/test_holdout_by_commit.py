@@ -351,6 +351,59 @@ def test_one_commit_under_two_versions_is_one_row_naming_both(
     }
 
 
+def test_the_operational_table_keys_and_labels_rows_as_the_outcome_read_does(
+    log: HoldoutLog,
+) -> None:
+    """One commit under two versions is one row in both, with the same name.
+
+    The operational table once keyed on the ``(version, commit)`` pair, so the
+    same night read as two rows there and one in the outcome read.
+    """
+    for hours, version, commit, withheld in [
+        (0, "1.0.0", COMMIT_A, False),
+        (1, "1.0.0", COMMIT_A, True),
+        (2, "1.1.0", COMMIT_A, False),
+        (3, "1.1.0", COMMIT_A, True),
+        (4, "1.0.0", None, False),
+        (5, "1.0.0", COMMIT_B, True),
+    ]:
+        log.task(
+            start=MONDAY + timedelta(hours=hours),
+            arms=[withheld],
+            pack_metadata=[_stamped(version, commit)],
+            commits=hours + 1,
+        )
+    log.sweep()
+
+    operational = holdout.analyze_holdout_operational(
+        log.event_log, days=DAYS, until=UNTIL, by_commit=True
+    )
+    full = _analyze(log)
+
+    assert operational.by_commit is not None
+    assert full.by_commit is not None
+    labels = [row.build for row in operational.by_commit.rows]
+    assert labels == [
+        f"1.0.0, 1.1.0 @ {COMMIT_A}",
+        build_label("1.0.0", None),
+        build_label("1.0.0", COMMIT_B),
+    ]
+    assert labels == [row.build for row in full.by_commit.rows]
+    for counted, analysed in zip(
+        operational.by_commit.rows, full.by_commit.rows, strict=True
+    ):
+        assert (counted.served, counted.withheld) == (
+            analysed.served.n,
+            analysed.withheld.n,
+        )
+        assert counted.first_seen == analysed.first_seen
+        assert counted.last_seen == analysed.last_seen
+    shared = operational.by_commit.rows[0]
+    assert (shared.served, shared.withheld) == (2, 2)
+    assert "commit" in operational.by_commit.note
+    assert "(version, commit)" not in operational.by_commit.note
+
+
 def test_two_commits_sharing_a_twelve_character_prefix_are_two_builds(
     log: HoldoutLog,
 ) -> None:
@@ -469,6 +522,9 @@ def test_a_task_the_descriptive_block_excludes_is_not_in_the_table(
 
 
 def test_no_analysed_task_gives_an_empty_table(log: HoldoutLog) -> None:
+    for hours in (1, 25):
+        log.sweep(at=UNTIL + timedelta(hours=hours))
+
     report = _analyze(log)
 
     assert report.by_commit is not None

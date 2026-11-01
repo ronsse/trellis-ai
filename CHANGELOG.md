@@ -14,16 +14,22 @@ All notable changes to Trellis will be documented in this file.
   stratum's share of the estimator's weight. A read given `--until` whose
   capture sweeps have not settled past it reports `settled_window.settled:
   false` and `inference.status == "window not settled"` instead of a result,
-  and carries no value computed from an outcome: the arm means, outcome SDs,
-  MDE and power figures and guardrail values are null (the keys stay), so an
-  early read cannot show the arms' difference; `--operational` is the early
-  check. The window is also unsettled while an in-window, in-rate task is
+  and carries nothing an outcome fixes: the arm means, outcome SDs, MDE and
+  power figures and guardrail values are null, and so is every count of who is
+  analysed (the funnel's cut-offs excluded, outcome missing and analysed, the
+  per-arm, per-parent, per-stratum and per-build counts, the adjustments'
+  counts, the realised N and each guardrail's n), because those counts give the
+  arms' outcomes back (the keys stay, no covariate fit runs, and the by-build
+  table lists the eligible tasks). An early read cannot show the arms'
+  difference; `--operational` is the early check. The window is also unsettled
+  while an in-window, in-rate task is
   unfinished (a join stamped after its source's last sweep), and only sources
   with such a task are waited on, so a retired source does not hold the read
   open. A capture sweep that parsed no session and lost some to an error no
   longer counts as a completed sweep, in this report and in `--operational`.
   `--by-commit` keys a row on the commit, so one commit under two versions is
-  one row naming both. The agent-type secondary is marked pre-registered, and the analytic MDE and
+  one row naming both, in the full read and in `--operational` alike. The
+  agent-type secondary is marked pre-registered, and the analytic MDE and
   N-for-a-10%-effect now size at the analysed `--rate` instead of assuming a
   50/50 split (`analytic_mde` takes a `share`, default 0.5, so existing calls
   are unchanged). The primary estimator, strata, exclusions, assignment and

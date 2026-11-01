@@ -1705,6 +1705,11 @@ def _num(value: float | None, spec: str = ".3g") -> str:
     return "n/a" if value is None else format(value, spec)
 
 
+def _count(value: int | None) -> str:
+    """A count, or ``withheld`` where an unsettled read declines to state it."""
+    return "withheld" if value is None else str(value)
+
+
 def _fig(value: float | None, reason: str | None, spec: str = ".3g") -> str:
     """A figure, or why the evidence cannot give it."""
     if value is not None:
@@ -1746,7 +1751,7 @@ def _render_holdout_sessions(report: HoldoutReport) -> None:
         f"    main sessions {s.rolled_up} rolled up ({s.not_finished} not finished "
         f"and {s.without_main_join} without a main join left out): reaching a "
         f"retrieval {s.reaching_retrieval} ({reaching}), with a non-empty pack "
-        f"{s.eligible} ({eligible}), analysed {s.analysed} ({analysed})"
+        f"{s.eligible} ({eligible}), analysed {_count(s.analysed)} ({analysed})"
     )
     console.print(
         f"    main-session outcome SD {_fig(s.outcome_sd, why('outcome_sd'))} "
@@ -1768,11 +1773,11 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
     console.print(
         f"    eligible tasks {d.eligible_tasks} "
         f"({_per_30_days(d.eligible_per_30d, why('eligible_per_30d'))}); analysed "
-        f"{d.analysed_tasks} "
+        f"{_count(d.analysed_tasks)} "
         f"({_per_30_days(d.analysed_per_30d, why('analysed_per_30d'))})"
     )
     across = (
-        f" across {d.parents} parent sessions"
+        f" across {_count(d.parents)} parent sessions"
         if d.between_parent_share is not None
         else ""
     )
@@ -1807,10 +1812,16 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
     cut_off_counts = (
         "withheld" if cut_offs is None else f"{cut_offs.served} / {cut_offs.withheld}"
     )
+    analysed_by_arm = d.analysed_by_arm
+    analysed_counts = (
+        "withheld"
+        if analysed_by_arm is None
+        else f"{analysed_by_arm.served} / {analysed_by_arm.withheld}"
+    )
     console.print(
         f"    served / withheld: eligible {d.eligible_by_arm.served} / "
         f"{d.eligible_by_arm.withheld}, cut-offs {cut_off_counts}, analysed "
-        f"{d.analysed_by_arm.served} / {d.analysed_by_arm.withheld}"
+        f"{analysed_counts}"
     )
     console.print(f"    post-hoc share {_fig(d.post_hoc_share, why('post_hoc_share'))}")
     for check in d.arm_ratio:
@@ -1850,16 +1861,27 @@ def _secondary_line(label: str, inference: HoldoutSecondaryInference) -> str:
 
 def _render_holdout_secondary(report: HoldoutReport) -> None:
     """The covariate-adjusted fits, each on a few lines, marked as not decisive."""
+    from trellis.analyze.holdout import WINDOW_NOT_SETTLED  # noqa: PLC0415
+
     for adjustment in report.covariate_adjusted.adjustments:
         label = _ADJUSTMENT_LABELS.get(adjustment.name, adjustment.name)
         inference = adjustment.inference
         unadjusted = adjustment.unadjusted_same_subset
-        caveat = " (CI ignores coefficient uncertainty)" if inference else ""
+        withheld = adjustment.status == WINDOW_NOT_SETTLED
+        caveat = (
+            " (CI ignores coefficient uncertainty)"
+            if inference is not None and not withheld
+            else ""
+        )
         console.print()
         console.print(
             f"  [bold]Secondary (covariate-adjusted, not decisive)[/bold]: "
             f"{escape(label)}{caveat}"
         )
+        if withheld:
+            # No fit ran, so there is no count of the tasks it would use either.
+            console.print(f"    {escape(adjustment.reason or '')}")
+            continue
         if inference is None:
             console.print(f"    not measurable: {escape(adjustment.reason or '')}")
         elif inference.p_value is not None:
@@ -1902,10 +1924,10 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
             f"{inference.permutations:,} within-stratum permutations"
         )
     console.print(
-        f"    strata (parent session x ISO week) {inference.strata}: "
-        f"{inference.strata_both_arms} with both arms, {inference.strata_one_arm} "
-        f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
-        "zero weight"
+        f"    strata (parent session x ISO week) {_count(inference.strata)}: "
+        f"{_count(inference.strata_both_arms)} with both arms, "
+        f"{_count(inference.strata_one_arm)} with one arm, whose "
+        f"{_count(inference.tasks_in_one_arm_strata)} tasks carry zero weight"
     )
     if inference.top_stratum_weight_share is not None:
         console.print(
@@ -1921,7 +1943,7 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
         f"{power.target_power:.0%} power"
     )
     console.print(
-        f"    achieved: N {power.realised_n}, SD within parent "
+        f"    achieved: N {_count(power.realised_n)}, SD within parent "
         f"{_num(power.realised_sd)}; power at the planned MDE "
         f"{_num(power.power_at_planned_mde)}; MDE at {power.target_power:.0%} "
         f"power {_num(power.mde_at_target_power)} ({power.sims} simulated "
@@ -1932,7 +1954,7 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
 
 def _guardrail_arm(arm: HoldoutGuardrailArm, reads: str) -> str:
     """One arm's guardrail value with its n and any tasks lacking the field."""
-    detail = f"n {arm.n}"
+    detail = f"n {_count(arm.n)}"
     if arm.value is not None and arm.missing:
         detail += f", {arm.missing} without {escape(reads)}"
     return f"{_fig(arm.value, arm.not_measurable)} ({detail})"
@@ -1957,8 +1979,13 @@ def _render_settled_window(settled: HoldoutSettledWindow) -> None:
     console.print(
         "    No figure computed from an outcome is printed on this read: the arm "
         "means, the outcome SDs, the MDE, the power and the guardrail values "
-        "are withheld. [bold]--operational[/bold] reports whether the "
-        "experiment is running, with no outcome read."
+        "are withheld."
+    )
+    console.print(
+        "    So is every count of who is analysed (cut-offs excluded, outcome "
+        "missing, analysed, per arm, per build and per stratum), because those "
+        "counts give the figures back. [bold]--operational[/bold] reports "
+        "whether the experiment is running, with no outcome read."
     )
 
 
@@ -1975,23 +2002,25 @@ def _render_holdout_by_commit(report: HoldoutReport) -> None:
     )
     width = max([len("build"), *(len(row.build) for row in table.rows)])
     if not table.rows:
-        console.print("    no analysed task")
+        # A withheld table lists the eligible tasks; a settled one the analysed.
+        which = "analysed" if table.units_spanning_builds is not None else "eligible"
+        console.print(f"    no {which} task")
     else:
         console.print(
             f"    {'build'.ljust(width)}  {'first':10}  {'last':10}  "
             f"{'served n/mean':13}  {'withheld n/mean':15}  served - withheld"
         )
     for row in table.rows:
-        served = f"{row.served.n} / {_num(row.served.outcome_mean)}"
-        withheld = f"{row.withheld.n} / {_num(row.withheld.outcome_mean)}"
+        served = f"{_count(row.served.n)} / {_num(row.served.outcome_mean)}"
+        withheld = f"{_count(row.withheld.n)} / {_num(row.withheld.outcome_mean)}"
         console.print(
             f"    {escape(row.build.ljust(width))}  {escape(row.first_seen[:10])}  "
             f"{escape(row.last_seen[:10])}  {served:13}  {withheld:15}  "
             f"{_num(row.difference)}"
         )
     console.print(
-        f"    {table.units_spanning_builds} task(s) span builds, each counted "
-        "under its first pack's build"
+        f"    {_count(table.units_spanning_builds)} task(s) span builds, each "
+        "counted under its first pack's build"
     )
     if table.pooled_builds:
         console.print(
@@ -2095,8 +2124,8 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"    eligible {f.eligible} "
         f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
         f"pack id, {f.pre_treatment_unknown} with no retrieval timing), "
-        f"cut-offs excluded {f.cut_offs_excluded}, outcome "
-        f"missing {f.outcome_missing}, analysed {f.analysed}"
+        f"cut-offs excluded {_count(f.cut_offs_excluded)}, outcome "
+        f"missing {_count(f.outcome_missing)}, analysed {_count(f.analysed)}"
     )
     _render_holdout_descriptive(report)
     _render_holdout_by_commit(report)

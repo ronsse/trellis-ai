@@ -319,15 +319,19 @@ class TestMainSessions:
 
         s = report.descriptive.sessions
         assert (s.rolled_up, s.not_finished, s.without_main_join) == (9, 1, 1)
-        assert (s.reaching_retrieval, s.eligible, s.analysed) == (8, 6, 4)
+        assert (s.reaching_retrieval, s.eligible) == (8, 6)
         assert s.reaching_retrieval_per_30d == pytest.approx(8 * 30 / DAYS)
         assert s.eligible_per_30d == pytest.approx(6 * 30 / DAYS)
-        assert s.analysed_per_30d == pytest.approx(4 * 30 / DAYS)
         # The window is not settled (the only sweep ran before it ended), so the
-        # figures computed from an outcome are withheld; the counts stay.
+        # figures computed from an outcome are withheld, and so is every count of
+        # the analysed sessions, which an outcome fixes. The settled read below
+        # counts four.
+        assert s.analysed is None
+        assert s.analysed_per_30d is None
         assert s.outcome_sd is None
-        assert all(h.mde is None and h.ratio is None for h in s.mde_by_horizon)
-        assert [h.n for h in s.mde_by_horizon] == pytest.approx([2, 4, 6])
+        assert all(
+            h.n is None and h.mde is None and h.ratio is None for h in s.mde_by_horizon
+        )
         assert any("no join for the main transcript" in n for n in report.notes)
 
     def test_a_settled_read_powers_the_rolled_up_sessions(

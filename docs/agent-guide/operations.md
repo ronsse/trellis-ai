@@ -3742,10 +3742,11 @@ gives that stamp in `serve.serving_builds` (`1.0.0 @ <commit>`,
 `1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp).
 Rows are grouped on the commit, so one commit under two versions is one row
 labelled with both (`1.0.0, 1.1.0 @ <commit>`) and pooled once; a build with no
-commit is keyed by its version. `analyze health` and `--operational` key on the
-full `(version, commit)` pair, so their rows can split a commit that this table
-joins. `rows` come in first-seen order, each with `build`, `first_seen` and
-`last_seen` (the earliest and latest first-pack times of the tasks counted under
+commit is keyed by its version. `analyze health` keys on the full
+`(version, commit)` pair, so its rows can split a commit that this table joins;
+`--operational` keys and labels its rows as this table does, so the two agree on
+what a row is. `rows` come in first-seen order, each with `build`, `first_seen`
+and `last_seen` (the earliest and latest first-pack times of the tasks counted under
 it) and, per arm, `n` and
 `outcome_mean`, the mean of the primary's outcome column (`null` for an empty
 arm). The rows cover the same tasks as the primary: the analysed set, so cut-offs
@@ -3786,22 +3787,40 @@ and a stopped source with an analysed task does, named in `reason`. There is no 
 
 Until the window settles, `settled_window.settled` is `false`, `needs_sweep_after` names the time a
 completed sweep must reach, `reason` says why, the text prints an `INCOMPLETE READ` line, and
-`inference.status` reads `window not settled`. The read carries no value computed from an outcome.
-The primary and each adjustment's `inference` and `unadjusted_same_subset` are refused (the
-adjustment's own `status` still reports whether its fit ran). `by_commit` keeps its counts and
-drops its means and differences. In `descriptive`, the outcome SDs, `between_parent_share`,
-`n_for_10pct_effect`, the PR base rate and `prs_created_mean`, the cut-off shares and
-`cut_offs_by_arm`, and every `mde_by_horizon` figure are `null`, and `not_measurable` says so. In
-`power`, `status` reads `window not settled` and `realised_sd`, `power_at_planned_mde` and
-`mde_at_target_power` are `null`. In `guardrails`, every measure but `recall_rate` (which reads
-pack ids, not an outcome) has a `null` value in both arms, with `n` and `missing` kept. The keys all
-stay so no consumer loses one, and the exit code is `0` either way and does not depend on
-`--format`. Counts a window and a rate fix, such as `eligible_by_arm`, stay: the analysed counts
-and the by-build `n`s also stay, so an arm's cut-off count can be derived from them. An early
-check that the experiment is running is `--operational`, which reads no outcome. The refusal
-fires only for an `--until` close to the data's last sweep, so it is not a horizon gate, and
-`--settle-hours 0` settles on one sweep. With daily sweeps (say at 10:00Z, as an example only) and
-`--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is the next morning's and
+`inference.status` reads `window not settled`. The read carries nothing an outcome fixes, which is
+more than the values computed from one: who is analysed is decided by whether a session ended on a
+usage limit and whether a value exists, so a count of the analysed tasks gives the arms' outcomes
+back (eligible minus analysed is the cut-offs and the missing). Two stores that differ only in the
+withheld arm's outcome values, usage-limit flags or missing outcomes print the same unsettled
+read, which `tests/unit/analyze/test_holdout_readout_form.py` pins through the library, the CLI in
+both formats and the REST route.
+
+The values are `null`. The primary and each adjustment's `inference` and `unadjusted_same_subset`
+are refused. In `descriptive`, the outcome SDs, `between_parent_share`, `n_for_10pct_effect`, the PR
+base rate and `prs_created_mean`, the cut-off shares and `cut_offs_by_arm`, and every
+`mde_by_horizon` figure are `null`, and `not_measurable` says so. In `power`, `status` reads
+`window not settled` and `realised_sd`, `power_at_planned_mde` and `mde_at_target_power` are
+`null`. In `guardrails`, every measure but `recall_rate` (which reads pack ids, not an outcome) has
+a `null` value in both arms.
+
+The counts of who is analysed are `null` too: in `funnel`, `analysed`, `cut_offs_excluded` and
+`outcome_missing`, and the `cut_offs` row of `exclusions` (`excluded`); in `descriptive`,
+`analysed_tasks`, `analysed_per_30d`, `analysed_by_arm` and `parents`, and `sessions.analysed` and
+its per-30-day rate and horizon `n`s; in `inference`, the four strata counts; in `power`,
+`realised_n`; in `guardrails`, `n` and `missing` of every measure but `recall_rate`, whose value,
+`n` and `missing` count eligible tasks and stay; in each `mde_by_horizon` entry, `n`. No covariate
+fit runs, so `covariate_adjusted` and each adjustment read `window not settled` with `n_used` and
+`n_missing_covariate` `null`. `by_commit`
+lists the eligible tasks of each commit, with every `n`, mean and difference `null`, and
+`units_spanning_builds` `null`. The re-call rate averages the eligible tasks instead of the analysed
+ones, which no outcome moves. The text prints `withheld` for a count. The keys all stay so no
+consumer loses one, and the exit code is `0` either way and does not depend on `--format`. The
+counts a window and a rate fix stay: `eligible_by_arm`, the rest of the funnel, the arm-ratio
+checks. A read with no `--until` does not run the check and is not changed, and neither is a
+settled read. An early check that the experiment is running is `--operational`, which reads no
+outcome. The refusal fires only for an `--until` close to the data's last sweep, so it is not a
+horizon gate, and `--settle-hours 0` settles on one sweep. With daily sweeps (say at 10:00Z, as an
+example only) and `--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is the next morning's and
 the earliest complete read follows the sweep after it.
 
 A later run of the same command reads the same window: the window is bounded by `--until`, and
@@ -3839,7 +3858,7 @@ only from a join that names no pack. That bounds what the fixtures read, not the
 store: a reader of the events can still read them. Joins and sweeps are paged to completion, so there is no
 scan cap and `--limit` with `--operational` is a usage error (exit 2 in both
 formats). Joins stamped at one instant are ordered by event id, and
-`--by-commit` rows first seen together by build label.
+`--by-commit` rows first seen together by row label.
 
 **The rule.** An operational figure depends only on values fixed when a task's
 first pack was assembled, and on capture sweep times, which no one task drives.
@@ -3947,8 +3966,10 @@ split by arm. `--outcome` and `--itt` are accepted and change nothing;
 `--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` are
 validated as for the full report and then unused, so an invalid one exits
 alike with and without `--operational`. With `--by-commit`, `by_commit` holds
-counts only: per build the eligible tasks that were `served` and `withheld`,
-each under its first pack's build. The text and JSON are an inspection aid, not
+counts only: per commit the eligible tasks that were `served` and `withheld`,
+each under its first pack's build, keyed and labelled as the `--by-commit` table
+of the full report keys and labels its rows (one commit stamped under two versions
+is one row, named with both). The text and JSON are an inspection aid, not
 a pause control: nothing here stops a run.
 
 The guardrails block

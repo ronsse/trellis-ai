@@ -104,7 +104,8 @@ the read. The withholding rate is an owner setting and is not part of it.
   later sweep follows. This is not a horizon gate. The refusal fires only for an `--until` close
   to the data's last sweep, and `--settle-hours 0` settles on one sweep. An unsettled read reports
   `settled_window.settled: false` and `inference.status == "window not settled"`, and carries no
-  figure computed from an outcome (arm means, SDs, MDE, power and guardrail values are null). To
+  figure computed from an outcome (arm means, SDs, MDE, power and guardrail values are null) and
+  no count of who is analysed (cut-offs excluded, outcome missing, analysed, realised N). To
   check early that the experiment is running, use `trellis analyze holdout --operational`, which
   reads no outcome. A later run of the same command reads the same window, so it must give the
   same pack rows while `scan.truncated` is `false`; raise `--limit` if it is not.

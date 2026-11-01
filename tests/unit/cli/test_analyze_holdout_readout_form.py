@@ -16,6 +16,8 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from tests.unit.analyze._holdout_fixture import (
+    ARM_VARIANTS,
+    CHANGED_TASKS,
     MONDAY,
     UNTIL,
     HoldoutLog,
@@ -245,59 +247,92 @@ def _read_shifted(
     monkeypatch: pytest.MonkeyPatch,
     root: Path,
     *,
-    shift: int,
+    seed: dict[str, Any],
     settled: bool,
     outcome: str,
+    itt: bool = False,
 ) -> tuple[Any, str]:
     registry = _store_at(monkeypatch, root)
     log = HoldoutLog(registry.operational.event_log)
-    seed_arm_shift(log, shift=shift)
+    seed_arm_shift(log, **seed)
     if settled:
         log.sweep()
     else:
         log.sweep(at=UNTIL - timedelta(hours=1))
-    text = runner.invoke(app, _argv(outcome))
-    machine = runner.invoke(app, _argv(outcome, "--format", "json"))
+    extra = ["--itt"] if itt else []
+    text = runner.invoke(app, _argv(outcome, *extra))
+    machine = runner.invoke(app, _argv(outcome, *extra, "--format", "json"))
     assert text.exit_code == machine.exit_code
     return _without_clock(_payload(machine)), plain(text.stdout)
 
 
-@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
+@pytest.mark.parametrize(
+    ("variant", "outcome", "itt"),
+    [
+        ("values", "log1p_turns", False),
+        ("values", "commits", False),
+        ("values", "prs_created", False),
+        ("cut_offs", "log1p_turns", False),
+        ("cut_offs", "commits", True),
+        ("missing", "log1p_turns", False),
+        ("missing", "prs_created", True),
+    ],
+)
 def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    variant: str,
+    outcome: str,
+    itt: bool,
 ) -> None:
     """Two stores that differ only in one arm's outcomes print the same read.
 
-    The whole payload is compared, as the whole of what the command prints is
-    what must not carry an outcome; a list of withheld keys would only name
-    the figures someone remembered.
+    The whole payload and the whole text are compared, as the whole of what
+    the command prints is what must not carry an outcome; a list of withheld
+    keys would only name the figures someone remembered. The outcome is the
+    value read, whether the session ended on a usage limit, and whether a
+    value exists at all, so a count of who was analysed moves with it.
     """
     flat_json, flat_text = _read_shifted(
-        monkeypatch, tmp_path / "flat", shift=0, settled=False, outcome=outcome
+        monkeypatch, tmp_path / "flat", seed={}, settled=False, outcome=outcome, itt=itt
     )
-    shifted_json, shifted_text = _read_shifted(
-        monkeypatch, tmp_path / "shifted", shift=6, settled=False, outcome=outcome
+    changed_json, changed_text = _read_shifted(
+        monkeypatch,
+        tmp_path / "changed",
+        seed=ARM_VARIANTS[variant],
+        settled=False,
+        outcome=outcome,
+        itt=itt,
     )
 
     assert flat_json["settled_window"]["settled"] is False
-    assert flat_json == shifted_json
-    assert flat_text == shifted_text
+    assert flat_json == changed_json
+    assert flat_text == changed_text
 
 
-def test_the_shift_does_move_a_settled_read(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("variant", sorted(ARM_VARIANTS))
+def test_the_difference_does_move_a_settled_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
 ) -> None:
     """The comparison above is not vacuous: settled, the same stores differ."""
     flat_json, flat_text = _read_shifted(
-        monkeypatch, tmp_path / "flat", shift=0, settled=True, outcome="commits"
+        monkeypatch, tmp_path / "flat", seed={}, settled=True, outcome="commits"
     )
-    shifted_json, shifted_text = _read_shifted(
-        monkeypatch, tmp_path / "shifted", shift=6, settled=True, outcome="commits"
+    changed_json, changed_text = _read_shifted(
+        monkeypatch,
+        tmp_path / "changed",
+        seed=ARM_VARIANTS[variant],
+        settled=True,
+        outcome="commits",
     )
 
     assert flat_json["settled_window"]["settled"] is True
-    assert flat_json != shifted_json
-    assert flat_text != shifted_text
+    assert flat_json != changed_json
+    assert flat_text != changed_text
+    if variant == "cut_offs":
+        assert changed_json["funnel"]["cut_offs_excluded"] == CHANGED_TASKS
+    if variant == "missing":
+        assert changed_json["funnel"]["outcome_missing"] == CHANGED_TASKS
 
 
 def test_the_text_says_what_is_withheld_and_where_the_early_check_is(
@@ -311,5 +346,13 @@ def test_the_text_says_what_is_withheld_and_where_the_early_check_is(
     assert text.exit_code == machine.exit_code == EXIT_OK
     flat = _flat(text)
     assert "No figure computed from an outcome is printed on this read" in flat
+    assert "every count of who is analysed" in flat
     assert "--operational" in flat
     assert "cut-offs withheld" in flat
+    # A count the read declines to state prints as the word, never as None.
+    assert "None" not in flat
+    assert (
+        "cut-offs excluded withheld, outcome missing withheld, analysed withheld"
+        in flat
+    )
+    assert "analysed withheld" in flat
