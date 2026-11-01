@@ -3706,7 +3706,9 @@ invalid option or an unnamed choice between rates, in both formats.
 
 Score the EventLog into learning candidates for human review and write two
 artifacts, `intent_learning_candidates.json` and
-`promotion_decisions.template.json`. Read-only: nothing is promoted here.
+`promotion_decisions.template.json`. Nothing is promoted here. It is not a pure
+read: besides the two files, each run records itself as a meta-Activity in the
+graph unless `--no-meta-trace` is passed.
 
 ```bash
 trellis analyze learning-candidates [--output-dir PATH] [--days N] \
@@ -3717,7 +3719,8 @@ trellis analyze learning-candidates [--output-dir PATH] [--days N] \
 |--------|---------|-------------|
 | `--output-dir` | `TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Where the two artifacts are written; the directory the Review queue and `curate review-ready` read |
 | `--days` | `30` | Days of EventLog history to scan |
-| `--min-support` | `2` | Times an item must appear in graded packs to be scored |
+| `--min-support` | `2` | Times an item must appear in graded packs, within one intent family, to be scored for that family |
+| `--no-meta-trace` | off | Do not record this run as a meta-Activity in the graph |
 
 `--format json` answers `status`, `observation_count`, `candidate_count`,
 `candidates_path`, `decisions_template_path` and `candidates`, plus two counts
@@ -3738,14 +3741,16 @@ is a candidate) and `N candidates promotion-ready`, with the `review with`
 pointer only when `N > 0`.
 
 `candidate_count` includes every `investigate_noise` row, so a large count says
-little about promotable knowledge; read `promotion_ready_count` for that.
+little about promotable knowledge. `promotion_ready_count` narrows it, but it is
+not a backlog either: a candidate stays counted after it is promoted, and one a
+review would refuse is still counted.
 
 **What `promotion_ready_count` is not.** It counts this run's list, so it moves
 with the flags that shape the list: `--min-support` and `--days` decide which
-items are candidates at all (a higher floor can only lower it), and
-`--output-dir` decides whether the file the review commands read by default is
-the one this run wrote. It is also not what `curate promote-learning` would act
-on: that plans a promotion for any approved candidate whose type is
+items are candidates at all (a higher floor can only lower it). `--output-dir`
+does not change the count; it decides whether the file the review commands read
+by default is the one this run wrote. It is also not what `curate
+promote-learning` would act on: that plans a promotion for any approved candidate whose type is
 `promote_guidance` or `promote_precedent`, whatever its citations.
 `curate review-ready` selects the same candidates as `promotion_ready_count`
 (its `ready_count`, for the same file), but refuses to approve one whose

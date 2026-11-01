@@ -14,11 +14,13 @@ All notable changes to Trellis will be documented in this file.
   predicate the digest and `curate review-ready` already use), both over the `candidates`
   list the command prints. The text output prints the same, and now says `0 candidates
   promotion-ready` where it used to print nothing. The count describes one run's list: a
-  different `--min-support`, `--days` or `--output-dir` changes it, and it is narrower than
-  what `curate promote-learning` accepts, so the help text and the operations guide say so.
-  No existing key, candidate, exit code or promotion changes. The text table now escapes the
-  recommendation and item type it prints, so a type containing `[...]` is no longer
-  deleted by Rich.
+  different `--min-support` or `--days` changes it, `--output-dir` only chooses whether the
+  review commands read that run's file, and the count is narrower than what `curate
+  promote-learning` accepts, so the help text and the operations guide say so. No existing
+  key, candidate or promotion changes. The text table now escapes the recommendation and
+  item type it prints, so a type containing `[...]` is no longer deleted by Rich. That also
+  fixes an exit code: such a type could make the text output exit 1 where `--format json`
+  exited 0, and both now exit 0.
 
 ### Fixed
 

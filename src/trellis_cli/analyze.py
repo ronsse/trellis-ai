@@ -3773,7 +3773,8 @@ def learning_candidates(
         2,
         "--min-support",
         help=(
-            "Minimum times an item must appear in graded packs to score as a candidate"
+            "Minimum times an item must appear in graded packs, within one "
+            "intent family, to score as a candidate for that family"
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -3804,13 +3805,15 @@ def learning_candidates(
     review-ready`` selects through: ``promote_guidance`` with at least one
     helpful citation and none unhelpful. It is a count of the list written by
     *this* run, so ``--min-support`` and ``--days`` change it, and it
-    is not what ``promote-learning`` would act on. That command accepts any
-    ``promote_*`` candidate you approve, ``promote_precedent`` included,
-    while ``review-ready`` also refuses a candidate already promoted or
-    contradicted by a noise candidate under another intent family.
+    is not what ``promote-learning`` would act on. That command plans a
+    promotion for any ``promote_*`` candidate you approve,
+    ``promote_precedent`` included, while ``review-ready`` also refuses a
+    candidate already promoted or contradicted by a noise candidate under
+    another intent family.
 
-    Read-only. Does not mutate the graph; the promote step does that
-    after a human review pass.
+    Promotes nothing; the promote step does that after a human review pass.
+    Not a pure read: besides the two artifacts, a run records itself as a
+    meta-Activity in the graph unless ``--no-meta-trace`` is passed.
     """
     output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
