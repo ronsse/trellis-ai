@@ -7,7 +7,7 @@
 ## 1. Premise — what this plan is for
 
 Trellis ships a synthetic agent-loop convergence scenario
-([`eval/scenarios/agent_loop_convergence/`](../../eval/scenarios/agent_loop_convergence/),
+(`eval/scenarios/agent_loop_convergence/`,
 plan §5.4 of [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md))
 that runs 30 rounds of pack-build → grade → feedback → dual-loop
 against a hand-templated 3-domain corpus and produces a positive
@@ -162,7 +162,7 @@ The provider already accepts `base_url` as a constructor kwarg (see
 `_build_async_client` in `openai.py:28-45`). The `[llm-openai]`
 optional extra installs the client library that Moonshot's API speaks.
 
-**Embedding provider — decided 2026-05-06 via [`eval/_smoke/moonshot_probe.py`](../../eval/_smoke/moonshot_probe.py): OpenAI `text-embedding-3-small`.**
+**Embedding provider — decided 2026-05-06 via `eval/_smoke/moonshot_probe.py`: OpenAI `text-embedding-3-small`.**
 
 Probe result on the `.ai` endpoint with `MOONSHOT_API_KEY` set:
 
@@ -272,7 +272,7 @@ enrichment + vector paths.
      ingestion site via `canonicalize_edge_kind()`.
    - Populates `entity_summary` documents per model from the
      `description` property + compiled SQL excerpt.
-3. Author ~15 ground-truth queries per [`EvalQuery`](../../eval/generators/trace_generator.py)
+3. Author ~15 ground-truth queries per `EvalQuery`
    shape: `domain="dbt"`, `intent="..."`, `required_coverage=[<model_ids>]`.
    Examples:
    - "Which models does `customers` depend on?" → `required_coverage=["model.jaffle_shop.stg_customers", "model.jaffle_shop.stg_orders", "model.jaffle_shop.stg_payments"]`
@@ -464,7 +464,7 @@ Anchored on three deliberate constraints:
 - [`adr-tag-vocabulary-split.md`](./adr-tag-vocabulary-split.md) —
   ContentTags / DataClassification / Lifecycle split. The "schema
   coverage gap" deferred in §7 is the unfilled side of this ADR.
-- [`eval/scenarios/agent_loop_convergence/`](../../eval/scenarios/agent_loop_convergence/)
+- `eval/scenarios/agent_loop_convergence/`
   — the existing synthetic scenario. Phase A reuses it as-is.
 - [`src/trellis_workers/extract/dbt_manifest.py`](../../src/trellis_workers/extract/dbt_manifest.py)
   — the dbt extractor Phase B-1 builds on.
