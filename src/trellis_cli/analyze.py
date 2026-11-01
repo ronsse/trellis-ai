@@ -1803,11 +1803,14 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
         f", mean PRs created (both arms) "
         f"{_fig(d.prs_created_mean, why('prs_created_mean'))}"
     )
+    cut_offs = d.cut_offs_by_arm
+    cut_off_counts = (
+        "withheld" if cut_offs is None else f"{cut_offs.served} / {cut_offs.withheld}"
+    )
     console.print(
         f"    served / withheld: eligible {d.eligible_by_arm.served} / "
-        f"{d.eligible_by_arm.withheld}, cut-offs {d.cut_offs_by_arm.served} / "
-        f"{d.cut_offs_by_arm.withheld}, analysed {d.analysed_by_arm.served} / "
-        f"{d.analysed_by_arm.withheld}"
+        f"{d.eligible_by_arm.withheld}, cut-offs {cut_off_counts}, analysed "
+        f"{d.analysed_by_arm.served} / {d.analysed_by_arm.withheld}"
     )
     console.print(f"    post-hoc share {_fig(d.post_hoc_share, why('post_hoc_share'))}")
     for check in d.arm_ratio:
@@ -1950,6 +1953,12 @@ def _render_settled_window(settled: HoldoutSettledWindow) -> None:
         "    re-run once a completed sweep has reached "
         f"{escape(settled.needs_sweep_after or '')} (latest sweep "
         f"{escape(settled.latest_sweep or 'none')})"
+    )
+    console.print(
+        "    No figure computed from an outcome is printed on this read: the arm "
+        "means, the outcome SDs, the MDE, the power and the guardrail values "
+        "are withheld. [bold]--operational[/bold] reports whether the "
+        "experiment is running, with no outcome read."
     )
 
 

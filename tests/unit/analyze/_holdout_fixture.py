@@ -351,23 +351,45 @@ class HoldoutLog:
         at: datetime | None = None,
         dry_run: bool = False,
         source_system: str = SOURCE_SYSTEM,
+        sessions_parsed: int | None = None,
+        sessions_errored: int | None = None,
     ) -> None:
         """A completed capture sweep, by default four hours after the latest join.
+
+        ``sessions_parsed`` and ``sessions_errored`` are the sweep's own
+        counters; left ``None`` the payload carries neither, as a sweep from
+        before capture wrote them.
 
         A sweep with no ``at`` is the last one the test needs, so it also
         settles the window ending at :data:`UNTIL`: the first sweep after it
         and one past the settle allowance (a read is incomplete until both
         exist). Pass ``at`` to place a single sweep exactly.
         """
+        counters = {
+            "sessions_parsed": sessions_parsed,
+            "sessions_errored": sessions_errored,
+        }
         if at is not None:
-            self._sweep_at(at, dry_run, source_system)
+            self._sweep_at(at, dry_run, source_system, counters)
             return
         assert self.latest_join is not None, "write a task before the sweep"
-        self._sweep_at(self.latest_join + timedelta(hours=4), dry_run, source_system)
+        self._sweep_at(
+            self.latest_join + timedelta(hours=4), dry_run, source_system, counters
+        )
         for hours in SETTLING_SWEEP_HOURS_AFTER_UNTIL:
-            self._sweep_at(UNTIL + timedelta(hours=hours), dry_run, source_system)
+            self._sweep_at(
+                UNTIL + timedelta(hours=hours), dry_run, source_system, counters
+            )
 
-    def _sweep_at(self, at: datetime, dry_run: bool, source_system: str) -> None:
+    def _sweep_at(
+        self,
+        at: datetime,
+        dry_run: bool,
+        source_system: str,
+        counters: dict[str, int | None],
+    ) -> None:
+        payload: dict[str, Any] = {"dry_run": dry_run, "source_system": source_system}
+        payload.update({key: n for key, n in counters.items() if n is not None})
         self.event_log.append(
             Event(
                 event_type=EventType.CAPTURE_SWEEP_COMPLETED,
@@ -376,7 +398,7 @@ class HoldoutLog:
                 entity_type="capture_sweep",
                 occurred_at=at,
                 recorded_at=at,
-                payload={"dry_run": dry_run, "source_system": source_system},
+                payload=payload,
             )
         )
 
@@ -512,3 +534,35 @@ def seed_late_build(
             ended_on_error=index > 8,
         )
     log.sweep()
+
+
+def seed_arm_shift(log: HoldoutLog, *, shift: int = 0, rate: float = 0.2) -> None:
+    """Ninety tasks over three parents and three builds; the withheld arm moved.
+
+    Every figure is arithmetic on the task's index, so two calls differ in
+    nothing but ``shift``, which is added to each of the withheld arm's four
+    outcome counts (turns, PRs, commits, tool errors). The served arm, the
+    cut-off flags, the covariates, the builds and the timing are identical.
+    """
+    commits = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
+    hour = 0
+    for parent_index, parent in enumerate(("parent-a", "parent-b", "parent-c")):
+        for k in range(30):
+            withheld = k % 5 == 0
+            move = shift if withheld else 0
+            build = commits[0] if k < 15 else commits[1 if k < 28 else 2]
+            log.task(
+                start=MONDAY + timedelta(hours=hour),
+                parent=parent,
+                arms=[withheld],
+                turns=10 + (k * 7 + parent_index * 3) % 25 + move,
+                prs_created=(k + parent_index) % 2 + move,
+                commits=(k * 5 + parent_index) % 4 + move,
+                tool_errors=(k * 3 + parent_index) % 3 + move,
+                rate=rate,
+                pack_metadata=[provenance(build)],
+                covariates=covariates_payload(
+                    brief_chars=100 + (hour * 37) % 800, agent_type=f"kind-{k % 3}"
+                ),
+            )
+            hour += 1

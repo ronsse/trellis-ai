@@ -19,7 +19,9 @@ from tests.unit.analyze._holdout_fixture import (
     UNTIL,
     HoldoutLog,
     covariates_payload,
+    outcome_payload,
     provenance,
+    seed_arm_shift,
 )
 from trellis.analyze import holdout
 from trellis.analyze.holdout import (
@@ -355,6 +357,23 @@ def test_the_descriptive_block_sizes_at_the_analysed_rate(log: HoldoutLog) -> No
     assert d.n_for_10pct_effect is None or d.n_for_10pct_effect > 0
 
 
+def test_the_n_for_ten_percent_is_sized_at_the_analysed_share(
+    log: HoldoutLog,
+) -> None:
+    _seed(log, [("a", i % 5 == 0, i) for i in range(30)], rate=0.2)
+    log.sweep()
+
+    d = _analyze(log, rate=0.2, outcome="log1p_commits").descriptive
+
+    sd = d.outcome_sd_within_parent
+    assert sd is not None
+    effect = -math.log(0.9)
+    assert d.n_for_10pct_effect == n_for_mde(sd, effect, 0.2)
+    # The even-split default would size a different N, so a sizing that
+    # ignored the analysed share cannot pass.
+    assert d.n_for_10pct_effect != n_for_mde(sd, effect)
+
+
 # ---------------------------------------------------------------------------
 # Settled window
 # ---------------------------------------------------------------------------
@@ -509,7 +528,11 @@ def test_every_source_system_must_settle() -> None:
     ]
 
     window = holdout._settled_window(
-        sweeps, joins, end=UNTIL, settle=settle, checked=True
+        sweeps,
+        holdout._SettleScope(joins=joins),
+        end=UNTIL,
+        settle=settle,
+        checked=True,
     )
 
     assert window.settled is False
@@ -517,3 +540,386 @@ def test_every_source_system_must_settle() -> None:
     assert window.reason is not None
     assert "src-b" in window.reason
     assert "src-a" not in window.reason
+
+
+# ---------------------------------------------------------------------------
+# Unfinished tasks block the window; the source set is the analysed scope
+# ---------------------------------------------------------------------------
+
+SETTLE = timedelta(hours=3)
+
+
+def _restamp(log: HoldoutLog, count: int, at: Any) -> None:
+    """Rewrite ``count`` joins at ``at``: a join-only re-parse, never backdated."""
+    joins = log.event_log.get_events(
+        event_type=EventType.CAPTURE_SESSION_PACKS, limit=1000
+    )
+    for join in joins[:count]:
+        log.event_log.append(
+            Event(
+                event_type=EventType.CAPTURE_SESSION_PACKS,
+                source="worker:session-capture",
+                entity_id=join.entity_id,
+                entity_type=join.entity_type,
+                occurred_at=at,
+                payload=join.payload,
+                metadata=join.metadata,
+            )
+        )
+
+
+def test_a_join_stamped_after_the_last_sweep_blocks_the_window(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.sweep()
+    assert _analyze(log).settled_window.settled is True
+    stamped = UNTIL + timedelta(hours=26)
+    _restamp(log, 2, stamped)
+
+    report = _analyze(log)
+
+    window = report.settled_window
+    assert window.settled is False
+    assert window.needs_sweep_after == (stamped + SETTLE).isoformat()
+    assert window.reason is not None
+    assert "2 in-window tasks are not finished" in window.reason
+    assert report.funnel.unfinished == 2
+    assert report.inference.status == WINDOW_NOT_SETTLED
+    assert report.inference.difference is None
+
+    # A sweep that ran the settle allowance after the restamp finishes them.
+    log.sweep(at=stamped + SETTLE)
+    settled = _analyze(log)
+    assert settled.settled_window.settled is True
+    assert settled.settled_window.reason is None
+    assert settled.funnel.unfinished == 0
+    assert settled.inference.status == "ok"
+
+
+def test_a_long_task_the_second_sweep_rewrote_blocks_the_window(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.task(
+        start=UNTIL - timedelta(hours=2),
+        arms=[True],
+        commits=5,
+        rate=0.5,
+        pack_metadata=[provenance(COMMITS["a"])],
+    )
+    log.sweep()
+    last_sweep = UNTIL + timedelta(hours=25)
+    # The task was still running at the first sweep, so the second rewrote it.
+    _restamp(log, 5, last_sweep)
+
+    window = _analyze(log).settled_window
+
+    assert window.settled is False
+    assert window.reason is not None
+    assert "not finished" in window.reason
+    assert window.needs_sweep_after == (last_sweep + SETTLE).isoformat()
+
+
+def test_a_join_outside_the_window_or_rate_holds_nothing_open(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.sweep()
+    # A task from a month before the window, restamped after the last sweep.
+    log.task(
+        start=UNTIL - timedelta(days=DAYS + 30),
+        arms=[False],
+        rate=0.5,
+        pack_metadata=[provenance(COMMITS["a"])],
+    )
+    _restamp(log, 5, UNTIL + timedelta(hours=40))
+
+    report = _analyze(log)
+
+    assert report.settled_window.settled is False
+    # Only the four in-window tasks hold it open; the old one is not counted.
+    assert report.funnel.unfinished == 4
+
+
+def _retired_source_join(log: HoldoutLog) -> None:
+    """A main session another capture source wrote: no pack, nothing analysed."""
+    log.join(
+        "retired-main",
+        at=MONDAY,
+        pack_ids=[],
+        parent=None,
+        outcome=None,
+        source_system="retired-src",
+    )
+
+
+def test_a_retired_source_with_nothing_analysed_does_not_block(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.sweep()
+    _retired_source_join(log)
+
+    window = _analyze(log).settled_window
+
+    assert window.settled is True
+    assert window.reason is None
+
+
+def test_a_stopped_source_with_an_analysed_task_blocks_and_is_named(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.sweep()
+    _retired_source_join(log)
+    pack = log.pack(at=MONDAY, withheld=True, items=3, rate=0.5)
+    log.join(
+        "stopped-task",
+        at=MONDAY + timedelta(hours=2),
+        pack_ids=[pack],
+        parent="parent-a",
+        outcome=outcome_payload(turns=5, commits=1),
+        source_system="stopped-src",
+    )
+
+    window = _analyze(log).settled_window
+
+    assert window.settled is False
+    assert window.reason is not None
+    assert "stopped-src" in window.reason
+    assert "retired-src" not in window.reason
+
+
+def test_a_store_with_no_joins_still_waits_for_the_default_source() -> None:
+    window = holdout._settled_window(
+        [], holdout._SettleScope(), end=UNTIL, settle=SETTLE, checked=True
+    )
+
+    assert window.settled is False
+    assert window.needs_sweep_after == UNTIL.isoformat()
+    assert window.reason is not None
+    assert holdout._SOURCE_SYSTEM_DEFAULT in window.reason
+
+
+def test_an_empty_store_read_with_until_is_not_settled(log: HoldoutLog) -> None:
+    window = _analyze(log).settled_window
+
+    assert window.checked is True
+    assert window.settled is False
+    assert window.reason is not None
+    assert holdout._SOURCE_SYSTEM_DEFAULT in window.reason
+
+
+# ---------------------------------------------------------------------------
+# What counts as a sweep, and where the settle clock starts
+# ---------------------------------------------------------------------------
+
+
+def test_a_sweep_that_parsed_nothing_and_lost_sessions_settles_nothing(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    log.sweep(sessions_parsed=0, sessions_errored=7)
+
+    window = _analyze(log).settled_window
+
+    assert window.settled is False
+    assert window.latest_sweep is None
+    assert window.reason is not None
+    assert "no completed claude-code sweep" in window.reason
+
+
+def test_a_sweep_that_parsed_nothing_and_lost_nothing_counts(log: HoldoutLog) -> None:
+    _one_task_log(log)
+    log.sweep(sessions_parsed=0, sessions_errored=0)
+
+    assert _analyze(log).settled_window.settled is True
+
+
+def test_a_sweep_that_parsed_some_and_lost_some_counts(log: HoldoutLog) -> None:
+    _one_task_log(log)
+    log.sweep(sessions_parsed=3, sessions_errored=2)
+
+    assert _analyze(log).settled_window.settled is True
+
+
+def test_an_errored_sweep_does_not_finish_a_join(log: HoldoutLog) -> None:
+    """``_finished`` reads the same sweeps the window does, so they agree."""
+    _one_task_log(log)
+    log.sweep()
+    stamped = UNTIL + timedelta(hours=26)
+    _restamp(log, 1, stamped)
+    log.sweep(at=stamped + SETTLE, sessions_parsed=0, sessions_errored=4)
+
+    report = _analyze(log)
+
+    assert report.funnel.unfinished == 1
+    assert report.settled_window.settled is False
+
+
+def test_the_settle_clock_starts_at_the_first_sweep_not_the_window_end(
+    log: HoldoutLog,
+) -> None:
+    _one_task_log(log)
+    # A task whose join lands just before the first sweep past the end.
+    log.task(
+        start=UNTIL - timedelta(hours=2),
+        arms=[True],
+        commits=5,
+        rate=0.5,
+        pack_metadata=[provenance(COMMITS["a"])],
+    )
+    first = UNTIL + timedelta(hours=10)
+    log.sweep(at=first)
+    log.sweep(at=first + timedelta(hours=2))
+
+    window = _analyze(log).settled_window
+
+    # Both sweeps are past end + 3 h, yet none ran 3 h after the first.
+    assert window.settled is False
+    assert window.needs_sweep_after == (first + SETTLE).isoformat()
+
+    log.sweep(at=first + SETTLE)
+    assert _analyze(log).settled_window.settled is True
+
+
+def test_a_sweep_exactly_at_the_window_end_is_the_first(log: HoldoutLog) -> None:
+    _one_task_log(log)
+    log.sweep(at=UNTIL)
+    log.sweep(at=UNTIL + SETTLE)
+
+    assert _analyze(log).settled_window.settled is True
+
+
+# ---------------------------------------------------------------------------
+# One commit under two version strings is one build
+# ---------------------------------------------------------------------------
+
+
+def test_one_commit_under_two_versions_is_one_row_that_stands(
+    log: HoldoutLog,
+) -> None:
+    layout = [("0.1.0", False, 4), ("0.2.0", False, 4)] * 3
+    layout += [("0.1.0", True, 1), ("0.2.0", True, 1)] * 3
+    for hours, (version, withheld, commits) in enumerate(layout):
+        stamp = provenance(COMMITS["a"])
+        stamp["write_provenance"]["version"] = version
+        log.task(
+            start=MONDAY + timedelta(hours=hours),
+            arms=[withheld],
+            commits=commits,
+            rate=0.5,
+            pack_metadata=[stamp],
+        )
+    log.sweep()
+
+    table = _analyze(log).by_commit
+
+    assert table is not None
+    # Three withheld under each version is below the pooling threshold; as one
+    # build there are six, so it stands rather than being pooled twice over.
+    assert table.pooled_builds == 0
+    assert [row.build for row in table.rows] == [f"0.1.0, 0.2.0 @ {COMMITS['a']}"]
+    row = table.rows[0]
+    assert (row.served.n, row.withheld.n) == (6, 6)
+    assert row.difference == 3.0
+
+
+# ---------------------------------------------------------------------------
+# An unsettled read carries no figure computed from an outcome
+# ---------------------------------------------------------------------------
+
+#: The wall-clock stamps a read writes for itself: not a figure.
+_CLOCK_KEYS = ("generated_at", "as_of")
+
+
+def _without_clock(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_clock(v) for k, v in node.items() if k not in _CLOCK_KEYS}
+    if isinstance(node, list):
+        return [_without_clock(v) for v in node]
+    return node
+
+
+def _arm_shifted_read(log: HoldoutLog, *, shift: int, settled: bool, **kw: Any) -> Any:
+    seed_arm_shift(log, shift=shift)
+    if settled:
+        log.sweep()
+    else:
+        log.sweep(at=UNTIL - timedelta(hours=1))
+    report = _analyze(log, rate=0.2, **kw)
+    assert report.settled_window.settled is settled
+    return _without_clock(report.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
+def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
+    tmp_path: Path, outcome: str
+) -> None:
+    """The rule: two stores that differ only in one arm's outcomes read the same.
+
+    A list of withheld keys would only name the figures someone remembered;
+    this compares the whole payload, so a figure added later is caught too.
+    """
+    reads = []
+    for name, shift in (("flat", 0), ("shifted", 6)):
+        event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+        reads.append(
+            _arm_shifted_read(
+                HoldoutLog(event_log), shift=shift, settled=False, outcome=outcome
+            )
+        )
+        event_log.close()
+
+    assert reads[0] == reads[1]
+
+
+def test_the_shift_does_move_a_settled_read(tmp_path: Path) -> None:
+    """The differential above is not vacuous: settled, the same stores differ."""
+    reads = []
+    for name, shift in (("flat", 0), ("shifted", 6)):
+        event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+        reads.append(
+            _arm_shifted_read(HoldoutLog(event_log), shift=shift, settled=True)
+        )
+        event_log.close()
+
+    assert reads[0] != reads[1]
+    assert reads[0]["inference"]["difference"] != reads[1]["inference"]["difference"]
+    assert (
+        reads[0]["guardrails"]["measures"][0]["withheld"]["value"]
+        != reads[1]["guardrails"]["measures"][0]["withheld"]["value"]
+    )
+
+
+def test_an_unsettled_read_keeps_the_keys_and_nulls_the_figures(
+    log: HoldoutLog,
+) -> None:
+    seed_arm_shift(log, shift=2)
+    log.sweep(at=UNTIL - timedelta(hours=1))
+
+    report = _analyze(log, rate=0.2)
+
+    d = report.descriptive
+    assert d.outcome_sd_within_parent is None
+    assert d.outcome_sd_total is None
+    assert d.cut_off_share is None
+    assert d.cut_offs_by_arm is None
+    assert d.n_for_10pct_effect is None
+    assert d.pr_base_rate_served is None
+    assert d.prs_created_mean is None
+    assert all(h.mde is None and h.ratio is None for h in d.mde_by_horizon)
+    assert report.power.status == WINDOW_NOT_SETTLED
+    assert report.power.realised_sd is None
+    assert report.power.power_at_planned_mde is None
+    assert report.power.mde_at_target_power is None
+    # What --operational publishes stays: the counts a rate and a window fix.
+    assert d.eligible_by_arm.served + d.eligible_by_arm.withheld == 90
+    recall = next(m for m in report.guardrails.measures if m.name == "recall_rate")
+    assert recall.served.value is not None
+    others = [m for m in report.guardrails.measures if m.name != "recall_rate"]
+    assert others
+    for measure in others:
+        assert measure.served.value is None
+        assert measure.withheld is None or measure.withheld.value is None

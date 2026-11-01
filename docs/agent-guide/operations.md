@@ -3732,13 +3732,16 @@ builds that served them (`verdict` reads `descriptive, not decisive`), so a read
 confounds the comparison. It is not a second estimate: no p-value, interval or
 verdict per build, and every other figure is what it is without the flag (the
 JSON carries no `by_commit` key unless it is passed, and the text table follows
-the descriptive block). A task's build is the `(version, commit)` in
+the descriptive block). A task's build is the commit in
 `metadata.write_provenance` on its first pack, the first id its join lists,
 which is the pack that sets its arm. `build` is the label `analyze health`
-gives that pair in `serve.serving_builds` (`1.0.0 @ <commit>`,
-`1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp),
-and rows are grouped on the full pair, so one commit under two versions is two
-rows. `rows` come in first-seen order, each with `build`, `first_seen` and
+gives that stamp in `serve.serving_builds` (`1.0.0 @ <commit>`,
+`1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp).
+Rows are grouped on the commit, so one commit under two versions is one row
+labelled with both (`1.0.0, 1.1.0 @ <commit>`) and pooled once; a build with no
+commit is keyed by its version. `analyze health` and `--operational` key on the
+full `(version, commit)` pair, so their rows can split a commit that this table
+joins. `rows` come in first-seen order, each with `build`, `first_seen` and
 `last_seen` (the earliest and latest first-pack times of the tasks counted under
 it) and, per arm, `n` and
 `outcome_mean`, the mean of the primary's outcome column (`null` for an empty
@@ -3764,21 +3767,39 @@ of them.
 trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-commit --limit 20000 --format json
 ```
 
-`settled_window` says whether that read is complete. A task whose first pack came just before
-`--until` is joined by the first completed capture sweep at or after it, and counts as finished
-only when a later sweep ran `--settle-hours` after that join. Until then `settled_window.settled`
-is `false`, `needs_sweep_after` names the time a completed sweep must reach, `reason` says why, the
-text prints an `INCOMPLETE READ` line, `inference.status` reads `window not settled` with no
-estimate, p-value, interval or arm mean, and `by_commit` keeps its counts but drops its means and
-differences. Each covariate adjustment's `inference.status` and `unadjusted_same_subset.status`
-read the same, while the adjustment's own `status` still reports whether its fit ran. The exit code
-is `0` either way and does not depend on `--format`. Without `--until` the check does not run
-(`checked: false`). With daily sweeps at 10:00Z and `--until 2026-12-23T22:47:00Z`, the first
-sweep at or after the horizon is 2026-12-24 10:00Z and the earliest complete read follows the
-2026-12-25 10:00Z sweep. Only the primary, its adjustments and the by-build figures are refused:
-the `descriptive` block (spreads, counts, sizing and the guardrails' per-arm figures) and the
-`power` block still print on an incomplete read. A source system whose sweeps have stopped keeps
-the read incomplete.
+`settled_window` says whether that read is complete, and it is checked only when `--until` is
+given (`checked: false` otherwise). A task whose first pack came just before `--until` is joined
+by the first completed capture sweep at or after it, and counts as finished only when a later
+sweep ran `--settle-hours` after that join. A sweep that parsed no session and lost some to an
+error (`sessions_parsed` 0, `sessions_errored` above 0) settles nothing, in this report and in
+`--operational`; a sweep that parsed none and lost none had nothing to do and counts. The window
+is also unsettled while any in-window, in-rate task is unfinished, whatever its source: a join
+stamped after its source's last sweep (a join-only re-parse, or a long task the second sweep
+rewrote) is dropped from the read, so `reason` names the count and a later sweep that runs
+`--settle-hours` after the latest such join settles it. A join-only re-parse must therefore
+precede the settling sweeps. Only sources that wrote an in-window, in-rate task with an outcome
+are waited on, so a retired source whose tasks are outside the analysis does not hold the read open,
+and a stopped source with an analysed task does, named in `reason`. There is no override flag.
+
+Until the window settles, `settled_window.settled` is `false`, `needs_sweep_after` names the time a
+completed sweep must reach, `reason` says why, the text prints an `INCOMPLETE READ` line, and
+`inference.status` reads `window not settled`. The read carries no value computed from an outcome.
+The primary and each adjustment's `inference` and `unadjusted_same_subset` are refused (the
+adjustment's own `status` still reports whether its fit ran). `by_commit` keeps its counts and
+drops its means and differences. In `descriptive`, the outcome SDs, `between_parent_share`,
+`n_for_10pct_effect`, the PR base rate and `prs_created_mean`, the cut-off shares and
+`cut_offs_by_arm`, and every `mde_by_horizon` figure are `null`, and `not_measurable` says so. In
+`power`, `status` reads `window not settled` and `realised_sd`, `power_at_planned_mde` and
+`mde_at_target_power` are `null`. In `guardrails`, every measure but `recall_rate` (which reads
+pack ids, not an outcome) has a `null` value in both arms, with `n` and `missing` kept. The keys all
+stay so no consumer loses one, and the exit code is `0` either way and does not depend on
+`--format`. Counts a window and a rate fix, such as `eligible_by_arm`, stay: the analysed counts
+and the by-build `n`s also stay, so an arm's cut-off count can be derived from them. An early
+check that the experiment is running is `--operational`, which reads no outcome. The refusal
+fires only for an `--until` close to the data's last sweep, so it is not a horizon gate, and
+`--settle-hours 0` settles on one sweep. With daily sweeps (say at 10:00Z, as an example only) and
+`--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is the next morning's and
+the earliest complete read follows the sweep after it.
 
 A later run of the same command reads the same window: the window is bounded by `--until`, and
 `--limit 20000` is the per-event-type scan cap. The scan reads newest first from now and the cap
@@ -4243,8 +4264,11 @@ reads that stamp in three places (`src/trellis/analyze/holdout.py`):
 1. **Settle.** `_finished` requires a completed, non-dry-run sweep at least
    `trellis analyze holdout --settle-hours` (default 3) after the session's latest
    join, so every rewritten session reads `unfinished` until the next sweep that
-   completes that long after the rejoin. Run the rejoin at least 3 hours before a
-   nightly sweep, and read the holdout only after that sweep.
+   completes that long after the rejoin. A read given `--until` is also refused
+   (`settled_window.settled: false`, `reason` naming the count) while any in-window
+   task is unfinished, so run the rejoin before the settling sweeps, at least 3
+   hours before a sweep, and read the holdout only after that sweep. Without
+   `--until` the refusal does not apply.
 2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
    so the rollup re-dates to the rejoin time, and a run with `--until` earlier than
    the rejoin drops every rewritten session from the rollup. The rollup is

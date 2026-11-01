@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.unit.analyze._holdout_fixture import UNTIL, HoldoutLog, seed_arm_shift
 from trellis.analyze.domains import analyze_domains
 from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.retrieve.token_usage import analyze_token_usage
@@ -372,3 +374,57 @@ def test_report_route_is_a_sync_handler():
     import inspect
 
     assert not inspect.iscoroutinefunction(analyze.get_analyze_report)
+
+
+# ---------------------------------------------------------------------------
+# An unsettled holdout read carries no figure computed from an outcome.
+# ---------------------------------------------------------------------------
+
+_HOLDOUT_FAST = {
+    "days": 60,
+    "until": UNTIL.isoformat(),
+    "rate": 0.2,
+    "limit": 20_000,
+    "permutations": 299,
+    "bootstraps": 100,
+    "power_sims": 20,
+}
+_CLOCK_KEYS = ("generated_at", "as_of")
+
+
+def _without_clock(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_clock(v) for k, v in node.items() if k not in _CLOCK_KEYS}
+    if isinstance(node, list):
+        return [_without_clock(v) for v in node]
+    return node
+
+
+@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
+def test_an_unsettled_holdout_read_does_not_move_with_the_withheld_outcomes(
+    client, tmp_path, outcome
+):
+    """Two stores that differ only in one arm's outcomes answer the same."""
+    reads = []
+    opened = []
+    try:
+        for name, shift in (("flat", 0), ("shifted", 6)):
+            registry = StoreRegistry(stores_dir=tmp_path / name)
+            opened.append(registry)
+            log = HoldoutLog(registry.operational.event_log)
+            seed_arm_shift(log, shift=shift)
+            log.sweep(at=UNTIL - timedelta(hours=1))
+            app_module._registry = registry
+            analyze._CACHE.clear()
+            resp = client.get(
+                "/api/v1/analyze/holdout",
+                params={**_HOLDOUT_FAST, "outcome": outcome},
+            )
+            assert resp.status_code == 200
+            reads.append(_without_clock(resp.json()["data"]))
+    finally:
+        for registry in opened:
+            registry.close()
+
+    assert reads[0]["settled_window"]["settled"] is False
+    assert reads[0] == reads[1]

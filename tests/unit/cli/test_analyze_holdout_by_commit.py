@@ -169,12 +169,13 @@ def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike() -> None:
     assert "no analysed task" in _flat(text)
 
 
-def test_a_build_is_the_version_and_commit_pair_labelled_as_health_labels_it(
+def test_a_build_is_labelled_as_health_labels_it_and_one_commit_is_one_row(
     log: HoldoutLog,
 ) -> None:
     stamps = [
         {"write_provenance": {"version": "1.0.0", "commit": COMMIT_A}},
         {"write_provenance": {"version": "1.1.0", "commit": COMMIT_A}},
+        {"write_provenance": {"version": "2.0.0", "commit": COMMIT_B}},
         None,
     ]
     for hours, stamp in enumerate(stamps):
@@ -190,8 +191,8 @@ def test_a_build_is_the_version_and_commit_pair_labelled_as_health_labels_it(
 
     assert text.exit_code == machine.exit_code == EXIT_OK
     expected = [
-        build_label("1.0.0", COMMIT_A),
-        build_label("1.1.0", COMMIT_A),
+        f"1.0.0, 1.1.0 @ {COMMIT_A}",
+        build_label("2.0.0", COMMIT_B),
         NO_PROVENANCE_LABEL,
     ]
     table = _payload(machine)["by_commit"]

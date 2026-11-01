@@ -49,8 +49,8 @@ BUILD_B = build_label("0.0.0", COMMIT_B)
 def _every_build_stands_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """These cases are about attribution, which pooling would blur.
 
-    The pooling rule has its own file, ``test_holdout_by_commit_pooling.py``,
-    that runs at the real threshold.
+    The pooling rule is tested at the real threshold in
+    ``test_holdout_readout_form.py``.
     """
     monkeypatch.setattr(holdout, "BY_COMMIT_POOL_THRESHOLD", 0)
 
@@ -318,7 +318,9 @@ def test_an_unstamped_first_pack_beside_a_stamped_one_names_the_unstamped_build(
     assert [row.build for row in report.by_commit.rows] == [NO_PROVENANCE_LABEL]
 
 
-def test_one_commit_under_two_versions_is_two_builds(log: HoldoutLog) -> None:
+def test_one_commit_under_two_versions_is_one_row_naming_both(
+    log: HoldoutLog,
+) -> None:
     for hours, version, withheld, commits in [
         (0, "1.0.0", False, 2),
         (1, "1.0.0", True, 4),
@@ -336,12 +338,17 @@ def test_one_commit_under_two_versions_is_two_builds(log: HoldoutLog) -> None:
     report = _analyze(log)
 
     assert report.by_commit is not None
-    expected = [build_label("1.0.0", COMMIT_A), build_label("1.1.0", COMMIT_A)]
-    assert [row.build for row in report.by_commit.rows] == expected
-    assert set(expected) == _health_labels(log)
-    old, new = (_rows(report)[label] for label in expected)
-    assert (old.served.outcome_mean, old.withheld.outcome_mean) == (2.0, 4.0)
-    assert (new.served.outcome_mean, new.withheld.outcome_mean) == (6.0, 8.0)
+    (label,) = [row.build for row in report.by_commit.rows]
+    assert label == f"1.0.0, 1.1.0 @ {COMMIT_A}"
+    row = _rows(report)[label]
+    assert (row.served.n, row.withheld.n) == (2, 2)
+    assert (row.served.outcome_mean, row.withheld.outcome_mean) == (4.0, 6.0)
+    # ``analyze health`` still keys on (version, commit); this table keys on the
+    # commit the pre-registration names, so the two differ on purpose here.
+    assert _health_labels(log) == {
+        build_label("1.0.0", COMMIT_A),
+        build_label("1.1.0", COMMIT_A),
+    }
 
 
 def test_two_commits_sharing_a_twelve_character_prefix_are_two_builds(

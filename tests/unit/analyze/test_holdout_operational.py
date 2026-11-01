@@ -759,9 +759,17 @@ class _JoinGate(_Gate):
 
 
 class _SweepGate(_Gate):
-    """A sweep payload, readable at the two keys the sweep reader uses."""
+    """A sweep payload, readable at the keys the sweep reader uses.
 
-    OPEN = frozenset({"dry_run", "source_system"})
+    ``sessions_parsed`` and ``sessions_errored`` are how a sweep says it wrote
+    nothing: a sweep that parsed no session and lost one to an error did not
+    finish any task's join, so it settles nothing. They count sessions, not
+    outcomes.
+    """
+
+    OPEN = frozenset(
+        {"dry_run", "source_system", "sessions_parsed", "sessions_errored"}
+    )
 
     def _refusal(self, key: str) -> str:
         return f"gated read: a sweep's {key!r}"

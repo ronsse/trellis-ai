@@ -15,7 +15,13 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from tests.unit.analyze._holdout_fixture import MONDAY, UNTIL, HoldoutLog, provenance
+from tests.unit.analyze._holdout_fixture import (
+    MONDAY,
+    UNTIL,
+    HoldoutLog,
+    provenance,
+    seed_arm_shift,
+)
 from trellis.ops.serving_builds import build_label
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK
@@ -202,3 +208,108 @@ def test_the_operational_read_prints_none_of_the_readout_form(log: HoldoutLog) -
     assert "difference" not in out
     assert "outcome_mean" not in out
     assert "settled_window" not in out
+
+
+# ---------------------------------------------------------------------------
+# An unsettled read carries no figure computed from an outcome
+# ---------------------------------------------------------------------------
+
+#: The wall-clock stamps a read writes for itself: not a figure.
+_CLOCK_KEYS = ("generated_at", "as_of")
+
+
+def _without_clock(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_clock(v) for k, v in node.items() if k not in _CLOCK_KEYS}
+    if isinstance(node, list):
+        return [_without_clock(v) for v in node]
+    return node
+
+
+def _store_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> StoreRegistry:
+    stores_dir = root / "data" / "stores"
+    stores_dir.mkdir(parents=True)
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(root / "config"))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(root / "data"))
+    _reset_registry()
+    return StoreRegistry(stores_dir=stores_dir)
+
+
+def _argv(outcome: str, *extra: str) -> list[str]:
+    argv = list(READOUT)
+    argv[argv.index("--outcome") + 1] = outcome
+    return [*argv, *extra]
+
+
+def _read_shifted(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    *,
+    shift: int,
+    settled: bool,
+    outcome: str,
+) -> tuple[Any, str]:
+    registry = _store_at(monkeypatch, root)
+    log = HoldoutLog(registry.operational.event_log)
+    seed_arm_shift(log, shift=shift)
+    if settled:
+        log.sweep()
+    else:
+        log.sweep(at=UNTIL - timedelta(hours=1))
+    text = runner.invoke(app, _argv(outcome))
+    machine = runner.invoke(app, _argv(outcome, "--format", "json"))
+    assert text.exit_code == machine.exit_code
+    return _without_clock(_payload(machine)), plain(text.stdout)
+
+
+@pytest.mark.parametrize("outcome", ["log1p_turns", "commits", "prs_created"])
+def test_an_unsettled_read_does_not_move_with_the_withheld_arms_outcomes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
+) -> None:
+    """Two stores that differ only in one arm's outcomes print the same read.
+
+    The whole payload is compared, as the whole of what the command prints is
+    what must not carry an outcome; a list of withheld keys would only name
+    the figures someone remembered.
+    """
+    flat_json, flat_text = _read_shifted(
+        monkeypatch, tmp_path / "flat", shift=0, settled=False, outcome=outcome
+    )
+    shifted_json, shifted_text = _read_shifted(
+        monkeypatch, tmp_path / "shifted", shift=6, settled=False, outcome=outcome
+    )
+
+    assert flat_json["settled_window"]["settled"] is False
+    assert flat_json == shifted_json
+    assert flat_text == shifted_text
+
+
+def test_the_shift_does_move_a_settled_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The comparison above is not vacuous: settled, the same stores differ."""
+    flat_json, flat_text = _read_shifted(
+        monkeypatch, tmp_path / "flat", shift=0, settled=True, outcome="commits"
+    )
+    shifted_json, shifted_text = _read_shifted(
+        monkeypatch, tmp_path / "shifted", shift=6, settled=True, outcome="commits"
+    )
+
+    assert flat_json["settled_window"]["settled"] is True
+    assert flat_json != shifted_json
+    assert flat_text != shifted_text
+
+
+def test_the_text_says_what_is_withheld_and_where_the_early_check_is(
+    log: HoldoutLog,
+) -> None:
+    seed_arm_shift(log, shift=2)
+    log.sweep(at=UNTIL - timedelta(hours=1))
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    flat = _flat(text)
+    assert "No figure computed from an outcome is printed on this read" in flat
+    assert "--operational" in flat
+    assert "cut-offs withheld" in flat

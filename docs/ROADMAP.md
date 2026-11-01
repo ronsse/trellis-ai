@@ -94,22 +94,28 @@ the read. The withholding rate is an owner setting and is not part of it.
 
 - The read, once, at the horizon:
   `trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-commit --limit 20000 --format json`.
-  It is complete only after the first capture sweep past the horizon has settled: daily sweeps
-  run at 10:00Z, the first at or after 2026-12-23T22:47Z is 2026-12-24 10:00Z, and the joins it
-  writes finish a settle allowance (3 h) later, so the earliest complete read follows the
-  2026-12-25 10:00Z sweep. An earlier read reports `settled_window.settled: false` and
-  `inference.status == "window not settled"`, and withholds the by-build means. A later run of the
-  same command reads the same window, so it must give the same pack rows while `scan.truncated`
-  is `false`; raise `--limit` if it is not.
+  The settled-window check runs only with `--until`. The read is complete once the capture
+  sweeps have settled past `--until`: the first completed sweep at or after it writes the joins of
+  the tasks still running, and a sweep one settle allowance (`--settle-hours`, 3 h by default)
+  after that one finishes them. With daily sweeps (say at 10:00Z, as an example and not any
+  deployment's schedule), a horizon at 22:47Z is first swept the next morning and the sweep after
+  that settles it. A join-only re-parse, if one is run, must precede the settling sweeps: a join
+  stamped after its source's last sweep leaves its task unfinished and the read refused until a
+  later sweep follows. This is not a horizon gate. The refusal fires only for an `--until` close
+  to the data's last sweep, and `--settle-hours 0` settles on one sweep. An unsettled read reports
+  `settled_window.settled: false` and `inference.status == "window not settled"`, and carries no
+  figure computed from an outcome (arm means, SDs, MDE, power and guardrail values are null). To
+  check early that the experiment is running, use `trellis analyze holdout --operational`, which
+  reads no outcome. A later run of the same command reads the same window, so it must give the
+  same pack rows while `scan.truncated` is `false`; raise `--limit` if it is not.
 - Acceptance: that command reports `inference.status == "ok"` with `settled_window.settled: true`,
-  and `power.realised_n` at or above `power.planned_n`, or the readout records why not.
-  `planned_n` (114) was sized for a 50/50 split. The same minimum detectable effect needs
-  `0.25 / (p * (1 - p))` times as many tasks at withheld share `p`: 1.5625 times at the live rate
-  of 0.2, about 178. The descriptive block's `mde_by_horizon` and `n_for_10pct_effect` size at the
-  analysed `--rate` (`descriptive.mde_withheld_share`), so read those, and
-  `power.mde_at_target_power`, rather than comparing `realised_n` to 114 alone. A non-`ok`
-  `inference.status` names the reason, and when `realised_n` falls short, `funnel` counts the
-  excluded tasks by reason. `ok` means the primary analysis ran, not that it found an effect.
+  and `power.mde_at_target_power` at or below `power.planned_mde`, or the readout records why not.
+  That is the check because it reads the realised N, SD and withheld share together;
+  `planned_n` (114) was sized for a 50/50 split, so `realised_n` is not compared to it at the
+  live rate of 0.2. The descriptive block's `mde_by_horizon` and `n_for_10pct_effect` size at the
+  analysed `--rate` (`descriptive.mde_withheld_share`). A non-`ok` `inference.status` names the
+  reason, and when `realised_n` falls short, `funnel` counts the excluded tasks by reason. `ok`
+  means the primary analysis ran, not that it found an effect.
 - Method: [`operations.md` § `trellis analyze holdout`](agent-guide/operations.md#trellis-analyze-holdout).
   The command is read-only.
 
