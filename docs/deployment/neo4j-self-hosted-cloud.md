@@ -138,6 +138,12 @@ selects the backend. Add the `knowledge:` block from
 moves documents to Postgres and blobs to S3 and lists the variables
 those need.
 
+Pointing Trellis at a new backend does not copy data already in SQLite. To bring an
+existing graph across, see
+[`trellis admin migrate-graph`](../agent-guide/operations.md#trellis-admin-migrate-graph):
+it copies the current graph only (no closed versions, new timestamps), and no
+command moves documents, traces, the event log, vectors or feedback.
+
 Pair with managed Postgres (RDS / Cloud SQL / Neon) for the
 operational plane the same way the AuraDB doc shows in
 [`neo4j-auradb.md` §"Combined with Postgres operational plane"](./neo4j-auradb.md#step-4--combined-with-postgres-operational-plane).

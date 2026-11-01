@@ -102,7 +102,10 @@ talks to a running `trellis admin serve` (there is no in-process SDK mode), so
 scripts, CI, and Python agent frameworks need the shared server.
 
 Default stores are local SQLite. Switch backends in
-`~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`):
+`~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`). A switch does not
+copy existing data: `trellis admin migrate-graph` moves the current graph only, and no
+command moves documents, traces, the event log, vectors or feedback
+([details](../agent-guide/operations.md#trellis-admin-migrate-graph)):
 
 ```yaml
 knowledge:

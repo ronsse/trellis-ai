@@ -11,7 +11,7 @@ import stat
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, NoReturn
@@ -2121,6 +2121,105 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     return registry, registry.knowledge.graph_store
 
 
+#: A ``valid_to`` cutoff past every closed row, so a dry-run ``compact_versions``
+#: counts all of a store's history.
+_AFTER_EVERY_VERSION = datetime(9999, 12, 31, tzinfo=UTC)
+
+#: Stores a graph copy does not touch. ``migrate-graph`` reads and writes the
+#: graph and nothing else, so a success line must not read as "the store moved".
+_MIGRATE_GRAPH_NOT_MOVED = ("documents", "traces", "event_log", "vectors", "feedback")
+
+
+def _count_source_version_rows(store: Any) -> dict[str, int] | None:
+    """Count the closed (``valid_to`` set) rows a current-rows copy leaves behind.
+
+    ``GraphStore.compact_versions(dry_run=True)`` counts exactly those rows per
+    table and deletes none, so the count needs no new store method. ``None``
+    means the store could not say: a backend that does not implement it, or a
+    read that failed. The caller reports "not counted" for that, never ``0``,
+    which would claim no history was left. The copy has finished by the time
+    this runs and the count is advisory, so a failure here is logged and never
+    fails it.
+    """
+    try:
+        counted = store.compact_versions(_AFTER_EVERY_VERSION, dry_run=True)
+    except Exception as exc:
+        logger.warning(
+            "migrate_graph_version_count_failed", error_class=type(exc).__name__
+        )
+        return None
+    return {
+        "nodes": counted.nodes_compacted,
+        "edges": counted.edges_compacted,
+        "aliases": counted.aliases_compacted,
+    }
+
+
+def _migrate_graph_scope(
+    report: Any, uncopied: dict[str, int] | None
+) -> dict[str, Any]:
+    """What a ``migrate-graph`` run did and did not carry over.
+
+    Built from what the run read, so the JSON payload and the text lines
+    (``_migrate_graph_scope_lines``) come from one source. In a dry run
+    ``current_rows_copied`` counts what would be written, as ``nodes_written``
+    does.
+    """
+    return {
+        "copies": "current graph rows only (nodes, edges, aliases)",
+        "current_rows_copied": {
+            "nodes": report.nodes_written,
+            "edges": report.edges_written,
+            "aliases": report.aliases_written,
+        },
+        "source_version_rows_counted": uncopied is not None,
+        "source_version_rows_not_copied": uncopied,
+        # The ABC's ``upsert_node``, ``upsert_edge`` and ``upsert_alias`` take no
+        # timestamp, so the destination stamps every row it writes
+        # (``test_the_graph_abc_accepts_no_timestamp_to_carry_over``).
+        "timestamps_preserved": False,
+        "timestamps_note": (
+            "created_at, updated_at and valid_from are set on the destination "
+            "when each row is written, and edge and alias ids are new; the "
+            "source's values are not carried over"
+        ),
+        "not_moved": list(_MIGRATE_GRAPH_NOT_MOVED),
+    }
+
+
+def _migrate_graph_scope_lines(scope: dict[str, Any], *, dry_run: bool) -> list[str]:
+    """The text-format rendering of ``_migrate_graph_scope``, printed on every run."""
+    copied = scope["current_rows_copied"]
+    verb = "Would copy" if dry_run else "Copied"
+    lines = [
+        (
+            f"{verb} current graph rows only: nodes={copied['nodes']} "
+            f"edges={copied['edges']} aliases={copied['aliases']}."
+        )
+    ]
+    left = scope["source_version_rows_not_copied"]
+    if left is None:
+        lines.append(
+            "Source version rows not copied: not counted (the source store could "
+            "not report them)."
+        )
+    else:
+        lines.append(
+            "Source version rows not copied (closed history): "
+            f"nodes={left['nodes']} edges={left['edges']} aliases={left['aliases']}."
+        )
+    lines.append(f"Timestamps are not preserved: {scope['timestamps_note']}.")
+    lines.append("Not moved by this command: " + ", ".join(scope["not_moved"]) + ".")
+    return lines
+
+
+def _print_migrate_graph_scope(scope: dict[str, Any], *, dry_run: bool) -> None:
+    """Print the scope lines. Constants and counts only, so ``markup=False``;
+    ``soft_wrap`` keeps each statement on one line for a script reading them."""
+    for line in _migrate_graph_scope_lines(scope, dry_run=dry_run):
+        console.print(line, markup=False, soft_wrap=True)
+
+
 @admin_app.command("migrate-graph")
 def migrate_graph(
     from_config: Path = typer.Option(  # noqa: B008
@@ -2167,6 +2266,14 @@ def migrate_graph(
     ),
 ) -> None:
     """Copy current graph data (nodes + edges + aliases) between backends.
+
+    This moves the current graph only. Closed history rows (the SCD-2
+    versions behind ``as_of`` reads and node history) are not copied, and the
+    run counts them when the source store can. Timestamps are not preserved:
+    the destination sets ``created_at``, ``updated_at`` and ``valid_from`` when
+    it writes each row. Documents, traces, the event log, vectors and feedback
+    are not moved by this command, and no Trellis command moves them. Every
+    run, in either ``--format``, states these limits beside its counts.
 
     POC scope: current versions only, in-memory snapshot up to
     ``--max-nodes``. Idempotent on retry — a destination that already
@@ -2236,6 +2343,8 @@ def migrate_graph(
                     "failures in one pass.[/yellow]"
                 )
                 raise typer.Exit(code=EXIT_STORE) from exc
+            # Read while the source is still open; the copy never wrote to it.
+            uncopied = _count_source_version_rows(src_store)
         finally:
             # Close in dest-first order so the source connection survives
             # if the dest close blows up — diagnostics may need to
@@ -2280,12 +2389,16 @@ def migrate_graph(
         # disagree. A ``status`` of "error" beside an exit code of 0 would
         # have been a third signal, not a fix.
         payload["status"] = "error" if failed else "ok"
+        payload["copy_scope"] = _migrate_graph_scope(report, uncopied)
         emit_json(payload, indent=2)
     else:
         if report.dry_run:
             console.print(f"[yellow]{report.summary()}[/yellow]")
         else:
             console.print(f"[green]{report.summary()}[/green]")
+        _print_migrate_graph_scope(
+            _migrate_graph_scope(report, uncopied), dry_run=report.dry_run
+        )
         if failed:
             console.print()
             console.print("[red]Errors:[/red]")

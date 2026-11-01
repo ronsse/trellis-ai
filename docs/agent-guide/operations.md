@@ -216,6 +216,45 @@ flagged `stale` when that age exceeds 36h regardless of its own
 `last_status`, `null` rendered as "Not measured", and a fetch failure
 rendered as a visible error rather than a silent empty list.
 
+### `trellis admin migrate-graph`
+
+Copy the **current** graph (nodes, edges, aliases) from one graph store to another.
+
+```bash
+trellis admin migrate-graph --from-config FROM.yaml --to-config TO.yaml \
+  [--dry-run] [--max-nodes N] [--continue-on-error] [--format text|json] [--no-meta-trace]
+```
+
+Each YAML file holds a single `graph:` block in the shape `recommended-config.yaml` uses. A destination row that already exists is skipped, so a re-run is safe.
+
+**What it does not move.** A successful run is a copy of the current graph, not of the store:
+
+- **Closed history is not copied.** Only current rows (`valid_to IS NULL`) are read. A node with three versions arrives with one, so `as_of` reads and `get_node_history` on the destination start at the copy. The run counts the closed rows it left behind (nodes, edges and aliases) with `compact_versions(dry_run=True)` on the source, which deletes nothing. If the source store cannot report that count, `source_version_rows_counted` is `false` and the count is `null`: it is never printed as `0`.
+- **Timestamps are not preserved.** `upsert_node`, `upsert_edge` and `upsert_alias` take no clock, so the destination sets `created_at`, `updated_at` and `valid_from` when it writes each row. Edge and alias ids are new; node ids are kept.
+- **Only the graph moves.** Documents, traces, the event log, vectors and feedback are not moved by this command, and no Trellis command moves them. `trellis admin backup` copies SQLite stores to a directory; it does not load them into another backend. To keep a SQLite store's history intact, leave it on SQLite.
+
+The statement is part of every run's output, in both formats, not only when history was lost. `--format json` adds one key, `copy_scope`, and keeps every existing key; `status` is `ok` on a clean copy:
+
+```json
+{
+  "status": "ok",
+  "nodes_read": 2, "nodes_written": 2,
+  "copy_scope": {
+    "copies": "current graph rows only (nodes, edges, aliases)",
+    "current_rows_copied": {"nodes": 2, "edges": 1, "aliases": 1},
+    "source_version_rows_counted": true,
+    "source_version_rows_not_copied": {"nodes": 1, "edges": 1, "aliases": 1},
+    "timestamps_preserved": false,
+    "timestamps_note": "created_at, updated_at and valid_from are set on the destination when each row is written, and edge and alias ids are new; the source's values are not carried over",
+    "not_moved": ["documents", "traces", "event_log", "vectors", "feedback"]
+  }
+}
+```
+
+Under `--dry-run`, `current_rows_copied` counts what would be written, as `nodes_written` does, and the text says "Would copy".
+
+**Exit codes** (the same under both formats): `0` for a clean copy; `5` when a step failed (`errors` is non-empty, or a store write aborted the run); `2` for an unusable `--from-config` or `--to-config`; `1` when the source has more current nodes than `--max-nodes`.
+
 ### `trellis admin show-prompt`
 
 Print the retrieve, record, grade loop as text for a consumer that reads no skill: a model called with an API key, a framework's system message, or a dispatched subagent.

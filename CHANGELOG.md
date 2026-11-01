@@ -6,6 +6,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin migrate-graph` now says it copies the current graph only.** The command
+  reads current rows and writes them through the destination's `upsert_*` methods, so a node
+  with two SCD-2 versions arrives with one, every row's `created_at`, `updated_at` and
+  `valid_from` (and every edge and alias id) is minted by the destination, and no store but
+  the graph is touched. A clean run reported `status: ok` and said none of that. Every run
+  now states it, in both formats and whether or not history was lost. `--format json` gains
+  one key, `copy_scope`: `current_rows_copied` (nodes, edges, aliases written, or that would
+  be written under `--dry-run`), `source_version_rows_not_copied` (the source's closed rows,
+  counted with `compact_versions(dry_run=True)`, which deletes nothing),
+  `source_version_rows_counted`, `timestamps_preserved: false` with a note, and `not_moved`
+  (documents, traces, event log, vectors, feedback). A source that cannot give the count
+  reports `null` and `source_version_rows_counted: false`, never `0`. Existing keys keep
+  their meaning, `status` is still `ok` on a clean copy, and exit codes are unchanged and
+  independent of `--format`. The text form prints four lines after the summary. The help,
+  README, `docs/agent-guide/operations.md` (a new `migrate-graph` section) and the
+  deployment pages that send a reader from SQLite to another backend state the same limits.
+  Checked sqlite to sqlite; the Postgres, Neo4j and ArcadeDB paths, including their
+  `compact_versions` counts, were not run. It adds no migration command and changes
+  nothing about what is copied.
 - **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
   (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
   its criteria, so archived, too-young and wrong-state rows used up the window and a
