@@ -2,6 +2,8 @@
 
 **Status:** active 2026-04-26 · **Program relocated 2026-07-12:** the harness, scenarios, corpora, and eval unit tests now live in the private `ronsse/trellis-evals` repo (subtree split, history preserved). This doc remains the strategy of record.
 
+> Paths under `eval/` and `tests/unit/eval/` named below describe the harness while it lived in this repo; they moved to the `trellis-evals` repo on 2026-07-12.
+
 > *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
 
 **Owner:** rotating
@@ -67,6 +69,8 @@ From [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) §5 plus the "explor
 | Blob TTL / graph compaction automation | Real accumulation rates observed |
 
 ## 3. The strategic question — where do eval tests live?
+
+> Superseded 2026-07-12: the program took Option A and now lives in the private `trellis-evals` repo. The recommendation below is the April decision, kept as written.
 
 ### Three options considered
 
