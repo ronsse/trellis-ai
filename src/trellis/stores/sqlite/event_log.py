@@ -12,6 +12,12 @@ import structlog
 from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.instant import (
+    MigrationEvents,
+    instant_key,
+    instant_key_sql,
+    migrate_instant_column,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -73,6 +79,28 @@ CREATE TABLE IF NOT EXISTS events (
     schema_version TEXT
 )"""
 
+#: ``occurred_at`` is TEXT in whatever offset (or none) the writer's ``datetime``
+#: carried, so the queries compare and order :data:`_OCCURRED_AT_UTC_SQL`, its
+#: instant as fixed-width UTC (see :mod:`trellis.stores.sqlite.instant`), not
+#: the text. ``idx_events_occurred_at`` stays: an earlier build expects it.
+_OCCURRED_AT_UTC_SQL = instant_key_sql("occurred_at")
+
+_OCCURRED_AT_UTC_INDEX = "idx_events_occurred_at_utc"
+
+#: Led by ``event_type``, so a read that names a type and then compares or
+#: orders the instant (the session dedup and feedback lookups, ``count`` for a
+#: type) is a range scan, not an evaluation of the expression per matching row.
+_TYPE_OCCURRED_AT_UTC_INDEX = (
+    "idx_events_type_occurred_at_utc",
+    "event_type, occurred_at_utc",
+)
+
+_MIGRATION_EVENTS = MigrationEvents(
+    migrating="migrating_event_log_schema_add_occurred_at_utc",
+    skipped="event_log_schema_migration_skipped",
+    index_skipped="event_log_index_creation_skipped",
+)
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events(occurred_at)",
     "CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)",
@@ -95,6 +123,37 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         for idx_sql in _CREATE_INDEXES:
             cur.execute(idx_sql)
         self._conn.commit()
+        self._has_occurred_at_utc = self._migrate_add_occurred_at_utc()
+
+    def _event_columns(self) -> set[str]:
+        return {row["name"] for row in self._conn.execute("PRAGMA table_xinfo(events)")}
+
+    def _migrate_add_occurred_at_utc(self) -> bool:
+        """Additive migration: index ``occurred_at`` by instant, not by text.
+
+        See :func:`~trellis.stores.sqlite.instant.migrate_instant_column`; no
+        stored row is rewritten. Returns whether the column exists afterwards;
+        when it does not, :meth:`_instant` evaluates the same expression inline,
+        which returns the same rows and is merely unindexed.
+        """
+        return migrate_instant_column(
+            self._conn,
+            db_path=self._db_path,
+            table="events",
+            source_column="occurred_at",
+            instant_column="occurred_at_utc",
+            index=_OCCURRED_AT_UTC_INDEX,
+            columns=self._event_columns,
+            events=_MIGRATION_EVENTS,
+            also_indexes=(_TYPE_OCCURRED_AT_UTC_INDEX,),
+        )
+
+    def _instant(self) -> str:
+        """The SQL the time bounds and ``ORDER BY`` read: the indexed column
+        when the migration ran, else the expression it holds."""
+        if self._has_occurred_at_utc:
+            return "occurred_at_utc"
+        return f"({_OCCURRED_AT_UTC_SQL})"
 
     # -- mutations -----------------------------------------------------------
 
@@ -203,12 +262,13 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             clause, value_params = _scrub_match_clause("source", source)
             clauses.append(clause)
             params.extend(value_params)
+        instant = self._instant()
         if since is not None:
-            clauses.append("occurred_at >= ?")
-            params.append(since.isoformat())
+            clauses.append(f"{instant} >= ?")
+            params.append(instant_key(since))
         if until is not None:
-            clauses.append("occurred_at <= ?")
-            params.append(until.isoformat())
+            clauses.append(f"{instant} <= ?")
+            params.append(instant_key(until))
         if payload_filters:
             for key, value in payload_filters.items():
                 # Build the JSON path with concatenation so the key is a
@@ -226,9 +286,13 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
+        # ``rowid`` in the same direction breaks ties among events at one
+        # instant, so ``limit`` cuts the same rows whichever plan runs (the
+        # indexes, or the inline expression on a file that could not migrate).
+        # Every index on the instant carries ``rowid`` last, so it adds no sort.
         sql = (
             f"SELECT * FROM events WHERE {where} "
-            f"ORDER BY occurred_at {direction} LIMIT ?"
+            f"ORDER BY {instant} {direction}, rowid {direction} LIMIT ?"
         )
         params.append(limit)
 
@@ -250,8 +314,8 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             clauses.append("event_type = ?")
             params.append(str(event_type))
         if since is not None:
-            clauses.append("occurred_at >= ?")
-            params.append(since.isoformat())
+            clauses.append(f"{self._instant()} >= ?")
+            params.append(instant_key(since))
 
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"

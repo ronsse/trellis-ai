@@ -217,6 +217,49 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **SQLite event log time bounds compare `occurred_at` by instant, not as
+  text.** `get_events(since=..., until=...)`, `count(since=...)` and the
+  `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`
+  text, so an event stamped `-11:00` that was newer than a `since` bound read
+  as older and was dropped, a `+14:00` event fell outside an `until`, and a
+  bound given in another zone, or a naive stamp, sat on the wrong side of the
+  instant it names. `EventLog.get_events` now documents inclusive by-instant
+  bounds, and `SQLiteEventLog` filters and orders on a generated
+  `occurred_at_utc` column with two indexes, added to an existing file on open
+  without rewriting a stored row: one on the instant and one led by
+  `event_type` (Postgres already has the matching `(event_type, occurred_at)`
+  index). A read that names an event type, such as `count`, the session dedup
+  and the recency lookups, is a range scan on the second. A read that filters
+  on `source` and then compares or orders the instant has no index led by
+  `source`, so it evaluates the expression per matching row: 122 ms before and
+  598 ms after on a million-row log. Events at one instant now come back in
+  insertion order (newest first for `order="desc"`) on every plan; before, the
+  order among them depended on the plan, so a `desc` `limit` that cuts a tie
+  can return other rows of that tie than it did. The migration is best effort,
+  as the trace store's is: a read-only file or one under another connection's
+  write lock opens as before, warns (`event_log_schema_migration_skipped`) and
+  reads through the same expression unindexed. The expression, the bound and
+  the migration now live in `trellis.stores.sqlite.instant`, which
+  `SQLiteTraceStore` uses unchanged in behaviour. `idx_events_occurred_at`
+  stays, because an earlier build expects it; `append` still writes the text it
+  is given, so `get_event` returns the `occurred_at` it was handed, naive or
+  offset. Eight by-instant cases join the event log contract suite, so Postgres
+  runs them under `live-infra`. The Postgres backend binds a naive datetime
+  without normalising it, which psycopg sends as `timestamp` and the server
+  reads in the session's time zone, so the naive case holds there under a UTC
+  session only; it is not changed here.
+
+  **Upgrade note.** The first open of an existing SQLite event log builds both
+  indexes while holding the write lock, about 5 to 7 seconds per million rows
+  (5.2 s at one million, 15 s at three, 37 s at five with a cold cache).
+  Another process writing to the file waits for the build and, once one
+  build outlasts that writer's 10-second busy timeout, fails with
+  `database is locked`: no failure at three million rows (longest stall 7.7 s),
+  three at five million. Take the first open after upgrading a log of several
+  million rows with no writer running. `trellis analyze` and every other
+  read-only command do this migration too when the file allows it; under a held
+  lock they skip it and warn. Postgres is unaffected.
+
 - **A refused command under `--format json` answers with one JSON object, not a
   Rich line.** `trellis extract refresh` (all eight refusal branches),
   `trellis classify shadow` and `trellis worker enrich` / `mine-precedents`
