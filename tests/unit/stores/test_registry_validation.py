@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
+from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
 
 from trellis.errors import ConfigError
-from trellis.stores.registry import RegistryValidationError, StoreRegistry
+from trellis.stores import registry as registry_module
+from trellis.stores.registry import (
+    _FINGERPRINT_META_FILENAME,
+    RegistryValidationError,
+    StoreRegistry,
+    _reset_backend_cache,
+)
 
 
 class TestValidateSuccess:
@@ -199,6 +210,169 @@ class TestUriFormatValidation:
         reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
         format_errors = reg._check_uri_formats(["trace"])
         assert format_errors == []
+
+
+class _SpyStore:
+    """Stands in for a backend class: records each construction, connects to nothing."""
+
+    built: ClassVar[list[str]] = []
+    raises: ClassVar[Exception | None] = None
+
+    def __init__(self, dsn: str | None = None, uri: str | None = None) -> None:
+        type(self).built.append(dsn or uri or "")
+        if type(self).raises is not None:
+            raise type(self).raises
+
+
+_HEALTHY_DSN = "postgres://user:pw@host:5432/db"
+_REFUSED_DSN = "postgres:///dbname"
+
+
+@pytest.fixture
+def spy() -> Iterator[type[_SpyStore]]:
+    """Swap the Postgres trace/document and Neo4j graph backends for a spy."""
+    _SpyStore.built = []
+    _SpyStore.raises = None
+    try:
+        with ExitStack() as stack:
+            for store_type, backend in (
+                ("trace", "postgres"),
+                ("document", "postgres"),
+                ("graph", "neo4j"),
+            ):
+                plane = registry_module._PLANE_OF[store_type]
+                stack.enter_context(
+                    patch.dict(
+                        registry_module._BUILTIN_BACKENDS[plane][store_type],
+                        {backend: (__name__, "_SpyStore")},
+                    )
+                )
+            _reset_backend_cache()
+            yield _SpyStore
+    finally:
+        _reset_backend_cache()
+
+
+class TestRefusedUriIsNotInstantiated:
+    """A store whose URI the pre-flight refused is named, not built.
+
+    Building it would hand a known-bad URI to a driver; the Postgres pool
+    waits out a 30 s timeout on one.
+    """
+
+    def test_a_refused_dsn_is_reported_and_never_constructed(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        config = {
+            "trace": {"backend": "postgres", "dsn": _REFUSED_DSN},
+            "document": {"backend": "postgres", "dsn": _HEALTHY_DSN},
+        }
+        reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace", "document"])
+
+        ((name, exc),) = excinfo.value.errors
+        assert name == "trace"
+        assert isinstance(exc, ConfigError)
+        assert exc.setting == "dsn"
+        assert str(excinfo.value).splitlines() == [
+            "StoreRegistry validation failed for 1 store(s):",
+            "  - trace: ConfigError: dsn: empty network location (host:port required)",
+        ]
+        # The healthy store in the same validate is still built and cached.
+        assert spy.built == [_HEALTHY_DSN]
+        assert "document" in reg._cache
+        assert "trace" not in reg._cache
+
+    def test_stores_sharing_a_refused_dsn_are_each_named_and_none_built(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        config = {
+            "trace": {"backend": "postgres", "dsn": _REFUSED_DSN},
+            "document": {"backend": "postgres", "dsn": _REFUSED_DSN},
+        }
+        reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace", "document"])
+
+        assert [name for name, _ in excinfo.value.errors] == ["trace", "document"]
+        assert spy.built == []
+        assert reg._cache == {}
+
+    def test_the_skip_follows_the_store_not_the_uri_text(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        # ``bolt://`` is refused for a Postgres store and valid for Neo4j.
+        shared = "bolt://host:7687"
+        config = {
+            "trace": {"backend": "postgres", "dsn": shared},
+            "graph": {"backend": "neo4j", "uri": shared},
+        }
+        reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace", "graph"])
+
+        ((name, exc),) = excinfo.value.errors
+        assert name == "trace"
+        assert "unexpected URL scheme for postgres backend" in str(exc)
+        assert spy.built == [shared]  # the graph store, not the trace store
+        assert "graph" in reg._cache
+
+    def test_a_store_another_preflight_check_names_is_still_instantiated(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        # The fingerprint check labels its error with a store type too.
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        (stores_dir / _FINGERPRINT_META_FILENAME).write_text(
+            json.dumps({"trace": "trace/sqlite/v0"})
+        )
+        config = {"document": {"backend": "postgres", "dsn": _REFUSED_DSN}}
+        reg = StoreRegistry(config=config, stores_dir=stores_dir)
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace", "document"])
+
+        named = [name for name, _ in excinfo.value.errors]
+        assert named == ["document", "trace"]
+        assert "SchemaFingerprintMismatch" in str(excinfo.value.errors[1][1])
+        assert "trace" in reg._cache  # built despite the fingerprint error
+        assert spy.built == []  # the refused document store never was
+
+    def test_a_refused_store_still_reports_what_precedes_the_constructor(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        config = {
+            "trace": {"backend": "postgres", "dsn": _REFUSED_DSN, "bogus": 1},
+        }
+        reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace"])
+
+        errors = excinfo.value.errors
+        assert [name for name, _ in errors] == ["trace", "trace"]
+        assert "empty network location" in str(errors[0][1])
+        assert "does not accept" in str(errors[1][1])
+        assert spy.built == []
+
+    def test_a_well_formed_dsn_is_constructed_and_its_failure_reported(
+        self, tmp_path: Path, spy: type[_SpyStore]
+    ) -> None:
+        spy.raises = ConnectionError("pool timed out")
+        config = {"trace": {"backend": "postgres", "dsn": _HEALTHY_DSN}}
+        reg = StoreRegistry(config=config, stores_dir=tmp_path / "stores")
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["trace"])
+
+        ((name, exc),) = excinfo.value.errors
+        assert name == "trace"
+        assert isinstance(exc, ConnectionError)
+        assert spy.built == [_HEALTHY_DSN]
 
 
 class TestEmbeddingDimConsistency:

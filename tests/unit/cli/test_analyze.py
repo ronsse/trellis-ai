@@ -1782,6 +1782,276 @@ class TestLearningCandidates:
         assert data["candidate_count"] == 0, data
 
 
+class TestLearningCandidatesBreakdown:
+    """``by_recommendation_type`` and ``promotion_ready_count`` on both surfaces."""
+
+    @staticmethod
+    def _serve(
+        registry: StoreRegistry,
+        *,
+        item_id: str,
+        rounds: int,
+        item_type: str = "document",
+        success: bool = True,
+        helpful: bool = False,
+        unhelpful: bool = False,
+    ) -> None:
+        """Serve ``item_id`` in ``rounds`` graded packs, citing it as asked."""
+        event_log = registry.operational.event_log
+        for i in range(rounds):
+            pack_id = f"bd-{item_id}-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "breakdown intent",
+                    "domain": "bd-test",
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": item_type,
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                    "injected_item_ids": [item_id],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "outcome": "success" if success else "failure",
+                    "success": success,
+                    "helpful_item_ids": [item_id] if helpful else [],
+                    "unhelpful_item_ids": [item_id] if unhelpful else [],
+                },
+            )
+
+    def _seed_mixed(self, registry: StoreRegistry) -> None:
+        """One ready candidate, and four that are listed without being ready."""
+        # promote_guidance, one helpful citation per serving, none unhelpful.
+        self._serve(registry, item_id="bd:doc:ready", rounds=2, helpful=True)
+        # promote_guidance by success rate, but nobody cited it helpful.
+        self._serve(registry, item_id="bd:doc:uncited", rounds=2)
+        # promote_guidance with a helpful citation AND an unhelpful one.
+        self._serve(registry, item_id="bd:doc:contested", rounds=1, helpful=True)
+        self._serve(registry, item_id="bd:doc:contested", rounds=1, unhelpful=True)
+        # promote_precedent: helpful, unhelpful-free, but not promote_guidance.
+        self._serve(
+            registry,
+            item_id="bd:prec:one",
+            rounds=2,
+            item_type="precedent",
+            helpful=True,
+        )
+        # investigate_noise: every serving failed.
+        self._serve(registry, item_id="bd:doc:noisy", rounds=2, success=False)
+
+    @staticmethod
+    def _run_json(out_dir: Path, *extra: str) -> dict:
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+                *extra,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout.strip())
+
+    def test_empty_event_log_reports_zero(self, tmp_path: Path) -> None:
+        data = self._run_json(tmp_path / "review")
+        assert data["candidate_count"] == 0
+        assert data["by_recommendation_type"] == {}
+        assert data["promotion_ready_count"] == 0
+
+    def test_mix_of_types_is_counted_per_type(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_mixed(temp_stores)
+        data = self._run_json(tmp_path / "review")
+        assert data["candidate_count"] == 5, data
+        assert data["by_recommendation_type"] == {
+            "investigate_noise": 1,
+            "promote_guidance": 3,
+            "promote_precedent": 1,
+        }
+        # The counts add up to the list that is printed, not to a subset.
+        assert sum(data["by_recommendation_type"].values()) == data["candidate_count"]
+        assert sum(data["by_recommendation_type"].values()) == len(data["candidates"])
+
+    def test_listed_but_unready_candidates_are_not_counted_ready(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_mixed(temp_stores)
+        data = self._run_json(tmp_path / "review")
+        by_item = {c["item_id"]: c for c in data["candidates"]}
+        # Every one of these is on the list...
+        assert set(by_item) == {
+            "bd:doc:ready",
+            "bd:doc:uncited",
+            "bd:doc:contested",
+            "bd:prec:one",
+            "bd:doc:noisy",
+        }
+        # ...and exactly one passes the predicate: an uncited, a contested, a
+        # precedent-typed and a noise candidate are listed without being ready.
+        assert data["promotion_ready_count"] == 1
+
+    def test_promotion_ready_count_is_the_digest_and_review_ready_set(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """One predicate: the JSON count, the artifact digest and review-ready agree."""
+        from trellis.learning.review_ready import build_review_rows
+
+        self._seed_mixed(temp_stores)
+        out_dir = tmp_path / "review"
+        data = self._run_json(out_dir)
+        artifact = json.loads(Path(data["candidates_path"]).read_text(encoding="utf-8"))
+        rows = build_review_rows(
+            data["candidates"], document_store=None, is_promoted=lambda _eid: False
+        )
+        assert data["promotion_ready_count"] == artifact["promotion_ready"]["count"]
+        assert data["promotion_ready_count"] == len(rows) == 1
+        assert rows[0]["item_id"] == "bd:doc:ready"
+
+    def test_min_support_changes_the_count_it_describes(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """The count describes this run's list, so a higher floor removes the row."""
+        self._serve(temp_stores, item_id="bd:doc:once", rounds=1, helpful=True)
+        out_dir = tmp_path / "review"
+        # Default ``--min-support 2``: a once-served item is not a candidate.
+        default = self._run_json(out_dir)
+        assert default["by_recommendation_type"] == {}
+        assert default["promotion_ready_count"] == 0
+        # The same event log under ``--min-support 1`` has one ready candidate.
+        lowered = self._run_json(out_dir, "--min-support", "1")
+        assert lowered["by_recommendation_type"] == {"promote_guidance": 1}
+        assert lowered["promotion_ready_count"] == 1
+
+    def test_existing_keys_keep_their_meaning(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_mixed(temp_stores)
+        data = self._run_json(tmp_path / "review")
+        assert {
+            "status",
+            "observation_count",
+            "candidate_count",
+            "candidates_path",
+            "decisions_template_path",
+            "candidates",
+        } <= set(data)
+        assert data["status"] == "ok"
+        assert data["observation_count"] == 10
+        assert data["candidate_count"] == len(data["candidates"]) == 5
+
+    def test_text_surface_prints_the_breakdown(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_mixed(temp_stores)
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(tmp_path / "r")],
+        )
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert (
+            "By recommendation: investigate_noise 1, promote_guidance 3, "
+            "promote_precedent 1" in rendered
+        )
+        assert "1 candidate promotion-ready" in rendered
+
+    def test_text_surface_says_zero_when_none_are_ready(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._serve(temp_stores, item_id="bd:doc:uncited", rounds=2)
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(tmp_path / "r")],
+        )
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "By recommendation: promote_guidance 1" in rendered
+        assert "0 candidates promotion-ready" in rendered
+        assert "review with" not in rendered
+
+    def test_text_surface_empty_state_says_zero(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(tmp_path / "r")],
+        )
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "0 candidates promotion-ready" in rendered
+        assert "By recommendation" not in rendered
+
+    def test_text_and_json_exit_alike(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_mixed(temp_stores)
+        codes = {
+            fmt: runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "learning-candidates",
+                    "--output-dir",
+                    str(tmp_path / fmt),
+                    "--format",
+                    fmt,
+                ],
+            ).exit_code
+            for fmt in ("text", "json")
+        }
+        assert codes == {"text": 0, "json": 0}
+
+    def test_item_type_with_markup_survives_the_table(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        # ``item_type`` is whatever the serving pack's payload carried; Rich
+        # would delete ``[tag]`` from it rather than print it.
+        self._serve(
+            temp_stores, item_id="bd:doc:odd", rounds=2, item_type="odd[tag]type"
+        )
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(tmp_path / "r")],
+        )
+        assert result.exit_code == 0, result.output
+        assert "odd[tag]type" in plain(result.output)
+
+    def test_type_names_are_escaped_in_the_breakdown_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analyze,
+            "summarize_learning_candidates",
+            lambda _candidates: {
+                "by_recommendation_type": {"a[tag]b": 2, "x:zap:y": 1},
+                "promotion_ready_count": 0,
+            },
+        )
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(tmp_path / "r")],
+        )
+        assert result.exit_code == 0, result.output
+        assert "By recommendation: a[tag]b 2, x:zap:y 1" in plain(result.output)
+
+
 class TestLearningParameterRegistry:
     """CLI-side wiring for the registry-required scoring path.
 

@@ -20,6 +20,40 @@ All notable changes to Trellis will be documented in this file.
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
 
+- **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
+  upgrading and rolling back a SQLite store.** The script installs the previous
+  release (the newest release tag that is an ancestor of HEAD and not HEAD
+  itself, read from git) and the candidate into separate fresh venvs, then, over
+  one set of scratch stores: the previous release writes a document, a trace,
+  two entities and an edge, a pack and pack feedback and reads them back; the
+  candidate reads them, writes a second set, reads both and runs
+  `trellis admin health`; the previous release reads both sets again. Fields the
+  script wrote are compared with what it wrote, and fields the build chose
+  (content hash, timestamps) must not change between reads by either build. The
+  first failure names its step and exits non-zero. The workflow runs on `v*`
+  tags, nightly and on demand, with no `pull_request` trigger, and does not gate
+  `publish.yml`. Postgres and the other cloud backends are not covered.
+  `docs/deployment/runbook.md` gains an "Upgrading" section, linked from
+  `RELEASING.md`, that states what the script proves, and that the only
+  compatibility refusal is the registry's schema fingerprint, which no release
+  has bumped and the script does not exercise.
+
+- **`trellis analyze learning-candidates` says what its candidates are.** `--format json`
+  reported only `candidate_count`, which includes every `investigate_noise` row, so a long
+  list could not be told apart from a backlog of promotable knowledge. The JSON now also
+  carries `by_recommendation_type` (a count per `recommendation_type`; a type with no
+  candidate is absent) and `promotion_ready_count` (how many pass `is_promotion_ready`, the
+  predicate the digest and `curate review-ready` already use), both over the `candidates`
+  list the command prints. The text output prints the same, and now says `0 candidates
+  promotion-ready` where it used to print nothing. The count describes one run's list: a
+  different `--min-support` or `--days` changes it, `--output-dir` only chooses whether the
+  review commands read that run's file, and the count is narrower than what `curate
+  promote-learning` accepts, so the help text and the operations guide say so. No existing
+  key, candidate or promotion changes. The text table now escapes the recommendation and
+  item type it prints, so a type containing `[...]` is no longer deleted by Rich. That also
+  fixes an exit code: such a type could make the text output exit 1 where `--format json`
+  exited 0, and both now exit 0.
+
 - **`trellis analyze holdout --operational` reports the experiment's health
   without reading an outcome.** A pack holdout needs a check that it is running
   (arm counts and their ratio, the funnel, covariate coverage, per-build
@@ -69,6 +103,47 @@ All notable changes to Trellis will be documented in this file.
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
 ### Fixed
+
+- **`trellis admin migrate-graph` now says what it copies and what it leaves behind.** The
+  command reads current rows and writes them through the destination's `upsert_*` methods, so a
+  node with three SCD-2 versions arrives with one, the destination sets each row's timestamps
+  and mints every edge and alias id, edges and aliases are read through the current nodes (one
+  attached to an id with no current node is never read), and no store but the graph is touched.
+  A clean run reported `status: ok` and said none of that. A run that finishes now states it,
+  in both formats and whether or not anything was lost. `--format json` gains one key,
+  `copy_scope`: `current_rows_copied` (nodes, edges, aliases written, or that would be
+  written under `--dry-run`), `source_version_rows_not_copied` (the source's closed rows,
+  counted with `compact_versions(dry_run=True)`, which deletes nothing) with
+  `source_version_rows_counted`, `current_edges_not_reached` (the source's current edge count
+  less the edges the run read) with `current_edges_not_reached_counted`, `unreached_note`
+  (aliases have no count), `timestamps_preserved: false` with a note, and `not_moved`
+  (documents, traces, event log, vectors, blobs, feedback). A source that cannot give a count
+  reports `null` and a `false` flag, never `0`. Existing keys keep their meaning, `status` is
+  still `ok` on a clean copy, and exit codes are unchanged and independent of `--format`. The
+  text form prints six lines after the summary. A run that aborts on a store error (exit 5)
+  prints text in both formats, no JSON and no `copy_scope`, and the destination may hold a
+  partial copy; a source over `--max-nodes` exits 1 before writing anything. A re-run adds
+  missing rows and neither updates nor removes existing ones, and `--dry-run` creates the
+  destination database. The help, README, `docs/agent-guide/operations.md` (a new
+  `migrate-graph` section, including the exit codes as observed through the entry point, two of
+  which end in a traceback) and the deployment pages that send a reader from SQLite to another
+  backend state the same limits. Checked sqlite to sqlite only: the Postgres and Neo4j paths
+  were not run, and ArcadeDB inherits the Bolt `compact_versions`, which has no ArcadeDB test and
+  no live run here. It adds no migration command and changes nothing about
+  what is copied or any exit code.
+
+- **`StoreRegistry.validate()` no longer builds a store whose URI its own pre-flight refused.**
+  A Postgres store configured with a `dsn` the check rejects (`postgres:///db`, `://host/db`)
+  was still constructed, so `validate()` waited out the connection pool's 30 s timeout and
+  added a second `PoolTimeout` entry for a store the `ConfigError` had already named. The
+  aggregate now names that store once, from the URI check, and returns without connecting.
+  The checks that precede the constructor still run for it (unknown backend, a missing driver
+  package, a config key the backend does not accept); a connection or schema error that only
+  the constructor raises is reported once the URI is fixed. The skip is keyed by store, so a
+  store carrying the same string under a backend that accepts it, and a store another
+  pre-flight check names, are built as before. The `RegistryValidationError` type, the
+  `(store_type, exception)` pairs and the `ConfigError` text are unchanged; its "for N
+  store(s)" count is of entries, so it is one lower for such a store.
 
 - **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
   say the table has "no estimate".** It prints each arm's outcome mean per
