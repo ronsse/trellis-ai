@@ -252,7 +252,8 @@ pass "exit 0, ${SKILL_FILES} skill files under \$HOME/.claude/skills"
 
 step "health"
 run "${TRELLIS}" admin health --format json
-# It exits 0 whatever it finds, so the report is the check. The *.db keys are not
+# It exits 5 when a store file is damaged (so `run` fails the step) and 0 when one
+# is missing, so the report is the check for the rest. The *.db keys are not
 # asserted: SQLite files are created lazily and read false right after quickstart.
 jcheck 'd["config"] and d["data_dir"] and d["stores_dir"]' \
     "health reports no config/stores after quickstart"

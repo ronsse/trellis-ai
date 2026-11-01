@@ -142,11 +142,8 @@ class TestNoAbsolutePersonalPath:
     def test_no_catalog_argv_contains_the_old_hardcoded_skynet_hub_path(self) -> None:
         """Pins the exact literal that was the second defect: the old
         ``schedule_seed.py`` hardcoded ``/home/nronsse/projects/skynet-hub/
-        stacks/trellis``. ``_FEEDBACK_LOG_DIR`` legitimately resolves under
-        ``Path.home()`` on a real machine (same fallback pattern as
-        ``trellis.stores.registry``), so a bare ``"/home/"`` substring
-        check is a false positive there — this checks for the specific
-        hardcoded string instead.
+        stacks/trellis``. This checks for that specific string rather than a
+        bare ``"/home/"`` substring.
         """
         old_path = "/home/nronsse/projects/skynet-hub/stacks/trellis"
         for name, spec in JOB_CATALOG.items():
@@ -205,3 +202,20 @@ class TestTuneJobScheduleNeverAutoPromotes:
         # The description's claim is only true because of this -- pin
         # both together so neither can drift from the other unnoticed.
         assert "--dry-run" in JOB_CATALOG["tune"].argv
+
+
+class TestReconcileFeedbackJobUsesTheCommandDefault:
+    """The scheduled job must not name a log directory.
+
+    ``admin reconcile-feedback`` defaults to the one directory the writers use,
+    resolved from ``config.yaml`` then ``TRELLIS_DATA_DIR``. A directory fixed
+    into the argv from the environment alone points at the wrong place when
+    ``config.yaml`` names another data dir, and a named directory that holds no
+    log now exits 2, which fails the job on a fresh install.
+    """
+
+    def test_argv_carries_no_log_dir(self) -> None:
+        argv = JOB_CATALOG["reconcile-feedback"].argv
+        assert argv is not None
+        assert argv[:3] == ("trellis", "admin", "reconcile-feedback")
+        assert "--log-dir" not in argv

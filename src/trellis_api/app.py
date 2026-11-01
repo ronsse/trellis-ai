@@ -374,6 +374,12 @@ def main(
 
     configure_logging()
     app = create_app(host=host, port=port)
+    # The lifespan builds this registry once uvicorn is running, where a
+    # config error that raises there is a traceback and uvicorn's own exit 3.
+    # Parsing the config here, as the lifespan will, lets the typed error
+    # reach the callers below (the CLI boundary, ``console_main``) as exit 5.
+    # It parses config.yaml only; ``validate`` still runs in the lifespan.
+    StoreRegistry.from_config_dir()
     if on_bind_ok is not None:
         on_bind_ok()
     uvicorn.run(app, host=host, port=port)

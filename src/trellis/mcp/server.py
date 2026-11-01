@@ -34,6 +34,7 @@ that previously did ``if result.startswith("Error:")`` need to catch
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -4999,6 +5000,12 @@ def _close_registry() -> None:
         _registry = None
 
 
+#: ``trellis_cli.exit_codes.EXIT_STORE``, the code the CLI gives a typed
+#: configuration or store error. Written out because core does not import the
+#: CLI; ``tests/unit/mcp/test_main_boundary.py`` pins the two equal.
+_EXIT_TRELLIS_ERROR = 5
+
+
 def main() -> None:
     """Run the Trellis MCP server over the configured transport.
 
@@ -5026,8 +5033,8 @@ def main() -> None:
     # only live record; the durable record is the same stamp on every
     # event it writes.
     logger.info("mcp_write_provenance", **get_write_provenance())
-    transport = resolve_transport()
     try:
+        transport = resolve_transport()
         if transport == TRANSPORT_HTTP:
             settings = resolve_http_settings()
             _configure_http_auth(settings)
@@ -5059,5 +5066,15 @@ def main() -> None:
         else:
             _install_shutdown_signal_handlers()
             mcp.run()
+    except TrellisError as exc:
+        # A bad ``TRELLIS_MCP_TRANSPORT``, an unusable http setting or a
+        # store that will not open is an operator error whose message names
+        # its own fix; a traceback buries it. One stderr line (stdout is the
+        # stdio protocol's) and the code the CLI gives this class. An untyped
+        # exception keeps its traceback.
+        sys.stderr.write(
+            f"trellis-mcp: {exc.code} — {sanitize_error_message(exc.message)}\n"
+        )
+        raise SystemExit(_EXIT_TRELLIS_ERROR) from None
     finally:
         _close_registry()

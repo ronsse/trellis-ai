@@ -74,9 +74,14 @@ class BackendNotInstalledError(ConfigError):
         self.extra = extra
         self.package_name = package_name
         if extra:
-            install_hint = f'Run: uv pip install -e ".[{extra}]"'
+            # Two spellings because the reader may hold a wheel or a checkout:
+            # an editable install needs a source tree and fails without one.
+            install_hint = (
+                f"Run: pip install 'trellis-ai[{extra}]'"
+                f' (in a source checkout: pip install -e ".[{extra}]")'
+            )
         elif package_name:
-            install_hint = f"Run: uv pip install {package_name}"
+            install_hint = f"Run: pip install {package_name}"
         else:
             install_hint = "Install the matching optional dependency for this backend."
         message = f"Backend {backend_name!r} is not installed. {install_hint}"
