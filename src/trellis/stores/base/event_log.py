@@ -823,13 +823,13 @@ class EventLog(ABC):
         stored with a ``-11:00`` or ``+14:00`` offset is found by the moment it
         happened, not by the wall-clock digits it was written with, and results
         are ordered by instant, events at one instant in insertion order (SQLite).
-        On SQLite a naive bound or a naive stored ``occurred_at`` is read as
-        UTC; Postgres reads a naive bound in the session's time zone, so pass an
-        aware datetime to get the same answer from both. The returned event
-        keeps the ``occurred_at`` it was appended with, so a caller that
-        compares or sorts them across events must normalise (see ``_as_utc``
-        below) first. ``count(since=...)``
-        reads its bound the same way.
+        A naive bound or a naive ``occurred_at`` is read as UTC on both
+        backends, whatever the server session's time zone; an aware datetime
+        names its own instant. SQLite hands back the ``occurred_at`` it was
+        appended with, naive or offset, and Postgres an aware one, so a caller
+        that compares or sorts them across events must normalise (see
+        ``_as_utc`` below) first. ``count(since=...)`` reads its bound the
+        same way.
 
         ``order`` controls truncation semantics when ``limit`` is hit:
         ``"asc"`` (default) preserves chronological consumption for

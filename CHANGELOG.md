@@ -343,6 +343,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Postgres event log reads a naive timestamp as UTC, whatever the
+  session's time zone.** `PostgresEventLog` bound a naive `datetime` as it
+  came, which psycopg sends as `timestamp` and the server reads in the
+  session's time zone. Under any session but UTC a naive `occurred_at` was
+  stored hours away from the instant its digits name, and a naive `since` or
+  `until` named another instant, so the same naive value meant different
+  things to SQLite, to the trace store and to this log. Against a scratch
+  Postgres 16 in `America/Los_Angeles`, a naive event stamped
+  `2026-03-04T05:06:07` was stored as 13:06:07 UTC, an `until` at 05:06:07Z
+  missed it, `count(since=...)` read one of two events, and two event log
+  contract cases failed (the naive `occurred_at` and the naive-and-aware
+  ordering ones); all 53 contract cases passed under `UTC`, and under
+  `America/Los_Angeles`, `Pacific/Kiritimati` and `Pacific/Pago_Pago` once the
+  binds below were in. `append` now binds a naive `occurred_at` and
+  `recorded_at` as UTC, `get_events` a naive `since` and `until`, and `count` a
+  naive `since`, on the trace store's rule (`as_utc`). An aware value reaches
+  the driver as the very object it was, so a deployment whose callers pass
+  aware datetimes sees no change; it is not passed through `as_utc`, which
+  clamps a stamp at the edge of `datetime`'s range where the server today
+  stores the instant it was given. Rows already stored under a non-UTC
+  session are not rewritten. `EventLog.get_events` now says both backends read
+  a naive bound or `occurred_at` as UTC; that replaces the last sentence of the
+  SQLite entry below, which called the Postgres case unchanged. Reads still
+  have no tie-break: `ORDER BY occurred_at` on Postgres orders events at one
+  instant as the plan happens to, where SQLite uses insertion order. That
+  stays out of this change on purpose, because the session dedup read keeps
+  the newest `limit` `PACK_ASSEMBLED` rows of a session by that order, so a
+  tie-break could change which tied rows survive the cut, which ids are
+  deduplicated out of the next pack, and so what a pack serves. The new
+  mocked-pool test (`tests/unit/stores/test_postgres_event_log_binding.py`)
+  runs wherever psycopg is installed; `live-infra` runs the contract suite
+  under the server's default session, which is UTC, so only the mocked test
+  and a local run in another zone cover the fix.
+
 - **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
   is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
   and a CI smoke test under `tests/unit/eval/` as living here; the harness moved
@@ -410,8 +444,27 @@ All notable changes to Trellis will be documented in this file.
   byte-identical. The three LLM-client and config helpers keep their signatures:
   they read the running command's `--format` through
   `trellis_cli.output.active_output_format`, which answers `text` outside a
-  command. Still prose under `--format json`, left as is because tests pin it:
-  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+  command. `trellis admin migrate-graph`'s config-file, step and capacity
+  refusals were left as prose; the next entry covers them.
+- **The remaining refusals under `--format json` answer with one JSON object
+  too.** `trellis admin migrate-graph` (its five `--from-config` / `--to-config`
+  refusals, a source over `--max-nodes`, and a run a store error aborted),
+  `trellis admin show-proposal` and `trellis admin list-proposals` on a blank id
+  or a non-positive `--limit`, `trellis admin draft-promotion-adr` on an unknown
+  candidate or an existing output file without `--force`, and the learning
+  parameter file guard shared by `trellis analyze learning-candidates` and
+  `trellis worker curate` each printed prose on stdout and exited non-zero. They
+  now emit `{"status": "error", "message": ...}`. An aborted `migrate-graph`
+  run also carries the next step under `hint`, where text prints it as a second
+  line, and still carries no `copy_scope`. The proposal commands add
+  `"error": "validation_error"` so their existing `error` key stays populated.
+  Exit codes are unchanged by this entry (`migrate-graph` config file `2`, step
+  abort `5`, the others `1`); a source over `--max-nodes` changes in the entry
+  under Changed. The human-format text is byte-identical. One success path
+  changes: `draft-promotion-adr --force` under
+  `--format json` no longer prints its "Overwriting existing file" line ahead of
+  the JSON object, which made stdout unparseable at exit `0`; the warning is
+  still logged and text still prints it.
 - **`trellis admin quickstart` stops on a config path it cannot read instead of
   initializing over it.** `config.yaml` as a dangling or looping symlink read as
   absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
@@ -727,6 +780,18 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
+  current nodes than `--max-nodes`.** Breaking for a script that branches on the
+  code. Old `1`, new `2` (`EXIT_VALIDATION`), in both formats. `1` is the
+  "unexpected error, file it with a traceback" code
+  (`docs/design/adr-cli-exit-codes.md`), and this is a deliberate refusal of the
+  arguments given: re-run with a larger `--max-nodes`, as for the command's other
+  input refusals, which already exit `2`. It is not `5`:
+  `MigrationCapacityExceededError` is a `RuntimeError`, not a `TrellisError`, and
+  no store or backend failed. Every other `migrate-graph` exit code is
+  unchanged (`0`, `2` for a config file, `5` for a step failure or a bad
+  backend); nothing was written before the refusal, as before.
 
 - **The repeated-rejection health signal is rated against each tool's attempts and
   no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`

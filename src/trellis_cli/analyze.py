@@ -85,7 +85,7 @@ from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
-from trellis_cli.output import build_console, emit_json
+from trellis_cli.output import active_output_format, build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -287,7 +287,13 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
     try:
         return _build_learning_registry()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        # The format comes from the running command: this helper exits on one
+        # path, so neither its signature nor the stubs that replace it can
+        # grow a parameter.
+        if active_output_format() == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
